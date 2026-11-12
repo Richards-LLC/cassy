@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  fresh-machine-worker-capacity:
+    title: Spawn routing honors native live worker caps, recovered local capacity and existing task deliveries
+    tasks: [cas-a92f]
+    journeys: [FACTORY-SPAWN]
+    invariants: [FACTORY-FRESH-WORKER-CAPACITY]
   same-task-uncommitted-review-resume:
     title: Blocked and reopened tasks retain their original same-worker source boundary before the first commit
     tasks: [cas-d4c7]
@@ -641,6 +646,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-FRESH-WORKER-CAPACITY:
+    statement: Peer placement uses a fresh native worker count within factory.max_workers and fresh host pressure; unsent asks yield to recovered local capacity and accepted or in-flight asks retain one delivery per task.
+    check: Run the three cas_a92f regressions in factory_build_routing through the real directory, route and durable outbox seam; verify full peers receive zero asks, local recovery abandons unsent asks and directory outages retain accepted deliveries without another lookup or send.
+    bug: {task: cas-a92f}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -1492,8 +1501,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:factory', trigger: spawn_workers}
   steps: [Assign the task and brief, Start the isolated worker, Confirm assignment acceptance]
-  owners: [cas-cli/src/mcp/tools/core/agent_coordination/branch_adoption.rs, cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs, cas-cli/src/cli/factory/wedged.rs, crates/cas-store/src/spawn_queue_store.rs, cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs, cas-cli/src/worktree/git/branch_ops.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
-  invariants: [FACTORY-DIRTY-REVIEW-RESUME, FACTORY-DETACHED-SUCCESSOR, FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS, FACTORY-SPAWN-FETCH-TRACKING]
+  owners: [cas-cli/src/factory_build_routing.rs, cas-cli/src/factory_build_guard.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs, cas-cli/src/config/settings.rs, cas-cli/src/config/access/get.rs, cas-cli/src/config/access/set.rs, cas-cli/src/config/access/list.rs, cas-cli/src/config/meta/seed/coordination.rs, cas-cli/src/mcp/tools/core/agent_coordination/branch_adoption.rs, cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs, cas-cli/src/cli/factory/wedged.rs, crates/cas-store/src/spawn_queue_store.rs, cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs, cas-cli/src/worktree/git/branch_ops.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
+  invariants: [FACTORY-FRESH-WORKER-CAPACITY, FACTORY-DIRTY-REVIEW-RESUME, FACTORY-DETACHED-SUCCESSOR, FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS, FACTORY-SPAWN-FETCH-TRACKING]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-QA-RECEIPT

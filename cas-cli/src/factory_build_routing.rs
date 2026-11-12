@@ -15,6 +15,10 @@ const SPAWN_BRIEF_MARKER: &str = "📌 SPAWN BRIEF ";
 pub(crate) struct BuildCapacity {
     pub observed_at: DateTime<Utc>,
     pub free_slots: usize,
+    #[serde(default)]
+    pub live_workers: Option<usize>,
+    #[serde(default)]
+    pub max_workers: Option<usize>,
     pub load_1m: Option<f64>,
     pub cpu_count: usize,
     pub cpu_psi_avg10: Option<f64>,
@@ -31,10 +35,55 @@ pub(crate) fn publish_capacity(root: &Path, agent: &mut cas_types::Agent) {
         .unwrap_or_default()
         .factory();
     let guard = crate::factory_build_guard::inspect_capacity(root, &config);
-    let sample = guard.build_capacity(Utc::now());
+    let mut sample = guard.build_capacity(Utc::now());
+    sample.max_workers = Some(config.max_workers);
+    match live_worker_count(root) {
+        Ok(workers) => {
+            sample.live_workers = Some(workers);
+            sample.free_slots = sample.free_slots.min(config.max_workers.saturating_sub(workers));
+        }
+        Err(_) => sample.free_slots = 0,
+    }
     if let Ok(value) = serde_json::to_string(&sample) {
         agent.metadata.insert(CAPACITY_META.into(), value);
     }
+}
+
+/// Use the roster's native heartbeat/process rule across local project stores.
+/// Registry aliases and same-name re-registrations consume only one slot.
+pub(crate) fn live_worker_count(root: &Path) -> Result<usize, String> {
+    use std::collections::HashSet;
+    let sessions = crate::ui::factory::SessionManager::new()
+        .list_sessions_read_only().map_err(|error| error.to_string())?;
+    let mut roots = HashSet::from([root.canonicalize().map_err(|error| error.to_string())?]);
+    for session in &sessions {
+        if let Some(project) = session.metadata.project_dir.as_deref()
+            && let Ok(root) = crate::store::find_cas_root_ignoring_env(Path::new(project))
+        {
+            roots.insert(root.canonicalize().map_err(|error| error.to_string())?);
+        }
+    }
+    let machine = cas_types::Agent::get_or_generate_machine_id();
+    let mut workers = HashSet::new();
+    for root in roots {
+        let agents = crate::store::open_agent_store(&root).map_err(|error| error.to_string())?;
+        for agent in agents.list(None).map_err(|error| error.to_string())? {
+            if agent.machine_id.as_deref().is_none_or(|id| id == machine)
+                && crate::mcp::tools::service::agent_liveness::is_live_factory_worker(&agent)
+            {
+                workers.insert((agent.factory_session.unwrap_or_else(|| root.display().to_string()), agent.name));
+            }
+        }
+    }
+    // A real pane process covers the registration gap; dead metadata names do not.
+    for session in sessions {
+        for worker in session.metadata.workers {
+            if worker.pid.is_some_and(crate::mcp::daemon::pid_alive) {
+                workers.insert((session.name.clone(), worker.name));
+            }
+        }
+    }
+    Ok(workers.len())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +97,12 @@ struct RoutePlan {
     load_per_cpu: Option<f64>,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    observed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    live_workers: Option<usize>,
+    #[serde(default)]
+    max_workers: Option<usize>,
 }
 
 impl RoutePlan {
@@ -56,8 +111,14 @@ impl RoutePlan {
             .load_per_cpu
             .map(|load| format!("{load:.2}"))
             .unwrap_or_else(|| "unknown".into());
+        let observation = self.observed_at.map(|at| format!(
+            "; observed {} ({}s ago), workers {}/{}",
+            at.to_rfc3339(), (Utc::now() - at).num_seconds().max(0),
+            self.live_workers.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()),
+            self.max_workers.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()),
+        )).unwrap_or_else(|| "; original observation unavailable".into());
         format!(
-            "routed to {}: {} free slots, load/CPU {load}",
+            "routed to {}: {} free slots, load/CPU {load}{observation}",
             self.recipient, self.free_slots
         )
     }
@@ -170,8 +231,10 @@ fn live_capacity(peer: &crate::cloud::peers::Peer, now: DateTime<Utc>) -> Option
     {
         return None;
     }
-    let capacity: BuildCapacity = serde_json::from_value(peer.build_capacity.clone()?).ok()?;
-    (fresh(capacity.observed_at) && capacity.cpu_count > 0).then_some(capacity)
+    let mut capacity: BuildCapacity = serde_json::from_value(peer.build_capacity.clone()?).ok()?;
+    let remaining = capacity.max_workers?.saturating_sub(capacity.live_workers?);
+    capacity.free_slots = capacity.free_slots.min(remaining);
+    (fresh(capacity.observed_at) && capacity.cpu_count > 0 && capacity.free_slots > 0).then_some(capacity)
 }
 
 fn expire(
@@ -179,8 +242,10 @@ fn expire(
     task: &mut cas_types::Task,
     plan: &RoutePlan,
     cause: &str,
-) -> Result<(), String> {
-    crate::cloud::peer_mailbox::cancel_build_route(root, &plan.sender_agent_id, &plan.key)?;
+) -> Result<bool, String> {
+    if !crate::cloud::peer_mailbox::cancel_build_route(root, &plan.sender_agent_id, &plan.key)? {
+        return Ok(false);
+    }
     task.notes = task
         .notes
         .lines()
@@ -198,7 +263,7 @@ fn expire(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(())
+    Ok(true)
 }
 
 /// Revalidate unsent asks at mailbox duty, independently of another spawn.
@@ -239,7 +304,7 @@ pub(crate) fn reconcile_retry(root: &Path, sender: &str, key: &str, send_failed:
         else if expected.assignee.is_some() || expected.status != cas_types::TaskStatus::Open || queued { "staffed_locally" }
         else { return Ok(false) };
     let mut task = expected.clone();
-    expire(root, &mut task, &plan, cause)?;
+    if !expire(root, &mut task, &plan, cause)? { return Ok(false); }
     tasks.update_if_current(&task, &expected).map_err(|error| error.to_string())?;
     Ok(true)
 }
@@ -270,36 +335,52 @@ fn prepare(
     {
         return Ok(None);
     }
-    // A routed task never moves onward. Its source may replay only while
-    // the selected peer and sample are fresh and the route is under 15 min.
+    let local_ready = guard.violations().is_empty()
+        && live_worker_count(root)? < config.max_workers;
+    // Only unsent routes reach this point. Recheck local capacity before discovery.
     if has_route(task) {
         let plan = task.notes.lines().find_map(|line| {
             serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
         });
-        let Some(plan) = plan.filter(|plan| plan.source_machine_id == machine_id(sender)) else {
+        let Some(mut plan) = plan.filter(|plan| plan.source_machine_id == machine_id(sender)) else {
             return Ok(None);
         };
+        if local_ready {
+            return if expire(root, task, &plan, "local capacity recovered")? {
+                Ok(None)
+            } else { Ok(Some(plan)) };
+        }
         let now = Utc::now();
         let in_window = plan.created_at.is_some_and(|created| {
             created <= now && now - created < chrono::Duration::seconds(ROUTE_LIFETIME_SECS)
         });
-        let peer_ready = config.auto_route_builds
-            && in_window
-            && discover_peers(root, Some(&sender.id))
-                .ok()
-                .is_some_and(|discovery| {
+        let capacity = (config.auto_route_builds && in_window)
+            .then(|| discover_peers(root, Some(&sender.id)).ok()).flatten()
+                .and_then(|discovery| {
                     let PeerDiscovery::Found { peers, .. } = discovery else {
-                        return false;
+                        return None;
                     };
-                    peers.iter().any(|peer| {
-                        peer.agent_id == plan.recipient_agent_id
-                            && live_capacity(peer, now).is_some()
+                    peers.iter().find_map(|peer| {
+                        (peer.agent_id == plan.recipient_agent_id)
+                            .then(|| live_capacity(peer, now)).flatten()
                     })
                 });
-        if peer_ready {
+        if let Some(capacity) = capacity {
+            plan.free_slots = capacity.free_slots;
+            plan.observed_at = Some(capacity.observed_at);
+            plan.live_workers = capacity.live_workers;
+            plan.max_workers = capacity.max_workers;
+            plan.load_per_cpu = capacity.load_1m
+                .filter(|load| load.is_finite() && *load >= 0.0)
+                .map(|load| load / capacity.cpu_count as f64);
+            let json = serde_json::to_string(&plan).map_err(|error| error.to_string())?;
+            task.notes = task.notes.lines().map(|line| {
+                if line.starts_with(ROUTE_MARKER) { format!("{ROUTE_MARKER}{json}") }
+                else { line.to_string() }
+            }).collect::<Vec<_>>().join("\n");
             return Ok(Some(plan));
         }
-        expire(
+        let cancelled = expire(
             root,
             task,
             &plan,
@@ -311,9 +392,9 @@ fn prepare(
                 "peer or capacity is no longer fresh"
             },
         )?;
-        return Ok(None);
+        return Ok((!cancelled).then_some(plan));
     }
-    if !config.auto_route_builds || guard.requested_builders == 0 || guard.violations().is_empty() {
+    if !config.auto_route_builds || local_ready {
         return Ok(None);
     }
     // Discovery outages retain the caller's existing local admission behaviour.
@@ -372,6 +453,9 @@ fn prepare(
         free_slots: capacity.free_slots,
         load_per_cpu: ratio,
         created_at: Some(now),
+        observed_at: Some(capacity.observed_at),
+        live_workers: capacity.live_workers,
+        max_workers: capacity.max_workers,
     };
     if let Some(brief) = brief {
         task.notes.push_str(&format!("\n{SPAWN_BRIEF_MARKER}{brief}\n"));
@@ -393,6 +477,22 @@ pub(crate) fn route(
 ) -> Result<Option<String>, String> {
     let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let expected = tasks.get(task_id).map_err(|error| error.to_string())?;
+    let existing_receipt = || -> Result<Option<String>, String> {
+        if sender.role != cas_types::AgentRole::Supervisor { return Ok(None); }
+        let Some(project) = crate::cloud::resolve_canonical_id(root) else { return Ok(None) };
+        let key = format!("build-route:{project}:{task_id}");
+        let Some((recipient, delivery)) = crate::cloud::peer_mailbox::build_route_ownership(root, &key)? else {
+            return Ok(None);
+        };
+        let original = expected.notes.lines().find_map(|line| {
+            serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
+                .filter(|plan| plan.key == key)
+        });
+        Ok(Some(format!("{}; existing delivery {delivery}", original
+            .map(|plan| plan.receipt()).unwrap_or_else(|| format!("already routed to {recipient}")))))
+    };
+    // Accepted and in-flight asks retain ownership even if presence disappears.
+    if let Some(receipt) = existing_receipt()? { return Ok(Some(receipt)); }
     let mut task = expected.clone();
     let plan = prepare(root, sender, &mut task, brief, config, guard)?;
     if task.notes != expected.notes {
@@ -401,6 +501,7 @@ pub(crate) fn route(
             .map_err(|error| error.to_string())?;
     }
     let Some(plan) = plan else { return Ok(None) };
+    if let Some(receipt) = existing_receipt()? { return Ok(Some(receipt)); }
     match plan.send(root, &task) {
         Ok(receipt) => Ok(Some(receipt)),
         Err(crate::cloud::peer_mailbox::PeerSendError::BuildRouteCooldown(_)) => {
@@ -509,6 +610,9 @@ mod tests {
         worker.pid = Some(std::process::id()); agents.register(&worker).unwrap();
         worker.id = "dead-row".into(); worker.name = "dead-row".into(); worker.pid = None;
         agents.register(&worker).unwrap();
+        worker.id = "foreign-row".into(); worker.name = "foreign-row".into();
+        worker.pid = Some(std::process::id()); worker.machine_id = Some("other-machine".into());
+        agents.register(&worker).unwrap();
         publish_capacity(&root, &mut sender);
         let sample: serde_json::Value = serde_json::from_str(&sender.metadata[CAPACITY_META]).unwrap();
         assert_eq!(sample["live_workers"], 1); assert_eq!(sample["max_workers"], 8);
@@ -519,7 +623,18 @@ mod tests {
         let server = MockServer::start().await;
         let env = crate::test_support::TestEnvGuard::temp_home();
         let (root, sender) = failed_route_fixture(&server, env.home()).await;
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for index in 0..8 {
+            let mut worker = cas_types::Agent::new(format!("worker-{index}"), format!("worker-{index}"));
+            worker.role = cas_types::AgentRole::Worker;
+            agents.register(&worker).unwrap();
+        }
+        assert_eq!(live_worker_count(&root).unwrap(), 8);
         assert!(retry_route(&root, &sender).await.is_err());
+        let mut freed = agents.get("worker-7").unwrap();
+        freed.status = cas_types::AgentStatus::Shutdown;
+        agents.update(&freed).unwrap();
+        assert_eq!(live_worker_count(&root).unwrap(), 7);
         let routed_root = root.clone();
         let result = tokio::task::spawn_blocking(move || route(
             &routed_root, &sender, "cas-retry", None, &Default::default(),
@@ -549,6 +664,10 @@ mod tests {
         let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 1);
+        // A missing task note cannot create another route.
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut task = tasks.get("cas-retry").unwrap();
+        task.notes.clear(); tasks.update(&task).unwrap();
         // A send holding its transport lease also cannot be recalled into a local duplicate.
         conn.execute("UPDATE peer_message_outbox SET cloud_id=NULL,state='retrying',last_error=NULL,next_attempt_at=?1", [Utc::now().timestamp() + 120]).unwrap();
         assert!(retry_route(&root, &sender).await.unwrap().is_some());
@@ -1006,7 +1125,6 @@ mod tests {
             "stale-sample",
             "old-route",
             "disabled",
-            "pending-disabled",
         ] {
             server.reset().await;
             let project = env.home().join(case);
@@ -1038,7 +1156,7 @@ mod tests {
             Mock::given(method("POST"))
                 .and(path("/api/peer-messages"))
                 .respond_with(
-                    ResponseTemplate::new(if case == "pending-disabled" { 503 } else { 200 })
+                    ResponseTemplate::new(503)
                         .set_body_json(serde_json::json!({"id": "sent", "status": "queued"})),
                 )
                 .mount(&server)
@@ -1067,11 +1185,7 @@ mod tests {
                 })
             };
             let initial = invoke(root.clone(), sender.clone(), false).await.unwrap();
-            if case == "pending-disabled" {
-                assert!(initial.is_err());
-            } else {
-                assert!(initial.unwrap().is_some());
-            }
+            assert!(initial.is_err());
             if case == "old-route" {
                 let mut task = tasks.get("cas-release").unwrap();
                 task.notes = task
@@ -1113,21 +1227,11 @@ mod tests {
                 "{case}: route must release instead of replay: {result:?}"
             );
             let updated = tasks.get("cas-release").unwrap();
-            assert!(
-                updated.notes.to_ascii_lowercase().contains("expired"),
-                "{case}: {}",
-                updated.notes
-            );
+            assert!(updated.notes.lines().any(|line| line.starts_with(EXPIRED_MARKER)), "{case}");
             assert!(updated.assignee.is_none());
-            if case == "pending-disabled" {
-                let status = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:1")
-                    .unwrap()
-                    .unwrap();
-                assert!(
-                    status.contains("abandoned") && status.contains("expired"),
-                    "{status}"
-                );
-            }
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            let state: String = conn.query_row("SELECT state FROM peer_message_outbox", [], |row| row.get(0)).unwrap();
+            assert_eq!(state, "abandoned", "{case}");
         }
     }
 

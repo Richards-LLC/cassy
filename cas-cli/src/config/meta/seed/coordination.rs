@@ -328,6 +328,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.max_workers",
+        section: "factory",
+        name: "Maximum Workers",
+        description: "Machine-wide live worker cap for spawn admission and advertised peer capacity. Counts current heartbeats and live harness processes across local factory sessions.",
+        value_type: ConfigType::Int,
+        default: "8",
+        constraint: Constraint::Range(1, 256),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "workers", "routing", "capacity"],
+        use_cases: &["Keep task placement within the host's worker capacity"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.max_concurrent_builders",
         section: "factory",
         name: "Maximum Concurrent Builders",

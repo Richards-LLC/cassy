@@ -80,7 +80,7 @@
 - `cas-cli/src/factory_auth_health.rs`, `cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs` - authentication/model failure evidence and collision-free worker reservation.
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs`, `cas-cli/src/factory_review_scratch.rs` - candidate build ownership and review-checkout creation, reuse and cleanup.
 - `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_target_cache/owner.rs` - capped proof admission, separate selected-test captures, target leases, capacity retries, owned scratch and child-only test environments. `scripts/worker-proof-guards.py` keeps automatic guard output outside the selected capture.
-- `cas-cli/src/factory_worker_runs.rs`, `cas-cli/src/factory_build_routing.rs` - detached command records, completion wakes, pre-recycle producer shutdown and same-account capacity routing.
+- `cas-cli/src/factory_worker_runs.rs`, `cas-cli/src/factory_build_routing.rs` - detached command records, completion wakes, pre-recycle producer shutdown and same-account capacity routing with native machine-wide worker caps and durable task delivery reuse.
 - `cas-cli/src/epic_design_review.rs`, `cas-cli/src/cli/factory/queries.rs` - stakeholder defect staffing pauses and explicit message routing.
 - `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_ci.rs`, `cas-cli/src/factory_ci_retry.rs` - release-train guards, full-set proof and exact-tip retry notices.
 - `crates/cas-core/src/memory/handoff.rs` - per-project/role machine selection and supersession; owner/session stamps are audit metadata.

@@ -409,6 +409,10 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
         Some(PeerMessageKind::Quiet)
     } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
+    // cas-9cda: a published landing approval wakes (cas-35563) so the
+    // supervisor sees its train move, but it is status, not a question.
+    let landing = body.starts_with(crate::mcp::tools::core::workflow::premerge_verification::PEER_PREMERGE_TAG);
+    let kind = kind.or(landing.then_some(PeerMessageKind::Status));
     // Split decisions carry typed wake intent independent of reply ids. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {
@@ -467,13 +471,17 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         )
     };
     let attachments = render_attachments(&attachments, &message.project_id);
-    format!(
-        "{envelope}\n{origin}\nReply with coordination action=message \
-         target={name}@{machine} summary=\"<one line>\" message=\"<reply>\" \
-         in_reply_to=<this message's notification id>.\n{attachments}\n{body}",
-        name = message.sender_name,
-        body = body,
-    )
+    // A landing is a fact, not a question: it asks for nothing back.
+    let reply = if landing {
+        String::new()
+    } else {
+        format!(
+            "Reply with coordination action=message target={name}@{machine} summary=\"<one line>\" \
+             message=\"<reply>\" in_reply_to=<this message's notification id>.\n",
+            name = message.sender_name,
+        )
+    };
+    format!("{envelope}\n{origin}\n{reply}{attachments}\n{body}")
 }
 
 /// A pointer a peer message carries (cas-2a5a): a published artifact, or a

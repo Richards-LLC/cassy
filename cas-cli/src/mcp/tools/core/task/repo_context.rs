@@ -1411,6 +1411,12 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&linked, dir.path().join("alias")).unwrap();
 
+        std::fs::create_dir(main.join(".cas")).unwrap();
+        std::fs::write(main.join(".cas/config.toml"), "[project]\ncanonical_id = \"cas-src\"\n").unwrap();
+        assert!(!linked.join(".cas").exists());
+        assert!(repo_answers_to(&main, "project:cas-src"));
+        assert!(repo_answers_to(&linked, "project:cas-src"));
+
         let a = resolve_path_context(&main, "master").unwrap();
         let b = resolve_path_context(&linked, "master").unwrap();
         assert_eq!(a.repo_selector, b.repo_selector);
@@ -1420,6 +1426,12 @@ mod tests {
             let c = resolve_path_context(&dir.path().join("alias"), "master").unwrap();
             assert_eq!(a.git_common_dir, c.git_common_dir);
         }
+
+        // A linked checkout's explicit identity keeps precedence over fallback.
+        std::fs::create_dir(linked.join(".cas")).unwrap();
+        std::fs::write(linked.join(".cas/config.toml"), "[project]\ncanonical_id = \"linked-project\"\n").unwrap();
+        assert!(repo_answers_to(&linked, "project:linked-project"));
+        assert!(!repo_answers_to(&linked, "project:cas-src"));
     }
 
     #[test]

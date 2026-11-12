@@ -2966,11 +2966,11 @@ The hook also accepts this complete fixed profile before a named nextest command
 (use an existing, literal absolute path without shell expansion):
 
 ```bash
-env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
+env -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
 ```
 
 The hook carries this as runner metadata, including detached execution. The
-runner removes those six credentials and sets XDG only on the final Cargo/test
+runner removes those four credentials and sets XDG only on the final Cargo/test
 child, after Cassy credential bootstrap and normal builder admission. Parent
 identity, private targets, memory limits and clean-tip receipts remain in force.
 Other environment wrappers, partial profiles, identity/build overrides and shell
@@ -4079,18 +4079,6 @@ installed file, and the history ledger records both renders.
 and commit the regenerated JSON. Skipping it means the version you just replaced is not recognized as Cassy content downstream, so installs that still hold it will keep it forever instead of upgrading (cas-0c0a).
 
 Lanes never hand-merge the ledger (cas-fb11). `.gitattributes` marks it `merge=cas-generated`, so a merge keeps the target's copy without a conflict, and `scripts/regenerate-generated-artifacts.sh <pre-merge-head> <merged-head>` reruns the generator on the merged history and commits the result. Cassy's merge runs that script. After a manual `git merge`, run it yourself; run `python3 scripts/cas-merge-drivers.py install` once per clone first. The committed ledger then equals a fresh generator run, which the release gate's `builtin-projections` row checks. `scripts/test-regenerate-generated-artifacts.py` merges two lanes that both add builtin history.
-
-### Viktor distribution
-
-The managed Viktor surface has three coupled user-facing pieces: its Claude/Codex/Grok builtin
-skill mirrors, `cas viktor` credential-safe provisioning output, and the proxy's configured
-allowlist. Keep the skill body compact and put operational detail in its reference. The mirrors
-must retain identical meaning after their mechanical tool-prefix substitutions; run the builtin
-flavor-drift test. Never add a credential literal to source, fixtures, docs, or artifacts. The
-only supported user entry is `cas viktor key`; it prompts, validates, then saves the
-key in machine-scoped state, while `cas serve` still holds only the `VIKTOR_API_KEY` reference.
-For a new CLI or proxy-facing behavior, add a clean-project `cas init`/command assertion and a
-direct registry test so the source cannot exist without reaching all three downstream harnesses.
 
 ## Releasing
 

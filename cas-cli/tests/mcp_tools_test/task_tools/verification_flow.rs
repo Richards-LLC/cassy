@@ -9214,7 +9214,7 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
             &receipt.id,
             cas_store::DelegationVerdict::Pass,
             1,
-            "viktor://run/cas-3924-fixture",
+            "review://run/cas-3924-fixture",
         )
         .expect("complete passing external receipt");
     assert_eq!(receipt.task_id, task.id);
@@ -9287,7 +9287,7 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
             &nonpass.id,
             cas_store::DelegationVerdict::Fail,
             1,
-            "viktor://run/cas-3924-failed",
+            "review://run/cas-3924-failed",
         )
         .expect("complete nonpassing receipt");
     let nonpass_response =
@@ -9318,7 +9318,7 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
             &wrong_task.id,
             cas_store::DelegationVerdict::Pass,
             1,
-            "viktor://run/cas-3924-wrong-task",
+            "review://run/cas-3924-wrong-task",
         )
         .expect("complete wrong-task receipt");
     let wrong_task_response =
@@ -9341,7 +9341,7 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
             &wrong_epic.id,
             cas_store::DelegationVerdict::Pass,
             1,
-            "viktor://run/cas-3924-wrong-epic",
+            "review://run/cas-3924-wrong-epic",
         )
         .expect("complete wrong-epic receipt");
     let wrong_epic_response =
@@ -9364,7 +9364,7 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
             &wrong_session.id,
             cas_store::DelegationVerdict::Pass,
             1,
-            "viktor://run/cas-3924-wrong-session",
+            "review://run/cas-3924-wrong-session",
         )
         .expect("complete wrong-session receipt");
     let wrong_session_response =
@@ -9388,7 +9388,7 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
             &wrong_gate.id,
             cas_store::DelegationVerdict::Pass,
             1,
-            "viktor://run/cas-3924-wrong-gate",
+            "review://run/cas-3924-wrong-gate",
         )
         .expect("complete wrong-gate receipt");
     let wrong_gate_response =
@@ -9408,7 +9408,7 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
             &missing_evidence.id,
             cas_store::DelegationVerdict::Pass,
             1,
-            "viktor://run/cas-3924-temporary-evidence",
+            "review://run/cas-3924-temporary-evidence",
         )
         .expect("complete receipt before fixture corruption");
     // Corrupt only this test's TempDir database to prove that close revalidates
@@ -9451,7 +9451,7 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
     assert_eq!(closed.status, TaskStatus::Closed);
     assert!(closed.notes.contains(&receipt.id), "{}", closed.notes);
     assert!(
-        closed.notes.contains("viktor://run/cas-3924-fixture"),
+        closed.notes.contains("review://run/cas-3924-fixture"),
         "{}",
         closed.notes
     );

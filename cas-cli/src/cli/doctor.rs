@@ -9067,14 +9067,13 @@ mod tests {
         fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
         fs::write(
             &user_proxy,
-            "[servers.viktor]\ntransport = 'http'\n\
-             url = 'https://viktor.invalid/mcp'\n\
-             auth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n",
-        ).unwrap();
-        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
-            "XDG_CONFIG_HOME",
-            inherited.path(),
-        );
+            "[servers.review]\ntransport = 'http'\n\
+             url = 'https://review.invalid/mcp'\n\
+             auth = 'env:CAS_7401_MISSING_REVIEW_KEY'\n",
+        )
+        .unwrap();
+        let _ambient =
+            crate::test_env_guard::AmbientEnvRestore::set("XDG_CONFIG_HOME", inherited.path());
         // The shared guard redirects XDG and scrubs provider credentials;
         // keep the poisoned ambient config above to prove that boundary.
         let _env = crate::test_support::TestEnvGuard::temp_home();

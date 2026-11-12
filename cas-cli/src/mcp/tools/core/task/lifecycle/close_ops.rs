@@ -12147,30 +12147,6 @@ impl CasCore {
             ),
         }
 
-        // Viktor inbound watches carry the same frozen task context as
-        // reminders. A reply arriving after task close must not wake a worker
-        // against an obsolete premise, so quarantine it at the close boundary.
-        match cas_store::SqliteViktorWatchStore::open(&self.cas_root) {
-            Ok(store) => match store.quarantine_for_task(&req.id) {
-                Ok(quarantined) if quarantined > 0 => tracing::info!(
-                    task_id = %req.id,
-                    quarantined,
-                    "quarantined Viktor watches on task close"
-                ),
-                Ok(_) => {}
-                Err(error) => tracing::error!(
-                    task_id = %req.id,
-                    error = %error,
-                    "task closed but Viktor watch quarantine failed"
-                ),
-            },
-            Err(error) => tracing::error!(
-                task_id = %req.id,
-                error = %error,
-                "task closed but Viktor watch store could not open for quarantine"
-            ),
-        }
-
         // cas-062d / cas-17e4: durable Closed outbox push after successful close.
         {
             let actor = self
@@ -34964,15 +34940,15 @@ esac
         let dir = init_factory_repo("worker");
         let p = dir.path();
 
-        std::fs::write(p.join("viktor.rs"), "pub fn delivery() { legacy(); }\n").unwrap();
-        git(p, &["add", "viktor.rs"]);
+        std::fs::write(p.join("review.rs"), "pub fn delivery() { legacy(); }\n").unwrap();
+        git(p, &["add", "review.rs"]);
         git(p, &["commit", "-q", "-m", "feat(cas-0c19): add delivery"]);
         let first_attempt_anchor = rev_parse_local(p, "HEAD");
 
         // The same task corrects its own implementation before the branch is
         // merged. This replaces the exact hunk from the parked first attempt.
-        std::fs::write(p.join("viktor.rs"), "pub fn delivery() { evolved(); }\n").unwrap();
-        git(p, &["add", "viktor.rs"]);
+        std::fs::write(p.join("review.rs"), "pub fn delivery() { evolved(); }\n").unwrap();
+        git(p, &["add", "review.rs"]);
         git(p, &["commit", "-q", "-m", "fix(cas-0c19): evolve delivery"]);
         let merged_branch_tip = rev_parse_local(p, "HEAD");
 
@@ -34984,7 +34960,7 @@ esac
         assert_eq!(
             delivery_content_presence_on_target(p, &first_attempt_anchor, "main"),
             DeliveryContentPresence::Superseded {
-                paths: vec!["viktor.rs".to_string()],
+                paths: vec!["review.rs".to_string()],
                 commits: vec![merged_branch_tip.clone()],
             },
             "precondition: the old anchor's exact hunk was intentionally replaced"
@@ -34992,7 +34968,7 @@ esac
         assert_eq!(
             delivery_content_presence_on_target(p, &merged_branch_tip, "main"),
             DeliveryContentPresence::Present {
-                paths: vec!["viktor.rs".to_string()]
+                paths: vec!["review.rs".to_string()]
             },
             "precondition: the merged branch tip's final effect is present"
         );

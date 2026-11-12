@@ -179,7 +179,7 @@ fn main() -> ExitCode {
     if startup.is_ok() {
         // A refused daemon must leave no startup log or telemetry state.
         init_logging(&cli);
-        let args = redact_viktor_key_args(std::env::args().skip(1).collect());
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
         sentry::add_command_breadcrumb(&args.join(" "));
     }
 
@@ -481,7 +481,7 @@ fn record_arg_error(err: &clap::Error) {
                     let timer = TraceTimer::new();
 
                     // Extract the raw args that were passed
-                    let args = redact_viktor_key_args(std::env::args().skip(1).collect());
+                    let args = std::env::args().skip(1).collect::<Vec<_>>();
 
                     // Determine error kind for categorization
                     let error_kind = match err.kind() {
@@ -505,36 +505,5 @@ fn record_arg_error(err: &clap::Error) {
                 }
             }
         }
-    }
-}
-
-/// Keep the only supported operator key-entry command out of crash and
-/// development telemetry, including parse-error diagnostics.
-fn redact_viktor_key_args(mut args: Vec<String>) -> Vec<String> {
-    if let Some(index) = args
-        .windows(2)
-        .position(|window| window[0] == "viktor" && window[1] == "key")
-        && let Some(key) = args.get_mut(index + 2)
-    {
-        *key = "[REDACTED]".to_string();
-    }
-    args
-}
-
-#[cfg(test)]
-mod tests {
-    use super::redact_viktor_key_args;
-
-    #[test]
-    fn viktor_key_is_redacted_from_telemetry_arguments() {
-        assert_eq!(
-            redact_viktor_key_args(vec![
-                "--json".to_string(),
-                "viktor".to_string(),
-                "key".to_string(),
-                "operator-issued-secret".to_string(),
-            ]),
-            vec!["--json", "viktor", "key", "[REDACTED]"]
-        );
     }
 }

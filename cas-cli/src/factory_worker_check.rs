@@ -1785,8 +1785,11 @@ fn discard_shared_fingerprints(target: &Path) -> Result<()> {
 }
 
 /// The fixed provider credential-free test profile; never an arbitrary env override.
-pub(crate) const ISOLATED_TEST_CREDENTIALS: [&str; 6] = [
-    "VIKTOR_API_KEY", "VIKTOR_KEY", "NEON_API_KEY", "NEON_TOKEN", "VERCEL_TOKEN", "VERCEL_API_TOKEN",
+pub(crate) const ISOLATED_TEST_CREDENTIALS: [&str; 4] = [
+    "NEON_API_KEY",
+    "NEON_TOKEN",
+    "VERCEL_TOKEN",
+    "VERCEL_API_TOKEN",
 ];
 
 /// Literal child-only test inputs; admission identity, tool selection and build
@@ -5156,7 +5159,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
             hook_event_name: "PreToolUse".into(),
             tool_name: Some("Bash".into()), agent_role: Some("worker".into()),
             tool_input: Some(serde_json::json!({"command": format!(
-                "env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME={} cargo nextest run -p cas -E 'test(worker)' > target/tests.log 2>&1 &", xdg.display())})),
+                "env -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME={} cargo nextest run -p cas -E 'test(worker)' > target/tests.log 2>&1 &", xdg.display())})),
             ..Default::default()
         };
         let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
@@ -5177,7 +5180,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
 python3 - <<'PYENV'
 import os
 from pathlib import Path
-for key in ['VIKTOR_API_KEY', 'VIKTOR_KEY', 'NEON_API_KEY', 'NEON_TOKEN', 'VERCEL_TOKEN', 'VERCEL_API_TOKEN']:
+for key in ['NEON_API_KEY', 'NEON_TOKEN', 'VERCEL_TOKEN', 'VERCEL_API_TOKEN']:
     assert key not in os.environ, key + ' leaked into test child'
 assert os.environ.get('XDG_CONFIG_HOME') == {xdg:?}, 'private config directory lost'
 assert os.environ.get('CAS_SESSION_ID') == 'worker-env-fixture', 'runtime identity lost'

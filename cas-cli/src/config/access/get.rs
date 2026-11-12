@@ -35,9 +35,14 @@ impl Config {
                 self.hub.as_ref().cloned().unwrap_or_default().transport_mode().as_str().into(),
             ),
             "hub.tailscale_serve" => Some(
-                self.hub.as_ref().cloned().unwrap_or_default().transport_mode().publishes().to_string(),
+                self.hub
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_default()
+                    .transport_mode()
+                    .publishes()
+                    .to_string(),
             ),
-            "viktor.enabled" => Some(self.viktor_enabled().to_string()),
             key if key.starts_with("fast_lane.") => {
                 let lane = self.fast_lane.clone().unwrap_or_default();
                 match key {

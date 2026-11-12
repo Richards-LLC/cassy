@@ -202,6 +202,7 @@ function canCloseUnconfirmedUsage(receipt: CommandReceipt): boolean {
 
 export function commandReceiptNode(receipt: CommandReceipt, step?: (key: CommandKey) => void, dismiss?: () => void): HTMLElement {
   const row = document.createElement("article"); row.className = "supervisor-command-receipt"; row.dataset.phase = receipt.phase;
+  if (!receipt.interactive && !receipt.output && !canCloseUnconfirmedUsage(receipt)) row.classList.add("command-status");
   const title = document.createElement("strong"); title.textContent = `/${receipt.command} · ${{ queued: "Queued", submitted: "Requested", observed: "Observed", refused: "Not sent", unconfirmed: "Unconfirmed", cancelled: "Cancelled" }[receipt.phase]}`;
   const detail = document.createElement("p"); detail.textContent = receipt.detail;
   row.append(title, detail);
@@ -220,7 +221,8 @@ export function commandReceiptNode(receipt: CommandReceipt, step?: (key: Command
   }
   if (dismiss) {
     const button = document.createElement("button"); button.type = "button";
-    button.textContent = "Dismiss command status"; button.onclick = dismiss; row.append(button);
+    button.textContent = "×"; button.setAttribute("aria-label", "Dismiss command status"); button.title = "Dismiss command status";
+    button.onclick = dismiss; row.append(button);
   }
   return row;
 }

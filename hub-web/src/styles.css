@@ -3614,6 +3614,10 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .supervisor-command-receipts { margin: var(--space-4); }
 .supervisor-command-receipt { inline-size: fit-content; max-inline-size: min(100%, var(--dialog-width)); border-block-start: var(--line-width) solid var(--line-subtle); padding: var(--space-3); background: var(--bg-panel); color: var(--ink-mid); }
 .supervisor-command-receipt strong { color: var(--ink); font-family: var(--font-mono); }
+.supervisor-command-receipt.command-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1) var(--space-2); padding: var(--space-2); }
+.supervisor-command-receipt.command-status strong { grid-column: 1; }
+.supervisor-command-receipt.command-status p { grid-column: 1; margin: 0; font-size: var(--fs-xs); }
+.supervisor-command-receipt.command-status button { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin: 0; min-width: var(--rail-item-min); }
 .supervisor-command-receipt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font: var(--fs-xs)/var(--line-ui) var(--font-mono); }
 #conversation-commands .action-label { display: none; }
 

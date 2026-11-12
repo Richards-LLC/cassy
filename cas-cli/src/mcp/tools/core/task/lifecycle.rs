@@ -6319,8 +6319,10 @@ mod related_recall_response_tests {
             endpoint: server.uri(), token: Some("fixture-token".into()),
             team_id: Some("team-1".into()), ..Default::default()
         }.save_to_cas_dir(root).unwrap();
+        // The refusal reads the inventory once; the confirmed create reads it
+        // again to audit its G-148 override (cas-b5cd, dc1d07bac9).
         Mock::given(method("GET")).respond_with(ResponseTemplate::new(503))
-            .expect(1).mount(&server).await;
+            .expect(2).mount(&server).await;
         let request = epic_request("Restore the product search index", "Rebuild missing conversation search documents.");
         let warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
         for required in ["EPIC INVENTORY WARNING", "DUPLICATE EPIC WARNING", "cas-local-search", "search-supervisor", "confirm_warning=true"] {

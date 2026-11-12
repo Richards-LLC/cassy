@@ -6,5 +6,5 @@
 
 // Re-export all types from cas-factory
 pub use cas_factory::{
-    ActiveLeaseSummary, AgentSummary, DirectorData, DirectorStores, EpicGroup, TaskSummary,
+    ActiveLeaseSummary, DirectorData, DirectorStores, TaskSummary,
 };

@@ -40,6 +40,8 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             "npx playwright test --reporter --help",
             // GH #1876: the seed is consumed by --shuffle, so nothing names a spec.
             "npx playwright test --shuffle 42",
+            "npx playwright test --shuffle=42",
+            "npx playwright test qa/a.spec.ts --shuffle=42 --full",
             "npx playwright test -- --help",
             "npx playwright test --help --full",
             "npx playwright test --help; npx playwright test",
@@ -132,6 +134,8 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "npx playwright test --help 2>&1 | head -40",
         // GH #1852: collection only; nothing launches.
         "pnpm exec playwright test --list > target/collection.log 2>&1",
+        "pnpm exec playwright test --list --forbid-only --shuffle=42",
+        "pnpm exec playwright test --list --quiet --shuffle 42",
         "npx vitest run",
         "npx tsc --noEmit",
         "cat > README.md <<'EOF'\nnpx playwright test\nEOF",

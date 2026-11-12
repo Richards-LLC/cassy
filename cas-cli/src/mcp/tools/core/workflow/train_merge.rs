@@ -317,9 +317,8 @@ impl CasCore {
     }
 }
 
-/// Publication, rather than a local-only merge, advances the queue. Merge
-/// admission's one origin read and its push refresh the tracking ref, so
-/// origin is asked again only after a merge whose result the ref lacks.
+/// Publication, rather than a local-only merge, advances the queue. The merge's
+/// origin read and push refresh the tracking ref; ask origin only if it lacks one.
 fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     let git = GitOperations::new(queue.repo.clone());
     let tracked = git.resolve_commit(&format!("refs/remotes/origin/{}", queue.target))

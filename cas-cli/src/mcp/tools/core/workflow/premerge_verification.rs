@@ -758,17 +758,13 @@ impl Approval {
         }
         let candidate = &self.candidate;
         // A local merge whose push failed is not a landed mapping. With an
-        // origin, only remote history can repair an interrupted write: the
-        // tracking ref, which the push and the merge's origin read refresh.
+        // origin, only its tracking ref (refreshed by push and merge) can repair.
         let operations = crate::worktree::GitOperations::new(candidate.repository.clone());
         let tracked = format!("refs/remotes/origin/{}", candidate.target_branch);
-        let target = match operations.resolve_commit(&tracked) {
-            Some(_) => tracked,
-            None => operations
-                .fetch_merge_target(&candidate.target_branch)
-                .map_err(|error| format!("publication could not be confirmed: {error}"))?
-                .unwrap_or_else(|| candidate.target_branch.clone()),
-        };
+        let target = if operations.resolve_commit(&tracked).is_some() { tracked } else { operations
+            .fetch_merge_target(&candidate.target_branch)
+            .map_err(|error| format!("publication could not be confirmed: {error}"))?
+            .unwrap_or_else(|| candidate.target_branch.clone()) };
         let commits = git(
             &candidate.repository,
             &[
@@ -1217,8 +1213,7 @@ impl CasCore {
             true,
         )
         .map_err(fail)?;
-        // Only a new review reads origin here; an existing approval is
-        // revalidated under the target lock against the merge's one read.
+        // Only a new review reads origin before the merge lock.
         refresh_review_target(repo, target).map_err(fail)?;
         let candidate = self.build_verification_candidate(
             task,

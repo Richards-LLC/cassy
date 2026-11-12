@@ -2106,11 +2106,9 @@ enum Containment {
     NotContained,
 }
 
-/// `refreshed` is the caller's origin read (`Ok(None)` for LocalMerge, whose
-/// declared local target is authoritative). For pushed deliveries, a failed
-/// refresh cannot let stale history claim publication. Tracking refs refresh
-/// there; local target advancement remains behind CI, unless this source is
-/// already integrated and no merge is needed.
+/// `refreshed` is the merge's one origin read (`Ok(None)`: the local target is
+/// the authority). A failed refresh cannot let stale history claim publication;
+/// local target advancement remains behind CI unless no merge is needed.
 fn contained_merge_receipt(
     git: &crate::worktree::GitOperations,
     source: &str,
@@ -4558,9 +4556,7 @@ impl CasCore {
             scoped_task = Some(task.clone());
         }
         // cas-bebc (GH #1023 finding 9): never integrate another live factory
-        // session's worker branch or task from this session. Asked once, after
-        // inference: the inferred receipt can reveal a foreign owner the bare
-        // input could not. It precedes the inference refusal and every effect.
+        // session's worker or task. Asked once, after inference, before effects.
         // gate[G-93 merge-admission integrity]: Foreign factory-session owner
         if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
             &cas_root,
@@ -5054,10 +5050,9 @@ impl CasCore {
         // Return conflicting deliveries before candidate preparation can hide
         // merge-tree's exit 1 behind a verification refusal (cas-225b). A
         // train reservation keeps its strict probe. A single task-scoped merge
-        // probes advisorily (cas-e1db): a missing target, an unresolvable
-        // source or a diverged origin leave the ordinary merge path to report
-        // them. Neither probe reads origin; the cached origin ref stands in
-        // for the one origin read taken under the target lock.
+        // probes advisorily (cas-e1db). Both use the cached origin ref; a
+        // missing target, an unresolvable source or a diverged origin leave
+        // the ordinary merge path to report them.
         let strict = train_queue.is_some();
         // gate[G-103 train-merge integrity]: Queued train conflict preflight and target diverged
         if strict || scoped_task.is_some() {
@@ -5174,8 +5169,7 @@ impl CasCore {
 
         // LocalMerge uses its local target. Pushed deliveries need fresh
         // origin containment, or the existing fallback when origin is absent.
-        // This fetch is the merge's one origin read: the target sync below
-        // and its containment re-check reuse it.
+        // gate[G-110 merge-admission integrity]: Fresh target from the merge's one origin read (containment, prepare, diverged)
         let mut target_fetched = false;
         if transactional_delivery.is_none() {
             let refreshed = if scoped_task.as_deref()
@@ -5673,7 +5667,6 @@ impl CasCore {
             } else {
                 manager.git().reconcile_target_with_origin(&worktree.parent_branch)
             };
-            // gate[G-110 merge-admission integrity]: Fresh target from the one origin read (containment, prepare, diverged)
             if let crate::worktree::git::TargetReconcile::PreparationFailed { reason } = &reconcile
             {
                 return Err(McpError {
@@ -6228,8 +6221,7 @@ impl CasCore {
                         | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
                     )
                 });
-            // An early publication checked this landing before its push, and
-            // promotion checks it again; only an unpublished merge needs it here.
+            // An early publication was checked before its push and at promotion.
             if reconciled_publication.is_none() && early_target_push.is_none()
                 && let Some(approval) = premerge_approval.as_ref()
             {
@@ -6407,7 +6399,6 @@ impl CasCore {
         let reviewed_attempt = if target_push.is_none() && let Some(approval) = premerge_approval.as_ref() {
             let landed = manager.git().resolve_commit(&worktree.parent_branch)
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Reviewed target no longer resolves"))?;
-            // As above: an early publication's landing is already checked.
             if early_target_push.is_none() {
                 approval.verify_landing(&landed)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(

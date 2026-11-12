@@ -249,11 +249,15 @@ pub(crate) fn canonical_selector(selector: &str) -> String {
 /// one; matching tests membership in that set.
 fn repo_identities(repo_root: &Path) -> Vec<String> {
     let mut identities = Vec::new();
-    let cas_root = repo_root.join(".cas");
-    if let Some(project_id) = crate::cloud::canonical_id_from_config_toml(&cas_root)
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty())
-    {
+    let configured_id = |root: &Path| crate::cloud::canonical_id_from_config_toml(&root.join(".cas"))
+        .map(|id| id.trim().to_string()).filter(|id| !id.is_empty());
+    if let Some(project_id) = configured_id(repo_root).or_else(|| {
+        // Scratch linked worktrees need not carry the main checkout's ignored
+        // .cas directory. Follow Git's common dir, preserving any local pin.
+        if !repo_root.join(".git").is_file() { return None; }
+        let (primary, _) = git_layout(repo_root).ok()?;
+        (primary != canonical(repo_root.to_path_buf())).then(|| configured_id(&primary)).flatten()
+    }) {
         identities.push(format!("project:{project_id}"));
     }
     if let Some(remote) = crate::cloud::derive_canonical_id_from_git_remote(repo_root) {

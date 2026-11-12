@@ -1015,7 +1015,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--changed-since')
     parser.add_argument('--messages-only', action='store_true')
+    parser.add_argument('--print-gate-codes', action='store_true')
     args = parser.parse_args()
+    if args.print_gate_codes:
+        print('\n'.join(sorted(registered_gate_codes())))
+        return 0
     try:
         if args.changed_since:
             base = subprocess.check_output(['git', 'merge-base', args.changed_since, 'HEAD'], text=True).strip()

@@ -5725,7 +5725,8 @@ async fn personal_pull_of_a_team_owned_project_stages_nothing_cas_abad() {
 /// on cas-98d2 and cas-e50f, deliveries parked on prowl. request_changes
 /// commits through cas-store directly, so nothing was queued for Cloud and
 /// prowl kept both tasks AwaitingMerge until a supervisor mirrored the verdict.
-/// Reopen shares the direct-write path; the discovery note rides the same row.
+/// Reopen and standalone verification verdicts share the direct-write path;
+/// no later note or request_changes may mask a verdict that was never queued.
 #[tokio::test]
 async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     use rmcp::handler::server::wrapper::Parameters;
@@ -5743,6 +5744,12 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
         task
     };
     let (parked, closed) = (row("cas-a836-parked", TaskStatus::AwaitingMerge), row("cas-a836-closed", TaskStatus::Closed));
+    let verdict_cases = [
+        ("cas-a836-approved-delivery", "approved", true, TaskStatus::AwaitingMerge),
+        ("cas-a836-rejected-delivery", "rejected", true, TaskStatus::Blocked),
+        ("cas-a836-approved-task", "approved", false, TaskStatus::InProgress),
+        ("cas-a836-rejected-task", "rejected", false, TaskStatus::InProgress),
+    ];
     let machine = |logged_in: bool| {
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -5756,6 +5763,14 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
         let tasks = crate::store::open_task_store_local(&root).unwrap();
         tasks.add(&parked).unwrap();
         tasks.add(&closed).unwrap();
+        for (id, _, delivery, _) in verdict_cases {
+            let mut task = row(id, TaskStatus::InProgress);
+            task.pending_verification = true;
+            if !delivery {
+                task.task_type = cas_types::TaskType::Epic;
+            }
+            tasks.add(&task).unwrap();
+        }
         (dir, root)
     };
     let (_reviewer_dir, reviewer) = machine(true);
@@ -5764,6 +5779,44 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     let core = crate::mcp::CasCore::with_daemon(reviewer.clone(), None, None);
     core.set_agent_id_for_testing("peer-supervisor".into());
+    core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+        "peer-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+    )).unwrap();
+    for (id, status, delivery, expected) in verdict_cases {
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let dispatch = if delivery {
+            let input = cas_types::WorkerCompletionReceiptInput {
+                task_id: id.into(), worker_agent_id: "owner-worker".into(),
+                repo_selector: "remote:github.com/org/review".into(),
+                source_branch: "factory/owner-worker".into(), commit_sha: "a".repeat(40),
+                merge_base_sha: "b".repeat(40), target_branch: "epic/review".into(),
+                target_sha: "c".repeat(40), proof_reference: "proof:review".into(),
+                scope_summary: "review".into(), artifact_path: None,
+            };
+            let receipt = cas_store::build_worker_completion_receipt(&input, "owner-worker", chrono::Utc::now());
+            cas_store::create_worker_delivery_with_dispatch(
+                &reviewer, &receipt, cas_types::WorkerDeliveryState::AwaitingVerification,
+                "owner-worker", "peer-supervisor", deadline,
+            ).unwrap().1
+        } else {
+            cas_store::create_verification_dispatch_bound(
+                &reviewer, id, "owner-worker", "peer-supervisor",
+                &cas_types::VerificationProofBoundary::task(), deadline, false,
+            ).unwrap()
+        };
+        let result = core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
+            "task_id": id, "dispatch_id": dispatch.id, "status": status,
+            "verification_type": if delivery { "task" } else { "epic" },
+            "summary": "Standalone peer verdict",
+        })).unwrap())).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{id}: {result:?}");
+        let local = crate::store::open_task_store_local(&reviewer).unwrap().get(id).unwrap();
+        assert_eq!(local.status, expected, "{id}");
+        assert!(!local.pending_verification, "{id}");
+        let queue = SyncQueue::open(&reviewer).unwrap();
+        let queued = queue.pending_for_team("review-team", 20, 5).unwrap();
+        assert!(queued.iter().any(|item| item.entity_id == id), "verdict not queued: {id}");
+    }
     core.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
         id: parked.id.clone(),
         reason: "Verifier rejected the delivery; add the missing guard.".into(),
@@ -5812,4 +5865,10 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     assert!(returned.notes.contains(discovery), "discovery note lost");
     assert_eq!(returned.assignee, parked.assignee);
     assert_eq!(tasks.get(&closed.id).unwrap().status, TaskStatus::Open, "reopen never reached the owner");
+    for (id, _, _, expected) in verdict_cases {
+        let received = tasks.get(id).unwrap();
+        assert_eq!(received.status, expected, "{id}");
+        assert!(!received.pending_verification, "{id}");
+        assert_eq!(received.assignee.as_deref(), Some("owner-worker"));
+    }
 }

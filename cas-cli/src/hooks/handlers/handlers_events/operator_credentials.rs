@@ -102,7 +102,9 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     // Nested shells are not listings or filters, so their payloads never
     // reach here with inert names.
     let names_inert = depth == 0 && listed_names_stay_inert(command);
-    for words in super::pre_tool::shell_statement_words(command) {
+    let statements = super::pre_tool::shell_statement_words(command);
+    let arguments = super::pre_tool::shell_statement_arguments(command);
+    for (statement_index, words) in statements.iter().enumerate() {
         let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
             continue;
         };
@@ -153,7 +155,18 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             continue;
         }
 
-        if statement_references_store(&words, &cwd, depth, names_inert) {
+        // Parse actual argv, without `2>/dev/null`, but retain raw words for
+        // protected redirect targets below. Ambiguous statement alignment
+        // keeps the conservative read classification.
+        let names_only = names_inert
+            && statements.len() == arguments.len()
+            && arguments.get(statement_index).is_some_and(|argv| {
+                super::pre_tool::unwrapped_command_index(argv).is_some_and(|index| {
+                    argv[index] == words[command_index]
+                        && lists_names_only(&executable, &argv[index + 1..])
+                })
+            });
+        if statement_references_store(words, &cwd, depth, names_only) {
             return true;
         }
     }
@@ -167,7 +180,7 @@ fn statement_references_store(
     words: &[String],
     cwd: &Path,
     depth: usize,
-    names_inert: bool,
+    names_only: bool,
 ) -> bool {
     if depth > 3 {
         return false;
@@ -197,7 +210,7 @@ fn statement_references_store(
     let descends = invocation_recursively_reads_directories(&executable, args);
     // A listing descends into a store's parent but opens no file. An operand
     // that names a store itself is still refused below.
-    let recursive = descends && !(names_inert && lists_names_only(&executable, args));
+    let recursive = descends && !names_only;
     let recursive_operands = recursive_path_operand_indices(&executable, args);
     let store_parent_cwd = descends && cwd_is_store_or_parent(cwd);
     for (index, arg) in args.iter().enumerate() {
@@ -225,7 +238,8 @@ fn statement_references_store(
         && store_parent_cwd
         && matches!(executable.as_str(), "rg" | "grep" | "egrep" | "fgrep")
         && recursive_search_defaults_to_cwd(&executable, args)
-        && recursive_path_operand_indices(&executable, args).is_empty()
+        // The first positional may be the search pattern, not a file.
+        && recursive_operands.len() <= 1
         && path_references_store(".", cwd, true)
     {
         return true;

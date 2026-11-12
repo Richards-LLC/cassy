@@ -471,6 +471,7 @@ fn cas_bfa1_round4_focus_no_parent_preserves_old_tag_tip() {
 /// reaches a worker; origin must have the lane afterwards.
 #[test]
 fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
+    let mut unpublished = Vec::new();
     for entry in ["update", "create"] {
         with_fixture(|_repo, origin, root, base| {
             let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
@@ -513,11 +514,11 @@ fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
                     .block_on(core.cas_task_create(rmcp::handler::server::wrapper::Parameters(request)))
                     .unwrap();
             }
-            assert_eq!(
-                git(origin, &["rev-parse", "refs/heads/epic/unpublished"]),
-                base,
-                "the first assignment ({entry}) must publish the epic lane at its base"
-            );
+            let remote = git(origin, &["for-each-ref", "--format=%(objectname)", "refs/heads/epic/unpublished"]);
+            if remote != base {
+                unpublished.push(entry);
+            }
         });
     }
+    assert!(unpublished.is_empty(), "first assignment left the epic lane off origin via: {unpublished:?}");
 }

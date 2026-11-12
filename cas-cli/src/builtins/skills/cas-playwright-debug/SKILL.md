@@ -31,7 +31,7 @@ test run or the project's evidence bundle. See the [official CLI guide](https://
 
 ## Playwright 1.64–1.65 recording and upgrades
 
-- `test.skip/fixme/fail/slow` take only a description; rewrite conditional calls. Class fields follow `useDefineForClassFields`: page-object fields initialized from `this.page` can throw; initialize them in the constructor instead.
+- `test.skip/fixme/fail/slow` add a description-only form in 1.65; boolean/conditional forms remain supported, including conditional skip/slow. Class fields follow `useDefineForClassFields`: page-object fields initialized from `this.page` can throw; initialize them in the constructor instead.
 - Cookie matching follows RFC 6265; `APIRequestContext` params append to the existing query; actions wait for non-inert elements. Node 20 is no longer tested.
 - Since 1.64, device `screen` is forwarded and elements inside hidden iframes are hidden.
 

@@ -5455,15 +5455,17 @@ fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
 
 #[tokio::test]
 async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
-    for (caller, message, allowed, reassign_to_caller) in [
-        ("test-agent", "", true, false),
-        ("other-worker", "", false, true),
-        ("test-agent", "WIP: carry supervisor answers across target movement", true, false),
-        ("test-agent", "fix(cas-abcd): another task's work", false, false),
-        ("other-worker", "unnamed WIP before review", false, false),
+    for (caller, message, allowed, reassign_to_caller, shape) in [
+        ("test-agent", "", true, false, ""),
+        ("test-agent", "", true, false, "target-advanced"),
+        ("test-agent", "", false, false, "source-changed"),
+        ("other-worker", "", false, true, ""),
+        ("test-agent", "WIP: carry supervisor answers across target movement", true, false, ""),
+        ("test-agent", "fix(cas-abcd): another task's work", false, false, ""),
+        ("other-worker", "unnamed WIP before review", false, false, ""),
         // Reassignment makes this caller authorized, so the old worker's
         // branch history must be refused by commit ownership instead.
-        ("other-worker", "unnamed WIP before review", false, true),
+        ("other-worker", "unnamed WIP before review", false, true, ""),
     ] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
@@ -5499,7 +5501,15 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             "action": "start", "id": task.id, "brief": true,
         })).unwrap();
         service.task(Parameters(start())).await.expect("initial start");
-        let boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
+        let mut boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
+        if shape == "source-changed" {
+            let recorded = "factory/test-agent-cas-8ca7";
+            branch_transfer_git(root, &["branch", recorded]);
+            let mut changed = tasks.get(&task.id).unwrap();
+            changed.deliverables.factory_branch_start.as_mut().unwrap().branch = recorded.into();
+            boundary = changed.deliverables.factory_branch_start.clone();
+            tasks.update(&changed).unwrap();
+        }
         if !message.is_empty() {
             branch_transfer_git(root, &["commit", "--allow-empty", "-m", "test(cas-8ca7): reproduce blocked work"]);
             let mut held = tasks.get(&task.id).unwrap();
@@ -5527,6 +5537,9 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             "action": "update", "id": task.id, "status": "open",
         })).unwrap();
         service.task(Parameters(request)).await.expect("reopen task");
+        if shape == "target-advanced" {
+            branch_transfer_git(temp.path(), &["commit", "--allow-empty", "-m", "target advanced during review"]);
+        }
         if reassign_to_caller {
             let mut reassigned = tasks.get(&task.id).expect("task after review hold");
             reassigned.assignee = Some(caller.into());

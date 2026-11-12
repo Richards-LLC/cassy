@@ -454,15 +454,26 @@ pub(crate) fn focus_epic(
 }
 
 fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String {
+    epic_branch_readiness(cas_root, epic).unwrap_or_else(|| {
+        let branch = crate::mcp::tools::core::task::repo_context::effective_epic_branch(epic)
+            .unwrap_or_default();
+        format!("\nEPIC BRANCH READY: '{branch}' already published on origin.")
+    })
+}
+
+/// Publish the epic branch when origin lacks it (cas-bfa1). Every path that
+/// puts the first child in a worker's hands calls this: focus, spawn, and a
+/// later assignment (cas-2c0b). `None` means the branch was already published.
+pub(crate) fn epic_branch_readiness(cas_root: &Path, epic: &cas_types::Task) -> Option<String> {
     use crate::mcp::tools::core::task::repo_context;
     use crate::worktree::GitOperations;
     let Some(branch) = repo_context::effective_epic_branch(epic)
     else {
-        return "\nEpic branch not checked: no recorded lane.".into();
+        return Some("\nEpic branch not checked: no recorded lane.".into());
     };
     let root = cas_root.parent().unwrap_or(cas_root);
     let Ok(mut repo) = GitOperations::detect_repo_root(root) else {
-        return "\nEpic branch not checked: no Git repository.".into();
+        return Some("\nEpic branch not checked: no Git repository.".into());
     };
     if let Some(target) = &epic.deliverables.work_target
         && !repo_context::repo_answers_to(&repo, &target.repo_selector)
@@ -475,9 +486,9 @@ fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String 
         match repo_context::resolve_repo_context_bounded(cas_root, target, &probe) {
             Ok(context) => repo = context.repo_root,
             Err(error) => {
-                return format!(
+                return Some(format!(
                     "\nEpic branch not checked: declared repository unavailable ({error:?}); no fallback publication."
-                );
+                ));
             }
         }
     }
@@ -489,13 +500,10 @@ fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String 
         .map(|target| target.target_branch.trim())
         .filter(|base| !base.is_empty() && *base != branch);
     match git.ensure_epic_published(branch, base, epic.deliverables.epic_branch_origin.as_ref()) {
-        Ok(readiness) => match readiness.notice {
-            Some(receipt) => format!("\n{receipt}"),
-            None => format!("\nEPIC BRANCH READY: '{branch}' already published on origin."),
-        },
-        Err(error) => format!(
+        Ok(readiness) => readiness.notice.map(|receipt| format!("\n{receipt}")),
+        Err(error) => Some(format!(
             "\nEPIC BRANCH UNVERIFIED: {error}\nFocus recorded; branch readiness requires attention."
-        ),
+        )),
     }
 }
 

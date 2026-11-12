@@ -18,13 +18,14 @@ fn git(repo: &Path, args: &[&str]) -> String {
 fn with_fixture(check: impl FnOnce(&Path, &Path, &Path, &str)) {
     let temp = tempfile::TempDir::new().unwrap();
     let home = tempfile::TempDir::new().unwrap();
-    let _env = crate::test_support::TestEnvGuard::with_vars(&[
+    let mut env = crate::test_support::TestEnvGuard::with_vars(&[
         ("HOME", home.path().to_str().unwrap()),
         (
             "XDG_CONFIG_HOME",
             home.path().join(".config").to_str().unwrap(),
         ),
         ("CAS_PUSH_EPIC_BRANCH", "0"),
+        ("CAS_AGENT_ROLE", "supervisor"),
     ]);
     let origin = temp.path().join("origin.git");
     let repo = temp.path().join("repo");
@@ -46,6 +47,7 @@ fn with_fixture(check: impl FnOnce(&Path, &Path, &Path, &str)) {
     );
     git(&repo, &["push", "origin", "main"]);
     let root = crate::store::init_cas_dir(&repo).unwrap();
+    env.set("CAS_ROOT", &root);
     std::fs::write(
         root.join("config.toml"),
         "[project]\ncanonical_id = \"publication-test\"\n",
@@ -462,4 +464,42 @@ fn cas_bfa1_round4_focus_no_parent_preserves_old_tag_tip() {
             );
         });
     }
+}
+
+/// GH #1871: spawn_workers without task_id, then task update assignee on a
+/// child, is the first time the epic reaches a worker; origin must have it.
+#[test]
+fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
+    with_fixture(|_repo, origin, root, base| {
+        let tasks = crate::store::open_task_store(root).unwrap();
+        tasks.add(&cas_types::Task::new("cas-child".into(), "Child".into())).unwrap();
+        tasks
+            .add_dependency(&cas_types::Dependency::new(
+                "cas-child".into(),
+                "cas-unpublished".into(),
+                cas_types::DependencyType::ParentChild,
+            ))
+            .unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        let supervisor = cas_types::Agent::new_with_role(
+            "sup".into(), "sup".into(), cas_types::AgentRole::Supervisor,
+        );
+        agents.register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(
+            serde_json::json!({"id": "cas-child", "assignee": "spawned-worker"}),
+        )
+        .unwrap();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(request)))
+            .unwrap();
+        assert_eq!(
+            git(origin, &["rev-parse", "refs/heads/epic/unpublished"]),
+            base,
+            "the first assignment must publish the epic lane at its base"
+        );
+    });
 }

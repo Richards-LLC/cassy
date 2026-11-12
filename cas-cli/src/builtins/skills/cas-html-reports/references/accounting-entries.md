@@ -88,6 +88,5 @@ using the same $2,250.00 amount. Both are labelled illustrations; no client post
 The chart has internal `Id` `233`, disabled numbers and a stale `AcctNum`: After displays the
 account's **Hosting Income** name, never “account 233” or that disabled number.
 
-Sources: [the reported failure and requested rules](https://github.com/Richards-LLC/cassy/issues/1868),
-[OpenStax, journal entries](https://openstax.org/books/principles-financial-accounting/pages/3-5-use-journal-entries-to-record-transactions-and-post-to-t-accounts),
+Sources: [OpenStax, journal entries](https://openstax.org/books/principles-financial-accounting/pages/3-5-use-journal-entries-to-record-transactions-and-post-to-t-accounts),
 [Intuit's Account API (`Id` and `AcctNum`)](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/account).

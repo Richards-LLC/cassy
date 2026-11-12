@@ -5,6 +5,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from html import escape
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -134,7 +135,7 @@ def render(report, fmt):
     if fmt == 'json':
         return json.dumps(report, indent=2)
     html = fmt == 'html'
-    safe = escape if html else lambda value: escape(value).replace('|', '\\|')
+    safe = escape if html else lambda value: re.sub(r'([\\`*_{}\[\]()#+.!|~-])', r'\\\1', escape(value))
     blocks = []
     for entry in report['entries']:
         heading = safe(f"{entry['date']} · {entry['type']} {entry['document']} · {entry['name']}")

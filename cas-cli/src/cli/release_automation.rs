@@ -948,6 +948,39 @@ pub(super) mod tests {
         (temp, root, train, owner, args)
     }
 
+    /// cas-8703b: the caller's older script must not decide train notes validity.
+    #[test]
+    fn notes_check_uses_frozen_train_linter_cas_8703b() {
+        use clap::Parser;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (temp, root, mut train, _, _) = fixture();
+        let repo = temp.path();
+        fs::create_dir(repo.join("scripts")).unwrap();
+        let script = repo.join("scripts/release-train-announce.py");
+        fs::write(&script, "import sys\nsys.exit(0)\n").unwrap();
+        git(repo, &["add", "scripts"]).unwrap();
+        git(repo, &["commit", "-qm", "older linter"]).unwrap();
+        git(repo, &["branch", "-f", "main", "HEAD"]).unwrap();
+        fs::write(&script, "import pathlib, sys\nsys.exit(1 if 'LEDGER.md' in pathlib.Path(sys.argv[2]).read_text() else 0)\n").unwrap();
+        git(repo, &["commit", "-qam", "train-only rule"]).unwrap();
+        let tip = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        train.labels.push(format!("release-train-frozen:{}:{tip}", chrono::Utc::now().timestamp()));
+        open_task_store(&root).unwrap().update(&train).unwrap();
+        git(repo, &["checkout", "main"]).unwrap();
+        let draft = root.join("draft.md");
+        fs::write(&draft, "LEDGER.md").unwrap();
+        assert!(Command::new("python3").arg(&script).arg("--lint").arg(&draft).status().unwrap().success());
+        let cli = super::super::Cli::try_parse_from([
+            "cas", "release", "notes", "check", "--train", &train.id, draft.to_str().unwrap(),
+        ]).unwrap();
+        assert!(super::super::run_command(&cli, Some(&root)).is_err());
+        fs::write(&draft, "readable notes").unwrap();
+        assert!(super::super::run_command(&cli, Some(&root)).is_ok());
+        // The check does not move the caller's branch or replace its script.
+        assert_eq!(git(repo, &["branch", "--show-current"]).unwrap(), "main");
+        assert_eq!(fs::read_to_string(script).unwrap(), "import sys\nsys.exit(0)\n");
+    }
+
     #[test]
     fn release_inventory_contract_roundtrip() {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;

@@ -51,7 +51,10 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     std::fs::write(repo.join(".gitignore"), ".cas/\nrelease-ran\n").unwrap();
     commit(repo, ".gitignore");
     commit(repo, "scripts/release.sh");
-    std::fs::write(repo.join("scripts/release.sh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CAS_ROOT/../release-ran\"\n").unwrap();
+    std::fs::write(repo.join("scripts/release.sh"), r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CAS_ROOT/../release-ran"
+[ "$(cat "$2")" != invalid ] || exit 5
+"#).unwrap();
     run(repo, &["update-index", "--chmod=+x", "scripts/release.sh"]);
     std::fs::set_permissions(repo.join("scripts/release.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     run(repo, &["commit", "-qam", "release script"]);
@@ -112,19 +115,32 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     assert!(wakes()[0].payload.contains(&draft.display().to_string()), "{}", wakes()[0].payload);
     assert!(!repo.join("release-ran").exists(), "no cut without notes");
 
-    std::fs::write(&draft, "notes\n").unwrap();
-    poll(&none);
+    // cas-8703b: only a changed draft rearms a notes-lint failure.
     let log = draft.with_file_name("auto-cut.log");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !std::fs::read_to_string(&log).unwrap_or_default().contains("RELEASE_EXIT=") {
-        assert!(std::time::Instant::now() < deadline, "release.sh never finished");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(std::fs::read_to_string(&log).unwrap().contains("RELEASE_EXIT=0"));
-    let ran = std::fs::read_to_string(repo.join("release-ran")).unwrap();
-    assert_eq!(ran.trim(), format!("--notes {}", draft.display()));
+    let wait = |code: i32| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !std::fs::read_to_string(&log).unwrap_or_default().contains(&format!("RELEASE_EXIT={code}")) {
+            assert!(std::time::Instant::now() < deadline, "release.sh never finished");
+            std::thread::yield_now();
+        }
+    };
+    let attempts = || std::fs::read_to_string(repo.join("release-ran")).unwrap().lines().count();
+    std::fs::write(&draft, "invalid").unwrap();
     poll(&none);
-    let notes = open_task_store(&root).unwrap().get("cas-tr").unwrap().notes;
-    assert_eq!(notes.matches("AUTO-CUT: started").count(), 1, "one cut per tip");
-    assert_eq!(wakes().len(), 1);
+    wait(5);
+    poll(&none);
+    poll(&none);
+    assert_eq!(attempts(), 1);
+    std::fs::write(&draft, "fixed").unwrap();
+    poll(&BTreeSet::from(["factory/other".to_string()]));
+    assert_eq!(attempts(), 1, "notes correction cannot bypass queue admission");
+    poll(&none);
+    wait(0);
+    poll(&none);
+    poll(&none);
+    assert_eq!(attempts(), 2, "one automatic retry for corrected notes");
+    std::fs::write(&draft, "another edit after success").unwrap();
+    poll(&none);
+    assert_eq!(attempts(), 2, "success cannot rearm on another notes edit");
+    assert!(frozen());
 }

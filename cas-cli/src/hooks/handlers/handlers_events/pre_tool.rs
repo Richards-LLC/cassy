@@ -6336,18 +6336,18 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
 /// Command text one shell line runs through substitution, for every guard
 /// that inspects executed commands. Expanding heredoc bodies contribute only
 /// their substitutions; literal bodies are data. Each flag marks text that
-/// could not be bounded, which callers must refuse rather than skip.
+/// could not be bounded, which callers must refuse rather than skip. An
+/// unterminated `$(` is a syntax error; the workspace contract names it.
 #[derive(Default)]
 pub(super) struct ShellSubstitutions {
     pub(super) bodies: Vec<String>,
     pub(super) unresolved_heredoc: bool,
     pub(super) unresolved_ansi_c: bool,
-    pub(super) unterminated: bool,
 }
 
 impl ShellSubstitutions {
     pub(super) fn unresolved(&self) -> bool {
-        self.unresolved_heredoc || self.unresolved_ansi_c || self.unterminated
+        self.unresolved_heredoc || self.unresolved_ansi_c
     }
 }
 
@@ -6432,10 +6432,7 @@ fn collect_shell_substitutions(command: &str, found: &mut ShellSubstitutions) {
             index += 1;
             continue;
         };
-        let Some(end) = end else {
-            found.unterminated = true;
-            break;
-        };
+        let Some(end) = end else { break };
         found.bodies.push(if ch == b'`' {
             shell_effects::backquote_body(&command[start..end])
         } else {

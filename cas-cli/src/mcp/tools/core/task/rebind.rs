@@ -42,6 +42,12 @@ mod ledger_tests {
             }.persist(&root, tasks.as_ref(), &expected, &mut rebound).unwrap();
             assert_eq!(count(), index as u64 + 1);
 
+            for _ in 0..2 {
+                crate::quality_ledger::backfill(&root, since).unwrap();
+                assert_eq!(rows().len(), index * 2 + 1);
+                assert_eq!(count(), index as u64 + 1);
+            }
+
             // Replay an immutable alias produced by the released backfill writer.
             let line = rebound.notes.lines().last().unwrap();
             let mut digest = std::collections::hash_map::DefaultHasher::new();

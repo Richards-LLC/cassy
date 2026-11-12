@@ -7017,6 +7017,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reexec_transfers_timed_out_cleanup_without_releasing_name_cas_624d2() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+        let mut agent = cas_types::Agent::new("held-registration".into(), "held-worker".into());
+        agent.metadata.insert("clone_path".into(), root.join("worktrees/held-worker").display().to_string());
+        let request = DeferredWorkerCleanup {
+            occurrence: uuid::Uuid::new_v4().to_string(), agent, additional_agents: vec![],
+            tasks: vec![], worktree: None, staging_complete: None,
+        };
+        let path = request.path(&root);
+        request.persist(&root).unwrap();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = held.recv();
+            CrashCleanupOutcome { worktree: None }
+        });
+        let mut app = FactoryApp::for_test_at(root.clone());
+        app.set_factory_session("held-session".into());
+        let mut job = WorkerCleanupJob::new(request.agent.name.clone(), handle);
+        job.occurrence = request.occurrence.clone();
+        job.recovery_path = Some(path.clone());
+        job.started = Instant::now() - WORKER_CLEANUP_WARN_AFTER;
+        app.register_worker_cleanup(job);
+        app.warn_worker_cleanups_at(Instant::now(), |_, _, _| true);
+        assert!(app.worktree_cleanup_jobs[0].warned);
+
+        // This is the daemon's actual pre-exec seam. Preparation must leave
+        // custody intact if a later manifest write or exec fails.
+        let result = app.prepare_handoff().await;
+        assert!(result.is_ok(), "durable timed-out cleanup blocked reexec: {:?}", result.err());
+        assert!(app.crash_cleanup_pending("held-worker"));
+        assert!(!app.worktree_cleanup_jobs[0].handle.is_finished());
+
+        for fault in ["missing", "malformed", "worker", "occurrence", "symlink", "reservation"] {
+            request.persist(&root).unwrap();
+            match fault {
+                "missing" => std::fs::remove_file(&path).unwrap(),
+                "malformed" => std::fs::write(&path, b"{").unwrap(),
+                "worker" | "occurrence" => {
+                    let mut bytes = serde_json::to_value(&request).unwrap();
+                    if fault == "worker" { bytes["agent"]["name"] = "foreign-worker".into(); }
+                    else { bytes["occurrence"] = uuid::Uuid::new_v4().to_string().into(); }
+                    std::fs::write(&path, serde_json::to_vec(&bytes).unwrap()).unwrap();
+                }
+                "symlink" => {
+                    let other = root.join("foreign-intent.json");
+                    std::fs::rename(&path, &other).unwrap();
+                    std::os::unix::fs::symlink(other, &path).unwrap();
+                }
+                "reservation" => { app.crash_cleanups_pending.insert("held-worker".into(), 2); }
+                _ => unreachable!(),
+            }
+            let error = app.prepare_handoff().await.err().expect(fault).to_string();
+            assert!(error.contains("held-worker"), "{fault}: {error}");
+            assert!(error.contains(&request.occurrence), "{fault}: {error}");
+            assert!(app.crash_cleanup_pending("held-worker"));
+            app.crash_cleanups_pending.insert("held-worker".into(), 1);
+        }
+        request.persist(&root).unwrap();
+        assert!(app.prepare_handoff().await.is_ok());
+        drop(release);
+        app.join_worker_worktree_cleanups();
+        drop(app);
+
+        // Successful exec kills the old threads; startup restores reservations
+        // from these same intents before accepting another spawn.
+        let mut replacement = FactoryApp::for_test_at(root);
+        replacement.resume_deferred_worker_cleanups();
+        assert!(replacement.crash_cleanup_pending("held-worker"));
+        replacement.join_worker_worktree_cleanups();
+        assert!(!replacement.crash_cleanup_pending("held-worker"));
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
     async fn staged_cleanup_adoption_waits_for_file_commit_cas_c35a() {
         for legacy in [false, true] {
             let env = crate::test_support::TestEnvGuard::temp_home();

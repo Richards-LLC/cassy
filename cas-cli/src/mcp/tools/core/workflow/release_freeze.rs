@@ -504,6 +504,61 @@ mod tests {
         check_merge(&root, lane, Some("cas-feat")).unwrap();
     }
 
+    #[tokio::test]
+    async fn mcp_supervisor_lift_is_audited_and_notifies_operator_cas_0e54() {
+        use crate::mcp::tools::service::CasService;
+        use cas_types::{Agent, AgentRole};
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, root) = fixture();
+        freeze(&root, "cas-tr", "operator", None).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
+        let request = |reason: Option<&str>| serde_json::from_value(serde_json::json!({
+            "action":"train_freeze", "id":"cas-tr", "decision":"lift", "reason":reason,
+        })).unwrap();
+        for role in [None, Some(AgentRole::Worker), Some(AgentRole::Standard), Some(AgentRole::Director), Some(AgentRole::Supervisor)] {
+            let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+            core.set_agent_id_for_testing("caller".into());
+            if let Some(role) = role {
+                let mut actor = Agent::new_with_role("caller".into(), "release-lead".into(), role);
+                if role == AgentRole::Supervisor {
+                    actor.status = cas_types::AgentStatus::Stopped;
+                }
+                core.open_agent_store().unwrap().register(&actor).unwrap();
+            }
+            let service = CasService::new(core, None);
+            assert!(service.factory(Parameters(request(Some("repair the cut")))).await.is_err());
+            assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
+        }
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let mut actor = Agent::new_with_role("caller".into(), "release-lead".into(), AgentRole::Supervisor);
+        actor.factory_session = Some("release-session".into());
+        core.open_agent_store().unwrap().register(&actor).unwrap();
+        core.set_agent_id_for_testing(actor.id.clone());
+        let service = CasService::new(core, None);
+        for reason in [None, Some(""), Some("   ")] {
+            assert!(service.factory(Parameters(request(reason))).await.is_err());
+            assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
+        }
+        let reason = "repair the cut";
+        let result = service.factory(Parameters(request(Some(reason)))).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+        let train = store.get("cas-tr").unwrap();
+        assert!(freeze_of(&train).is_none(), "real MCP lift must clear the gate");
+        check_merge(&root, "epic/release-train-vnext-cas-tr", Some("cas-feat")).unwrap();
+        let decision = train.notes.lines().find_map(|line| line.split_once("RELEASE FREEZE LIFTED: ")
+            .and_then(|(_, payload)| serde_json::from_str::<Value>(payload).ok())).unwrap();
+        assert_eq!(decision["actor"], actor.name);
+        assert_eq!(decision["reason"], reason);
+        assert!(DateTime::parse_from_rfc3339(decision["at"].as_str().unwrap()).is_ok());
+        let notices = crate::store::open_supervisor_queue_store(&root).unwrap().peek("operator", 10).unwrap();
+        assert_eq!(notices.len(), 1);
+        let payload: Value = serde_json::from_str(&notices[0].payload).unwrap();
+        assert_eq!(payload["kind"], "release_freeze_lifted");
+        assert_eq!(payload["context"], decision);
+    }
+
     /// ETA = now + median train suite + queue + publish minutes.
     #[test]
     fn eta_adds_measured_stage_medians() {

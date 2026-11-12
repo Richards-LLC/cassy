@@ -697,17 +697,19 @@ impl Candidate {
             &self.repository,
             &["merge-base", &self.target_sha, &self.source_sha],
         )?;
-        // Shared overview additions may touch the same file while leaving
-        // every delivered hunk and its context unchanged. Compare the actual
-        // clean merge's full-context patch, never waive the whole document.
-        let overview = "docs/PRODUCT_OVERVIEW.md";
-        let unchanged_overview = delivered_patch_id_for_paths(
-            &self.repository, &self.target_sha, &self.tree, &[overview],
-        ).ok().zip(delivered_patch_id_for_paths(
-            &self.repository, target, &tree, &[overview],
-        ).ok()).is_some_and(|(reviewed, current)| reviewed == current);
+        // Shared overview and journey registry upkeep may touch the same file
+        // while leaving every delivered hunk and its context unchanged. Compare
+        // the clean merge's full-context patch, never waive the whole document.
+        let unchanged_upkeep = ["docs/PRODUCT_OVERVIEW.md", "docs/qa/journeys.yaml"]
+            .into_iter()
+            .filter(|path| delivered_patch_id_for_paths(
+                &self.repository, &self.target_sha, &self.tree, &[*path],
+            ).ok().zip(delivered_patch_id_for_paths(
+                &self.repository, target, &tree, &[*path],
+            ).ok()).is_some_and(|(reviewed, current)| reviewed == current))
+            .collect::<Vec<_>>();
         let reviewed_changes = |paths: Vec<String>| paths.into_iter()
-            .filter(|path| path != overview || !unchanged_overview).collect::<Vec<_>>();
+            .filter(|path| !unchanged_upkeep.contains(&path.as_str())).collect::<Vec<_>>();
         let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
             &base,
@@ -790,7 +792,7 @@ impl Candidate {
         Ok(parent)
     }
 
-    fn verify_landing(&self, landed: &str) -> Result<(), String> {
+    pub(crate) fn verify_landing(&self, landed: &str) -> Result<(), String> {
         let expected = self.tree_on(&self.landing_base(landed)?)?;
         // Check the final bundle after regeneration, not the stale dist in
         // the merge commit below it. History/projection outputs retain their

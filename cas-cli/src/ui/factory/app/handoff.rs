@@ -28,11 +28,47 @@ pub(crate) struct AppHandoff {
 
 impl FactoryApp {
     pub(crate) async fn prepare_handoff(&mut self) -> anyhow::Result<AppHandoff> {
+        let now = Instant::now();
+        let mut blockers: Vec<_> = self
+            .pending_workers
+            .iter()
+            .map(|worker| {
+                format!(
+                    "kind=provisioning worker={} elapsed={}s",
+                    worker.name,
+                    now.saturating_duration_since(worker.started_at).as_secs(),
+                )
+            })
+            .collect();
+        blockers.extend(self.worktree_cleanup_jobs.iter().map(|job| {
+            format!(
+                "kind=worktree_cleanup worker={} occurrence={} elapsed={}s",
+                job.worker,
+                job.occurrence,
+                now.saturating_duration_since(job.started).as_secs(),
+            )
+        }));
+        for (worker, count) in &self.crash_cleanups_pending {
+            let tracked = self
+                .worktree_cleanup_jobs
+                .iter()
+                .filter(|job| &job.worker == worker)
+                .count();
+            if *count > tracked || tracked == 0 {
+                // Crash jobs outside this collection have no recorded clock or
+                // occurrence. Report that gap without inventing either value.
+                blockers.push(format!(
+                    "kind=crash_cleanup worker={worker} pending={} occurrence=untracked elapsed=unknown",
+                    count.saturating_sub(tracked),
+                ));
+            }
+        }
+        blockers.sort();
         anyhow::ensure!(
-            self.pending_workers.is_empty()
-                && self.worktree_cleanup_jobs.is_empty()
-                && self.crash_cleanups_pending.is_empty(),
-            "Worker provisioning or cleanup is still active; retry reexec"
+            blockers.is_empty(),
+            "Reexec blocked by active jobs: {}. Recovery: once workers are idle, fully restart this factory. \
+             Cleanup jobs and worker-name reservations stay active until completion or factory shutdown.",
+            blockers.join("; "),
         );
         Ok(AppHandoff {
             cas_dir: self.cas_dir.clone(),

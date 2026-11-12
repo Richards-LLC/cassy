@@ -51,3 +51,7 @@ Read runtime API configuration and validate the resolved origin, including redir
 Use [locators-and-accessibility.md](locators-and-accessibility.md) for the single Quasar selector map. Hidden teleported options need semantic .visible() narrowing; link-rendering q-btn needs the link role. Shared-data failures need isolated fixtures or a justified lock, not blanket serialization or retries.
 
 For passkeys, use the supported virtual-authenticator API and the allowed relying-party origin; do not patch navigator.credentials. For time-dependent auth/expiry behavior, install page.clock before app code reads time. Keep real network completion event-driven.
+
+## Stories and gallery
+
+For component-state tests, serve a story gallery at baseURL and expose the documented mount/unmount interface. A story supplies props, fixture data and providers (Pinia/Quasar) for one scenario. Use the built-in mount fixture: const card = await mount('components/PostCard/Draft', { title: fixture.title }); then query card's semantic controls, card.update(props) and card.unmount(). Assert the public outcome; no retired experimental component-testing package is needed. Keep component-story projects distinct from independent journeys and reset their state; a performance optimization must not leak DOM or storage between cases.

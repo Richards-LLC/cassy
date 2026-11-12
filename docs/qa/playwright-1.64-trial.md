@@ -29,8 +29,8 @@ it is not encoder-only CPU. `ffprobe` confirms the output codec and frame rate.
 
 Important baseline correction: 1.63.0 has no fps option. It silently ignores the
 requested 10 and emits VP8 at 25 fps. There is no genuine 1.63/10 fps baseline.
-The guidance now requires 1.64 for the example rather than promising that control
-on 1.63. The 1.64 comparison is the valid rate control: 10 fps used 9.5% less
+The historical trial required 1.64 for this control rather than promising it
+on 1.63; current authoring uses the latest stable version. The 1.64 comparison is the valid rate control: 10 fps used 9.5% less
 median total CPU and 40.2% fewer video bytes than 25 fps, with essentially equal
 wall time. The three small runs on a shared host do not establish performance
 under encoder contention or justify raising the cap. Across versions, 1.64/10 fps
@@ -105,9 +105,9 @@ narrow this gap; only the pinned-server walk above was completed.
 
 ## Release prep and parity
 
-`cas-cut-release` now compares the locked version to `npm view @playwright/test
-version` and flags more than one minor of lag or any major gap. For example,
-installed 1.64 / latest 1.65 is within policy; latest 1.66 or 2.0 needs an upgrade
+Historical policy (superseded by cas-playwright-tests): `cas-cut-release` then compared the locked version to `npm view @playwright/test
+version` and flagged more than one minor of lag or any major gap. For example,
+installed 1.64 / latest 1.65 was within that retired policy; latest 1.66 or 2.0 needed an upgrade
 or explicit supervisor deferral. The live lookup returned **1.64.1**, matching
 `hub-web/package-lock.json`; no package bump is needed. Agent regeneration and
 review follow an upgrade. This is a release checklist, not a new network-dependent

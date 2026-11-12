@@ -57,7 +57,11 @@ def explicit_metadata(skill, harness):
         metadata = skill / "agents/openai.yaml"
         metadata.parent.mkdir(exist_ok=True)
         if metadata.exists():
-            if "policy:\n  allow_implicit_invocation: false" in metadata.read_text():
+            body = metadata.read_text()
+            if "policy:\n  allow_implicit_invocation: false" in body:
+                return
+            if body.strip() == "policy:\n  allow_implicit_invocation: true":
+                metadata.write_text(body.replace("allow_implicit_invocation: true", "allow_implicit_invocation: false"))
                 return
             raise AssertionError("fixture adapter cannot represent an existing native policy safely")
         metadata.write_text("policy:\n  allow_implicit_invocation: false\n")
@@ -710,7 +714,7 @@ def main():
                             args.inventory, args.audience, args.invoke) for mode, named in cases]
     report = {"harness": subprocess.check_output([str(args.executable), "--version"], text=True).strip(),
               "fixture_skills": COUNT if args.inventory == "synthetic" else None,
-              "role_skills": KEEP if args.inventory == "synthetic" else 1, "results": results}
+              "role_skills": KEEP if args.inventory == "synthetic" else len(role_skills(args.audience)), "results": results}
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
     if any(result.get("status") == "unsupported" for result in results):

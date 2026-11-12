@@ -28,6 +28,8 @@ Main-reach finding corrections require a declared live main journey before any t
 Managed project updates recognize the owned content Cassy previously wrote, including uncommitted generated settings. A genuine conflict preserves only that path in the working tree and index while other settings and skills refresh. The update summary and SessionStart name the preserved files for review.
 
 
+Test authoring uses two automatically discoverable skills: cas-writing-tests for general quality and cas-playwright-tests for browser/e2e/journey specs. Browser specs bind their title to a final user outcome, retain meaningful red controls and honest execution evidence, and share one target/auth/config/locator policy. Audit checks those promises; debug owns failure diagnosis and QA owns evidence. Old TDD/Nuxt names redirect for one release.
+
 ## Personas
 
 - **Operator** - the repository maintainer: starts factory sessions, picks the work, reviews delivery evidence, approves releases and can answer from Commander.

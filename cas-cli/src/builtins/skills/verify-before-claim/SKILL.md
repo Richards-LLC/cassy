@@ -109,7 +109,7 @@ A proof command is **observable, deterministic, and recoverable**: anyone re-run
 
 ## When This Skill Doesn't Fire
 
-- **Pure documentation / markdown-only tasks**: no executable proof exists. Record this explicitly (`note_type=decision`: "No executable proof — documentation-only change. Reviewer must inspect rendered output.") and skip the four steps.
+- **Standalone documentation**: prove its applicable syntax/render acceptance. When text drives installation, routing or a parser, verify that consumer; never add a wording test. Record unexercised runtime routes explicitly.
 - **Spike / decision tasks** (`task_type=spike`): the deliverable is a decision note, not code. The proof is the existence and content of the decision note — capture that as the proof step instead.
 - **Tasks with `execution_note=additive-only`**: ship only new files, verify presence (`ls`, `git status`), and capture that as the proof. The close gate's `additive-only` enforcement (no `M`/`D` lines) is the safety net.
 

@@ -226,25 +226,7 @@ the separate source-review, verdict and CI limits, including test-only changes.
 
 ## Config
 
-```ts
-// playwright.config.ts
-import { defineConfig } from '@playwright/test';
-
-const QA = process.env.QA_ARTIFACTS!; // ~/.cas/artifacts/<project-key>/<task-id>/qa
-
-export default defineConfig({
-  outputDir: `${QA}/test-results`,
-  use: {
-    baseURL: process.env.BASE_URL, // the real build under test
-    trace: {
-      mode: 'on',
-      snapshots: { dom: true, aria: true, screen: true },
-      screenshots: false, // the filmstrip shares page.screencast and shrinks receipt.webm
-      sources: true,
-    },
-  },
-});
-```
+Use the journey/evidence project in [the canonical authoring configuration](../../cas-playwright-tests/references/configuration.md). Keep its full reports and successful trace/video/ARIA capture; set outputDir to this bundle's test-results directory. This reference adds evidence packaging, not another runner configuration.
 
 The evidence trace is always the test runner's own `trace.zip`. Close counts
 assertions from its `test.trace`, which records every assertion's outcome and
@@ -253,7 +235,7 @@ test-level errors. A library `context.tracing` zip (including one saved with
 
 For an authenticated run, sign in through a setup project with `trace: 'off'` that
 saves `storageState`, and give the evidence project `dependencies: ['setup']`, that
-`storageState`, and the trace settings above. Evaluate arguments and network headers
+`storageState`, and the canonical journey trace settings. Evaluate arguments and network headers
 can still carry credentials, so scrub the runner's zip before listing it. The scrub
 replaces cookie, authorization and token values with `[REDACTED]` and leaves
 `test.trace` intact:
@@ -344,7 +326,7 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   await page.screenshot({ path: `${QA}/M01.png` });
 
   if (visualChange) {
-    await showRecordingChapter(page, 'M02 query with no matches — expect clear no-results copy', {
+    await showRecordingChapter(page, 'M02 query with no matches — expect the empty result state', {
       duration: 1000,
     });
   }

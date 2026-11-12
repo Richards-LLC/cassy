@@ -7458,7 +7458,16 @@ This is the body content."#;
             (SupervisorCli::OpenCode, ".opencode"),
         ] {
             let project = tempfile::tempdir().unwrap();
+            let legacy_refs = project.path().join(dir).join("skills/cas-tdd/references");
+            std::fs::create_dir_all(&legacy_refs).unwrap();
+            std::fs::write(legacy_refs.join("tests.md"),
+                include_str!("builtins/skills/cas-writing-tests/references/tests.md")).unwrap();
+            let custom = [35_u8, 32_u8, 88_u8, 10_u8];
+            std::fs::write(legacy_refs.join("custom.md"), custom).unwrap();
             sync_all_builtins_for_project(harness, project.path()).unwrap();
+            assert!(!legacy_refs.join("tests.md").exists());
+            assert_eq!(std::fs::read(legacy_refs.join("custom.md")).unwrap(), custom);
+            assert!(project.path().join(dir).join("skills/cas-tdd/SKILL.md").is_file());
             for name in ["cas-writing-tests", "cas-playwright-tests"] {
                 let skill_dir = project.path().join(dir).join("skills").join(name);
                 let body = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();

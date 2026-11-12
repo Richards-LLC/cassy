@@ -38,7 +38,7 @@ export default defineConfig({
   use: { baseURL, headless: true, serviceWorkers: 'block',
     trace: 'retain-on-failure', video: 'retain-on-failure' },
   projects: [
-    { name: 'setup', testMatch: /auth\.setup\.ts/ },
+    { name: 'setup', testMatch: 'tests/setup/auth.setup.ts', use: { trace: 'off', video: 'off' } },
     { name: 'hermetic', testMatch: 'tests/hermetic/**/*.spec.ts',
       dependencies: ['setup'], use: { storageState: 'playwright/.auth/qa.json' } },
     { name: 'journeys', testMatch: 'tests/journeys/**/*.spec.ts',
@@ -51,7 +51,7 @@ export default defineConfig({
 });
 ```
 
-Select hermetic on PRs; select live smoke explicitly after a reviewed staging deploy. Default fixtures are test-scoped; setup writes state with real sign-in, not a page shared across tests. Add a project per role where required. Ignore auth files in Git and restrict artifact access.
+The shared qa.json example is read-only role state; mutating projects select per-run/worker account state through their fixture. Select hermetic on PRs; select live smoke explicitly after a reviewed staging deploy. Default fixtures are test-scoped; setup writes state with real sign-in, not a page shared across tests. Add a project per role where required. Ignore auth files in Git and restrict artifact access.
 
 ## Network and target policy
 
@@ -75,7 +75,7 @@ Keep full journey reports, including success captures. onlyFailures is permitted
 
 ## Evidence fixtures
 
-Attach final.aria.json from await page.locator('body').ariaSnapshotJSON() in the journey teardown, including failed attempts when the page remains available. Retain the trace and video on success for journeys; an existing retained screencast can satisfy video without duplicating frames. Use the established evidence wrapper for captions, redaction and capture manifests. Never label a DOM-only trace as an ARIA capture.
+Attach final.aria.json from await page.locator('body').ariaSnapshotJSON() in test-scoped teardown on failures and on successful journeys, whenever the page remains available. Retain the trace and video on success for journeys; an existing retained screencast can satisfy video without duplicating frames. Use the established evidence wrapper for captions, redaction and capture manifests. Never label a DOM-only trace as an ARIA capture.
 
 Take screenshots at the fresh page's actual viewport. A time-logic test installs page.clock before the app reads time; normal IO uses events and web-first expectations. Full integration/journey evidence remains with the project's existing landing/batch owner.
 

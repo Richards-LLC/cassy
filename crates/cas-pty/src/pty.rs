@@ -193,12 +193,13 @@ pub fn claude_worker_contract(worker_name: &str) -> String {
 
 /// The skills a factory worker's native listing keeps. Every other skill stays
 /// available by name through the `skill` MCP tool, which the contract names.
-/// OpenCode's verbose rows set the budget: six fit under 2,500 characters.
+/// Keep the native listing under 2,500 characters, including both test authors.
 pub const WORKER_ROLE_SKILLS: &[&str] = &[
     "cas-diagnosing-bugs",
     "cas-resolving-merge-conflicts",
     "cas-search",
-    "cas-tdd",
+    "cas-writing-tests",
+    "cas-playwright-tests",
     "cas-worker",
     "verify-before-claim",
 ];

@@ -114,13 +114,14 @@ depth; do not weaken them independently. Ephemeral/JIT runners remain future
 hardening, but the operator chose the enforceable approval gate now rather than
 changing runner routing or retiring the merge-queue acceleration.
 
-### Light lane slots (cas-3b5e)
+### Light lane slots
 
-Slots 3 and 4 (`soundwave-cas-lane-3`, `soundwave-cas-lane-4`) run only the
+Slots 3 through 8 (`soundwave-cas-lane-3` through `soundwave-cas-lane-8`) provide
+six light listeners and run only the
 slim factory lane in `.github/workflows/lane.yml`, which has a single `push`
 trigger for `factory/**` and no pull-request event. They carry the
 `cas-lane-light` label and never `cas-ci-32core`, so merge-queue and release
-jobs cannot select them. They were registered on 2026-10-19 with a repository
+jobs cannot select them. Slots 3 and 4 were registered on 2026-10-19 with a repository
 registration token (`RUNNER_REGISTRATION=repo`), because the available token
 lacks `admin:org`. They are therefore repository runners outside the
 `cassy-public-trusted` group, with the same effective scope (this repository
@@ -128,6 +129,29 @@ only). The organization fork-PR approval policy above remains the boundary for
 a fork that edits a workflow to request the label. Move them into the group
 with an org registration token when one is available. Their units cap CPU at
 200% and run no sccache server.
+
+The operator approved six light lanes on 2026-11-12. To add slots 5–8 on soundwave,
+run from the trusted, merged checkout as the operator whose stored `gh` login can
+register repository runners:
+
+```bash
+./ops/install-light-lanes-5-8.sh
+```
+
+The script requests sudo once for the whole operation. It fetches a fresh repository
+registration token for each slot using the operator's `gh` identity, provisions with
+`RUNNER_REGISTRATION=repo`, and enables/starts each unit through the installer. Tokens
+stay in captured variables/environment, never in printed output or sudo command arguments;
+tracing and `GH_DEBUG` are disabled. The light registration command expands its token only
+inside the service-account child, keeping it out of sudo's command log.
+
+The same operation deploys the updated prune helper/unit. Its idle check covers all
+slots 1–8; missing/unreadable job state still fails closed. Only the two heavy slots have
+shared Rust caches, whose budgets remain unchanged. The script waits up to two minutes
+for all six light listeners, then prints their name, online status and busy flag from
+`gh api repos/Richards-LLC/cassy/actions/runners`. A missing/offline light listener makes
+it fail with the observed status rows. This is operator-run provisioning; committing the
+units alone does not establish that the new services are online.
 
 ## Availability and isolation
 
@@ -148,7 +172,7 @@ the workflow can repair after assignment; treat the variable as a readiness
 lease and disable it before any maintenance. This preserves a concrete hosted
 fallback instead of wedging planned queue work.
 
-Two listeners run as the non-login `cassy-actions` system account under
+Two heavy listeners run as the non-login `cassy-actions` system account under
 `cassy-actions-runner.service` and `cassy-actions-runner-2.service`. Their
 checkouts, Cargo target directories, Rust toolchain, and sccache live under
 `/var/lib/cassy-actions`, never under `.cas` or the factory worktrees. The

@@ -60,6 +60,8 @@ NAMED = {
         "cas-cli/src/builtins/skills/cas-html-reports/scripts/accounting-journals.py",
         "cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.json",
         "cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-chart.json")},
+    "ops/install-light-lanes-5-8.sh": "bash scripts/test-cassy-actions-runner-registration.sh",
+    "scripts/install-cassy-actions-runner.sh": "bash scripts/test-cassy-actions-runner-registration.sh",
     "hub-web/package.json": "python3 scripts/test-worker-memory.py "
                             "AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
 }

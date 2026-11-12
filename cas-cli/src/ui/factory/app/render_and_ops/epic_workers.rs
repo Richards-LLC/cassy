@@ -8683,6 +8683,47 @@ while True:
         assert_eq!(unchanged.status, TaskStatus::InProgress);
     }
 
+    /// A worker's block belongs to that worker. Retiring it and pre-assigning a
+    /// replacement must leave an Open task with no hold, or the replacement
+    /// inherits a block (and its old timestamp) it never made.
+    #[test]
+    fn shutdown_then_preassign_drops_departed_workers_block() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        store
+            .add(&task_with("cas-blk1", Some("wise-raven"), TaskStatus::Blocked))
+            .unwrap();
+        store
+            .patch_execution_state(
+                "cas-blk1",
+                &serde_json::json!({
+                    "blocked_hold": {"reason": "needs input", "who": "raven-old-session",
+                        "when": "2026-11-12T18:11:16.986803Z"},
+                    "answered_blocker": {"worker": "raven-old-session", "supervisor": "lead",
+                        "reason": "needs input", "ask": null},
+                }),
+            )
+            .unwrap();
+        let agent = retired_worker(&cas_dir);
+        let agent_store = crate::store::open_agent_store(&cas_dir).unwrap();
+
+        settle_retired_worker_bindings(
+            &cas_dir,
+            agent_store.as_ref(),
+            &agent,
+            &["cas-blk1".to_string()],
+            WorkerRetirement::Shutdown,
+        );
+        assert!(assign_task_to_new_worker(&cas_dir, "cas-blk1", "calm-leopard"));
+
+        let task = store.get("cas-blk1").unwrap();
+        assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.assignee.as_deref(), Some("calm-leopard"));
+        let state = store.get_execution_state("cas-blk1").unwrap().unwrap_or_default();
+        assert!(state.get("blocked_hold").is_none(), "{state}");
+        assert!(state.get("answered_blocker").is_none(), "{state}");
+    }
+
     /// Closed tasks must never be reopened by shutdown release.
     #[test]
     fn release_worker_task_bindings_skips_closed() {

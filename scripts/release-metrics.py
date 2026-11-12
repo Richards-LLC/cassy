@@ -223,6 +223,49 @@ def metrics(run_dir: Path | None, published: int) -> list[tuple[str, str]]:
     ]
 
 
+def release_clock(run_dir: Path | None, payload: dict) -> list[tuple[str, str]]:
+    """Only receipt timestamps; no Git/PR-open fallback for a missing merge."""
+    def epoch(value):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return int(parsed.timestamp()) if parsed.tzinfo is not None else None
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    def stamp(value):
+        return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z") if value is not None else UNAVAILABLE
+
+    merge = epoch(payload.get("context", {}).get("last_delivery_merged_at"))
+    cut = epoch_file(run_dir / "cut.start.epoch") if run_dir else None
+    pr = epoch(payload.get("pr", {}).get("created_at"))
+    main = epoch(payload.get("pr", {}).get("merged_at"))
+    published = epoch(payload.get("published_at"))
+    installs = {}
+    for host, value in re.findall(r"<!-- cas-release-install host=([\w.-]+) installed=([0-9]+) -->", payload.get("body", "")):
+        installs[host] = min(installs.get(host, int(value)), int(value))
+
+    def delta(start, end):
+        return end - start if start is not None and end is not None and end >= start else None
+
+    merge_main = delta(merge, main)
+    main_publish = delta(main, published)
+    limits = budgets()
+    def budgeted(value, limit):
+        return f"{value}s / {limit}s {'OK' if value <= limit else 'OVER'}" if value is not None else UNAVAILABLE
+
+    ordered = all(a is not None and b is not None and a <= b for a, b in zip(
+        (merge, cut, pr, main), (cut, pr, main, published)))
+    hosts_complete = all(delta(published, installs.get(host)) is not None for host in ("soundwave", "prowl"))
+    complete = ordered and hosts_complete
+    within = str(merge_main <= 1800 and main_publish <= limits["publish"]).lower() if complete else UNAVAILABLE
+    installed = "; ".join(f"{host} {stamp(installs.get(host))} ({delta(merge, installs.get(host)) if delta(merge, installs.get(host)) is not None else UNAVAILABLE}s since last merge)" for host in sorted(set(installs) | {"soundwave", "prowl"}))
+    header = "| Last delivery merged | Cut started | PR opened | Main | Published | Installed per machine | Last merge to main | Main to published |"
+    row = "| " + " | ".join([stamp(merge), stamp(cut), stamp(pr), stamp(main), stamp(published), installed,
+                                budgeted(merge_main, 1800), budgeted(main_publish, limits["publish"])]) + " |"
+    return [("LAST_MERGE_TO_MAIN_SECONDS", str(merge_main) if merge_main is not None else UNAVAILABLE),
+            ("FULL_CLOCK_WITHIN_BUDGET", within), ("RELEASE_CLOCK_HEADER", header), ("RELEASE_CLOCK_ROW", row)]
+
+
 def main(argv: list[str]) -> int:
     if len(argv) == 2 and argv[0] == "--normalize-request":
         try:
@@ -238,6 +281,9 @@ def main(argv: list[str]) -> int:
     run_dir = Path(argv[0]) if argv[0] else None
     for key, value in metrics(run_dir, int(argv[1])):
         print(f"{key}={value}")
+    if os.environ.get("RELEASE_CLOCK_INPUT"):
+        for key, value in release_clock(run_dir, json.loads(os.environ["RELEASE_CLOCK_INPUT"])):
+            print(f"{key}={value}")
     return 0
 
 

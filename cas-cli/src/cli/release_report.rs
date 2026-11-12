@@ -157,6 +157,8 @@ struct ReleaseMetadata {
 
 #[derive(Debug, Clone, Default)]
 struct ReleaseEvidence {
+    clock_header: Option<String>,
+    clock_row: Option<String>,
     interventions: Option<u64>,
     tag_published_at: Option<String>,
     publication_latency_seconds: Option<i64>,
@@ -214,6 +216,8 @@ fn receipt_reference_line(reference: Option<&ReceiptReference>) -> String {
 impl ReleaseEvidence {
     fn record_latency(&mut self, values: &HashMap<String, String>) {
         self.latency_receipt_read = true;
+        self.clock_header = values.get("RELEASE_CLOCK_HEADER").cloned();
+        self.clock_row = values.get("RELEASE_CLOCK_ROW").cloned();
         let seconds = |key: &str| {
             values
                 .get(key)
@@ -392,6 +396,11 @@ fn parse_stage_pairs(pairs: &str) -> Vec<(String, i64)> {
 /// budget with the earlier releases' times, FAILED naming every overrun.
 fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
     let mut output = String::from("### Pipeline latency\n\n");
+    if let (Some(header), Some(row)) = (&evidence.clock_header, &evidence.clock_row) {
+        output.push_str(&format!("{header}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n{row}\n\n"));
+    } else {
+        output.push_str("Release clock: unavailable in this receipt.\n\n");
+    }
     if evidence.stage_seconds.is_empty() {
         output.push_str(if evidence.latency_receipt_read {
             "Stage timings are unavailable: the latency receipt records no STAGE_SECS.\n\n"
@@ -1866,51 +1875,6 @@ fn assemble_markdown(
         ));
     } else {
         zero_notes.push("No GitHub issues are counted in this report's fixes ledger.".to_string());
-    }
-    let green_timing =
-        if sources.release_evidence.publication_start_kind.as_deref() == Some("gate-green") {
-            Some(sources.release_evidence.publication_timing())
-        } else {
-            sources
-                .release_evidence
-                .green_to_published_seconds
-                .map(format_duration)
-        };
-    match green_timing.filter(|value| value != "unavailable") {
-        Some(value) => glance.push((
-            "Green to published".to_string(),
-            value,
-            "Merge-queue CI completion to publication".to_string(),
-        )),
-        None => unavailable.push("green to published"),
-    }
-    match sources.release_evidence.request_timing() {
-        value if value == "unavailable" => unavailable.push("request to published"),
-        value => glance.push((
-            "Request to published".to_string(),
-            value,
-            "The release request, or first cut, to publication".to_string(),
-        )),
-    }
-    match sources.release_evidence.cut_to_published_seconds {
-        Some(seconds) => glance.push((
-            "Cut to published".to_string(),
-            format_duration(seconds),
-            "The first release-train cut to publication".to_string(),
-        )),
-        None => unavailable.push("cut to published"),
-    }
-    if let Some((publication_endpoint, publication_description)) =
-        sources.release_evidence.publication_endpoint()
-    {
-        let timing = sources.release_evidence.publication_timing();
-        if timing != "unavailable" {
-            glance.push((
-                publication_endpoint.to_string(),
-                timing,
-                publication_description.to_string(),
-            ));
-        }
     }
     match sources.release_evidence.blocker_summary() {
         value if value == "unavailable" => unavailable.push("blockers"),

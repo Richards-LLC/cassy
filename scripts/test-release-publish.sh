@@ -132,7 +132,7 @@ check 'grep -q "release create v9.99.2 --repo example/repo --verify-tag --title 
 check 'grep -q "cas-x86_64-unknown-linux-gnu.tar.gz" "$tmp/gh.log" && grep -q "cas-aarch64-apple-darwin.tar.gz" "$tmp/gh.log"' 'both platform assets are uploaded'
 check '! grep -q -- "--prerelease" "$tmp/gh.log"' 'a real release is not a prerelease'
 check 'grep -q "^- One shipped change.$" "$tmp/notes.md" && ! grep -q "The previous release" "$tmp/notes.md"' 'notes carry exactly the version CHANGELOG section'
-check 'grep -q "<!-- cas-release-timer pr=4242 opened=$created published=1760500000 -->" "$tmp/notes.md"' 'notes carry the timer marker the host install completes'
+check '! grep -q "cas-release-timer" "$tmp/notes.md"' 'publication does not print a narrower clock'
 
 # 4. A retry after the tag push accepts the tag at the same commit.
 : >"$tmp/gh.log"
@@ -159,7 +159,7 @@ check '[[ "$(git -C "$remote" rev-parse "refs/tags/dryrun-v9.99.2-1^{}")" == "$o
 # Wait for publication, not just the early timer line. grep -q on process
 # substitution returned while the publisher was still pushing into origin.git.
 output="$(run_publish --version 9.99.2 --sha "$other" --assets "$assets" --tag dryrun-v9.99.2-2 --notes-out /dev/stdout 2>/dev/null)"
-check 'grep -q "<!-- cas-release-timer pr= opened= published=" <<<"$output" && grep -q "release create dryrun-v9.99.2-2" "$tmp/gh.log"' 'a commit with no merged PR finishes publishing with a timer line'
+check 'grep -q "release create dryrun-v9.99.2-2" "$tmp/gh.log"' 'a commit with no merged PR finishes publishing with a timer line'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

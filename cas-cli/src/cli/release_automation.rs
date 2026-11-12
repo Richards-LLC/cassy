@@ -194,6 +194,8 @@ pub(super) struct ReleaseContext {
     release_commit: Option<String>,
     first_child_commit: Option<String>,
     first_child_epoch: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_delivery_merged_at: Option<String>,
     landing_reminder: Option<i64>,
     publish_reminder: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,6 +313,7 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
         release_commit: None,
         first_child_commit: None,
         first_child_epoch: None,
+        last_delivery_merged_at: None,
         landing_reminder: None,
         publish_reminder: None,
         release_inputs: None,
@@ -385,6 +388,14 @@ fn track_on_train(
         expected.release_inputs = Some(read_cut_inputs(path, repo, &args.commit)?);
     }
     let previous_commit = expected.release_commit.replace(args.commit.clone());
+    if expected.last_delivery_merged_at.is_none() {
+        expected.last_delivery_merged_at = cas_store::observed_delivery_merges_into(root, &expected.branch)?
+            .into_iter()
+            .filter(|merged| git(repo, &["merge-base", "--is-ancestor", &merged.merge_commit_sha, &args.commit]).is_ok())
+            .map(|merged| merged.created_at)
+            .max()
+            .map(|at| at.to_rfc3339());
+    }
     if expected.first_child_commit.is_none() {
         ensure!(
             args.first_child.len() == 40 && args.first_child.bytes().all(|b| b.is_ascii_hexdigit()),

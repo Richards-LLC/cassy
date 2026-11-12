@@ -12,7 +12,7 @@ case "$*" in
   *'/commits/v'*) printf '%040d\n' 1 ;;
   *'/pulls'*) echo '[{"number":42,"base":{"ref":"main"},"created_at":"2026-11-12T14:35:00Z","merged_at":"2026-11-12T14:50:00Z","merge_commit_sha":"0000000000000000000000000000000000000001"}]' ;;
   *'/releases/tags/'*) cat "$FAKE_BODY" ;;
-  *) echo '{"workflow_runs":[]}' ;;
+  *) echo '{"workflow_runs":[{"id":1,"event":"push","head_branch":"main","head_sha":"0000000000000000000000000000000000000001","created_at":"2026-11-12T14:50:01Z"}]}' ;;
 esac
 GH
 cat >"$tmp/bin/cas" <<'CAS'

@@ -4276,6 +4276,13 @@ mod tests {
             "node",
             b"node\0.../@playwright/mcp/cli.js\0"
         ));
+        for (command, raw) in [
+            ("node", b"node\0node_modules/playwright/cli.js\0mcp\0".as_slice()),
+            ("node", b"node\0node_modules/.bin/playwright\0mcp\0".as_slice()),
+            ("npm", b"npm\0exec\0--prefix\0hub-web\0playwright\0mcp\0".as_slice()),
+        ] {
+            assert!(is_known_sidecar_commandline(command, raw));
+        }
         assert!(is_known_sidecar_commandline("cas", b"cas\0serve\0"));
         assert!(!is_known_sidecar_commandline("node", b"node\0server.js\0"));
         for (command, raw) in [

@@ -624,24 +624,7 @@ mod codex_home_contract_tests {
             .expect("Codex worker must receive an explicit HOME");
         assert_eq!(worker_home, host_home.to_string_lossy());
         assert!(std::path::Path::new(worker_home).is_dir());
-        let profile = config
-            .env
-            .iter()
-            .rev()
-            .find_map(|(key, value)| {
-                (key == "PLAYWRIGHT_MCP_USER_DATA_DIR").then_some(value.as_str())
-            })
-            .expect("Codex worker must receive an explicit Playwright profile path");
-        assert_eq!(
-            profile,
-            host_home.join(".playwright-mcp-profile").to_string_lossy()
-        );
-        assert!(
-            std::path::Path::new(profile)
-                .parent()
-                .is_some_and(std::path::Path::is_dir),
-            "Playwright profile parent must exist: {profile}"
-        );
+        assert!(!config.env.iter().any(|(key, _)| key == "PLAYWRIGHT_MCP_USER_DATA_DIR"));
     }
 }
 

@@ -14,10 +14,40 @@ by a released-trunk sync merge.
 """
 import argparse
 import ast
+from functools import cache
+import os
 from pathlib import Path
 import re
 import subprocess
 from rust_test_source import tokens, pairs
+
+
+@cache
+def registered_gate_codes():
+    """Read the declarations that generate gates::REGISTRY in cas-cli/build.rs."""
+    repo = Path(__file__).resolve().parent.parent
+    codes = set()
+    delivery_stages = {'park', 'close-after-merge', 'epic-close', 'merge-admission', 'train-merge'}
+    declaration = re.compile(
+        r'^[ \t]*(?:///|//!|//|#|<!--|\*)[ \t]*gate\[([GHWNC]-[0-9]{2,3})'
+        r'[ \t]+([a-z-]+)(?:[ \t]+(integrity|as-of))?[ \t]*\]:([^\n]*)$', re.MULTILINE)
+    for root in ('cas-cli/src', 'crates', 'scripts'):
+        for directory, children, files in os.walk(repo / root):
+            children[:] = [name for name in children
+                           if name not in {'target', 'node_modules', 'tests', 'fixtures', 'gates'}]
+            for name in files:
+                if (Path(name).suffix not in {'.rs', '.sh', '.py', '.registry'}
+                        or name.endswith('_tests.rs') or name == 'tests.rs'):
+                    continue
+                try:
+                    source = (Path(directory) / name).read_text()
+                except (OSError, UnicodeError):
+                    continue
+                for code, stage, policy, title in declaration.findall(source):
+                    if (bool(policy) == (stage in delivery_stages)
+                            and title.strip().removesuffix('-->').removesuffix('*/').strip()):
+                        codes.add(code)
+    return frozenset(codes)
 
 
 def human_message_literal(value):
@@ -27,6 +57,9 @@ def human_message_literal(value):
     their wire spelling includes spaces. No English vocabulary is consulted.
     """
     if not isinstance(value, str) or not value.strip():
+        return False
+    gate = re.fullmatch(r'\[([GHWNC]-[0-9]{2,3})\]', value)
+    if gate and gate[1] in registered_gate_codes():
         return False
     static = re.sub(r'\$?\{[^{}]*\}', '', value)
     if not any(char.isalpha() for char in static):
@@ -982,7 +1015,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--changed-since')
     parser.add_argument('--messages-only', action='store_true')
+    parser.add_argument('--print-gate-codes', action='store_true')
     args = parser.parse_args()
+    if args.print_gate_codes:
+        print('\n'.join(sorted(registered_gate_codes())))
+        return 0
     try:
         if args.changed_since:
             base = subprocess.check_output(['git', 'merge-base', args.changed_since, 'HEAD'], text=True).strip()

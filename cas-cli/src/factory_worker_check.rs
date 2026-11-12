@@ -2753,6 +2753,35 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         assert!(invocations.lines().last().unwrap().ends_with("test(unrelated)"), "{invocations}");
         assert_eq!(invocations.lines().count(), 2);
         assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].ends_with("test(unrelated) 2"));
+
+        // Use actual registered gate identities in the admission fixture;
+        // bracket syntax alone must never authorize prose assertions.
+        std::fs::create_dir(repo.join("cas-cli/src")).unwrap();
+        std::fs::create_dir(repo.join("cas-cli/tests")).unwrap();
+        let declarations = ["G-28", "G-86"].map(|code| {
+            let gate = crate::gates::find(code).unwrap();
+            format!("// gate[{} {} integrity]: Fixture gate\n", gate.code, gate.stage)
+        }).join("");
+        std::fs::write(repo.join("cas-cli/src/receipt.rs"), declarations).unwrap();
+        for (token, admitted) in [
+            ("[G-28]", true),
+            ("[G-86]", true),
+            ("[G-999]", false),
+            ("[delivery rejected]", false),
+            ("[G-28] delivery rejected", false),
+        ] {
+            std::fs::write(repo.join("cas-cli/tests/receipt.rs"), format!(
+                "#[test] fn receipt() {{ assert!(error.contains({token:?})); }}\n"
+            )).unwrap();
+            fixture_commit_as(&repo, "gate token admission");
+            std::fs::remove_file(repo.join("target/invocations")).ok();
+            let result = execute_at(&root, &args, &repo, &fake);
+            assert_eq!(result.is_ok(), admitted, "token={token}: {result:?}");
+            assert_eq!(repo.join("target/invocations").exists(), admitted);
+            assert_eq!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty(), !admitted);
+        }
+        std::fs::remove_file(repo.join("cas-cli/tests/receipt.rs")).unwrap();
+        fixture_commit_as(&repo, "remove admission probe");
         fake_cargo(&fake, r#"case "$*" in
     *test_support::*) printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n' ;;
     *) printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n' ;;

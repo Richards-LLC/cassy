@@ -703,8 +703,8 @@ invariants:
     check: Run supervisor_close_reuses_landed_queue_proof_cas_4386, direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831 and supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386 through the close handler. Require legacy and full-validation wrapper receipts, a trailing colon and automatic discovery; retain event/status/repository/workflow/tree/artifact/containment refusals.
     bug: {task: cas-f448}
   FACTORY-MACHINE-COMMAND-SHAPE:
-    statement: Exact structured executable-command redirects are admitted as machine identifiers while equivalent rendered error narrative remains refused.
-    check: Run test_human_message_assertions_use_behavior_or_machine_ids in scripts/test-check-test-shape.py; accept redirect_command equality for cas cloud project set and reject the equivalent error.message sentence.
+    statement: Exact structured executable-command redirects and registered bracketed gate tokens are admitted as machine identifiers while unknown gate tokens and rendered error narrative remain refused.
+    check: Run test_human_message_assertions_use_behavior_or_machine_ids in scripts/test-check-test-shape.py; accept redirect_command equality for cas cloud project set and reject the equivalent error.message sentence. Run factory_worker_check::tests::worker_proofs_include_fixed_guards_before_an_unrelated_filter through real named-test admission; registered gate tokens reach Cargo and record proof, while unknown tokens, bracketed prose and prose appended to a token do neither.
     bug: {task: cas-8edf}
   FACTORY-CLI-PAYLOAD-SHAPE:
     statement: Exact CLI flag payload round trips are data-integrity checks; generated prose and unrelated fields remain rejected by the test-shape gate.

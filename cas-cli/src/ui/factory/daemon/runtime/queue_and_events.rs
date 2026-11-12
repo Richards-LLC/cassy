@@ -8131,10 +8131,18 @@ impl FactoryDaemon {
         anyhow::ensure!(
             row.target.eq_ignore_ascii_case("operator")
                 && (row.recipient_device_id.as_deref() == Some(device_id)
-                    || (row.recipient_device_id.is_none() && device_id == "*")),
+                    || (row.recipient_device_id.is_none() && device_id == "*")
+                    // A "*" mirror is addressed to whichever device the hub
+                    // reached, as the persistence receipt already allows.
+                    || (row.recipient_device_id.as_deref() == Some("*") && device_id != "*")),
             "operator reply {notification_id} receipt does not match its paired device"
         );
-        if row.processed_at.is_none() {
+        // GH #1829: a receipt after the delivery deadline still proves receipt.
+        let expired = queue.message_delivery_report(notification_id)?.is_some_and(|report| {
+            report.stage == cas_store::DeliveryStage::Abandoned
+                && report.pending_reason == Some(cas_store::PendingReason::OperatorDeliveryExpired)
+        });
+        if row.processed_at.is_none() || expired {
             queue.mark_transport_delivered(notification_id)?;
         }
         self.queue_jobs.operator_reply_retries.clear();

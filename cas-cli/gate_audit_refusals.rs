@@ -1,5 +1,5 @@
 //! Discover authority-conditioned refusals independently of gate markers.
-use super::{Audit, Body, Function, Flags, bracket_codes, test_only};
+use super::{Audit, Body, Function, bracket_codes, test_only};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{path::Path, process::Command};
 use syn::{spanned::Spanned, visit::{self, Visit}};
@@ -21,6 +21,35 @@ pub(super) fn policy_module(path: &str, declared: &BTreeSet<String>) -> bool {
     declared.contains(path) || POLICY_ROOTS.iter().any(|root| path.starts_with(root))
 }
 
+// Value references exclude field/method spellings: model.role must never
+// borrow an unrelated local role binding.
+#[derive(Default)]
+struct References(BTreeSet<String>);
+impl<'ast> Visit<'ast> for References {
+    fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+        if let Some(name) = expr.path.get_ident() { self.0.insert(name.to_string()); }
+        visit::visit_expr_path(self, expr);
+    }
+    fn visit_expr_field(&mut self, expr: &'ast syn::ExprField) {
+        if let syn::Expr::Path(receiver) = expr.base.as_ref()
+            && let Some(receiver) = receiver.path.get_ident()
+            && let syn::Member::Named(field) = &expr.member
+        { self.0.insert(format!("{receiver}.{field}")); }
+        visit::visit_expr_field(self, expr);
+    }
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        use syn::{parse::Parser, punctuated::Punctuated, Token};
+        if let Ok(args) = Punctuated::<syn::Expr, Token![,]>::parse_terminated.parse2(mac.tokens.clone()) {
+            for value in args { self.visit_expr(&value); }
+        } else {
+            let first = mac.tokens.clone().into_iter().take_while(|token|
+                !matches!(token, proc_macro2::TokenTree::Punct(mark) if mark.as_char() == ','))
+                .collect::<proc_macro2::TokenStream>();
+            if let Ok(value) = syn::parse2::<syn::Expr>(first) { self.visit_expr(&value); }
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct Payload {
     codes: BTreeSet<String>,
@@ -32,26 +61,8 @@ impl Payload {
     fn expression(expr: &syn::Expr) -> Self {
         let mut f = Function::default();
         Body { function: &mut f }.visit_expr(expr);
-        let mut names = Flags::default();
+        let mut names = References::default();
         names.visit_expr(expr);
-        struct Projections(BTreeSet<String>);
-        impl<'ast> Visit<'ast> for Projections {
-            fn visit_expr_field(&mut self, expr: &'ast syn::ExprField) {
-                if let syn::Expr::Path(receiver) = expr.base.as_ref()
-                    && let Some(receiver) = receiver.path.get_ident()
-                    && let syn::Member::Named(field) = &expr.member
-                { self.0.insert(format!("{receiver}.{field}")); }
-                visit::visit_expr_field(self, expr);
-            }
-            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-                let first = mac.tokens.clone().into_iter().take_while(|token|
-                    !matches!(token, proc_macro2::TokenTree::Punct(mark) if mark.as_char() == ','))
-                    .collect::<proc_macro2::TokenStream>();
-                if let Ok(value) = syn::parse2::<syn::Expr>(first) { self.visit_expr(&value); }
-            }
-        }
-        let mut fields = Projections(BTreeSet::new()); fields.visit_expr(expr);
-        names.0.extend(fields.0);
         Self { codes: f.refused, authority: f.authority, calls: f.calls, variables: names.0 }
     }
     fn mac(mac: &syn::Macro) -> Self {
@@ -60,7 +71,7 @@ impl Payload {
         }
         let mut f = Function::default();
         Body { function: &mut f }.visit_macro(mac);
-        let mut names = Flags::default();
+        let mut names = References::default();
         names.visit_macro(mac);
         Self { codes: f.refused, authority: f.authority, calls: f.calls, variables: names.0 }
     }
@@ -122,8 +133,9 @@ impl<'ast> Visit<'ast> for Bindings {
         visit::visit_local(self, local);
     }
     fn visit_expr_assign(&mut self, expr: &'ast syn::ExprAssign) {
-        let mut flags = Flags::default(); flags.visit_expr(&expr.left);
-        self.invalid.extend(flags.0);
+        if let syn::Expr::Path(path) = expr.left.as_ref() && let Some(name) = path.path.get_ident() {
+            self.invalid.insert(name.to_string());
+        }
         visit::visit_expr_assign(self, expr);
     }
 }

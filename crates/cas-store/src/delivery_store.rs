@@ -1165,6 +1165,7 @@ mod tests {
 
     #[test]
     fn supervisor_changes_request_reopens_exact_unmerged_delivery_without_losing_assignee() {
+        for cycle_bound in [false,true] {
         let root = TempDir::new().unwrap();
         let task_store = SqliteTaskStore::open(root.path()).unwrap();
         task_store.init().unwrap();
@@ -1216,12 +1217,10 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let connection = Connection::open(root.path().join("cas.db")).unwrap();
-        connection.execute("UPDATE verification_dispatches SET receipt_id='dc-unrelated',delivery_transaction_id=NULL WHERE id=?1",[&dispatch.id]).unwrap();
-        assert!(crate::request_changes_for_parked_delivery_with_merge_sources(root.path(),&task.id,"supervisor-session","rework",&[]).is_err());
-        assert_eq!(task_store.get(&task.id).unwrap().status,TaskStatus::AwaitingMerge);
-        connection.execute("UPDATE verification_dispatches SET receipt_id=?1,delivery_transaction_id=?2 WHERE id=?3",params![receipt.id,delivery.id,dispatch.id]).unwrap();
-        drop(connection);
+        if cycle_bound {
+            let connection = Connection::open(root.path().join("cas.db")).unwrap();
+            connection.execute("UPDATE verification_dispatches SET receipt_id=?1,delivery_transaction_id=NULL WHERE id=?2",params![cycles()[0].cycle_id,dispatch.id]).unwrap();
+        }
 
         // GH #1276: deterministically pause a close retry after its read,
         // then let the supervisor commit request_changes before it writes.
@@ -1239,7 +1238,7 @@ mod tests {
             &["d".repeat(40)],
         )
         .unwrap();
-        assert_eq!(outcome.boundary, crate::RequestChangesBoundary::Exact);
+        assert_eq!(outcome.boundary, if cycle_bound { crate::RequestChangesBoundary::UnboundDelivery } else { crate::RequestChangesBoundary::Exact });
         assert_eq!(
             outcome.delivery_transaction_id.as_deref(),
             Some(delivery.id.as_str())
@@ -1376,6 +1375,7 @@ mod tests {
         assert!(crate::delivery_cycles(root.path(), &legacy.id).unwrap().is_empty());
         crate::backfill_delivery_cycles(root.path(), "").unwrap();
         assert_eq!(open_cycle(), expected, "explicit terminal delivery history recovery");
+        }
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the

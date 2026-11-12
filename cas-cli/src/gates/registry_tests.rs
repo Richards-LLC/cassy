@@ -114,6 +114,40 @@ fn every_registered_refusal_site_emits_its_code() {
         let result = gate_audit::scan(fixture.path(), &fixture_registry);
         assert_eq!(result.gaps.is_empty(), covered, "{body}: {:?}", result.gaps);
     }
+    // Caller binding forms share the real scanner; counts also catch leaked
+    // provenance across positions, shadowed names and unrelated pattern fields.
+    let mut binding_failures = Vec::new();
+    for (case, source, expected) in [
+        ("let", r#"fn probe() { let caller = self.get_agent_id()?; if denied(caller) { return Err("denied"); } }"#, 1),
+        ("let_mut", r#"fn probe() { let mut caller = self.get_agent_id()?; if denied(caller) { return Err("denied"); } }"#, 1),
+        ("shadow_position", r#"fn probe() { let caller = self.get_agent_id()?; if denied(caller) { return Err("denied"); } let caller = ordinary(); if denied(caller) { return Err("ordinary"); } }"#, 1),
+        ("scope_restore", r#"fn probe() { let caller = self.get_agent_id()?; { let caller = ordinary(); if denied(caller) { return Err("ordinary"); } } if denied(caller) { return Err("denied"); } }"#, 1),
+        ("scope_exit", r#"fn probe() { let caller = ordinary(); { let caller = self.get_agent_id()?; } if denied(caller) { return Err("ordinary"); } }"#, 0),
+        ("tuple", r#"fn probe() { let (caller, model) = (self.get_agent_id()?, ordinary()); if denied(caller) { return Err("denied"); } if model.role == Worker { return Err("ordinary"); } }"#, 1),
+        ("struct", r#"fn probe() { let Pair { caller, model } = Pair { caller: self.get_agent_id()?, model: ordinary() }; if denied(caller) { return Err("denied"); } if model.role == Worker { return Err("ordinary"); } }"#, 1),
+        ("if_let", r#"fn probe() { if let Some(caller) = self.resolve_registered_caller()? { if caller.role == Worker { return Err("denied"); } } }"#, 1),
+        ("match_arm", r#"fn probe() { match self.resolve_registered_caller()? { Some(caller) if caller.role == Worker => Err("denied"), _ => Ok(()) } }"#, 1),
+        ("parameter", r#"fn probe(caller: InvocationContext) { if caller.role == Worker { return Err("denied"); } }"#, 1),
+        ("parameter_tuple", r#"fn probe((caller, model): (InvocationContext, Model)) { if caller.role == Worker { return Err("denied"); } if model.role == Worker { return Err("ordinary"); } }"#, 1),
+        ("parameter_id", r#"fn probe(caller_id: &str) { if task.assignee != caller_id { return Err("denied"); } }"#, 1),
+        ("closure_capture", r#"fn probe() { let caller = self.get_agent_id()?; let run = || { if denied(caller) { return Err("denied"); } }; }"#, 1),
+        ("closure_parameter", r#"fn probe() { let run = |caller: InvocationContext| { if caller.role == Worker { return Err("denied"); } }; }"#, 1),
+        ("closure_shadow", r#"fn probe() { let caller = self.get_agent_id()?; let run = |caller| { if denied(caller) { return Err("ordinary"); } }; }"#, 0),
+        ("closure_predicate", r#"fn probe() { let caller = self.get_agent_id()?; let denied = || denied(caller); if denied() { return Err("denied"); } }"#, 1),
+        ("reassign_source", r#"fn probe() { let mut caller = ordinary(); caller = self.get_agent_id()?; if denied(caller) { return Err("denied"); } }"#, 1),
+        ("reassign_clear", r#"fn probe() { let mut caller = self.get_agent_id()?; caller = ordinary(); if denied(caller) { return Err("ordinary"); } }"#, 0),
+        ("reassign_position", r#"fn probe() { let mut caller = ordinary(); if denied(caller) { return Err("ordinary"); } caller = self.get_agent_id()?; }"#, 0),
+        ("branch_assignment", r#"fn probe() { let mut caller = ordinary(); if input { caller = self.get_agent_id()?; } if denied(caller) { return Err("denied"); } }"#, 1),
+        ("let_else", r#"fn probe() { let Some(caller) = self.resolve_registered_caller()? else { return Ok(()); }; if caller.role == Worker { return Err("denied"); } }"#, 1),
+        ("for_pattern", r#"fn probe() { for caller in self.resolve_registered_caller()? { if denied(caller) { return Err("denied"); } } }"#, 1),
+        ("slice_reference", r#"fn probe() { let &[ref caller, _] = &[self.get_agent_id()?, ordinary()]; if denied(caller) { return Err("denied"); } }"#, 1),
+        ("verification_tools", r#"fn probe() { if terminal { let caller_id = self.get_agent_id()?; } let caller_id = self.get_agent_id()?; let mut caller = agent_store.get(&caller_id)?; if !caller.is_alive() { return Err(McpError { code: INVALID_REQUEST }); } let direct = caller.role == Supervisor; let handoff = caller.role == Standard && caller.parent_id != caller_id; if !direct && !handoff { return Err(McpError { code: INVALID_PARAMS }); } }"#, 2),
+    ] {
+        std::fs::write(policy_dir.join("gates_cmd.rs"), format!("fn unrelated() {{ tag(\"G-01\", \"unrelated\"); }}\n{source}")).unwrap();
+        let result = gate_audit::scan(fixture.path(), &fixture_registry);
+        let actual = result.authority_uncoded.values().sum::<usize>();
+        if actual != expected { binding_failures.push((case, actual, expected)); }
+    }
     // The seed is a counted inventory, not a function-wide waiver. Wording
     // edits preserve it; duplicate/new guards exceed it, and Git history
     // prevents a later commit growing the allowance again.
@@ -157,6 +191,25 @@ fn every_registered_refusal_site_emits_its_code() {
     write_baseline(&std::collections::BTreeMap::new());
     std::fs::write(&probe, "fn unrelated() { tag(\"G-01\", \"unrelated\"); }").unwrap();
     assert!(gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
+    // A landed deletion consumes all allowance; restoring an older seed
+    // cannot regain it, even when the old seed had never been edited.
+    write_baseline(&seed);
+    git(&["add", "cas-cli/gate-audit-authority-baseline.json"]);
+    git(&["commit", "-qm", "landed seed"]);
+    std::fs::write(&probe, legacy).unwrap();
+    std::fs::remove_file(&baseline).unwrap();
+    git(&["add", "-u"]);
+    git(&["commit", "-qm", "delete baseline"]);
+    if gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty() {
+        binding_failures.push(("baseline_deleted", 0, 1));
+    }
+    write_baseline(&seed);
+    git(&["add", "cas-cli/gate-audit-authority-baseline.json"]);
+    git(&["commit", "-qm", "restore old seed"]);
+    if gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty() {
+        binding_failures.push(("baseline_restored", 0, 1));
+    }
+    assert!(binding_failures.is_empty(), "{binding_failures:?}");
     std::fs::remove_file(&baseline).unwrap();
     std::fs::remove_file(policy_dir.join("gates_cmd.rs")).unwrap();
     let scripts_dir = fixture.path().join("scripts");

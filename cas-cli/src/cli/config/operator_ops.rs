@@ -832,7 +832,7 @@ large_artifact_dir = \"before\"\n",
                 assert_ne!(expected.get(key), before_value, "{key} must use a non-default value");
             }
             set_config_value(&mut config, key, &value, &cas_root, operator).unwrap();
-            let stored_root = if key == "viktor.enabled" || key.starts_with("hub.") {
+            let stored_root = if key.starts_with("hub.") {
                 crate::config::host_config_dir()
             } else {
                 cas_root.clone()

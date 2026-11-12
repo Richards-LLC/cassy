@@ -174,7 +174,7 @@ Knowledge stays local-first: the SQLite metadata and markdown bodies are the sou
 curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 
 # Complete the machine setup and initialize this project — login, pairing,
-# hub service, optional Viktor, hooks, builtins, and cloud sync are guided here
+# hub service, hooks, builtins, and cloud sync are guided here
 cd your-project
 cas setup --project "$PWD"
 
@@ -288,20 +288,6 @@ cas cloud sync        # push + pull (optional)
 ```
 
 Cassy ships builtin skills (`cas-code-review`, `cas-worker`, `cas-github-issues`, `codemap`, …) in Claude, Codex and Grok flavors, kept in lockstep by a parity test. If they crowd your context, Claude Code's `skillOverrides` in `settings.json` can set any skill to `"off"`, `"user-invocable-only"`, or `"name-only"` without disabling Cassy.
-
-### Viktor delegation
-
-`cas init` installs the `cas-viktor` skill in the Claude, Codex, and Grok mirrors. For a
-credential-safe setup check, run `cas viktor`. If no credential is configured, get an
-operator-issued key and enter it once with `cas viktor key` (paste it when prompted); Cassy validates
-the non-spending MCP handshake before storing the key only for this machine. Invalid or expired
-keys are not saved. Start a new CAS session after setup. `cas viktor` identifies the managed user
-configuration and explains any project policy override without printing the key. `cas serve`
-loads the machine credential into its managed, credential-reference-only Viktor upstream and exact
-conversation allowlist. Agents use the proxy's `mcp_search`/`mcp_execute` surface, and CAS delivers
-completed answers as inbound notifications instead of requiring agent-side polling. A committed
-`.cas/proxy.toml` opts out of the managed default, so it must explicitly configure the required
-Viktor server and routes.
 
 ## Diagnostics
 

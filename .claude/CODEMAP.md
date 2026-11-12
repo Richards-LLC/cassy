@@ -44,7 +44,7 @@
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` - hosted exact-SHA prechecks, dispatch recovery and receipt cleanup.
 - `cas-cli/src/cli/release_automation.rs`, `scripts/release.sh` - read-only per-member cut previews, zero-closure and unreviewed included-delivery refusal before push, candidate reuse and cut receipts with older-release missing-review residuals.
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs`, `cas-cli/src/gh_budget.rs` - health, update receipts and GitHub request budgets.
-- `cas-cli/src/cli/config/`, `cas-cli/src/config/` - command/config registry and operator policy.
+- `cas-cli/src/cli/config/`, `cas-cli/src/config/` - command/config registry and operator policy; machine settings include hub transport.
 - `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/`, `cas-cli/src/hooks/handoff_updates.rs` - lifecycle policy, canonical artifact-root diagnostics, inherited process-signal guards and Violet handoff reads.
 - `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
 - `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs` - worker Git target/branch guards, literal script execution/syntax-check operands and path bindings, and unresolved-directory refusals; shared shell lexer, command policy and session scratchpad path classification/diagnostics.
@@ -55,7 +55,7 @@
 - `cas-cli/src/extraction/`, `cas-cli/src/consolidation/`, `cas-cli/src/sync/` - extraction, memory decay and harness synchronization.
 - `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` - task artifacts, registered nested-checkout publication with checkout-relative secret guards, audited supervisor revocation with explicit Cloud acknowledgement, brand resolution, HTML/PDF finalization and immutable captures.
 - `cas-cli/src/mcp/tools/core/task/close_refusal.rs` - input-bound task-state close gate facts shared by every close handler and the progress watchdog.
-- `cas-cli/src/builtins/` - canonical skills, agents, jobs, harness catalogs and reference-history manifest.
+- `cas-cli/src/builtins/` - canonical skills, agents, jobs, three harness catalogs and reference-history manifest, including retired-file hashes for managed pruning.
 - `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` - rule-marker navigation and reference contract.
 - `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` - dataset-bound proof, measured phase outcomes and verifier prompt replays.
 
@@ -93,6 +93,8 @@
 - `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator project holds, audited state and relay admission.
 
 ## MCP, storage and delivery gates
+
+- `cas-cli/src/mcp/server/runtime.rs`, `crates/cas-mcp-proxy/src/config.rs` - explicit upstream loading, policy and catalog boot; retired upstream entries are discarded in memory. `cas-cli/src/mcp/tools/service/external_verification.rs` retains the configured delegation gateway.
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - stdio framing, startup, in-flight accounting and compatible backend replacement; `daemon.rs` owns an independent entity-sync scheduler, with entity, knowledge and quality cursor leases in `cloud/sync_lease.rs`.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.

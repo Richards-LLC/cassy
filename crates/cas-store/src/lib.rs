@@ -89,8 +89,6 @@ pub mod trace_archive;
 pub mod tracing;
 mod verification_store;
 mod version_store;
-mod viktor_inbound_store;
-mod viktor_watch_store;
 mod worktree_store;
 
 // Mock stores for testing
@@ -275,12 +273,6 @@ pub use verification_store::{
     resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
     save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
-};
-
-// Durable Viktor thread watches used by the embedded daemon's inbound bridge.
-pub use viktor_inbound_store::{SqliteViktorInboundStore, ViktorInboundMessage};
-pub use viktor_watch_store::{
-    DEFAULT_VIKTOR_WATCH_TTL_SECS, SqliteViktorWatchStore, ViktorThreadWatch, ViktorWatchStatus,
 };
 
 // Worktree store for git worktree tracking

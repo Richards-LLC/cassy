@@ -267,8 +267,8 @@ impl ProxyPolicy for AllowAllProxyPolicy {
 ///
 /// This policy is deliberately applied to the parsed `server` and `tool`
 /// fields in [`ProxyPolicyRequest`]. It does not inspect an MCP tool-name
-/// string, so `mcp__viktor_shadow__ask_viktor` cannot inherit permission for
-/// `mcp__viktor__ask_viktor` through prefix or substring matching.
+/// string, so `mcp__review_shadow__start_review` cannot inherit permission for
+/// `mcp__review__start_review` through prefix or substring matching.
 #[derive(Debug, Default)]
 pub struct ExternalToolAllowlistPolicy {
     allowed_routes: BTreeSet<ExternalToolRoute>,
@@ -1066,7 +1066,7 @@ impl ProxyEngine {
         let (server_filter, keywords) = parse_search_query(query);
 
         // A configured upstream that failed to connect used to look exactly
-        // like an unknown server: `server:viktor` simply returned `[]`. That
+        // like an unknown server: `server:review` simply returned `[]`. That
         // hides credential loss after a daemon restart and strands any
         // durable work that relies on the upstream. Keep ordinary no-match
         // searches empty, but make an explicitly selected, configured and
@@ -3106,7 +3106,7 @@ mod tests {
     #[test]
     fn supervisor_scoped_routes_admit_supervisors_and_refuse_workers() {
         let policy =
-            ExternalToolAllowlistPolicy::new([ExternalToolRoute::new("viktor", "ask_viktor")])
+            ExternalToolAllowlistPolicy::new([ExternalToolRoute::new("review", "start_review")])
                 .with_supervisor_routes([
                     ExternalToolRoute::parse_allowlist_entry("neon.*").unwrap(),
                     ExternalToolRoute::new("violet", "violet_post"),
@@ -3149,7 +3149,7 @@ mod tests {
         // General routes stay open to everyone; unlisted routes keep the old
         // "add it to the allowlist" reason.
         assert_eq!(
-            decide(Worker, "viktor", "ask_viktor"),
+            decide(Worker, "review", "start_review"),
             ProxyPolicyDecision::Allow
         );
         assert_eq!(
@@ -3163,7 +3163,7 @@ mod tests {
             CatalogAccess::SupervisorOnly
         );
         assert_eq!(
-            policy.catalog_access("viktor", "ask_viktor"),
+            policy.catalog_access("review", "start_review"),
             CatalogAccess::Callable
         );
         assert_eq!(
@@ -3186,7 +3186,7 @@ mod tests {
         let policy = ExternalToolAllowlistPolicy::new([
             ExternalToolRoute::parse_allowlist_entry("vercel.*").unwrap(),
             ExternalToolRoute::parse_allowlist_entry("neon.*").unwrap(),
-            ExternalToolRoute::new("viktor", "ask_viktor"),
+            ExternalToolRoute::new("review", "start_review"),
         ])
         .with_worker_read_only(
             ["vercel".to_string(), "neon".to_string()],
@@ -3248,7 +3248,7 @@ mod tests {
         );
         // A server without the mode is unchanged for workers.
         assert_eq!(
-            decide(Worker, "viktor", "ask_viktor", false),
+            decide(Worker, "review", "start_review", false),
             ProxyPolicyDecision::Allow
         );
     }
@@ -3275,10 +3275,10 @@ mod tests {
 
     #[test]
     fn parses_external_mcp_tool_names_into_server_and_tool_components() {
-        let viktor = ExternalToolRoute::parse_mcp_tool_name("mcp__viktor__ask_viktor")
-            .expect("Viktor tool name should parse");
-        assert_eq!(viktor.server(), "viktor");
-        assert_eq!(viktor.tool(), "ask_viktor");
+        let review = ExternalToolRoute::parse_mcp_tool_name("mcp__review__start_review")
+            .expect("Review tool name should parse");
+        assert_eq!(review.server(), "review");
+        assert_eq!(review.tool(), "start_review");
 
         let tool_with_separator =
             ExternalToolRoute::parse_mcp_tool_name("mcp__foreign__read__metadata")
@@ -3286,14 +3286,14 @@ mod tests {
         assert_eq!(tool_with_separator.server(), "foreign");
         assert_eq!(tool_with_separator.tool(), "read__metadata");
 
-        assert!(ExternalToolRoute::parse_mcp_tool_name("mcp__viktor__").is_none());
-        assert!(ExternalToolRoute::parse_mcp_tool_name("viktor__ask_viktor").is_none());
+        assert!(ExternalToolRoute::parse_mcp_tool_name("mcp__review__").is_none());
+        assert!(ExternalToolRoute::parse_mcp_tool_name("review__start_review").is_none());
     }
 
     #[test]
     fn external_tool_allowlist_requires_exact_parsed_server_and_tool() {
         let policy =
-            ExternalToolAllowlistPolicy::new([ExternalToolRoute::new("viktor", "ask_viktor")]);
+            ExternalToolAllowlistPolicy::new([ExternalToolRoute::new("review", "start_review")]);
         let caller = registered_worker_caller();
         let arguments = None;
 
@@ -3308,12 +3308,15 @@ mod tests {
             })
         };
 
-        assert_eq!(decision("viktor", "ask_viktor"), ProxyPolicyDecision::Allow);
+        assert_eq!(
+            decision("review", "start_review"),
+            ProxyPolicyDecision::Allow
+        );
         for (server, tool) in [
             // Shares the trusted server name as a substring but is not it.
-            ("viktor-shadow", "ask_viktor"),
+            ("review-shadow", "start_review"),
             // Shares the trusted tool name as a prefix but is not it.
-            ("viktor", "ask_viktor_with_full_context"),
+            ("review", "start_review_with_full_context"),
             // A wholly foreign external tool is not implicitly permitted.
             ("foreign", "read_file"),
         ] {
@@ -3379,12 +3382,12 @@ mod tests {
     #[test]
     fn delegation_routes_require_internal_supervisor_dispatch_kind() {
         let policy = ExternalToolAllowlistPolicy::new([
-            ExternalToolRoute::new("viktor", "ask_viktor"),
+            ExternalToolRoute::new("review", "start_review"),
             ExternalToolRoute::new("github", "list_issues"),
             ExternalToolRoute::new("violet", "violet_post"),
         ])
         .with_supervisor_delegation_routes([
-            ExternalToolRoute::new("viktor", "ask_viktor"),
+            ExternalToolRoute::new("review", "start_review"),
             ExternalToolRoute::new("violet", "violet_post"),
         ]);
         let arguments = None;
@@ -3401,7 +3404,7 @@ mod tests {
         };
 
         assert_eq!(
-            decide(&caller, ProxyDispatchKind::Direct, "viktor", "ask_viktor"),
+            decide(&caller, ProxyDispatchKind::Direct, "review", "start_review"),
             ProxyPolicyDecision::Deny {
                 reason: "external delegation route requires the registered supervisor gateway"
                     .to_string()
@@ -3422,8 +3425,8 @@ mod tests {
             decide(
                 &caller,
                 ProxyDispatchKind::ExternalProductionVerification,
-                "viktor",
-                "ask_viktor"
+                "review",
+                "start_review"
             ),
             ProxyPolicyDecision::Allow
         );
@@ -3472,14 +3475,14 @@ mod tests {
         let engine = ProxyEngine::from_configs(HashMap::new()).await.unwrap();
         engine
             .set_policy(Arc::new(ExternalToolAllowlistPolicy::new([
-                ExternalToolRoute::new("viktor", "ask_viktor"),
+                ExternalToolRoute::new("review", "start_review"),
             ])))
             .await;
 
         let result = engine
             .execute(
                 &registered_worker_caller(),
-                r#"{"server":"viktor-shadow","tool":"ask_viktor"}"#,
+                r#"{"server":"review-shadow","tool":"start_review"}"#,
                 None,
             )
             .await;
@@ -3490,53 +3493,53 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "proxy policy denied tool 'ask_viktor' on 'viktor-shadow': external tool is not explicitly allowlisted; add \"viktor-shadow.ask_viktor\" to [proxy].allowlist"
+            "proxy policy denied tool 'start_review' on 'review-shadow': external tool is not explicitly allowlisted; add \"review-shadow.start_review\" to [proxy].allowlist"
         );
         let audit = engine.policy_audit();
         assert_eq!(audit.len(), 1);
         assert!(!audit[0].allowed);
-        assert_eq!(audit[0].server, "viktor-shadow");
-        assert_eq!(audit[0].tool, "ask_viktor");
+        assert_eq!(audit[0].server, "review-shadow");
+        assert_eq!(audit[0].tool, "start_review");
     }
 
     #[tokio::test]
-    async fn disconnected_configured_viktor_is_loud_in_search_and_execute() {
+    async fn disconnected_configured_review_is_loud_in_search_and_execute() {
         let config = ServerConfig::Http {
             url: "https://example.invalid/mcp".to_string(),
-            auth: Some("env:CAS_TEST_MISSING_VIKTOR_KEY_8563".to_string()),
+            auth: Some("env:CAS_TEST_MISSING_REVIEW_KEY_8563".to_string()),
             headers: HashMap::new(),
             oauth: false,
         };
-        let engine = ProxyEngine::from_configs(HashMap::from([("viktor".to_string(), config)]))
+        let engine = ProxyEngine::from_configs(HashMap::from([("review".to_string(), config)]))
             .await
             .unwrap();
         engine
             .set_policy(Arc::new(ExternalToolAllowlistPolicy::new([
-                ExternalToolRoute::new("viktor", "ask_viktor"),
+                ExternalToolRoute::new("review", "start_review"),
             ])))
             .await;
 
-        let search = engine.search("server:viktor", None).await.unwrap_err();
+        let search = engine.search("server:review", None).await.unwrap_err();
         assert!(
-            search.to_string().contains("viktor"),
+            search.to_string().contains("review"),
             "configured but disconnected discovery must not read as an empty catalog: {search}"
         );
         let execute = match engine
             .execute(
                 &registered_worker_caller(),
-                r#"{"server":"viktor","tool":"ask_viktor","args":{}}"#,
+                r#"{"server":"review","tool":"start_review","args":{}}"#,
                 None,
             )
             .await
         {
-            Ok(_) => panic!("disconnected Viktor execution must fail loudly"),
+            Ok(_) => panic!("disconnected Review execution must fail loudly"),
             Err(error) => error,
         };
         assert!(
-            execute.to_string().contains("viktor"),
+            execute.to_string().contains("review"),
             "configured but disconnected execution must identify the absent upstream: {execute}"
         );
-        assert!(!engine.upstream_connected("viktor").await);
+        assert!(!engine.upstream_connected("review").await);
     }
 
     /// cas-53ce: a stdio MCP upstream speaking newline-delimited JSON-RPC.
@@ -4405,16 +4408,16 @@ for line in sys.stdin:
     fn missing_optional_credentials_are_logged_once_below_error_while_real_failures_stay_errors() {
         let config = ServerConfig::Http {
             url: "https://example.invalid/mcp".to_string(),
-            auth: Some("env:VIKTOR_API_KEY".to_string()),
+            auth: Some("env:REVIEW_API_KEY".to_string()),
             headers: HashMap::new(),
             oauth: false,
         };
         let missing_code = classify_error(&anyhow::Error::new(MissingCredentialError {
-            name: "VIKTOR_API_KEY".to_string(),
+            name: "REVIEW_API_KEY".to_string(),
         }));
-        assert_eq!(missing_code, "missing_credential_env:VIKTOR_API_KEY");
+        assert_eq!(missing_code, "missing_credential_env:REVIEW_API_KEY");
 
-        let mut missing_health = initial_health("viktor", &config);
+        let mut missing_health = initial_health("review", &config);
         assert_eq!(
             record_failure(&mut missing_health, &missing_code, 1_000),
             FailureVisibility::Info,
@@ -4426,7 +4429,7 @@ for line in sys.stdin:
             "retries for an unchanged missing credential must not return to error"
         );
 
-        let mut configured_failure_health = initial_health("viktor", &config);
+        let mut configured_failure_health = initial_health("review", &config);
         assert_eq!(
             record_failure(
                 &mut configured_failure_health,

@@ -370,30 +370,6 @@ pub(super) async fn prepare_service(cas_root: std::path::PathBuf) -> anyhow::Res
     #[cfg(feature = "mcp-proxy")]
     let project_proxy_path = cas_root.join("proxy.toml");
 
-    // Reconcile the credential-free, user-scoped Viktor default before loading
-    // proxy configuration. The machine setting persists an opt-out across
-    // serves; an explicit project .cas/proxy.toml still opts out of first-time
-    // provisioning while Viktor remains enabled.
-    #[cfg(feature = "mcp-proxy")]
-    {
-        let viktor_enabled = match crate::config::Config::load(&crate::config::host_config_dir()) {
-            Ok(config) => config.viktor_enabled(),
-            Err(error) => {
-                eprintln!("[Cassy] Failed to read managed Viktor setting: {error}");
-                true
-            }
-        };
-        if (!project_proxy_path.exists() || !viktor_enabled)
-            && let Ok(path) = cmcp_core::config::Scope::User.config_path()
-            && let Err(error) = cmcp_core::config::Config::reconcile_viktor_managed_default(
-                &path,
-                viktor_enabled,
-            )
-        {
-            eprintln!("[Cassy] Failed to reconcile managed Viktor proxy config: {error}");
-        }
-    }
-
     #[cfg(feature = "mcp-proxy")]
     if !project_proxy_path.exists()
         && let Ok(path) = cmcp_core::config::Scope::User.config_path()
@@ -407,23 +383,13 @@ pub(super) async fn prepare_service(cas_root: std::path::PathBuf) -> anyhow::Res
     let proxy = {
         let cfg = load_proxy_config_for_process(&cas_root);
         match cfg {
-            Ok(mut cfg) if !cfg.servers.is_empty() => {
+            Ok(cfg) if !cfg.servers.is_empty() => {
                 if let Err(error) =
                     crate::cli::integrate::violet::load_machine_credentials_into_process_env_except(
                         &worker_proxy_policy(&cas_root)?.unwrap_or_default().supervisor_only_env
                     )
                 {
                     eprintln!("[Cassy] Failed to load machine-scoped proxy credentials: {error}");
-                }
-                if std::env::var_os("VIKTOR_API_KEY").is_none()
-                    && !worker_proxy_policy(&cas_root)?.is_some_and(|policy| policy.denies_env("VIKTOR_API_KEY")) {
-                    match crate::cli::viktor::load_machine_credential() {
-                        Ok(Some(key)) => install_machine_viktor_credential(&mut cfg, key),
-                        Ok(None) => {}
-                        Err(error) => eprintln!(
-                            "[Cassy] Failed to load machine-scoped Viktor credential: {error}"
-                        ),
-                    }
                 }
                 eprintln!(
                     "[Cassy] Connecting to {} upstream MCP server(s)...",
@@ -441,13 +407,7 @@ pub(super) async fn prepare_service(cas_root: std::path::PathBuf) -> anyhow::Res
                 {
                     Ok(engine) => {
                         install_proxy_policy(&engine, &snapshot_config).await;
-                        crate::coordination::stakeholder_contacts::install(&engine, &cas_root).await;
-                        engine
-                            .set_call_observer(std::sync::Arc::new(
-                                crate::mcp::viktor_watch::ViktorWatchRecorder::new(
-                                    cas_root.clone(),
-                                ),
-                            ))
+                        crate::coordination::stakeholder_contacts::install(&engine, &cas_root)
                             .await;
                         let count = engine.tool_count().await;
                         eprintln!(
@@ -463,14 +423,6 @@ pub(super) async fn prepare_service(cas_root: std::path::PathBuf) -> anyhow::Res
                         .await
                         {
                             eprintln!("[Cassy] Failed to publish MCP proxy state: {error}");
-                        }
-                        if let Err(error) =
-                            crate::mcp::viktor_watch::alert_unpollable_watches(&cas_root, &engine)
-                                .await
-                        {
-                            eprintln!(
-                                "[Cassy] Failed to surface unpollable Viktor watches: {error}"
-                            );
                         }
                         let engine = std::sync::Arc::new(engine);
                         spawn_idle_upstream_sweeper(&engine, idle_timeout);
@@ -699,20 +651,6 @@ async fn proxy_boot_reachability_receipt(engine: &cmcp_core::ProxyEngine) -> Str
             unavailable.join(",")
         }
     )
-}
-
-/// Replace only Cassy's in-memory managed Viktor credential reference. Project
-/// configurations and operator-owned Viktor upstreams retain their own auth.
-#[cfg(feature = "mcp-proxy")]
-fn install_machine_viktor_credential(config: &mut cmcp_core::config::Config, key: String) {
-    let Some(cmcp_core::config::ServerConfig::Http { url, auth, .. }) =
-        config.servers.get_mut(cmcp_core::config::VIKTOR_SERVER)
-    else {
-        return;
-    };
-    if url == cmcp_core::config::VIKTOR_MCP_URL && auth.as_deref() == Some("env:VIKTOR_API_KEY") {
-        *auth = Some(key);
-    }
 }
 
 /// Total time budget for the eager store-init phase before `cas serve` aborts.
@@ -1627,14 +1565,13 @@ env = { DENIED_LITERAL_FIXTURE_TOKEN = "synthetic-denied", ALLOWED_LITERAL_FIXTU
         std::fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
         std::fs::write(
             &user_proxy,
-            "[servers.viktor]\ntransport = 'http'\n\
-             url = 'https://viktor.invalid/mcp'\n\
-             auth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n",
-        ).unwrap();
-        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
-            "XDG_CONFIG_HOME",
-            inherited.path(),
-        );
+            "[servers.review]\ntransport = 'http'\n\
+             url = 'https://review.invalid/mcp'\n\
+             auth = 'env:CAS_7401_MISSING_REVIEW_KEY'\n",
+        )
+        .unwrap();
+        let _ambient =
+            crate::test_env_guard::AmbientEnvRestore::set("XDG_CONFIG_HOME", inherited.path());
         // The shared guard redirects XDG and scrubs provider credentials;
         // keep the poisoned ambient config above to prove that boundary.
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -1741,8 +1678,6 @@ url = "https://context7.invalid/mcp"
         );
         server.verify().await;
     }
-    #[cfg(feature = "mcp-proxy")]
-    use super::install_machine_viktor_credential;
     use super::{
         ensure_mcp_schema, open_startup_pull_entry_store, open_startup_pull_task_store,
         resolve_mcp_serve_root,
@@ -1753,36 +1688,6 @@ url = "https://context7.invalid/mcp"
     use crate::types::{Entry, Task};
     use std::sync::Arc;
     use tempfile::TempDir;
-
-    #[cfg(feature = "mcp-proxy")]
-    #[test]
-    fn machine_viktor_key_replaces_only_the_managed_memory_config() {
-        use cmcp_core::config::{Config as ProxyConfig, ServerConfig};
-
-        let mut managed = ProxyConfig::default();
-        assert!(managed.ensure_viktor_managed_default());
-        install_machine_viktor_credential(&mut managed, "machine-test-key".to_string());
-        assert!(matches!(
-            managed.servers.get("viktor"),
-            Some(ServerConfig::Http { auth: Some(auth), .. }) if auth == "machine-test-key"
-        ));
-
-        let mut operator_owned = ProxyConfig::default();
-        operator_owned.add_server(
-            "viktor".to_string(),
-            ServerConfig::Http {
-                url: "https://operator.example/mcp".to_string(),
-                auth: Some("env:OPERATOR_VIKTOR_KEY".to_string()),
-                headers: Default::default(),
-                oauth: false,
-            },
-        );
-        install_machine_viktor_credential(&mut operator_owned, "machine-test-key".to_string());
-        assert!(matches!(
-            operator_owned.servers.get("viktor"),
-            Some(ServerConfig::Http { auth: Some(auth), .. }) if auth == "env:OPERATOR_VIKTOR_KEY"
-        ));
-    }
 
     #[cfg(feature = "mcp-proxy")]
     #[tokio::test]
@@ -1802,20 +1707,20 @@ url = "https://context7.invalid/mcp"
                 supervisor_only: false,
             },
             ExternalToolConfig {
-                server: "viktor".to_string(),
-                tool: "ask_viktor".to_string(),
+                server: "review".to_string(),
+                tool: "start_review".to_string(),
                 supervisor_only: false,
             },
             ExternalToolConfig {
-                server: "viktor".to_string(),
+                server: "review".to_string(),
                 tool: "wait_for_run".to_string(),
                 supervisor_only: false,
             },
         ];
         config.delegation.external_production_verification =
             Some(ExternalProductionVerificationConfig {
-                server: "viktor".to_string(),
-                start_tool: "ask_viktor".to_string(),
+                server: "review".to_string(),
+                start_tool: "start_review".to_string(),
                 wait_tool: "wait_for_run".to_string(),
                 reserved_amount: 1,
                 max_per_run: 1,
@@ -1833,13 +1738,13 @@ url = "https://context7.invalid/mcp"
         };
 
         let foreign = engine
-            .call_tool(&caller, "viktor-shadow", "ask_viktor", None)
+            .call_tool(&caller, "review-shadow", "start_review", None)
             .await
             .unwrap_err()
             .to_string();
         assert!(foreign.contains("external tool is not explicitly allowlisted"));
         let direct_delegation = engine
-            .call_tool(&caller, "viktor", "ask_viktor", None)
+            .call_tool(&caller, "review", "start_review", None)
             .await
             .unwrap_err()
             .to_string();
@@ -1856,63 +1761,19 @@ url = "https://context7.invalid/mcp"
         );
         assert!(!ordinary.contains("proxy policy denied"));
         let delegated = engine
-            .call_external_production_verification_tool(&caller, "viktor", "ask_viktor", None)
+            .call_external_production_verification_tool(&caller, "review", "start_review", None)
             .await
             .unwrap_err()
             .to_string();
         assert!(
             delegated
-                .contains("MCP upstream 'viktor' is absent: it is configured but not connected")
+                .contains("MCP upstream 'review' is absent: it is configured but not connected")
         );
         assert!(!delegated.contains("proxy policy denied"));
 
         let audit = engine.policy_audit();
         assert_eq!(audit.iter().filter(|entry| entry.allowed).count(), 2);
         assert_eq!(audit.iter().filter(|entry| !entry.allowed).count(), 2);
-    }
-
-    #[cfg(feature = "mcp-proxy")]
-    #[tokio::test]
-    async fn managed_viktor_conversation_policy_is_exact_and_audits_worker_task_attribution() {
-        use cmcp_core::config::{Config as ProxyConfig, VIKTOR_CONVERSATION_TOOLS, VIKTOR_SERVER};
-
-        let engine = cmcp_core::ProxyEngine::from_configs(Default::default())
-            .await
-            .unwrap();
-        let mut config = ProxyConfig::default();
-        assert!(config.ensure_viktor_managed_default());
-        super::install_proxy_policy(&engine, &config).await;
-        let caller = cmcp_core::ProxyCaller {
-            agent_id: "worker-session".to_string(),
-            role: crate::types::AgentRole::Worker,
-            session_id: "worker-session".to_string(),
-            factory_session: Some("factory-2428".to_string()),
-            active_task_ids: vec!["cas-2428".to_string()],
-        };
-
-        for tool in VIKTOR_CONVERSATION_TOOLS {
-            let error = engine
-                .call_tool(&caller, VIKTOR_SERVER, tool, None)
-                .await
-                .unwrap_err()
-                .to_string();
-        }
-        let forbidden = engine
-            .call_tool(&caller, VIKTOR_SERVER, "get_file_download_url", None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(forbidden.contains("external tool is not explicitly allowlisted"));
-
-        let audit = engine.policy_audit();
-        assert_eq!(audit.len(), VIKTOR_CONVERSATION_TOOLS.len() + 1);
-        for receipt in audit.iter().take(VIKTOR_CONVERSATION_TOOLS.len()) {
-            assert!(receipt.allowed);
-            assert_eq!(receipt.caller.agent_id, "worker-session");
-            assert_eq!(receipt.caller.active_task_ids, ["cas-2428"]);
-            assert!(receipt.timestamp_ms > 0);
-        }
-        assert!(!audit.last().unwrap().allowed);
     }
 
     #[cfg(feature = "mcp-proxy")]

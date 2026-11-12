@@ -60,7 +60,7 @@ cas doctor
 ```
 
 `cas setup` is idempotent: rerunning it reports the environment, login, pairing,
-hub service, optional Viktor key, and project status without repeating completed
+hub service, and project status without repeating completed
 work. Use `cas setup --dry-run` to inspect the fresh-machine plan first.
 
 After a binary update, one `cas update` refreshes every discovered local Cassy

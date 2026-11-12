@@ -15,7 +15,7 @@ use crate::cli::config::util::{format_constraint, truncate_description};
 use crate::config::operator_policy::InvocationContext;
 
 pub(super) fn host_scoped_key(key: &str) -> bool {
-    key == "viktor.enabled" || key.starts_with("hub.")
+    key.starts_with("hub.")
 }
 
 fn config_root_for_key(key: &str, cas_root: &Path) -> PathBuf {
@@ -238,9 +238,6 @@ pub(crate) fn update_config_in_place<T>(
         crate::config::atomic_replace_project_config(&path, &contents)?;
     }
     *config = saved;
-    if key == "viktor.enabled" {
-        crate::cli::viktor::reconcile_managed_proxy(config.viktor_enabled())?;
-    }
     Ok(result)
 }
 
@@ -340,7 +337,6 @@ fn persist_editor_changes_for_root(
         toml::from_str(&raw)?
     };
     let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
-    let mut reconcile_viktor = false;
 
     for (key, value) in changes {
         let (serialized_path, stored_path, alternate_path) = config_document_paths(&document, key);
@@ -361,7 +357,6 @@ fn persist_editor_changes_for_root(
         } else {
             remove_config_document_key(&mut document, stored_path, alternate_path)?;
         }
-        reconcile_viktor |= key == "viktor.enabled";
     }
 
     let contents = document.to_string();
@@ -370,9 +365,6 @@ fn persist_editor_changes_for_root(
     if contents != raw {
         crate::config::atomic_replace_project_config(&path, &contents)?;
         written_paths.push(path.clone());
-    }
-    if reconcile_viktor {
-        crate::cli::viktor::reconcile_managed_proxy(after.viktor_enabled())?;
     }
     Ok(())
 }
@@ -570,10 +562,10 @@ pub(in crate::cli) fn reset_config_value(
     if removed {
         crate::config::atomic_replace_project_config(&path, &contents)?;
     }
-    if key == "viktor.enabled" {
-        crate::cli::viktor::reconcile_managed_proxy(after.viktor_enabled())?;
-    }
-    Ok((before.get(key).unwrap_or_default(), after.get(key).unwrap_or_default()))
+    Ok((
+        before.get(key).unwrap_or_default(),
+        after.get(key).unwrap_or_default(),
+    ))
 }
 
 #[derive(serde::Serialize)]
@@ -697,7 +689,6 @@ pub(crate) fn execute_list(
     // Get all current values
     let mut items: HashMap<String, String> = config.list().into_iter().collect();
     let host_config = Config::load(&crate::config::host_config_dir())?;
-    items.insert("viktor.enabled".into(), host_config.viktor_enabled().to_string());
     for (key, value) in host_config.list() {
         if host_scoped_key(&key) {
             items.insert(key, value);

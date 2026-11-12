@@ -3037,6 +3037,15 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
     ];
     for (case, path, target_edits) in cases {
         let registry = path == "docs/qa/journeys.yaml";
+        let content = |edits: &[(usize, &str)]| {
+            let body = shared(edits);
+            if registry {
+                format!("version: 1\nsurfaces: []\njourneys: []\nseeded_from:\n{}",
+                    body.lines().map(|line| format!("- {line}\n")).collect::<String>())
+            } else {
+                body
+            }
+        };
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -3046,7 +3055,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         };
         run_git(&["reset", "--hard", "epic/rebound"], &fixture.worker);
         std::fs::create_dir_all(fixture.worker.join(path).parent().unwrap()).unwrap();
-        std::fs::write(fixture.worker.join(path), shared(&[])).unwrap();
+        std::fs::write(fixture.worker.join(path), content(&[])).unwrap();
         if registry {
             std::fs::create_dir_all(fixture.worker.join(".claude")).unwrap();
             std::fs::write(fixture.worker.join(".claude/CODEMAP.md"), shared(&[])).unwrap();
@@ -3054,7 +3063,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         run_git(&["add", "-A"], &fixture.worker);
         run_git(&["commit", "-m", "Shared file on the target"], &fixture.worker);
         run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &fixture.worker);
-        std::fs::write(fixture.worker.join(path), shared(&[(3, "delivered 3"), (12, "delivered 12")])).unwrap();
+        std::fs::write(fixture.worker.join(path), content(&[(3, "delivered 3"), (12, "delivered 12")])).unwrap();
         if registry {
             std::fs::write(fixture.worker.join(".claude/CODEMAP.md"), shared(&[(3, "delivery map")])).unwrap();
         }
@@ -3087,7 +3096,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         let writer = fixture.cas_root.join("target-writer");
         run_git(&["worktree", "add", "--detach", writer.to_str().unwrap(), "refs/remotes/origin/epic/rebound"],
             &fixture.repo.root);
-        std::fs::write(writer.join(path), shared(target_edits)).unwrap();
+        std::fs::write(writer.join(path), content(target_edits)).unwrap();
         if registry {
             std::fs::write(writer.join(".claude/CODEMAP.md"), shared(&[(5, "sibling map")])).unwrap();
         }
@@ -3121,7 +3130,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
         assert!(landed, "{case}: the rebound approval publishes: {text}");
         assert_eq!(git_stdout(fixture.origin.path(), &["show", &format!("refs/heads/epic/rebound:{path}")]),
-            shared(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");
+            content(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");
         // Close consumes the carried approval through its landed mapping.
         let closed = fixture.service.task(Parameters(task_req(serde_json::json!({
             "action": "close", "id": task.id, "reason": "rebound approval landed",

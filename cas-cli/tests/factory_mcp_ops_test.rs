@@ -2533,7 +2533,7 @@ async fn test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_187
     env.create_epic("Test Epic");
     let home = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
     let host = home.join("fake-bin/codex-code-mode-host");
-    cas::test_paths::warm_stub(&host, "#!/bin/sh\nexec sleep 30\n");
+    cas::test_paths::warm_stub(&host, "#!/bin/sh\nexec /bin/sleep 30\n");
 
     let mut spawn = factory_req("spawn_workers");
     spawn.count = Some(1);

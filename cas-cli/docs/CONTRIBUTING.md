@@ -4557,6 +4557,17 @@ argument arrays can be asserted on their immutable parsed fields, including
 let-else command routing. Unrelated fields, generated values and substring or
 inequality prose checks retain the ordinary rejection rules.
 
+For recorded Python CLI calls, compare argument vectors rather than command
+sentences. The lint recognizes literal string lists compared directly with
+`shlex.split(calls.read_text())` using equality (either operand order), or list
+membership/absence in `[shlex.split(line) for line in calls.read_text().splitlines()]`.
+For example, `self.assertIn(["config", "get", "qa.registry.enforce"],
+[shlex.split(line) for line in calls.read_text().splitlines()])` checks the
+recorded caller arguments. Record shell-quoted arguments so spaces inside an
+argument survive parsing. Quoted caller text remains data in these vectors.
+Raw `read_text()` command substrings, rendered output and ordinary whitespace
+splitting receive no exemption; `pin:` comments still cannot waive prose pins.
+
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys
 at four workers. Independent QA consumes matching passing worker receipts

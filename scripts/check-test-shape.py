@@ -650,7 +650,7 @@ def js_assertion_diagnostics(source, path):
 
 
 def python_runtime_inputs(source):
-    """Path literals consumed by file reads are inputs, not returned-text pins."""
+    """File paths and explicit recorded argv comparisons are machine data."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -664,12 +664,52 @@ def python_runtime_inputs(source):
         # AST columns count UTF-8 bytes; text_literals uses character offsets.
         return starts[line - 1] + len(lines[line - 1].encode('utf-8')[:byte_column].decode('utf-8'))
 
+    def file_read(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'read_text' and not node.args and not node.keywords)
+
+    def shell_split(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == 'shlex'
+                and node.func.attr == 'split' and len(node.args) == 1 and not node.keywords)
+
+    def recorded_argv(node, many=False):
+        if not many:
+            return shell_split(node) and file_read(node.args[0])
+        if not isinstance(node, ast.ListComp) or len(node.generators) != 1:
+            return False
+        loop = node.generators[0]
+        return (isinstance(loop.target, ast.Name) and not loop.ifs and not loop.is_async
+                and shell_split(node.elt) and isinstance(node.elt.args[0], ast.Name)
+                and node.elt.args[0].id == loop.target.id
+                and isinstance(loop.iter, ast.Call) and isinstance(loop.iter.func, ast.Attribute)
+                and loop.iter.func.attr == 'splitlines' and not loop.iter.args and not loop.iter.keywords
+                and file_read(loop.iter.func.value))
+
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in ('read_text', 'read_bytes')):
             for value in ast.walk(node.func.value):
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
                     yield offset(value.lineno, value.col_offset), offset(value.end_lineno, value.end_col_offset)
+        operands, many = [], False
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and len(node.args) >= 2:
+            if node.func.attr == 'assertEqual':
+                operands = [node.args[:2], node.args[:2][::-1]]
+            elif node.func.attr in ('assertIn', 'assertNotIn'):
+                operands, many = [node.args[:2]], True
+        elif isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare) and len(node.test.ops) == 1:
+            expected, actual = node.test.left, node.test.comparators[0]
+            if isinstance(node.test.ops[0], ast.Eq):
+                operands = [(expected, actual), (actual, expected)]
+            elif isinstance(node.test.ops[0], (ast.In, ast.NotIn)):
+                operands, many = [(expected, actual)], True
+        for expected, actual in operands:
+            if (isinstance(expected, ast.List) and expected.elts
+                    and all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in expected.elts)
+                    and recorded_argv(actual, many)):
+                for item in expected.elts:
+                    yield offset(item.lineno, item.col_offset), offset(item.end_lineno, item.end_col_offset)
 
 
 def lint_text_pins(source, path, ranges=None, changed_lines=None):

@@ -237,6 +237,10 @@ def test_workflow_command():
             (f'self.assertEqual(calls.read_text().split(), {payload})', True),
             (f'self.assertEqual(shlex.split(result.stderr), {payload})', True),
             (f'self.assertEqual(render(shlex.split(calls.read_text())), {payload})', True),
+            (f'self.assertIn({payload}, [shlex.split(line.strip()) for line in calls.read_text().splitlines()])', True),
+            (f'label = "é"; self.assertEqual(shlex.split(calls.read_text()), {payload})', False),
+            (f'self.assertEqual(shlex.split(calls.read_text()), {payload}); '
+             'self.assertEqual(calls.read_text(), "Please retry the operation later.")', True),
             ('# pin: recorded caller payload\n'
              'self.assertEqual(calls.read_text(), "Please retry the operation later.")', True),
         ]

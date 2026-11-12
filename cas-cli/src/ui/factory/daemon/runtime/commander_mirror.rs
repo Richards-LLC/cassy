@@ -1925,6 +1925,10 @@ mod tests {
         supervisor.cc_session_id = Some("after-clear".into());
         agents.update(&supervisor).unwrap();
         if old_mcp_ended {
+            {
+                use cas_store::EventStore as _;
+                cas_store::SqliteEventStore::open(&root).unwrap().init().unwrap();
+            }
             agents.unregister("supervisor-id").unwrap();
         }
         crate::mcp::CasCore::with_daemon(root.clone(), None, None)

@@ -37,7 +37,7 @@ def cut(repo, branch, tip, args):
                 (directory / 'owner.json').write_text(json.dumps({'pid': os.getpid(), 'branch': branch, 'tip': tip, 'checkout': str(checkout)}))
                 env = dict(os.environ, CAS_RELEASE_CUT_OWNED='1', CAS_RELEASE_CUT_BRANCH=branch,
                            CAS_RELEASE_TRAIN_TIP=tip, CAS_ROOT=os.environ.get('CAS_ROOT', str(common.parent / '.cas')))
-                return subprocess.run(['bash', 'scripts/release.sh', *args], cwd=checkout, env=env).returncode
+                return subprocess.run(['bash', 'scripts/release.sh', *args], cwd=checkout, env=env, pass_fds=(lease.fileno(),)).returncode
             finally:
                 subprocess.run(['git', '-C', str(repo), 'worktree', 'remove', '--force', str(checkout)], check=True)
                 (directory / 'owner.json').unlink(missing_ok=True)

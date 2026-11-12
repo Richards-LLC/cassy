@@ -593,7 +593,7 @@ mod tests {
         cas_store::record_quality_event(root, &event).unwrap();
     }
 
-    /// The report as `cas ledger report` builds it for work since v4.18.0.
+    /// The report as `cas ledger report` builds it for work since the last release.
     fn scored(root: &Path, name: &str) -> Scorer {
         let events = cas_store::quality_events_between(root, None, None).unwrap();
         let mut report = super::super::aggregate("unreleased".into(), false,

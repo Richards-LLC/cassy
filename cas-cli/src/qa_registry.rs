@@ -322,12 +322,29 @@ pub struct Fixture {
 #[serde(default)]
 pub struct BugFamily {
     pub title: String,
+    /// What the case covers; a delivery may extend it as its regression case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
     pub found: Option<Value>,
     pub fixed_by: Vec<String>,
     pub tasks: Vec<String>,
     pub invariants: Vec<String>,
     pub journeys: Vec<String>,
+    /// Unsupported keys, kept so a change to them is named, never counted.
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
+
+impl BugFamily {
+    /// The supported fields only, which is what a changed case compares.
+    pub fn case(&self) -> Self {
+        Self { extra: BTreeMap::new(), ..self.clone() }
+    }
+}
+
+/// The fields a bug family's case is compared on.
+pub const BUG_FAMILY_FIELDS: [&str; 7] =
+    ["title", "statement", "found", "fixed_by", "tasks", "invariants", "journeys"];
 
 /// Gabber's backend/frontend map and a flat glob list have the same meaning.
 #[derive(Debug, Clone, Serialize, Deserialize)]

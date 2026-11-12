@@ -612,6 +612,33 @@ fn registry_upkeep_bug_requires_changed_case_for_task() {
     }
 }
 
+/// GH #1863: extending an existing inline family's statement is its case;
+/// a change only to an unsupported key is still refused, naming that key.
+#[test]
+fn registry_upkeep_statement_extension_is_a_case_but_unsupported_keys_are_not_cas_f63f() {
+    let family = |statement: &str, note: &str| format!(
+        "{YAML}bug_families:\n  paid-invoice-duplicated-by-manual-sync:\n    title: Paid invoice duplicated by manual sync\n    statement: {statement}\n    note: {note}\n    tasks: [cas-1234]\n    invariants: [INV]\n    journeys: [signup]\n"
+    );
+    for (registry, accepted) in [
+        (family("Manual sync never duplicates a paid invoice, including linked PENDING webhook evidence", "kept"), true),
+        (family("Manual sync never duplicates a paid invoice", "changed"), false),
+    ] {
+        let mut f = Fixture::new(&family("Manual sync never duplicates a paid invoice", "kept"));
+        f.task.task_type = TaskType::Bug;
+        f.task.updated_at = f.store.update(&f.task).unwrap();
+        write(f.repo.path(), "src/pages/signup.ts", "fixed");
+        write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, &registry);
+        let head = commit(f.repo.path());
+        match f.run(&head) {
+            Ok(_) => assert!(accepted, "an unsupported-key change is not a case"),
+            Err(error) => {
+                assert!(!accepted, "a statement extension is a case: {error}");
+                assert!(error.contains("bug_families.paid-invoice-duplicated-by-manual-sync") && error.contains("note"), "{error}");
+            }
+        }
+    }
+}
+
 #[test]
 fn registry_upkeep_observe_persists_would_refusal_and_off_skips() {
     // A delivery that breaks YAML retains the base policy's severity, including

@@ -3089,7 +3089,8 @@ Slim lanes omit broad Rust tests for factory pushes, but run the train's
 impact selection (`scripts/ci-test-impact.py`, unchanged) for the delivery's
 range on hosted runners (cas-2e1b). The range starts at the delivery's
 recorded start base when `refs/cas/delivery-base/<branch>` exists and is an
-ancestor of the pushed head; otherwise it uses the classifier's inferred
+ancestor of the pushed head (task start pushes that ref, best effort, each
+time it records a new start base); otherwise it uses the classifier's inferred
 comparison base. The plan step logs which one it used. `Scoped Validation — impact own tests`
 builds the selection and runs the changed modules' unit tests, edited
 integration suites and directly changed crates first; up to three `impact ring`

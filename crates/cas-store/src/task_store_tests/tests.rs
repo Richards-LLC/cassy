@@ -13,6 +13,28 @@ fn create_test_store() -> (TempDir, SqliteTaskStore) {
 }
 
 #[test]
+fn retarget_parent_and_receipt_commit_or_roll_back_together_cas_4845() {
+    let (temp, store) = create_test_store();
+    let mut child = Task::new("cas-child".into(), "move trains".into());
+    let mut old = Task::new("cas-old".into(), "old train".into());
+    old.task_type = TaskType::Epic;
+    let mut next = old.clone(); next.id = "cas-next".into();
+    store.add(&old).unwrap(); store.add(&next).unwrap();
+    store.create_atomic(&child, &[], Some(&old.id), None).unwrap();
+    let parent = Dependency::new(child.id.clone(), next.id.clone(), DependencyType::ParentChild);
+    child.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "epic/next".into() });
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_retarget_receipt BEFORE INSERT ON task_mutation_receipts BEGIN SELECT RAISE(ABORT, 'receipt failure'); END;").unwrap();
+    assert!(store.update_with_parent(&child, Some(&parent), "retarget-failed").is_err());
+    assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, old.id);
+    assert_eq!(store.get(&child.id).unwrap().deliverables.work_target, None);
+    conn.execute_batch("DROP TRIGGER fail_retarget_receipt;").unwrap();
+    store.update_with_parent(&child, Some(&parent), "retarget-pass").unwrap();
+    assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, next.id);
+    assert_eq!(store.get(&child.id).unwrap().deliverables.work_target, child.deliverables.work_target);
+}
+
+#[test]
 fn test_task_crud() {
     let (_temp, store) = create_test_store();
 

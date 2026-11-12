@@ -599,6 +599,24 @@ impl TaskStore for SyncingTaskStore {
         Ok(persisted_at)
     }
 
+    fn update_with_parent(&self, task: &Task, parent: Option<&Dependency>, _receipt_id: &str) -> Result<DateTime<Utc>> {
+        let _guard = self.queue.lock_task_sync_mutations(&[&task.id]).map_err(queue_error_before_local_commit)?;
+        let previous = self.inner.get(&task.id)?;
+        let previous_parents: Vec<_> = self.inner.get_dependencies(&task.id)?.into_iter()
+            .filter(|d| d.dep_type == DependencyType::ParentChild).collect();
+        let intent = self.stage_upsert(task, "update", Some(&previous.updated_at.to_rfc3339()), Some(&previous))?;
+        let at = match self.inner.update_with_parent(task, parent, &intent.mutation_id) {
+            Ok(at) => at,
+            Err(error) => { self.cancel_staged_after_local_failure(&intent); return Err(error); }
+        };
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
+        let result = self.fulfill_upsert(&intent);
+        for dep in previous_parents { self.queue_dependency_delete(&dep, task.scope); }
+        if let Some(dep) = parent { self.queue_dependency_upsert(dep, task); }
+        result?;
+        Ok(at)
+    }
+
     fn update_if_current(&self, task: &Task, expected: &Task) -> Result<DateTime<Utc>> {
         let _sync_guard = self.queue.lock_task_sync_mutations(&[&task.id])
             .map_err(queue_error_before_local_commit)?;

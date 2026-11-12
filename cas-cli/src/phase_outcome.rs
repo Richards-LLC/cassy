@@ -291,7 +291,21 @@ pub(crate) fn refusal(
     id: &str,
     include_self: bool,
 ) -> Result<Option<String>> {
+    refusal_with_parent(root, store, id, include_self, None)
+}
+
+fn refusal_with_parent(root: &Path, store: &dyn cas_store::TaskStore, id: &str, include_self: bool, parent: Option<Option<&str>>) -> Result<Option<String>> {
     let origin = id;
+    let dependencies = |id: &str| -> cas_store::Result<Vec<cas_types::Dependency>> {
+        let mut deps = store.get_dependencies(id)?;
+        if id == origin && let Some(parent) = parent {
+            deps.retain(|d| d.dep_type != DependencyType::ParentChild);
+            if let Some(parent) = parent {
+                deps.push(cas_types::Dependency::new(id.into(), parent.into(), DependencyType::ParentChild));
+            }
+        }
+        Ok(deps)
+    };
     // A sibling prerequisite shares some ancestors with the task. Those are
     // implementation phases whose outcomes this work is meant to establish,
     // rather than external prerequisite phases whose outcomes gate it.
@@ -300,8 +314,7 @@ pub(crate) fn refusal(
     while let Some(ancestor) = ancestors.pop() {
         if own_ancestors.insert(ancestor.clone()) {
             ancestors.extend(
-                store
-                    .get_dependencies(&ancestor)?
+                dependencies(&ancestor)?
                     .into_iter()
                     .filter(|dep| dep.dep_type == DependencyType::ParentChild)
                     .map(|dep| dep.to_id),
@@ -340,7 +353,7 @@ pub(crate) fn refusal(
                 ));
             }
         }
-        for dep in store.get_dependencies(&id)? {
+        for dep in dependencies(&id)? {
             match dep.dep_type {
                 DependencyType::ParentChild => pending.push((dep.to_id, prerequisite)),
                 DependencyType::Blocks | DependencyType::RequiresStart => {
@@ -362,7 +375,11 @@ pub(crate) fn check(
     id: &str,
     include_self: bool,
 ) -> std::result::Result<(), String> {
-    match refusal(root, store, id, include_self) {
+    check_with_parent(root, store, id, include_self, None)
+}
+
+pub(crate) fn check_with_parent(root: &Path, store: &dyn cas_store::TaskStore, id: &str, include_self: bool, parent: Option<Option<&str>>) -> std::result::Result<(), String> {
+    match refusal_with_parent(root, store, id, include_self, parent) {
         Ok(None) => Ok(()),
         Ok(Some(message)) => Err(message),
         Err(error) => Err(format!("OUTCOME CHECK FAILED for {id}: {error:#}")),
@@ -411,6 +428,8 @@ mod tests {
         .unwrap();
         let _ = check(&root, store.as_ref(), "child", false)
                 .unwrap_err();
+        assert!(check_with_parent(&root, store.as_ref(), "child", false, Some(Some("reader"))).is_ok());
+        assert!(check_with_parent(&root, store.as_ref(), "independent", false, Some(Some("consumer"))).is_err());
         assert!(
             check(&root, store.as_ref(), "reader-child", true).is_ok(),
             "the phase must be able to implement its own outcome"

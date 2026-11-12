@@ -291,6 +291,11 @@ pub(crate) fn observe(root: &Path, task_id: &str) -> Result<()> {
 
 pub(crate) fn ensure_staffing_allowed(root: &Path, task_id: &str) -> Result<()> {
     crate::mcp::tools::core::workflow::release_freeze::check_staffing(root, task_id)?;
+    let store = crate::store::open_task_store(root)?;
+    if let Ok(task) = store.get(task_id) {
+        crate::mcp::tools::core::task::release_train::check_published_base(root, store.as_ref(), &task, None)
+            .map_err(anyhow::Error::msg)?;
+    }
     if let Some((epic, pause)) = refresh_at(root, task_id, Utc::now())? {
         anyhow::bail!(pause.message(&epic));
     }

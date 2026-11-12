@@ -120,6 +120,9 @@ pub(crate) fn reconcile_once(
     trigger: ReconcileTrigger,
     reconciler: &dyn Reconciler,
 ) -> Result<String> {
+    if let Some(tag) = scope.release_tag.as_deref() {
+        crate::mcp::tools::core::task::release_train::synchronize_open_trains(root, repo, tag)?;
+    }
     let key = operation_key(&scope.project_id, &scope.release_id, &scope.final_release_sha);
     let recorded = reconciler.completed(root, &key)?;
     let reused = recorded.is_some();
@@ -320,15 +323,17 @@ pub fn published(args: &PublishedArgs, current_root: Option<&Path>) -> Result<()
     let tag = format!("v{version}");
     let mut failures = Vec::new();
     for root in release_roots(current_root)? {
-        let Some(context) = tracked_context(&root, &args.repo, &version)? else {
-            continue;
-        };
+        let Some((repo, _)) = crate::mcp::tools::core::task::repo_context::integration_branch(&root) else { continue; };
+        if crate::github_repo::origin_slug(&repo, std::time::Duration::from_secs(3)).map_err(anyhow::Error::msg)?.as_deref() != Some(args.repo.as_str()) { continue; }
+        let context = tracked_context(&root, &args.repo, &version)?;
         let result = (|| {
-            let (repo, _) = crate::mcp::tools::core::task::repo_context::integration_branch(&root)
-                .context("project checkout unavailable")?;
             // The tag may be newer than this checkout; fetching it is idempotent.
             let _ = git(&repo, &["fetch", "--quiet", "origin", "tag", &tag]);
             let tag_sha = published_tag_sha(&repo, &tag)?;
+            let Some(context) = context else {
+                crate::mcp::tools::core::task::release_train::synchronize_open_trains(&root, &repo, &tag)?;
+                return Ok(format!("{tag}: open trains synchronized"));
+            };
             let scope = tag_scope(&root, &repo, Some(&context), &context.train_id, &tag, &tag_sha)?;
             let trigger = ReconcileTrigger::Publish { tag: tag.clone() };
             reconcile_once(&root, &repo, &scope, trigger, &LocalReconciler)
@@ -810,6 +815,14 @@ mod tests {
         assert_eq!(git(repo, &["rev-parse", "epic/custom-cleanup"]).unwrap(), tip);
         assert_eq!(repairs().len(), 1);
         assert_eq!(git(repo, &["status", "--porcelain", "--untracked-files=no"]).unwrap(), "");
+        git(repo, &["checkout", "-q", "epic/conflicting"]).unwrap();
+        assert!(git(repo, &["merge", "--no-ff", "--no-commit", "v9.99.7"]).is_err());
+        fs::write(repo.join("shared.txt"), "train\nrelease\n").unwrap();
+        git(repo, &["add", "shared.txt"]).unwrap();
+        git(repo, &["commit", "-qm", "resolve publication conflict"]).unwrap();
+        git(repo, &["push", "-q", "origin", "epic/conflicting"]).unwrap();
+        git(repo, &["checkout", "-q", "main"]).unwrap();
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&root, "cas-b002").is_ok());
     }
 
     #[test]

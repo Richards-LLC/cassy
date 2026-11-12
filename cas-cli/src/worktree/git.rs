@@ -1297,7 +1297,7 @@ impl GitOperations {
         no_ff: bool,
     ) -> Result<Option<String>> {
         let repo_root = self.repo_root.clone();
-        self.merge_branch_in_dir(&repo_root, Some(target_branch), source_branch, no_ff)
+        self.merge_branch_in_dir(&repo_root, Some(target_branch), source_branch, no_ff, true)
     }
 
     /// Refuse an in-place merge unless `dir`'s symbolic HEAD is exactly the
@@ -1335,6 +1335,7 @@ impl GitOperations {
         expected_target: Option<&str>,
         branch: &str,
         no_ff: bool,
+        regenerate: bool,
     ) -> Result<Option<String>> {
         // cas-e18f: a merge left over from a previous, un-aborted failure
         // must be reported distinctly, not surfaced as an opaque failure of
@@ -1357,7 +1358,7 @@ impl GitOperations {
         // cas-0c988: committed build output (hub-web/dist) is regenerated
         // after the merge, never hand-merged. Register the driver its
         // `.gitattributes` names before git needs it.
-        ensure_merge_drivers(dir, &[branch]);
+        if regenerate { ensure_merge_drivers(dir, &[branch]); }
         let pre_merge_head = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(dir)
@@ -1402,7 +1403,7 @@ impl GitOperations {
         }
 
         // cas-0c988: rebuild generated output from the merged sources.
-        if let Some(pre_merge_head) = pre_merge_head.as_deref() {
+        if regenerate && let Some(pre_merge_head) = pre_merge_head.as_deref() {
             self.regenerate_generated_artifacts(dir, pre_merge_head);
         }
 
@@ -1552,7 +1553,18 @@ impl GitOperations {
         no_ff: bool,
     ) -> Result<Option<String>> {
         self.advance_via_temp_worktree(target_branch, |dir| {
-            self.merge_branch_in_dir(dir, None, source_branch, no_ff)
+            self.merge_branch_in_dir(dir, None, source_branch, no_ff, true)
+        }, None)
+    }
+
+    /// Import published bytes in one merge, with the normal checkout/CAS guards.
+    pub(crate) fn merge_published_release(&self, target: &str, tag: &str, fresh: &str) -> Result<Option<String>> {
+        self.advance_via_temp_worktree(target, |dir| {
+            let output = Command::new("git").args(["merge", "--ff-only", fresh]).current_dir(dir).output()?;
+            if !output.status.success() {
+                return Err(GitError::CommandFailed(String::from_utf8_lossy(&output.stderr).into_owned()));
+            }
+            self.merge_branch_in_dir(dir, None, tag, true, false)
         }, None)
     }
 
@@ -1566,7 +1578,7 @@ impl GitOperations {
         publication: &mut MergePublication<'_>,
     ) -> Result<Option<String>> {
         self.advance_via_temp_worktree(target_branch, |dir| {
-            self.merge_branch_in_dir(dir, None, source_branch, true)
+            self.merge_branch_in_dir(dir, None, source_branch, true, true)
         }, Some(publication))
     }
 

@@ -1837,8 +1837,20 @@ check_registry_upkeep() {
         policy="${policy//\'/}"
         if [[ -z "$policy" ]]; then
             if [[ -z "$fallback" ]]; then
-                fallback="$("$cas_bin" config get qa.registry.enforce)" || return 1
-                case "$fallback" in off|observe|enforce|strict) ;; *) return 1 ;; esac
+                # Only a header-less registry reaches the store (cas-199b).
+                if ! fallback="$("$cas_bin" config get qa.registry.enforce)"; then
+                    printf 'journey-catalog: FAIL: docs/qa/journeys.yaml at %s declares no enforce: policy and no Cassy store supplies qa.registry.enforce\n' "$revision"
+                    printf 'FIX: add an enforce: off|observe|enforce|strict header to docs/qa/journeys.yaml, or run where cas config get qa.registry.enforce answers\n'
+                    return 1
+                fi
+                case "$fallback" in
+                    off|observe|enforce|strict) ;;
+                    *)
+                        printf 'journey-catalog: FAIL: qa.registry.enforce is %s; expected off, observe, enforce or strict\n' "${fallback:-empty}"
+                        printf 'FIX: set qa.registry.enforce to a valid policy, or declare enforce: in docs/qa/journeys.yaml\n'
+                        return 1
+                        ;;
+                esac
             fi
             policy="$fallback"
         fi

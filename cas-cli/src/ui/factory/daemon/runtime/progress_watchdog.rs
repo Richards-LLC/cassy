@@ -126,7 +126,7 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         if peer_branches.contains(target) || cas_dir.parent().is_some_and(|repo| delivery_is_contained(repo, task, target)) {
             return false;
         }
-        // cas-1f65: only the operator lifts a release freeze; a repair may
+        // cas-1f65: lifting is an explicit decision; a repair may
         // still merge under a red, so it stays actionable here.
         use crate::mcp::tools::core::workflow::release_freeze;
         if task.labels.iter().any(|label| label == release_freeze::REPAIR_LABEL) {
@@ -203,7 +203,7 @@ fn report_freeze_held(cas_dir: &Path, held: FreezeHeld) {
         }
         ids.sort();
         let detail = format!(
-            "Parked for a frozen release train, so not a stall: {}. {since}. Only the operator can lift it, with Lift freeze on the {train} train card in Commander; publishing the release also ends it. The progress watchdog will not chase these deliveries or page the operator for them.",
+            "Parked for a frozen release train, so not a stall: {}. {since}. Lift freeze on the {train} train card in Commander, or use train_freeze decision=lift with a reason as a live registered supervisor; publishing the release also ends it. The progress watchdog will not chase these deliveries or page the operator for them.",
             ids.join(", ")
         );
         if matches!(

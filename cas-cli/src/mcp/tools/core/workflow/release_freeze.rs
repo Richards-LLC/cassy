@@ -7,7 +7,7 @@
 //! the one exception, and only while the train is red: a recorded
 //! train-suite red, or a failed GitHub train run at the frozen tip. The freeze
 //! ends when a published release covers its tip, or when the operator
-//! lifts it in Commander. A supervisor cannot lift it.
+//! lifts it in Commander, or a live supervisor lifts it with an audited reason.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -137,7 +137,7 @@ fn refusal(train: &Task, freeze: &Freeze, subject: &str) -> String {
     format!(
         "TRAIN FROZEN: train frozen for release, parked for the next train. {}; {subject}. \
          No merge was attempted. Only a `{REPAIR_LABEL}` task merges while the train is red. \
-         The freeze ends when the release is published or the operator lifts it in Commander.",
+         The freeze ends on publication or an operator or audited supervisor lift.",
         frozen_since(train, freeze),
     )
 }
@@ -338,26 +338,65 @@ fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Optio
     Ok(format!(
         "TRAIN FROZEN: {train_id} at {}. {}. Merges, new staffing and CI retries into {lane} are refused on every machine \
          except `{REPAIR_LABEL}` tasks while the train is red; new tasks join the next train. \
-         The freeze ends when the release is published or the operator lifts it in Commander.",
+         The freeze ends on publication or an operator or audited supervisor lift.",
         short(&freeze.tip),
         summary(root, &task, &freeze, now)
     ))
 }
 
-/// The operator's lift from Commander.
-pub(crate) fn lift(root: &Path, train_id: &str, actor: &str) -> Result<String> {
+/// Structured decision consumed by the Commander release card.
+const LIFT_NOTE: &str = "RELEASE FREEZE LIFTED: ";
+
+pub(crate) fn last_lift(train: &Task) -> Option<Value> {
+    train.notes.lines().rev().find_map(|line| {
+        serde_json::from_str(line.split_once(LIFT_NOTE)?.1).ok()
+    })
+}
+
+/// Both lift entry points reopen the same cut/freeze state and record the decision.
+fn lift_with_reason(root: &Path, train_id: &str, actor: &str, reason: &str) -> Result<(String, Value)> {
+    let _lock = crate::mcp::tools::core::task::release_train::lock_trains_blocking(root)?;
     let store = crate::store::open_task_store(root)?;
     let mut task = train(store.as_ref(), train_id)?;
-    ensure!(freeze_of(&task).is_some(), "{train_id} is not frozen");
-    task.labels.retain(|label| !label.starts_with(FROZEN_LABEL));
-    task.updated_at = Utc::now();
+    ensure!(freeze_of(&task).is_some() || is_cut_train(&task), "{train_id} is not frozen or cut");
+    let now = Utc::now();
+    let detail = format!("{actor} reopened {train_id} at {}: {reason}", eastern(now));
+    let decision = serde_json::json!({
+        "actor": actor, "at": now.to_rfc3339(), "reason": reason, "train_id": train_id,
+        "frozen_tip": freeze_of(&task).map(|freeze| freeze.tip), "was_cut": is_cut_train(&task),
+        "summary": detail,
+    });
+    task.labels.retain(|label| !label.starts_with(FROZEN_LABEL)
+        && label != crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_CUT_LABEL);
+    task.notes.push_str(&format!("\n[{}] ✅ DECISION {LIFT_NOTE}{decision}", now.format("%Y-%m-%d %H:%M")));
+    task.updated_at = now;
     store.update(&task)?;
-    store.append_note(train_id, &format!("RELEASE FREEZE LIFTED: {actor} lifted the freeze on {train_id}"))?;
-    Ok(format!("Freeze lifted on {train_id}; merges into the train resume."))
+    Ok((detail, decision))
+}
+
+/// The operator's one-tap lift from Commander remains available.
+pub(crate) fn lift(root: &Path, train_id: &str, actor: &str) -> Result<String> {
+    lift_with_reason(root, train_id, actor, "Operator request in Commander").map(|(detail, _)| detail)
 }
 
 impl crate::mcp::CasCore {
-    /// MCP release freeze: a live supervisor explicitly confirms the lift policy.
+    /// MCP lift: the caller's live registration supplies authority and audit identity.
+    pub(crate) fn train_lift(&self, train_id: &str, reason: Option<&str>) -> Result<String> {
+        let actor = self.resolve_live_supervisor_authority()
+            .map_err(|_| anyhow::anyhow!("train_freeze requires a live registered supervisor"))?;
+        let reason = reason.map(str::trim).filter(|reason| !reason.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("TRAIN_LIFT_REASON_REQUIRED: decision=lift requires a nonempty reason"))?;
+        let (detail, decision) = lift_with_reason(&self.cas_root, train_id, &actor.name, reason)?;
+        crate::supervisor_notices::enqueue_with_context(
+            &self.cas_root,
+            &crate::supervisor_notices::Recipient::operator(actor.factory_session.as_deref().unwrap_or(&actor.id)),
+            "release_freeze_lifted", &detail,
+            &format!("{train_id}:{}", decision["at"]), Some(decision),
+        )?;
+        Ok(detail)
+    }
+
+    /// MCP release freeze: a live supervisor explicitly confirms the release request.
     pub(crate) fn train_freeze(&self, train_id: &str, reason: Option<&str>, promote: bool) -> Result<String> {
         let actor = self
             .resolve_live_supervisor_authority()
@@ -367,7 +406,7 @@ impl crate::mcp::CasCore {
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .ok_or_else(|| anyhow::anyhow!(
-                "TRAIN_FREEZE_CONFIRMATION_REQUIRED: train_freeze is a release freeze, not a temporary CI hold. Only the operator can lift it in Commander; a published release covering its tip also ends it. A supervisor cannot lift it. Confirm with reason=\"release-freeze: <reason>\". For a temporary CI wait, coordinate peers to defer merges; see CONTRIBUTING's Temporary CI merge hold follow-up. No freeze was applied by this call."
+                "TRAIN_FREEZE_CONFIRMATION_REQUIRED: train_freeze is a release freeze, not a temporary CI hold. A live registered supervisor can lift with decision=lift and a required reason, audited and notified to the operator. The operator can also lift it in Commander; publication covering its tip ends it. Confirm with reason=\"release-freeze: <reason>\". For a temporary CI wait, coordinate peers to defer merges; see CONTRIBUTING's Temporary CI merge hold follow-up. No freeze was applied by this call."
             ))?;
         let _lock = crate::mcp::tools::core::task::release_train::lock_trains_blocking(&self.cas_root)?;
         freeze_with_promotion(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason), promote)
@@ -614,7 +653,7 @@ mod tests {
         check_staffing(&root, "cas-feat").unwrap();
     }
 
-    /// The operator lift clears the gate; a supervisor has no lift action.
+    /// The operator lift clears the same gate as the audited supervisor lift.
     #[test]
     fn operator_lift_reopens_the_train() {
         let _env = TestEnvGuard::temp_home();
@@ -624,6 +663,89 @@ mod tests {
         assert!(check_merge(&root, lane, Some("cas-feat")).is_err());
         lift(&root, "cas-tr", "operator").unwrap();
         check_merge(&root, lane, Some("cas-feat")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_supervisor_lift_is_audited_and_notifies_operator_cas_0e54() {
+        use crate::mcp::tools::service::CasService;
+        use cas_types::{Agent, AgentRole};
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = TestEnvGuard::temp_home();
+        let (temp, root) = fixture();
+        freeze(&root, "cas-tr", "operator", None).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        let lane = "epic/release-train-vnext-cas-tr";
+        let mut cut = store.get("cas-tr").unwrap();
+        cut.labels.push("release-train-cut".into());
+        store.update(&cut).unwrap();
+        let tip = git(temp.path(), &["rev-parse", lane]);
+        let dir = crate::train_ci::directory(&root, "cas-tr").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("state.json"), serde_json::json!({
+            "branch": lane, "red_since": "2026-11-12T22:00:00Z", "red_head": tip, "run_id": "421",
+        }).to_string()).unwrap();
+        git(temp.path(), &["checkout", "-qb", "factory/repair", lane]);
+        std::fs::write(temp.path().join("repair.txt"), "one-commit repair\n").unwrap();
+        git(temp.path(), &["add", "repair.txt"]);
+        git(temp.path(), &["commit", "-qm", "repair the red train"]);
+        let repair_tip = git(temp.path(), &["rev-parse", "HEAD"]);
+        assert!(crate::mcp::tools::core::task::release_train::check_cut_merge(&root, lane, Some("cas-fix")).is_err());
+        let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
+        let request = |reason: Option<&str>| serde_json::from_value(serde_json::json!({
+            "action":"train_freeze", "id":"cas-tr", "decision":"lift", "reason":reason,
+        })).unwrap();
+        for (index, role) in [None, Some(AgentRole::Worker), Some(AgentRole::Standard), Some(AgentRole::Director), Some(AgentRole::Supervisor)].into_iter().enumerate() {
+            let caller_id = format!("denied-{index}");
+            let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+            core.set_agent_id_for_testing(caller_id.clone());
+            if let Some(role) = role {
+                let mut actor = Agent::new_with_role(caller_id.clone(), "release-lead".into(), role);
+                if role == AgentRole::Supervisor {
+                    actor.status = cas_types::AgentStatus::Shutdown;
+                }
+                core.open_agent_store().unwrap().register(&actor).unwrap();
+                assert_eq!(core.open_agent_store().unwrap().get(&caller_id).unwrap().role, role);
+            }
+            let service = CasService::new(core, None);
+            assert!(service.factory(Parameters(request(Some("repair the cut")))).await.is_err());
+            assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
+        }
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let mut actor = Agent::new_with_role("live-caller".into(), "release-lead".into(), AgentRole::Supervisor);
+        actor.factory_session = Some("release-session".into());
+        core.open_agent_store().unwrap().register(&actor).unwrap();
+        core.set_agent_id_for_testing(actor.id.clone());
+        let service = CasService::new(core, None);
+        for reason in [None, Some(""), Some("   ")] {
+            assert!(service.factory(Parameters(request(reason))).await.is_err());
+            assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
+        }
+        let reason = "repair the cut";
+        let result = service.factory(Parameters(request(Some(reason)))).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+        let train = store.get("cas-tr").unwrap();
+        assert!(freeze_of(&train).is_none(), "real MCP lift must clear the gate");
+        assert!(!is_cut_train(&train));
+        crate::mcp::tools::core::task::release_train::check_cut_merge(&root, lane, Some("cas-fix")).unwrap();
+        git(temp.path(), &["checkout", "-q", lane]);
+        git(temp.path(), &["merge", "--ff-only", "factory/repair"]);
+        assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), repair_tip);
+        let decision = train.notes.lines().find_map(|line| line.split_once("RELEASE FREEZE LIFTED: ")
+            .and_then(|(_, payload)| serde_json::from_str::<Value>(payload).ok())).unwrap();
+        assert_eq!(decision["actor"], actor.name);
+        assert_eq!(decision["reason"], reason);
+        assert!(DateTime::parse_from_rfc3339(decision["at"].as_str().unwrap()).is_ok());
+        let notices = crate::store::open_supervisor_queue_store(&root).unwrap().peek("operator", 10).unwrap();
+        assert_eq!(notices.len(), 1);
+        let payload: Value = serde_json::from_str(&notices[0].payload).unwrap();
+        assert_eq!(payload["kind"], "release_freeze_lifted");
+        assert_eq!(payload["context"], decision);
+        assert_eq!(last_lift(&train), Some(decision));
+        crate::supervisor_notices::adopt_operator_notices(&root, "connected-commander").unwrap();
+        let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].target, "operator");
+        assert_eq!(prompts[0].factory_session.as_deref(), Some("connected-commander"));
     }
 
     /// ETA = now + median train suite + queue + publish minutes.

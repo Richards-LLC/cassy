@@ -1218,8 +1218,8 @@ invariants:
       /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
       endpoint (S1, S2) is verified when those land; the phone part is S6'
   HUB-J17-RELEASE-FREEZE-PAIRING:
-    statement: A verified default pairing without factory-operate or factory-manage can lift and set a freeze from the release card; revoked or preview credentials cannot mutate it, and supervisors have no lift action.
-    check: Run hub::tests::release_freeze_default_pairing_cas_16c0a and the existing fleet-ops view freeze/lift case. In batch QA, use a verified default pairing to lift a frozen disposable train from its release card, read back removal of its freeze label, then freeze it again; worker controls still require their own permissions.
+    statement: A verified default pairing without factory-operate or factory-manage can lift and set a freeze from the release card; revoked or preview credentials cannot mutate it, and a live registered supervisor can lift through train_freeze decision=lift with a required audited reason and operator notice. Every frozen train remains actionable regardless of focus.
+    check: Run hub::tests::release_freeze_default_pairing_cas_16c0a, mcp_supervisor_lift_is_audited_and_notifies_operator_cas_0e54 and the fleet-ops freeze/lift and unfocused-trains cases. In batch QA, use a verified default pairing to lift a frozen disposable train from its release card, read back removal of its freeze label, then freeze it again; worker controls still require their own permissions.
     bug: {task: cas-16c0a}
   HUB-J17-FOCUS-CHOICES:
     statement: Focus epic offers only titled live epics owned by the selected supervisor or its verification identity, excludes the current focus, and orders the release train before priority. Progress, completion and Undo use titles while operations keep exact IDs; the desktop menu scrolls within a short region.

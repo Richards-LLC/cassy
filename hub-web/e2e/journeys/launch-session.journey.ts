@@ -606,8 +606,6 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
         ? page.getByRole("searchbox", { name: "Search conversations", exact: true })
         : page.getByRole("textbox", { name: "Your message", exact: true });
       await shortcutTarget.press("ControlOrMeta+k");
-      // Proof control: reproduce focus lost during a shell rebuild between chords.
-      if (width === 1280) await page.getByRole("searchbox", { name: "Search conversations", exact: true }).evaluate(input => (input as HTMLInputElement).blur());
       await expect(palette).toBeVisible();
       await palette.getByRole("button", { name: /^Quality/ }).click();
       const dialog = page.getByRole("dialog", { name: "Quality" });
@@ -615,6 +613,7 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
       const factor = dialog.locator(".quality-factor");
       await expect(factor).toHaveText("2.9× worse");
       await expect(factor).toBeVisible();
+      expect(await factor.evaluate(node => node.getClientRects().length)).toBe(1);
       await expect(dialog.locator(".quality-hero svg")).toBeVisible();
       await expect(dialog.locator(".quality-rubric:not(.quality-pending)")).toHaveCount(7);
       await expect(dialog.locator(".quality-pending")).not.toHaveCount(0);

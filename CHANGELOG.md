@@ -7,6 +7,47 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.19.0] - 2026-11-12
+
+### Fixed — Release cuts
+
+- **Linked worktree project identity** — Release previews inherit the main checkout's project identity when a linked worktree has no local configuration, while explicit linked worktree project pins retain precedence.
+
+### Fixed — Release reports
+
+- **Finish uploads when the message link is unavailable** — A successful PDF upload with no shared-message link now records its message ID and marks the link unavailable, preserving the distinct file link and upload verification. Malformed links and missing IDs still stop publication.
+
+### Fixed — Cloud sync
+
+- **Keep peer task state current during background work** — Entity sync has its own scheduled worker, so long indexing or maintenance no longer delays its next pull. Knowledge and quality telemetry release the entity lease and serialize their own cursors, allowing task updates to arrive on the configured cadence without a manual sync.
+- **Skip busy stores before cloud setup** — Background sync checks the store lease before team discovery and registration, so an already syncing store makes no competing cloud requests. Entity sync still releases its lease before optional knowledge and quality work.
+
+### Fixed — Factory
+
+- **Concurrent receipt handoff** — Exact worker receipt submissions now share the result of an in-progress candidate build instead of receiving an immediate merge hold. Slow builds retain their bounded wait and completion notice.
+- **Identify jobs blocking daemon updates** — A refused in-place update lists active and queued worker actions alongside cleanup, with worker identities and known occurrence and elapsed data. Both daemon and app guards share this diagnostic, so an active spawn cannot hide cleanup blockers. It explains how to recover with a full factory restart once workers are idle; ongoing cleanup keeps its worker name reserved.
+
+### Fixed — Factory verification
+
+- **Return a clear hold while a merge candidate builds** — Immutable candidate preparation runs once in the background with a 20-second response wait. Slow builds retain their exact cache and notify the supervisor when ready or failed; retries still require the candidate's exact review before publication.
+
+### Fixed — Worker test evidence
+
+- **Keep selected test logs ready for receipts** — Capped runs retain the selected test output in its own log and print its path in the passing receipt. Supervisors can record it directly while the original log keeps automatic guard evidence and the receipt validator still requires exactly one summary.
+
+### Fixed — Factory task resume
+
+- **Inherited identity attribution** — Linked worktrees retain their main checkout's project identity without letting that inherited identity authorize an unnamed empty checkpoint when a task resumes after review.
+- **Resume shipped release imports** — Review corrections can restart a sync lane carrying commits already present in origin's trunk. Local tags and unshipped foreign-task commits grant no attribution, including when a prior park recorded their tip.
+
+### Fixed — Task delivery
+
+- **Authorize imports before the first park** — Supervisors can grant an exact merge source to an active task or one blocked before its first park. The grant uses the production syncing store's guarded update, preserving task state and queuing the authorization for sync.
+
+### Fixed — Factory messages
+
+- **Show the age of late lifecycle signals** — A lifecycle relay created long after its original transition now shows that transition's age when surfaced. Relays superseded by the current task state remain suppressed.
+
 ## [4.18.0] - 2026-11-12
 
 ### Fixed — QA candidates

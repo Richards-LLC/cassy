@@ -870,6 +870,8 @@ version_literal_candidates() {
 check_version_literals() {
     local file hit found=false
     local -a roots=(cas-cli/src cas-cli/tests crates scripts)
+    # Whole version only: the version inside a longer number (a Node path) is not a literal.
+    local version_pattern="(^|[^0-9.])${version//./\\.}([^0-9]|$)"
 
     # Tracked files only: gitignored build caches (for example
     # crates/ghostty_vt_sys/zig/.zig-cache) embed absolute checkout paths, and
@@ -880,7 +882,7 @@ check_version_literals() {
         case "$file" in
             *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock|*/references/exemplars/*) continue ;;
         esac
-        hit="$(grep -nIF -- "$version" "$file" 2>/dev/null || true)"
+        hit="$(grep -nIE -- "$version_pattern" "$file" 2>/dev/null || true)"
         if [[ -n "$hit" ]]; then
             printf '%s\n' "$hit"
             found=true

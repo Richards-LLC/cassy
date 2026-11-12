@@ -166,7 +166,7 @@ EOF_OPERATOR_LAUNCH
     done
     # Real defects in the new rows are covered by test-fast-release-rows.py.
     for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-design-paths \
-        journeys-for-diff check-builtin-skill-limits check-migration-registry ci-script-tests-for-diff \
+        journeys-for-diff doc-fragments check-builtin-skill-limits check-migration-registry ci-script-tests-for-diff \
         check-call-shapes; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
     done
@@ -1095,6 +1095,16 @@ repo="$(new_fixture version-literal)"
 printf 'const VERSION: &str = "9.99.7-rc.1";\n' >"$repo/cas-cli/src/version.rs"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure version-literals "$output"
+
+# The version inside a longer number (a Node path) is not a version literal.
+repo="$(new_fixture version-literal-longer-number)"
+printf 'const NODE: &str = "/opt/node/v19.99.7/bin/node";\n' >"$repo/cas-cli/src/version.rs"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only version-literals 2>&1 || true)"
+if grep -qF 'PASS version-literals' <<<"$output"; then
+    ok 'version-literals ignores the version inside a longer number'
+else
+    bad "version-literals matched inside a longer number (output: $output)"
+fi
 
 # A gitignored build cache that embeds the checkout path (for example a worktree
 # named after the release) must not trip version-literals in a git checkout.

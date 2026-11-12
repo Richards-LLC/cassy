@@ -1098,7 +1098,7 @@ assert_named_failure version-literals "$output"
 
 # The version inside a longer number (a Node path) is not a version literal.
 repo="$(new_fixture version-literal-longer-number)"
-printf 'const NODE: &str = "/opt/node/v19.99.7/bin/node";\n' >"$repo/cas-cli/src/node_path.rs"
+printf 'const NODE: &str = "/opt/node/v19.99.7/bin/node";\n' >"$repo/cas-cli/src/version.rs"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only version-literals 2>&1 || true)"
 if grep -qF 'PASS version-literals' <<<"$output"; then
     ok 'version-literals ignores the version inside a longer number'

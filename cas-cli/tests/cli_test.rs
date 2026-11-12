@@ -192,7 +192,7 @@ esac
     env.set("PATH", std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))).unwrap());
     env.set("CAS_GH_BIN", &gh);
     env.set("GH_BIN", &gh);
-    let binary = cas::test_paths::binary("cas", Some(env!("CARGO_BIN_EXE_cas").into()));
+    let binary = cas::test_paths::cas_binary();
     env.set("CAS_BIN", &binary);
     env.set("CAS_SKIP_FACTORY_TOOLING", "1");
     env.set("RELEASE_DATE", "2026-01-02");

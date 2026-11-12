@@ -369,12 +369,11 @@ pr_state() {
     "$gh_bin" api graphql -F owner="${repo_slug%%/*}" -F name="${repo_slug#*/}" -F number="$pr_number" -f branch="$base" -f query='
 query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
   repository(owner: $owner, name: $name) {
-    mergeQueue(branch: $branch) { configuration { maximumEntriesToMerge mergingStrategy } }
     pullRequest(number: $number) {
       state autoMergeRequest { enabledAt } mergeQueueEntry { state }
     }
   }
-}' --jq '.data.repository | .pullRequest + {queueConfiguration: .mergeQueue.configuration}'
+}' --jq '.data.repository.pullRequest'
 }
 
 publish_branch() {

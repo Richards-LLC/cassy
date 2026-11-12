@@ -129,6 +129,19 @@ pub fn plan(args: &PlanArgs, root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Observe each published train push even while its automatic cut is paused.
+pub(crate) fn plan_train_tip(root: &Path, train: &cas_types::Task, tip: &str) -> Result<()> {
+    let repo = crate::train_guardrails::train_repo_root(root, train)?;
+    if !repo.join("scripts/release.sh").is_file() { return Ok(()) }
+    let path = crate::mcp::tools::core::workflow::release_auto_cut::notes_draft(root, &train.id)?.with_file_name("train-push-plan.json");
+    if fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<CutPlan>(&bytes).ok()).is_some_and(|old| old.tip == tip) { return Ok(()) }
+    let base = train.deliverables.work_target.as_ref().context("train integration target missing")?.target_branch.clone();
+    let value = evaluate(&PlanArgs { commit: Some(tip.into()), version: None, train: Some(train.id.clone()), notes: None, base: format!("origin/{base}"), admit: false }, root, &repo);
+    fs::create_dir_all(path.parent().context("train push plan directory")?)?;
+    fs::write(path, serde_json::to_vec_pretty(&value)?)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,7 +178,7 @@ mod tests {
         save(&receipt_path(&root, &args.version).unwrap(), &previous).unwrap();
         let before = serde_json::to_value(tasks.list(None).unwrap()).unwrap();
         let plan = evaluate(&PlanArgs { commit: Some(tip.clone()), version: Some(args.version), train: Some(train.id), notes: Some(notes), base: "origin/main".into(), admit: false }, &root, repo);
-        for code in ["NOTES_LINT", "NO_CODE_PROOF", "VERSION_RECEIPT"] {
+        for code in ["NOTES_LINT", "NO_CODE_PROOF", "VERSION_RECEIPT", "NO_ELIGIBLE_MEMBERS"] {
             assert!(plan.blockers.contains_key(code), "{code}: {:?}", plan.blockers);
         }
         assert_eq!(git(repo, &["rev-parse", "HEAD"]).unwrap(), tip);

@@ -357,10 +357,11 @@ pub(crate) fn notify_train_cuts(
     let mut sent = 0;
     for epic in tasks.list(None)?.into_iter().filter(|task| !task.is_terminal()) {
         let Some(train) = train_lane(&epic).map(str::to_string) else { continue };
+        let Some(tip) = eligible_tip(cas_dir, &epic, &train) else { continue };
+        crate::cli::release_automation::plan_train_tip(cas_dir, &epic, &tip)?;
         if queued.contains(&train) || crate::mcp::tools::core::task::release_train::is_cut_train(&epic) {
             continue;
         }
-        let Some(tip) = eligible_tip(cas_dir, &epic, &train) else { continue };
         // A published tip with changelog fragments is cut by Cassy;
         // the notice below only covers trains auto-cut declines.
         use crate::mcp::tools::core::workflow::release_auto_cut::{self, Outcome};

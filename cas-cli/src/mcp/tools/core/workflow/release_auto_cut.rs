@@ -166,6 +166,7 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
         )?;
     }
     if !draft.is_file() {
+        std::fs::create_dir_all(draft.parent().context("notes draft directory")?)?;
         let deadline = crate::cli::release_report::eastern_time(now + Duration::minutes(NOTES_DEADLINE_MINUTES));
         release_action(
             root,

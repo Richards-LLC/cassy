@@ -76,6 +76,7 @@
 - `cas-cli/src/cli/factory/wedged.rs`, `crates/cas-store/src/spawn_queue_store.rs` - worker diagnostics, fingerprinted descendant CPU/output samples and retained failed-boot records by worker or spawn request.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs`, `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - transcript mirrors, redaction and typed turn/cost accounting.
 - `crates/cas-pty/src/pty.rs`, `crates/cas-pty/src/claude_binary.rs` - startup briefs, harness argv, native Claude selection and version probes.
+- `cas-cli/src/ops/fleet.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs` - shared epic publication checks for focus, child assignment and worker start, preserving branch provenance and child targets.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` - binding and ordered backlogs, including pre-registration assignment admission.
 - `cas-cli/src/factory_auth_health.rs`, `cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs` - authentication/model failure evidence and collision-free worker reservation.
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs`, `cas-cli/src/factory_review_scratch.rs` - candidate build ownership and review-checkout creation, reuse and cleanup.

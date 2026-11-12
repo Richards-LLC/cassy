@@ -1939,6 +1939,7 @@ impl CasCore {
         };
 
         if task.assignee.is_some() {
+            assignment_warning.push_str(&epic_lane::assignment_branch_note(&self.cas_root, task_store.as_ref(), &task));
             assignment_warning.push_str(&epic_lane::published_release_note(&self.cas_root, task_store.as_ref(), &task));
         }
 
@@ -2597,7 +2598,7 @@ impl CasCore {
         let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
         super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;
         super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;
-        let blocker_warning = if open_blocker_ids.is_empty() {
+        let mut blocker_warning = if open_blocker_ids.is_empty() {
             qa_claim_note
         } else {
             format!(
@@ -3675,6 +3676,9 @@ impl CasCore {
                 return Err(Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to update: {error}")));
             }
         };
+        if is_worker {
+            blocker_warning.push_str(&epic_lane::assignment_branch_note(&self.cas_root, task_store.as_ref(), &task));
+        }
         // cas-b269 review 2: clear urgent-stop halt ONLY after start fully
         // succeeds, and only if halt gen is not newer than this start's
         // ceiling (concurrent urgent stop must win).

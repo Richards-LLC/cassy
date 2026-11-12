@@ -2818,6 +2818,8 @@ impl CasCore {
         }
 
         if task.assignee.is_some() && task.assignee != prior_assignee {
+            let publication = super::lifecycle::epic_lane::assignment_branch_note(&self.cas_root, task_store.as_ref(), &task);
+            if !publication.is_empty() { warnings.push(publication.trim().to_string()); }
             if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
                 warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
             }

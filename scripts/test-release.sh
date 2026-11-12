@@ -367,7 +367,7 @@ EOF2
     before="$(git -C "$fixture" rev-parse HEAD)"
     : >"$FAKE_GH_LOG"
     run "$fixture" --no-watch --notes "$tmp/invalid-slack.md" >"$tmp/invalid-draft.log" 2>&1 || status=$?
-    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+    [[ $status -eq 5 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
         grep -qF '[rule: unresolved_token]' "$tmp/invalid-draft.log" &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/invalid-draft &&
         ! grep -q '^pr create' "$FAKE_GH_LOG"

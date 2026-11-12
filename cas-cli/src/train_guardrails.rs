@@ -372,6 +372,7 @@ pub(crate) fn notify_train_cuts(
             Ok(Outcome::Declined(reason)) => format!("Auto-cut: {reason}."),
             Err(error) => format!("Auto-cut failed: {error:#}."),
         };
+        let auto_cut = format!("{auto_cut} Check notes with `cas release notes check --train {}`.", epic.id);
         let merged: Vec<_> = cas_store::observed_delivery_merges_into(cas_dir, &train)?
             .into_iter()
             .filter(|merge| tasks.get(&merge.task_id).is_ok_and(|t| t.status == TaskStatus::Closed))

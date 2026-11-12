@@ -3,7 +3,7 @@ use crate::qa_batch::{ReleaseInventory, ReleaseProofRef, ReleaseScope};
 use std::collections::BTreeMap;
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
-use clap::Args;
+use clap::{Args, Subcommand};
 use cas_types::{TaskStatus, TaskType};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,6 +11,53 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+
+#[derive(Debug, Args)]
+pub struct NotesArgs {
+    #[command(subcommand)]
+    command: NotesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum NotesCommand {
+    /// Run the existing draft lint from the frozen train tip (or current lane)
+    Check {
+        #[arg(long)]
+        train: String,
+        /// Defaults to the train's auto-cut release-notes draft
+        draft: Option<PathBuf>,
+    },
+}
+
+pub fn notes(args: &NotesArgs, root: &Path) -> Result<()> {
+    use crate::mcp::tools::core::workflow::{release_auto_cut, release_freeze};
+    let NotesCommand::Check { train, draft } = &args.command;
+    let train = open_task_store(root)?.get(train)?;
+    let lane = crate::train_guardrails::train_lane(&train).context("not a release train")?;
+    let repo = crate::train_guardrails::train_repo_root(root, &train)?;
+    let tip = release_freeze::recorded(&train).map(|freeze| freeze.tip)
+        .map(Ok).unwrap_or_else(|| git(&repo, &["rev-parse", lane]))?;
+    let draft = draft.clone().map(Ok).unwrap_or_else(|| release_auto_cut::notes_draft(root, &train.id))?
+        .canonicalize().context("release-notes draft unavailable")?;
+    let path = "scripts/release-train-announce.py";
+    let object = format!("{tip}:{path}");
+    let blob = git(&repo, &["rev-parse", &object])?;
+    eprintln!("Release notes linter: train {} at {tip}, script {blob}", train.id);
+    let caller = git(&repo, &["hash-object", path]).unwrap_or_else(|_| "unavailable".into());
+    if caller != blob {
+        eprintln!("Checkout linter {caller} differs from train script {blob}; using the train's script.");
+    }
+    let source = Command::new("git").arg("-C").arg(&repo).args(["show", &object]).output()?;
+    ensure!(source.status.success(), "cannot read train linter: {}", String::from_utf8_lossy(&source.stderr));
+    let script = tempfile::NamedTempFile::new()?;
+    fs::write(script.path(), source.stdout)?;
+    let output = Command::new("python3").arg("-I").arg(script.path()).arg("--lint").arg(draft)
+        .current_dir(&repo).output()?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    ensure!(output.status.success(), "release-notes lint failed with train script {blob}");
+    Ok(())
+}
 
 #[derive(Debug, Args)]
 pub struct ContextArgs {

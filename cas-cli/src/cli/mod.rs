@@ -470,6 +470,8 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum ReleaseCommands {
+    /// Check release notes using the train's own linter
+    Notes(release_automation::NotesArgs),
     /// Resolve the canonical train, or read a previous cut receipt
     Context(release_automation::ContextArgs),
     /// Arm durable release landing and publication reminders
@@ -1044,6 +1046,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Whoami => auth::execute(&AuthCommands::Whoami, cli),
         Commands::Update(args) => update::execute(args, cli, cas_root),
         Commands::Changelog(args) => changelog::execute(args, cli),
+        Commands::Release(ReleaseCommands::Notes(args)) => release_automation::notes(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Inventory(args)) => release_automation::inventory(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Preview(args)) => release_automation::preview(args, require_cas_root(cas_root)?),

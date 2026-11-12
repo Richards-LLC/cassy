@@ -31,7 +31,8 @@
 # the release version. A re-bump renames it and rewrites its version.
 #
 # Exit codes: 0 prepared and admitted (or dry run); 1 setup error;
-# 3 no queue admission after the enqueue request; 4 non-release merge conflict.
+# 3 no queue admission after the enqueue request; 4 non-release merge conflict;
+# 5 notes lint refused (auto-cut retries after the draft changes).
 
 set -Eeuo pipefail
 # prepare runs in a command substitution; keep errexit there too.
@@ -287,9 +288,24 @@ place_draft() {
 }
 
 lint_release_draft() {
-    local draft="$1"
-    python3 "$script_dir/release-train-announce.py" --lint "$draft" >&2 \
-        || die "release-notes draft failed lint: $draft"
+    local draft="$1" lint_tip lint_script lint_blob checkout_blob lint_status=0
+    # Keep the existing single lint, using the train before prepare merges main.
+    lint_tip="${CAS_RELEASE_TRAIN_TIP:-${train_ci_start:-HEAD}}"
+    lint_blob="$(git rev-parse "$lint_tip:scripts/release-train-announce.py")"
+    checkout_blob="$(git hash-object "$script_dir/release-train-announce.py")"
+    say "notes linter: train $lint_tip, script $lint_blob"
+    if [[ "$checkout_blob" != "$lint_blob" ]]; then
+        say "checkout linter $checkout_blob differs from train script $lint_blob; using the train's script"
+    fi
+    lint_script="$(mktemp)"
+    git show "$lint_tip:scripts/release-train-announce.py" > "$lint_script" \
+        || { rm -f "$lint_script"; die "cannot read train notes linter at $lint_tip"; }
+    python3 -I "$lint_script" --lint "$draft" >&2 || lint_status=$?
+    rm -f "$lint_script"
+    if ((lint_status)); then
+        printf 'error: release-notes draft failed lint: %s\n' "$draft" >&2
+        exit 5
+    fi
     CAS_RELEASE_CONTEXT_JSON="$context" python3 "$script_dir/release_changelog.py" \
         verify-deliveries "$remote/$base" --notes "$draft" --report "$release_input_report" >&2
 }

@@ -27,6 +27,8 @@ pub(crate) const PAUSED_LABEL: &str = "release-auto-cut-paused";
 const STARTED_LABEL: &str = "release-auto-cut:";
 /// How long the supervisor has to write a missing notes draft.
 const NOTES_DEADLINE_MINUTES: i64 = 30;
+/// scripts/release.sh reserves this exit for its existing notes lint.
+const NOTES_LINT_EXIT: i32 = 5;
 
 /// What the poll does next for this train.
 #[derive(Debug, PartialEq, Eq)]
@@ -126,7 +128,16 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
         return Ok(Outcome::Declined(reason));
     }
     let started = format!("{STARTED_LABEL}{tip}");
-    if train.labels.contains(&started) {
+    let draft = notes_draft(root, &train.id)?;
+    let log = train_dir(root, &train.id)?.join("auto-cut.log");
+    let digest = std::fs::read(&draft).ok().map(|bytes| blake3::hash(&bytes).to_hex().to_string());
+    // A changed draft can retry only a completed notes-lint refusal. Every
+    // ordinary admission guard below still applies; other failures stay held.
+    let attempted = std::fs::read_to_string(log.with_extension("notes")).ok();
+    let notes_retry = release_exit(&log) == Some(NOTES_LINT_EXIT)
+        && digest.as_ref().zip(attempted.as_ref())
+            .is_some_and(|(current, attempted)| current != attempted);
+    if train.labels.contains(&started) && !notes_retry {
         report_failure(root, train, lane, tip)?;
         return Ok(Outcome::Handled);
     }
@@ -154,7 +165,6 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             Some(format!("auto-cut: green train suite at {tip}, {count} changelog fragments").as_str()),
         )?;
     }
-    let draft = notes_draft(root, &train.id)?;
     if !draft.is_file() {
         let deadline = crate::cli::release_report::eastern_time(now + Duration::minutes(NOTES_DEADLINE_MINUTES));
         release_action(
@@ -165,15 +175,17 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             &format!(
                 "Release train {lane} ({}) is green at {tip} with {count} changelog fragments and is frozen for its \
                  auto-cut. Write the release-notes draft at {} by {deadline} (docs/release-notes/RUBRIC.md; \
-                 `{{{{VERSION}}}}` becomes the version). Cassy cuts once it exists, and never writes or posts notes.",
+                 `{{{{VERSION}}}}` becomes the version). Check it with `cas release notes check --train {}`. \
+                 Cassy cuts once it exists, and never writes or posts notes.",
                 train.id,
-                draft.display()
+                draft.display(),
+                train.id
             ),
         )?;
         return Ok(Outcome::Handled);
     }
-    let log = train_dir(root, &train.id)?.join("auto-cut.log");
-    start_release(root, &repo, lane, &draft, &log, &train.id)?;
+    std::fs::write(log.with_extension("notes"), digest.context("release-notes draft unreadable")?)?;
+    start_release(root, &repo, lane, tip, &draft, &log, &train.id)?;
     let store = crate::store::open_task_store(root)?;
     let mut task = store.get(&train.id)?;
     task.labels.retain(|label| !label.starts_with(STARTED_LABEL));
@@ -189,7 +201,7 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
 
 /// Check out the lane in a dedicated worktree and run `scripts/release.sh`
 /// detached; the worktree is removed when the script exits.
-fn start_release(root: &Path, repo: &Path, lane: &str, draft: &Path, log: &Path, train_id: &str) -> Result<()> {
+fn start_release(root: &Path, repo: &Path, lane: &str, tip: &str, draft: &Path, log: &Path, train_id: &str) -> Result<()> {
     let checkout = train_dir(root, train_id)?.join("cut-checkout");
     std::fs::create_dir_all(checkout.parent().context("checkout parent")?)?;
     if checkout.exists() {
@@ -200,8 +212,8 @@ fn start_release(root: &Path, repo: &Path, lane: &str, draft: &Path, log: &Path,
     git(repo, &["worktree", "add", "--quiet", &checkout.to_string_lossy(), lane])?;
     let release = r#"cd "$1" || exit 1
 scripts/release.sh --notes "$2"; rc=$?
-printf '\nRELEASE_EXIT=%s\n' "$rc"
 cd / && git -C "$3" worktree remove --force "$1"
+printf '\nRELEASE_EXIT=%s\n' "$rc"
 exit "$rc""#;
     let status = Command::new("sh")
         .arg("-c")
@@ -213,6 +225,7 @@ exit "$rc""#;
         .arg(repo)
         .env("CAS_AUTO_CUT_SCRIPT", release)
         .env("CAS_ROOT", root)
+        .env("CAS_RELEASE_TRAIN_TIP", tip)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -221,28 +234,38 @@ exit "$rc""#;
     Ok(())
 }
 
+fn release_exit(log: &Path) -> Option<i32> {
+    std::fs::read_to_string(log).ok()?.lines().rev()
+        .find_map(|line| line.strip_prefix("RELEASE_EXIT=")?.trim().parse().ok())
+}
+
 /// A started cut that exited nonzero wakes the supervisor once, with its log.
 fn report_failure(root: &Path, train: &Task, lane: &str, tip: &str) -> Result<()> {
     let log = train_dir(root, &train.id)?.join("auto-cut.log");
-    let text = std::fs::read_to_string(&log).unwrap_or_default();
-    let Some(code) = text.lines().rev().find_map(|line| line.strip_prefix("RELEASE_EXIT=")) else {
+    let Some(code) = release_exit(&log) else {
         return Ok(());
     };
-    if code.trim() == "0" {
+    if code == 0 {
         return Ok(());
     }
+    let repair = if code == NOTES_LINT_EXIT {
+        format!("Correct the draft at {} and check it with `cas release notes check --train {}`. \
+            Cassy stays armed and retries once when the draft changes.", notes_draft(root, &train.id)?.display(), train.id)
+    } else {
+        format!("Repair it, then on {lane} run `scripts/release.sh --notes {}`.", notes_draft(root, &train.id)?.display())
+    };
+    let attempted = std::fs::read_to_string(log.with_extension("notes")).unwrap_or_default();
     release_action(
         root,
         train,
         ReleaseNoticePhase::CutReady,
-        &format!("auto-cut-failed:{tip}"),
+        &format!("auto-cut-failed:{tip}:{attempted}"),
         &format!(
             "Auto-cut of {lane} ({}) at {tip} failed: scripts/release.sh exited {}. Complete log: {}. \
-             The train stays frozen. Repair it, then on {lane} run `scripts/release.sh --notes {}`.",
+             The train stays frozen. {repair}",
             train.id,
-            code.trim(),
-            log.display(),
-            notes_draft(root, &train.id)?.display()
+            code,
+            log.display()
         ),
     )?;
     Ok(())

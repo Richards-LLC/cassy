@@ -792,7 +792,7 @@ impl Candidate {
         Ok(parent)
     }
 
-    fn verify_landing(&self, landed: &str) -> Result<(), String> {
+    pub(crate) fn verify_landing(&self, landed: &str) -> Result<(), String> {
         let expected = self.tree_on(&self.landing_base(landed)?)?;
         // Check the final bundle after regeneration, not the stale dist in
         // the merge commit below it. History/projection outputs retain their

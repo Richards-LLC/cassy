@@ -9,8 +9,8 @@
 #   1. refuses an existing release object for the tag (never replaces bytes
 #      that a receipt may already have announced);
 #   2. writes the notes: the CHANGELOG section for the version plus the
-#      release timer, "PR #N opened -> published", with a marker that the
-#      host's install-on-publish step completes with the install time;
+#      per-host install receipts added by install-on-publish; the publication
+#      receipt measures the whole release clock after GitHub publishes;
 #   3. creates the annotated tag at <commit> and pushes it (an existing remote
 #      tag is accepted only when it already peels to <commit>);
 #   4. creates the GitHub release with the assets.
@@ -72,32 +72,6 @@ if [[ ! -s "$notes" ]]; then
     printf 'Release %s.\n' "$tag" >"$notes"
 fi
 
-now="${RELEASE_PUBLISH_NOW:-$(date -u +%s)}"
-iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ; }
-pr_line=""
-pr_json="$("$gh_bin" api "repos/$repo/commits/$sha/pulls" \
-    --jq '[.[] | select(.merged_at != null)] | first | {number, created_at} // empty' 2>/dev/null || true)"
-pr_number=""
-pr_created=""
-if [[ -n "$pr_json" ]]; then
-    pr_number="$(jq -r '.number // empty' <<<"$pr_json" 2>/dev/null || true)"
-    pr_created="$(jq -r '.created_at // empty' <<<"$pr_json" 2>/dev/null || true)"
-fi
-if [[ -n "$pr_number" && -n "$pr_created" ]]; then
-    opened="$(date -u -d "$pr_created" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$pr_created" +%s 2>/dev/null || true)"
-fi
-{
-    printf '\n---\n\n'
-    if [[ -n "${opened:-}" ]]; then
-        minutes=$(( (now - opened + 59) / 60 ))
-        printf '**Release timer:** PR #%s opened %s → published %s: %s min. Installed: pending.\n' \
-            "$pr_number" "$(iso "$opened")" "$(iso "$now")" "$minutes"
-        printf '<!-- cas-release-timer pr=%s opened=%s published=%s -->\n' "$pr_number" "$opened" "$now"
-    else
-        printf '**Release timer:** published %s; no merged PR found for %s. Installed: pending.\n' "$(iso "$now")" "$sha"
-        printf '<!-- cas-release-timer pr= opened= published=%s -->\n' "$now"
-    fi
-} >>"$notes"
 
 # 3. The annotated tag. A retry after a partial run may find it already pushed.
 remote_tag="$(git ls-remote --tags origin "refs/tags/$tag^{}" | cut -f1)"

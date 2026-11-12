@@ -17,12 +17,9 @@
 #
 # When the latest release is newer than `cas --version`, --once runs
 # `cas update --yes --version <x.y.z>`, checks `cas --version`, and completes
-# the release timer in the GitHub release notes: release.yml writes
-# "PR #N opened -> published" with a marker; the first host to install adds
-# "-> installed", the one timer from PR opened to installed. A failed install
-# is retried after RELEASE_INSTALL_RETRY_SECONDS (default 600). Each newly seen
-# publication runs `cas release published` after the installed version is
-# verified; failed publications retry on that binary after newer installs.
+# each host's install timestamp in the existing publication receipt and notes.
+# Failed notices retain that original timestamp across retries. The full release
+# clock is rendered from receipt endpoints, never from PR opening alone.
 # `cas release installed` after it is recovery on the same operation.
 #
 # Environment: CAS_RELEASE_REPO (default Richards-LLC/cassy), CAS_BIN (cas),
@@ -143,37 +140,38 @@ installed_version() {
     "$cas_bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1
 }
 
-# Replace "Installed: pending." with the install time and the full timer.
+# Every host adds its actual install timestamp. The publication receipt reads
+# these markers; a second host never overwrites the first one's clock.
 complete_timer() {
-    local tag="$1" installed_at="$2" body notes marker pr opened minutes host replacement
-    body="$("$gh_bin" api "repos/$repo/releases/tags/$tag" --jq .body 2>/dev/null)" || {
-        log "could not read the $tag release notes; timer not completed"
-        return 0
-    }
-    if ! grep -q 'Installed: pending\.' <<<"$body"; then
-        return 0
-    fi
-    marker="$(grep -oE '<!-- cas-release-timer [^>]*-->' <<<"$body" | head -n 1 || true)"
-    pr="$(sed -n 's/.* pr=\([0-9]*\) .*/\1/p' <<<"$marker")"
-    opened="$(sed -n 's/.* opened=\([0-9]*\) .*/\1/p' <<<"$marker")"
-    host="${RELEASE_INSTALL_HOST:-$(hostname -s 2>/dev/null || echo host)}"
-    if [[ -n "$pr" && -n "$opened" ]]; then
-        minutes=$(( (installed_at - opened + 59) / 60 ))
-        replacement="Installed on $host $(iso "$installed_at"). **PR #$pr opened → installed: $minutes min.**"
-    else
-        replacement="Installed on $host $(iso "$installed_at")."
-    fi
+    local tag="$1" installed_at="$2" host="$3" body notes
+    [[ "$installed_at" =~ ^[0-9]+$ && "$host" =~ ^[a-zA-Z0-9_.-]+$ ]] || return 0
+    body="$("$gh_bin" api "repos/$repo/releases/tags/$tag" --jq .body 2>/dev/null)" || return 0
+    grep -qF "<!-- cas-release-install host=$host " <<<"$body" && return 0
     notes="$(mktemp)"
-    REPLACEMENT="$replacement" INSTALLED_AT="$installed_at" perl -pe '
-        s/Installed: pending\./$ENV{REPLACEMENT}/;
-        s/(<!-- cas-release-timer [^>]*?) -->/$1 installed=$ENV{INSTALLED_AT} -->/;
-    ' <<<"$body" >"$notes"
+    printf '%s\n\nInstalled on %s %s.\n<!-- cas-release-install host=%s installed=%s -->\n' \
+        "$body" "$host" "$(iso "$installed_at")" "$host" "$installed_at" >"$notes"
     if "$gh_bin" release edit "$tag" --repo "$repo" --notes-file "$notes" >/dev/null; then
-        log "release timer for $tag: $replacement"
+        log "installed $tag on $host at $(iso "$installed_at")"
     else
-        log "could not update the $tag release notes; timer not completed"
+        log "could not record $tag install time; retrying from the retained receipt"
     fi
     rm -f "$notes"
+}
+
+record_install() {
+    local receipt="$state_dir/install-on-publish.pending.json"
+    INSTALL_HOST="${RELEASE_INSTALL_HOST:-$(hostname -s)}" INSTALL_AT="$(now)" \
+        perl -MJSON::PP -0777 -ne 'my $v = decode_json($_); $v->{install_host} = $ENV{INSTALL_HOST}; $v->{installed_at} = 0 + $ENV{INSTALL_AT}; print encode_json($v);' \
+        "$receipt" >"$receipt.tmp"
+    mv "$receipt.tmp" "$receipt"
+}
+
+complete_receipt_timer() {
+    local tag="$1" receipt="$2" fields
+    [[ -s "$receipt" ]] || return 0
+    fields="$(perl -MJSON::PP -0777 -ne 'my $v = eval { decode_json($_) }; print "$v->{installed_at} $v->{install_host}" if $v && $v->{installed_at} && $v->{install_host};' "$receipt")"
+    [[ -n "$fields" ]] || return 0
+    complete_timer "$tag" "${fields%% *}" "${fields#* }"
 }
 
 update_release() {
@@ -305,6 +303,7 @@ report_failed_notice() {
 notify_installed() {
     local tag="$1" attempts
     [[ -r "$pending_dir/$tag.json" ]] || return 0
+    complete_receipt_timer "$tag" "$pending_dir/$tag.json"
     if [[ -e "$notified_dir/$tag" ]]; then
         rm -f "$pending_dir/$tag.json"
         return 0
@@ -318,8 +317,7 @@ notify_installed() {
         mv "$pending_dir/$tag.json.tmp" "$pending_dir/$tag.json"
         attempts=$((attempts + 1))
         if deliver_notice installed "$pending_dir/$tag.json"; then
-            touch "$notified_dir/$tag"
-            rm -f "$pending_dir/$tag.json"
+            mv "$pending_dir/$tag.json" "$notified_dir/$tag"
             printf '%s\n' "$tag" >"$state_dir/install-on-publish.notified.tmp"
             mv "$state_dir/install-on-publish.notified.tmp" "$state_dir/install-on-publish.notified"
             return 0
@@ -384,6 +382,7 @@ run_once() {
     if [[ -n "$current" ]] && ! version_greater "$latest" "$current"; then
         notify_published "$tag"
         if [[ "$current" == "$latest" ]]; then
+            complete_receipt_timer "$tag" "$notified_dir/$tag"
             queue_notice "$tag" "$state_dir/install-on-publish.pending.json"
             notify_installed "$tag"
         fi
@@ -407,7 +406,7 @@ run_once() {
         rm -f "$state_file"
         log "installed $tag in $(( $(now) - started )) s"
         (( status == 0 )) || log "cas update exited $status after installing $tag; its summary names the failed project refresh"
-        complete_timer "$tag" "$(now)"
+        record_install
         notify_published "$tag"
         queue_notice "$tag" "$state_dir/install-on-publish.pending.json"
         notify_installed "$tag"

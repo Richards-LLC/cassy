@@ -128,5 +128,8 @@ printf 'MACOS_SHA256=%s\n' "$macos_sha"
 
 # Keep rule-176 timings visible beside the existing published-byte receipt.
 if [[ -r "$workdir/release-latency.receipt" ]]; then
-    grep -E '^(FIRST_CHILD_|MAIN_TO_|QUEUE_)' "$workdir/release-latency.receipt" || true
+    grep -E '^(LAST_MERGE_TO_|MAIN_TO_|FULL_CLOCK_)' "$workdir/release-latency.receipt" || true
+    sed -n 's/^RELEASE_CLOCK_HEADER=//p' "$workdir/release-latency.receipt"
+    printf '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    sed -n 's/^RELEASE_CLOCK_ROW=//p' "$workdir/release-latency.receipt"
 fi

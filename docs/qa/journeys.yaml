@@ -4,7 +4,7 @@
 # A delivery uses the stricter policy at base and head.
 version: 1
 main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26, FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
-updated: '2026-11-11'
+updated: '2026-11-12'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -636,6 +636,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  REPORT-JOURNAL-GRID:
+    statement: Accounting report entries use saved ledger identities, numeric debit and credit rows, balanced totals, source-or-hypothetical amounts and visible revision changes; internal QBO IDs are never chart account numbers.
+    check: Run scripts/test-accounting-journals.py through the shipped CLI with saved chart/source fixtures, including disabled or blank AcctNum, imbalance, invalid accounts, missing or mismatched sources and revised amounts. Open the generated simple and compound before-after page in light/dark desktop/phone, print and JS-disabled modes; inspect indentation, totals and memo placement.
+    bug: {task: cas-b1f3}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -3470,3 +3474,14 @@ journeys:
     basis: New controls; no production traffic attribution yet.
   spec: hub-web/e2e/journeys/supervisor-commands.journey.ts
   catalog_gaps: Browser outcomes use a protocol double; Rust security tests and disposable Claude/Codex runs prove native mappings and observations.
+
+- id: CLI-ACCOUNTING-GRIDS
+  name: Validate and render accounting report entries
+  status: live
+  kind: cli
+  entry: {url: 'cli:accounting-journals.py', trigger: Render a bookkeeping report}
+  steps: [Save chart and source snapshots, Validate identities and exact-cent balance before output, Render debit and credit grids with memo below, Audit all revised grid amounts]
+  owners: [cas-cli/src/builtins/skills/cas-html-reports/SKILL.md, cas-cli/src/builtins/skills/cas-html-reports/references/accounting-entries.md, cas-cli/src/builtins/skills/cas-html-reports/scripts/accounting-journals.py, scripts/test-accounting-journals.py]
+  invariants: [REPORT-JOURNAL-GRID]
+  spec: scripts/test-accounting-journals.py
+  traffic: {share_pct: null, basis: New report-authoring capability; no per-journey usage instrumentation.}

@@ -120,6 +120,15 @@ target project's `DESIGN.md`, resolved by [DESIGN.md first](../design-spec/refer
 number formatting are in `references/presentation-rules.md`; chart construction follows
 `cas-dataviz`.
 
+## Accounting entries
+
+Any bookkeeping entry follows [references/accounting-entries.md](references/accounting-entries.md):
+one dated transaction block, exact ledger account identities, Account/Debit/Credit grid, debit
+rows then indented credit rows, numeric amount cells, balanced totals and a memo below. Run its
+local validator **before emitting the report**; an unbalanced or unsourced actual entry fails the
+render. Label illustrations/void views, audit revisions, and keep recommendations outside grids.
+The reference includes simple and compound before/after examples.
+
 ## Worked examples
 
 Each exemplar ships with a `.why.md` sidecar holding its concept brief, its critique scores, and the

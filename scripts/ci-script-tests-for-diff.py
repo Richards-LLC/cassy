@@ -54,6 +54,10 @@ HEAVY = {
 # cas-2077 changed one and first failed in the merge queue (4 GiB != 2 GiB);
 # this one assertion pins that contract in 0.001 s. The full suite stays HEAVY.
 NAMED = {
+    **{path: "python3 scripts/test-accounting-journals.py" for path in (
+        "cas-cli/src/builtins/skills/cas-html-reports/scripts/accounting-journals.py",
+        "cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.json",
+        "cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-chart.json")},
     "hub-web/package.json": "python3 scripts/test-worker-memory.py "
                             "AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
 }

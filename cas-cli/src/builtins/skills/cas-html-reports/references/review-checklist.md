@@ -56,6 +56,10 @@ Before scoring form, record `## Plan alignment` in the concept brief:
 - [ ] The HTML links to its markdown source by relative path.
 - [ ] Both files are staged in the same commit.
 
+For bookkeeping entries, also complete [Accounting entries](accounting-entries.md): save a passing
+pre-render validation receipt; check exact chart names and the enabled `AcctNum` preference,
+source/hypothetical labels, both totals, memo placement, void-view disclosure and revision diffs.
+
 ## 2. Information architecture
 
 - [ ] The `data-verdict` headline states the selected type's lead in at most 40 words (conclusion for

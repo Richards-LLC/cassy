@@ -1,0 +1,23 @@
+{
+  "account_numbers_enabled": false,
+  "provenance": "Fictional chart for a presentation example; no client data.",
+  "accounts": [
+    {
+      "Id": "233",
+      "Name": "Hosting Income",
+      "AcctNum": "4000"
+    },
+    {
+      "Id": "234",
+      "Name": "Accounts Receivable"
+    },
+    {
+      "Id": "235",
+      "Name": "Bank"
+    },
+    {
+      "Id": "236",
+      "Name": "Processing Fees"
+    }
+  ]
+}

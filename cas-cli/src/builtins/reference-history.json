@@ -820,6 +820,7 @@
       "88b85e245a4b9c274ed4f3a243f72c56f2130e44954a1df22339862a56d47ab8",
       "8e7fcf0a7f885df2946563ea8dd28f5504f703a8441ee634fab5e6055e79a2cc",
       "9d72928c7835c669fd760a1ec6fbec4658175c61afdda6f982072ba414c9874e",
+      "a15e804397ca4a176a6f76e0e43659b0f0334c5b7184294410d9590fdc542556",
       "ad9b0966404ae2a195559a832d6b1bb8702bd23ca62712fb84cd81af5d23202c",
       "bb6867923a3681ad3bfda2425024926e462b3e976ac8765294ec2842adcd7df8",
       "c41e21be1feeda1ae493d5b45fb74d330258960188c3be42d155b2cc877c2861",
@@ -829,6 +830,31 @@
       "d73cce7fa20631f1f8b739758e9232f032478c0948ac4ee62a0050eff5541282",
       "e62b7a2ae7815ea61f2dea6e6963479a6ffac4bcbd1ac362e4184126b5850597",
       "fe64b0e033a2ce8896907907a62602cb4d30129046202d8c4e53d58bceea38b1"
+    ],
+    "skills/cas-html-reports/references/accounting-entries.md": [
+      "52b5fbf99ee609fee1a420a858b98e233d3cd56a5ae244739a74e0d302f13e82"
+    ],
+    "skills/cas-html-reports/references/examples/accounting-chart.json": [
+      "da9432b101ade10f78f99ece29985a5a920ba2870f6f2dcd473601b2847e192c"
+    ],
+    "skills/cas-html-reports/references/examples/accounting-journals.html": [
+      "1230fcbdb0f7f865519cb25a272d66a696a50349956e8ac867338defd81f60bc",
+      "2554bc46fa48f81cde4be437b1a123a2b02f91f2728ec0a27d267a7ac95e1c0a",
+      "4551c8b629f44edd3951087c754097f7b0576bd1ed0ee0177092b576a3230d98",
+      "a1e6ab716e951f8ae354d33eca9e602d2f99d8039c86b5a13e066c8db002d77c",
+      "bc3bff4e90c93ec61f92c9a0fabf2ee435d3c9bee5f6bb1bca2dd3017da22631"
+    ],
+    "skills/cas-html-reports/references/examples/accounting-journals.json": [
+      "095f8f6bd2195ef8440640f04fe162c58c07dda7aebbdc3ac21f2a1b025cd282"
+    ],
+    "skills/cas-html-reports/references/examples/accounting-journals.md": [
+      "d7682d6ddfeab32e589b59c55e69c95050bc9239bef7b9976030c66cddc145d6"
+    ],
+    "skills/cas-html-reports/references/examples/accounting-journals.visual-qa.md": [
+      "04c944ad09442d4e779c640bc451b96e44b87bde816ca22b645472db797494bf"
+    ],
+    "skills/cas-html-reports/references/examples/accounting-journals.why.md": [
+      "a821a3bda6a47063ab1aece1bc3e03d37fd1d66fc50ebcc4b9142f115dbf9318"
     ],
     "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html": [
       "36d334edb0d25ee07aca6a55c91cf72e6d04b59e548e1660a452d20334c26e6b",
@@ -897,6 +923,7 @@
     ],
     "skills/cas-html-reports/references/review-checklist.md": [
       "05a1fa5cb46c1bfb47af0f4917b96ad49529ecf3e4cc721b0b8ecd85672778e8",
+      "56c8787cb434927c05446f4cb75849ec3438d6d0afc4c06e0e8971221a375c0b",
       "814f8403a04fc50a8936a5b64e64b645fda253fc9592e4833ff3444a2cb68a6a",
       "c0044ff9b6014670f68ad0559957449dfe9c73084e91f9c8e4a088a291eeab21",
       "c14aaed5688f731bc64b077d307556025cb5135e5f0402460682769cf3be995d",
@@ -919,6 +946,7 @@
       "a42a62983a16c9537e3953b39b7e7b881501c3cb74fb14839426b7a856a24866"
     ],
     "skills/cas-html-reports/references/technical-contract.md": [
+      "20769ce80c0aaaf670881943ca1b390a07e5d22e1d41c2f87600c01f19978dd1",
       "4b99bf5185317f22f720689b2eb26ef6e571ddabb5b46ffd7a74dfbb323d4ce1",
       "9161ea20abeaf4850201e4a53745c82c9c150069ff3f088e9bb27d737f3f0561",
       "9d905e9b5b830f26554904db1b89f304303d1b2a84702efc4c36f81c368d4d6a",
@@ -926,6 +954,9 @@
       "bcb5c5b187654e8902bd22cd767b345215a217aa4bf916896d42b1ecd4b11e2a",
       "c24d0c85d29713205a75cb408ab44b94de1cc7211f286a52f88329447aa3ea96",
       "f0731b4fc55a1436241cb526179f396987e961e29a0b801123433b220aea4dda"
+    ],
+    "skills/cas-html-reports/scripts/accounting-journals.py": [
+      "1a2cf3975c02061350f6b3694c1c282083a1b8a3c409c3f0cdca1ab39fd5e522"
     ],
     "skills/cas-ideate/SKILL.md": [
       "233c1beb408d6f14a8d77f9c4e0f7129bd4d2883423ff4ded7530183b4b5baf5",

@@ -235,6 +235,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-ci-queue-flakes.py
 	cd .. && python3 scripts/test-train-ci.py
 	cd .. && python3 scripts/test-sow-delivery-report.py
+	cd .. && python3 scripts/test-accounting-journals.py
 	cd .. && python3 scripts/test-regenerate-generated-artifacts.py
 	cd .. && python3 scripts/test-check-communication-slos.py
 	cd .. && python3 scripts/test-assembly-proof.py

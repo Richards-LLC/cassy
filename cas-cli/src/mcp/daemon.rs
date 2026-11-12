@@ -597,6 +597,8 @@ pub struct EmbeddedDaemon {
     cloud_coordinator: RwLock<Option<CloudCoordinator>>,
     /// Code watcher (if code indexing is enabled)
     code_watcher: Option<Arc<std::sync::Mutex<CodeWatcher>>>,
+    #[cfg(test)]
+    code_index_started: tokio::sync::Notify,
     /// MCP proxy engine for hot-reload (set after server startup)
     #[cfg(feature = "mcp-proxy")]
     proxy: RwLock<Option<Arc<cmcp_core::ProxyEngine>>>,
@@ -660,6 +662,8 @@ impl EmbeddedDaemon {
             cloud_syncer: std::sync::RwLock::new(cloud_syncer),
             cloud_coordinator: RwLock::new(cloud_coordinator),
             code_watcher,
+            #[cfg(test)]
+            code_index_started: tokio::sync::Notify::new(),
             #[cfg(feature = "mcp-proxy")]
             proxy: RwLock::new(None),
             #[cfg(feature = "mcp-proxy")]
@@ -1669,6 +1673,8 @@ impl EmbeddedDaemon {
         };
         let cas_root = self.config.cas_root.clone();
 
+        #[cfg(test)]
+        self.code_index_started.notify_one();
         // Run in blocking task since it's CPU intensive
         let result = tokio::task::spawn_blocking(move || {
             let watcher_guard = watcher

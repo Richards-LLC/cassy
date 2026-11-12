@@ -1,0 +1,3 @@
+title: QA candidate builds load the builder and its dependencies from the requested revision even when the current checkout predates them
+tasks: [cas-31c95]
+journeys: [FACTORY-QA-RECEIPT]

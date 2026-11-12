@@ -648,6 +648,18 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
       await expect.poll(async () => Math.abs(await anchorY(anchor.key) - anchor.y),
         { message: `"${anchor.key}" stays where the reader left it ${what}` }).toBeLessThanOrEqual(3);
     };
+    // Opening a file can leave the thread at its tail, depending on the
+    // available height. Park the reader above it before asserting that their
+    // top line holds; a tail-follower instead keeps the newest turn in view.
+    const thread = page.locator(".conversation-reading.thread");
+    const parkReader = async () => {
+      await thread.evaluate(thread => {
+        thread.scrollTop = Math.min(thread.scrollTop, thread.scrollHeight - thread.clientHeight * 1.5);
+      });
+      await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+      await expect.poll(() => thread.evaluate(thread => thread.scrollHeight - thread.clientHeight - thread.scrollTop)).toBeGreaterThan(80);
+    };
+    await parkReader();
     const beforeDrop = await reading();
     const beforeNote = await note("art-offline").textContent();
     // cas-c945 QA F01: what a screen reader would hear. Each change of text
@@ -703,7 +715,9 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     await expect(note("art-offline")).toHaveAttribute("aria-live", "off");
     await log.locator('a[data-artifact-id="art-offline"]').click();
     await expect(note("art-offline")).toHaveText(reconnecting!);
-    // Opening the card brought it into view: that is where the reader is now.
+    // Opening the card can return to the tail; park above it again before
+    // checking a mid-thread reader's position across the reconnect.
+    await parkReader();
     const beforeReconnect = await reading();
     const firstPages = hub.historyRequests.filter((request) => request.before === undefined).length;
     hub.release(PELICAN);
@@ -718,6 +732,29 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     await expect(note("art-cloud-down")).toHaveCount(0);
     await expect(note("art-local-draft")).toBeVisible();
     expect(page.context().pages()).toHaveLength(1);
+  });
+
+  await journey.stage("Follow the latest turn while the file note wraps at a drop", async () => {
+    const thread = page.locator(".conversation-reading.thread");
+    const header = page.locator("#conversation-connection");
+    const offline = log.locator('a[data-artifact-id="art-offline"]');
+    await offline.click();
+    const note = offline.locator(".fnote");
+    await expect(note).toBeVisible();
+    const beforeNote = await note.textContent();
+    // The composer intentionally resumes following, regardless of whether
+    // this viewport needed to scroll when the file was opened.
+    await page.getByRole("textbox", { name: "Your message" }).focus();
+    const tailGap = () => thread.evaluate(thread => thread.scrollHeight - thread.clientHeight - thread.scrollTop);
+    await expect.poll(tailGap).toBeLessThanOrEqual(1);
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+    await expect(note).not.toHaveText(beforeNote!);
+    await expect.poll(tailGap).toBeLessThanOrEqual(1);
+    hub.release(PELICAN);
+    await expect(header).toHaveAttribute("data-phase", "live", { timeout: 30_000 });
+    await expect.poll(tailGap).toBeLessThanOrEqual(1);
   });
 });
 

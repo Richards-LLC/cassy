@@ -115,6 +115,11 @@ impl CloudSyncer {
         let Some(team_id) = self.cloud_config.active_team_id() else {
             return Ok(summary);
         };
+        // Serialize these cursors independently of task/entry sync, including
+        // explicit CLI/ledger callers. Contention defers this optional round.
+        let Some(_lease) = crate::cloud::sync_lease::SyncLease::try_acquire_quality(self.queue.cas_dir())? else {
+            return Ok(summary);
+        };
         if let Some(refusal) = self.ephemeral_project_refusal() {
             tracing::warn!("[Cassy sync] {refusal}");
             return Ok(summary);

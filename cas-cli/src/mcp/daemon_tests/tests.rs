@@ -270,6 +270,76 @@ fn factory_owner_from_old_hostname_can_reregister_cas_b815() {
     }
 }
 
+/// The actual daemon must keep pulling while its index worker is held, and
+/// quality-event HTTP must not own the entity-sync lease.
+#[tokio::test]
+async fn cloud_pull_ticks_while_indexing_is_held_cas_154b() {
+    use std::sync::atomic::AtomicUsize;
+    let env = TestEnvGuard::temp_home();
+    let root = init_cas_dir(&env.home().join("project")).unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(&root, "pull-schedule").unwrap();
+    let server = MockServer::start().await;
+    let team = "550e8400-e29b-41d4-a716-446655440000";
+    let mut cloud = CloudConfig::default();
+    cloud.endpoint = server.uri();
+    cloud.token = Some("synthetic-schedule-token".into());
+    cloud.set_team(team, "fixture-team");
+    cloud.save_to_cas_dir(&root).unwrap();
+    let pulls = Arc::new(AtomicUsize::new(0));
+    let pulled_again = Arc::new(tokio::sync::Notify::new());
+    let count = pulls.clone();
+    let again = pulled_again.clone();
+    Mock::given(method("GET")).and(path(format!("/api/teams/{team}/sync/pull")))
+        .respond_with(move |_: &wiremock::Request| {
+            if count.fetch_add(1, Ordering::SeqCst) == 1 { again.notify_one(); }
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [], "pulled_at": "2026-11-12T00:00:00Z",
+            }))
+        }).mount(&server).await;
+    let quality_seen = Arc::new(tokio::sync::Notify::new());
+    let quality_released_entity = Arc::new(AtomicBool::new(false));
+    let seen = quality_seen.clone();
+    let released = quality_released_entity.clone();
+    let lease_root = root.clone();
+    Mock::given(method("GET")).and(path(format!("/api/teams/{team}/quality-events")))
+        .respond_with(move |_: &wiremock::Request| {
+            released.store(crate::cloud::sync_lease::SyncLease::try_acquire(&lease_root).unwrap().is_some(), Ordering::SeqCst);
+            seen.notify_one();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"events": [], "next_cursor": null}))
+        }).mount(&server).await;
+    let daemon = Arc::new(EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: root, index_code: true, min_idle_secs: 0, code_index_interval_secs: 1000,
+        cloud_sync_interval_secs: 2000, maintenance_interval_secs: 10000,
+        index_history: false, index_history_docs: false, embed_drain: false,
+        ..Default::default()
+    }));
+    let watcher = daemon.code_watcher.as_ref().unwrap().clone();
+    let (locked, acquired) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = watcher.lock().unwrap();
+        locked.send(()).unwrap();
+        let _ = held.recv();
+    });
+    acquired.recv().unwrap();
+    let worker = daemon.clone();
+    let run = tokio::spawn(async move { worker.run().await });
+    tokio::time::timeout(Duration::from_secs(10), quality_seen.notified()).await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(1000)).await;
+    daemon.code_index_started.notified().await;
+    tokio::time::advance(Duration::from_secs(1000)).await;
+    tokio::time::resume();
+    let periodic_pull = tokio::time::timeout(Duration::from_secs(5), pulled_again.notified()).await;
+    daemon.shutdown();
+    drop(release);
+    holder.join().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), run).await.unwrap().unwrap().unwrap();
+    assert!(periodic_pull.is_ok(), "an indexing job suppressed the next scheduled pull");
+    assert!(quality_released_entity.load(Ordering::SeqCst), "quality events retained the entity-sync lease");
+}
+
 /// cas-f1fb: exercise the serve's real sync entrypoint, including the lease
 /// around queue writes and HTTP. A hub sweep already in flight must win;
 /// after it releases, the daemon must sync and keep competing holders out.

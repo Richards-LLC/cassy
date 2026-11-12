@@ -435,6 +435,100 @@ mod tests {
         assert!(freeze_of(&store.get("cas-tr").unwrap()).is_none());
     }
 
+    /// cas-e49f: replay the operator's own-target, unlabeled release epic
+    /// through the published factory entry, then the auto-cut consumer.
+    #[tokio::test]
+    async fn mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f() {
+        use crate::mcp::tools::core::task::release_train::active_trains;
+        use crate::mcp::tools::core::workflow::release_auto_cut::{self, Outcome};
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let _env = TestEnvGuard::temp_home();
+        let (temp, root) = fixture();
+        let repo = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='freeze-test'\n[factory]\nepic_base_branch='main'\n").unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role(
+            "freeze-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id.clone());
+        let store = core.open_task_store().unwrap();
+        let mut epic = store.get("cas-tr").unwrap();
+        epic.labels.clear();
+        let lane = epic.effective_epic_branch().unwrap().to_string();
+        epic.deliverables.work_target.as_mut().unwrap().target_branch = lane.clone();
+        epic.epic_verification_owner = Some(supervisor.id);
+        store.update(&epic).unwrap();
+        git(repo, &["checkout", "-q", &lane]);
+        for path in ["scripts/release.sh", "changelog.d/cas-e49f.md"] {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "release fixture\n").unwrap();
+            git(repo, &["add", path]);
+        }
+        git(repo, &["commit", "-qm", "release inputs"]);
+        git(repo, &["checkout", "-q", "main"]);
+        let tip = git(repo, &["rev-parse", &lane]);
+        let service = CasService::new(core, None);
+        let request = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut"});
+        let refusal = service.factory(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap_err();
+        assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), serde_json::to_value(&epic).unwrap());
+        // The last line is a replayable MCP payload, not pinned human prose.
+        let remedy: Value = serde_json::from_str(refusal.message.lines().last().unwrap()).unwrap();
+        assert_eq!(remedy, serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut", "decision":"promote"}));
+        service.factory(Parameters(serde_json::from_value(remedy).unwrap())).await.unwrap();
+        let promoted = active_trains(store.as_ref(), "main");
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].id, epic.id);
+        assert_eq!(promoted[0].deliverables.work_target.as_ref().unwrap().repo_selector, "project:freeze-test");
+        assert_eq!(freeze_of(&promoted[0]).unwrap().tip, tip);
+        assert!(matches!(release_auto_cut::attempt(&root, &promoted[0], &lane, &tip, false, Utc::now()).unwrap(), Outcome::Handled));
+        assert!(!release_auto_cut::notes_draft(&root, &epic.id).unwrap().exists());
+        // No second promotion or freeze record on replay.
+        let before = serde_json::to_value(store.get(&epic.id).unwrap()).unwrap();
+        let replay = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut", "decision":"promote"});
+        service.factory(Parameters(serde_json::from_value(replay).unwrap())).await.unwrap();
+        assert_eq!(serde_json::to_value(store.get(&epic.id).unwrap()).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f() {
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let _env = TestEnvGuard::temp_home();
+        let (temp, root) = fixture();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='freeze-test'\n[factory]\nepic_base_branch='main'\n").unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role(
+            "freeze-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let store = core.open_task_store().unwrap();
+        git(temp.path(), &["checkout", "-qb", "epic/chosen"]);
+        std::fs::write(temp.path().join("chosen.txt"), "independent work\n").unwrap();
+        git(temp.path(), &["add", "chosen.txt"]);
+        git(temp.path(), &["commit", "-qm", "divergent lane"]);
+        git(temp.path(), &["checkout", "-q", "main"]);
+        let mut epic = store.get("cas-tr").unwrap();
+        epic.id = "cas-chosen".into();
+        epic.labels.clear();
+        epic.branch = Some("epic/chosen".into());
+        epic.deliverables.work_target.as_mut().unwrap().target_branch = "epic/chosen".into();
+        store.add(&epic).unwrap();
+        let before = serde_json::to_value(store.list(None).unwrap()).unwrap();
+        let service = CasService::new(core, None);
+        let request = serde_json::json!({"action":"train_freeze", "id":epic.id, "reason":"release-freeze: v4.21.0 cut", "decision":"promote"});
+        let refusal = service.factory(Parameters(serde_json::from_value(request).unwrap())).await.unwrap_err();
+        assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        for id in ["cas-chosen", "cas-tr"] { assert!(refusal.message.contains(id)); }
+        assert_eq!(serde_json::to_value(store.list(None).unwrap()).unwrap(), before);
+    }
+
     /// The 4.2.1 incident: merges kept landing after the release ask. Frozen,
     /// a feature is refused and a repair is refused until the train is red,
     /// by receipt or by GitHub. A peer reads only the synced task row, and

@@ -1,0 +1,4 @@
+title: Registered gate wire tokens pass named-test admission while unknown tokens and prose remain refused
+tasks: [cas-af9e]
+invariants: [FACTORY-MACHINE-COMMAND-SHAPE]
+journeys: [FACTORY-CLOSE]

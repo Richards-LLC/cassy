@@ -11,6 +11,9 @@ use serde::Serialize;
 
 use super::Cli;
 
+#[path = "ledger_scorers.rs"]
+mod scorers;
+
 #[derive(Args)]
 pub struct LedgerArgs {
     #[command(subcommand)]
@@ -741,6 +744,8 @@ struct LedgerReport {
     /// Skills, guards, rules and gates the release changed, from git between its tags.
     changes: Measure<Vec<String>>,
     reviews: Vec<DeliveryReviews>,
+    /// Rubric scorers with cited hits (cas-a5eb); measurement only.
+    scorers: Vec<scorers::Scorer>,
     intervention_rows: Vec<InterventionRow>,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
@@ -837,6 +842,7 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
     let reviews: Vec<_> = history.iter().filter(|e| e.task_id.as_ref()
         .is_some_and(|task| reviewed.contains(&(project_name(e), task.clone())))).cloned().collect();
     report.reviews = review_rows(&reviews);
+    report.scorers = scorers::score(cas_root, repo, &report);
     let published_at = published
         .then(|| cas_store::quality_release_events(cas_root))
         .transpose()?
@@ -985,6 +991,7 @@ fn aggregate(
         merged: Vec::new(),
         changes: unknown("no repository read"),
         reviews: review_rows(events),
+        scorers: Vec::new(),
         intervention_rows: Vec::new(),
         interventions_total: 0,
         interventions: BTreeMap::new(),
@@ -1295,6 +1302,7 @@ fn render(report: &LedgerReport) -> String {
             let _ = writeln!(out, "    {}. {:?} {} {} ({})", index + 1, round.outcome, round.provenance, round.verification_id, when(round.at));
         }
     }
+    scorers::render(&mut out, &report.scorers);
     let _ = writeln!(out, "\nInterventions: {}", report.interventions_total);
     for (kind, count) in &report.interventions {
         let _ = writeln!(out, "  {kind:<16}{count:>4}");

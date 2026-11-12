@@ -1416,8 +1416,14 @@ verification, including a no-code task carrying external proof. Close reports a
 named assignee absent from the registry as no longer registered. A live supervisor
 may explicitly request `supervisor_override=true` with a close reason when no
 current proof cycle or unresolved legacy verdict prevents it; the waiver records
-a durable `Skipped` row. Pending, timed-out and resolved dispatches retain their
-exact verdict authority, including an error requiring recovery. Measured Tier 0,
+a durable `Skipped` row. Active and resolved dispatches retain their exact
+verdict authority, including an error requiring recovery. For a non-epic task
+not yet parked, an expired task-only dispatch requests a fresh pending review
+on the next close, even if ordinary verification configuration changed. It
+never grants approval. A no-code report can supply a corrected portable
+`external_ref` inline on that close; its reference and fresh dispatch are saved
+together. Active cycles remain immutable, and receipt-bound delivery or epic
+timeout recovery still requires the existing supervisor path. Measured Tier 0,
 light-depth and other existing policy exemptions remain explicit in close output;
 identity availability is reported separately from the exemption actually applied.
 

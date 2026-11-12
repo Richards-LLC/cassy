@@ -1172,6 +1172,13 @@ async fn expired_task_close_renews_verification_with_corrected_proof_cas_afd2() 
             let corrected = "https://example.test/deploys/corrected";
             let mut request = serde_json::json!({"action":"close", "id":id, "reason":"Corrected evidence recorded"});
             if no_code { request["external_ref"] = corrected.into(); }
+            if no_code && state == "due" {
+                let mut invalid = request.clone();
+                invalid["external_ref"] = "/tmp/corrected-report.md".into();
+                call(&f.worker, invalid).await;
+                assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap(), old);
+                assert_eq!(f.task(id).external_ref.as_deref(), Some(PROOF));
+            }
             let response = call(&f.worker, request.clone()).await;
             let current = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
             assert_ne!(f.task(id).status, TaskStatus::Closed, "{no_code}/{state}: {response}");

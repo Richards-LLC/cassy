@@ -1083,7 +1083,7 @@ mod tests {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::finish_resolves_after_the_native_turn_outlasts_the_timeout_cas_5b8a") { return; }
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        let (_root, mut daemon) = fixture().await;
+        let (root, mut daemon) = fixture().await;
         let name = daemon.app.supervisor_name().to_owned();
         let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
         let mut agent = store.get("single-sup").unwrap();
@@ -1091,12 +1091,18 @@ mod tests {
         let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
         std::fs::create_dir_all(&projects).unwrap();
         let path = projects.join("finish-late.jsonl");
+        let prior = serde_json::json!({"type":"assistant","timestamp":Utc::now() - chrono::Duration::seconds(2),"message":{"role":"assistant","stop_reason":"end_turn"}});
+        std::fs::write(&path, format!("{prior}\n")).unwrap();
         quiet_for(&mut daemon, &name, COMMAND_SETTLE);
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
         let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
         daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "finish-late".into(), owner.clone()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while daemon.app.mux.pane_inject_busy(&name) { tokio::task::yield_now().await; }
+            loop {
+                daemon.dispatch_supervisor_command(Request::Status, "finish-late".into(), owner.clone()).await.unwrap();
+                if !daemon.app.mux.pane_inject_busy(&name) && std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { break; }
+                tokio::task::yield_now().await;
+            }
         }).await.unwrap();
         let record = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "finish-late".into())).unwrap();
         // Incident: Finish arrived at 21:39:20.866 and ended at 21:41:04.029.
@@ -1120,6 +1126,7 @@ mod tests {
         }).await.unwrap();
         let observed = daemon.dispatch_supervisor_command(Request::Status, "finish-late".into(), owner).await.unwrap();
         assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed));
+        assert_eq!(String::from_utf8_lossy(&std::fs::read(root.path().join("input")).unwrap()).matches("/finish").count(), 1);
     }
     #[test]
     fn finish_needs_its_own_completed_harness_turn_not_an_echo_or_unrelated_reply() {

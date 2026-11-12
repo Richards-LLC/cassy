@@ -189,10 +189,10 @@ bug_families:
     invariants: [HUB-J26-REGISTERED-RUN-STALL]
     journeys: [HUB-J26]
   peer-ask-merge-scope:
-    title: Only explicit asks hold related merges and correlated typed answers clear them
-    tasks: [cas-5ec1]
-    invariants: [HUB-J5-NO-ACTION-WAKES]
-    journeys: [HUB-J5]
+    title: Only explicitly scoped asks hold related merges; contextual mentions grant no hold and correlated typed answers clear holds
+    tasks: [cas-5ec1, cas-5d65]
+    invariants: [HUB-J5-NO-ACTION-WAKES, FACTORY-STRUCTURED-PEER-HOLD]
+    journeys: [HUB-J5, FACTORY-MERGE]
   image-viewer-reload-readiness:
     title: Image-viewer recovery waits for the restored turn after reload without racing the transient conversation list
     tasks: [cas-4acf]
@@ -722,6 +722,10 @@ invariants:
   FACTORY-RELEASE-CLOSEOUT:
     statement: Release receipts stamp the reconciler version; binaries older than the tag record stale refusals without effects, and qualified binaries replay unstamped or below-tag outcomes once. Release finalization closes unchanged approved shipped members independently, preserves already-closed outcomes and leaves REVIEW_MISSING as an individual residual; preview produces the same decisions without store or cache writes. Release replay preserves immutable delivery cycles, committed member outcomes and named exceptions; parent closure requires complete shipped children and explicit independent acceptance, and missing coverage queues one existing epic proof cycle under the recorded release identity without requiring a registered caller.
     check: Run newer_reconciler_replays_stale_operation_once_cas_cf7c for legacy, older, equal and newer recorded versions, stale runtime refusal, one qualified replay and stable delivery intents/notice identity. Run published_train_closes_members_independently_cas_734b (real store, verification on, review SHA different from tag, peer-approved source distinct from the landed head, local synthetic candidate bound to the source and shipped tree, different-source and unshipped-tree candidates held, unrelated-head approval held, bound report, equal base/anchor, already closed, missing approval, stale generation and zero-write preview), release_replay_recovers_after_committed_effect_and_supervisor_turnover, queue_landed_premerge_candidate_closes_cas_192b0, landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk and release_operation_recovers_checkpoint_and_serializes_same_identity. Run unregistered_reconcile_queues_parent_review_cas_d47d through actual reconcile with closed shipped children; assert the release-owned pending dispatch, independent reviewer, absent verdict and stable replay. Require crash recovery, stable adapter notice intent, deleted parent branch, dead owner adoption, mismatched child coverage queued once, accepted parent/train lifecycle and no direct train closure on task creation. Actual isolated gabber release replay belongs to release batch proof after adapter integration.
+  FACTORY-STRUCTURED-PEER-HOLD:
+    statement: Only a kind=ask first-content-line CAS_MERGE_HOLD JSON declaration for an exact task_id or PR grants merge-hold authority; incidental body mentions and legacy prose-only asks do not.
+    check: Run peer_ask_gate::tests at the delivered tip. Replay Not yours task context, in-my-merge context, plain review prose, task/PR scoped holds and mismatches, quoted metadata, invalid/empty scope, and unresolved raw PR scope. Preserve explicit-kind, override/operator notice, linked and unambiguous answer, sibling answer and branch/bare PR resolution cases.
+    bug: {task: cas-5d65}
   FACTORY-MERGE-QUEUE-CI-IDENTITY:
     statement: Successful canonical or legacy merge-group CI evidence can prove an exact landed delivery, including punctuated run citations, while unrelated or failed runs remain refused.
     check: Run supervisor_close_reuses_landed_queue_proof_cas_4386, direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831 and supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386 through the close handler. Require legacy and full-validation wrapper receipts, a trailing colon and automatic discovery; retain event/status/repository/workflow/tree/artifact/containment refusals.
@@ -1016,7 +1020,7 @@ invariants:
     check: Run a_merge_waits_on_the_supervisors_unanswered_peer_ask_cas_bddf9 through merge override and operator adoption, and project-navigation.test.ts through history and the Needs-you DOM. In batch QA inspect the same override row on desktop and phone, including a retained code-only summary.
     bug: {task: cas-ef6e}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicit asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicitly scoped CAS_MERGE_HOLD asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run peer_ask_gate::tests for explicit asks, correlated typed answers, retained ambiguous holds and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-QUIET-MERGE-HEADS-UP:
@@ -1463,7 +1467,7 @@ journeys:
   - cas-cli/src/builtins/agents/task-verifier.body.md
   - cas-cli/src/finding_triage.rs
   - crates/cas-store/src/verification_store.rs
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION, FACTORY-CANDIDATE-CONFLICT-RETURN]
+  invariants: [FACTORY-STRUCTURED-PEER-HOLD, FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION, FACTORY-CANDIDATE-CONFLICT-RETURN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-CLOSE

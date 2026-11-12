@@ -135,7 +135,8 @@ pub(crate) fn plan_train_tip(root: &Path, train: &cas_types::Task, tip: &str) ->
     if !repo.join("scripts/release.sh").is_file() { return Ok(()) }
     let path = crate::mcp::tools::core::workflow::release_auto_cut::notes_draft(root, &train.id)?.with_file_name("train-push-plan.json");
     if fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<CutPlan>(&bytes).ok()).is_some_and(|old| old.tip == tip) { return Ok(()) }
-    let base = train.deliverables.work_target.as_ref().context("train integration target missing")?.target_branch.clone();
+    let base = train.deliverables.work_target.as_ref().map(|target| target.target_branch.clone())
+        .or_else(|| crate::mcp::tools::core::task::repo_context::integration_branch(root).map(|(_, branch)| branch)).context("project integration target missing")?;
     let value = evaluate(&PlanArgs { commit: Some(tip.into()), version: None, train: Some(train.id.clone()), notes: None, base: format!("origin/{base}"), admit: false }, root, &repo);
     fs::create_dir_all(path.parent().context("train push plan directory")?)?;
     fs::write(path, serde_json::to_vec_pretty(&value)?)?;

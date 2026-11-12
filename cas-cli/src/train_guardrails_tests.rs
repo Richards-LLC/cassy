@@ -195,6 +195,7 @@ fn cut_notice_is_sent_once_per_state_and_names_the_project_release_command_cas_d
     let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(plan["tip"], run(repo, &["rev-parse", TRAIN]));
     assert!(plan["blockers"].get("NOTES_LINT").is_some());
+    assert!(plan["blockers"].get("IDENTITY").is_some());
     let later = now + chrono::Duration::hours(3);
     for _ in 0..2 {
         notify_train_cuts(&cas_dir, &none, later).unwrap();

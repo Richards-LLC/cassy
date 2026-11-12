@@ -1052,6 +1052,33 @@ fn healer_fixme_is_found_and_allowed_skips_carry_their_reason() {
     );
 }
 
+/// GH #1877: a Playwright 1.65 migration, plus one reformatted and two new
+/// unreasoned skips.
+const PLAYWRIGHT_165_DIFF: &str = r#"diff --git a/tests/qa-coverage/orders.spec.ts b/tests/qa-coverage/orders.spec.ts
+--- a/tests/qa-coverage/orders.spec.ts
++++ b/tests/qa-coverage/orders.spec.ts
+@@ -10,3 +10,5 @@ test("order detail", async ({ page }) => {
+-  test.skip(!ALLOWED_ROLES.includes(currentRole), 'outside this case');
+-  if (!link) return;
+-    test.skip();
++  if (!ALLOWED_ROLES.includes(currentRole)) test.skip(`Role ${currentRole} is outside the roles exercised by this case`);
++  if (!link) test.skip("No order detail links in the fixture data");
++  test.skip();
++  test.skip();
++  test.skip("pending title", async () => {});
+"#;
+
+#[test]
+fn playwright_runtime_skip_reasons_are_reasoned_and_bare_skips_are_not_gh_1877() {
+    let allowed: Vec<(usize, bool)> = added_skip_markers(PLAYWRIGHT_165_DIFF)
+        .iter()
+        .map(|marker| (marker.line, marker.allowed.is_some()))
+        .collect();
+    // 10-11 state their reason, 12 rewrites a removed identical call, 13 is
+    // a new bare skip and 14 declares a skipped test without a reason.
+    assert_eq!(allowed, [(10, true), (11, true), (12, true), (13, false), (14, false)]);
+}
+
 #[test]
 fn skip_marker_matching_respects_word_boundaries_and_file_kinds() {
     assert_eq!(marker_in("process.exit(1)"), None);

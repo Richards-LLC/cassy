@@ -2622,14 +2622,76 @@ fn allow_reason(line: &str) -> Option<String> {
     (!reason.is_empty()).then(|| reason.to_string())
 }
 
+/// Playwright's runtime skip states its reason as a string argument (GH #1877):
+/// `test.skip("reason")` or `test.skip(condition, "reason")`. A declaration,
+/// `test.skip("title", async () => …)`, and a bare or condition-only call
+/// state none. `test.fixme` keeps requiring `cas-allow-skip`.
+fn runtime_skip_reason(line: &str) -> Option<String> {
+    let start = line.find("test.skip(")? + "test.skip(".len();
+    let mut args = vec![String::new()];
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = line[start..].chars();
+    while let Some(ch) = chars.next() {
+        let current = args.last_mut().expect("one argument");
+        if let Some(open) = quote {
+            current.push(ch);
+            if ch == '\\' {
+                current.extend(chars.next());
+            } else if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => {
+                let args: Vec<&str> = args.iter().map(|arg| arg.trim()).collect();
+                let reason = match args.as_slice() {
+                    [reason] => reason,
+                    [condition, reason] if !string_literal(condition) => reason,
+                    _ => return None,
+                };
+                return string_literal(reason)
+                    .then(|| reason[1..reason.len() - 1].trim().to_string())
+                    .filter(|reason| !reason.is_empty());
+            }
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        args.last_mut().expect("one argument").push(ch);
+    }
+    None
+}
+
+fn string_literal(text: &str) -> bool {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next_back()) {
+        (Some(open @ ('\'' | '"' | '`')), Some(close)) => open == close && text.len() > 2,
+        _ => false,
+    }
+}
+
 /// Skip markers on the added lines of a `git diff -U<n>` body. A marker is
 /// allowed when its own line or the line directly above it (added or
-/// context) carries `cas-allow-skip: <reason>`.
+/// context) carries `cas-allow-skip: <reason>`, when a runtime `test.skip`
+/// states its reason, or when it rewrites an identical call that the same
+/// hunk removes (indentation or surrounding edits, not a new marker).
 pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
     let mut markers = Vec::new();
     let mut file: Option<String> = None;
     let mut new_line = 0usize;
     let mut previous: Option<String> = None;
+    let mut removed: Vec<String> = Vec::new();
+    let call = |line: &str, marker: &str| -> String {
+        let at = line.find(marker).unwrap_or(0);
+        line[at..].chars().filter(|ch| !ch.is_whitespace()).collect()
+    };
     for raw in diff.lines() {
         if let Some(path) = raw.strip_prefix("+++ ") {
             file = path
@@ -2637,6 +2699,7 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
                 .map(str::to_string)
                 .filter(|_| path != "/dev/null");
             previous = None;
+            removed.clear();
             continue;
         }
         if raw.starts_with("--- ") || raw.starts_with("diff --git") {
@@ -2650,6 +2713,7 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
                 .and_then(|start| start.parse().ok())
                 .unwrap_or(0);
             previous = None;
+            removed.clear();
             continue;
         }
         let Some(path) = file.as_deref() else {
@@ -2659,12 +2723,21 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
             if is_js_test_file(path)
                 && let Some(marker) = marker_in(added)
             {
+                let rewritten = removed
+                    .iter()
+                    .position(|old| *old == call(added, marker))
+                    .map(|index| removed.swap_remove(index));
+                let runtime = (marker == "test.skip(")
+                    .then(|| runtime_skip_reason(added))
+                    .flatten();
                 markers.push(SkipMarker {
                     file: path.to_string(),
                     line: new_line,
                     marker,
                     allowed: allow_reason(added)
-                        .or_else(|| previous.as_deref().and_then(allow_reason)),
+                        .or_else(|| previous.as_deref().and_then(allow_reason))
+                        .or(runtime)
+                        .or_else(|| rewritten.map(|_| "unchanged existing marker".to_string())),
                 });
             }
             previous = Some(added.to_string());
@@ -2672,8 +2745,13 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
         } else if let Some(context) = raw.strip_prefix(' ') {
             previous = Some(context.to_string());
             new_line += 1;
-        } else if raw.starts_with('-') {
+        } else if let Some(gone) = raw.strip_prefix('-') {
             // Removed lines do not advance the new-file counter.
+            if is_js_test_file(path)
+                && let Some(marker) = marker_in(gone)
+            {
+                removed.push(call(gone, marker));
+            }
         } else {
             previous = None;
         }

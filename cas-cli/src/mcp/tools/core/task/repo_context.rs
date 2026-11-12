@@ -275,16 +275,7 @@ pub(crate) fn repo_answers_to(repo_root: &Path, target_selector: &str) -> bool {
 }
 
 fn selector_for_repo(repo_root: &Path) -> Result<String, String> {
-    let cas_root = repo_root.join(".cas");
-    if let Some(project_id) = crate::cloud::canonical_id_from_config_toml(&cas_root)
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty())
-    {
-        return Ok(format!("project:{project_id}"));
-    }
-    crate::cloud::derive_canonical_id_from_git_remote(repo_root)
-        .map(|remote| format!("remote:{remote}"))
-        .ok_or_else(|| {
+    repo_identities(repo_root).into_iter().next().ok_or_else(|| {
             format!(
                 "repository {} has neither [project].canonical_id nor a normalizable origin URL",
                 repo_root.display()

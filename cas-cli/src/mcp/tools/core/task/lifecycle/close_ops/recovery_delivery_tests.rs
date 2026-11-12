@@ -638,6 +638,58 @@ async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
     assert!(paths.iter().any(|path| path == "child.txt"));
 }
 
+/// cas-8144: a follow-up task's lane fast-forwarded onto a commit whose
+/// subject names the original task refused close and merge; only
+/// cancel-and-recreate escaped. A logged-in supervisor's merge_source grant,
+/// made through the real handler on the syncing store, adopts that commit.
+/// Work stacked after the grant is still judged by its own subject.
+#[tokio::test]
+async fn merge_source_adopts_fast_forwarded_foreign_named_commit_cas_8144() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let cas_dir = repo.join(".cas");
+    crate::cloud::CloudConfig {
+        endpoint: "http://127.0.0.1:9".into(), token: Some("fixture-token".into()),
+        team_id: Some("team-1".into()), ..Default::default()
+    }.save_to_cas_dir(&cas_dir).unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    git(&f.worker_path, &["reset", "-q", "--hard", "main"]);
+    let base = git(repo, &["rev-parse", "main"]);
+    std::fs::write(f.worker_path.join("fix.rs"), "fix\n").unwrap();
+    git(&f.worker_path, &["add", "fix.rs"]);
+    git(&f.worker_path, &["commit", "-qm", "fix(commander): repair the board (cas-e1db)"]);
+    let moved = git(&f.worker_path, &["rev-parse", "HEAD"]);
+
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.parked_branch = None;
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: BRANCH.into(), base_sha: base,
+    });
+    tasks.update(&task).unwrap();
+    assert!(task_attribution::started_delivery(repo, &task).is_err());
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+        id: TASK.into(),
+        reason: format!("Follow-up delivers the original fix merge_source={moved}"),
+    })).await.unwrap();
+    let granted = tasks.get(TASK).unwrap();
+    assert_eq!(granted.status, TaskStatus::InProgress);
+    let delivery = task_attribution::started_delivery(repo, &granted).unwrap().unwrap();
+    assert_eq!(delivery.commits, vec![moved.clone()]);
+    let identity = task_commit_identity_in_repo(repo, &granted, None).unwrap();
+    assert!(!task_attribution::commit_claims_another_task(repo, &moved, &identity));
+
+    std::fs::write(f.worker_path.join("other.rs"), "other\n").unwrap();
+    git(&f.worker_path, &["add", "other.rs"]);
+    git(&f.worker_path, &["commit", "-qm", "fix(cas-dddd): unrelated delivery"]);
+    assert!(task_attribution::started_delivery(repo, &granted).is_err());
+}
+
 /// GH #1558: an ordinary close after pushing a target merge must bind the
 /// merged tip, without asking the worker for an explicit commit receipt.
 #[tokio::test]

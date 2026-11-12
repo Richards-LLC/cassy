@@ -4029,48 +4029,6 @@ mod tests {
         }
     }
 
-    /// cas-8144: a follow-up task's lane fast-forwarded onto a commit whose
-    /// subject names the original task refused close and merge, and only
-    /// cancel-and-recreate escaped. The supervisor's merge_source grant adopts
-    /// that commit; work stacked on it is still judged by its own subject.
-    #[test]
-    fn merge_source_adopts_fast_forwarded_foreign_named_commit_cas_8144() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        for (granted, foreign_tail, allowed) in
-            [(false, false, false), (true, false, true), (true, true, false)]
-        {
-            let dir = fixture();
-            let repo = dir.path();
-            std::fs::write(repo.join(".git/info/exclude"), ".cas/\n").unwrap();
-            let root = crate::store::init_cas_dir(repo).unwrap();
-            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='wedge'\n").unwrap();
-            git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
-            let base = git(repo, &["rev-parse", "main"]);
-            let moved = commit(repo, "fix.rs", "fix\n", "fix(commander): repair the board (cas-e1db)");
-            if foreign_tail {
-                commit(repo, "other.rs", "other\n", "fix(cas-dddd): unrelated delivery");
-            }
-            let target = cas_types::WorkTarget { repo_selector: "project:wedge".into(), target_branch: "main".into() };
-            let mut task = Task::new("cas-f19b".into(), "Follow-up fix".into());
-            task.assignee = Some("worker".into());
-            task.deliverables.work_target = Some(target.clone());
-            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-                work_target: target.clone(), assignee: "worker".into(), branch: "factory/worker".into(), base_sha: base,
-            });
-            if granted {
-                task.deliverables.authorized_merge_sources.push(cas_types::AuthorizedMergeSource {
-                    commit: moved.clone(), supervisor_id: "supervisor".into(), work_target: target,
-                });
-            }
-            let result = task_commit_identity_in_repo(repo, &task, None);
-            assert_eq!(result.is_ok(), allowed, "granted={granted}, foreign={foreign_tail}: {result:?}");
-            if let Ok(identity) = result {
-                assert!(identity.matches_known_commit(&moved));
-                assert!(!commit_claims_another_task(repo, &moved, &identity));
-            }
-        }
-    }
-
     #[tokio::test]
     async fn receipt_upper_boundary_excludes_later_sibling_commit() {
         use crate::mcp::CasService;

@@ -13564,7 +13564,9 @@ impl CasCore {
                     work_target.target_branch,
                     req.reason.trim(),
                 ));
-                task_store.update_if_current_with_mutation_receipt(&granted, &task, "")
+                // The syncing wrapper implements only the guarded update; the
+                // receipt variant refused every logged-in supervisor (cas-8144).
+                task_store.update_if_current(&granted, &task)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
                         format!("task merge source authorization rejected: {error}")))?;
             }

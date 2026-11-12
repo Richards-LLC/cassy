@@ -166,7 +166,7 @@ EOF_OPERATOR_LAUNCH
     done
     # Real defects in the new rows are covered by test-fast-release-rows.py.
     for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-design-paths \
-        journeys-for-diff check-builtin-skill-limits check-migration-registry ci-script-tests-for-diff \
+        journeys-for-diff doc-fragments check-builtin-skill-limits check-migration-registry ci-script-tests-for-diff \
         check-call-shapes; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
     done

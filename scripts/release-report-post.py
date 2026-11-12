@@ -652,7 +652,9 @@ class McpClient:
         fail("Violet file read returned no receipt for the uploaded PDF")
 
 
-def message_receipt(envelope: dict[str, Any], label: str) -> tuple[str, str]:
+def message_receipt(
+    envelope: dict[str, Any], label: str, *, allow_unavailable_permalink: bool = False
+) -> tuple[str, str | None]:
     message = envelope.get("message")
     if not isinstance(message, dict):
         fail(f"{label} post returned no message receipt")
@@ -660,13 +662,15 @@ def message_receipt(envelope: dict[str, Any], label: str) -> tuple[str, str]:
     permalink = message.get("permalink")
     if not isinstance(message_id, str) or not message_id.strip():
         fail(f"{label} post returned no message id")
+    if permalink is None and allow_unavailable_permalink:
+        return message_id, None
     if not isinstance(permalink, str) or not permalink.startswith("https://"):
         fail(f"{label} post returned no HTTPS permalink")
     return message_id, permalink
 
 
 def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str | None]:
-    message_id, message_permalink = message_receipt(envelope, "PDF")
+    message_id, message_permalink = message_receipt(envelope, "PDF", allow_unavailable_permalink=True)
     file_block = envelope.get("file")
     if not isinstance(file_block, dict):
         files = envelope.get("files")
@@ -675,11 +679,13 @@ def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str | None]:
     if not isinstance(file_block, dict):
         fail("PDF post returned no file id")
     file_id = file_block.get("file_id") or file_block.get("id")
-    file_permalink = file_block.get("permalink") or file_block.get("url") or message_permalink
+    file_permalink = file_block.get("permalink") or file_block.get("url")
     if not isinstance(file_id, str) or not file_id.strip() or file_id == message_id:
         fail("PDF post returned no distinct file id")
     if not isinstance(file_permalink, str) or not file_permalink.startswith("https://"):
         fail("PDF post returned no HTTPS file permalink")
+    if file_permalink == message_permalink:
+        fail("PDF post returned no distinct file permalink")
     download_url = file_block.get("download_url")
     return file_id, file_permalink, checked_download_url(download_url) if download_url is not None else None
 
@@ -899,7 +905,7 @@ def main(argv: list[str]) -> int:
                 }],
             },
         )
-        pdf_message_id, pdf_message_permalink = message_receipt(pdf_envelope, "PDF")
+        pdf_message_id, pdf_message_permalink = message_receipt(pdf_envelope, "PDF", allow_unavailable_permalink=True)
         pdf_file_id, pdf_permalink, pdf_download_url = file_receipt(pdf_envelope)
         remote_pdf_sha, remote_pdf_size, remote_pdf_pages = verify_remote_pdf(
             client, channel, pdf_file_id, pdf_download_url, read_since, pdf_bytes, pdf_sha, pages
@@ -930,7 +936,7 @@ def main(argv: list[str]) -> int:
                 "PDF_FILE_PERMALINK": pdf_permalink,
                 "PDF_FILE_ID": pdf_file_id,
                 "PDF_MESSAGE_ID": pdf_message_id,
-                "PDF_MESSAGE_PERMALINK": pdf_message_permalink,
+                "PDF_MESSAGE_PERMALINK": pdf_message_permalink if pdf_message_permalink is not None else "unavailable",
                 "HTML_FILE_ID": html_file_id,
                 "USER_THREAD_TS": user_thread,
                 "DEV_THREAD_TS": dev_thread,

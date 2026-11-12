@@ -425,6 +425,12 @@ fn reconcile_reused_factory_branch(
     let mut has_task_commits = false;
     let carries_only_task_commits = task_identity
         .and_then(|identity| {
+            // Released imports are upstream, not this task's foreign work.
+            // Exclude them before the bounded history scan. Local-only trunk
+            // commits cannot vouch for shipping.
+            let released = close_ops::task_attribution::released_trunk_ref(worktree_path, target_branch)
+                .filter(|reference| reference.starts_with("refs/remotes/"))
+                .map(|reference| format!("^{reference}"));
             let history = crate::git_evidence::git_text(
                 worktree_path,
                 &[
@@ -435,17 +441,16 @@ fn reconcile_reused_factory_branch(
                     "--format=%H %P%x1f%B%x1e",
                     &factory_tip,
                     &format!("^{target_tip}"),
-                    "--",
-                ],
+                ].into_iter().chain(released.iter().map(String::as_str)).chain(["--"]).collect::<Vec<_>>(),
             )?;
             let records: Vec<_> = history
                 .split('\u{1e}')
                 .map(str::trim)
                 .filter(|record| !record.is_empty())
                 .collect();
-            if records.is_empty() || records.len() > 200 {
+            if records.len() > 200 {
                 unattributed_commit = format!(
-                    "{factory_tip} (task history is empty or exceeds the 200-commit attribution limit)"
+                    "{factory_tip} (task history exceeds the 200-commit attribution limit)"
                 );
                 return Some(false);
             }

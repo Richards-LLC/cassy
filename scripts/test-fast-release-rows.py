@@ -291,6 +291,15 @@ class FastRows(unittest.TestCase):
         self.assertIn("PASS test-env", result.stdout)
 
 
+    def test_fast_version_literals_ignores_exemplar_prose(self):
+        self.write("cas-cli/src/builtins/skills/example/references/exemplars/report.html",
+                   "<p>Checkout release 9.99.7.</p>\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS version-literals", result.stdout)
+
+
     def test_real_defects_name_the_row(self):
         cases = [
             ("test-env", "cas-cli/tests/sample.rs", '#[test] fn sample() { std::env::set_var("HOME", "other"); }\n'),

@@ -2755,7 +2755,14 @@ checkout must both still be clean at `head`. The command must satisfy the same
 single-package, named-test and explicit-harness rules as a worker run. The
 non-empty UTF-8 log (at most 25 MiB) must contain exactly one nextest summary,
 with a nonzero selection and every executed test passed. Supply the selected
-run's log, without separate guard-run summaries. A failed recorded retry removes
+run's log, without separate guard-run summaries. Ordinary capped runs print
+`Selected test log: <path>` before execution and include that path in their
+passing receipt (`test.selected_log` in its JSON). This is the untouched selected
+Cargo output, including ANSI bytes; automatic guards remain in the original
+producer log. Each attempt keeps a separate capture beside the redirected
+producer log, or under the receipt directory's `logs/` for foreground runs.
+Use that selected path as `log_path`; no extraction or filtering is needed.
+A failed recorded retry removes
 that exact command's previous receipt. An active worker run refuses recording.
 The action writes the normal worker-check receipt key and adds
 `supervisor-recorded` provenance to both its displayed receipt and task audit

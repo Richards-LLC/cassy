@@ -26,14 +26,72 @@ pub(crate) struct AppHandoff {
     operator_draft_hold: bool,
 }
 
+/// Shared metadata shape for daemon queues and app-owned jobs. Missing clocks
+/// and identities stay explicit rather than being inferred from display names.
+pub(crate) fn reexec_job_blocker(
+    kind: &str,
+    worker: &str,
+    occurrence: &str,
+    started: Option<Instant>,
+    now: Instant,
+) -> String {
+    let elapsed = started
+        .map(|at| format!("{}s", now.saturating_duration_since(at).as_secs()))
+        .unwrap_or_else(|| "unknown".into());
+    format!("kind={kind} worker={worker} occurrence={occurrence} elapsed={elapsed}")
+}
+
 impl FactoryApp {
-    pub(crate) async fn prepare_handoff(&mut self) -> anyhow::Result<AppHandoff> {
+    /// Both preflight guards share one refusal, before any job or pane custody
+    /// changes. Daemon-owned spawns cannot mask app-owned cleanup blockers.
+    pub(crate) fn ensure_reexec_jobs_idle(&self, mut blockers: Vec<String>) -> anyhow::Result<()> {
+        let now = Instant::now();
+        blockers.extend(self.pending_workers.iter().map(|worker| {
+            reexec_job_blocker(
+                "provisioning",
+                &worker.name,
+                "untracked",
+                Some(worker.started_at),
+                now,
+            )
+        }));
+        blockers.extend(self.worktree_cleanup_jobs.iter().map(|job| {
+            reexec_job_blocker(
+                "worktree_cleanup",
+                &job.worker,
+                &job.occurrence,
+                Some(job.started),
+                now,
+            )
+        }));
+        for (worker, count) in &self.crash_cleanups_pending {
+            let tracked = self
+                .worktree_cleanup_jobs
+                .iter()
+                .filter(|job| &job.worker == worker)
+                .count();
+            if *count > tracked || tracked == 0 {
+                // Crash jobs outside this collection have no recorded clock or
+                // occurrence. Report that gap without inventing either value.
+                blockers.push(format!(
+                    "{} pending={}",
+                    reexec_job_blocker("crash_cleanup", worker, "untracked", None, now),
+                    count.saturating_sub(tracked),
+                ));
+            }
+        }
+        blockers.sort();
         anyhow::ensure!(
-            self.pending_workers.is_empty()
-                && self.worktree_cleanup_jobs.is_empty()
-                && self.crash_cleanups_pending.is_empty(),
-            "Worker provisioning or cleanup is still active; retry reexec"
+            blockers.is_empty(),
+            "Reexec blocked by active jobs: {}. Recovery: once workers are idle, fully restart this factory. \
+             Cleanup jobs and worker-name reservations stay active until completion or factory shutdown.",
+            blockers.join("; "),
         );
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_handoff(&mut self) -> anyhow::Result<AppHandoff> {
+        self.ensure_reexec_jobs_idle(Vec::new())?;
         Ok(AppHandoff {
             cas_dir: self.cas_dir.clone(),
             project_dir: self.project_dir.clone(),

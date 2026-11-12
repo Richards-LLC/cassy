@@ -105,7 +105,14 @@ pub(super) fn validated_started_delivery(
             &start.work_target.repo_selector,
         )
     };
-    let checkout_identity_matches = repository_matches(repo);
+    // Inherited identity proves repository membership, not checkout-local
+    // attribution for an unnamed empty checkpoint.
+    let checkout_identity_matches = repository_matches(repo)
+        && (!crate::mcp::tools::core::task::repo_context::canonical_selector(
+            &start.work_target.repo_selector,
+        ).starts_with("project:")
+            || crate::cloud::canonical_id_from_config_toml(&repo.join(".cas"))
+                .is_some_and(|id| !id.trim().is_empty()));
     if task.deliverables.work_target.as_ref() != Some(&start.work_target)
         || task.assignee.as_deref() != Some(start.assignee.as_str())
         || !(checkout_identity_matches

@@ -200,7 +200,7 @@ fn supervisor_alone(db: &rusqlite::Connection, reviews: &[DeliveryReviews], loca
 
 const Q_HOLDS: &str = "Did each release receipt raise at most one grouped hold notice?";
 
-struct Notice { id: i64, at: DateTime<Utc>, kind: Option<String>, key: Option<String>, payload: serde_json::Value }
+struct Notice { id: i64, at: DateTime<Utc>, key: Option<String>, payload: serde_json::Value }
 
 fn notices(db: &rusqlite::Connection, kinds: &[&str]) -> rusqlite::Result<Vec<Notice>> {
     let mut stmt = db.prepare("SELECT id, created_at, transition_key, payload FROM supervisor_queue
@@ -212,10 +212,9 @@ fn notices(db: &rusqlite::Connection, kinds: &[&str]) -> rusqlite::Result<Vec<No
     for row in rows {
         let (id, at, key, payload) = row?;
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
-        let kind = payload["kind"].as_str().map(str::to_string);
-        if !kind.as_deref().is_some_and(|k| kinds.contains(&k)) { continue }
+        if !payload["kind"].as_str().is_some_and(|k| kinds.contains(&k)) { continue }
         let Some(at) = sqlite_time(&at) else { continue };
-        out.push(Notice { id, at, kind, key, payload });
+        out.push(Notice { id, at, key, payload });
     }
     Ok(out)
 }

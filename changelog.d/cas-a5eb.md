@@ -1,0 +1,3 @@
+### Added — Friction ledger
+
+- **Scorers with cited hits** — Was: the ledger report listed review rounds, verdicts and notices, and nobody graded them. Now: `cas ledger report` scores five rubrics per release. They cover review rounds per delivery, decision verdicts graded by the supervisor alone, hold notices per release receipt, minutes a train sat green and uncut, and minutes workers sat held or idle while their epic had ready work. Each rubric has four scored labels, and every hit names its delivery, receipt, train or worker with evidence ids. The scorers only measure; nothing gates or refuses on them.

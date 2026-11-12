@@ -12650,10 +12650,24 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
             "merge-foreign",
             false,
         ),
+        (
+            "fix(cas-5eb1a): own work",
+            Some("current"),
+            "",
+            "unattributed-local-pin",
+            true,
+        ),
     ] {
         git_stdout(&worker_path, &["reset", "--hard", &base]);
         git_stdout(env.cas_root.parent().unwrap(), &["reset", "--hard", &base]);
         env.task_store().update(&task).unwrap();
+        if after == "unattributed-local-pin" {
+            std::fs::create_dir_all(worker_path.join(".cas")).unwrap();
+            std::fs::write(
+                worker_path.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"review-resume-fixture\"\n",
+            ).unwrap();
+        }
         let start = || {
             serde_json::from_value::<TaskRequest>(serde_json::json!({
                 "action": "start", "id": task.id, "brief": true
@@ -12811,7 +12825,7 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                     ],
                 );
             }
-            "unattributed" => {
+            "unattributed" | "unattributed-local-pin" => {
                 git_stdout(
                     &worker_path,
                     &["commit", "--allow-empty", "-m", "unnamed continuation"],

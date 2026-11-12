@@ -553,49 +553,88 @@ mod tests {
         assert_eq!(store.get(&child.id).unwrap().assignee, None);
     }
 
-    /// A train is not landed while a child is in flight, before any child
-    /// delivered, or while its lane holds work the integration branch lacks.
+    /// Both machines must use shared branch facts, not an older local train
+    /// with unfinished children. The actual task-create handler owns routing.
     #[tokio::test]
-    async fn landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk() {
+    async fn default_train_uses_shared_live_branch_across_machines_cas_7ab6() {
         let _env = TestEnvGuard::temp_home();
-        let temp = repo();
-        let repo = temp.path();
-        git(repo, &["branch", "epic/train"]);
-        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
-        let store = core.open_task_store().unwrap();
-        let mut train = Task::new("cas-train".into(), RELEASE_TRAIN_TITLE.into());
-        train.task_type = TaskType::Epic;
-        train.labels = vec![RELEASE_TRAIN_LABEL.into()];
-        train.branch = Some("epic/train".into());
-        store.add(&train).unwrap();
-        let child = |id: &str, status: TaskStatus| {
-            let mut task = Task::new(id.into(), id.into());
-            task.status = status;
-            store.add(&task).unwrap();
-            store
-                .add_dependency(&Dependency::new(id.into(), train.id.clone(), DependencyType::ParentChild))
-                .unwrap();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let seed = repo();
+        let bare = TempDir::new().unwrap();
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(seed.path(), &["tag", "seed"]);
+        git(seed.path(), &["branch", "epic/stale"]);
+        std::fs::write(seed.path().join("seed.txt"), "published release\n").unwrap();
+        git(seed.path(), &["commit", "-qam", "published release"]);
+        for lane in ["epic/empty-old", "epic/empty-new"] {
+            git(seed.path(), &["branch", lane]);
+        }
+        git(seed.path(), &["checkout", "-qb", "epic/live"]);
+        std::fs::write(seed.path().join("work.txt"), "unreleased work\n").unwrap();
+        git(seed.path(), &["add", "work.txt"]);
+        git(seed.path(), &["commit", "-qm", "unreleased work"]);
+        git(seed.path(), &["branch", "epic/other"]);
+        git(seed.path(), &["config", &format!("url.{}.insteadOf", bare.path().display()),
+            "https://github.com/example/train-test.git"]);
+        git(seed.path(), &["push", "-q", "origin", "--all"]);
+        git(seed.path(), &["push", "-q", "origin", "--tags"]);
+        let train = |id: &str, lane: &str, age: i64| {
+            let mut task = Task::new(id.into(), RELEASE_TRAIN_TITLE.into());
+            task.task_type = TaskType::Epic;
+            task.labels = vec![RELEASE_TRAIN_LABEL.into()];
+            task.branch = Some(lane.into());
+            task.created_at -= chrono::Duration::seconds(age);
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:train-fixture".into(), target_branch: "main".into(),
+            });
+            task
         };
-        child("cas-cancelled", TaskStatus::Cancelled);
-        assert!(!landed(store.as_ref(), repo, &train, "main"), "no delivered child");
-        child("cas-open", TaskStatus::Open);
-        child("cas-done", TaskStatus::Closed);
-        assert!(!landed(store.as_ref(), repo, &train, "main"), "child in flight");
-        let mut open = store.get("cas-open").unwrap();
-        open.status = TaskStatus::Closed;
-        store.update(&open).unwrap();
-        git(repo, &["checkout", "-q", "epic/train"]);
-        std::fs::write(repo.join("fix.txt"), "fix\n").unwrap();
-        git(repo, &["add", "fix.txt"]);
-        git(repo, &["commit", "-q", "-m", "fix"]);
-        git(repo, &["checkout", "-q", "main"]);
-        assert!(!landed(store.as_ref(), repo, &train, "main"), "lane ahead of main");
-        git(repo, &["merge", "-q", "--no-ff", "epic/train"]);
-        assert!(landed(store.as_ref(), repo, &train, "main"));
-        std::fs::create_dir_all(repo.join(".cas")).unwrap();
-        std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
-        let (next, _) = core.release_train_for_new_task(store.as_ref()).await;
-        assert_ne!(next.as_deref(), Some(train.id.as_str()));
-        assert_ne!(store.get(&train.id).unwrap().status, TaskStatus::Closed);
+        let stale = train("cas-a111", "epic/stale", 600);
+        let live = train("cas-a222", "epic/live", 300);
+        let copies = TempDir::new().unwrap();
+        for machine in ["one", "two"] {
+            let repo = copies.path().join(machine);
+            git(bare.path(), &["clone", "-q", bare.path().to_str().unwrap(), repo.to_str().unwrap()]);
+            git(&repo, &["remote", "set-url", "origin", "https://github.com/example/train-test.git"]);
+            git(&repo, &["config", &format!("url.{}.insteadOf", bare.path().display()),
+                "https://github.com/example/train-test.git"]);
+            if machine == "one" {
+                git(&repo, &["checkout", "-q", "--detach"]);
+                git(&repo, &["branch", "-f", "main", "seed"]);
+            }
+            std::fs::create_dir(repo.join(".cas")).unwrap();
+            std::fs::write(repo.join(".cas/config.toml"),
+                "[project]\ncanonical_id='train-fixture'\n[factory]\nrelease_train=true\nepic_base_branch='main'\n").unwrap();
+            let core = CasCore::with_daemon(repo.clone(), None, None);
+            let store = core.open_task_store().unwrap();
+            for row in [&stale, &live] { store.add(row).unwrap(); }
+            let unfinished = Task::new("cas-a000".into(), "Unfinished old work".into());
+            store.create_atomic(&unfinished, &[], Some(&stale.id), None).unwrap();
+            core.cas_task_create(Parameters(request("New repair"))).await.unwrap();
+            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "New repair").unwrap();
+            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, live.id, "{machine}");
+
+            let other = train("cas-a333", "epic/other", 100);
+            store.add(&other).unwrap();
+            let before = store.list(None).unwrap().len();
+            let refusal = core.cas_task_create(Parameters(request("Ambiguous repair"))).await.unwrap_err();
+            assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            for id in [&live.id, &other.id] { assert!(refusal.message.contains(id)); }
+            assert_eq!(store.list(None).unwrap().len(), before);
+
+            for mut row in [live.clone(), other] {
+                row.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
+                store.update(&row).unwrap();
+            }
+            let older = train("cas-a444", "epic/empty-old", 60);
+            let newer = train("cas-a555", "epic/empty-new", 0);
+            // Reverse insertion order on the other machine must not affect election.
+            let empty = if machine == "one" { [&older, &newer] } else { [&newer, &older] };
+            for row in empty { store.add(row).unwrap(); }
+            core.cas_task_create(Parameters(request("Fresh train work"))).await.unwrap();
+            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "Fresh train work").unwrap();
+            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, newer.id);
+            for id in [&stale.id, &live.id] { assert_eq!(store.get(id).unwrap().status, TaskStatus::Open); }
+        }
     }
 }

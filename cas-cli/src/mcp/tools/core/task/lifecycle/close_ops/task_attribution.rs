@@ -117,8 +117,7 @@ pub(super) fn validated_started_delivery(
     }
     // cas-985f: a worker told to merge the released trunk into its lane brings
     // in other tasks' already-released commits. They are upstream, not foreign.
-    let upstream: Vec<_> = released_trunk_ref(repo, &target).into_iter()
-        .chain(released_tag_refs(repo)).map(|reference| format!("^{reference}")).collect();
+    let upstream = released_trunk_ref(repo, &target).map(|reference| format!("^{reference}"));
     let identity = task_commit_identity(task, None);
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
@@ -555,14 +554,6 @@ pub(crate) fn released_trunk_ref(repo: &Path, target: &str) -> Option<String> {
     ]
     .into_iter()
     .find(|reference| git_ref_exists(repo, reference))
-}
-
-/// Versioned release tags are immutable shipped history, even when the local
-/// origin/trunk ref has not caught up. Arbitrary `v*` scratch tags grant nothing.
-pub(crate) fn released_tag_refs(repo: &Path) -> Vec<String> {
-    git_text(repo, &["tag", "--list", "v*"]).unwrap_or_default().lines()
-        .filter(|tag| tag.strip_prefix('v').is_some_and(|version| semver::Version::parse(version).is_ok()))
-        .map(|tag| format!("refs/tags/{tag}")).collect()
 }
 
 fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {

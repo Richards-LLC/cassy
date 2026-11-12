@@ -424,10 +424,9 @@ fn reconcile_reused_factory_branch(
             // Released imports are upstream, not this task's foreign work.
             // Exclude them before the bounded history scan. Local-only trunk
             // commits cannot vouch for shipping.
-            let released: Vec<_> = close_ops::task_attribution::released_trunk_ref(worktree_path, target_branch)
+            let released = close_ops::task_attribution::released_trunk_ref(worktree_path, target_branch)
                 .filter(|reference| reference.starts_with("refs/remotes/"))
-                .into_iter().chain(close_ops::task_attribution::released_tag_refs(worktree_path))
-                .map(|reference| format!("^{reference}")).collect();
+                .map(|reference| format!("^{reference}"));
             let history = crate::git_evidence::git_text(
                 worktree_path,
                 &[

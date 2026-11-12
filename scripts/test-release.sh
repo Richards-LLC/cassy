@@ -666,7 +666,7 @@ one_item_hotfix_train() {
 check 'one_item_hotfix_train' 'cas-d725: one-item hotfix train cuts, queues once and publishes through the normal release path'
 
 cut_own_review_missing() {
-    local fixture="$tmp/own-review" status=0
+    local fixture="$tmp/own-review" status=0 refusal
     clone_epic "$fixture" epic/own-review own-review
     mkdir -p "$fixture/changelog.d"
     printf '### Fixed — Review fixture\n\n- **First** — First delivery.\n' >"$fixture/changelog.d/cas-000a.md"
@@ -678,10 +678,13 @@ cut_own_review_missing() {
     : >"$FAKE_GH_LOG"
     FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
+    # REVIEW_MISSING is the machine refusal identifier; a trailing gate frame
+    # must not hide its task IDs or turn the unrelated preview member into one.
+    refusal="$(grep -F 'REVIEW_MISSING' "$tmp/own-review.log" | tail -1)"
     [[ "$status" == 1 ]] &&
-        tail -1 "$tmp/own-review.log" | grep -q 'cas-000a' &&
-        tail -1 "$tmp/own-review.log" | grep -q 'cas-000b' &&
-        ! tail -1 "$tmp/own-review.log" | grep -q 'cas-dead' &&
+        grep -q 'cas-000a' <<<"$refusal" &&
+        grep -q 'cas-000b' <<<"$refusal" &&
+        ! grep -q 'cas-dead' <<<"$refusal" &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/own-review &&
         ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
         ! grep -Eq '^pr (create|merge) ' "$FAKE_GH_LOG"

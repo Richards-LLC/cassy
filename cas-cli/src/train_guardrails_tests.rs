@@ -142,16 +142,12 @@ async fn batch_drop_reverts_the_bad_children_once_and_a_conflict_changes_nothing
     assert_eq!(sq.peek("operator", 10).unwrap().len(), 1);
 }
 
-/// The receipt `train_ci::observe` records for the train's current tip.
-fn tip_receipt(repo: &Path, cas_dir: &Path, outcome: &str) {
-    let dir = crate::train_ci::directory(cas_dir, EPIC).unwrap();
-    std::fs::create_dir_all(&dir).unwrap();
-    let state = serde_json::json!({"branch": TRAIN, "head": run(repo, &["rev-parse", TRAIN]), "outcome": outcome});
-    std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
+fn publish_tip(repo: &Path) {
+    run(repo, &["push", "-q", "origin", TRAIN]);
 }
 
 #[test]
-fn red_or_missing_train_tip_verdict_sends_no_cut_notice_gh_1635() {
+fn published_tip_notifies_without_train_receipt_and_ignores_legacy_red_cas_92cb() {
     let _env = TestEnvGuard::temp_home();
     let (dir, _origin) = repo_with_origin();
     let repo = dir.path();
@@ -160,29 +156,22 @@ fn red_or_missing_train_tip_verdict_sends_no_cut_notice_gh_1635() {
     let sq = open_supervisor_queue_store(&cas_dir).unwrap();
     let none = BTreeSet::new();
     let late = Utc::now() + chrono::Duration::hours(3);
-
     notify_train_cuts(&cas_dir, &none, late).unwrap();
-    assert!(sq.peek("sup-id", 10).unwrap().is_empty(), "no verdict: no max-age notice");
-    tip_receipt(repo, &cas_dir, "FAIL");
-    notify_train_cuts(&cas_dir, &none, late).unwrap();
-    assert!(sq.peek("sup-id", 10).unwrap().is_empty(), "red tip: no max-age notice");
+    assert!(sq.peek("sup-id", 10).unwrap().is_empty());
 
-    tip_receipt(repo, &cas_dir, "PASS");
+    publish_tip(repo);
+    let legacy = crate::train_ci::directory(&cas_dir, EPIC).unwrap();
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("state.json"), r#"{"outcome":"FAIL","red_since":"old-tip"}"#).unwrap();
+    for _ in 0..2 { notify_train_cuts(&cas_dir, &none, late).unwrap(); }
+    assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 1);
+
     merge_child(repo, &cas_dir, "cas-c", &[]);
     notify_train_cuts(&cas_dir, &none, late).unwrap();
-    assert!(sq.peek("sup-id", 10).unwrap().is_empty(), "green at an older tip does not count");
-
-    tip_receipt(repo, &cas_dir, "PASS");
-    notify_train_cuts(&cas_dir, &none, late).unwrap();
-    assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 1, "green at the current tip notifies");
-
-    // The max-age notice is per tip, not per train: a changed tip that goes green notifies again.
-    merge_child(repo, &cas_dir, "cas-d", &[]);
-    tip_receipt(repo, &cas_dir, "PASS");
-    for _ in 0..2 {
-        notify_train_cuts(&cas_dir, &none, late).unwrap();
-    }
-    assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 2, "a new green tip notifies once more");
+    assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 1);
+    publish_tip(repo);
+    for _ in 0..2 { notify_train_cuts(&cas_dir, &none, late).unwrap(); }
+    assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 2);
 }
 
 #[test]
@@ -192,7 +181,7 @@ fn cut_notice_is_sent_once_per_state_and_names_the_project_release_command_cas_d
     let repo = dir.path();
     let cas_dir = train(repo, &[("cas-a", TaskStatus::Closed), ("cas-b", TaskStatus::InProgress)]);
     merge_child(repo, &cas_dir, "cas-a", &[]);
-    tip_receipt(repo, &cas_dir, "PASS");
+    publish_tip(repo);
     std::fs::create_dir_all(repo.join("scripts")).unwrap();
     std::fs::write(repo.join("scripts/release.sh"), "#!/bin/sh\n").unwrap();
     let sq = open_supervisor_queue_store(&cas_dir).unwrap();

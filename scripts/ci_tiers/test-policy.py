@@ -75,10 +75,10 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(values['web-check-needed'],'true')
         self.assertEqual(values['bridge-check-needed'],'true')
 
-    def test_train_and_queue_call_one_full_graph(self):
+    def test_only_queue_calls_the_full_graph(self):
         caller = policy.load(self.root/'.github/workflows/full-validation.yml')
         self.assertIn('merge_group', caller['on'])
-        self.assertEqual(caller['on']['push']['branches'], ['epic/release-train-**'])
+        self.assertNotIn('push', caller['on'])
         self.assertEqual(caller['jobs']['validation']['uses'], './.github/workflows/ci.yml')
         self.assertIs(caller['jobs']['validation']['with']['full-set'], True)
         jobs = self.ci()['jobs']
@@ -97,13 +97,14 @@ class PolicyTests(unittest.TestCase):
             return {name for name, job in jobs.items() if self.gh_expr(job.get('if', 'true'), context)}
         train = selected('push', 'refs/heads/epic/release-train-fixture')
         queue = selected('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1')
-        self.assertEqual(train, queue)
+        self.assertNotIn('fast-validation-suite-build', train)
+        self.assertNotIn('fast-validation-preflight', train)
         self.assertTrue({'fast-validation-preflight', 'fast-validation-ci-tiers',
                          'fast-validation-web', 'fast-validation-journeys',
                          'fast-validation-suite-build', 'fast-validation-suite-shards',
                          'fast-validation-suite', 'fast-validation-docs',
-                         'queue-flake-publication', 'fast-validation'}.issubset(train))
-        self.assertNotIn('scoped-validation-fast', train)
+                         'queue-flake-publication', 'fast-validation'}.issubset(queue))
+        self.assertNotIn('scoped-validation-fast', queue)
 
     def test_current_policy_and_all_registered_prose_pass(self):
         self.assertEqual(policy.validate(self.root, verbose=False), [])
@@ -229,37 +230,20 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         actual_archive, _ = policy.role(changed, 'Build full suite archive', source)
         self.assertGreater(actual_disable, actual_archive)
 
-    def test_preflight_default_check_runs_only_without_the_archive_build(self):
+    def test_preflight_build_covers_check_and_reads_main_scoped_cache(self):
         jobs = self.ci()['jobs']
         preflight = jobs['fast-validation-preflight']
-        archive = jobs['fast-validation-suite-build']
-        check = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
-        build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
-        self.assertNotIn('--no-default-features', shlex.split(build['run']))
-        portable = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-5:] == ['cargo','build','-p','cas','--no-default-features'])
-        consumer = next(s for s in preflight['steps'] if 'export CAS_TEST_BINARY=' in s.get('run', ''))
-        context = {'github.event_name': 'merge_group',
-                   'github.ref': 'refs/heads/gh-readonly-queue/main/pr-1',
-                   'needs.ci-diff.outputs.class': 'rust-touched',
-                   'needs.fast-validation-runner-route.outputs.mode': 'hosted',
-                   'steps.classify-diff.outputs.rust-unaffected': 'false'}
-        for reuse, unaffected, expected_check, expected_archive, expected_portable in [
-            ('', 'false', False, True, True),
-            ('full-gate', 'false', True, False, True),
-            ('', 'true', False, False, False),
-        ]:
-            with self.subTest(reuse=reuse, unaffected=unaffected):
-                case = {**context,
-                        'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
-                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
-                        'steps.classify-diff.outputs.rust-unaffected': unaffected}
-                # These functions are GitHub job status, not routing inputs.
-                selected = lambda job, step: self.gh_expr(job['if'], case) and self.gh_expr(
-                    step.get('if', 'true').replace('cancelled()', 'False').replace('success()', 'True'), case)
-                self.assertEqual(selected(preflight, check), expected_check)
-                self.assertEqual(selected(archive, build), expected_archive)
-                self.assertEqual(selected(preflight, portable), expected_portable)
-                self.assertEqual(selected(preflight, consumer), expected_portable and not reuse)
+        commands = [shlex.split(policy.uncomment(step.get('run', ''))) for step in preflight['steps']]
+        self.assertFalse(any(tokens[-4:] == ['cargo', 'check', '-p', 'cas'] for tokens in commands))
+        self.assertTrue(any(tokens[-5:] == ['cargo', 'build', '-p', 'cas', '--no-default-features'] for tokens in commands))
+        setup = lambda job: next(step for step in job['steps']
+            if step.get('uses') == './.github/actions/setup-rust-linux')
+        consumer, producer = setup(preflight), setup(jobs['fast-validation-preflight-cache'])
+        for key in ('cache-key', 'shared-key'):
+            self.assertTrue(consumer['with'][key])
+            self.assertEqual(consumer['with'][key], producer['with'][key])
+        self.assertIn('fast-validation-preflight-cache', jobs)
+        self.assertNotIn('fast-validation-preflight-cache', jobs['fast-validation']['needs'])
 
     def test_preflight_restores_only_proven_exact_tree_cli(self):
         job = self.ci()['jobs']['fast-validation-preflight']
@@ -286,22 +270,13 @@ out = pathlib.Path(args[args.index('--dir')+1]); out.mkdir(parents=True, exist_o
 shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
 ''')
         gh.chmod(0o755)
-        check = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-4:] == ['cargo', 'check', '-p', 'cas'])
-        build = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-5:] == ['cargo', 'build', '-p', 'cas', '--no-default-features'])
-        smoke = next(s for s in job['steps'] if 'npm run --prefix hub-web build' in s.get('run', ''))
-        context = {'steps.job-receipt.outputs.reused': 'false',
-                   'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'full-gate',
-                   'needs.fast-validation-main-push-dedupe.outputs.validating-run-id': '101',
-                   'needs.fast-validation-main-push-dedupe.outputs.receipt-tree': tree}
+        build = next(s for s in job['steps'] if shlex.split(policy.uncomment(s.get('run', '')))[-5:] == ['cargo', 'build', '-p', 'cas', '--no-default-features'])
+        context = {}
         for proof, receipt_tree, cached, available, runnable, expected_run in [
-            ('full-gate', tree, '', True, True, '101'),
-            ('full-gate', tree, '100', True, True, '100'),
-            ('full-gate', '0'*40, '', True, True, ''),
             ('', tree, '', True, True, ''),
-            ('full-gate', tree, '', False, True, ''),
-            ('full-gate', tree, '', True, False, ''),
-            ('', '0'*40, '100', True, True, '100'),
+            ('', tree, '100', True, True, '100'),
             ('', tree, '100', False, True, ''),
+            ('', tree, '100', True, False, ''),
         ]:
             with self.subTest(proof=proof, cached=cached, available=available, runnable=runnable):
                 binary.write_text('#!/bin/sh\nexit '+('0' if runnable else '1')+'\n')
@@ -328,14 +303,11 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 route = {**case, 'steps.cli-restore.outputs.restored': outputs['restored'],
                          'steps.classify-diff.outputs.rust-unaffected': 'false',
                          'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false'}
-                self.assertEqual(self.gh_expr(check['if'], route), not restored)
                 self.assertEqual(self.gh_expr(build['if'], route), not restored)
-                if proof == 'full-gate':
-                    self.assertTrue(self.gh_expr(smoke['if'], route))
 
-    def test_train_runs_finish_while_factory_runs_cancel_cas_43ab(self):
+    def test_factory_runs_cancel_while_queue_runs_stay_independent(self):
         cases = [('push', 'refs/heads/factory/fixture', True, True),
-                 ('push', 'refs/heads/epic/release-train-fixture', False, True),
+                 ('push', 'refs/heads/epic/release-train-fixture', False, False),
                  ('push', 'refs/heads/epic/ordinary', False, False),
                  ('push', 'refs/heads/main', False, False),
                  ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', False, False)]
@@ -353,10 +325,6 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 groups = [group(v) for v in values]
                 if (groups[0] == groups[1]) != grouped:
                     return False
-            train_groups = [group({'github.event_name': 'push', 'github.ref': ref, 'github.run_id': '1'})
-                            for ref in ['refs/heads/epic/release-train-a', 'refs/heads/epic/release-train-b']]
-            if train_groups[0] == train_groups[1]:
-                return False
             return True
         workflow = self.ci()
         self.assertTrue(valid(workflow, cases))
@@ -370,13 +338,9 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             mutate(changed)
             self.assertFalse(valid(changed, cases))
 
-        caller = copy.deepcopy(policy.load(self.root / '.github/workflows/full-validation.yml'))
-        routes = [cases[1], cases[-1]]
-        self.assertTrue(valid(caller, routes))
-        for field, value in [('cancel-in-progress', True), ('group', '${{ github.run_id }}')]:
-            changed = copy.deepcopy(caller)
-            changed['concurrency'][field] = value
-            self.assertFalse(valid(changed, routes))
+        caller = policy.load(self.root / '.github/workflows/full-validation.yml')
+        self.assertFalse(caller['concurrency']['cancel-in-progress'])
+        self.assertEqual(caller['on'], {'merge_group': None})
 
     @staticmethod
     def gh_value(expression, context):

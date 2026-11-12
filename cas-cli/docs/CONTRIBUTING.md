@@ -3071,19 +3071,14 @@ fast rows once in `lane.yml`'s classification job, for both docs and code;
 non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
-Slim lanes omit broad Rust tests for factory pushes. Release-train pushes and
-merge-group events call the same reusable `ci.yml` through
-`full-validation.yml`: preflight, every script/CI-tier test, Commander web,
-cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.
-Both share quarantine plus one rerun. The schema-2 `train-full-gate` artifact
-binds every required job to the source tree and main baseline; train cuts refuse
-legacy or partial receipts. The queue can reuse this complete proof after only
-release-plumbing changes with main unchanged, then runs compile/source-built
-smoke and asset drift checks. Otherwise the queue runs the full graph. Explicit
-non-train hotfixes retain their emergency cut path, disclose the absent receipt
-and always receive full queue validation. Train and queue wall clocks enter the
-friction ledger once per immutable run attempt. CI retains complete native logs;
-the daemon still holds a red train and wakes its supervisor once.
+Slim lanes omit broad Rust tests for factory pushes. The merge queue alone calls
+`ci.yml` through `full-validation.yml` for full proof: script/CI tiers, preflight,
+Commander web, cumulative changed-web journeys, doctests and the Rust archive/shards.
+Train pushes retain lane impact tests and cuts require no train receipt. The
+queue retains quarantine, one rerun and durable flake publication. Preflight
+builds without a redundant check; a main-scope cache producer primes matching
+CLI dependencies outside the validation fan-in. Queue success can deduplicate
+the exact-tree main push, never the reverse.
 
 Each full-set test/build job also publishes a schema-2 job receipt through
 `.github/actions/full-gate-job`. Its key binds the Git tree, stable job/matrix
@@ -3092,10 +3087,9 @@ A requeue can reuse a successful producer job from a failed overall run; it
 validates the completed producer workflow and that particular job through GitHub.
 Failed jobs, changed inputs, missing proof and lookup errors execute normally.
 The Rust archive must still exist before its builder can skip; remaining shards
-download from the original producer run. Reused native train reports feed the
-existing full-suite collector. Cached flake observations retain their original
+download from the original producer run. Reused native shard reports retain their original bytes. Cached flake observations retain their original
 run identity, so reuse cannot count as another independent failure. The final
-full-set receipt still requires every selected job and durable flake publication;
+queue gate still requires every selected job and durable flake publication;
 a per-job receipt alone never authorizes a release.
 Park reads, and never
 runs, a capped test PASS in every workspace crate whose sources or tests
@@ -4881,8 +4875,8 @@ and `worktree_merge`; resume those calls after the run. This manual wait does
 not enforce a shared hold across machines.
 
 Auto-cut (`workflow/release_auto_cut.rs`) runs inside the daemon's cut-notice
-poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip
-has a green train-suite receipt, it acts when the tip holds `changelog.d/`
+poll (`train_guardrails::notify_train_cuts`). For an uncut train whose current tip
+is published to its lane, it acts when the tip holds `changelog.d/`
 fragments, no merge-queue run is in flight, the operator has not paused it
 (Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
 label), the train's supervisor is registered on this machine and the cadence

@@ -37,19 +37,13 @@ case "$1 $2" in
   "release view") exit 1 ;;
   "release create") ;;
   "api repos/"*)
-    case "$2" in */logs) cat "${FAKE_TRAIN_LOG_ZIP:?}" ;; *) echo '{}' ;; esac ;;
+    echo '{}' ;;
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit") ;;
   "pr merge") [[ "${FAKE_MERGE_EXIT:-0}" == 0 ]] && touch "$state/admitted"; exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
-  "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
-  "api -X")
-    case "$4" in
-      */jobs) echo '{"jobs":[{"name":"Shared train and queue graph / Full-set gate","conclusion":"success"}]}' ;;
-      *) cat "${FAKE_TRAIN_RUN:-/dev/null}" ;;
-    esac ;;
   "api graphql")
     if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
     elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}'
@@ -541,6 +535,19 @@ hotfix_fallback() {
         ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&
         ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
+train_cut_without_receipt() {
+    local fixture="$tmp/train-ci-cut" before after
+    clone_epic "$fixture" epic/release-train-fixture train-ci
+    write_valid_draft "$tmp/train-ci-notes.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    after="$(git -C "$fixture" rev-parse HEAD)"
+    [[ "$after" != "$before" ]] || return 1
+    ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:' || return 1
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]]
+}
+check 'train_cut_without_receipt' 'train preparation needs no train suite receipt and retries unchanged preparation'
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
 freeze_failure_stops_publication() {

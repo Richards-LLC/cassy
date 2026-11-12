@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Main pushes may reuse a successful queue's exact-tree artifact. Queue entries
-# may reuse a completed train full-set artifact when main is unchanged and the
-# remaining source-to-queue delta is release plumbing. The shared consumer also
-# checks the tree-bound cas/full-gate status; status-only or partial proof never
-# skips the full graph.
+# Only main pushes may reuse a successful queue's exact-tree artifact.
+# Every queue entry runs the full graph on its release tree.
 set -euo pipefail
 
 output="${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
@@ -12,17 +9,6 @@ ref="${GITHUB_REF:-}"
 repository="${GITHUB_REPOSITORY:-}"
 
 printf 'run-fast-validation=true\njourneys-reuse=false\n' >>"$output"
-
-full_gate_reuse() {
-    # Failure or unavailable evidence always leaves the full graph selected.
-    python3 scripts/train-ci.py reuse --repo . --github-output "$output" \
-        || echo "::warning::Full-set proof unavailable; running the complete shared gate."
-}
-
-if [[ "$event" == "merge_group" ]]; then
-    full_gate_reuse
-    exit 0
-fi
 
 if [[ "$event" != "push" || "$ref" != "refs/heads/main" ]]; then
     echo "Merge-queue tree dedupe applies only to main pushes; running Fast Validation for ${event:-unknown} ${ref:-unknown}."

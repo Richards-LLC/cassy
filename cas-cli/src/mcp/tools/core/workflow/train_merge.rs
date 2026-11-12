@@ -806,10 +806,18 @@ mod tests {
         red["outcome"] = "PASS".into();
         red.as_object_mut().unwrap().remove("red_since");
         std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
+        // Count origin reads: merge admission asks origin once per entry.
+        let reads = fixture.root.join("origin-reads.log");
+        let counter = fixture.root.join("count-upload-pack");
+        std::fs::write(&counter, format!("#!/bin/sh\necho read >> '{}'\nexec git upload-pack \"$@\"\n", reads.display())).unwrap();
+        std::fs::set_permissions(&counter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        git(fixture._repo.path(), &["config", "remote.origin.uploadpack", counter.to_str().unwrap()]);
         // Reconstruct the consumer from durable state, as after daemon restart.
         resume_pending(&fixture.root, "queue-session")
             .await
             .unwrap();
+        let reads = std::fs::read_to_string(&reads).unwrap_or_default().lines().count();
+        assert_eq!(reads, fixture.ids.len(), "origin reads for {} train entries", fixture.ids.len());
         let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap())
             .unwrap()
             .unwrap();

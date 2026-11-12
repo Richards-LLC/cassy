@@ -5982,7 +5982,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
     let remediation = if let Some(backlog) = &unlinked_backlog {
         backlog.next_step
     } else if held_notice.is_some() && rejections.is_empty() {
-        "Resolve the held personal rows above by reviewing `cas cloud queue migrate-to-team`; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+        "Resolve the held personal rows above by reviewing `cas cloud queue migrate-to-team` (rows it reports as already on the team are pull echoes: preview `cas cloud queue --purge-pull-echoes --dry-run`); `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
     } else if rejections.is_empty()
         || rejections
             .iter()

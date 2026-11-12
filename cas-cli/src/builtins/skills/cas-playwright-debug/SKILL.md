@@ -22,7 +22,7 @@ Check `node --version` and `npx playwright --version` first:
 
 On older Playwright, use `npx playwright show-trace <trace.zip>` and upgrade.
 If assertions pass but teardown times out, rerun the named test with `--trace off`,
-then on Node 22 before blaming the product ([field evidence #1875](https://github.com/Richards-LLC/cassy/issues/1875)).
+then on Node 22 before blaming the product.
 
 For coding-agent browser work, default to `npx playwright cli`: snapshots live
 in files and element refs keep tool output small. Use Playwright MCP for a long

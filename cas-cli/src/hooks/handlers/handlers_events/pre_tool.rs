@@ -2705,6 +2705,9 @@ struct GitCommandTarget {
     git_dir: Option<std::path::PathBuf>,
     work_tree: Option<std::path::PathBuf>,
     is_detached_checkout: bool,
+    /// The revision a `git checkout` names, so a refusal can show the
+    /// checkout to run instead of commit guidance (GH #1860).
+    checkout_rev: Option<String>,
     unresolved_directory: bool,
     uncertain_scope: bool,
 }
@@ -2721,6 +2724,7 @@ impl GitCommandTarget {
             git_dir: None,
             work_tree: None,
             is_detached_checkout: false,
+            checkout_rev: None,
             unresolved_directory: false,
             uncertain_scope: false,
         }
@@ -3050,6 +3054,11 @@ fn collect_git_write_targets(
                 .iter()
                 .take_while(|word| word.as_str() != "--")
                 .any(|word| word == "--detach");
+        target.checkout_rev = (git_words[write_index] == "checkout")
+            .then(|| git_words[write_index + 1..].iter()
+                .take_while(|word| word.as_str() != "--")
+                .find(|word| !word.starts_with('-')).cloned())
+            .flatten();
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];
@@ -3257,6 +3266,24 @@ fn check_worker_git_commit_scope_at_target(
             .is_some_and(|(cwd, worktree)| cwd.starts_with(worktree));
 
         if !inside_worktree {
+            if let Some(rev) = &target.checkout_rev {
+                let detach = if target.is_detached_checkout { &["--detach"][..] } else { &[] };
+                let args: Vec<&str> = ["-C", clone_path, "checkout"].into_iter()
+                    .chain(detach.iter().copied()).chain([rev.as_str()]).collect();
+                let [checkout] = match crate::worktree::GitOperations::shell_remedies([("git", &args[..])]) {
+                    Ok(commands) => commands,
+                    Err(refusal) => return Some(refusal),
+                };
+                let cwd = crate::worktree::GitOperations::visible_git_label(&cwd);
+                let clone_path = crate::worktree::GitOperations::visible_git_label(clone_path);
+                return Some(format!(
+                    "WORKER_CHECKOUT_OUTSIDE_WORKTREE: 🚫 a worker checks out revisions only in \
+                    its assigned worktree ({clone_path}); {cwd} is outside it.\n\n\
+                    Run the checkout there:\n  {checkout}\n\n\
+                    To read another revision without moving your checkout, use \
+                    `git show <rev>:<path>`."
+                ));
+            }
             let worker_name =
                 std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
             let lane = format!("factory/{worker_name}");
@@ -12540,10 +12567,19 @@ mod worker_commit_guard_tests {
         let output = handle_pre_tool_use(&outside_checkout, None).expect("handler ok");
         let value = serde_json::to_value(output).unwrap();
         assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("outside your assigned worktree"));
+        // GH #1860: the refusal names the checkout fix, not commit guidance.
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or_default();
+        let [checkout, switch] = crate::worktree::GitOperations::shell_remedies([
+            ("git", &["-C", path.as_str(), "checkout", "--detach", sha.as_str()][..]),
+            ("git", &["switch", "factory/bisect-worker"][..]),
+        ]).unwrap();
+        assert!(reason.starts_with("WORKER_CHECKOUT_OUTSIDE_WORKTREE"), "{reason}");
+        assert!(reason.contains(&checkout) && !reason.contains(&switch), "{reason}");
+        let outside_commit = hook_git_write_input(
+            &path, &format!("git -C '{}' commit -m outside", outside.path().display()));
+        let value = serde_json::to_value(handle_pre_tool_use(&outside_commit, None).expect("handler ok")).unwrap();
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or_default();
+        assert!(reason.contains(&switch) && !reason.starts_with("WORKER_CHECKOUT_OUTSIDE_WORKTREE"), "{reason}");
     }
 
     #[test]

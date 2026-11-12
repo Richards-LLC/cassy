@@ -3881,6 +3881,70 @@ mod tests {
                 .unwrap_err();
     }
 
+    /// cas-aacc: a cancelled delivery explicitly assigned to a successor can
+    /// be re-landed unchanged, including a port whose subject names its sources.
+    #[test]
+    fn cancelled_delivery_transfers_only_to_its_successor_cas_aacc() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for (status, successor, repo_selector, foreign_tail, integrated, allowed) in [
+            (TaskStatus::Cancelled, Some("cas-bbbb"), "project:handoff", false, false, true),
+            (TaskStatus::Cancelled, Some("cas-bbbc"), "project:handoff", false, false, false),
+            (TaskStatus::Cancelled, None, "project:handoff", false, false, false),
+            (TaskStatus::Open, Some("cas-bbbb"), "project:handoff", false, false, false),
+            (TaskStatus::Cancelled, Some("cas-bbbb"), "project:another", false, false, false),
+            (TaskStatus::Cancelled, Some("cas-bbbb"), "project:handoff", true, false, false),
+            (TaskStatus::Cancelled, Some("cas-bbbb"), "project:handoff", false, true, true),
+        ] {
+            let dir = fixture();
+            let repo = dir.path();
+            std::fs::write(repo.join(".git/info/exclude"), ".cas/\n").unwrap();
+            let root = crate::store::init_cas_dir(repo).unwrap();
+            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='handoff'\n").unwrap();
+            let base = git(repo, &["rev-parse", "main"]);
+            let first = commit(repo, "one.rs", "first\n", "fix(cas-aaaa): repair part one");
+            let port = commit(repo, "two.rs", "second\n", "fix: reviewed port (cas-cccc)");
+            git(repo, &["update-ref", "refs/remotes/origin/factory/old-cas-aaaa", &port]);
+            if integrated {
+                git(repo, &["branch", "-f", "main", &port]);
+            }
+            git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+            let target = cas_types::WorkTarget { repo_selector: "project:handoff".into(), target_branch: "main".into() };
+            let mut previous = Task::new("cas-aaaa".into(), "Cancelled repair".into());
+            previous.status = status;
+            previous.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Cancelled {
+                superseded_by: successor.map(str::to_owned),
+            });
+            previous.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: repo_selector.into(), target_branch: "main".into() });
+            previous.deliverables.historical_factory_branch_anchors = vec![port.clone()];
+            // The incident's invalid old start boundary cannot be reused as
+            // the successor's boundary or prevent exact-receipt handoff.
+            previous.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target.clone(), assignee: "old".into(), branch: "factory/old-cas-aaaa".into(), base_sha: "a".repeat(40),
+            });
+            let store = crate::store::open_task_store(&root).unwrap();
+            store.add(&previous).unwrap();
+            let mut task = Task::new("cas-bbbb".into(), "Successor repair".into());
+            task.assignee = Some("worker".into());
+            task.deliverables.work_target = Some(target.clone());
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target, assignee: "worker".into(), branch: "factory/worker".into(),
+                base_sha: if integrated { port.clone() } else { base },
+            });
+            if foreign_tail {
+                commit(repo, "foreign.rs", "foreign\n", "fix(cas-dddd): unrelated delivery");
+            } else if integrated {
+                commit(repo, "new.rs", "new\n", "fix(cas-bbbb): new successor work");
+            }
+            let result = task_commit_identity_in_repo(repo, &task, None);
+            assert_eq!(result.is_ok(), allowed, "{status:?}, {successor:?}, foreign={foreign_tail}, integrated={integrated}: {result:?}");
+            if let Ok(identity) = result {
+                assert_eq!(identity.matches_known_commit(&first), !integrated);
+                assert_eq!(identity.matches_known_commit(&port), !integrated);
+            }
+            assert_eq!(store.get(&previous.id).unwrap(), previous);
+        }
+    }
+
     #[tokio::test]
     async fn receipt_upper_boundary_excludes_later_sibling_commit() {
         use crate::mcp::CasService;

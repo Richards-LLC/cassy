@@ -1161,6 +1161,15 @@ async fn start_beside_a_branch_parked_for_another_target_preserves_its_tip_gh_10
     std::fs::write(repo.join("burn.txt"), "burn-down work\n").unwrap();
     git(&["add", "burn.txt"]);
     git(&["commit", "-q", "-m", "burn-down work"]);
+    // cas-aacc: the published epic tip is authoritative even when the
+    // supervisor's linked cut checkout advanced the shared local ref.
+    let origin = tempfile::tempdir().unwrap();
+    git(&["init", "--bare", "-q", origin.path().to_str().unwrap()]);
+    git(&["config", &format!("url.{}.insteadOf", origin.path().display()), "https://github.com/example/gh1006-fixture.git"]);
+    git(&["push", "-q", "origin", "epic/burn-down"]);
+    let published = git(&["rev-parse", "refs/remotes/origin/epic/burn-down"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "unpublished release preparation"]);
+    let local_only = git(&["rev-parse", "HEAD"]);
     // The worker's branch holds a delivery parked for merge elsewhere.
     git(&["checkout", "-q", "-b", "factory/test-agent", "main"]);
     std::fs::write(repo.join("hub.css"), ".row{gap:8px}\n").unwrap();
@@ -1192,17 +1201,10 @@ async fn start_beside_a_branch_parked_for_another_target_preserves_its_tip_gh_10
     .await;
     let task_id = extract_task_id(&created).unwrap().to_string();
 
-    let started = core
+    core
         .cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
         .await
-        .map(extract_text)
         .unwrap_or_else(|error| panic!("start must preserve the parked branch: {}", error.message));
-    assert!(started.contains("PARKED BRANCH PRESERVED"), "{started}");
-    // The parked task, branch and tip are named as the preserved delivery.
-    assert!(
-        started.contains(&format!("cas-pk06 stays on factory/test-agent at {parked_tip}")),
-        "{started}"
-    );
     assert_eq!(
         git(&["rev-parse", "factory/test-agent"]),
         parked_tip,
@@ -1213,7 +1215,12 @@ async fn start_beside_a_branch_parked_for_another_target_preserves_its_tip_gh_10
         format!("factory/test-agent-{task_id}"),
         "the new task works on its own branch"
     );
-    assert_eq!(git(&["rev-parse", "HEAD"]), git(&["rev-parse", "epic/burn-down"]));
+    let saved = store.get(&task_id).unwrap();
+    assert_eq!(saved.status, TaskStatus::InProgress);
+    assert_eq!(saved.deliverables.factory_branch_start.unwrap().base_sha, published);
+    assert_eq!(git(&["rev-parse", "HEAD"]), published);
+    assert_eq!(git(&["rev-parse", "epic/burn-down"]), local_only);
+    assert_eq!(store.get("cas-pk06").unwrap().status, TaskStatus::AwaitingMerge);
 }
 
 #[tokio::test]

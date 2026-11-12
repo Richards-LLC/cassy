@@ -193,9 +193,8 @@ fn every_registered_refusal_site_emits_its_code() {
     assert!(gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
     // A landed deletion consumes all allowance; restoring an older seed
     // cannot regain it, even when the old seed had never been edited.
-    write_baseline(&seed);
-    git(&["add", "cas-cli/gate-audit-authority-baseline.json"]);
-    git(&["commit", "-qm", "landed seed"]);
+    git(&["restore", "cas-cli/gate-audit-authority-baseline.json"]);
+    git(&["checkout", "-qb", "deletion", "HEAD^"]);
     std::fs::write(&probe, legacy).unwrap();
     std::fs::remove_file(&baseline).unwrap();
     git(&["add", "-u"]);

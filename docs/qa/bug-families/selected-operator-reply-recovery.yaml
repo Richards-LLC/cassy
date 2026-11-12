@@ -1,4 +1,4 @@
-title: A lost operator reply selection retries durably after reconnect or expires once with a sender notice
-tasks: [cas-1962]
+title: Selected operator replies record forwarding attempts and accept authenticated wildcard receipts despite transient SQLite contention
+tasks: [cas-1962, cas-c271]
 invariants: [HUB-J5-SELECTED-REPLY-RECOVERY]
 journeys: [HUB-J5, FACTORY-SUPERVISE]

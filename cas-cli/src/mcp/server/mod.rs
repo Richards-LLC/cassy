@@ -181,7 +181,7 @@ impl CasCore {
         Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(
-                "Child registration rejected: this MCP connection already belongs to another caller. Native Codex children share the parent's caller and cannot authenticate an independent review by registering. Use Cassy's daemon-owned verifier for candidate reviews or a separately registered verifier bound to the exact dispatch. A registered supervisor may review and submit directly with supervisor_direct provenance. The existing caller is unchanged.",
+                "Child registration rejected: this MCP connection already belongs to another caller. Native Codex children share the parent's caller and cannot authenticate an independent review by registering. Use Cassy's daemon-owned verifier for candidate reviews or a separately registered verifier bound to the exact dispatch. The existing caller is unchanged.",
             ),
             data: Some(serde_json::json!({
                 "rule_id": "shared_mcp_child_identity",

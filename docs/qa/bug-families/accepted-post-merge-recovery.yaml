@@ -1,0 +1,3 @@
+title: Accepted merged deliveries satisfy pending predecessors, preserve scoped decisions and retain supervisor-owned close recovery
+tasks: [cas-5bbe, cas-562b]
+journeys: [FACTORY-CLOSE, FACTORY-MERGE]

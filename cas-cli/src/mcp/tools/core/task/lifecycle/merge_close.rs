@@ -206,6 +206,48 @@ fn record_batch_close_outcome(
     Ok(note.into_owned())
 }
 
+/// One recorder-owned action after every member of this receipt has settled.
+/// Full gate details remain on each task; replay cannot create another wake.
+fn queue_batch_close_holds(
+    root: &std::path::Path,
+    receipt: &cas_store::QaBatchReceipt,
+    outcomes: &std::collections::BTreeMap<String, CassyMergeClose>,
+) -> Result<(), String> {
+    if crate::release_reconcile::active() { return Ok(()); }
+    #[derive(serde::Serialize)]
+    struct Hold<'a> { task_id: &'a str, reason: &'a str, next_action: String }
+    let mut groups = std::collections::BTreeMap::<String, Vec<Hold<'_>>>::new();
+    for (id, outcome) in outcomes {
+        let CassyMergeClose::Held(reason) = outcome else { continue; };
+        let heading = reason.lines().find(|line| !line.trim().is_empty()).unwrap_or("OTHER");
+        let kind = heading.split_once(':').map_or(heading, |(kind, _)| kind)
+            .trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).trim();
+        let action = format!("task action=close id={id} commit_receipt={} reason=\"<gate proof>\"", receipt.task_heads[id]);
+        groups.entry(kind.to_string()).or_default().push(Hold { task_id: id, reason, next_action: action });
+    }
+    if groups.is_empty() { return Ok(()); }
+    let closed = outcomes.values().filter(|outcome| matches!(outcome, CassyMergeClose::Closed { .. })).count();
+    let already = outcomes.values().filter(|outcome| matches!(outcome, CassyMergeClose::AlreadyClosed)).count();
+    let held: usize = groups.values().map(Vec::len).sum();
+    let mut detail = format!("Receipt {} at {}: {closed} closed, {already} already closed, {held} held.\n", receipt.id, receipt.staging_sha);
+    for (kind, members) in &groups {
+        detail.push_str(&format!("\n{kind} ({}):\n", members.len()));
+        for member in members {
+            detail.push_str(&format!("- {}: {}\nSupervisor action: resolve this gate, then {}.\n",
+                member.task_id, member.reason, member.next_action));
+        }
+    }
+    detail.push_str("\nPer-member details are retained in task notes. No worker re-close is required.");
+    let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?
+        .list(None).map_err(|error| error.to_string())?;
+    let recipient = crate::supervisor_notices::resolve(&agents, Some(&receipt.recorder_agent_id), None);
+    crate::supervisor_notices::enqueue_keyed(root, &recipient, "batch_close_hold", &detail,
+        &format!("supervisor-notice:batch_close_hold:{}", receipt.id),
+        Some(serde_json::json!({"receipt_id": receipt.id, "closed_count": closed,
+            "already_closed_count": already, "held_by_kind": groups})))
+        .map_err(|error| error.to_string())
+}
+
 /// The shared, delivery-bound return path for synchronous close and durable QA decisions.
 pub(crate) fn return_merged_delivery_for_source_fix(
     cas_root: &std::path::Path, actor: &str, task: &Task,
@@ -258,17 +300,47 @@ pub(crate) fn return_merged_delivery_for_source_fix(
 }
 
 impl CasCore {
-    /// Source-upkeep refusals opt in here at their typed call sites. Only a
-    /// published, still-current parked delivery may be returned for a fix;
-    /// verification/QA waits and unreadable evidence keep their own recovery.
+    /// A close gate after landing belongs to the supervisor. Keep its parked
+    /// delivery authority; only an explicit correction decision reopens work.
     pub(super) fn return_merged_delivery_for_source_fix(
         &self, task: &Task, repo: &std::path::Path, target: &str, gate: &str,
     ) -> String {
-        let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
-        match return_merged_delivery_for_source_fix(&self.cas_root, &actor, task, repo, target, gate) {
-            Ok(detail) if detail.is_empty() => String::new(),
-            Ok(detail) => format!("\n\n{detail}"),
-            Err(error) => format!("\n\nCassy could not return task {} for its source fix ({error}); run task action=request_changes id={}.", task.id, task.id),
+        let recover = || -> Result<Option<String>, String> {
+            let (Some(anchor), Some(merge)) = (
+                task.deliverables.factory_branch_anchor.as_deref(),
+                task.deliverables.green_merge_commit.as_deref(),
+            ) else { return Ok(None) };
+            if task.status != TaskStatus::AwaitingMerge
+                || !super::close_ops::commit_is_merged_into_parent(repo, anchor, target)
+                || !super::close_ops::commit_is_merged_into_parent(repo, merge, target)
+            {
+                return Ok(None);
+            }
+            let tasks = crate::store::open_task_store(&self.cas_root).map_err(|e| e.to_string())?;
+            let current = tasks.get(&task.id).map_err(|e| e.to_string())?;
+            if current.status != task.status
+                || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
+                || current.deliverables.green_merge_commit != task.deliverables.green_merge_commit
+                || current.deliverables.work_target != task.deliverables.work_target
+            {
+                return Ok(None);
+            }
+            let agents = crate::store::open_agent_store(&self.cas_root).map_err(|e| e.to_string())?;
+            let session = super::supervisor_push::resolve_lifecycle_factory_session(
+                agents.as_ref(), task.assignee.as_deref().unwrap_or("cassy"));
+            let recipient = super::supervisor_push::resolve_notice_recipient(agents.as_ref(), session.as_deref());
+            let detail = format!("Post-merge close recovery for {}: delivery {anchor} landed at {merge}. The supervisor owns this gate; the delivery remains parked. Resolve the gate and retry supervisor close. The worker has no new source delivery or close action.\n{gate}", task.id);
+            crate::supervisor_notices::enqueue_with_context(
+                &self.cas_root, &recipient, "post_merge_close_recovery", &detail,
+                &format!("{}:{anchor}:{merge}", task.id),
+                Some(serde_json::json!({"task_id":task.id, "delivery":anchor, "merge":merge, "target":target, "owner":"supervisor"})),
+            ).map_err(|e| e.to_string())?;
+            Ok(Some(format!("Supervisor close recovery queued for {}; delivery remains parked.", task.id)))
+        };
+        match recover() {
+            Ok(None) => String::new(),
+            Ok(Some(detail)) => format!("\n\n{detail}"),
+            Err(error) => format!("\n\nSupervisor owns post-merge close recovery for {}; notice could not be queued: {error}", task.id),
         }
     }
 
@@ -689,7 +761,6 @@ impl CasCore {
                 }
             };
             let mut hold = |reason: &str| {
-                use sha2::Digest;
                 let detail = format!(
                     "Receipt {} covers {task_id} at {}. Ordinary finalization is held:\n{reason}\n\n\
                      Supervisor action: resolve the gate above, then retry ordinary close with \
@@ -698,25 +769,6 @@ impl CasCore {
                     receipt.id, receipt.staging_sha, receipt.task_heads[task_id],
                 );
                 record(&detail);
-                // A retired implementer cannot relay this hold. Address the
-                // recorder (or its live successor/operator) directly, using
-                // the existing idempotent supervisor outbox and wake class.
-                let notice = (|| -> Result<(), String> {
-                    if crate::release_reconcile::active() { return Ok(()); }
-                    let agents = crate::store::open_agent_store(&self.cas_root)
-                        .map_err(|error| error.to_string())?.list(None).map_err(|error| error.to_string())?;
-                    let recipient = crate::supervisor_notices::resolve(
-                        &agents, Some(&receipt.recorder_agent_id), None,
-                    );
-                    let occurrence = format!("{task_id}:{}:{:x}", receipt.task_heads[task_id], sha2::Sha256::digest(reason.as_bytes()));
-                    crate::supervisor_notices::enqueue(
-                        &self.cas_root, &recipient, "batch_close_hold", &detail, &occurrence,
-                    ).map_err(|error| error.to_string())
-                })();
-                let mut reason = reason.to_string();
-                if let Err(error) = notice {
-                    reason.push_str(&format!("; supervisor notice not queued: {error}"));
-                }
                 outcomes.insert(task_id.clone(), CassyMergeClose::Held(crate::gates::tag("G-90", reason)));
             };
             let task = match store.get(task_id) {
@@ -811,6 +863,13 @@ impl CasCore {
                 ))),
                 CassyMergeClose::NotEligible => {
                     hold(&crate::gates::tag("G-89", "not parked, or merged under a CI override; it needs its own close"))
+                }
+            }
+        }
+        if let Err(error) = queue_batch_close_holds(&self.cas_root, receipt, &outcomes) {
+            for outcome in outcomes.values_mut() {
+                if let CassyMergeClose::Held(reason) = outcome {
+                    reason.push_str(&format!("; supervisor notice not queued: {error}"));
                 }
             }
         }
@@ -1092,6 +1151,44 @@ mod tests {
         assert!(detail.contains(command));
         assert_eq!(note.lines().count(), 1);
         assert!(note.chars().count() <= 800, "{note}");
+    }
+
+    #[test]
+    fn automatic_post_merge_recovery_keeps_delivery_and_notifies_supervisor_once_cas_5bbe() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "recovery-session");
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "main"]);
+        git(repo.path(), &["commit", "-q", "--allow-empty", "-m", "delivery"]);
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+        let root = crate::store::init_cas_dir(repo.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (id, name, role) in [("sup-id", "supervisor", cas_types::AgentRole::Supervisor),
+            ("worker-id", "worker", cas_types::AgentRole::Worker)] {
+            let mut agent = cas_types::Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("recovery-session".into());
+            agents.register(&agent).unwrap();
+        }
+        let mut task = Task::new("cas-recovery".into(), "parked delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        task.deliverables.green_merge_commit = Some(head);
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("sup-id".into());
+        for _ in 0..2 {
+            core.return_merged_delivery_for_source_fix(&task, repo.path(), "main", "upkeep refusal");
+        }
+        let after = tasks.get(&task.id).unwrap();
+        assert_eq!(after.status, TaskStatus::AwaitingMerge);
+        assert_eq!(serde_json::to_value(&after.deliverables).unwrap(), serde_json::to_value(&task.deliverables).unwrap());
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "supervisor");
+        assert_eq!(rows[0].factory_session.as_deref(), Some("recovery-session"));
     }
 
     /// cas-e9d6: agents share one Git identity, so a tip someone else pushed

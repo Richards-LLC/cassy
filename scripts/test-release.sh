@@ -70,7 +70,9 @@ case "$1 $2" in
     esac
     printf '{"train_id":"cas-0001","branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
   "release preview")
-    jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" '{scope:{final_release_sha:$sha},members:2,would_close:$n,would_hold:(2-$n),by_reason:{REVIEW_MISSING:(2-$n)},review_missing:["cas-0001"]}' ;;
+    jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" \
+      --argjson missing "${FAKE_REVIEW_MISSING:-$(printf '%s' '["cas-dead"]')}" \
+      '{scope:{final_release_sha:$sha},members:($n+($missing|length)),would_close:$n,would_hold:($missing|length),by_reason:{REVIEW_MISSING:($missing|length)},review_missing:$missing}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
@@ -663,9 +665,33 @@ one_item_hotfix_train() {
 }
 check 'one_item_hotfix_train' 'cas-d725: one-item hotfix train cuts, queues once and publishes through the normal release path'
 
+cut_own_review_missing() {
+    local fixture="$tmp/own-review" status=0
+    clone_epic "$fixture" epic/own-review own-review
+    mkdir -p "$fixture/changelog.d"
+    printf '### Fixed — Review fixture\n\n- **First** — First delivery.\n' >"$fixture/changelog.d/cas-000a.md"
+    printf '### Fixed — Review fixture\n\n- **Second** — Second delivery.\n' >"$fixture/changelog.d/cas-000b.md"
+    git -C "$fixture" add changelog.d
+    git -C "$fixture" commit --quiet -m 'included deliveries'
+    write_valid_draft "$tmp/own-review-notes.md"
+    : >"$FAKE_CAS_LOG"
+    : >"$FAKE_GH_LOG"
+    FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
+        run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] &&
+        tail -1 "$tmp/own-review.log" | grep -q 'cas-000a' &&
+        tail -1 "$tmp/own-review.log" | grep -q 'cas-000b' &&
+        ! tail -1 "$tmp/own-review.log" | grep -q 'cas-dead' &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/own-review &&
+        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
+        ! grep -Eq '^pr (create|merge) ' "$FAKE_GH_LOG"
+}
+check 'cut_own_review_missing' 'own included deliveries missing review refuse with their ids even when another member would close'
+
 cut_preview_gate() {
     local fixture="$tmp/preview-cut" status=0
     clone_epic "$fixture" epic/preview-cut preview-cut
+    git -C "$fixture" commit --quiet --allow-empty -m 'reviewed delivery (cas-000c)'
     write_valid_draft "$tmp/preview-notes.md"
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
@@ -681,7 +707,7 @@ cut_preview_gate() {
         grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
         grep -q '^release track .* --preview ' "$FAKE_CAS_LOG"
 }
-check 'cut_preview_gate' 'cut refuses zero would-close before push and permits approved members with one candidate build'
+check 'cut_preview_gate' 'cut refuses zero would-close but older-release review residuals do not block reviewed included members'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

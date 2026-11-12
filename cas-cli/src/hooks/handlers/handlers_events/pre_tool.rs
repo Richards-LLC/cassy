@@ -2792,6 +2792,7 @@ fn git_subcommand_index(git_words: &[String]) -> Option<usize> {
 struct WorkerPathWord {
     literal: Option<bool>,
     quoted: bool,
+    raw_syntax_word: bool,
 }
 
 /// Only constants and whole, previously bound variables are known here. Never
@@ -2857,14 +2858,19 @@ fn collect_git_write_targets(
         previous_end = *end;
         if let ShellToken::Word(value) = token {
             let quoted = raw.starts_with('"') && raw.ends_with('"');
+            // Syntax-check allowances use the raw spelling, never cooked
+            // words that can hide quoting, escaping or shell expansion.
+            let raw_syntax_word = raw == value.as_str() && !raw.is_empty()
+                && raw.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte));
             path_words.entry(value.clone()).and_modify(|prior| {
                 if prior.literal != Some(*literal) { prior.literal = None; }
                 prior.quoted &= quoted;
-            }).or_insert(WorkerPathWord { literal: Some(*literal), quoted });
+                prior.raw_syntax_word &= raw_syntax_word;
+            }).or_insert(WorkerPathWord { literal: Some(*literal), quoted, raw_syntax_word });
         }
     }
     let path_word = |word: &str| path_words.get(word).copied()
-        .unwrap_or(WorkerPathWord { literal: None, quoted: false });
+        .unwrap_or(WorkerPathWord { literal: None, quoted: false, raw_syntax_word: false });
     let allow_variables = lexed.unresolved_at.is_none() && !lexed.tokens.iter().enumerate().any(|(index, token)| match token {
         ShellToken::Operator('(' | ')' | '|') => true,
         ShellToken::Operator('&') => lexed.tokens.get(index.wrapping_sub(1)) != Some(&ShellToken::Operator('&'))
@@ -2942,12 +2948,29 @@ fn collect_git_write_targets(
             };
             // A literal script file is opaque, just like executing it directly.
             // Its remaining arguments are script data, not shell options.
+            let literal_script = |script: &String| {
+                !script.is_empty()
+                    && !script.starts_with(['-', '+'])
+                    && path_word(script).literal == Some(true)
+            };
+            // Syntax checks require exact raw noexec flags followed by raw
+            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Redirects
+            // and expansions can supply +n/-c and execute a payload.
+            let syntax_check = command_index == 0
+                && !lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('<' | '>')))
+                && shell_statement_arguments(command).iter().any(|statement| {
+                    if statement != &words { return false; }
+                    let flags = statement[1..].iter()
+                        .take_while(|flag| matches!(flag.as_str(), "-n" | "--noexec")
+                            && path_word(flag).raw_syntax_word)
+                        .count();
+                    flags > 0 && statement.len() > flags + 1
+                        && statement[flags + 1..].iter().all(|script| {
+                            literal_script(script) && path_word(script).raw_syntax_word
+                        })
+                });
             if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
-                && args.first().is_some_and(|script| {
-                    !script.is_empty()
-                        && !script.starts_with(['-', '+'])
-                        && path_word(script).literal == Some(true)
-                })
+                && (args.first().is_some_and(literal_script) || syntax_check)
             {
                 continue;
             }
@@ -12832,6 +12855,65 @@ mod worker_commit_guard_tests {
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn shell_syntax_checks_preserve_worker_scope_cas_93e0() {
+        let mut env = TestEnvGuard::temp_home();
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().unwrap();
+        add_linked_worktree(repo.path(), linked.path(), "factory/syntax-worker");
+        let repo_path = repo.path().display().to_string();
+        let linked_path = linked.path().display().to_string();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "syntax-worker");
+        env.set("CAS_CLONE_PATH", &linked_path);
+
+        for (command, denied) in [
+            (format!("bash -n {{+n,-c,'cd \"{repo_path}\"; git commit -m probe'}}"), true),
+            (format!("bash -n < scripts/release.sh +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            ("bash -n scripts/release.sh scripts/fast-rows-pre-push.sh".into(), false),
+            ("bash -n ./scripts/release-v1.sh".into(), false),
+            ("bash --noexec scripts/release.sh".into(), false),
+            ("bash -n --noexec -n scripts/release.sh".into(), false),
+            ("sh -n scripts/release.sh".into(), false),
+            ("bash -n 'scripts/release.sh'".into(), true),
+            ("bash -n 'scripts/release check.sh'".into(), true),
+            ("bash -n $VAR".into(), true),
+            ("bash -n scripts/*.sh".into(), true),
+            ("bash -n ~/x".into(), true),
+            ("bash -n scripts/release=check.sh".into(), true),
+            ("bash -n scripts/release\\.sh".into(), true),
+            ("bash '-n' scripts/release.sh".into(), true),
+            ("bash '--noexec' scripts/release.sh".into(), true),
+            ("bash -l -n scripts/release.sh".into(), true),
+            ("bash -n -- scripts/release.sh".into(), true),
+            ("bash --noexec -- scripts/release.sh".into(), true),
+            ("bash -n scripts/release.sh > syntax.log 2>&1".into(), true),
+            ("bash -n < scripts/release.sh".into(), true),
+            ("bash -n scripts/release.sh > /tmp/cas-93e0.log 2>&1".into(), true),
+            ("bash -n scripts/release.sh +n -c ':'".into(), true),
+            ("bash -n scripts/release.sh -c ':'".into(), true),
+            ("bash -n scripts/release.sh -o nounset".into(), true),
+            ("bash -n scripts/release.sh -i".into(), true),
+            ("bash -n scripts/release.sh -s".into(), true),
+            ("bash -n scripts/release.sh --rcfile config".into(), true),
+            ("bash -n scripts/release.sh --unknown".into(), true),
+            (format!("bash -n scripts/release.sh; git -C '{repo_path}' commit -m probe"), true),
+            (format!("bash -n +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            (format!("bash +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            (format!("bash -c 'cd \"{repo_path}\"; git commit -m probe' -n"), true),
+        ] {
+            let input = hook_git_write_input(&linked_path, &command);
+            let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+            let value = serde_json::to_value(output).unwrap();
+            assert_eq!(
+                value["hookSpecificOutput"]["permissionDecision"] == "deny",
+                denied,
+                "{command}: {value}",
+            );
+        }
     }
 
     // ── Integration: handle_pre_tool_use for Bash git commit ─────────────

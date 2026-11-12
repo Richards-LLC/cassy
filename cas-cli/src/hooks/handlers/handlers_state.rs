@@ -518,7 +518,7 @@ impl ExitBlockers {
                 lines.push(format!("  {open_count} open task(s): Start with {prefix}task action: start, implement, then close"));
             }
             if in_progress_count > 0 {
-                lines.push(format!("  {in_progress_count} in_progress task(s): Verify before close (spawn 'task-verifier' directly, or ask supervisor if workers are Codex)"));
+                lines.push(format!("  {in_progress_count} in_progress task(s): Close when done; Cassy's daemon-owned verifier reviews the close dispatch"));
             }
         }
 

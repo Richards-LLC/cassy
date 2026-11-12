@@ -62,8 +62,8 @@ to the existing agent's `cc_session_id`. The durable agent ID and factory
 ownership stay the same. A different name, process or role keeps its own
 registration semantics.
 
-Use the daemon-owned candidate verifier or a separately registered reviewer
-with a sealed handoff for the exact dispatch. A native child that observes its
+Use the daemon-owned verifier, which reviews close and candidate dispatches;
+retrying the close or merge that opened a dispatch starts one replacement. A native child that observes its
 parent's identity returns that evidence without recording a verdict, including
 `status=error`. A registered supervisor may record a verdict directly, with
 `supervisor_direct` provenance, only on mechanical evidence (counts, receipts,

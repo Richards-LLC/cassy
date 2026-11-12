@@ -275,16 +275,20 @@ pub(crate) struct WorkerDispatchGate<'a> {
     pub context: &'a str,
     /// Whether Cassy queued the supervisor handoff itself.
     pub handoff_queued: bool,
+    /// Whether Cassy's daemon-owned verifier is already reviewing it.
+    pub automatic_review: bool,
     pub coord: &'a str,
     pub close_reason_hint: &'a str,
 }
 
 pub(crate) fn worker_dispatch_gate(gate: &WorkerDispatchGate<'_>) -> String {
-    let WorkerDispatchGate { task_id: id, dispatch_id, owner, deadline, context, handoff_queued, coord, close_reason_hint } = gate;
+    let WorkerDispatchGate { task_id: id, dispatch_id, owner, deadline, context, handoff_queued, automatic_review, coord, close_reason_hint } = gate;
     // cas-8725: when CAS queued the handoff itself, say so — a worker told to
     // "forward this" sends a second, free-text copy that cannot wake anyone.
     // cas-abb0: remaining close recovery belongs to the supervisor.
-    let handoff = if *handoff_queued {
+    let handoff = if *automatic_review {
+        format!("Cassy's daemon-owned verifier is reviewing this dispatch; send no {coord} message for it.")
+    } else if *handoff_queued {
         format!("Cassy has already delivered this dispatch to the supervisor; send no {coord} message for it.")
     } else {
         format!(

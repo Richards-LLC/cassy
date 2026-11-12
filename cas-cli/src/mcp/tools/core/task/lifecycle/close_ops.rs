@@ -10555,11 +10555,21 @@ impl CasCore {
                                 } else {
                                     "The proof boundary and owner are unchanged; the requester differs."
                                 };
+                                // A retried close replaces a stopped automatic
+                                // verifier once; a claimed dispatch is untouched.
+                                let conflict = if !is_epic
+                                    && self.daemon.is_some()
+                                    && self.emit_premerge_review_handoff(&task, &dispatch)?.is_some()
+                                {
+                                    format!("{conflict} Cassy's daemon-owned verifier started on this exact dispatch.")
+                                } else {
+                                    conflict.to_string()
+                                };
                                 return Ok(Self::tool_error(gate_text::worker_verification_required(
                                     &req.id,
                                     &gate_text::worker_pending_dispatch(
                                         &req.id, &dispatch.id, &dispatch.owner_agent_id,
-                                        &dispatch.deadline_at.to_string(), conflict,
+                                        &dispatch.deadline_at.to_string(), &conflict,
                                     ),
                                 )));
                             }
@@ -10576,8 +10586,16 @@ impl CasCore {
                         // close). Best-effort: the printed instructions below
                         // remain the fallback, so a queue failure degrades to
                         // today's behaviour instead of losing the close.
+                        // GH #1867: the daemon-owned verifier that reviews
+                        // merge candidates owns this exact close dispatch too.
+                        // A native Task/Agent child shares its parent's MCP
+                        // caller and cannot record it, so the supervisor gets
+                        // no handoff to staff unless startup fails.
+                        let automatic_review = !is_epic
+                            && self.daemon.is_some()
+                            && self.emit_premerge_review_handoff(&task, &dispatch)?.is_some();
                         let mut dispatch_handoff_queued = false;
-                        if is_factory_worker {
+                        if is_factory_worker && !automatic_review {
                             match crate::store::open_prompt_queue_store(&self.cas_root) {
                                 Ok(prompt_queue) => {
                                     match crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_verification_dispatch_handoff(
@@ -10624,9 +10642,7 @@ impl CasCore {
                                 dispatch_row.provenance = cas_types::VerificationProvenance::System;
                                 dispatch_row.issuer_agent_id = Some(requester_id);
                                 dispatch_row.summary = format!(
-                                    "Dispatch requested ({}) — task-verifier subagent must be spawned via \
-                                         Task(subagent_type=\"task-verifier\", prompt=\"Verify task {}\"). \
-                                         This row will be superseded by the subagent's verdict.",
+                                    "Dispatch requested ({}) for task {}. This row will be superseded by the independent verifier's verdict.",
                                     dispatch.id, req.id
                                 );
                                 if let Err(e) = cas_store::add_system_verification(
@@ -10682,9 +10698,17 @@ impl CasCore {
                                 deadline: &dispatch.deadline_at.to_string(),
                                 context: &format!("{bound_head}{superseded_verdict}"),
                                 handoff_queued: dispatch_handoff_queued,
+                                automatic_review,
                                 coord: &coord,
                                 close_reason_hint: &close_reason_hint,
                             })
+                        } else if automatic_review {
+                            format!(
+                                "Task {} close is pending verification dispatch {} owned by {} until {}. \
+                                     Cassy's daemon-owned verifier is reviewing this exact dispatch; do not spawn another verifier. \
+                                     A verdict needing attention notifies the owner.",
+                                req.id, dispatch.id, dispatch.owner_agent_id, dispatch.deadline_at,
+                            )
                         } else if supervisor_is_assignee {
                             // cas-7998: the supervisor self-verifies in their
                             // own harness, so the direct verification alias
@@ -10695,12 +10719,11 @@ impl CasCore {
                                 crate::mcp::tools::core::guidance::supervisor_prefix()
                             );
                             format!(
-                                "You implemented this task yourself. Spawn a task-verifier to review your work:\n\n\
-                                     Task(subagent_type=\"{}\", prompt=\"Verify task {}; dispatch_id={}\")\n\n\
-                                     Or record verification directly:\n\
+                                "You implemented this task yourself. Review it and record the verdict directly; \
+                                     a native Task/Agent verifier shares your MCP caller and cannot record it:\n\
                                      {sup_ver} action=add task_id={} dispatch_id={} \
                                      status=approved summary=\"Self-verified: <reason>\"",
-                                verifier_agent, req.id, dispatch.id, req.id, dispatch.id
+                                req.id, dispatch.id
                             )
                         } else {
                             let bound_head = dispatch

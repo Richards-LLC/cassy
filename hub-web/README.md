@@ -34,6 +34,7 @@ Both use Playwright’s managed Chromium with isolated, headless contexts; autom
 set `PLAYWRIGHT_MCP_STORAGE_STATE` to an explicit storage-state file; keep it
 out of Git. There is no shared persistent profile.
 
-The committed test agents are the planner and generator. Trial a healer only
+Both `hub-web/.claude/agents/` and `hub-web/.codex/agents/` commit only the
+Playwright planner and generator; neither contains a healer. Trial a healer only
 in scratch under the existing review guard; never delegate assertion changes
 to it in this checkout.

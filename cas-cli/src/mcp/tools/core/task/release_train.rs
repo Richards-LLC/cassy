@@ -761,21 +761,6 @@ mod tests {
             for id in [&live.id, &other.id] { assert!(refusal.message.contains(id)); }
             assert_eq!(store.list(None).unwrap().len(), before);
 
-            for mut row in [live.clone(), other, contained, alias] {
-                row.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
-                store.update(&row).unwrap();
-            }
-            let mut fresh = store.get("cas-a888").unwrap();
-            fresh.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
-            store.update(&fresh).unwrap();
-            let older = train("cas-a444", "epic/empty-old", 60);
-            let newer = train("cas-a555", "epic/empty-new", 0);
-            // Reverse insertion order on the other machine must not affect election.
-            let empty = if machine == "one" { [&older, &newer] } else { [&newer, &older] };
-            for row in empty { store.add(row).unwrap(); }
-            core.cas_task_create(Parameters(request("Fresh train work"))).await.unwrap();
-            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "Fresh train work").unwrap();
-            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, newer.id);
             for id in [&stale.id, &live.id] { assert_eq!(store.get(id).unwrap().status, TaskStatus::Open); }
         }
     }

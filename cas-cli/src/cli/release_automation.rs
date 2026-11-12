@@ -620,12 +620,6 @@ fn unmerged_factory_commit_count(repo: &Path, child: &cas_types::Task, tag_sha: 
         .unwrap_or(0)
 }
 
-fn is_release_train_task(task: &cas_types::Task) -> bool {
-    task.task_type == TaskType::Epic
-        && (crate::mcp::tools::core::task::release_train::is_release_train(task)
-            || task.effective_epic_branch().is_some_and(|lane| lane.starts_with("epic/release-train-")))
-}
-
 fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> bool {
     let Some(anchor) = crate::qa_batch::delivery_anchor(repo, child) else {
         return false;
@@ -672,7 +666,7 @@ fn preview_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<Strin
     let tag_sha = published_tag_sha(&repo, tag)?;
     let store = open_task_store(root)?;
     let train = store.get(train_id)?;
-    ensure!(is_release_train_task(&train), "{train_id} is not a release train");
+    ensure!(crate::mcp::tools::core::task::release_train::is_release_train(&train), "{train_id} is not a release train");
     let lane = train.effective_epic_branch().context("release train has no lane")?;
     let lane_ref = if git(&repo, &["rev-parse", "--verify", &format!("origin/{lane}^{{commit}}")]).is_ok() {
         format!("origin/{lane}")
@@ -1967,7 +1961,7 @@ else:
     }
 
     #[test]
-    fn backfill_continues_after_bad_train_and_accepts_legacy_train_lane() {
+    fn backfill_continues_after_bad_train_and_requires_train_label() {
         let (temp, root, _, _, _) = fixture();
         let repo = temp.path();
         let bare = temp.path().join("origin.git");
@@ -2025,6 +2019,10 @@ else:
         push.push("--tags");
         git(repo, &push).unwrap();
 
+        assert!(preview_shipped_train(&root, "cas-d7c7", "v4.6.0").is_err());
+        let mut labelled = store.get("cas-d7c7").unwrap();
+        labelled.labels.push("release-train".into()); store.update(&labelled).unwrap();
+        assert!(preview_shipped_train(&root, &labelled.id, "v4.6.0").is_ok());
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let _cwd = env.enter_dir(repo);
         assert!(backfill(&BackfillArgs { dry_run: true }, &root).is_err());

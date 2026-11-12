@@ -1,0 +1,3 @@
+title: Test-shape lint accepts structured recorded CLI argument vectors while raw text pins remain rejected
+tasks: [cas-632b]
+journeys: [FACTORY-CLOSE]

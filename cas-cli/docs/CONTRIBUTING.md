@@ -4557,6 +4557,26 @@ argument arrays can be asserted on their immutable parsed fields, including
 let-else command routing. Unrelated fields, generated values and substring or
 inequality prose checks retain the ordinary rejection rules.
 
+For recorded Python CLI calls, compare argument vectors rather than command
+sentences. The lint recognizes literal string lists compared directly with
+`shlex.split(calls.read_text())` using equality (either operand order), or list
+membership/absence in `[shlex.split(line) for line in calls.read_text().splitlines()]`.
+The actual operand may also be a local name whose nearest preceding assignment
+in the same function uses either projection. Prefer reading once per phase:
+
+```python
+argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+self.assertIn(["config", "get", "qa.registry.enforce"], argv)
+```
+
+Each later assignment starts a new binding: it must itself use a recorded argv
+projection. Intervening loop bindings or other writes, use before assignment
+and bindings in another function receive no exemption.
+Record shell-quoted arguments so spaces inside an
+argument survive parsing. Quoted caller text remains data in these vectors.
+Raw `read_text()` command substrings, rendered output and ordinary whitespace
+splitting receive no exemption; `pin:` comments still cannot waive prose pins.
+
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys
 at four workers. Independent QA consumes matching passing worker receipts

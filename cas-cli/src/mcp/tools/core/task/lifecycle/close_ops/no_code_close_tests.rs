@@ -1143,6 +1143,9 @@ async fn no_code_audit_ledger_closes_unless_it_declares_the_qa_matrix_gh1766() {
     let mut agent = agents.get("nocode-worker-session").unwrap();
     agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
     agents.update(&agent).unwrap();
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
     let id = "cas-c766";
     let mut spike = no_code_spike(id, "main");
     spike.status = TaskStatus::Open;
@@ -1166,7 +1169,8 @@ async fn no_code_audit_ledger_closes_unless_it_declares_the_qa_matrix_gh1766() {
     assert_ne!(f.task(id).status, TaskStatus::Closed);
     std::fs::write(dir.join("LEDGER.md"), audit).unwrap();
     let response = call(&f.worker, request).await;
-    assert_closed_without_lane(&f, id, &response);
+    assert!(!response.contains("QA LEDGER REJECTED"), "{response}");
+    assert!(response.contains("VERIFICATION"), "the report reaches ordinary verification: {response}");
 }
 
 /// GH #1167 (2): the supervisor's evidence_only close of an artifact-only

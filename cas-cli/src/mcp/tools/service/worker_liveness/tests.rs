@@ -827,7 +827,7 @@ fn child_progress_follows_harness_through_cas_serve_frontend_cas_8ea3() {
     use std::os::unix::process::CommandExt;
     // Frontend: `cas serve` with the backend as its child. Worker: a bounded
     // CPU burner standing in for the capped build under the harness.
-    const HARNESS: &str = "(exec -a cas bash -c 'sleep 60 & echo $!; wait' cas serve) &\nend=$((SECONDS+60)); while ((SECONDS<end)); do :; done";
+    const HARNESS: &str = "(exec -a cas bash -c 'sleep 60 & echo $!; wait' cas serve) &\n(end=$((SECONDS+60)); while ((SECONDS<end)); do :; done) &\nwait";
     let mut harness = std::process::Command::new("bash")
         .arg0("claude")
         .args(["-c", HARNESS])

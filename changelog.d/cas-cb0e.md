@@ -1,3 +1,3 @@
-### Fixed
+### Fixed — Cloud queue
 
-- `cas cloud queue migrate-to-team` no longer enqueues personal task and dependency rows that already equal the team's current row. It reports them as already on the team and points at `cas cloud queue --purge-pull-echoes --dry-run`; the held-queue remediation text names the purge too (GH #1776).
+- **migrate-to-team stops re-enqueueing pull echoes** — Was: task and dependency rows already equal to the team's row were "enqueued" and nothing changed. Now: they are reported as already on the team and point at `cas cloud queue --purge-pull-echoes --dry-run`. (GH #1776)

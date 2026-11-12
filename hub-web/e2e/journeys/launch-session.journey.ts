@@ -602,6 +602,8 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
       // Ctrl/Cmd+K lands in the list search; pressed again, it opens the palette.
       const palette = page.locator("#command-palette");
       await page.keyboard.press("ControlOrMeta+k");
+      // Proof control: reproduce focus lost during a shell rebuild between chords.
+      await page.getByRole("searchbox", { name: "Search conversations", exact: true }).evaluate(input => (input as HTMLInputElement).blur());
       if (!await palette.isVisible()) await page.keyboard.press("ControlOrMeta+k");
       await palette.getByRole("button", { name: /^Quality/ }).click();
       const dialog = page.getByRole("dialog", { name: "Quality" });

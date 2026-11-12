@@ -3923,6 +3923,7 @@ mod tests {
             });
             let store = crate::store::open_task_store(&root).unwrap();
             store.add(&previous).unwrap();
+            let previous_snapshot = serde_json::to_value(store.get(&previous.id).unwrap()).unwrap();
             let mut task = Task::new("cas-bbbb".into(), "Successor repair".into());
             task.assignee = Some("worker".into());
             task.deliverables.work_target = Some(target.clone());
@@ -3941,7 +3942,7 @@ mod tests {
                 assert_eq!(identity.matches_known_commit(&first), !integrated);
                 assert_eq!(identity.matches_known_commit(&port), !integrated);
             }
-            assert_eq!(store.get(&previous.id).unwrap(), previous);
+            assert_eq!(serde_json::to_value(store.get(&previous.id).unwrap()).unwrap(), previous_snapshot);
         }
     }
 

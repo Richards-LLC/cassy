@@ -120,7 +120,8 @@ pub(crate) fn reconcile_once(
     trigger: ReconcileTrigger,
     reconciler: &dyn Reconciler,
 ) -> Result<String> {
-    let key = operation_key(&scope.project_id, &scope.release_id, &scope.final_release_sha);
+    let tree = release_reconcile::final_tree(repo, &scope.final_release_sha).map_err(anyhow::Error::msg)?;
+    let key = operation_key(&scope.project_id, &scope.release_id, &tree);
     let recorded = reconciler.completed(root, &key)?;
     let reused = recorded.is_some();
     let receipt = match recorded {
@@ -247,15 +248,6 @@ pub(super) fn tag_scope(
     tag: &str,
     tag_sha: &str,
 ) -> Result<ReleaseScope> {
-    if let Some(scope) = context.and_then(|c| c.release_scope.as_ref()) {
-        ensure!(
-            scope.final_release_sha == tag_sha && scope.release_id == tag,
-            "tracked release scope names {} at {}, not {tag} at {tag_sha}",
-            scope.release_id,
-            scope.final_release_sha
-        );
-        return Ok(scope.clone());
-    }
     let project_id = crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?;
     let repository = match context {
         Some(context) => context.repository.clone(),
@@ -268,7 +260,7 @@ pub(super) fn tag_scope(
         .and_then(|c| c.release_inputs.as_ref())
         .map(|inputs| inputs.included_task_ids.clone())
         .unwrap_or_default();
-    Ok(ReleaseScope {
+    let mut scope = ReleaseScope {
         project_id,
         repository,
         release_id: tag.to_string(),
@@ -278,10 +270,11 @@ pub(super) fn tag_scope(
         release_tag: Some(tag.to_string()),
         constituent_epic_ids: vec![train_id.to_string()],
         included_task_ids,
-        no_code_members: context.and_then(|c| c.release_inputs.as_ref())
-            .map(|inputs| inputs.no_code_members.clone()).unwrap_or_default(),
+        no_code_members: BTreeMap::new(),
         proof_refs,
-    })
+    };
+    scope.bind_reports(root).map_err(anyhow::Error::msg)?;
+    Ok(scope)
 }
 
 /// Installed/backfill recovery: the same operation as publish, with its own
@@ -411,7 +404,7 @@ fn promoted_with(root: &Path, pr: u64, inputs: Option<&Path>, reconciler: &dyn R
             "release input audit does not identify this promotion");
         Ok(inputs)
     }).transpose()?.unwrap_or_default();
-    let scope = ReleaseScope {
+    let mut scope = ReleaseScope {
         project_id,
         repository: slug,
         release_id: format!("pr-{pr}"),
@@ -421,9 +414,10 @@ fn promoted_with(root: &Path, pr: u64, inputs: Option<&Path>, reconciler: &dyn R
         release_tag: None,
         constituent_epic_ids: Vec::new(),
         included_task_ids: inputs.included_task_ids,
-        no_code_members: inputs.no_code_members,
+        no_code_members: BTreeMap::new(),
         proof_refs,
     };
+    scope.bind_reports(root).map_err(anyhow::Error::msg)?;
     let report = reconcile_once(root, &repo, &scope, ReconcileTrigger::Promotion { pr, merge_sha }, reconciler)?;
     match fs::remove_file(pending_promotion_path(root, pr)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
@@ -596,13 +590,15 @@ const MAINTAINED_VIEWS: [(&str, &str); 3] = [
 /// Both blocks for the ReleaseScope JSON at `scope_path`, bound to that scope.
 /// `cas qa ledger init --release-scope` writes them into the review ledger,
 /// so the published RELEASE_VERDICT bytes carry them.
-pub(crate) fn review_blocks_for_scope(root: &Path, scope_path: &Path) -> Result<String> {
-    let scope: ReleaseScope = serde_json::from_slice(&fs::read(scope_path)?)?;
+pub(crate) fn review_blocks_for_scope(root: &Path, scope_path: &Path) -> Result<(ReleaseInventory, String)> {
+    let mut scope: ReleaseScope = serde_json::from_slice(&fs::read(scope_path)?)?;
+    scope.reviewed_sha = scope.final_release_sha.clone();
     let (repo, _) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
         .context("project checkout unavailable")?;
     let inventory = crate::qa_batch::resolve_release_inventory(root, &repo, &scope)
         .map_err(anyhow::Error::msg)?;
-    render_review_blocks(root, &repo, &inventory)
+    let blocks = render_review_blocks(root, &repo, &inventory)?;
+    Ok((inventory, blocks))
 }
 
 /// Both fenced blocks for the release review ledger. Epics are those every
@@ -709,6 +705,7 @@ mod tests {
     impl Recording {
         fn receipt(&self, key: ReleaseOperationKey, scope: &ReleaseScope, trigger: ReconcileTrigger) -> ReleaseReconcileReceipt {
             ReleaseReconcileReceipt {
+                preview: None,
                 notice_intent: Some(ReleaseNoticeIntent {
                     key: format!("{}:{}", key.release_id, key.final_release_sha),
                     recipient: self.recipient.clone(),
@@ -742,8 +739,9 @@ mod tests {
         fn completed(&self, _: &Path, key: &ReleaseOperationKey) -> Result<Option<ReleaseReconcileReceipt>> {
             Ok(self.done.borrow().iter().find(|r| &r.key == key).cloned())
         }
-        fn reconcile(&self, _: &Path, scope: &ReleaseScope, _: &ReleaseInventory, trigger: ReconcileTrigger) -> Result<ReleaseReconcileReceipt> {
-            let key = operation_key(&scope.project_id, &scope.release_id, &scope.final_release_sha);
+        fn reconcile(&self, root: &Path, scope: &ReleaseScope, _: &ReleaseInventory, trigger: ReconcileTrigger) -> Result<ReleaseReconcileReceipt> {
+            let tree = release_reconcile::final_tree(root.parent().unwrap(), &scope.final_release_sha).unwrap();
+            let key = operation_key(&scope.project_id, &scope.release_id, &tree);
             self.calls.borrow_mut().push(trigger.clone());
             let receipt = self.receipt(key, scope, trigger);
             self.done.borrow_mut().push(receipt.clone());
@@ -867,7 +865,7 @@ mod tests {
             project_id: "release-fixture".into(),
             repository: "Example/Repo".into(),
             release_id: "v9.99.2".into(),
-            reviewed_sha: base.clone(),
+            reviewed_sha: git(repo, &["rev-parse", &format!("{base}^1")]).unwrap(),
             final_release_sha: base.clone(),
             promotion_pr: None,
             release_tag: None,
@@ -879,8 +877,9 @@ mod tests {
         let scope_path = root.join("scope.json");
         fs::write(&scope_path, serde_json::to_vec(&scope).unwrap()).unwrap();
 
-        let ledger = review_blocks_for_scope(&root, &scope_path).unwrap();
+        let (_, ledger) = review_blocks_for_scope(&root, &scope_path).unwrap();
         let transformations = crate::qa_batch::release_close::parse_manifest(&ledger).unwrap().unwrap();
+        assert_eq!(transformations.reviewed_sha, base);
         assert_eq!((transformations.release_id.as_str(), transformations.final_release_sha.as_str()), ("v9.99.2", base.as_str()));
         let json = ledger.split("```cassy-release-epics\n").nth(1).unwrap().split("\n```").next().unwrap();
         let epics: EpicManifest = serde_json::from_str(json).unwrap();
@@ -933,7 +932,7 @@ mod tests {
         for _ in 0..2 {
             recover(&root, &train.id, &tag, ReconcileTrigger::Installed).unwrap();
         }
-        let key = operation_key("release-fixture", &tag, &anchor);
+        let key = operation_key("release-fixture", &tag, &release_reconcile::final_tree(repo, &anchor).unwrap());
         let record: ReleaseReconcileReceipt = serde_json::from_value(
             cas_store::release_reconcile_store::load_release_operation(&root, &key).unwrap().unwrap(),
         ).unwrap();

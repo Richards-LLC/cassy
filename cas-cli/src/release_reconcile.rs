@@ -34,6 +34,8 @@ pub(crate) struct ReleaseReconcileReceipt {
     #[serde(default)]
     pub reconciler_stale: bool,
     pub scope: ReleaseScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<serde_json::Value>,
     pub triggers: Vec<ReconcileTrigger>,
     pub members: BTreeMap<String, CassyMergeClose>,
     pub close_intents: BTreeMap<String, serde_json::Value>,
@@ -81,6 +83,7 @@ pub(crate) enum ParentOutcome {
 /// Only effect boundaries are replaceable; the identity lock and checkpoint
 /// transactions are the production store in both replay tests and adapters.
 trait ReleaseEffects {
+    fn final_tree(&self, scope: &ReleaseScope) -> Result<String>;
     fn reconciler_version(&self) -> &str {
         env!("CARGO_PKG_VERSION")
     }
@@ -138,6 +141,37 @@ fn retire_unproven_members(receipt: &mut ReleaseReconcileReceipt, inventory: &Re
     receipt.residuals.retain(|residual| !discarded.contains(&residual.task_id));
 }
 
+fn new_receipt(key: ReleaseOperationKey, scope: &ReleaseScope) -> ReleaseReconcileReceipt {
+    let now = chrono::Utc::now().to_rfc3339();
+    ReleaseReconcileReceipt {
+        key, scope: scope.clone(), preview: None, reconciler_version: None, reconciler_stale: false,
+        triggers: vec![], members: BTreeMap::new(), close_intents: BTreeMap::new(),
+        issue_outcomes: vec![], parents: BTreeMap::new(), exceptions: vec![],
+        started_at: now.clone(), updated_at: now, complete: false,
+        sync_pending: vec![], residuals: vec![], notice_intent: None,
+    }
+}
+
+fn same_identity(receipt: &ReleaseReconcileReceipt, scope: &ReleaseScope) -> Result<()> {
+    // Review evidence and commit names can change without changing shipped content.
+    let immutable = |scope: &ReleaseScope| {
+        let mut scope = scope.clone();
+        scope.proof_refs.clear();
+        scope.reviewed_sha.clear();
+        scope.final_release_sha = receipt.key.final_release_sha.clone();
+        scope.release_tag = None;
+        scope.included_task_ids.extend(scope.no_code_members.keys().cloned());
+        scope.included_task_ids.sort();
+        scope.included_task_ids.dedup();
+        scope.no_code_members.clear();
+        serde_json::to_value(scope).map_err(|e| e.to_string())
+    };
+    if immutable(&receipt.scope)? != immutable(scope)? {
+        return Err(crate::gates::tag("G-128", "RELEASE_IDENTITY_CHANGED"));
+    }
+    Ok(())
+}
+
 async fn resume(
     root: &Path,
     scope: &ReleaseScope,
@@ -153,7 +187,8 @@ async fn resume(
     let key = ReleaseOperationKey {
         project_id: scope.project_id.clone(),
         release_id: scope.release_id.clone(),
-        final_release_sha: scope.final_release_sha.clone(),
+        // The store's legacy column name is retained; identity is the tree.
+        final_release_sha: effects.final_tree(scope)?,
     };
     let lock_root = root.to_path_buf();
     let lock_key = key.clone();
@@ -165,42 +200,12 @@ async fn resume(
     .await
     .map_err(|e| format!("RELEASE_OPERATION_LOCK_FAILED: {e}"))?
     .map_err(|e| e.to_string())?;
-    let now = chrono::Utc::now().to_rfc3339();
     let mut receipt: ReleaseReconcileReceipt = match operation.load().map_err(|e| e.to_string())? {
         Some(saved) => serde_json::from_value(saved).map_err(|e| e.to_string())?,
-        None => ReleaseReconcileReceipt {
-            key,
-            reconciler_version: None,
-            reconciler_stale: false,
-            scope: scope.clone(),
-            triggers: vec![],
-            members: BTreeMap::new(),
-            close_intents: BTreeMap::new(),
-            issue_outcomes: vec![],
-            parents: BTreeMap::new(),
-            exceptions: vec![],
-            started_at: now.clone(),
-            updated_at: now,
-            complete: false,
-            sync_pending: vec![],
-            residuals: vec![],
-            notice_intent: None,
-        },
+        None => new_receipt(key, scope),
     };
-    // Proof may be supplied on a recovery attempt. Membership and the reviewed
-    // and final commits remain frozen for the lifetime of the operation.
-    let immutable = |scope: &ReleaseScope| {
-        let mut scope = scope.clone();
-        scope.proof_refs.clear();
-        scope.included_task_ids.extend(scope.no_code_members.keys().cloned());
-        scope.included_task_ids.sort();
-        scope.included_task_ids.dedup();
-        scope.no_code_members.clear();
-        serde_json::to_value(scope).map_err(|e| e.to_string())
-    };
-    if immutable(&receipt.scope)? != immutable(scope)? {
-        return Err(crate::gates::tag("G-128", "RELEASE_IDENTITY_CHANGED"));
-    }
+    same_identity(&receipt, scope)?;
+    receipt.scope = scope.clone();
     if !receipt.triggers.contains(&trigger) {
         receipt.triggers.push(trigger);
     }
@@ -415,6 +420,31 @@ pub(crate) fn preview_release(
     crate::qa_batch::release_close::reconcile_members(root, repo, inventory, false, &mut |_, _| Ok(()))
 }
 
+pub(crate) fn final_tree(repo: &Path, sha: &str) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", &format!("{sha}^{{tree}}")])
+        .current_dir(repo).output().map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err("RELEASE_TREE_UNRESOLVED".into()); }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Persist the dry run on the same operation the publication will resume.
+/// No member decision here is a committed lifecycle effect.
+pub(crate) fn record_preview(root: &Path, repo: &Path, scope: &ReleaseScope, preview: serde_json::Value) -> Result<()> {
+    let key = ReleaseOperationKey {
+        project_id: scope.project_id.clone(), release_id: scope.release_id.clone(),
+        final_release_sha: final_tree(repo, &scope.final_release_sha)?,
+    };
+    let operation = ReleaseOperation::open(root, key.clone()).map_err(|e| e.to_string())?;
+    let mut saved = match operation.load().map_err(|e| e.to_string())? {
+        Some(saved) => serde_json::from_value(saved).map_err(|e| e.to_string())?,
+        None => new_receipt(key, scope),
+    };
+    same_identity(&saved, scope)?;
+    saved.preview = Some(preview);
+    operation.save(&serde_json::to_value(saved).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
 /// The sole authoritative completed-operation lookup. Partial/held operations
 /// return None so a trusted event can resume them; JSON exports are derived.
 pub(crate) fn completed_operation(
@@ -535,6 +565,9 @@ struct CoreEffects<'a> {
 }
 
 impl ReleaseEffects for CoreEffects<'_> {
+    fn final_tree(&self, scope: &ReleaseScope) -> Result<String> {
+        final_tree(&self.repo, &scope.final_release_sha)
+    }
     fn intent(&self, id: &str) -> Result<serde_json::Value> {
         let store = crate::store::open_task_store(self.root).map_err(|e| e.to_string())?;
         let task = match store.get(id) {
@@ -693,6 +726,7 @@ mod tests {
         owner: String,
     }
     impl ReleaseEffects for Effects {
+        fn final_tree(&self, _: &ReleaseScope) -> Result<String> { Ok("a".repeat(40)) }
         fn reconciler_version(&self) -> &str { &self.version }
         fn intent(&self, id: &str) -> Result<serde_json::Value> {
             Ok(serde_json::json!({"cycle": id}))
@@ -925,6 +959,19 @@ mod tests {
         assert!(!outbox.insert(replay_intent.key.clone()));
         assert_eq!(replay_intent.recipient, intent.recipient);
         assert_eq!(effects.parent_passes, 1);
+        let mut rereviewed = scope.clone();
+        rereviewed.reviewed_sha = "b".repeat(40);
+        rereviewed.final_release_sha = "c".repeat(40); // Same tree returned by the effect fixture.
+        let mut rereviewed_inventory = inventory.clone();
+        rereviewed_inventory.scope = rereviewed.clone();
+        let unchanged = resume(temp.path(), &rereviewed, &rereviewed_inventory,
+            ReconcileTrigger::Backfill, &mut effects).await.unwrap();
+        assert_eq!(unchanged.key, replay.key);
+        assert_eq!(effects.actual_closes, 2);
+        rereviewed.included_task_ids.push("cas-unshipped".into());
+        rereviewed_inventory.scope = rereviewed.clone();
+        assert!(resume(temp.path(), &rereviewed, &rereviewed_inventory,
+            ReconcileTrigger::Backfill, &mut effects).await.unwrap_err().contains("RELEASE_IDENTITY_CHANGED"));
         assert!(
             completed_operation(temp.path(), &replay.key)
                 .unwrap()

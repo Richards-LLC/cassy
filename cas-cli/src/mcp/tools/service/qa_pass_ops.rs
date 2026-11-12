@@ -31,8 +31,8 @@ impl CasService {
         };
         let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
             required(req.ledger_author.as_deref(), "ledger_author")?,
-            req.task_ids.as_deref().ok_or_else(|| reject("task_ids is required".into()))?,
-            required(req.staging_sha.as_deref(), "staging_sha")?,
+            req.task_ids.as_deref().unwrap_or_default(),
+            req.staging_sha.as_deref().unwrap_or_default(),
             required(req.ledger_artifact_id.as_deref(), "ledger_artifact_id")?,
             std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?),
             schema)

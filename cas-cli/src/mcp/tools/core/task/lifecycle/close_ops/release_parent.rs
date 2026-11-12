@@ -129,7 +129,10 @@ impl CasCore {
                 dispatch.id, dispatch.state
             ));
         }
-        let requester = self.get_agent_id().map_err(|e| e.to_string())?;
+        // Use the same recorded release actor as ordinary parent close;
+        // CLI reconciliation needs no registered calling session.
+        let requester = crate::qa_batch::release_close::parent_authority(&self.cas_root, &task.id)
+            .ok_or("RELEASE_PARENT_REQUESTER_UNAVAILABLE")?;
         let agents = self
             .open_agent_store()
             .map_err(|e| e.to_string())?

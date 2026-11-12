@@ -290,8 +290,20 @@ fn train(store: &dyn cas_store::TaskStore, train_id: &str) -> Result<Task> {
 
 /// Freeze a train at its current tip. Repeating it reports the standing freeze.
 pub(crate) fn freeze(root: &Path, train_id: &str, actor: &str, reason: Option<&str>) -> Result<String> {
+    freeze_with_promotion(root, train_id, actor, reason, false)
+}
+
+fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Option<&str>, promote: bool) -> Result<String> {
     let store = crate::store::open_task_store(root)?;
-    let mut task = train(store.as_ref(), train_id)?;
+    let mut task = store.get(train_id).with_context(|| format!("{train_id} not found"))?;
+    ensure!(task.task_type == crate::types::TaskType::Epic && !task.is_terminal(), "{train_id} is not an open epic");
+    if !is_release_train(&task) && !promote {
+        let command = serde_json::json!({
+            "action": "train_freeze", "id": train_id, "decision": "promote",
+            "reason": format!("release-freeze: {}", reason.unwrap_or("release requested")),
+        });
+        anyhow::bail!("TRAIN_PROMOTION_REQUIRED: {train_id} is not a release train. Promote and freeze it in one call to factory:\n{command}");
+    }
     ensure!(!is_cut_train(&task), "{train_id} is already cut; it accepts no merges");
     if let Some(freeze) = active(root, &task) {
         return Ok(format!(
@@ -301,13 +313,17 @@ pub(crate) fn freeze(root: &Path, train_id: &str, actor: &str, reason: Option<&s
         ));
     }
     let lane = task.effective_epic_branch().context("train has no lane")?.to_string();
-    let git = crate::worktree::GitOperations::new(repo_of(root, &task).context("train repository missing")?);
+    let repo = repo_of(root, &task).context("train repository missing")?;
+    let git = crate::worktree::GitOperations::new(repo.clone());
     let tip = git
         .fetch_merge_target(&lane)
         .ok()
         .flatten()
         .or_else(|| git.resolve_commit(&lane))
         .with_context(|| format!("cannot resolve the tip of {lane}"))?;
+    if promote {
+        crate::mcp::tools::core::task::release_train::prepare_promotion(store.as_ref(), &repo, &mut task, &tip)?;
+    }
     let now = Utc::now();
     task.labels.retain(|label| !label.starts_with(FROZEN_LABEL));
     task.labels.push(format!("{FROZEN_LABEL}{}:{tip}", now.timestamp()));
@@ -342,7 +358,7 @@ pub(crate) fn lift(root: &Path, train_id: &str, actor: &str) -> Result<String> {
 
 impl crate::mcp::CasCore {
     /// MCP release freeze: a live supervisor explicitly confirms the lift policy.
-    pub(crate) fn train_freeze(&self, train_id: &str, reason: Option<&str>) -> Result<String> {
+    pub(crate) fn train_freeze(&self, train_id: &str, reason: Option<&str>, promote: bool) -> Result<String> {
         let actor = self
             .resolve_live_supervisor_authority()
             .map_err(|_| anyhow::anyhow!("train_freeze requires a live registered supervisor"))?;
@@ -353,7 +369,8 @@ impl crate::mcp::CasCore {
             .ok_or_else(|| anyhow::anyhow!(
                 "TRAIN_FREEZE_CONFIRMATION_REQUIRED: train_freeze is a release freeze, not a temporary CI hold. Only the operator can lift it in Commander; a published release covering its tip also ends it. A supervisor cannot lift it. Confirm with reason=\"release-freeze: <reason>\". For a temporary CI wait, coordinate peers to defer merges; see CONTRIBUTING's Temporary CI merge hold follow-up. No freeze was applied by this call."
             ))?;
-        freeze(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason))
+        let _lock = crate::mcp::tools::core::task::release_train::lock_trains_blocking(&self.cas_root)?;
+        freeze_with_promotion(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason), promote)
     }
 }
 
@@ -423,13 +440,13 @@ mod tests {
         let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
 
         for reason in [Some("Lane CI freeze until run 42582303864 finishes"), None, Some("release-freeze: ")] {
-            let error = core.train_freeze("cas-tr", reason).expect_err("unconfirmed release freeze");
+            let error = core.train_freeze("cas-tr", reason, false).expect_err("unconfirmed release freeze");
             eprintln!("{error}");
             assert_eq!(error.to_string().split(':').next(), Some("TRAIN_FREEZE_CONFIRMATION_REQUIRED"));
             assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
         }
 
-        core.train_freeze("cas-tr", Some("release-freeze: cut the reviewed release")).unwrap();
+        core.train_freeze("cas-tr", Some("release-freeze: cut the reviewed release"), false).unwrap();
         assert!(freeze_of(&store.get("cas-tr").unwrap()).is_some());
         lift(&root, "cas-tr", "operator").unwrap();
         assert!(freeze_of(&store.get("cas-tr").unwrap()).is_none());

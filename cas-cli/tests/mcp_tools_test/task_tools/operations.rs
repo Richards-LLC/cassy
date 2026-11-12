@@ -5456,6 +5456,8 @@ fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
 #[tokio::test]
 async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
     for (caller, message, allowed, reassign_to_caller) in [
+        ("test-agent", "", true, false),
+        ("other-worker", "", false, true),
         ("test-agent", "WIP: carry supervisor answers across target movement", true, false),
         ("test-agent", "fix(cas-abcd): another task's work", false, false),
         ("other-worker", "unnamed WIP before review", false, false),
@@ -5498,21 +5500,29 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         })).unwrap();
         service.task(Parameters(start())).await.expect("initial start");
         let boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
-        branch_transfer_git(root, &["commit", "--allow-empty", "-m", "test(cas-8ca7): reproduce blocked work"]);
-        let mut held = tasks.get(&task.id).unwrap();
-        held.deliverables.factory_branch_anchor = Some(branch_transfer_git(root, &["rev-parse", "HEAD"]));
-        tasks.update(&held).unwrap();
+        if !message.is_empty() {
+            branch_transfer_git(root, &["commit", "--allow-empty", "-m", "test(cas-8ca7): reproduce blocked work"]);
+            let mut held = tasks.get(&task.id).unwrap();
+            held.deliverables.factory_branch_anchor = Some(branch_transfer_git(root, &["rev-parse", "HEAD"]));
+            tasks.update(&held).unwrap();
+        }
+        // GH #1843: before the first commit, the recorded start is the only
+        // provenance for both tracked edits and new source/migration files.
+        std::fs::write(root.join(".gitignore"), ".cas/\n# task edit\n").unwrap();
+        std::fs::write(root.join("delivery.txt"), "work before the block\n").unwrap();
         let request = serde_json::from_value(serde_json::json!({
             "action": "update", "id": task.id, "status": "blocked",
         })).unwrap();
         service.task(Parameters(request)).await.expect("block task");
         // An unnamed WIP child of the attributed red commit, made while
         // blocked, still belongs to the same recorded start boundary.
-        std::fs::write(root.join("delivery.txt"), "work before the block\n").unwrap();
-        branch_transfer_git(root, &["add", "delivery.txt"]);
-        branch_transfer_git(root, &["commit", "-m", message]);
+        if !message.is_empty() {
+            branch_transfer_git(root, &["add", "delivery.txt"]);
+            branch_transfer_git(root, &["commit", "-m", message]);
+        }
         let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
         let content = std::fs::read(root.join("delivery.txt")).unwrap();
+        let dirty = branch_transfer_git(root, &["status", "--porcelain", "--untracked-files=all"]);
         let request = serde_json::from_value(serde_json::json!({
             "action": "update", "id": task.id, "status": "open",
         })).unwrap();
@@ -5551,6 +5561,7 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         assert_eq!(saved.deliverables.factory_branch_start, boundary);
         assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), tip);
         assert_eq!(std::fs::read(root.join("delivery.txt")).unwrap(), content);
+        assert_eq!(branch_transfer_git(root, &["status", "--porcelain", "--untracked-files=all"]), dirty);
     }
 }
 

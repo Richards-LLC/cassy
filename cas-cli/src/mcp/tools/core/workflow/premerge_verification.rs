@@ -147,17 +147,6 @@ fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>
     Ok(Some(key.to_string()))
 }
 
-/// Outputs scripts/regenerate-generated-artifacts.sh commits after a merge.
-fn is_regenerated_output(path: &str) -> bool {
-    path.starts_with("hub-web/dist/")
-        || matches!(
-            path,
-            "cas-cli/src/builtins/reference-history.json"
-                | "cas-cli/src/builtins/codex/agents/task-verifier.toml"
-                | ".codex/agents/task-verifier.toml"
-        )
-}
-
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     if args.first() == Some(&"merge-tree") {
         // Candidate preparation precedes the manager's merge preflight.
@@ -635,7 +624,7 @@ impl Candidate {
                 &["diff", "--name-only", "--no-renames", parent, &landed],
             )?
             .lines()
-            .all(is_regenerated_output);
+            .all(crate::qa_pass::is_generated_artifact);
             if !generated_only
                 || git(
                     &self.repository,
@@ -682,7 +671,7 @@ impl Candidate {
             &["diff", "--name-only", "--no-renames", &expected, landed],
         )?;
         if changed.lines().any(|path| {
-            !is_regenerated_output(path) || path.starts_with("hub-web/dist/")
+            !crate::qa_pass::is_generated_artifact(path) || path.starts_with("hub-web/dist/")
         }) {
             return Err(
                 "landed tree differs from the recomputed approved delivery; publication refused"

@@ -540,11 +540,17 @@ pub(crate) fn change_patch_id_excluding(
     (out.status.success() && !id.is_empty()).then_some(id)
 }
 
-/// cas-0c988: committed build output that a merge regenerates instead of
-/// merging. A delivery's reviewed content never includes it.
-pub const GENERATED_ARTIFACT_PATHS: &[&str] = &["hub-web/dist"];
+/// cas-0c988, cas-03bc: the one list of committed output that
+/// scripts/regenerate-generated-artifacts.sh rewrites after a merge instead
+/// of merging. A delivery's reviewed content never includes it.
+pub const GENERATED_ARTIFACT_PATHS: &[&str] = &[
+    "hub-web/dist",
+    "cas-cli/src/builtins/reference-history.json",
+    "cas-cli/src/builtins/codex/agents/task-verifier.toml",
+    ".codex/agents/task-verifier.toml",
+];
 
-fn is_generated_artifact(path: &str) -> bool {
+pub(crate) fn is_generated_artifact(path: &str) -> bool {
     GENERATED_ARTIFACT_PATHS.iter().any(|generated| {
         path.strip_prefix(generated)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))

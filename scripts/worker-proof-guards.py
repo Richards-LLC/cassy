@@ -16,9 +16,12 @@ def git(repo, *args):
     return subprocess.check_output(['git', '-C', str(repo), *args], text=True)
 
 
-def verified(script, cargo, args, count):
+def verified(script, cargo, args, count, *, selected=False):
     env = os.environ.copy()
     env.update(CARGO=cargo, VERIFIED_TEST_COUNT_FILE=str(count))
+    if not selected:
+        # Guard output remains in the producer log, outside the selected capture.
+        env.pop('VERIFIED_TEST_LOG', None)
     # The build target lease must survive Python and Bash into Cargo/rustc.
     result = subprocess.run(['bash', '-c', script, 'worker-verified-tests', *args],
                             env=env, close_fds=False)
@@ -46,7 +49,7 @@ def main():
         print(f'guards: PASS tests={guard_count.read_text().strip()} '
               f'elapsed={time.monotonic() - started:.3f}s', flush=True)
     requested = args.args[1:] if args.args[:1] == ['--'] else args.args
-    verified(args.verified_script, args.cargo, requested, args.count_file)
+    verified(args.verified_script, args.cargo, requested, args.count_file, selected=True)
 
 
 if __name__ == '__main__':

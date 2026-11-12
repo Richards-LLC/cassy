@@ -12,11 +12,6 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  peer-state-pull-scheduling:
-    title: Long indexing, maintenance and quality rounds do not postpone background task pull or hold its entity lease
-    tasks: [cas-154b]
-    journeys: [FACTORY-SUPERVISE]
-    invariants: [FACTORY-PEER-PULL-CADENCE]
   reexec-cleanup-blocker-recovery:
     title: Timed-out cleanup refuses reexec with exact worker and occurrence identities and idle full-factory restart recovery while retaining cleanup custody
     tasks: [cas-624d2]
@@ -593,6 +588,16 @@ bug_families:
     tasks: [cas-0d3f]
     journeys: [CLI-RELEASE, FACTORY-CLOSE]
     invariants: [FACTORY-RELEASE-CLOSEOUT]
+  peer-state-pull-scheduling:
+    title: Long indexing, maintenance and quality rounds do not postpone background task pull or hold its entity lease
+    tasks: [cas-154b]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-PEER-PULL-CADENCE]
+  selected-test-receipt-log:
+    title: Capped runs expose untouched selected output separately from automatic guards for direct supervisor receipt recording
+    tasks: [cas-70b8]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-SELECTED-TEST-LOG]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -631,10 +636,6 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
-  FACTORY-PEER-PULL-CADENCE:
-    statement: Entity sync runs at its configured cadence independently of indexing and maintenance; quality and knowledge work never own the entity-sync lease, and existing team scope and task lifecycle guards remain authoritative.
-    check: "Run cloud_pull_ticks_while_indexing_is_held_cas_154b through the real daemon loop with a channel-held index mutex and fake scheduling time; require a subsequent pull and an available entity lease during quality HTTP. Retain existing store-lease exclusion and team-only cycle regressions. On the delivered binary, measure creation or parking visibility between prowl and soundwave without forced sync, state the bound and publish the timing receipt."
-    bug: {task: cas-154b}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -1401,6 +1402,14 @@ invariants:
     statement: Installed post-release notices have a persisted attempt cap; exhaustion retains one failed receipt and reports once to the release owner without repeating reconciliation or requeuing the receipt.
     check: Run scripts/test-install-on-publish.sh with an always-failing older notice across timer restarts and legacy receipt rediscovery. Require exactly the configured attempts, one failed JSON and one failure report. Run failed_install_notice_reaches_owner_once_cas_fed1 to verify repeated reporting reaches the recorded owner once even after train rollover, without published-tag reconciliation.
     bug: {task: cas-fed1}
+  FACTORY-PEER-PULL-CADENCE:
+    statement: Entity sync runs at its configured cadence independently of indexing and maintenance; quality and knowledge work never own the entity-sync lease, and existing team scope and task lifecycle guards remain authoritative.
+    check: "Run cloud_pull_ticks_while_indexing_is_held_cas_154b through the real daemon loop with a channel-held index mutex and fake scheduling time; require a subsequent pull and an available entity lease during quality HTTP. Retain existing store-lease exclusion and team-only cycle regressions. On the delivered binary, measure creation or parking visibility between prowl and soundwave without forced sync, state the bound and publish the timing receipt."
+    bug: {task: cas-154b}
+  FACTORY-SELECTED-TEST-LOG:
+    statement: Capped runs preserve full raw guard evidence and expose a separate untouched selected-test capture in their receipt. A live supervisor can record that capture directly; combined summaries, empty selections and failed guards remain refused.
+    check: Run factory_worker_check::tests::worker_proofs_include_fixed_guards_before_an_unrelated_filter through the guarded runner and record_supervisor_test. Require exact selected ANSI bytes, two summaries in the raw producer log, direct recording of the selected capture, rejection of the raw log, and failed retries retaining prior capture bytes.
+    bug: {task: cas-70b8}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -1454,8 +1463,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/mcp/tools/core/task/rebind.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs, cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs, cas-cli/src/mcp/tools/service/server_handler.rs]
-  invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY, FACTORY-CLOSE-LATE-PARK, FACTORY-MACHINE-COMMAND-SHAPE]
+  owners: [cas-cli/src/factory_worker_check.rs, scripts/worker-proof-guards.py, cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/mcp/tools/core/task/rebind.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs, cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs, cas-cli/src/mcp/tools/service/server_handler.rs]
+  invariants: [FACTORY-SELECTED-TEST-LOG, FACTORY-QUEUED-SOURCE-BOUNDARY, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY, FACTORY-CLOSE-LATE-PARK, FACTORY-MACHINE-COMMAND-SHAPE]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE

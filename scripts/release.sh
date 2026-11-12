@@ -194,7 +194,6 @@ place_draft() {
     git add -- "$target"
 }
 
-# Steps 1-3 plus the commit. Prints the version prepared.
 prepare() {
     local base_version version current prepared_commit
     fetch_base

@@ -815,3 +815,40 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1);
     assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1);
 }
+
+// cas-8ea3: a Claude worker's row names the `cas serve --backend` grandchild as
+// `pid` and the harness as `ppid`, with the `cas serve` frontend between them.
+// A foreground capped build under the harness must read as child progress.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn child_progress_follows_harness_through_cas_serve_frontend_cas_8ea3() {
+    use std::io::{BufRead, Write};
+    use std::os::unix::process::CommandExt;
+    const WORK: &str = "import sys\nprint('ready', flush=True)\nfor line in sys.stdin:\n    import time\n    end = time.process_time() + 0.15\n    while time.process_time() < end:\n        pass\n    print('done', flush=True)";
+    const BACKEND: &str = "import sys\nfor _ in sys.stdin:\n    pass";
+    const FRONTEND: &str = "import subprocess, sys\nb = subprocess.Popen(['cas', '-u', '-c', sys.argv[1], 'serve', '--backend'], executable='python3', stdin=subprocess.PIPE)\nprint(b.pid, flush=True)\nfor _ in sys.stdin:\n    pass";
+    const HARNESS: &str = "import subprocess, sys\nf = subprocess.Popen(['cas', '-u', '-c', sys.argv[1], sys.argv[2], 'serve'], executable='python3', stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)\nbackend = f.stdout.readline().strip()\nw = subprocess.Popen(['python3', '-u', '-c', sys.argv[3]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)\nassert w.stdout.readline().strip() == 'ready'\nprint(backend, flush=True)\nfor line in sys.stdin:\n    w.stdin.write(line); w.stdin.flush(); w.stdout.readline()\n    print('done', flush=True)";
+    let mut harness = std::process::Command::new("python3")
+        .arg0("claude")
+        .args(["-u", "-c", HARNESS, FRONTEND, BACKEND, WORK])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = std::io::BufReader::new(harness.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let backend: u32 = line.trim().parse().unwrap();
+    let mut agent = cas_types::Agent::new(format!("cas-8ea3-{}", harness.id()), "worker".into());
+    agent.pid = Some(backend);
+    agent.pid_starttime = crate::mcp::daemon::read_pid_starttime(backend);
+    agent.ppid = Some(harness.id());
+    let now = Utc::now();
+    assert!(child_progress(&agent, now).is_none(), "a cold sample proves nothing");
+    writeln!(harness.stdin.as_mut().unwrap(), "work").unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    assert!(child_progress(&agent, now + chrono::Duration::seconds(1)).is_some());
+    drop(harness.stdin.take());
+    harness.wait().unwrap();
+}

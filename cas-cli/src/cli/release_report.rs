@@ -157,6 +157,8 @@ struct ReleaseMetadata {
 
 #[derive(Debug, Clone, Default)]
 struct ReleaseEvidence {
+    clock_header: Option<String>,
+    clock_row: Option<String>,
     interventions: Option<u64>,
     tag_published_at: Option<String>,
     publication_latency_seconds: Option<i64>,
@@ -214,6 +216,8 @@ fn receipt_reference_line(reference: Option<&ReceiptReference>) -> String {
 impl ReleaseEvidence {
     fn record_latency(&mut self, values: &HashMap<String, String>) {
         self.latency_receipt_read = true;
+        self.clock_header = values.get("RELEASE_CLOCK_HEADER").cloned();
+        self.clock_row = values.get("RELEASE_CLOCK_ROW").cloned();
         let seconds = |key: &str| {
             values
                 .get(key)
@@ -285,22 +289,6 @@ impl ReleaseEvidence {
             });
     }
 
-    fn request_timing(&self) -> String {
-        match (
-            self.request_to_published_seconds,
-            self.request_source.as_deref(),
-        ) {
-            (Some(seconds), Some("cut-start")) => {
-                format!(
-                    "{} — from the first cut; no request time recorded",
-                    format_duration(seconds)
-                )
-            }
-            (Some(seconds), _) => format_duration(seconds),
-            (None, _) => "unavailable".to_string(),
-        }
-    }
-
     fn blocker_summary(&self) -> String {
         let Some(count) = self.blocker_count else {
             return "unavailable".to_string();
@@ -335,39 +323,6 @@ impl ReleaseEvidence {
         format!("{count} — {} blocked: {each}", format_duration(total))
     }
 
-    fn publication_timing(&self) -> String {
-        let Some(seconds) = self.publication_latency_seconds else {
-            return "unavailable".to_string();
-        };
-        let timing = format_duration(seconds);
-        match self.publication_budget_seconds {
-            Some(budget) => format!(
-                "{timing} — {} ({} budget)",
-                if seconds <= budget {
-                    "within budget"
-                } else {
-                    "over budget"
-                },
-                format_duration(budget)
-            ),
-            None => format!("{timing} — budget unavailable"),
-        }
-    }
-
-    fn publication_endpoint(&self) -> Option<(&'static str, &'static str)> {
-        match self.publication_start_kind.as_deref() {
-            Some("main-landed") => Some((
-                "Main to published",
-                "Release PR merge time to publication when merge-queue green evidence is unavailable; measured budget result",
-            )),
-            Some("gate-green") => None,
-            _ => Some((
-                "Tag to published",
-                "First tag workflow to publication; measured budget result",
-            )),
-        }
-    }
-
     fn has_reportable_publication_timing(&self) -> bool {
         self.green_to_published_seconds.is_some() || self.main_to_published_seconds.is_some()
     }
@@ -392,6 +347,11 @@ fn parse_stage_pairs(pairs: &str) -> Vec<(String, i64)> {
 /// budget with the earlier releases' times, FAILED naming every overrun.
 fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
     let mut output = String::from("### Pipeline latency\n\n");
+    if let (Some(header), Some(row)) = (&evidence.clock_header, &evidence.clock_row) {
+        output.push_str(&format!("{header}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n{row}\n\n"));
+    } else {
+        output.push_str("Release clock: unavailable in this receipt.\n\n");
+    }
     if evidence.stage_seconds.is_empty() {
         output.push_str(if evidence.latency_receipt_read {
             "Stage timings are unavailable: the latency receipt records no STAGE_SECS.\n\n"
@@ -1867,51 +1827,6 @@ fn assemble_markdown(
     } else {
         zero_notes.push("No GitHub issues are counted in this report's fixes ledger.".to_string());
     }
-    let green_timing =
-        if sources.release_evidence.publication_start_kind.as_deref() == Some("gate-green") {
-            Some(sources.release_evidence.publication_timing())
-        } else {
-            sources
-                .release_evidence
-                .green_to_published_seconds
-                .map(format_duration)
-        };
-    match green_timing.filter(|value| value != "unavailable") {
-        Some(value) => glance.push((
-            "Green to published".to_string(),
-            value,
-            "Merge-queue CI completion to publication".to_string(),
-        )),
-        None => unavailable.push("green to published"),
-    }
-    match sources.release_evidence.request_timing() {
-        value if value == "unavailable" => unavailable.push("request to published"),
-        value => glance.push((
-            "Request to published".to_string(),
-            value,
-            "The release request, or first cut, to publication".to_string(),
-        )),
-    }
-    match sources.release_evidence.cut_to_published_seconds {
-        Some(seconds) => glance.push((
-            "Cut to published".to_string(),
-            format_duration(seconds),
-            "The first release-train cut to publication".to_string(),
-        )),
-        None => unavailable.push("cut to published"),
-    }
-    if let Some((publication_endpoint, publication_description)) =
-        sources.release_evidence.publication_endpoint()
-    {
-        let timing = sources.release_evidence.publication_timing();
-        if timing != "unavailable" {
-            glance.push((
-                publication_endpoint.to_string(),
-                timing,
-                publication_description.to_string(),
-            ));
-        }
-    }
     match sources.release_evidence.blocker_summary() {
         value if value == "unavailable" => unavailable.push("blockers"),
         value if value == "0" => zero_notes.push("No release stage was blocked.".to_string()),
@@ -3270,6 +3185,19 @@ mod tests {
     }
 
     #[test]
+    fn release_clock_receipt_row_reaches_report_without_stage_timings() {
+        let mut evidence = ReleaseEvidence::default();
+        let header = "| Last delivery merged | Cut started | PR opened | Main | Published | Installed per machine | Last merge to main | Main to published |";
+        let row = "| 2026-11-12T12:00:00Z | unavailable | 2026-11-12T14:35:00Z | 2026-11-12T14:50:00Z | 2026-11-12T15:00:00Z | soundwave 2026-11-12T15:01:00Z; prowl unavailable | 10200s / 1800s OVER | 600s / 1200s OK |";
+        evidence.record_latency(&parse_key_values(&format!(
+            "RELEASE_CLOCK_HEADER={header}\nRELEASE_CLOCK_ROW={row}\n"
+        )));
+        let report = pipeline_latency_section(&evidence);
+        assert!(report.contains(row));
+        assert!(report.contains(header));
+    }
+
+    #[test]
     fn publication_receipt_interventions_preserve_unknown_and_real_counts() {
         let mut evidence = ReleaseEvidence::default();
         for (value, expected) in [
@@ -3331,7 +3259,6 @@ mod tests {
             "PUBLISH_START_KIND=main-landed\nPUBLISH_LATENCY_SECONDS=616\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
         ));
         assert_eq!(evidence.publication_start_kind.as_deref(), Some("main-landed"));
-        assert!(evidence.publication_endpoint().is_some());
     }
 
     /// cas-0dd1: with `[factory] artifacts_root` configured, the release
@@ -3377,7 +3304,6 @@ mod tests {
         assert_eq!(green.green_to_published_seconds, Some(626));
         assert_eq!(green.main_to_published_seconds, Some(616));
         assert!(green.has_reportable_publication_timing());
-        assert!(green.publication_endpoint().is_none());
         assert_eq!(green.publication_latency_seconds, Some(626));
 
         let fallback_root = tempfile::tempdir().unwrap();

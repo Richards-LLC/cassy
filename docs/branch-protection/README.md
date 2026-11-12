@@ -173,62 +173,36 @@ stop that followed escalates.
 ## 5. Check names are pinned
 
 The context string in the JSON is an exact match for the job `name:` value in
-`.github/workflows/full-validation.yml` (train/queue) or the reusable `.github/workflows/ci.yml` (other events). GitHub matches required checks **by name string**. Renaming a job
+`.github/workflows/full-validation.yml` (merge queue) or the reusable `.github/workflows/ci.yml` (other events). GitHub matches required checks **by name string**. Renaming a job
 without updating this file silently makes the required check un-reportable, and every affected
 ref becomes unmergeable until it is fixed. GH #138 already renamed these jobs once. See the
 "CI check names are pinned" section in [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
-## 3. One full validation graph for train and queue
+## 3. The merge queue owns full validation
 
-`.github/workflows/full-validation.yml` handles release-train pushes and
-`merge_group` through the same reusable `.github/workflows/ci.yml`. Its outer
-`Fast Validation` job preserves the required context. A newer train push cancels
-its predecessor. Both events select Commander journeys against the last release,
-run every registered script/CI-tier test, Commander vitest/typecheck/build,
-preflight, doctests and the complete Rust archive/shards. Quarantine and one
-rerun, including durable flake publication, apply equally to train and queue.
+`.github/workflows/full-validation.yml` runs only for `merge_group`, calling
+`ci.yml` with the complete graph. Its outer `Fast Validation` context requires
+preflight, registered CI/script tests, Commander web checks, changed-web
+journeys, doctests and all Rust archive/shards. Lane impact tests remain the
+early catch. Train pushes and release preparation require no train-suite receipt.
+Quarantine, one rerun and durable flake publication remain part of queue proof.
 
-The full-set fan-in emits `train-full-gate/receipt.json` with schema 2, exact
-source tree, main baseline, required/actual job outcomes and elapsed seconds.
-`cas/full-gate` is posted only after that fan-in succeeds. Consumers also require
-a successful completed GitHub workflow and its `Full-set gate` job; a status
-alone, legacy Rust-only artifact or missing job cannot authorize a cut or reuse.
-`scripts/release.sh` checks this receipt for a train’s starting tree before preparing
-release metadata. An explicit non-train hotfix keeps its emergency path, discloses
-that it has no train receipt, and receives the complete queue graph without reuse. An unchanged prepared retry retains the original starting tip.
+Preflight builds its source CLI once, without a preceding `cargo check`.
+Its hosted dependency cache shares a key with an advisory main-push maintenance
+job: main owns writes, future queue refs restore them, and a miss builds normally.
+Cache priming is outside the required validation fan-in and executes no tests.
 
-### Queue reuse
-
-`scripts/check-ci-merge-queue-validation.sh` delegates to the same receipt
-consumer in `scripts/train-ci.py`. The PR head must have the queue tree. A
-completed green source must be its ancestor, and its main baseline must equal
-the queue event's base SHA. The entire remaining diff may contain only version
-fields, matching lock versions, CHANGELOG/fragments, CODEMAP, builtin reference
-history and release notes. A version-generated `hub-web/dist` delta is allowed
-only with a version bump and is rebuilt and checked in the queue compile step.
-Any product change, moved main, partial/legacy proof or uncertainty runs the full
-graph. A release-plumbing continuation can reuse the source's earlier receipt.
-
-On reuse, preflight first restores `preflight-cli` from the validated full-gate
-run only when its receipt tree exactly matches the queue tree. A matching
-per-job receipt can also restore its original producer's CLI. The producer
-uploads a stripped copy of its no-default-features executable; restore checks
-that it runs on the current runner before skipping Rust setup, check and build.
-Missing artifacts, lookup failures, incompatible executables and release-plumbing
-tree changes keep source compilation. A job receipt is reusable only while its
-CLI artifact remains available. Every full-gate reuse still runs CLI smoke and
-the web asset rebuild/drift check, including when the job receipt also matches.
-CI tiers, web tests, journeys, Rust suite and doctests are already covered by
-the full-set source proof and do not run again. The target is under eight
-minutes; the live release ledger records the measured result rather than assuming it. Train and queue wall clocks are
-measured from the GitHub run start through the required fan-in, and the daemon
-records them in the friction ledger once per train/run attempt.
+A same-tree queue retry may reuse a successful individual job after verifying
+its workflow, inputs and still-available output artifacts. Failed or unavailable
+jobs execute again, and cached flake observations retain their original run
+identity. This never borrows a train verdict. After the queue succeeds, main
+may reuse its exact-tree validation artifact to avoid repeating the full suite.
 
 ### macOS Check latency: a warm cache from main
 
 This section previously described a required Darwin check on each queue entry.
 That policy was superseded by the November 4 decision above: `macos-check` is
-now advisory and excluded from `merge_group`, including full-gate reuse.
+now advisory and excluded from `merge_group`.
 
 Its existing non-queue behavior is retained: protected PRs get a cheap hosted
 notice; main pushes maintain Darwin dependency caches; tag pushes, schedules
@@ -241,13 +215,11 @@ macOS proof and uses its own release profile/cache.
 The original cold-cache measurements (PR #1191: Linux about 8m20s, Darwin
 16m16s) explain that maintenance lane, but no longer describe queue latency.
 `scripts/ci_tiers/test-policy.py` checks both main-cache behavior and exclusion
-of ordinary and full-gate-reuse queue events.
+of queue events.
 
-### Receipt implementation and evidence
+### Evidence
 
-The producer and consumer live in `scripts/train-ci.py`. Workflow graph parity,
-partial/legacy/wrong-tree refusal, plumbing reuse versus main movement, and the
-actual release entry-point refusal are exercised in the registered policy,
-train-CI, flake and release tests. `train_ci::tests` exercises measured durations
-through the real friction store. Live train and queue proofs are recorded in the
-release ledger after this source change lands.
+`scripts/train-ci.py` now retains queue shard evidence and individual-job retry
+support only. Policy, queue retry, flake and release fixtures cover the executable
+routes. Real before-run timings are attached to the delivery; the epic owner
+records the first two after-run timings on the integrated release tree.

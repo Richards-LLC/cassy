@@ -3,7 +3,7 @@
 #
 # Proves: a newer published release is installed with `cas update --yes
 # --version`; the release notes' timer is completed once with the install
-# time and the PR-opened -> installed minutes; an installed or older release
+# time and each host's receipt timestamp; an installed or older release
 # is a no-op; a failed install is retried only after the back-off; installation
 # configures and removes the native per-user scheduler.
 # shellcheck disable=SC2016 # check evaluates assertion strings in the test shell.
@@ -128,8 +128,8 @@ echo 9.99.1 >"$FAKE_INSTALLED"
 FAKE_LATEST=v9.99.2 FAKE_REFRESH_FAILS=1 RELEASE_INSTALL_NOW="$installed" "$installer" --once >"$tmp/out" 2>&1
 check 'grep -q "^cas update --yes --version 9.99.2$" "$FAKE_LOG"' 'a newer release runs cas update for that version'
 check '[[ "$(cat "$FAKE_INSTALLED")" == 9.99.2 ]]' 'the host converges on the published version'
-check 'grep -q "<!-- cas-release-timer pr=4242 opened=$opened published=$published installed=$installed -->" "$FAKE_BODY"' 'the timer marker records the install time'
-check '! grep -q "Installed: pending" "$FAKE_BODY"' 'the pending timer is replaced'
+check 'grep -q "<!-- cas-release-install host=.* installed=$installed -->" "$FAKE_BODY"' 'each host records its actual install time'
+check 'perl -MJSON::PP -0777 -ne '\''my $v=decode_json($_); exit(!$v->{installed_at} || !$v->{install_host});'\'' "$XDG_STATE_HOME/cassy/install-on-publish.notified.d/v9.99.2"' 'the successful notice retains the installation receipt'
 
 check '[[ "$(grep -c "^cas release installed --receipt " "$FAKE_LOG")" == 1 ]]' 'cas-61e0: fake publication and verified install notify the owning supervisor once'
 if python3 - "$FAKE_LOG" <<'PY_INSTALL_ORDER'
@@ -279,12 +279,12 @@ PY_TIMEOUT
 ) && ok 'a hung notice releases the lock, stays pending and retries once successfully' || bad 'a hung notice releases the lock, stays pending and retries once successfully'
 echo 9.99.2 >"$FAKE_INSTALLED"
 
-# 3. A second host leaves the completed timer alone.
+# 3. A second host adds its own timestamp and preserves the first host.
 echo 9.99.1 >"$FAKE_INSTALLED"
 cp "$FAKE_BODY" "$tmp/before.md"
 : >"$FAKE_LOG"
-FAKE_LATEST=v9.99.2 RELEASE_INSTALL_HOST=other "$installer" --once >/dev/null
-check 'cmp -s "$FAKE_BODY" "$tmp/before.md" && ! grep -q "release edit" "$FAKE_LOG"' 'a completed timer is not overwritten'
+FAKE_LATEST=v9.99.2 RELEASE_INSTALL_HOST=other XDG_STATE_HOME="$tmp/other-state" "$installer" --once >/dev/null
+check '[[ "$(grep -c "<!-- cas-release-install host=" "$FAKE_BODY")" == 2 ]] && grep -q "host=other installed=" "$FAKE_BODY"' 'both host timestamps remain reachable'
 
 # 4. A failed install is retried only after the back-off.
 echo 9.99.2 >"$FAKE_INSTALLED"

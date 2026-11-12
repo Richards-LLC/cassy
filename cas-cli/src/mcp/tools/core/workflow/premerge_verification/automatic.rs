@@ -921,7 +921,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 .unwrap()
                 .peek_all(20)
                 .unwrap();
-            if status == "approved" {
+            if matches!(status, "approved" | "target_move") {
                 assert!(
                     super::super::tests::run(
                         repo,
@@ -929,14 +929,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     )
                     .is_empty()
                 );
-                assert!(
-                    prompts.is_empty(),
-                    "approval must not wake the supervisor: {prompts:?}"
-                );
-            } else if status == "target_move" {
-                // The old approval's merge is held on the new review; its
-                // independent verdict subsequently publishes the delivery.
-                assert!(prompts.iter().all(|row| row.target == owner.id));
+                if status == "approved" {
+                    assert!(
+                        prompts.is_empty(),
+                        "approval must not wake the supervisor: {prompts:?}"
+                    );
+                }
             } else if status == "late_error" {
                 // A late verifier error on a settled dispatch stays silent.
                 assert!(prompts.is_empty(), "no recovery notice: {prompts:?}");

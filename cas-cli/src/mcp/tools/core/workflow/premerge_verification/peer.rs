@@ -536,7 +536,7 @@ mod tests {
             });
             tasks.add(&task).unwrap();
             let receipt = |task: &Task, sha: &str, target: &str, cycle: &str| PeerPremergeReceipt {
-            registry_version: Some(serde_json::json!(["G-104"])),
+                registry_version: Some(serde_json::json!(["G-104"])),
                 status: VerificationStatus::Approved, project_id: PROJECT.into(),
                 supervisor_id: "source-supervisor".into(), task_id: task.id.clone(),
                 source_branch: "factory/peer".into(), source_sha: sha.into(), target_branch: "main".into(),
@@ -557,6 +557,12 @@ mod tests {
             let old_message = message(&old, 2);
             assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Imported));
             let old_dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            let connection = crate::qa_batch::release_close::read_connection(&root).unwrap();
+            let original_stamp = super::super::cycle::stamp(&connection, &old.verdict_id).unwrap().unwrap();
+            assert_eq!(serde_json::to_value(original_stamp.registry_version).unwrap(), old.registry_version.clone().unwrap());
+            assert_eq!(original_stamp.approved_anchor, old.source_sha);
+            drop(connection);
+
             assert!(verify_peer_promotion(&root, &task, &old_dispatch, &old.verdict_id).unwrap());
 
             std::fs::write(source.join("delivery"), "repaired\n").unwrap();

@@ -250,10 +250,9 @@ pub(crate) fn approved(
             .map_err(|e| e.to_string())?;
         let verdict:Option<(String,String)>=conn.query_row("SELECT id,status FROM verifications WHERE dispatch_id=?1 AND task_id=?2 ORDER BY created_at DESC,id DESC LIMIT 1",
             params![id,task.id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
-        let Some((verdict, status)) = verdict.filter(|(_, status)| status == "approved") else {
+        let Some((verdict, _status)) = verdict.filter(|(_, status)| status == "approved") else {
             continue;
         };
-        let _ = status;
         match receipt_cycle(&conn, &dispatch)? {
             Some(bound) => {
                 if cycle.as_deref() != Some(bound.as_str()) {

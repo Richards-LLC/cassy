@@ -19,8 +19,48 @@ pub(crate) const IDENTIFIER: &str = "dev.cassy.cas";
 /// The signed copy replaces the binary by rename, so no reader sees a partly
 /// written file. Returns whether the binary was re-signed.
 #[cfg(target_os = "macos")]
-pub(crate) fn stabilize(_installed: &Path, _keychain: Option<&Path>) -> anyhow::Result<bool> {
-    Ok(false)
+pub(crate) fn stabilize(installed: &Path, keychain: Option<&Path>) -> anyhow::Result<bool> {
+    use anyhow::Context;
+    use std::process::Command;
+
+    let mut find = Command::new("/usr/bin/security");
+    find.args(["find-identity", "-p", "codesigning"]);
+    if let Some(keychain) = keychain {
+        find.arg(keychain);
+    }
+    let listing = find.output().context("could not list code-signing identities")?;
+    // Rows read `  1) <40-hex SHA-1> "<name>"`, possibly followed by a trust note.
+    let quoted = format!("\"{LOCAL_IDENTITY}\"");
+    let Some(hash) = String::from_utf8_lossy(&listing.stdout).lines().find_map(|line| {
+        let (_, rest) = line.split_once(") ")?;
+        let (hash, name) = rest.split_once(' ')?;
+        (hash.len() == 40 && name.starts_with(&quoted)).then(|| hash.to_owned())
+    }) else {
+        return Ok(false);
+    };
+    let name = installed.file_name().context("installed binary has no file name")?;
+    let staged = installed.with_file_name(format!(
+        ".{}.cas-sign-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    std::fs::copy(installed, &staged)
+        .with_context(|| format!("could not stage {}", staged.display()))?;
+    let mut sign = Command::new("/usr/bin/codesign");
+    sign.args(["--force", "--sign", &hash, "--identifier", IDENTIFIER]);
+    if let Some(keychain) = keychain {
+        sign.arg("--keychain").arg(keychain);
+    }
+    let signed = sign.arg(&staged).output().context("could not run codesign")?;
+    if !signed.status.success() {
+        let _ = std::fs::remove_file(&staged);
+        anyhow::bail!("codesign failed: {}", String::from_utf8_lossy(&signed.stderr).trim());
+    }
+    std::fs::rename(&staged, installed).with_context(|| {
+        let _ = std::fs::remove_file(&staged);
+        format!("could not replace {}", installed.display())
+    })?;
+    Ok(true)
 }
 
 #[cfg(not(target_os = "macos"))]

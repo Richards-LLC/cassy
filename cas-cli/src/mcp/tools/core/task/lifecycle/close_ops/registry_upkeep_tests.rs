@@ -103,6 +103,7 @@ fn registry_upkeep_mismatched_merge_parent_uses_task_only_delta() {
             task_floor: chrono::DateTime::UNIX_EPOCH,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: Some(f.base.clone()),
                 task_id: Some(f.task.id.clone()),

@@ -1086,6 +1086,7 @@ mod tests {
             task_floor: chrono::DateTime::UNIX_EPOCH,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: Some(base.clone()), task_id: Some(task.id.clone()),
                 known_commits: vec![original.clone()],
@@ -1164,6 +1165,7 @@ mod tests {
             task_floor: chrono::DateTime::UNIX_EPOCH,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: Some(base.clone()), task_id: Some(task.id.clone()),
                 known_commits: vec![parked.clone()],
@@ -1249,7 +1251,7 @@ mod tests {
             not_before: chrono::DateTime::UNIX_EPOCH,
             task_floor: chrono::DateTime::UNIX_EPOCH,
             basis: "fixture",
-            identity: TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some(task.id.clone()), known_commits: vec![] },
+            identity: TaskCommitIdentity { superseded_commits: Vec::new(), approved_merge_parents: Vec::new(), start_base: None, task_id: Some(task.id.clone()), known_commits: vec![] },
         };
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();

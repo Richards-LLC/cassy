@@ -18,6 +18,65 @@ pub(crate) struct StartedDelivery {
     pub commits: Vec<String>,
 }
 
+/// A supervisor's typed cancellation link transfers the predecessor's
+/// recorded delivery, never arbitrary commits merely sharing a worker lane.
+/// The current target is excluded so already-integrated history stays upstream.
+pub(super) fn include_superseded_commits(
+    repo: &Path,
+    task: &Task,
+    identity: &mut TaskCommitIdentity,
+) -> Result<(), String> {
+    let Some(target) = task.deliverables.work_target.as_ref() else { return Ok(()) };
+    let Ok((primary, _)) = crate::mcp::tools::core::task::repo_context::git_layout(repo) else { return Ok(()) };
+    let root = primary.join(".cas");
+    if !root.join("cas.db").is_file()
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(&primary, &target.repo_selector)
+    {
+        return Ok(());
+    }
+    let store = crate::store::open_task_store_local(&root).map_err(|error| error.to_string())?;
+    let target = preferred_diff_target_ref_for_delivery(repo, &target.target_branch, task.delivery_mode);
+    for previous in store.list(Some(TaskStatus::Cancelled)).map_err(|error| error.to_string())? {
+        if previous.id == task.id || !matches!(
+            &previous.terminal_outcome,
+            Some(cas_types::TaskTerminalOutcome::Cancelled { superseded_by: Some(id) }) if id == &task.id
+        ) || !previous.deliverables.work_target.as_ref().is_some_and(|target|
+            crate::mcp::tools::core::task::repo_context::repo_answers_to(&primary, &target.repo_selector))
+        {
+            continue;
+        }
+        let receipt = cas_store::get_latest_worker_delivery(&root, &previous.id)
+            .ok().flatten().map(|(receipt, _)| receipt.commit_sha);
+        let previous_identity = task_commit_identity(&previous, receipt);
+        for anchor in &previous_identity.known_commits {
+            if !matches!(anchor.len(), 40 | 64) || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || resolve_branch_sha(repo, anchor).is_none()
+            {
+                continue;
+            }
+            let history = git_text(repo, &[
+                "log", "-n", "201", "--format=%H%x1f%B%x1e", anchor, &format!("^{target}"), "--",
+            ]).ok_or_else(|| format!("Cannot inspect superseded delivery {} at {anchor}.", previous.id))?;
+            let records: Vec<_> = history.split('\u{1e}').map(str::trim)
+                .filter(|record| !record.is_empty()).collect();
+            if records.len() > 200 {
+                return Err(format!("Superseded delivery {} exceeds the 200-commit attribution limit.", previous.id));
+            }
+            for record in records {
+                let Some((sha, message)) = record.split_once('\u{1f}') else { continue };
+                if (previous_identity.matches_known_commit(sha)
+                    || (!subject_claims_another_task(message, &previous_identity)
+                        && message_references_task(message, &previous.id)))
+                    && !identity.superseded_commits.iter().any(|known| known == sha)
+                {
+                    identity.superseded_commits.push(sha.to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// cas-ead0: only the graph after the server's start boundary belongs to
 /// this cycle. Old subjects before it cannot claim the new task's lane.
 /// Bound all probes to immutable SHAs and refuse foreign descendants before
@@ -118,7 +177,8 @@ pub(super) fn validated_started_delivery(
     // cas-985f: a worker told to merge the released trunk into its lane brings
     // in other tasks' already-released commits. They are upstream, not foreign.
     let upstream = released_trunk_ref(repo, &target).map(|reference| format!("^{reference}"));
-    let identity = task_commit_identity(task, None);
+    let mut identity = task_commit_identity(task, None);
+    include_superseded_commits(repo, task, &mut identity)?;
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
@@ -199,7 +259,7 @@ pub(super) fn validated_started_delivery(
         {
             continue;
         }
-        if subject_claims_another_task(message, &identity) {
+        if !identity.matches_superseded_commit(sha) && subject_claims_another_task(message, &identity) {
             // cas-aa98: a no-code task delivers no commits, so the worker's
             // next task committing on this lane is that task's work, not
             // foreign work inside this delivery.
@@ -352,6 +412,7 @@ pub(super) fn commit_claims_another_task(
     identity: &TaskCommitIdentity,
 ) -> bool {
     is_safe_git_refname(commit)
+        && !identity.matches_superseded_commit(commit)
         && git_text(repo, &["log", "-1", "--format=%B", commit, "--"])
             .is_some_and(|message| subject_claims_another_task(&message, identity))
 }
@@ -406,7 +467,8 @@ pub(super) fn lane_commits_all_claim_other_tasks(
     Some(records.iter().all(|record| {
         record
             .split_once('\u{1f}')
-            .is_some_and(|(_, message)| subject_claims_another_task(message, identity))
+            .is_some_and(|(sha, message)| !identity.matches_superseded_commit(sha)
+                && subject_claims_another_task(message, identity))
     }))
 }
 
@@ -439,7 +501,7 @@ pub(crate) fn branch_task_claims(
         let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
             continue;
         };
-        if subject_claims_another_task(message, identity) {
+        if !identity.matches_superseded_commit(sha) && subject_claims_another_task(message, identity) {
             if foreign.is_none() {
                 let subject = message.trim().lines().next().unwrap_or("").trim();
                 foreign = Some(format!("{} {subject}", &sha[..sha.len().min(9)]));
@@ -2250,6 +2312,7 @@ mod tests {
             task_floor: floor,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-taskb".into()),
@@ -3482,6 +3545,7 @@ mod tests {
             &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
         );
         let identity = TaskCommitIdentity {
+            superseded_commits: Vec::new(),
             approved_merge_parents: Vec::new(),
             start_base: None,
             task_id: Some("cas-taskb".into()),
@@ -3889,6 +3953,7 @@ mod tests {
         for (status, successor, repo_selector, foreign_tail, integrated, allowed) in [
             (TaskStatus::Cancelled, Some("cas-bbbb"), "project:handoff", false, false, true),
             (TaskStatus::Cancelled, Some("cas-bbbc"), "project:handoff", false, false, false),
+            (TaskStatus::Cancelled, Some("cas-bbbb5"), "project:handoff", false, false, false),
             (TaskStatus::Cancelled, None, "project:handoff", false, false, false),
             (TaskStatus::Open, Some("cas-bbbb"), "project:handoff", false, false, false),
             (TaskStatus::Cancelled, Some("cas-bbbb"), "project:another", false, false, false),
@@ -3931,6 +3996,9 @@ mod tests {
                 work_target: target, assignee: "worker".into(), branch: "factory/worker".into(),
                 base_sha: if integrated { port.clone() } else { base },
             });
+            if status == TaskStatus::Open {
+                task.deliverables.factory_branch_anchor = Some(port.clone());
+            }
             if foreign_tail {
                 commit(repo, "foreign.rs", "foreign\n", "fix(cas-dddd): unrelated delivery");
             } else if integrated {

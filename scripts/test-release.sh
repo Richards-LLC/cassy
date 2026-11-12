@@ -525,13 +525,14 @@ done
 
 # A hotfix remains an explicit exception, including actual CLI refusal shapes.
 hotfix_fallback() {
-    local mode="$1" fixture="$tmp/hotfix-$1" status=0
+    local mode="$1" fixture="$tmp/hotfix-$1" status=0 before
     clone_epic "$fixture" "release/v9.99.1-$mode" "hotfix-$mode"
+    before="$(git -C "$fixture" rev-parse HEAD)"
     mkdir -p "$tmp/state-$mode"
     write_valid_draft "$tmp/hotfix-$mode.md"
-    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" FAKE_CAS_LOG="$tmp/hotfix-$mode-cas.log" \
+    CAS_RELEASE_CUT_OWNED= FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" FAKE_CAS_LOG="$tmp/hotfix-$mode-cas.log" \
         run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
-    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
+    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" log -1 --format=%s "refs/heads/release/v9.99.1-$mode")" == release:\ v* && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
         ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&
         ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }

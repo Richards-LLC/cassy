@@ -103,12 +103,58 @@ fn every_registered_refusal_site_emits_its_code() {
         (r#"let allowed = may_run(role); if !allowed { anyhow::bail!("denied"); }"#, false),
         (r#"if role == Worker { return Err(tag("G-01", "denied")); }"#, true),
         (r#"if input.is_empty() { return Err("required"); }"#, true),
+        (r#"if model.role == Worker || model.owner == expected { return Err("metadata"); }"#, true),
+        (r#"if incidental() { return Err("ordinary"); }"#, true),
+        (r#"if actual_caller() { return Err("denied"); }"#, false),
+        (r#"let caller = self.resolve_registered_caller()?; if caller.role == Worker { return Err("denied"); }"#, false),
+        (r#"let caller = self.get_agent_id()?; if task.assignee != caller { return Err("denied"); }"#, false),
     ] {
-        let source = format!("fn may_run(value: Role) -> bool {{ value != Worker }}\nfn probe(role: Role) {{ tag(\"G-01\", \"unrelated\"); {body} }}");
+        let source = format!("fn may_run(value: Role) -> bool {{ value != Worker }}\nfn incidental() -> bool {{ let unused = std::env::var(\"CAS_AGENT_ROLE\"); false }}\nfn actual_caller() -> bool {{ let role = std::env::var(\"CAS_AGENT_ROLE\"); role.is_ok() }}\nfn probe() {{ let role = std::env::var(\"CAS_AGENT_ROLE\"); tag(\"G-01\", \"unrelated\"); {body} }}");
         std::fs::write(policy_dir.join("gates_cmd.rs"), source).unwrap();
         let result = gate_audit::scan(fixture.path(), &fixture_registry);
         assert_eq!(result.gaps.is_empty(), covered, "{body}: {:?}", result.gaps);
     }
+    // The seed is a counted inventory, not a function-wide waiver. Wording
+    // edits preserve it; duplicate/new guards exceed it, and Git history
+    // prevents a later commit growing the allowance again.
+    let legacy = r#"fn probe() {
+        let role = std::env::var("CAS_AGENT_ROLE");
+        tag("G-01", "unrelated");
+        if role == Worker { anyhow::bail!("old diagnostic"); }
+    }"#;
+    let probe = policy_dir.join("gates_cmd.rs");
+    std::fs::write(&probe, legacy).unwrap();
+    let result = gate_audit::scan(fixture.path(), &fixture_registry);
+    assert!(!result.gaps.is_empty());
+    assert_eq!(result.authority_uncoded.values().sum::<usize>(), 1);
+    let seed = result.authority_uncoded;
+    let baseline = fixture.path().join("cas-cli/gate-audit-authority-baseline.json");
+    let write_baseline = |sites: &std::collections::BTreeMap<String, usize>| {
+        std::fs::write(&baseline, serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"sites":sites})).unwrap()).unwrap();
+    };
+    write_baseline(&seed);
+    std::fs::write(&probe, legacy.replace("old diagnostic", "reworded diagnostic")).unwrap();
+    assert!(gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
+    std::fs::write(&probe, legacy.replace("old diagnostic", "first").replace(
+        "if role == Worker", "if role == Supervisor")).unwrap();
+    assert!(!gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
+    let grown = gate_audit::scan(fixture.path(), &fixture_registry).authority_uncoded;
+    let git = |args: &[&str]| {
+        assert!(std::process::Command::new("git").current_dir(fixture.path())
+            .args(["-c","user.name=Fixture","-c","user.email=fixture@example.test"])
+            .args(args).status().unwrap().success());
+    };
+    git(&["init","-q"]);
+    git(&["add","cas-cli/gate-audit-authority-baseline.json"]);
+    git(&["commit","-qm","initial baseline"]);
+    write_baseline(&grown);
+    git(&["add","cas-cli/gate-audit-authority-baseline.json"]);
+    git(&["commit","-qm","attempted baseline growth"]);
+    assert!(!gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
+    write_baseline(&std::collections::BTreeMap::new());
+    std::fs::write(&probe, "fn unrelated() { tag(\"G-01\", \"unrelated\"); }").unwrap();
+    assert!(gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
+    std::fs::remove_file(&baseline).unwrap();
     std::fs::remove_file(policy_dir.join("gates_cmd.rs")).unwrap();
     let scripts_dir = fixture.path().join("scripts");
     std::fs::create_dir_all(&scripts_dir).unwrap();
@@ -135,6 +181,8 @@ fn every_registered_refusal_site_emits_its_code() {
     std::fs::write(root.join("target/gate-audit-gaps.txt"), audit.gaps.join("\n")).unwrap();
     let authority_rows = audit.rows.iter().filter(|row| row[0].starts_with("authority refusal (")).map(|row| row.join("\t")).collect::<Vec<_>>();
     std::fs::write(root.join("target/gate-audit-authority.tsv"), authority_rows.join("\n")).unwrap();
+    std::fs::write(root.join("target/gate-audit-authority-candidates.json"), serde_json::to_vec_pretty(
+        &serde_json::json!({"schema":1,"sites":audit.authority_uncoded})).unwrap()).unwrap();
     assert!(audit.gaps.is_empty(), "mechanical gate audit gaps:\n{}", audit.gaps.join("\n"));
     // Replay the two uncoded script boundaries from the rejected delivery.
     let fixture = tempfile::tempdir().unwrap();

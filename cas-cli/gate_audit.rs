@@ -19,6 +19,7 @@ const DEFINITION: &str = "A factory check is a policy refusal of a request that 
 pub struct Audit {
     pub rows: Vec<[String; 6]>,
     pub gaps: Vec<String>,
+    pub authority_uncoded: BTreeMap<String, usize>,
 }
 impl Audit {
     pub fn markdown(&self, total: usize) -> String {
@@ -58,6 +59,7 @@ struct Function {
     conditional: BTreeSet<String>,
     policy: bool,
     authority: bool,
+    authority_value: Option<refusals::AuthorityValue>,
     annotations: BTreeMap<String, String>,
     script_sink: bool,
     producer: Option<&'static str>,
@@ -149,6 +151,11 @@ impl<'ast> Visit<'ast> for Body<'_> {
         if let syn::Expr::Path(path) = expr.func.as_ref() {
             if let Some(segment) = path.path.segments.last() {
                 let name = segment.ident.to_string();
+                if matches!(name.as_str(), "var" | "var_os")
+                    && expr.args.first().and_then(literal).is_some_and(|key| refusals::identity_env(&key))
+                { self.function.authority = true; }
+                self.function.authority |= name == "from_process"
+                    && path.path.segments.iter().any(|segment| segment.ident == "InvocationContext");
                 self.function.calls.insert(name.clone());
                 if matches!(name.as_str(), "tag" | "refusal_tag" | "override_tag") {
                     if let Some(code) = expr.args.first().and_then(literal) {
@@ -240,6 +247,12 @@ impl<'ast> Visit<'ast> for Body<'_> {
                     proc_macro2::TokenTree::Ident(ident) => {
                         let name = ident.to_string();
                         body.function.authority |= refusals::authority_symbol(&name);
+                        if matches!(name.as_str(), "var" | "var_os")
+                            && let Some(proc_macro2::TokenTree::Group(args)) = tokens.get(index + 1)
+                            && let Some(proc_macro2::TokenTree::Literal(lit)) = args.stream().into_iter().next()
+                            && let Ok(key) = syn::parse_str::<syn::LitStr>(&lit.to_string())
+                            && refusals::identity_env(&key.value())
+                        { body.function.authority = true; }
                         if guard && candidate(&name) {
                             body.function.flags.insert(name.clone());
                             body.function.conditional.insert(name.clone());
@@ -270,7 +283,6 @@ impl<'ast> Visit<'ast> for Body<'_> {
     }
     fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
         let s = lit.value();
-        self.function.authority |= s == "CAS_AGENT_ROLE";
         self.function.script_sink |= s.contains("gates record-refusal") || s.contains("gates record-override");
         for (prefix, kind) in [("", "refusal"), ("override ", "override")] {
             for code in bracket_codes(&s, prefix) {
@@ -400,6 +412,7 @@ impl Functions<'_> {
         let mut body = Body { function: &mut f };
         body.visit_signature(signature);
         body.visit_block(block);
+        f.authority_value = refusals::authority_value(signature, block);
         self.output.push(f);
     }
 }
@@ -647,7 +660,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         }
     }
     loop {
-        let mut known = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>, bool)>::new();
+        let mut known = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
         let mut occurrences = BTreeMap::<String, usize>::new();
         for f in &functions {
             *occurrences.entry(f.name.clone()).or_default() += 1;
@@ -659,20 +672,18 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
             let entry = known.entry(f.name.clone()).or_default();
             entry.0.extend(f.refused.clone());
             entry.1.extend(f.overridden.clone());
-            entry.2 |= f.authority;
         }
         let mut changed = false;
         for f in &mut functions {
-            let prior = (f.refused.len(), f.overridden.len(), f.authority);
+            let prior = (f.refused.len(), f.overridden.len());
             if let Some(codes) = carried.get(&f.site) { f.overridden.extend(codes.clone()); }
             for call in &f.calls {
-                if let Some((refused, overridden, authority)) = known.get(call) {
+                if let Some((refused, overridden)) = known.get(call) {
                     f.refused.extend(refused.clone());
                     f.overridden.extend(overridden.clone());
-                    f.authority |= authority;
                 }
             }
-            changed |= prior != (f.refused.len(), f.overridden.len(), f.authority);
+            changed |= prior != (f.refused.len(), f.overridden.len());
         }
         if !changed {
             break;
@@ -683,7 +694,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         all_overridden.extend(f.overridden.clone());
     }
     let registered: BTreeSet<_> = registry.iter().map(|r| r.0.clone()).collect();
-    refusals::finish(refusal_sites, &functions, &registered, &mut audit);
+    refusals::finish(root, refusal_sites, &functions, &registered, &mut audit);
     for f in &functions {
         for code in f.refused.union(&f.overridden) {
             if !registered.contains(code) {

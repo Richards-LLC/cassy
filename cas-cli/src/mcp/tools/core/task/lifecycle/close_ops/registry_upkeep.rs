@@ -464,18 +464,21 @@ fn changed<T: serde::Serialize>(current: &T, before: Option<&T>) -> bool {
 }
 fn has_changed_case(registry: &Registry, before: &RegistryBaseline, id: &str) -> bool {
     registry.bug_families.iter().any(|(key, family)| {
+        let family = family.case();
         family.tasks.iter().any(|task| task == id)
             && changed(
-                family,
+                &family,
                 before
                     .registry
                     .as_ref()
-                    .and_then(|r| r.bug_families.get(key)),
+                    .and_then(|r| r.bug_families.get(key))
+                    .map(BugFamily::case)
+                    .as_ref(),
             )
             && before.alternatives.get(key).is_none_or(|variants| {
                 variants
                     .iter()
-                    .all(|variant| changed(family, Some(variant)))
+                    .all(|variant| changed(&family, Some(&variant.case())))
             })
     }) || registry.invariants.iter().any(|(key, invariant)| {
         let names_task = invariant.bug.as_ref().is_some_and(|bug| {

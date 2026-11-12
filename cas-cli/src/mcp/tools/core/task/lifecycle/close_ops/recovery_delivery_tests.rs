@@ -1991,3 +1991,91 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
     assert!(ledger.iter().any(|event| matches!(&event.payload,
         cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::OverrideClose, .. })), "{ledger:?}");
 }
+
+// cas-372b: retire an integrated delivery's original content through an
+// intentional descendant, then recover its missing identity via supervisor MCP.
+fn evolved_recovery_fixture(env: &mut TestEnvGuard) -> (Recovery, String) {
+    let f = fixture(env);
+    let repo = f.dir.path();
+    git(repo, &["merge", "-q", "--ff-only", &f.final_tip]);
+    std::fs::write(repo.join("footer.css"), ".footer { display: grid; }\n").unwrap();
+    git(repo, &["add", "footer.css"]);
+    git(repo, &["commit", "-qm", "fix(cas-sibling): intentionally evolve footer"]);
+    let replacement = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &replacement]);
+    let cas_dir = repo.join(".cas");
+    open_agent_store(&cas_dir).unwrap()
+        .release_lease(TASK, "recovery-session").unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.factory_branch_anchor = Some("f".repeat(40));
+    task.deliverables.historical_factory_branch_anchors.push(f.final_tip.clone());
+    tasks.update(&task).unwrap();
+    f.core.set_agent_id_for_testing("supervisor-session".into());
+    (f, replacement)
+}
+
+#[tokio::test]
+async fn recover_delivery_accepts_reviewed_evolution_cas_372b() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, replacement) = evolved_recovery_fixture(&mut env);
+    let cas_dir = f.dir.path().join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let before = tasks.get(TASK).unwrap();
+    let reason = format!("reviewed-drop: {} -- intentionally evolved footer", &replacement[..12]);
+    let service = crate::mcp::CasService::new(f.core, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "recover_delivery", "id": TASK, "commit_receipt": f.final_tip,
+        "supervisor_override": true, "reason": reason,
+    })).unwrap();
+    service.task(Parameters(request)).await.unwrap();
+    let recovered = tasks.get(TASK).unwrap();
+    assert_eq!(recovered.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
+    assert_eq!(recovered.status, before.status);
+    assert_eq!(recovered.assignee, before.assignee);
+    assert!(recovered.deliverables.historical_factory_branch_anchors.contains(&"f".repeat(40)));
+    let audit: serde_json::Value = serde_json::from_str(
+        recovered.notes.lines().last().unwrap().split_once("DELIVERY IDENTITY RECOVERED: ").unwrap().1,
+    ).unwrap();
+    assert_eq!(audit["actor"], "supervisor-session");
+    assert_eq!(audit["reason"], reason);
+    assert_eq!(audit["head"], f.final_tip);
+    assert!(audit["proof"].as_str().unwrap().contains(&replacement));
+}
+
+#[tokio::test]
+async fn recover_delivery_refuses_unproven_evolution_cas_372b() {
+    let mut env = TestEnvGuard::temp_home();
+    let (f, replacement) = evolved_recovery_fixture(&mut env);
+    let repo = f.dir.path();
+    let cas_dir = repo.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let before = tasks.get(TASK).unwrap();
+    std::fs::write(repo.join("unrelated.txt"), "unrelated\n").unwrap();
+    git(repo, &["add", "unrelated.txt"]);
+    git(repo, &["commit", "-qm", "unrelated target update"]);
+    let unrelated = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &unrelated]);
+    git(repo, &["checkout", "-q", "-b", "unmerged", &f.final_tip]);
+    std::fs::write(repo.join("footer.css"), ".footer { display: flex; }\n").unwrap();
+    git(repo, &["add", "footer.css"]);
+    git(repo, &["commit", "-qm", "unmerged footer replacement"]);
+    let unmerged = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["checkout", "-q", "main"]);
+    let service = crate::mcp::CasService::new(f.core, None);
+    for (override_flag, reason) in [
+        (true, "inspected the delivery".into()),
+        (false, format!("reviewed-drop: {replacement} -- missing override")),
+        (true, format!("reviewed-drop: {unmerged} -- not reachable")),
+        (true, format!("reviewed-drop: {unrelated} -- wrong path")),
+        (true, format!("reviewed-drop: {} -- predates delivery", f.old)),
+    ] {
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "recover_delivery", "id": TASK, "commit_receipt": f.final_tip,
+            "supervisor_override": override_flag, "reason": reason,
+        })).unwrap();
+        let error = service.task(Parameters(request)).await.unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(tasks.get(TASK).unwrap(), before);
+    }
+}

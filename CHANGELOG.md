@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.20.0] - 2026-11-12
+
+### Fixed — Release trains
+
+- **Version check ignores longer numbers** — Was: the release gate's version-literals row matched the release version as plain text, so a Node `v24.x` path that happened to end in the release number failed every push on the train (GH #1865). Now: it matches the version only as a whole number; a version followed by a suffix such as `-rc.1` still fails.
+- **One shared default train** — New tasks use shared origin branch history to skip stale or superseded trains, preserve fresh lanes, and refuse divergent candidates. Release cuts retire stale admissions without closing unfinished work.
+
+### Fixed — Pre-merge verification
+
+- **Peer evidence reaches the verifier** — Was: merging another machine's delivery stalled on a verifier supervisor_call, because the task's evidence lived only in the publishing machine's artifacts directory, and a supervisor had to copy it by hand. Now: before a pre-merge review candidate is fingerprinted and dispatched, each committed artifact the peer published for the task is downloaded from Cloud into this machine's task evidence directory under its published name. Local files are kept, each artifact is fetched once, and a restored LEDGER.md no longer makes the first merge attempt refuse its own candidate.
+
+### Fixed — Verification
+
+- **Retain review across independent registry upkeep** — A sibling delivery's separate journey registry edits keep the original approval when the delivery's hunks and surrounding context stay unchanged. Edits to reviewed context still require a fresh review.
+
+### Fixed — Factory
+
+- **Intentional waits stay quiet** — The progress watchdog excludes tasks blocked by open dependencies and tasks assigned to held workers, preventing stall warnings and operator pages until work becomes actionable again.
+- **Peer landings no longer ask for a reply** — Was: a published landing approval from a peer machine arrived as a question, with an instruction to reply, although nothing needed answering. Now: it arrives as a status with no reply instruction and still wakes the receiving supervisor, so the train's movement is seen promptly.
+- **Return from detached historical checkouts** — Worker Git guards recognize checkout and switch navigation across branch, previous-tip, detach, create and orphan forms. Detached commits, path restores and forced branch-ref rewrites stay guarded, including switch force-create aliases.
+
+### Fixed — Releases
+
+- **Cut fully reviewed trains** — Release cuts allow trains whose members are already closed after review and QA. A nonempty preview with nothing closable still refuses when members remain held or not eligible.
+
+### Fixed — Sessions
+
+- **Supervisor judgement survives an automatic context clear** — Was: the auto-clear handoff cut the supervisor's saved judgement to fit the session-start budget and stored the cut copy with a pointer back to itself, so the rest was lost; day-old idle and lifecycle notices filled the pending list, and workers were listed by registry status. Now: the handoff memory keeps the whole judgement first and only injections shorten it; idle and lifecycle notices older than an hour collapse to one count line and sort after live asks in the receipt; worker lines show the liveness `worker_status` reports.
+
+### Fixed — Release reconciliation
+
+- **Parent review without a session** — Release reconciliation uses its recorded release identity to request parent verification, allowing unregistered CLI processes to queue independent review instead of holding the epic with an agent registration error.
+
 ## [4.19.0] - 2026-11-12
 
 ### Fixed — Release cuts

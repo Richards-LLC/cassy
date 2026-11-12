@@ -1,3 +1,0 @@
-### Fixed — Sessions
-
-- **Supervisor judgement survives an automatic context clear** — Was: the auto-clear handoff cut the supervisor's saved judgement to fit the session-start budget and stored the cut copy with a pointer back to itself, so the rest was lost; day-old idle and lifecycle notices filled the pending list, and workers were listed by registry status. Now: the handoff memory keeps the whole judgement first and only injections shorten it; idle and lifecycle notices older than an hour collapse to one count line and sort after live asks in the receipt; worker lines show the liveness `worker_status` reports.

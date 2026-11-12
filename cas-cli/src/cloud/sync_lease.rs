@@ -1,4 +1,4 @@
-//! One cloud sync at a time per store (cas-f1fb).
+//! Serialize entity, knowledge and quality sync separately per store (cas-f1fb).
 //!
 //! Background syncers take this lease: each `cas serve` daemon's sync tick,
 //! and the hub's idle-store sweep through `cas cloud sync --background`.
@@ -23,7 +23,7 @@ use fs2::FileExt;
 pub const SYNC_LEASE_FILE: &str = "cloud-sync.lock";
 
 /// Exit code of `cas cloud sync --background` when another syncer holds the
-/// lease (`EX_TEMPFAIL`): nothing ran, and the store will be retried later.
+/// lease (`EX_TEMPFAIL`): entity push/pull did not run; the store is retried later.
 pub const SYNC_LEASE_BUSY_EXIT: i32 = 75;
 
 /// The lease file for one store.

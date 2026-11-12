@@ -1,6 +1,90 @@
 use super::*;
 use cas_types::{FactoryBranchStart, TaskStatus, WorkTarget};
 
+#[test]
+fn unregistered_reconcile_queues_parent_review_cas_d47d() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    for key in ["CAS_SESSION_ID", "CAS_AGENT_NAME", "CAS_AGENT_ID"] {
+        env.remove(key);
+    }
+    let repo = env.home().join("release");
+    std::fs::create_dir_all(&repo).unwrap();
+    let root = crate::store::init_cas_dir(&repo).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &repo);
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='parent-fixture'\n[verification]\nenabled=true\n").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    git(&["remote", "add", "origin", "https://github.com/example/parent-fixture.git"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    git(&["add", ".gitignore"]);
+    git(&["commit", "-m", "published release"]);
+    let published = git(&["rev-parse", "HEAD"]);
+    let tasks = crate::store::open_task_store(&root).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let reviewer = cas_types::Agent::new_with_role(
+        "parent-reviewer".into(), "parent-reviewer".into(), cas_types::AgentRole::Supervisor,
+    );
+    agents.register(&reviewer).unwrap();
+    let mut parent = Task::new("cas-parent".into(), "Published parent".into());
+    parent.task_type = cas_types::TaskType::Epic;
+    parent.origin_project = Some("parent-fixture".into());
+    parent.epic_verification_owner = Some(reviewer.id.clone());
+    tasks.add(&parent).unwrap();
+    let mut child = Task::new("cas-shipped".into(), "Closed shipped member".into());
+    child.origin_project = parent.origin_project.clone();
+    child.status = TaskStatus::Closed;
+    child.deliverables.factory_branch_anchor = Some(published.clone());
+    child.deliverables.factory_branch_start = Some(FactoryBranchStart {
+        work_target: WorkTarget { repo_selector: "project:parent-fixture".into(), target_branch: "main".into() },
+        branch: "factory/worker".into(), assignee: "worker".into(), base_sha: published.clone(),
+    });
+    tasks.add(&child).unwrap();
+    tasks.add_dependency(&cas_types::Dependency::new(
+        child.id.clone(), parent.id.clone(), cas_types::DependencyType::ParentChild,
+    )).unwrap();
+    let scope = ReleaseScope {
+        project_id: "parent-fixture".into(), repository: "example/parent-fixture".into(),
+        release_id: format!("v{}", env!("CARGO_PKG_VERSION")),
+        reviewed_sha: published.clone(), final_release_sha: published,
+        promotion_pr: None, release_tag: None, constituent_epic_ids: vec![parent.id.clone()],
+        included_task_ids: vec![child.id.clone()], no_code_members: BTreeMap::new(), proof_refs: vec![],
+    };
+    let core = crate::mcp::CasCore::for_cli(root.clone());
+    assert!(core.get_agent_id().is_err());
+    let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    assert!(inventory.exceptions.is_empty(), "{:?}", inventory.exceptions);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(crate::release_reconcile::reconcile_release(
+        &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
+    )).unwrap();
+    let Some(crate::release_reconcile::ParentOutcome::Pending { dispatch_id, owner }) = result.parents.get(&parent.id) else {
+        panic!("{:?}", result.parents);
+    };
+    assert_eq!(owner, &reviewer.id);
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, &parent.id).unwrap().unwrap();
+    assert_eq!(&dispatch.id, dispatch_id);
+    let key = cas_store::release_reconcile_store::ReleaseOperationKey {
+        project_id: scope.project_id.clone(), release_id: scope.release_id.clone(),
+        final_release_sha: scope.final_release_sha.clone(),
+    };
+    assert_eq!(dispatch.requester_agent_id, format!("release:{}", key.id().unwrap()));
+    assert_eq!(dispatch.state, cas_types::VerificationDispatchState::Pending);
+    assert!(cas_store::get_verification_for_dispatch(&root, dispatch_id).unwrap().is_none());
+    assert_eq!(tasks.get(&parent.id).unwrap().status, TaskStatus::Open);
+    assert_eq!(tasks.get(&child.id).unwrap().status, TaskStatus::Closed);
+    let replay = runtime.block_on(crate::release_reconcile::reconcile_release(
+        &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
+    )).unwrap();
+    assert_eq!(result.parents, replay.parents);
+}
+
 /// Publication of a later tree cannot turn one missing review into a train-wide hold.
 #[test]
 fn published_train_closes_members_independently_cas_734b() {

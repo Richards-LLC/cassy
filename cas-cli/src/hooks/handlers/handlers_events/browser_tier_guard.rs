@@ -2,6 +2,54 @@
 //! Runs before filesystem auto-approval, including without a Cassy root.
 use cas_core::hooks::types::HookInput;
 
+/// Playwright test options whose next argument is their value.
+const VALUE_OPTIONS: &[&str] = &[
+    "--config",
+    "-c",
+    "--project",
+    "--output",
+    "--reporter",
+    "--workers",
+    "--timeout",
+    "--grep",
+    "-g",
+    "--grep-invert",
+    "--shard",
+    "--retries",
+    "-j",
+    "--trace",
+    "--repeat-each",
+    "--max-failures",
+    "--browser",
+    "--global-timeout",
+    "--tsconfig",
+];
+
+/// `test --list` only collects: no browser, server or test runs (GH #1852).
+/// Every option must be understood, because an option value can itself be
+/// `--list` (`--grep-invert --list` runs the suite) and `--` turns later
+/// words into file filters. Positional words only narrow the listing.
+fn collection_only(args: &[String]) -> bool {
+    let mut list = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--list" {
+            list = true;
+        } else if VALUE_OPTIONS.contains(&arg) {
+            i += 1;
+        } else if arg.starts_with('-')
+            && !arg
+                .split_once('=')
+                .is_some_and(|(name, _)| name.starts_with("--") && VALUE_OPTIONS.contains(&name))
+        {
+            return false;
+        }
+        i += 1;
+    }
+    list
+}
+
 fn selected(args: &[String]) -> bool {
     if args
         .iter()
@@ -33,26 +81,7 @@ fn selected(args: &[String]) -> bool {
             i += if arg == "--grep" || arg == "-g" { 2 } else { 1 };
             continue;
         }
-        if matches!(
-            arg.as_str(),
-            "--config"
-                | "-c"
-                | "--project"
-                | "--output"
-                | "--reporter"
-                | "--workers"
-                | "--timeout"
-                | "--grep-invert"
-                | "--shard"
-                | "--retries"
-                | "-j"
-                | "--trace"
-                | "--repeat-each"
-                | "--max-failures"
-                | "--browser"
-                | "--global-timeout"
-                | "--tsconfig"
-        ) {
+        if VALUE_OPTIONS.contains(&arg.as_str()) {
             i += 2;
             continue;
         }
@@ -178,7 +207,11 @@ fn unfiltered(command: &str, depth: usize) -> bool {
                     args,
                     [subcommand, help] if subcommand == "test" && (help == "--help" || help == "-h")
                 );
-            let needs_selection = !help_only && (verified || args.iter().any(|a| a == "test"));
+            let collection = !verified
+                && args.first().is_some_and(|arg| arg == "test")
+                && collection_only(&args[1..]);
+            let needs_selection =
+                !help_only && !collection && (verified || args.iter().any(|a| a == "test"));
             // The direct CLI consumes its subcommand; the verified runner adds
             // that subcommand itself, so all of its args are filters/options.
             let args = if !verified && args.first().is_some_and(|arg| arg == "test") {

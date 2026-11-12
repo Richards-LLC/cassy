@@ -181,6 +181,46 @@ fn published_train_closes_members_independently_cas_734b() {
     let preview = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
     assert_eq!(snapshot(&root), before);
     assert_eq!(snapshot(&cache), cache_before);
+    // cas-afdf: replay a consolidated store copy outside Git from the
+    // original repository. Only the candidate's store location is relocated;
+    // repository, proof, key, source and tree bindings remain unchanged.
+    let replay = tempfile::tempdir().unwrap();
+    let copied_root = replay.path().join("store");
+    std::fs::create_dir_all(&copied_root).unwrap();
+    for (path, bytes) in &before {
+        let relative = path.strip_prefix(&root).unwrap();
+        if relative == Path::new("cas.db") || path.to_string_lossy().ends_with("-wal") { continue; }
+        let copy = copied_root.join(relative);
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        if relative.starts_with("verification-candidates") && path.file_name().unwrap() == "candidate.json" {
+            let mut candidate: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            candidate["cas_root"] = serde_json::json!(copied_root);
+            std::fs::write(copy, serde_json::to_vec(&candidate).unwrap()).unwrap();
+        } else {
+            std::fs::write(copy, bytes).unwrap();
+        }
+    }
+    conn.backup(rusqlite::DatabaseName::Main, copied_root.join("cas.db"), None).unwrap();
+    assert!(crate::worktree::GitOperations::new(replay.path().to_path_buf()).canonical_repo_key().is_err());
+    env.set("CAS_ROOT", &copied_root);
+    env.remove("CAS_CLONE_PATH");
+    {
+        let _cwd = env.enter_dir(&repo);
+        let replay_inventory = resolve_release_inventory(&copied_root, &repo, &scope).unwrap();
+        let replay_preview = crate::release_reconcile::preview_release(&copied_root, &repo, &replay_inventory).unwrap();
+        assert_eq!(serde_json::to_value(&replay_preview).unwrap(), serde_json::to_value(&preview).unwrap());
+        // Sharing an origin URL cannot substitute a different Git common dir.
+        let foreign = replay.path().join("other-repository");
+        git(&["clone", "--shared", "--quiet", repo.to_str().unwrap(), foreign.to_str().unwrap()]);
+        let output = Command::new("git").arg("-C").arg(&foreign)
+            .args(["remote", "set-url", "origin", "https://github.com/example/close-fixture.git"]).output().unwrap();
+        assert!(output.status.success());
+        assert!(resolve_release_inventory(&copied_root, &foreign, &scope).is_err());
+    }
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &repo);
+    assert_eq!(snapshot(&root), before);
+    assert_eq!(snapshot(&cache), cache_before);
     use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
     // Stale generations and unbound report approval hold only their member.
     let mut stale = inventory.clone();

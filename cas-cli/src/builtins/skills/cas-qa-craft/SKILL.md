@@ -101,14 +101,9 @@ These hold for every walk, task pass or [independent pass](references/independen
 
 ## Close gate
 
-In qa.mode=per_task only: close enforces fresh, commit-bound evidence (`qa.evidence_gate`). Rendered surfaces need
-`qa/bundle.json`, cited in a `platform_proof` note as `qa-bundle: <abs path>/bundle.json`; follow
-its contract, including passing `Expect`, visual QA, critique floors and base-build comparison for
-scoped findings. API-only changes need `LEDGER.md` and `contracts.diff`; demo-only non-web changes
-need a fresh `LEDGER.md` with a `PASS` / `real-build` row, plus a cas-cli-craft `terminal-qa: PASS`
-report under `<task-id>/terminal-qa/` when the diff touches `qa.terminal_render_paths` (`node
-<skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <cmd> --out <dir> -- <cmd>`).
-`<skills-dir>` is the harness skill directory: `.claude/skills`, `.codex/skills` or `.grok/skills`.
+In qa.mode=per_task only, close enforces fresh commit-bound evidence (`qa.evidence_gate`). Rendered surfaces need qa/bundle.json cited as qa-bundle: <abs path>/bundle.json in platform_proof; follow its passing Expect, visual QA, critique and base-build comparison contract.
+API-only changes need LEDGER.md and contracts.diff. Demo-only non-web changes need a real-build PASS ledger; terminal-render paths additionally use cas-cli-craft terminal-qa: PASS.
+The harness skill directory is .claude/skills, .codex/skills or .grok/skills; use its existing evidence tools rather than a second format.
 
 Any delivery that adds `test.fixme`, `.skip` or `.only` is refused unless the marker or the line
 above it carries `cas-allow-skip: <reason>`. Rejections name the exact command that produces what is

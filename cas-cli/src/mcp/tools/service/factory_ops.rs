@@ -328,7 +328,30 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
             crate::capability::probe_account_auth(cli, account_dir, deadline)
         },
         || installed_codex_version(deadline),
-    )
+    )?;
+    preflight_codex_exec_host(specs, deadline)
+}
+
+/// GH #1870: a logged-in account still cannot run a command when Codex's
+/// shell-execution host never starts. Refused as its own failure, so it never
+/// reads as a login problem.
+fn preflight_codex_exec_host(
+    specs: &[cas_mux::WorkerSpec],
+    deadline: crate::bounded_process::Deadline,
+) -> Result<(), String> {
+    if !specs.iter().any(|spec| spec.cli == cas_mux::SupervisorCli::Codex) {
+        return Ok(());
+    }
+    let host = crate::capability::probe_codex_exec_host(deadline);
+    if host.availability != cas_factory::CapabilityAvailability::Unavailable {
+        return Ok(());
+    }
+    Err(format!(
+        "spawn refused: Codex shell execution is unavailable — {}. {} \
+         No worktree was created and no task was assigned.",
+        host.reason.unwrap_or_default(),
+        host.remediation.unwrap_or_default(),
+    ))
 }
 
 /// Probe-injected core of [`preflight_account_auth`], so the refusal policy is
@@ -4390,6 +4413,24 @@ impl CasService {
                 ),
             ));
         }
+        // GH #1870: a relaunch on an account or Codex install that cannot run
+        // commands only advertises another dead worker; refuse it like a spawn.
+        // Unlike a spawn, the recorded account is not re-selected: only an
+        // affirmative probe verdict refuses.
+        let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+        let specs = std::slice::from_ref(&spec);
+        preflight_account_auth_with(
+            specs,
+            |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+            || installed_codex_version(deadline),
+        )
+        .and_then(|()| preflight_codex_exec_host(specs, deadline))
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("recycle_worker refused for {worker_name}: {error} Nothing was stopped or queued."),
+            )
+        })?;
         let mut spec_payload = serde_json::to_value(&spec).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,

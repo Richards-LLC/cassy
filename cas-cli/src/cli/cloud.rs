@@ -2685,7 +2685,23 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
 // QUEUE - View and manage sync queue
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, out: &mut dyn io::Write) -> anyhow::Result<()> {
+/// Read-only fetch of the team's current task and dependency rows. Inherited
+/// user credentials are used in memory only: unlike the purge, a migration
+/// preview must not rewrite `cloud.json`. `None` when the team is unreachable.
+fn fetch_team_rows_for_migration(cas_root: &Path, team: &str, project: &str) -> Option<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+    let mut config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    if let Ok(user) = CloudConfig::load_user() { config.inherit_credentials_from(&user); }
+    let syncer = crate::cloud::CloudSyncer::new_for_project(
+        std::sync::Arc::new(SyncQueue::open_read_only(cas_root).ok()?),
+        config,
+        crate::cloud::CloudSyncerConfig::default(),
+        project.to_string(),
+        cas_root,
+    );
+    Some((syncer.fetch_task_snapshot(Some(team), project).ok()?, syncer.fetch_dependency_snapshot(Some(team), project).ok()?))
+}
+
+fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, team_rows: Option<(&[serde_json::Value], &[serde_json::Value])>, out: &mut dyn io::Write) -> anyhow::Result<()> {
     // Deliberately avoid the inheriting loader: its credential cache writes.
     let config = CloudConfig::load_from_cas_dir(cas_root)?;
     let team = config.active_team_id().ok_or_else(|| anyhow::anyhow!("Link this project first with `cas cloud team set <team>`"))?;
@@ -2693,19 +2709,28 @@ fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, out: 
     anyhow::ensure!(!apply || config.team_only,
         "Apply requires an operator-declared team-only project: `cas config set cloud.team_only true`; preview with `cas cloud queue migrate-to-team`");
     let queue = if apply { SyncQueue::open(cas_root)? } else { SyncQueue::open_read_only(cas_root)? };
-    let rows = queue.migrate_personal_to_team(&team, &project, apply)?;
+    let rows = queue.migrate_personal_to_team_checked(&team, &project, apply, team_rows)?;
     let eligible = rows.iter().filter(|row| row.eligible).count();
+    let echoes = rows.iter().filter(|row| row.reason == "already_on_team_purge_pull_echoes").count();
+    let purge = "cas cloud queue --purge-pull-echoes --dry-run";
     if json {
         serde_json::to_writer(&mut *out, &serde_json::json!({
             "operation":"migrate_to_team", "dry_run":!apply, "team_id":team,
             "project_id":project,"team_only":config.team_only,"eligible":eligible,
             "enqueued":if apply {eligible} else {0}, "personal_retired":0,
+            "already_on_team":echoes, "team_rows_checked":team_rows.is_some(),
+            "purge_pull_echoes": if echoes > 0 { Some(purge) } else { None },
             "rows":rows, "next":SyncQueue::personal_backlog_remedy(config.team_only),
         }))?;
         writeln!(out)?;
     } else {
         writeln!(out, "{}: {eligible} eligible; {} retained", if apply {"Enqueued"} else {"Preview"}, rows.len()-eligible)?;
         writeln!(out, "Personal copies remain until itemized team delivery is acknowledged.")?;
+        if echoes > 0 {
+            writeln!(out, "{echoes} already on team, not enqueued; purge with:")?;
+            writeln!(out, "  {purge}")?;
+        }
+        if team_rows.is_none() { writeln!(out, "Team rows not checked; echoes may show as eligible.")?; }
         for row in &rows {
             // Full identifiers are available in JSON; fixed vocabulary is ASCII.
             let id: String = row.entity_id.chars().take(24).collect();
@@ -2839,7 +2864,12 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
     if let Some(CloudQueueCommand::MigrateToTeam { apply }) = args.command {
         anyhow::ensure!(!args.purge_team_owned && !args.clear && !args.retry && args.prune.is_none(),
             "migrate-to-team cannot be combined with queue maintenance flags");
-        return execute_queue_migrate_to_team(cas_root, cli.json, apply, &mut io::stdout());
+        let team_rows = (|| {
+            let team = CloudConfig::load_from_cas_dir(cas_root).ok()?.active_team_id()?;
+            let project = crate::cloud::resolve_canonical_id_for_sync(cas_root).ok()?;
+            fetch_team_rows_for_migration(cas_root, &team, &project)
+        })();
+        return execute_queue_migrate_to_team(cas_root, cli.json, apply, team_rows.as_ref().map(|(t, d)| (t.as_slice(), d.as_slice())), &mut io::stdout());
     }
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
@@ -8571,21 +8601,21 @@ mod team_cmd_tests {
         let before_config = fs::read(root.join("cloud.json")).unwrap();
         let before_queue = serde_json::to_value(queue.list_all(10).unwrap()).unwrap();
         let mut output = Vec::new();
-        execute_queue_migrate_to_team(&root, true, false, &mut output).unwrap();
+        execute_queue_migrate_to_team(&root, true, false, None, &mut output).unwrap();
         let preview: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(preview["dry_run"], true); assert_eq!(preview["enqueued"], 0);
         assert_eq!(preview["eligible"], 1); assert_eq!(preview["rows"][0]["entity_id"], task_id);
-        let _ = execute_queue_migrate_to_team(&root, true, true, &mut Vec::new()).unwrap_err();
+        let _ = execute_queue_migrate_to_team(&root, true, true, None, &mut Vec::new()).unwrap_err();
         assert_eq!(fs::read(root.join("cloud.json")).unwrap(), before_config);
         assert_eq!(serde_json::to_value(queue.list_all(10).unwrap()).unwrap(), before_queue);
         let mut plain = Vec::new();
-        execute_queue_migrate_to_team(&root, false, false, &mut plain).unwrap();
+        execute_queue_migrate_to_team(&root, false, false, None, &mut plain).unwrap();
         assert!(plain.is_ascii());
         assert!(String::from_utf8(plain).unwrap().lines().all(|l|l.len() <= 80));
         let mut local = crate::config::Config::load(&root).unwrap();
         local.set("cloud.team_only", "true").unwrap(); local.save(&root).unwrap();
         let mut applied = Vec::new();
-        execute_queue_migrate_to_team(&root, true, true, &mut applied).unwrap();
+        execute_queue_migrate_to_team(&root, true, true, None, &mut applied).unwrap();
         let applied: serde_json::Value = serde_json::from_slice(&applied).unwrap();
         assert_eq!(applied["enqueued"], 1); assert_eq!(applied["personal_retired"], 0);
         assert_eq!(queue.personal_row_count().unwrap(), 1);

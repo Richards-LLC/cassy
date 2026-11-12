@@ -5287,10 +5287,12 @@ mod tests {
                 .state,
             VerificationDispatchState::Pending
         );
-        create_verification_dispatch_bound(
+        let renewed = create_verification_dispatch_bound(
             dir.path(), "cas-timeout-a", "worker-a", "supervisor-a",
-            &VerificationProofBoundary::default(), future, true,
-        ).expect("supervisor recovery starts a fresh cycle");
+            &VerificationProofBoundary::default(), future, false,
+        ).expect("a task-only timeout starts a fresh pending cycle without approval");
+        assert_ne!(renewed.id, timed_out.id);
+        assert_eq!(renewed.state, VerificationDispatchState::Pending);
         assert!(expired_verification_dispatches(
             dir.path(), past - Duration::seconds(1), Utc::now(), 10,
         ).unwrap().is_empty(), "a superseded timeout must not page for the new cycle");

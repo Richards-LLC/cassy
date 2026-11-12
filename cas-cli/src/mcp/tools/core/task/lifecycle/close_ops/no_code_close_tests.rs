@@ -1131,6 +1131,69 @@ async fn no_code_spike_closes_when_its_target_exists_only_on_origin_gh1167() {
     assert_closed_without_lane(&f, id, &response);
 }
 
+/// cas-afd2: a dead verifier must not permanently jail either a source
+/// delivery or a no-code report. An active cycle remains immutable.
+#[tokio::test]
+async fn expired_task_close_renews_verification_with_corrected_proof_cas_afd2() {
+    use cas_types::{VerificationDispatchState as State, VerificationProofBoundary};
+    for no_code in [false, true] {
+        for state in ["due", "timed-out", "live"] {
+            let mut env = TestEnvGuard::temp_home();
+            let f = fixture(&mut env, "main");
+            env.set("CAS_AGENT_ROLE", "worker");
+            let id = "cas-afd2";
+            if no_code {
+                let mut task = no_code_spike(id, "main");
+                task.external_ref = Some(PROOF.into());
+                f.put(&task);
+                claim(&f, id);
+            } else {
+                let (checkout, lane) = issue_delivery(&f, id, "main");
+                let mut task = f.task(id);
+                task.task_type = TaskType::Task;
+                f.put(&task);
+                std::fs::write(checkout.join("own.txt"), "own delivery\n").unwrap();
+                git(&checkout, &["add", "own.txt"]);
+                git(&checkout, &["commit", "-qm", "fix(cas-afd2): own delivery"]);
+                git(&checkout, &["push", "-q", "origin", &lane]);
+            }
+            // The explicit dispatch still requires review if config changes.
+            let deadline = chrono::Utc::now() + chrono::Duration::minutes(if state == "live" { 10 } else { -1 });
+            let old = cas_store::create_verification_dispatch_bound(
+                &f.cas_dir(), id, "nocode-worker-session", "nocode-supervisor-session",
+                &VerificationProofBoundary::task(), deadline, false,
+            ).unwrap();
+            if state == "timed-out" {
+                cas_store::timeout_verification_dispatch(&f.cas_dir(), id, chrono::Utc::now()).unwrap().unwrap();
+            }
+            let mut task = f.task(id);
+            task.pending_verification = true;
+            f.put(&task);
+            let corrected = "https://example.test/deploys/corrected";
+            let mut request = serde_json::json!({"action":"close", "id":id, "reason":"Corrected evidence recorded"});
+            if no_code { request["external_ref"] = corrected.into(); }
+            let response = call(&f.worker, request.clone()).await;
+            let current = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "{no_code}/{state}: {response}");
+            if state == "live" {
+                assert_eq!(current.id, old.id, "{response}");
+                if no_code { assert_eq!(f.task(id).external_ref.as_deref(), Some(PROOF)); }
+                continue;
+            }
+            assert_ne!(current.id, old.id, "{no_code}/{state}: {response}");
+            assert_eq!(current.state, State::Pending, "{response}");
+            assert!(current.deadline_at > chrono::Utc::now());
+            assert!(f.task(id).pending_verification);
+            assert_eq!(cas_store::get_verification_dispatch(&f.cas_dir(), &old.id).unwrap().state, State::TimedOut);
+            if no_code { assert_eq!(f.task(id).external_ref.as_deref(), Some(corrected)); }
+            // A retry must retain the fresh cycle, not dispatch again or close.
+            let again = call(&f.worker, request).await;
+            assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap().id, current.id, "{again}");
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
+        }
+    }
+}
+
 /// GH #1766, #1817: a no-code spike's audit report is named LEDGER.md. Start
 /// announces how close classifies that file; close accepts the report unless
 /// it declares the canonical QA matrix, which stays validated.

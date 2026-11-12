@@ -442,6 +442,7 @@ mod tests {
                 "build_capacity_v1": serde_json::json!({
                     "observed_at": (Utc::now() - Duration::seconds(age)).to_rfc3339(),
                     "free_slots": slots, "load_1m": load, "cpu_count": 8,
+                    "live_workers": 0, "max_workers": 8,
                     "cpu_psi_avg10": null, "memory_psi_avg10": null
                 }).to_string()
             }
@@ -480,6 +481,74 @@ mod tests {
             &root, &sender, "cas-retry", None, &Default::default(),
             &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
         )).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_peer_at_worker_cap_is_not_routed_cas_a92f() {
+        let server = MockServer::start().await;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let (root, mut sender) = failed_route_fixture(&server, env.home()).await;
+        server.reset().await;
+        let mut full = peer("best", 1, 17.64, 0);
+        let capacity = full["metadata"][CAPACITY_META].as_str().unwrap();
+        let mut capacity: serde_json::Value = serde_json::from_str(capacity).unwrap();
+        capacity["live_workers"] = 8.into(); capacity["max_workers"] = 8.into();
+        full["metadata"][CAPACITY_META] = capacity.to_string().into();
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(directory(vec![full]))).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/peer-messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"sent","status":"queued"}))).mount(&server).await;
+        assert!(retry_route(&root, &sender).await.unwrap().is_none());
+        assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST").count(), 0);
+
+        // Fresh local publication counts quiet live harnesses, excluding dead registry rows.
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut worker = cas_types::Agent::new("quiet-worker".into(), "quiet-worker".into());
+        worker.role = cas_types::AgentRole::Worker;
+        worker.last_heartbeat = Utc::now() - Duration::hours(1);
+        worker.pid = Some(std::process::id()); agents.register(&worker).unwrap();
+        worker.id = "dead-row".into(); worker.name = "dead-row".into(); worker.pid = None;
+        agents.register(&worker).unwrap();
+        publish_capacity(&root, &mut sender);
+        let sample: serde_json::Value = serde_json::from_str(&sender.metadata[CAPACITY_META]).unwrap();
+        assert_eq!(sample["live_workers"], 1); assert_eq!(sample["max_workers"], 8);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovered_local_slot_cancels_unsent_route_cas_a92f() {
+        let server = MockServer::start().await;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let (root, sender) = failed_route_fixture(&server, env.home()).await;
+        assert!(retry_route(&root, &sender).await.is_err());
+        let routed_root = root.clone();
+        let result = tokio::task::spawn_blocking(move || route(
+            &routed_root, &sender, "cas-retry", None, &Default::default(),
+            &crate::factory_build_guard::evaluate(8, Some(1.0), 0, 1, 5),
+        )).await.unwrap().unwrap();
+        assert!(result.is_none());
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let state: String = conn.query_row("SELECT state FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(state, "abandoned");
+        assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST").count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delivered_task_route_is_reused_without_peer_lookup_or_send_cas_a92f() {
+        let server = MockServer::start().await;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let (root, sender) = failed_route_fixture(&server, env.home()).await;
+        server.reset().await;
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(directory(vec![peer("best", 1, 4.0, 0)]))).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/peer-messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"delivered-task-route","status":"queued"}))).mount(&server).await;
+        assert!(retry_route(&root, &sender).await.unwrap().is_some());
+        server.reset().await; // Directory is unavailable after the original ask was accepted.
+        assert!(retry_route(&root, &sender).await.unwrap().is_some());
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let count: usize = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

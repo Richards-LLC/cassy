@@ -2708,18 +2708,20 @@ child.wait()
     #[cfg(unix)]
     #[test]
     fn worker_proofs_include_fixed_guards_before_an_unrelated_filter() {
-        let mut env = crate::test_support::TestEnvGuard::new();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         // Keep the real lease above the wrapper's log FD 3, so that log
         // descriptor cannot accidentally satisfy the inherited-lease check.
         let _reserved_fds: Vec<_> = (0..16).map(|_| std::fs::File::open("/dev/null").unwrap()).collect();
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join(".cas");
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
         std::fs::create_dir(repo.join("scripts")).unwrap();
         std::fs::create_dir(repo.join("cas-cli")).unwrap();
-        std::fs::write(repo.join("cas-cli/Cargo.toml"), "[package]\nname = \"cas\"\n").unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = [\"cas-cli\"]\n").unwrap();
+        std::fs::write(repo.join("cas-cli/Cargo.toml"), "[package]\nname = \"cas\"\n[[test]]\nname = \"integration_factory\"\npath = \"factory.rs\"\n").unwrap();
+        std::fs::write(repo.join("cas-cli/factory.rs"), "// fixture\n").unwrap();
         for (name, source) in [
             ("check-test-shape.py", include_str!("../../scripts/check-test-shape.py")),
             ("rust_test_source.py", include_str!("../../scripts/rust_test_source.py")),
@@ -2733,15 +2735,48 @@ child.wait()
     [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 11
 fi
 printf '%s\n' "$*" >> target/invocations
-printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
-        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(unrelated)"].map(str::to_string);
-        execute_at(&root, &args, &repo, &fake).unwrap();
+printf '\033[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\033[0m\n'"#);
+        let scope = dir.path().join("scope");
+        fake_scope(&scope, r#"while [ "$1" != -- ]; do shift; done
+shift
+exec "$@" > target/raw.log 2>&1"#);
+        let args = ["nextest", "run", "-p", "cas", "--test", "integration_factory", "-E", "test(unrelated)"].map(str::to_string);
+        execute_at_with_scope(&root, &args, &repo, &fake, Some(&scope), None).unwrap();
         let invocations = std::fs::read_to_string(repo.join("target/invocations")).unwrap();
         assert!(invocations.contains("test_support::lib_test_process_env_mutation_is_isolated"), "{invocations}");
         assert!(invocations.contains("serialized_factory_fields_have_registry_entries_cas_f7b9"), "{invocations}");
         assert!(invocations.lines().last().unwrap().ends_with("test(unrelated)"), "{invocations}");
         assert_eq!(invocations.lines().count(), 2);
-        assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].ends_with("test(unrelated) 2"));
+        // cas-70b8: consume the ordinary runner's capture, without extracting
+        // or rewriting its bytes, through the supervisor receipt handler.
+        let head = fixture_head(&repo);
+        let receipt_path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &head, &targeted_test(&args).unwrap());
+        let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        let selected = PathBuf::from(receipt["test"]["selected_log"].as_str().expect("runner must expose its selected-test log"));
+        assert_eq!(std::fs::read(&selected).unwrap(), b"\x1b[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\x1b[0m\n");
+        assert!(passing_test_receipts(&root, &repo, &head)[0].contains(selected.to_str().unwrap()));
+        let raw = repo.join("target/raw.log");
+        assert_eq!(std::fs::read_to_string(&raw).unwrap().matches("Summary [").count(), 2);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        for (id, name, role) in [
+            ("worker-id", "worker", cas_types::AgentRole::Worker),
+            ("supervisor-id", "supervisor", cas_types::AgentRole::Supervisor),
+        ] {
+            agents.register(&cas_types::Agent::new_with_role(id.into(), name.into(), role)).unwrap();
+        }
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut task = cas_types::Task::new("cas-70b8".into(), "selected log".into());
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        let mut evidence = serde_json::json!({"head": head, "repo": repo.canonicalize().unwrap(), "cargo_args": args, "log_path": raw, "exit_code": 0});
+        assert!(record_supervisor_test(&core, "cas-70b8", &evidence.to_string()).is_err(), "combined guard evidence must remain inadmissible");
+        evidence["log_path"] = serde_json::json!(selected);
+        record_supervisor_test(&core, "cas-70b8", &evidence.to_string()).unwrap();
+        assert_eq!(passing_test_packages(&root, &repo, &head), vec!["cas"]);
         fake_cargo(&fake, r#"case "$*" in
     *test_support::*) printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n' ;;
     *) printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n' ;;

@@ -156,14 +156,14 @@
     <p class="eyebrow">Incident review · Practitioner · 2026-08-27 → 2026-08-30 · Checkout service</p>
     <div class="grid">
       <div>
-        <h1 class="verdict">One deploy, not a trend: checkout p95 <em>tripled</em> four minutes after 4.18.0 shipped and fell back within the hour of rollback.</h1>
+        <h1 class="verdict">One deploy, not a trend: checkout p95 <em>tripled</em> four minutes after 9.99.3 shipped and fell back within the hour of rollback.</h1>
         <hr class="rule">
         <p class="src">checkout.latency p95 · 1-min buckets · prod, all regions · 2026-08-27 00:00Z – 2026-08-30 00:00Z · n = 4.42M requests</p>
       </div>
       <figure>
         <svg viewBox="0 0 640 244" role="img" aria-labelledby="hero-t hero-d" preserveAspectRatio="xMidYMid meet">
-          <title id="hero-t">Checkout p95 over 72 hours: flat near 410 ms, a vertical step to 1,240 ms at the 4.18.0 promotion, and a return to 415 ms after rollback</title>
-          <desc id="hero-d">Line chart. Hourly p95 latency stays between 398 and 421 milliseconds from 2026-08-27 00:00Z until 2026-08-29 14:07Z, rises to about 1,240 milliseconds within four minutes of the 4.18.0 promotion, stays there until the 15:31Z rollback, and is back at 418 milliseconds by 16:23Z.</desc>
+          <title id="hero-t">Checkout p95 over 72 hours: flat near 410 ms, a vertical step to 1,240 ms at the 9.99.3 promotion, and a return to 415 ms after rollback</title>
+          <desc id="hero-d">Line chart. Hourly p95 latency stays between 398 and 421 milliseconds from 2026-08-27 00:00Z until 2026-08-29 14:07Z, rises to about 1,240 milliseconds within four minutes of the 9.99.3 promotion, stays there until the 15:31Z rollback, and is back at 418 milliseconds by 16:23Z.</desc>
           <rect x="543.1" y="18" width="10.5" height="196" fill="var(--verdict-soft)"/>
           <g stroke="var(--line)" stroke-width="1">
             <line x1="56" y1="214" x2="620" y2="214"/>
@@ -187,7 +187,7 @@
           <polyline fill="none" stroke="var(--verdict)" stroke-width="2.5" stroke-linejoin="round" points="543.1,40.7 546.4,38.9 549.5,39.8 553.6,41.7"/>
           <polyline fill="none" stroke="var(--ink-muted)" stroke-width="1.5" stroke-linejoin="round" points="553.6,41.7 557.3,126.9 560.3,155.5 573.0,156.7 620.0,155.9"/>
           <g font-family="var(--mono)" font-size="11">
-            <text x="536" y="30" text-anchor="end" fill="var(--verdict)" font-weight="600">1,240 ms · 4.18.0 promoted 14:07Z</text>
+            <text x="536" y="30" text-anchor="end" fill="var(--verdict)" font-weight="600">1,240 ms · 9.99.3 promoted 14:07Z</text>
             <line x1="538" y1="30" x2="543" y2="38" stroke="var(--verdict)" stroke-width="1"/>
             <text x="536" y="126" text-anchor="end" fill="var(--ink-muted)">rollback 15:31Z</text>
             <line x1="553.6" y1="41.7" x2="553.6" y2="120" stroke="var(--ink-muted)" stroke-width="1" stroke-dasharray="2 3"/>
@@ -222,12 +222,12 @@
       <ol class="timeline">
         <li>
           <span class="t">08-29 13:58Z</span><span class="spine"><span class="dot"></span></span>
-          <span class="ev"><b>checkout@4.18.0 canary passes</b> — 2% of traffic, p95 402 ms, no alerts.</span>
+          <span class="ev"><b>checkout@9.99.3 canary passes</b> — 2% of traffic, p95 402 ms, no alerts.</span>
         </li>
         <li class="elapsed-row"><span class="elapsed">+9 min</span></li>
         <li class="decisive">
           <span class="t">14:07Z</span><span class="spine"><span class="dot"></span></span>
-          <span class="ev"><b>4.18.0 promoted to 100%</b> — the decisive event.
+          <span class="ev"><b>9.99.3 promoted to 100%</b> — the decisive event.
             <span class="annot">The build adds a synchronous <code>validate_address</code> call to a third-party API, awaited inside the request path. Mean call time 820 ms; it only runs when the address carries a unit number, which the canary's 2% sample never hit.</span>
           </span>
         </li>
@@ -244,12 +244,12 @@
         <li><span class="elapsed">+24 min</span></li>
         <li>
           <span class="t">14:54Z</span><span class="spine"><span class="dot"></span></span>
-          <span class="ev"><b>Diff review finds the blocking call</b> — 4.18.0 vs 4.17.3, 41 files; the validator is the only change on the request path.</span>
+          <span class="ev"><b>Diff review finds the blocking call</b> — 9.99.3 vs 9.99.2, 41 files; the validator is the only change on the request path.</span>
         </li>
         <li><span class="elapsed">+37 min</span></li>
         <li>
           <span class="t">15:31Z</span><span class="spine"><span class="dot"></span></span>
-          <span class="ev"><b>Rollback to 4.17.3 started</b> — 84 min after promotion; 37 of them spent waiting for a second approver.</span>
+          <span class="ev"><b>Rollback to 9.99.2 started</b> — 84 min after promotion; 37 of them spent waiting for a second approver.</span>
         </li>
         <li><span class="elapsed">+52 min</span></li>
         <li class="good">
@@ -406,7 +406,7 @@
 <footer class="prov">
   <div class="wrap">
     <p class="eyebrow">Provenance</p>
-    <p>Markdown source: <code>docs/incidents/2026-08-29-checkout-p95.md</code> (this HTML is rendered from it, same commit). Metrics: <code>checkout.latency</code> p95 and p50, 1-min buckets, prod, 2026-08-27 00:00Z – 2026-08-30 00:00Z, queried 2026-08-30 09:12Z. Deploys: <code>deploys/checkout/2026-08-29.jsonl</code>. Alerts: <code>alerts/checkout-p95-high</code>. On-call note: <code>oncall/2026-08-29-checkout.md</code>. Diff: <code>checkout@4.17.3..4.18.0</code>, 41 files. All figures are measured, none modelled; percentiles as recorded, no rounding.</p>
+    <p>Markdown source: <code>docs/incidents/2026-08-29-checkout-p95.md</code> (this HTML is rendered from it, same commit). Metrics: <code>checkout.latency</code> p95 and p50, 1-min buckets, prod, 2026-08-27 00:00Z – 2026-08-30 00:00Z, queried 2026-08-30 09:12Z. Deploys: <code>deploys/checkout/2026-08-29.jsonl</code>. Alerts: <code>alerts/checkout-p95-high</code>. On-call note: <code>oncall/2026-08-29-checkout.md</code>. Diff: <code>checkout@9.99.2..9.99.3</code>, 41 files. All figures are measured, none modelled; percentiles as recorded, no rounding.</p>
     <p>Illustrative dataset written for the cas-ui-craft skill; the service, versions, and numbers are fictional and internally consistent.</p>
   </div>
 </footer>

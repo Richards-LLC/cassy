@@ -3,6 +3,153 @@ use crate::ui::factory::daemon::FactoryDaemon;
 use cas_store::SurfacingSource;
 use std::time::{Duration, Instant};
 
+/// The real hub must reach the live composer while its local viewer reads history.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_reply() {
+    use crate::hub::*;
+    use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution};
+    use crate::ui::factory::supervisor_commands::{SupervisorCommand, SupervisorCommandPhase};
+    use cas_store::HistoryStore;
+    use chrono::Utc;
+    use futures_util::{SinkExt, StreamExt};
+    use std::io::Write;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    if !fixture_child("cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_reply") { return; }
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    daemon.teams = None;
+    let name = daemon.app.supervisor_name().to_owned();
+    let session = daemon.session_name.clone();
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let agents = crate::store::open_agent_store(&cas).unwrap();
+    let mut agent = agents.get("single-sup").unwrap();
+    agent.cc_session_id = Some("idle-hub".into());
+    agent.pid = Some(std::process::id());
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
+    agents.update(&agent).unwrap();
+    let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
+    epoch.pid = Some(std::process::id().into());
+    cas_store::SqliteHistoryStore::open(&cas).unwrap().record_epoch(&epoch).unwrap();
+    let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+    std::fs::create_dir_all(&projects).unwrap();
+    let transcript = projects.join("idle-hub.jsonl");
+    let now = Utc::now();
+    std::fs::write(&transcript, format!("{}\n{}\n",
+        serde_json::json!({"type":"user","version":"2.1.318","timestamp":now-chrono::Duration::seconds(2),"message":{"role":"user","content":"Prior turn"}}),
+        serde_json::json!({"type":"system","subtype":"turn_duration","timestamp":now-chrono::Duration::seconds(1)}),
+    )).unwrap();
+    let pane = daemon.app.mux.get_mut(&name).unwrap();
+    pane.feed(format!("{}\x1b[2J\x1b[19;1H────────────────────\r\n❯\r\n────────────────────", "historical output\r\n".repeat(60)).as_bytes()).unwrap();
+    pane.scroll(-40).unwrap();
+    let offset = pane.scroll_offset();
+    assert!(offset > 0);
+
+    let daemon_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let daemon_port = daemon_listener.local_addr().unwrap().port();
+    daemon.ws_listener = Some(daemon_listener);
+    let hub_root = HubRuntimePaths::default_for_user().unwrap();
+    daemon.relay_token = Some(crate::ui::factory::relay_token::mint(hub_root.root(), &session).unwrap());
+    let auth = AuthStore::open(hub_root.root(), "idle-hub").unwrap();
+    let origin = "https://controller.example";
+    let scopes = [Scope::PaneRead, Scope::PaneInput, Scope::MessageSend].into_iter().collect();
+    let invite = auth.mint_pairing(origin, scopes, now).unwrap();
+    let credential = auth.exchange_pairing(PairingExchange::test_fixture(invite.token, "idle-hub", origin,
+        [Scope::PaneRead, Scope::PaneInput, Scope::MessageSend].into_iter().collect()), now).unwrap();
+    let mut context = AuthContext::test_fixture(&credential.device_id, origin, credential.scopes.clone());
+    context.credential_id = credential.credential_id.clone();
+    auth.acquire_lease(&context, &session, now).unwrap();
+    let endpoint = format!("/v1/sessions/{session}/attach");
+    let ticket = auth.issue_ws_ticket(&context, &session, &endpoint, now).unwrap();
+    let mut projected = fixture_session(&session);
+    projected.supervisor = name.clone();
+    projected.project_dir = Some(root.path().to_string_lossy().into_owned());
+    projected.ws_port = Some(daemon_port);
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(SessionCatalog::new(RecordingReadModel::with_sessions(vec![projected])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "idle-hub".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events)
+        .with_auth(auth).with_effective_origin(origin));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub_address = listener.local_addr().unwrap();
+    let hub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let stopped = Arc::new(AtomicBool::new(false));
+    let driver_stop = Arc::clone(&stopped);
+    let driver = async {
+        while !driver_stop.load(Ordering::Acquire) {
+            daemon.accept_ws_clients().await;
+            daemon.process_ws_client_input().await;
+            daemon.last_commander_mirror_scan = None;
+            daemon.process_prompt_queue().await.unwrap();
+            daemon.serve_ws_clients().await;
+            tokio::task::yield_now().await;
+        }
+    };
+    let client = async {
+        async fn next(socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> DaemonMessage {
+            loop {
+                let frame = tokio::time::timeout(Duration::from_secs(10), socket.next()).await.unwrap().unwrap().unwrap();
+                if frame.is_text() || frame.is_binary() {
+                    return serde_json::from_slice(&frame.into_data()).unwrap();
+                }
+            }
+        }
+        let mut request = format!("ws://{hub_address}{endpoint}?ticket={}", ticket.ticket).into_client_request().unwrap();
+        request.headers_mut().insert("origin", origin.parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        while !matches!(next(&mut socket).await, DaemonMessage::Welcome { .. }) {}
+        socket.send(Message::Text(serde_json::to_string(&ClientMessage::SupervisorCommand {
+            command: SupervisorCommand::ReloadCassy, client_ref: "idle-command".into(), confirmed: false,
+            attribution: MessageAttribution::default(),
+        }).unwrap().into())).await.unwrap();
+        let command_accepted = loop {
+            match next(&mut socket).await {
+                DaemonMessage::SupervisorCommandReceipt { receipt } => break receipt.phase == SupervisorCommandPhase::Submitted,
+                DaemonMessage::Error { message, .. } => { eprintln!("command_refusal={message}"); break false; }
+                _ => {}
+            }
+        };
+        let sent = Instant::now();
+        socket.send(Message::Text(serde_json::to_string(&ClientMessage::SendMessage {
+            target: name.clone(), text: "idle-hub-probe".into(), summary: None, urgent: false,
+            client_ref: Some("idle-message".into()), in_reply_to: None, attribution: MessageAttribution::default(),
+        }).unwrap().into())).await.unwrap();
+        while !matches!(next(&mut socket).await, DaemonMessage::MessageQueued { .. }) {}
+        let reached_pane = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if std::fs::read(root.path().join("input")).unwrap().windows(b"idle-hub-probe".len()).any(|part| part == b"idle-hub-probe") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.is_ok();
+        let elapsed = sent.elapsed();
+        let at = Utc::now();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+        writeln!(file, "{}\n{}", serde_json::json!({"type":"user","uuid":"terminal-checkpoint","timestamp":at,"message":{"role":"user","content":"Terminal checkpoint"}}),
+            serde_json::json!({"type":"assistant","timestamp":at+chrono::Duration::milliseconds(1),"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Fixture supervisor answer"}]}})).unwrap();
+        let reply = loop {
+            if let DaemonMessage::OperatorReply { notification_id, device_id, message, .. } = next(&mut socket).await {
+                assert_eq!(device_id, "*");
+                assert_eq!(message, "Fixture supervisor answer");
+                break notification_id;
+            }
+        };
+        socket.send(Message::Text(serde_json::json!({"OperatorReplyPersisted":{"notification_id":reply,"device_id":""}}).to_string().into())).await.unwrap();
+        // Wildcard receipt settlement is owned by cas-c271 on the train.
+        stopped.store(true, Ordering::Release);
+        (command_accepted, reached_pane, elapsed)
+    };
+    let (_, (command_accepted, reached_pane, elapsed)) = tokio::join!(driver, client);
+    hub.abort();
+    assert_eq!(daemon.app.mux.get(&name).unwrap().scroll_offset(), offset);
+    eprintln!("command_accepted={command_accepted}; reached_pane={reached_pane}; message_elapsed={elapsed:?}");
+    assert!(command_accepted, "command admission must use the live input screen");
+    assert!(reached_pane && elapsed < Duration::from_secs(10), "operator message must reach the live composer within 10 seconds");
+    let input = std::fs::read_to_string(root.path().join("input")).unwrap();
+    assert_eq!(input.matches("/mcp reconnect cas").count(), 1);
+    assert_eq!(input.matches("idle-hub-probe").count(), 1);
+}
+
 // PTY preflight reads ambient PATH. Re-exec with a private harmless cas;
 // changing PATH globally would race other tests and depend on the host runtime.
 pub(super) fn fixture_child(test: &str) -> bool {
@@ -508,9 +655,13 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
         assert_eq!(original.matches('\r').count(), 1);
         // Replay the incident's native composer, with the startup frame still at
         // the input marker. No transcript exists, so echo cannot count as a turn.
+        daemon.app.mux.get_mut(&name).unwrap().feed("startup history\r\n".repeat(40).as_bytes()).unwrap();
         daemon.app.mux.get_mut(&name).unwrap().feed(
             format!("\x1b[2J\x1b[H────────────────────\r\n❯ [cas #{} agent-authored 5s first] startup draft\r\n────────────────────", row.id).as_bytes(),
         ).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().scroll(-10).unwrap();
+        let offset = daemon.app.mux.get(&name).unwrap().scroll_offset();
+        assert!(offset > 0);
         daemon.normal_delivery_probes.get_mut(&row.id).expect("startup observation remains owned")
             .next_check_at = Some(Instant::now());
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -520,6 +671,7 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
                 tokio::task::yield_now().await;
             }
         }).await.expect("the unsent first-boot draft receives one bare submit retry");
+        assert_eq!(daemon.app.mux.get(&name).unwrap().scroll_offset(), offset);
         assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes(),
             "retry never repeats the startup body or appends a nudge");
         // No native evidence even after recovery: remain unconfirmed, never keep

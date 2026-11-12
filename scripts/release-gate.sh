@@ -874,10 +874,11 @@ check_version_literals() {
     # Tracked files only: gitignored build caches (for example
     # crates/ghostty_vt_sys/zig/.zig-cache) embed absolute checkout paths, and
     # a worktree named after the release would otherwise fail this row.
+    # Skill reference exemplars use fictional release versions, not product code.
     while IFS= read -r -d '' file; do
         [[ -f "$file" ]] || continue
         case "$file" in
-            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
+            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock|*/references/exemplars/*) continue ;;
         esac
         hit="$(grep -nIF -- "$version" "$file" 2>/dev/null || true)"
         if [[ -n "$hit" ]]; then
@@ -915,7 +916,7 @@ check_next_version_literals() {
     while IFS= read -r -d '' file; do
         [[ -f "$file" ]] || continue
         case "$file" in
-            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
+            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock|*/references/exemplars/*) continue ;;
         esac
         changed+=("$file")
     done < <(git diff -z --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- "$@" 2>/dev/null)
@@ -939,7 +940,7 @@ check_next_version_literals() {
         return 1
     fi
     elsewhere="$(git grep -nIF "${patterns[@]}" -- "$@" ':(exclude)*.md' ':(exclude)*/reference-history.json' \
-        ':(exclude)*/Cargo.toml' ':(exclude)*/Cargo.lock' 2>/dev/null || true)"
+        ':(exclude)*/Cargo.toml' ':(exclude)*/Cargo.lock' ':(exclude)*/references/exemplars/*' 2>/dev/null || true)"
     if [[ -n "$elsewhere" ]]; then
         printf 'version-literals: NOTE pre-existing next-version literals outside this lane (not refused here; they fail the release gate after the bump):\n%s\n' \
             "$elsewhere"

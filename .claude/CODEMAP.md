@@ -1,173 +1,133 @@
 # Cassy — Codemap
 
-> Structural map of 18 Rust workspace members, Commander and Slack bridge. Regenerate with `/codemap` after module moves.
+> Structural map of eighteen Rust workspace members, Commander and the Slack bridge. Regenerate with `/codemap` after module moves.
 
 ## Top-level layout
 
-- `cas-cli/`, `crates/` - application composition and shared Rust packages.
-- `hub-web/`, `slack-bridge/` - Commander browser client and TypeScript Slack routing services.
-- `contrib/`, `homebrew/` - installable shell integrations and package formulas.
-- `docs/`, `site/` - architecture, design, QA and release documents; website and system PDF.
-- `fixtures/`, `migration/` - retrieval parity fixtures and historical Cloud-move scripts.
-- `ops/`, `scripts/` - service units, host installation, proof runners and release tooling.
-- `.cargo/`, `.config/` - Cargo configuration and nextest profiles.
-- `.claude/`, `.codex/` - harness instructions, projections and repository navigation.
-- `.githooks/`, `.github/` - Git policy hooks, CI workflows and issue templates.
-- `Cargo.toml`, `package.json`, `rust-toolchain.toml` - workspace, script and toolchain roots.
-- `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` - onboarding and contributor policies.
-- `DESIGN.md`, `CODING_STANDARDS.md`, `CHANGELOG.md`, `CAS-DEEP-DIVE.md` - design, standards and system references.
-- `changelog.d/` - delivery fragments; `scripts/release_changelog.py` promotes them and verifies delivery claims.
+- `cas-cli/`, `crates/` — application composition and shared Rust packages.
+- `hub-web/`, `slack-bridge/` — Commander browser client and TypeScript Slack routing services.
+- `contrib/`, `homebrew/` — shell integrations and package formulas.
+- `docs/`, `site/` — architecture, design, QA and release documents; website and system PDF.
+- `fixtures/`, `migration/` — retrieval fixtures and historical Cloud migration scripts.
+- `ops/`, `scripts/` — service units, host installation, proof runners and release tooling.
+- `.cargo/`, `.config/` — Cargo settings and nextest profiles.
+- `.claude/`, `.codex/` — harness instructions, projections and repository navigation.
+- `.githooks/`, `.github/` — Git policy hooks, CI workflows and issue templates.
+- `Cargo.toml`, `package.json`, `rust-toolchain.toml` — workspace, repository tooling and toolchain roots.
+- `README.md`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` — onboarding and contributor policies.
+- `DESIGN.md`, `CODING_STANDARDS.md`, `CHANGELOG.md`, `CAS-DEEP-DIVE.md` — design, standards and system references.
+- `changelog.d/` — delivery fragments compiled by `scripts/release_changelog.py`.
 
 ## Workspace / packages
 
-- `cas-cli/` - executable `cas` and composed application library.
-- `crates/cas-types/` - task, agent, delivery, event and wire types.
-- `crates/cas-store/` - SQLite task, agent, verification, prompt, QA and knowledge stores.
-- `crates/cas-search/` - Tantivy indexes, LMDB vectors, scoring and retrieval primitives.
-- `crates/cas-core/` - hooks, extraction, memory hygiene, temporal search and sync.
-- `crates/cas-code/` - tree-sitter parsing, symbol extraction and code chunks.
-- `crates/cas-mcp/`, `crates/cas-mcp-proxy/` - protocol/action registry and upstream MCP policy/connections, including Violet posting authority with scoped outcome lookup and caller-aware request-ID recovery.
-- `crates/cas-factory/`, `crates/cas-factory-protocol/` - sessions, probes, routing, spec resolution and transport.
-- `crates/cas-mux/`, `crates/cas-pty/` - panes, input routing, terminal rendering and harness/account isolation.
-- `crates/cas-recording/`, `crates/cas-diffs/` - recording exports and diff parsing/highlighting.
-- `crates/cas-operator-crypto/` - HPKE/JWS envelopes shared with Cloud.
-- `crates/cas-tui-test/` - PTY runners, screen assertions and test artifacts.
-- `crates/ghostty_vt/`, `crates/ghostty_vt_sys/` - terminal parser and Ghostty FFI/build support.
+- `cas-cli/` — executable `cas` and composed application library.
+- `crates/cas-types/` — task, agent, delivery, event and wire types.
+- `crates/cas-store/` — SQLite task, agent, verification, prompt, QA and knowledge stores.
+- `crates/cas-search/` — Tantivy indexes, LMDB vectors, scoring and retrieval primitives.
+- `crates/cas-core/` — hooks, extraction, memory hygiene, temporal search and sync.
+- `crates/cas-code/` — tree-sitter parsing, symbol extraction and code chunks.
+- `crates/cas-mcp/`, `crates/cas-mcp-proxy/` — protocol registry and upstream MCP policy/connections.
+- `crates/cas-factory/`, `crates/cas-factory-protocol/` — sessions, probes, routing, spec resolution and transport.
+- `crates/cas-mux/`, `crates/cas-pty/` — panes, input routing, terminal rendering and harness isolation.
+- `crates/cas-recording/`, `crates/cas-diffs/` — recording exports and diff parsing/highlighting.
+- `crates/cas-operator-crypto/` — HPKE/JWS envelopes shared with Cloud.
+- `crates/cas-tui-test/` — PTY runners, screen assertions and test artifacts.
+- `crates/ghostty_vt/`, `crates/ghostty_vt_sys/` — terminal parser and Ghostty FFI/build support.
 
 ## CLI, hooks and application services
 
-- `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, application modules and command dispatch.
-- `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs`, `cas-cli/src/cli/project_files/` - initialization, provisioning, managed sync and merge-residue recovery.
-- `cas-cli/src/accounts.rs`, `cas-cli/src/account_registry/`, `cas-cli/src/cli/accounts.rs` - account inventory, identity discovery, link planning and native usage.
-- `cas-cli/src/account_selection.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - recommendations, guarded account mutations and link repair. `cas-cli/src/config/` and `cas-cli/src/mcp/tools/service/factory_ops.rs` resolve local `factory.codex_home` preferences before worker recommendations.
-- `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs`, `cas-cli/src/agent_model.rs` - harness launches, account choice and role model observations.
-- `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` - hosted exact-SHA prechecks, dispatch recovery and receipt cleanup.
-- `cas-cli/src/cli/release_automation.rs`, `scripts/release.sh` - read-only per-member cut previews, zero-closure refusal before push, candidate reuse and cut receipts with missing-review residuals.
-- `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs`, `cas-cli/src/gh_budget.rs` - health, update receipts and GitHub request budgets.
-- `cas-cli/src/cli/config/`, `cas-cli/src/config/` - command/config registry and operator policy.
-- `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/`, `cas-cli/src/hooks/handoff_updates.rs` - lifecycle policy, canonical artifact-root diagnostics, inherited process-signal guards and Violet handoff reads.
-- `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
-- `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs` - worker Git target/branch guards, literal script operands and path bindings, and unresolved-directory refusals; shared shell lexer, command policy and session scratchpad path classification/diagnostics.
-- `cas-cli/src/cloud/`, `cas-cli/src/coordination/` - sync, presence, scoped artifacts and worker peer coordination; dependency recovery is in `cloud/sync_queue/dependency_repair.rs` and `cloud/syncer/pull.rs`, and `cloud/sync_queue/stats.rs` deduplicates retained conflict snapshots; `cas-cli/src/cloud/peer_mailbox/transcript.rs` serves bounded redacted peer transcripts.
-- `cas-cli/src/coordination/external_work.rs` - identity-only managed Slack claims, owner-addressed mention failure blockers and journal-backed reply authority shared by `cli/violet_cmd` and `mcp/tools/service/artifact_post.rs`; `artifacts/slack.rs` preserves it through external uploads.
-- `cas-cli/src/knowledge/`, `cas-cli/src/daemon/`, `cas-cli/src/hybrid_search/` - distillation, indexing and composed retrieval.
-- `cas-cli/src/mcp/tools/core/search.rs`, `cas-cli/src/mcp/tools/service/server_handler.rs` - retrieval dispatch and read-only search request deadlines.
-- `cas-cli/src/extraction/`, `cas-cli/src/consolidation/`, `cas-cli/src/sync/` - extraction, memory decay and harness synchronization.
-- `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` - task artifacts, registered nested-checkout publication with checkout-relative secret guards, audited supervisor revocation with explicit Cloud acknowledgement, brand resolution, HTML/PDF finalization and immutable captures.
-- `cas-cli/src/mcp/tools/core/task/close_refusal.rs` - input-bound task-state close gate facts shared by every close handler and the progress watchdog.
-- `cas-cli/src/builtins/` - canonical skills, agents, jobs, harness catalogs and reference-history manifest.
-- `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` - rule-marker navigation and reference contract.
-- `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` - dataset-bound proof, measured phase outcomes and verifier prompt replays.
+- `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` — executable, library modules and command dispatch.
+- `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs`, `cas-cli/src/cli/project_files/` — initialization, provisioning and managed-file sync.
+- `cas-cli/src/accounts.rs`, `cas-cli/src/account_registry/`, `cas-cli/src/account_selection.rs` — account inventory, discovery and recommendations.
+- `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs`, `cas-cli/src/cli/account_picker.rs` — account mutations, links and selection.
+- `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/agent_model.rs` — harness launches and model observations.
+- `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update.rs`, `cas-cli/src/ops/` — diagnostics, upgrades and operational commands.
+- `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` — exact-SHA prechecks and dispatch recovery.
+- `cas-cli/src/cli/release_automation.rs`, `cas-cli/src/cli/release_adapters.rs` — release inventory, promotion and reconciliation adapters.
+- `cas-cli/src/cli/release_notice_failure.rs`, `cas-cli/src/issue_reconcile.rs` — exhausted release notices and issue reconciliation.
+- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch, handlers and shared schemas.
+- `cas-cli/src/config/`, `cas-cli/src/harness_policy.rs` — runtime settings and harness policy projections.
+- `cas-cli/src/hybrid_search/`, `cas-cli/src/knowledge/`, `cas-cli/src/extraction/` — composed retrieval, distillation and extraction.
+- `cas-cli/src/consolidation/`, `cas-cli/src/sync/`, `cas-cli/src/memory_migration/` — memory maintenance and harness synchronization.
+- `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` — artifact publication, proof capture and report finalization.
+- `cas-cli/src/builtins/` — canonical skills, agents, harness catalogs and reference-history manifest.
+- `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` — rule-marker navigation.
+- `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` — dataset proofs and verifier replay fixtures.
 
 ## Factory runtime and terminals
 
-- `cas-cli/src/mcp/tools/service/server_handler.rs`, `cas-cli/src/mcp/tools/service/mutation_receipt.rs` - MCP response budgets, committed task dispositions and late-close outcome notes.
-
-- `cas-cli/src/ui/factory/app/`, `cas-cli/src/ui/factory/director/` - TUI state, worker dispatch/readiness, provisioning and delivery evidence.
-- `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - scoped worker messages and typed context respawn admission; `cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs` builds the saved-handoff resume brief.
-- `cas-cli/src/ui/factory/daemon/runtime/` - daemon lifecycle, event/probe jobs and queued work; `lifecycle.rs` handles expiry and shutdown; `director_refresh_tests.rs` covers blocker episodes.
-- `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - attributed envelopes, delivery-tip context, recipient receipts and durable escalation before an undelivered lifecycle relay retires.
-- `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - Slack intake, managed claim outcomes and ordered session wakes; `violet_reader_tests.rs` covers explicit-unmanaged fallback fencing.
-- `cas-cli/src/ui/factory/daemon/runtime/gui_client.rs`, `crates/cas-pty/src/input_queue.rs` - attach input draining and PTY byte diagnostics.
-- `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/`, `cas-cli/src/ui/factory/server_registry.rs` - attach guards, socket cleanup and owned-server checks.
-- `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - allowlists, Finish queues and native execution/reconnect evidence.
-- `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs` - progress watchdog (owned child CPU/output advancement counts; gate-refused closes and frozen-train deliveries reported once) and wedged-loop monitoring.
-- `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - reminder deadlines, queue admission and supervisor wake tests; `delivery_probe_jobs.rs` revalidates notification sender and receipts before watchdog nudges and retires transported worker-check completions.
-- `cas-cli/src/cli/factory/wedged.rs`, `crates/cas-store/src/spawn_queue_store.rs` - worker diagnostics, fingerprinted descendant CPU/output samples and retained failed-boot records by worker or spawn request.
-- `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs`, `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - transcript mirrors, redaction and typed turn/cost accounting.
-- `crates/cas-pty/src/pty.rs`, `crates/cas-pty/src/claude_binary.rs` - startup briefs, harness argv, native Claude selection and version probes.
-- `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` - binding and ordered backlogs, including pre-registration assignment admission.
-- `cas-cli/src/factory_auth_health.rs`, `cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs` - authentication/model failure evidence and collision-free worker reservation.
-- `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs`, `cas-cli/src/factory_review_scratch.rs` - candidate build ownership and review-checkout creation, reuse and cleanup.
-- `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_target_cache/owner.rs` - capped proof admission, target leases, capacity retries, owned scratch and child-only test environments.
-- `cas-cli/src/factory_worker_runs.rs`, `cas-cli/src/factory_build_routing.rs` - detached command records, completion wakes, pre-recycle producer shutdown and same-account capacity routing.
-- `cas-cli/src/epic_design_review.rs`, `cas-cli/src/cli/factory/queries.rs` - stakeholder defect staffing pauses and explicit message routing.
-- `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_ci.rs`, `cas-cli/src/factory_ci_retry.rs` - release-train guards, full-set proof and exact-tip retry notices.
-- `crates/cas-core/src/memory/handoff.rs` - per-project/role machine selection and supersession; owner/session stamps are audit metadata.
-- `cas-cli/src/supervisor_auto_clear.rs`, `cas-cli/src/supervisor_continuity.rs` - context pressure, succession handoffs and startup recovery.
-- `cas-cli/src/supervisor_message_wakes.rs`, `cas-cli/src/peer_ask_gate.rs`, `cas-cli/src/cloud/peer_mailbox/outbox.rs` - typed wake limits, sender hold/ETA feedback via durable outbox, linked reply wakes and explicit-ask merge holds.
-- `cas-cli/src/worktree/git.rs`, `scripts/cas-merge-drivers.py`, `.gitattributes` - candidate preparation and manager preflight share merge drivers. Independent registry entries merge by ID with the newest date, and competing entry or policy changes retain conflicts.
-- `cas-cli/src/cloud/file_leases.rs` - contended-file advice shared by Claude hook context and Codex notices, with separate-entry guidance for overview, codemap and registry edits.
-- `cas-cli/src/worktree/git/rescue.rs`, `cas-cli/src/worktree/retained.rs` - rescue refs and bounded retained-work inventories.
-- `cas-cli/src/worktree/git/branch_ops.rs` - bounded fetches with explicit origin tracking destinations, base freshness and branch publication.
-- `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator project holds, audited state and relay admission.
+- `cas-cli/src/ui/factory/app/`, `cas-cli/src/ui/factory/director/` — TUI state, dispatch, readiness and provisioning.
+- `cas-cli/src/ui/factory/daemon/runtime/` — lifecycle jobs, worker events, polling and queues.
+- `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` — delivery envelopes and prompt receipts.
+- `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs` — Slack intake and managed claim reads.
+- `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs` — progress and stalled-loop detection.
+- `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/ui/factory/daemon/runtime/delivery_probe_jobs.rs` — reminders and delivery/completion probes.
+- `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/`, `cas-cli/src/ui/factory/server_registry.rs` — attach and server ownership.
+- `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` — command admission and execution evidence.
+- `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs`, `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` — transcript mirrors and turn accounting.
+- `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` — task binding and ordered backlogs.
+- `cas-cli/src/factory_auth_health.rs`, `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_review_scratch.rs` — authentication, candidate and review checkout ownership.
+- `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_worker_runs.rs` — capped proof commands, detached jobs and completion records.
+- `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_target_cache/` — build admission, capacity and target ownership.
+- `cas-cli/src/supervisor_auto_clear.rs`, `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_message_wakes.rs` — continuity and typed wakes.
+- `cas-cli/src/supervisor_notices.rs`, `cas-cli/src/peer_ask_gate.rs`, `cas-cli/src/cloud/peer_mailbox/` — durable notices and peer asks.
+- `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_ci.rs`, `cas-cli/src/factory_ci_retry.rs` — train guards, proof and retries.
+- `cas-cli/src/worktree/git/`, `cas-cli/src/worktree/retained.rs`, `scripts/cas-merge-drivers.py` — Git operations, rescue refs and shared merge drivers.
+- `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` — operator project holds.
+- `crates/cas-pty/src/adopt.rs`, `crates/cas-mux/src/pane/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs` — daemon replacement and terminal adoption.
 
 ## MCP, storage and delivery gates
 
-- `cas-cli/src/gates/`, `cas-cli/build.rs` - generated check registry, explicit delivery integrity/as-of classifications, registry membership stamps and the approval-stamp applicability API; approval persistence belongs to the cycle approval writer.
-- `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - stdio framing, startup, in-flight accounting and compatible backend replacement.
-- `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution, exact-dispatch epic timeout recovery and existing parked-anchor protections; `close_ops/gate_text.rs` emits executable typed verdict payloads.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, receipt scope, proof/upkeep gates, rule coverage and reviewed corrections; `no_code_close_tests.rs` replays refused-close correction lineage.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs` - exact-tip test receipts, committed repo-root handoff exclusion and changelog validation, including task-owned fragment provenance across returned-delivery merge resolutions.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - reviewed landing, recorded train merges carried on release second parents, typed filesystem refusals and queue-proof validation for canonical and legacy CI.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - exact supervisor-approved merge parents, side-history attribution and linked-checkout WIP identity; the merge diff remains in proof scope.
-- `cas-cli/src/mcp/tools/core/task/lifecycle.rs` - recorded-start graph reconciliation for resumed worker branches and linked-checkout identity.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs` - bounded close-reason proof assertions and clause-specific receipt checks.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - review dispatch, read-only backfill admission, target-only parked-anchor recovery, ordinary close and lifecycle outbox.
-- `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs` - immutable candidates, shared generated-output regeneration with worktree merges, review scratch, plan/evidence binding, overview validation, target-move rebinding, late bound-child verdict admission and landed proof promotion.
-- `cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs` - account-aware automatic verifier launch with background startup after dispatch claim, sealed child authority, exact-child crash recovery, late verdict submission and separate attempt diagnostics.
-- `cas-cli/src/mcp/tools/core/agent_coordination/agent_session.rs`, `cas-cli/src/mcp/tools/core/agent_coordination/agent_management.rs`, `cas-cli/src/mcp/server/mod.rs` - connection-bound identity, same-pane supervisor session rebinding and child registration admission; native Codex reviewer guidance in `cas-cli/src/prompt_revalidation.rs`.
-- `cas-cli/src/mcp/tools/service/server_handler.rs`, `cas-cli/src/mcp/tools/service/mutation_receipt.rs`, `cas-cli/src/supervisor_notices.rs` - response deadlines, request-scoped commits and durable caller notices for registration continuations.
-- `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs`, `crates/cas-types/src/verification.rs`, `crates/cas-store/src/verification_store.rs` - peer approvals, durable portable proof boundaries and bounded host-path span sanitization preserving verifier questions.
-- `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs`, `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - single/queued candidate conflict recovery, guarded delivery publication, unpublished-merge restoration and exact-source protected default-branch PR routing.
-- `cas-cli/src/mcp/tools/core/workflow/train_merge.rs`, `cas-cli/src/mcp/tools/core/workflow/release_freeze.rs`, `cas-cli/src/mcp/tools/core/workflow/release_auto_cut.rs` - ordered train merges, explicit MCP freeze confirmation and automatic cut admission.
-- `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs` - audited branch/delivery recovery and empty retargeted-lane replacement.
-- `cas-cli/src/mcp/tools/core/task/block_hold.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` - task-scoped blocker answers, supervisor decision receipts and fresh-question deadlines.
-- `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - directed replies, blocker receipt ownership and revalidated batch-notice inbox reads.
-- `cas-cli/src/mcp/tools/core/task/source_claim.rs`, `cas-cli/src/cloud/peer_claims.rs` - stakeholder source admission, same-task peer staffing transfer, heartbeat retirement and fenced release.
-- `cas-cli/src/cloud/epic_split.rs`, `cas-cli/src/mcp/tools/service/epic_split_ops.rs`, `cas-cli/src/mcp/tools/service/coordination_external_work.rs` - accepted work shares, standalone split scope and separate Slack-thread authority.
-- `cas-cli/src/finding_triage.rs`, `cas-cli/src/mcp/tools/core/task/update.rs`, `cas-cli/src/mcp/tools/core/task/release_train.rs` - journey severity labels, atomic typed refusals of conflicting derived priority updates and default release-train assignment.
-- `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
-- `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - retirement snapshots and persistent queues.
-- `crates/cas-store/src/delivery_cycle.rs` - `DeliveryCycle` rows minted or appended by the task store on every local or synced anchor create/update and backfilled at store open (terminal history explicitly by ledger backfill); request-changes and reopen advance the synced cycle number.
-- `crates/cas-store/src/history_store.rs`, `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/qa_pass_store.rs` - provenance repair, durable prompts and QA maintenance; operator selections persist a reconnect retry and expire once with a sender notice at their own deadline; indexed mirror-age/action checks batch recent delivery alerts once per row; expired transcript copies retire quietly and durable outbox delivery remains independent. Conditional task sync lives in `crates/cas-store/src/task_store.rs` and `cas-cli/src/cloud/syncer/pull.rs`.
-- `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
-- `cas-cli/src/mcp/tools/service/core.rs`, `cas-cli/src/mcp/tools/core/memory.rs`, `cas-cli/src/mcp/tools/core/rules.rs`, `cas-cli/src/mcp/tools/core/rule_drift.rs` - memory/rule dispatch, partial updates, reserved handoff lineage on edits, provenance and drift.
+- `cas-cli/src/gates/`, `cas-cli/build.rs` — generated stable gate codes, classifications and registry stamps.
+- `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` — stdio transport, caller identity and backend replacement.
+- `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` — operations, registrations and bounded tool futures.
+- `cas-cli/src/mcp/tools/service/server_handler.rs`, `cas-cli/src/mcp/tools/service/mutation_receipt.rs` — response budgets and mutation receipts.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` — park/close orchestration, ownership and timeout recovery.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` — attribution, receipts, report quality, proof claims and reviewed corrections.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/registry_upkeep.rs` — shared delivery snapshots and finding-bound decisions used by report quality; registry enforcement is lane lint.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` — post-merge close and recovery-owner notices.
+- `cas-cli/src/mcp/tools/core/task/close_refusal.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` — close refusal facts and trusted note markers.
+- `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs` — branch and delivery recovery.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs`, `cas-cli/src/mcp/tools/core/workflow/premerge_verification/` — review dispatch and candidate verification.
+- `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs`, `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` — candidate merges and protected publication.
+- `cas-cli/src/mcp/tools/core/workflow/train_merge.rs`, `cas-cli/src/mcp/tools/core/workflow/release_freeze.rs` — ordered train merges and release freeze admission.
+- `cas-cli/src/mcp/tools/core/task/source_claim.rs`, `cas-cli/src/cloud/peer_claims.rs`, `cas-cli/src/cloud/epic_split.rs` — source claims and cross-machine work shares.
+- `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` — store decorators, migrations and worktree lifecycle.
+- `crates/cas-store/src/delivery_cycle.rs`, `crates/cas-types/src/delivery.rs` — delivery cycles, anchor lineage and typed delivery data.
+- `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/prompt_queue_store/` — prompt forwarding, receipt retries and expiry.
+- `crates/cas-store/src/task_store.rs`, `cas-cli/src/cloud/syncer/pull.rs` — conditional task storage and synced-cycle reconciliation.
+- `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` — memory and temporal search primitives.
 
 ## QA, Commander and services
 
-- `hub-web/src/main.ts`, `hub-web/src/styles.css` - Tasks & progress worker-card composition and shared desktop rail/phone sheet presentation. `hub-web/e2e/journeys/fleet-ops.journey.ts` checks named worker headers.
-- `cas-cli/src/release_reconcile.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs`, `crates/cas-store/src/release_reconcile_store.rs` - durable release replay with reconciler-version stamps and one qualified replay of stale operations, retirement of unproven discovery holds, portable report proof binding, shared no-write member preview and guarded release close, explicit parent acceptance, ordinary parent closure and SQLite operation records.
-
-- `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs`, `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - journey selection, registry validation, ledger parsing and declared coverage.
-- `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_pass/` - independent review dispatch, head/pass evidence paths and verdict validation.
-- `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - evidence manifests, capture origins and walk progress.
-- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_batch/release_close.rs`, `cas-cli/src/qa_batch/release_close_tests.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - exact-SHA release membership admitted by frozen declarations or shipping proof, portable ledger resolution, independent per-member release close, no-write preview and legacy transformation proofs, published-SHA release verdicts across historical epic targets, authorship rules and owner-scoped receipt notices.
-- `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs`, `docs/qa/fast-lane.md` - hotfix eligibility, post-merge proof and revert choices.
-- `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` - append-only quality events, delivery-cycle review provenance, wake-notice enrichment, attested manual interventions and measured estimates. `cas-cli/src/cli/ledger.rs` reports release metrics over individual train deliveries.
-- `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value auditing and CI timing recipes.
-- `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` - Commander service, HTTP/SSE bridge, pairing, durable operator input and explicit hub-stop intent respected by updates.
-- `cas-cli/src/cli/hub_preview.rs`, `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/local_image.rs` - time-boxed candidate previews and authorized media.
-- `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - browser bootstrap, selected conversations and reply grants.
-- `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams, history read deadlines and ordered publication.
-- `hub-web/src/conversation-history.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/early-thread.ts` - transcript paging and bounded windows.
-- `hub-web/src/project-navigation.ts`, `hub-web/src/epic-progress.ts`, `hub-web/src/team-view.ts` - project cards, train/task progress and team status.
-- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/worker-timeline.ts` - operation disclosures and worker activity.
-- `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-attachment.ts` - safe Markdown, diagrams and evidence rendering.
-- `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts`, `cas-cli/src/hub/composer_upload.rs` - upload identity, progress and stored attachments.
-- `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/accounts-panel.ts`, `hub-web/src/account-usage-check.ts` - pairing, input grants and account controls.
-- `hub-web/e2e/journeys/`, `hub-web/preview/` - catalog journeys, protocol doubles and real-hub fixtures.
-- `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` - Slack router and user-daemon entrypoints.
+- `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_upkeep.rs` — journey validation, diff impact and lane upkeep.
+- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_pass/` — ledger parsing, proof manifests and independent QA dispatch.
+- `cas-cli/src/qa_batch/`, `cas-cli/src/qa_post_release.rs`, `cas-cli/src/release_reconcile.rs` — release membership, batch verdicts and durable reconciliation.
+- `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs` — fast-lane eligibility and post-merge proof.
+- `cas-cli/src/quality_ledger/`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` — quality events, delivery metrics and measured estimates.
+- `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` — Commander service, bridge, pairing and durable input.
+- `hub-web/src/main.ts`, `hub-web/src/styles.css` — browser bootstrap, worker cards and desktop/phone presentation.
+- `hub-web/src/connection.ts`, `hub-web/src/status-refresh.ts`, `hub-web/src/conversation-store.ts` — authenticated connections and conversation state.
+- `hub-web/src/conversation-history.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/early-thread.ts` — transcript paging and bounded windows.
+- `hub-web/src/project-navigation.ts`, `hub-web/src/epic-progress.ts`, `hub-web/src/team-view.ts` — project, train and team views.
+- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/worker-timeline.ts` — activity and operation disclosures.
+- `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-attachment.ts` — Markdown, diagrams and attachment rendering.
+- `hub-web/src/composer-uploads.ts`, `cas-cli/src/hub/composer_upload.rs` — upload identity and progress.
+- `hub-web/src/pairing-dialog.ts`, `hub-web/src/write-grant.ts`, `hub-web/src/accounts-panel.ts` — pairing, grants and accounts.
+- `hub-web/e2e/journeys/`, `hub-web/preview/` — browser journeys, protocol doubles and real-hub fixtures.
+- `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` — Slack router and user-daemon entrypoints.
 
 ## Cross-cutting
 
-- **Tests:** inline Rust modules, `crates/cas-store/tests/`, `cas-cli/tests/`; process isolation in `cas-cli/src/test_env_guard.rs`. Workers use capped named nextest filters; the merge queue owns the full Rust suite.
-- **Browser proof:** Vitest in `hub-web/src/`, Playwright in `hub-web/e2e/`, affected selection via `scripts/journey-eval.sh` and `scripts/journeys-for-diff.py`.
-- **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/qa/bug-families/`, `docs/release-reports/` (Markdown, brief, HTML/PDF and visual QA), `docs/status-words.md`.
-- `cas-cli/src/cli/release_adapters.rs` - publish and promotion adapters: one release reconciliation per (project, release, final SHA), installed/backfill recovery on the same operation, the supervisor promotion-merge observer, the single closeout notice with typed outcome counts and the release review ledger's transformation/epic blocks.
-- `cas-cli/src/cli/release_automation.rs` - read-only release inventory, train context, bounded Git probes, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation; installed notices accept older publications after an upgrade.
-- `cas-cli/src/cli/release_notice_failure.rs` - exhausted installed-notice reporting through the release owner's keyed outbox, without reconciliation.
-- `scripts/install-on-publish.sh`, `scripts/test-install-on-publish.sh` - native release polling, version verification before reconciliation, capped installed-notice attempts with retained failed receipts and keyed owner reporting, and per-version publication retries after installing the latest release.
-- **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py` (attempt-aware shard fan-in and durable missing-receipt red state), `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
-- **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (CLI argv payload provenance; run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
-- `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` - exhaustive suite bases and individual script/web recovery.
+- **Tests:** inline Rust modules and `cas-cli/tests/`; process isolation uses `cas-cli/src/test_env_guard.rs`. Workers run capped named nextest filters; the merge queue runs the Rust suite.
+- **Browser proof:** Vitest under `hub-web/src/`, Playwright under `hub-web/e2e/`; affected selection in `scripts/journeys-for-diff.py`.
+- **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/release-reports/`.
+- **Generated docs:** `docs/product-overview.d/`, `docs/qa/bug-families/`, `scripts/doc-fragments.py` — fragments, lane lint and release compilation.
+- **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml`.
+- **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py`, `scripts/check-changed-markdown.py`.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/`, `hub-web/DESIGN.md`.
 
 ## Entrypoints
 
 - **CLI/library:** `cas-cli/src/main.rs` (`cas`), `cas-cli/src/lib.rs`; MCP daemon `cas-cli/src/mcp/daemon.rs` (`cas serve`).
 - **Factory:** `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`; Commander `hub-web/src/main.ts`.
-- **In-place daemon updates:** `crates/cas-pty/src/adopt.rs`, `crates/cas-mux/src/pane/handoff.rs`, `crates/cas-mux/src/mux/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs`, `cas-cli/src/cli/factory/reexec.rs`; real-hub journey HUB-J11.
-
-- `cas-cli/src/issue_reconcile.rs` - bounded GitHub reconciliation and typed release issue outcomes after delivery closes.

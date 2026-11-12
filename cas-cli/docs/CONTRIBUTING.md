@@ -84,8 +84,9 @@ registration semantics.
 Use the daemon-owned candidate verifier or a separately registered reviewer
 with a sealed handoff for the exact dispatch. A native child that observes its
 parent's identity returns that evidence without recording a verdict, including
-`status=error`. A registered supervisor may perform its own review and record
-the verdict directly; its provenance remains `supervisor_direct`.
+`status=error`. A registered supervisor may record a verdict directly, with
+`supervisor_direct` provenance, only on mechanical evidence (counts, receipts,
+logs, CI results).
 
 ## Commander message and terminal permissions
 

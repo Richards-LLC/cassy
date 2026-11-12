@@ -142,6 +142,34 @@ impl Finding {
     }
 }
 
+impl Finding {
+    fn scope_note(&self, input: &str, head: &str) -> String {
+        format!("UPKEEP ACCEPTED SCOPE {}", serde_json::json!({
+            "delivery": head, "input": input, "gate": self.gate,
+            "title": self.title, "detail": self.detail,
+        }))
+    }
+
+    fn accepted_subset_reason<'a>(&self, notes: &'a str, input: &str, head: &str, minute: Option<i64>) -> Option<&'a str> {
+        notes.lines().rev().find_map(|line| {
+            let scope: serde_json::Value = serde_json::from_str(line.split_once("UPKEEP ACCEPTED SCOPE ")?.1).ok()?;
+            if scope["delivery"] != head || scope["input"] != input
+                || scope["gate"] != self.gate || scope["title"] != self.title
+            {
+                return None;
+            }
+            let detail = scope["detail"].as_str()?;
+            if self.detail.is_empty() || !self.detail.lines().all(|line| detail.lines().any(|prior| prior == line)) {
+                return None;
+            }
+            let original = Finding { gate: self.gate, token: self.token, title: self.title, detail: detail.into() };
+            // Scope data is not authority: recompute its hash and require the
+            // original exact-delivery decision, including its timestamp.
+            decision_reason(notes, &original.scoped_token(input, head), minute)
+        })
+    }
+}
+
 fn decision_reason<'a>(
     notes: &'a str,
     token: &str,
@@ -215,13 +243,16 @@ pub(super) fn finish(
             ));
             notes.record(task, &format!("UPKEEP OBSERVE {}: {text}", finding.gate));
         } else if let Some(reason) =
-            decision_reason(&task.notes, &token, delivery_minute).map(str::to_owned)
+            decision_reason(&task.notes, &token, delivery_minute)
+                .or_else(|| finding.accepted_subset_reason(&task.notes, input_path, delivery_head, delivery_minute))
+                .map(str::to_owned)
         {
             notes.record(
                 task,
                 &format!("UPKEEP ESCAPE {}: {token} {reason}", finding.gate),
             );
             notices.push(crate::gates::override_tag("G-51", ""));
+            notes.record(task, &finding.scope_note(input_path, delivery_head));
         } else {
             refusals.push(text);
         }
@@ -251,3 +282,7 @@ pub(super) fn read(
     }
     git(repo, &["show", &format!("{revision}:{path}")]).map(Some)
 }
+
+#[cfg(test)]
+#[path = "registry_upkeep_tests.rs"]
+mod registry_upkeep_tests;

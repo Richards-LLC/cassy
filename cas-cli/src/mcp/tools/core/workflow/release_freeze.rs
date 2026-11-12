@@ -523,7 +523,7 @@ mod tests {
             if let Some(role) = role {
                 let mut actor = Agent::new_with_role("caller".into(), "release-lead".into(), role);
                 if role == AgentRole::Supervisor {
-                    actor.status = cas_types::AgentStatus::Stopped;
+                    actor.status = cas_types::AgentStatus::Shutdown;
                 }
                 core.open_agent_store().unwrap().register(&actor).unwrap();
             }

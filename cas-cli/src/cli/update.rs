@@ -43,6 +43,7 @@ mod bindings;
 pub(crate) mod findings;
 mod fixture;
 mod live;
+mod macos_signing;
 mod preview;
 
 /// Wrap the warning's prose without dropping words or adding elision. The
@@ -4772,7 +4773,15 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
         .from
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
-    remove_quarantine_if_present(&std::env::current_exe()?)?;
+    let installed = std::env::current_exe()?;
+    remove_quarantine_if_present(&installed)?;
+    // Before the hub relaunches, so the new image keeps the old privacy grants.
+    if let Err(error) = macos_signing::stabilize(&installed, None) {
+        report_update_warning(
+            &format!("could not re-sign {} with \"{}\": {error:#}", installed.display(), macos_signing::LOCAL_IDENTITY),
+            "macOS may ask again for privacy permissions; see docs/onboarding/macbook-from-zero.md, \"Keep macOS permissions across updates\"",
+        );
+    }
     super::install_on_publish::refresh_installed();
     // The hub goes first so it picks up the new binary immediately rather than
     // waiting behind a full refresh. Its verification is drawn from data in

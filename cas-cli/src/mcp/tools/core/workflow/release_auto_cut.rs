@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Duration, Utc};
+use sha2::{Digest, Sha256};
 
 use super::release_freeze;
 use crate::mcp::tools::core::task::release_train::is_release_train;
@@ -130,7 +131,7 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
     let started = format!("{STARTED_LABEL}{tip}");
     let draft = notes_draft(root, &train.id)?;
     let log = train_dir(root, &train.id)?.join("auto-cut.log");
-    let digest = std::fs::read(&draft).ok().map(|bytes| blake3::hash(&bytes).to_hex().to_string());
+    let digest = std::fs::read(&draft).ok().map(|bytes| format!("{:x}", Sha256::digest(bytes)));
     // A changed draft can retry only a completed notes-lint refusal. Every
     // ordinary admission guard below still applies; other failures stay held.
     let attempted = std::fs::read_to_string(log.with_extension("notes")).ok();

@@ -64,7 +64,9 @@ class BudgetBreach(unittest.TestCase):
             case "$1 $2" in
               "run list") printf '[{"databaseId":7,"status":"completed","conclusion":"success","event":"push","headBranch":"main","headSha":"%s","createdAt":"2026-10-14T15:10:00Z"}]\\n' "$(cat "$LANDED")" ;;
               "release view") printf '2026-10-14T15:12:16Z\\n' ;;
-              "api repos"*) printf '{"workflow_runs":[{"id":7,"created_at":"2026-10-14T15:10:00Z"}]}\\n' ;;
+              "api repos"*/commits/*/pulls) printf '[{"number":42,"base":{"ref":"main"},"created_at":"2026-10-14T15:00:00Z","merged_at":"2026-10-14T15:10:00Z","merge_commit_sha":"%s"}]\\n' "$(cat "$LANDED")" ;;
+              "api repos"*/commits/*) cat "$LANDED" ;;
+              "api repos"*) echo '' ;;
               *) exit 2 ;;
             esac
             '''))

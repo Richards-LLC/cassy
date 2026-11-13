@@ -2078,6 +2078,12 @@ mod tests {
         use cas_types::{FindingSeverity, IssueSeverity, VerificationIssue};
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&owner).unwrap();
         // Replay the structured findings from ver-ca026909ea7b (cas-2f46)
         // and ver-22c4d2451b27 (cas-d740), independent of their summary prose.
         let simplicity: VerificationIssue = serde_json::from_value(serde_json::json!({
@@ -2118,18 +2124,12 @@ mod tests {
         cases.push(("missing_triage", 2, vec![missing_triage], "hold_escalate"));
 
         for (name, rounds, issues, action) in cases {
-            let dir = tempfile::tempdir().unwrap();
-            let root = crate::store::init_cas_dir(dir.path()).unwrap();
-            env.set("CAS_ROOT", &root);
-            let core = CasCore::with_daemon(root.clone(), None, None);
-            let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
-            core.open_agent_store().unwrap().register(&owner).unwrap();
             let task = Task::new(name.into(), "Review".into());
             core.open_task_store().unwrap().add(&task).unwrap();
             for round in 1..=rounds {
                 let dispatch = cas_store::create_verification_dispatch(&root, &task.id, "worker", &owner.id,
                     chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
-                let mut verdict = Verification::new(format!("ver-{round}"), task.id.clone());
+                let mut verdict = Verification::new(format!("ver-{name}-{round}"), task.id.clone());
                 verdict.status = VerificationStatus::Rejected;
                 verdict.provenance = VerificationProvenance::System;
                 verdict.dispatch_id = Some(dispatch.id.clone());
@@ -2146,7 +2146,7 @@ mod tests {
                 }
             }
             let notices = crate::store::open_supervisor_queue_store(&root).unwrap()
-                .peek(&owner.id, 10).unwrap();
+                .poll(&owner.id, 10).unwrap();
             assert_eq!(notices.len(), 1, "{name}");
             let payload: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
             assert_eq!(payload["context"]["rejection_action"], action, "{name}");

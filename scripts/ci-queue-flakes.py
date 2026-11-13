@@ -314,7 +314,6 @@ def main():
     command.add_argument('--repo',type=Path,default=HERE.parent)
     command.add_argument('--shard',required=True)
     command.add_argument('--out',type=Path,required=True)
-    command.add_argument('--issues-repo',default=os.environ.get('CASSY_ISSUES_REPO',os.environ.get('GITHUB_REPOSITORY','')))
     command = commands.add_parser('reconcile')
     command.add_argument('--issues-repo',required=True)
     command.add_argument('--receipts',type=Path,required=True)

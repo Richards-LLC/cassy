@@ -1300,7 +1300,7 @@ jobs:
             echo "Chromium libraries present; skipping apt dependencies"
           fi
           python3 ../scripts/ci-queue-flakes.py run playwright --shard "$SHARD/6" \
-            --issues-repo Richards-LLC/cassy --out "$GITHUB_WORKSPACE/target/queue-flakes/playwright-$SHARD"
+            --out "$GITHUB_WORKSPACE/target/queue-flakes/playwright-$SHARD"
 
       # One artifact serves the queue fan-in and diagnosis. Infrastructure
       # failures can leave native reports without producing receipt.json.
@@ -1679,7 +1679,7 @@ jobs:
           export VERIFIED_TEST_LOG="target/ci-impact/full-shard-$SHARD.log"
           set +e
           python3 scripts/ci-queue-flakes.py run rust --shard "$SHARD/3" \
-            --issues-repo Richards-LLC/cassy --out "target/queue-flakes/rust-$SHARD"
+            --out "target/queue-flakes/rust-$SHARD"
           suite_status=$?
           set -e
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/epic/release-train-* ]]; then

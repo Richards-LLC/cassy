@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.23.1] - 2026-11-13
+
+### Fixed — Supervisor replies
+
+- **Accept verified Claude Code replies** — The operator evidence guard now matches numbers and SHAs against successful results from the current turn without requiring hidden tool-use IDs. Exact commands can be named in backticks. Unsupported facts and clipboard claims without a fresh read remain refused.
+
 ## [4.23.0] - 2026-11-13
 
 ### Fixed — Release validation

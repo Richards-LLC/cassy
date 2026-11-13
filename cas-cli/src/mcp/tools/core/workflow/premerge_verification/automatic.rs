@@ -1011,6 +1011,52 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     );
                 }
             }
+            if status == "supervisor_call" {
+                // cas-d5bb / cas-44eb: an answer is context for the verifier,
+                // not a supervisor-authored final approval.
+                let question = cas_store::get_verification_for_dispatch(&root, &dispatch.id)
+                    .unwrap().unwrap().summary;
+                let answer = "Scope reviewed: preserve drafts and use the existing scoped receipt.";
+                std::fs::write(&response_path, serde_json::json!({
+                    "status":"approved", "summary":"Independent verdict after scope answer",
+                    "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
+                }).to_string()).unwrap();
+                env.set("CAS_TEST_VERIFIER_STATUS", "approved");
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let request = serde_json::from_value(serde_json::json!({
+                    "task_id":task.id, "dispatch_id":dispatch.id,
+                    "status":"supervisor_call", "summary":answer,
+                })).unwrap();
+                runtime.block_on(core.cas_verification_add(
+                    rmcp::handler::server::wrapper::Parameters(request),
+                )).unwrap();
+                let resumed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+                assert_eq!(resumed.id, dispatch.id);
+                assert_ne!(resumed.verifier_agent_id, claimed.verifier_agent_id);
+                for _ in 0..600 {
+                    if settled() { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert!(settled());
+                let final_dispatch = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+                let final_verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+                assert_eq!(final_dispatch.state, cas_types::VerificationDispatchState::Resolved);
+                assert_eq!(final_verdict.status, VerificationStatus::Approved);
+                assert_eq!(final_verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
+                assert_eq!(final_verdict.agent_id, resumed.verifier_agent_id);
+                let conversation = std::fs::read_dir(root.join("verification-runs").join(&dispatch.id))
+                    .unwrap().map(|entry| entry.unwrap().path().join("prompt.txt"))
+                    .filter(|path| path != &output.with_file_name("prompt.txt"))
+                    .map(|path| std::fs::read_to_string(path).unwrap())
+                    .find_map(|body| body.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                        .find_map(|value| value.get("supervisor_calls").cloned()))
+                    .unwrap();
+                let summaries = conversation.as_array().unwrap().iter()
+                    .map(|call| call["summary"].as_str().unwrap()).collect::<Vec<_>>();
+                assert!(summaries.contains(&question.as_str()));
+                assert!(summaries.contains(&answer));
+                assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().is_some());
+            }
             if status == "harness_failed" {
                 let old_child = dispatch.verifier_agent_id.as_deref().unwrap();
                 let old_stderr = std::fs::read(output.with_file_name("harness.log")).unwrap();

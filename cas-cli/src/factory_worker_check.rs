@@ -2064,6 +2064,10 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         validate_harness(&repo, test)?;
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
+    let owned_tests = if let Some(test) = &test {
+        let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
+        stability::rust::selected(&repo, &base, &head, test)?
+    } else { Vec::new() };
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
@@ -2072,6 +2076,8 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let lane_path = lane_lock_path(&cas_root, &repo)?;
     let _lane = try_lock_lane_with_command(&cas_root, &repo, &worker_check_command(args))?
         .ok_or_else(|| lane_lock_refusal(&lane_path))?;
+    let owned_identities = owned_tests.iter().map(|test| test.identity.clone()).collect::<Vec<_>>();
+    stability::invalidate(&cas_root, &repo, &head, &owned_identities)?;
     if let Some(stale) = &_lane.stale_holder {
         eprintln!("{}", stale_lane_holder_notice(stale, chrono::Utc::now()));
     }
@@ -2273,6 +2279,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         command.env("XDG_CONFIG_HOME", directory);
         println!("Worker test environment: provider credentials removed; private XDG_CONFIG_HOME");
     }
+    if let Some(test) = &test && !owned_tests.is_empty() {
+        command = stability::rust::wrap(command, test, &owned_tests, &count_file);
+    }
     let scope_directory = tempfile::tempdir_in(&slots)?;
     let high = crate::factory_build_memory::memory_high(
         config.worker_memory_high_gib,
@@ -2301,6 +2310,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     #[cfg(unix)]
     let worker_signals = WorkerWaitSignals::install()?;
+    let started = std::time::Instant::now();
     let mut child = command
         .spawn()
         .context("start capped worker Cargo command")?;
@@ -2336,7 +2346,11 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 filter: test.filter,
                 harness: test.harness,
                 count,
-                stability: None,
+                stability: (!owned_identities.is_empty()).then(|| stability::Proof {
+                    runner: "nextest".into(), tests: owned_identities,
+                    consecutive_passes: stability::REQUIRED_PASSES,
+                    elapsed_ms: started.elapsed().as_millis(),
+                }),
                 selected_log,
                 host_path_opt_out,
                 supervisor_recorded: None,

@@ -139,6 +139,21 @@ pub(super) fn park_refusals(
         ));
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    // Same G-61 receipt gate for every harness. Non-Git scope-classification
+    // callers have no delivered tests; ordinary park already binds a Git tip.
+    if proof_repo.join(".git").exists() {
+        use crate::factory_worker_check::stability;
+        match stability::required(proof_repo, head, target, changed_paths, delivery_ranges)
+            .and_then(|tests| stability::missing(cas_root, proof_repo, head, &tests))
+        {
+            Ok(missing) if !missing.is_empty() => refusals.push(crate::gates::tag("G-61", format!(
+                "CHANGED_TEST_STABILITY_REQUIRED: task {} needs five consecutive capped passes at {short} for: {}. Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner, then retry park.",
+                task.id, missing.iter().map(|test| format!("{}::{}", test.path, test.name)).collect::<Vec<_>>().join(", "),
+            ))),
+            Err(error) => refusals.push(crate::gates::tag("G-61", format!("CHANGED_TEST_DISCOVERY_FAILED: {error:#}"))),
+            _ => {},
+        }
+    }
     let tested = crate::factory_worker_check::passing_test_packages_against(cas_root, proof_repo, head, target);
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
     // The module check below reads these receipts, so a crate that still owes

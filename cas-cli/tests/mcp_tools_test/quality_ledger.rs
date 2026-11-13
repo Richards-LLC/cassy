@@ -105,7 +105,7 @@ async fn handoff_lines_become_feature_verdicts() {
     let saved = extract_text(service.cas_remember(Parameters(request)).await.unwrap());
     assert!(saved.contains("Recorded 2 feature_feedback"), "{saved}");
 
-    let events = ledger(&temp);
+    let mut events = ledger(&temp);
     assert_eq!(events.len(), 2, "{events:?}");
     let QualityPayload::FeatureFeedback { feature, verdict, source, .. } = &events[0].payload else {
         panic!("{:?}", events[0].payload);
@@ -115,5 +115,7 @@ async fn handoff_lines_become_feature_verdicts() {
         ("ambient_recall", FeedbackVerdict::Noise, FeedbackSource::Supervisor)
     );
     assert_eq!(events[0].local_note.as_deref(), Some("283 injected, none used"));
+    // A valid public identity can contain the same digits as the private note.
+    events[0].id = "00000283-0000-4000-8000-000000000001".into();
     assert!(!serde_json::to_string(&events[0].to_wire()).unwrap().contains("283"));
 }

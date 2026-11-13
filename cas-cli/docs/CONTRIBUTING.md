@@ -3199,7 +3199,10 @@ the selector decided. A failed test fails the lane only when it passes (or
 does not exist) at the delivery's base: the same job checks out that base and
 reruns just the failed tests. Tests that fail there too are named in the job
 summary as inherited from the base and do not fail the delivery. Lane receipts are published as `lane-impact-*`, outside the
-selector's failure history. Release-train pushes and
+selector's failure history. Merges into a release train start no train
+suite; lane CI already proved each delivery. The daemon's train CI scan
+dispatches `full-validation.yml` once per frozen train tip (cas-0fc56), and a
+frozen train accepts no merge that could supersede it. That dispatched run and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.

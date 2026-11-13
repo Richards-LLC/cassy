@@ -177,7 +177,7 @@ class TrainReceipts(unittest.TestCase):
     def forge(self, artifact, status='completed', conclusion='success', fanin='success'):
         (self.root/'forge.json').write_text(json.dumps({'artifact': artifact, 'fanin': fanin, 'runs': [{
             'id': int(self.env['GITHUB_RUN_ID']), 'run_attempt': int(self.env['GITHUB_RUN_ATTEMPT']), 'head_sha': self.env['GITHUB_SHA'],
-            'head_branch': self.env['GITHUB_REF_NAME'], 'event': 'push', 'status': status, 'conclusion': conclusion}]}))
+            'head_branch': self.env['GITHUB_REF_NAME'], 'event': 'workflow_dispatch', 'status': status, 'conclusion': conclusion}]}))
 
     def observe(self, check=False, expected=0):
         return self.run_cli('check' if check else 'observe', '--repo', self.repo, '--head', self.env['GITHUB_SHA'],
@@ -401,7 +401,7 @@ class TrainReceipts(unittest.TestCase):
         # The prepared train push must also adopt, and its completed run must
         # retain a durable reference instead of claiming to have run the suite.
         docs_head = self.git('rev-parse', 'HEAD')
-        self.env.update(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
+        self.env.update(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
                         GITHUB_SHA=docs_head, GITHUB_RUN_ID='102')
         self.assertTrue(attempt())
         jobs = yaml.safe_load((SCRIPT.parent.parent/'.github/workflows/ci.yml').read_text())['jobs']
@@ -461,7 +461,7 @@ class TrainReceipts(unittest.TestCase):
         data['pr']['head']['sha'] = plumbing_head
         data_path.write_text(json.dumps(data))
         self.assertFalse(attempt())
-        self.env.update(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
+        self.env.update(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
                         GITHUB_SHA=self.git('rev-parse', 'HEAD'), GITHUB_RUN_ID='103')
         self.assertFalse(attempt())
         self.assertFalse(adoption.exists())

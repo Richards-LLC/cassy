@@ -180,10 +180,11 @@ ref becomes unmergeable until it is fixed. GH #138 already renamed these jobs on
 
 ## 3. One full validation graph for train and queue
 
-`.github/workflows/full-validation.yml` handles release-train pushes and
+`.github/workflows/full-validation.yml` handles the release-train run and
 `merge_group` through the same reusable `.github/workflows/ci.yml`. Its outer
-`Fast Validation` job preserves the required context. A newer train push cancels
-its predecessor. Both events select Commander journeys against the last release,
+`Fast Validation` job preserves the required context. A train merge starts no
+run: Cassy dispatches the workflow once per frozen train tip, so no run is
+cancelled by a later merge. Both events select Commander journeys against the last release,
 run every registered script/CI-tier test, Commander vitest/typecheck/build,
 preflight, doctests and the complete Rust archive/shards. Quarantine and one
 rerun, including durable flake publication, apply equally to train and queue.
@@ -210,7 +211,7 @@ only with a version bump and is rebuilt and checked in the queue compile step.
 Any product change, moved main, partial/legacy proof or uncertainty runs the full
 graph. A release-plumbing continuation can reuse the source's earlier receipt.
 
-A plumbing-only push to the train uses the same consumer before scheduling tests.
+A dispatched train run at a plumbing-only frozen tip uses the same consumer before scheduling tests.
 The existing dedupe job publishes a `train-full-gate` artifact with scope
 `full-set-adoption`: the adopting head/tree, main baseline, and original native
 source head, run and attempt. It becomes usable only after that workflow and its

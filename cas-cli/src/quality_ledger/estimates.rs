@@ -451,6 +451,8 @@ pub(crate) fn github_history(root: &Path, limit: usize, since: DateTime<Utc>) ->
     };
     let mut inserted = 0;
     for (workflow, event, stage) in [
+        // cas-0fc56: train suites are dispatched at freeze; push rows are history.
+        ("full-validation.yml", "workflow_dispatch", "train_tip_suite"),
         ("full-validation.yml", "push", "train_tip_suite"),
         ("full-validation.yml", "merge_group", "merge_queue"),
         ("ci.yml", "push", "train_tip_suite"),

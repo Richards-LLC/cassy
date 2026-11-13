@@ -227,7 +227,7 @@ pub(crate) fn wrap(command: Command, test: &TargetedTest, tests: &[Test], count:
     let mut args = vec!["nextest".to_owned(), "run".into(), "-p".into(), test.package.clone()];
     if let Some(harness) = &test.harness { args.extend(["--test".into(), harness.clone()]); }
     else { args.push("--lib".into()); }
-    args.extend(["-E".into(), repeat_filter(tests)]);
+    args.extend(["--retries".into(), "0".into(), "-E".into(), repeat_filter(tests)]);
     let mut wrapper = Command::new("bash");
     wrapper.args(["-c", r#"
 verified=$1

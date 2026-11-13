@@ -2263,6 +2263,10 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     {
         cargo_args.insert(4, "--lib".into());
     }
+    // Native retries must not turn a failing invocation into stability proof.
+    if !owned_tests.is_empty() {
+        cargo_args.extend(["--retries".into(), "0".into()]);
+    }
     command
         .args(&cargo_args)
         .current_dir(&repo)

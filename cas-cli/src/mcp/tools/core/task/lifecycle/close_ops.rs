@@ -2760,7 +2760,7 @@ pub(crate) fn retire_no_code_delivery_scope(
             evidence_only::measure_paths(repo, &[(start.base_sha.clone(), tip.clone())], false)?;
         }
     }
-    let audit = format!("Retired measured docs/artifacts delivery tips {tips:?}, source {:?}; no Git refs changed.", task.deliverables.factory_branch_start);
+    let audit = format!("Retired source records after no-code evidence checks: tips {tips:?}, start {:?}; no Git refs changed.", task.deliverables.factory_branch_start);
     let delivery = &mut task.deliverables;
     delivery.factory_branch_anchor = None;
     delivery.historical_factory_branch_anchors.clear();

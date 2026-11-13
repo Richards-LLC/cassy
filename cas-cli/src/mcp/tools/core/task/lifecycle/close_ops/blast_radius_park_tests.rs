@@ -860,6 +860,58 @@ async fn widening_covered_by_worker_receipts_keeps_the_parked_delivery_cas_d6eb(
     assert_eq!(f.task().proof_targets, ["unrelated", "widget::gear"]);
 }
 
+/// GH #1890: recovered deliveries keep receipts at the assigned worker's
+/// actual checkout even when its path and branch no longer follow conventions.
+#[tokio::test]
+async fn recovered_close_counts_supervisor_module_receipts_cas_231c() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let recovered = f.cas_dir().join("worktrees/recovered-proof");
+    git(f.dir.path(), &["worktree", "move", f.worker_path.to_str().unwrap(), recovered.to_str().unwrap()]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut worker = agents.get("br-worker-session").unwrap();
+    worker.metadata.insert("clone_path".into(), recovered.to_string_lossy().into_owned());
+    agents.update(&worker).unwrap();
+    let branch = "factory/retired-implementer";
+    git(&recovered, &["checkout", "-qb", branch]);
+    for module in ["registry", "receipts", "workflow", "lifecycle", "teams"] {
+        std::fs::write(recovered.join(format!("crates/widget/src/{module}.rs")), "pub fn changed() {}\n").unwrap();
+    }
+    git(&recovered, &["add", "."]);
+    git(&recovered, &["commit", "-qm", "fix(cas-br01): recover six changed modules"]);
+    git(&recovered, &["push", "-q", "origin", branch]);
+    let tip = git(&recovered, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    let mut task = f.task();
+    task.branch = Some(branch.into());
+    task.deliverables.parked_branch = Some(branch.into());
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    tasks.update(&task).unwrap();
+    git(f.dir.path(), &["merge", "-q", "--ff-only", branch]);
+    git(f.dir.path(), &["push", "-q", "origin", "main"]);
+    let close = serde_json::json!({"action":"close", "id":ID, "reason":"recovered gear", "commit_receipt":tip});
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let missing = call(&f.supervisor, close.clone()).await;
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{missing}");
+    let logs = tempfile::tempdir().unwrap();
+    for module in ["gear", "registry", "receipts", "workflow", "lifecycle", "teams"] {
+        let log = logs.path().join(format!("{module}.log"));
+        std::fs::write(&log, "Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+        let proof = serde_json::json!({
+            "head":tip, "repo":recovered,
+            "cargo_args":["nextest", "run", "-p", "widget", "--lib", "-E", format!("test({module})")],
+            "log_path":log, "exit_code":0,
+        });
+        f.supervisor.factory(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"record_test_receipt", "task_id":ID, "payload":proof.to_string(),
+        })).unwrap())).await.unwrap();
+    }
+    assert_eq!(crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &recovered, &tip).len(), 6);
+    let closed = call(&f.supervisor, close).await;
+    assert_eq!(f.task().status, TaskStatus::Closed, "{closed}");
+    assert_eq!(f.task().proof_targets, ["unrelated"], "receipts must not rewrite the declaration");
+}
+
 /// cas-e9d6: the 14:01 divergence. Cassy's post-merge close of a parked
 /// blast-radius delivery judges the worker's receipts at the delivered tip,
 /// exactly as the worker's own close does. A gate that truly fails on the

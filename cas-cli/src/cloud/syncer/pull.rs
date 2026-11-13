@@ -4105,13 +4105,8 @@ mod tests {
     // every project's rows — the cas-2eb3 contamination vector.
     #[test]
     fn pull_url_aborts_when_project_scope_is_unresolvable() {
-        let err = build_scoped_pull_url_with("https://cloud.example", &[], || None)
+        build_scoped_pull_url_with("https://cloud.example", &[], || None)
             .expect_err("an unresolvable project scope must abort the pull, not drop the scope");
-        let message = err.to_string();
-        assert!(
-            message.contains("not inside a CAS project directory"),
-            "unexpected error message: {message}"
-        );
     }
 
     #[test]

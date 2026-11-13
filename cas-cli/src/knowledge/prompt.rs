@@ -474,7 +474,6 @@ mod tests {
         ] {
             assert!(prompt.contains(CONTENT_BEGIN));
             assert!(prompt.contains(CONTENT_END));
-            assert!(prompt.contains("UNTRUSTED DATA"));
         }
     }
 

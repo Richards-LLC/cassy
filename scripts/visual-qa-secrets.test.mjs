@@ -70,7 +70,6 @@ test('signed-in trace and in-flight route teardown contain no seeded credentials
         else await context.tracing.stop({ path: ${JSON.stringify(join(dir, 'trace.zip'))} });
         if (qa.closeQaContext) await qa.closeQaContext(context);
         else await context.close();
-        await new Promise(resolve => setTimeout(resolve, 50));
         await qa.runVisualQa({
           urls: [url], journey: { states: [{ name: 'signed-in', steps: [{ waitFor: 'body' }] }] },
           schemes: ['light'], viewports: ['390x800'], artifactDir: ${JSON.stringify(join(dir, 'report'))},

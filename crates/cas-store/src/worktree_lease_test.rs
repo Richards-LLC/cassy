@@ -183,7 +183,6 @@ mod tests {
         let mut lease = WorktreeLease::new("wt-1".to_string(), "agent-1".to_string(), 60);
         let old_expires = lease.expires_at;
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
         lease.renew(120);
 
         assert!(lease.expires_at > old_expires);
@@ -272,12 +271,11 @@ mod tests {
 
         // First claim
         let result1 = agent_store
-            .try_claim_worktree(&worktree.id, "agent-1", 600)
+            .try_claim_worktree(&worktree.id, "agent-1", 60)
             .unwrap();
         assert!(result1.is_success());
         let lease1 = result1.lease().unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Same agent claims again - should succeed (renew)
         let result2 = agent_store
@@ -370,7 +368,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
 
         agent_store
             .renew_worktree_lease(&worktree.id, "agent-1", 120)
@@ -405,8 +402,11 @@ mod tests {
             .try_claim_worktree(&worktree.id, "agent-1", 1)
             .unwrap();
 
-        // Wait for expiration
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Set an expired fixture deadline without waiting on the wall clock.
+        rusqlite::Connection::open(_temp.path().join("cas.db")).unwrap().execute(
+            "UPDATE worktree_leases SET expires_at = ?1 WHERE worktree_id = ?2",
+            rusqlite::params![(Utc::now() - Duration::days(1)).to_rfc3339(), &worktree.id],
+        ).unwrap();
 
         // Agent 2 can now claim (expired lease)
         let result = agent_store
@@ -430,8 +430,11 @@ mod tests {
             .try_claim_worktree(&worktree.id, "agent-1", 1)
             .unwrap();
 
-        // Wait for expiration
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Set an expired fixture deadline without waiting on the wall clock.
+        rusqlite::Connection::open(_temp.path().join("cas.db")).unwrap().execute(
+            "UPDATE worktree_leases SET expires_at = ?1 WHERE worktree_id = ?2",
+            rusqlite::params![(Utc::now() - Duration::days(1)).to_rfc3339(), &worktree.id],
+        ).unwrap();
 
         // Reclaim expired
         let count = agent_store.reclaim_expired_worktree_leases().unwrap();

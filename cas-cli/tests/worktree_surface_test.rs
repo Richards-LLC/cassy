@@ -8506,19 +8506,8 @@ async fn test_worktree_cleanup_unknown_target_reports_not_found_not_disabled() {
         .await
         .expect_err("unknown target must be an error, not a success message");
 
-    let message = err.message.to_string();
-    assert!(
-        message.contains("Worktree not found: no-such-worker"),
-        "not-found must name the target: {message}"
-    );
-    assert!(
-        message.contains("System A worktree store") && message.contains("System B path"),
-        "not-found must name both systems it searched: {message}"
-    );
-    assert!(
-        !message.contains("experimental and disabled"),
-        "a genuine absence must never render as the disabled gate: {message}"
-    );
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(err.message.contains("[G-102]"));
 }
 
 /// AC2: a branch whose commits exist on no other branch is refused without

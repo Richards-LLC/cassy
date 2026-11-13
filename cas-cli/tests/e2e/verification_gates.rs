@@ -75,7 +75,7 @@ fn test_list_verifications() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should show all verifications
-    assert!(stdout.contains("Verification round 1") || stdout.contains("approved"));
+    assert!(stdout.contains("approved"));
 }
 
 /// Test getting the latest verification for a task
@@ -125,7 +125,7 @@ fn test_latest_verification() {
 
     // Latest should be the rejected one
     assert!(
-        stdout.contains("rejected") || stdout.contains("Second review"),
+        stdout.contains("rejected"),
         "Latest verification should be the second one"
     );
 }

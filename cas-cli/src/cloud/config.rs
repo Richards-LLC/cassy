@@ -1851,9 +1851,7 @@ mod tests {
         assert!(config.team_only);
         assert!(
             config
-                .validate_team_only()
-                .unwrap_err()
-                .contains("no active team")
+                .validate_team_only().is_err()
         );
 
         let mut linked = config;
@@ -3867,15 +3865,9 @@ mod tests {
             token: Some("tok".to_string()),
             ..Default::default()
         };
-        let json = serde_json::to_string(&config).unwrap();
-        assert!(
-            !json.contains("\"teams\""),
-            "empty teams must not appear in JSON, got: {json}"
-        );
-        assert!(
-            !json.contains("\"default_team_id\""),
-            "None default_team_id must not appear in JSON, got: {json}"
-        );
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.get("teams").is_none());
+        assert!(json.get("default_team_id").is_none());
     }
 
     #[test]

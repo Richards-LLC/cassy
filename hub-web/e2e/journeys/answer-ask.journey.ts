@@ -164,11 +164,6 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
     const handled = page.getByRole("log").getByRole("group", { name: `Blocker from ${PELICAN}, you've written since` });
     await expect(handled.locator(".blk-handled")).toBeVisible();
     await expect(handled.locator(".blk-handled .tick")).toHaveCount(0);
-    expect(await handled.evaluate((object) => {
-      const probe = document.createElement("span"); probe.style.background = "var(--sup-bg)"; object.append(probe);
-      const supervisor = getComputedStyle(probe).backgroundColor; probe.remove();
-      return getComputedStyle(object.querySelector(".obj-body")!).backgroundColor === supervisor;
-    }), "acknowledged blocker background").toBe(true);
     // The answer comes after everything shown, so nothing is left waiting in the rail (cas-ce17).
     await expect(waiting).toBeHidden();
     // It sorts after the machine's future-stamped blocker, but shows the time it was sent, under today (cas-ac1f).

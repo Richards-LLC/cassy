@@ -137,8 +137,9 @@ describe("atomic Commander journal", () => {
       const database = request.result, tx = database.transaction("sends", "readonly"), read = tx.objectStore("sends").getAll();
       tx.oncomplete = () => { database.close(); resolve(read.result); };
     }; });
-    expect(JSON.stringify(records)).not.toContain(item.text);
-    expect(records).toHaveLength(1); // Retain the reference fence, never the text.
+    expect(records).toHaveLength(1);
+    expect((records as { send?: unknown }[]).map(record => record.send)).toEqual([undefined]);
+    // Retain the reference fence, never the text.
     let writes = 0;
     expect(await make().dispatch(scope, item.id, fence, () => { writes++; return true; })).toBe("unconfirmed");
     expect(writes).toBe(0);
@@ -212,7 +213,8 @@ describe("atomic Commander journal", () => {
       const database = request.result, tx = database.transaction("sends", "readonly"), read = tx.objectStore("sends").getAll();
       tx.oncomplete = () => { database.close(); resolve(read.result); };
     }; });
-    expect(JSON.stringify(records)).not.toContain(item.text);
+    expect(records).toHaveLength(1);
+    expect((records as { send?: unknown }[]).map(record => record.send)).toEqual([undefined]);
   });
   it("a stale Retry or journal snapshot cannot create another write after confirmation (cas-9dc6)", async () => {
     const { a, b } = journals();
@@ -579,7 +581,7 @@ describe("journal privacy and immutable replay", () => {
       const database = request.result, tx = database.transaction("replies", "readonly"), read = tx.objectStore("replies").getAll();
       tx.oncomplete = () => { database.close(); resolve(read.result); };
     }; });
-    expect(JSON.stringify(records)).not.toContain("Never reached it");
+    expect((records as StoredReply[]).map(record => record.reply.notification_id)).toEqual([reply.notification_id]);
   });
   it("the newly committed reply remains durable at the cap even when all timestamps tie", async () => {
     const { a, db, make } = journals();

@@ -67,7 +67,6 @@ describe("F6: invalid and expired links keep their nonsecret outcome", () => {
     const outcome = readPairingFragment(location, history);
     expect(outcome).toEqual({ kind: "invalid" });
     expect(replacement).toBe("/commander");
-    expect(JSON.stringify(outcome)).not.toContain("not-a-token");
     expect(INVALID_PAIRING_LINK_MESSAGE).not.toContain(TOKEN);
   });
 

@@ -429,7 +429,7 @@ describe("wire-v1 reverse pairing", () => {
     const result = firstPage.clear();
 
     expect(result).toMatchObject({ persistentRemovalFailed: true, failClosed: true });
-    expect([...storage.values.values()].join("\n")).not.toContain(request.pollSecret);
+    expect([...storage.values.values()].map(value => JSON.parse(value))).toEqual([{ kind: "cleared" }]);
     expect(new PendingPairingStore(storage).load()).toBeNull();
   });
 

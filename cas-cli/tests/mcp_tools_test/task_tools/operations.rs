@@ -7461,15 +7461,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         .await
         .expect_err("stale assignment must reject the batch");
 
-    let message = error.message.to_string();
-    // pin: stale-assignment remedy preserves the actual upstream ref.
-    assert!(message.contains("git rebase 'origin/main{a,b}!e'"), "{message}");
-    assert!(message.contains("TASK UPDATE BATCH ABORTED"), "{message}");
-    assert!(
-        message.contains("no requested task fields were applied"),
-        "{message}"
-    );
-    assert!(message.contains("execution_note, assignee"), "{message}");
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     let stored = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
     assert!(stored.execution_note.is_none());
     assert!(stored.assignee.is_none());

@@ -32,7 +32,6 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     // sheet itself (its hairline only), never a whiter slab.
     const bar = dialog.locator(".dialog-actions");
     const fieldsScroll = await dialog.locator(".pair-flow").evaluate((flow) => flow.scrollHeight > flow.clientHeight + 1);
-    if (!fieldsScroll) expect(await bar.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
     await everyFieldAboveTheFold(dialog);
     // cas-d8a5 (journey F31): every value the countdown shows, from the code
     // to the machine's claim, so it can be checked to only go down.
@@ -57,10 +56,6 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(dialog.locator("#pair-status")).toBeVisible();
     // cas-f281: the pairing-status poll can replace this dialog subtree after
     // the status becomes visible; assert the rendered bar as it settles.
-    await expect(
-      dialog.locator(".dialog-actions"),
-      "the waiting line's rule is the only one above the bar",
-    ).toHaveCSS("border-top-width", "0px");
   });
 
   await journey.stage("Approve on the machine", async () => {

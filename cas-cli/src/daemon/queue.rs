@@ -311,7 +311,6 @@ mod tests {
     #[test]
     fn test_task_ordering() {
         let high = MaintenanceTask::new(TaskType::GenerateEmbeddings);
-        std::thread::sleep(std::time::Duration::from_millis(1));
         let low = MaintenanceTask::new(TaskType::PruneEntries);
 
         // High priority should come first
@@ -321,8 +320,8 @@ mod tests {
     #[test]
     fn test_same_priority_fifo() {
         let first = MaintenanceTask::new(TaskType::GenerateEmbeddings);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let second = MaintenanceTask::new(TaskType::GenerateEmbeddings);
+        let mut second = MaintenanceTask::new(TaskType::GenerateEmbeddings);
+        second.queued_at = first.queued_at + std::time::Duration::from_secs(1);
 
         // First queued should come first (FIFO)
         assert!(first > second);

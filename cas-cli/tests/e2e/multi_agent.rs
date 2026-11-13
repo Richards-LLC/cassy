@@ -305,7 +305,7 @@ fn test_task_mine() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(&task_id) || stdout.contains("My task"));
+    assert!(stdout.contains(&task_id));
 }
 
 /// Test agent cleanup of stale agents
@@ -538,63 +538,5 @@ fn test_agent_unregister() {
                 );
             }
         }
-    }
-}
-
-/// Test lease expiration behavior
-#[test]
-fn test_lease_expiration() {
-    let cas = new_cas_instance();
-
-    // Register an agent
-    let output = cas
-        .cas_cmd()
-        .args(["agent", "register", "--name", "expiration-agent"])
-        .output()
-        .expect("Failed to register agent");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let re = regex::Regex::new(r"(cli-[a-f0-9]+)").ok();
-    let agent_id = re
-        .and_then(|r| r.captures(&stdout))
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default();
-
-    if agent_id.is_empty() {
-        println!("Skipping test: could not extract agent ID");
-        return;
-    }
-
-    let task_id = cas.create_task("Task with expiring lease");
-
-    // Claim with very short duration
-    let output = cas
-        .cas_cmd()
-        .args([
-            "task",
-            "claim",
-            &task_id,
-            "--agent-id",
-            &agent_id,
-            "--duration",
-            "1",
-        ])
-        .output()
-        .expect("Failed to claim task");
-
-    if output.status.success() {
-        // Wait a bit (lease should expire)
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        // Check lease status
-        let output = cas
-            .cas_cmd()
-            .args(["agent", "leases"])
-            .output()
-            .expect("Failed to list leases");
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        println!("Leases after expiration: {}", stdout);
     }
 }

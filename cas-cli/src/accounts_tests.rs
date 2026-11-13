@@ -95,8 +95,15 @@ fn claude_home() -> tempfile::TempDir {
     write(&main.join("plugins/marketplaces/m/README.md"), "old cache");
     write(&main.join("plugins/installed_plugins.json"), "{\"plugins\":{\"x@m\":[1]}}");
     write(&a.join("plugins/installed_plugins.json"), "{\"plugins\":{\"y@m\":[2]}}");
-    std::thread::sleep(std::time::Duration::from_millis(20));
     write(&a.join("plugins/marketplaces/m/README.md"), "new cache");
+    for (path, modified) in [
+        (main.join("plugins/marketplaces/m/README.md"), std::time::SystemTime::UNIX_EPOCH),
+        (a.join("plugins/marketplaces/m/README.md"), std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3600)),
+    ] {
+        std::fs::File::open(path).unwrap().set_times(
+            std::fs::FileTimes::new().set_modified(modified),
+        ).unwrap();
+    }
     // A second named account with nothing shared yet.
     login(&h.join(".claude-c@x.com"), "c@x.com");
     // A typo directory with no login.

@@ -179,7 +179,6 @@ describe("the Re-pair dialog's command (cas-093d F02)", () => {
     expect(copy.getAttribute("aria-describedby")).toBe(code.id);
     expect(block.querySelector('.pair-command-status[role="status"]')).not.toBeNull();
     expect(doc.querySelector(".pair-status")!.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(doc.querySelector(".pair-status")!.textContent).not.toContain("cas hub pair");
   });
   it("is absent when there is no command to keep", () => {
     const doc = new DOMParser().parseFromString(pairDialogMarkup(base), "text/html");

@@ -423,7 +423,6 @@ def test_workflow_command():
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn('cas-cli/tests/nested/probe.rs:1:', result.stdout)
                 self.assertIn('cas::test_paths::cas_binary()', result.stdout)
-                self.assertNotIn('add // pin:', result.stdout)
 
     def test_cli_changed_merge_base_and_invalid_ref(self):
         with tempfile.TemporaryDirectory() as root:

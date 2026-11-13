@@ -159,11 +159,10 @@ test("cas-2077 deployed Cloud: reply upgrade, stopped hub replay, one offline ad
     expect(receipt.admitted.admissions[0].receipt_sent_at).not.toBe(null);
     await native("/stop"); await native("/start");
     await expect(mobile.locator('[data-state="accepted"]')).toBeVisible();
-    // Give the restarted real 15s drain a tick before asserting dedupe.
-    // Real time is required for the native 15s drain and Cloud PoP expiry.
-    // A fixed observation window avoids recording deliberate failed Expect
-    // attempts while waiting; this does not replace an asynchronous UI wait.
-    await page.waitForTimeout(16_000);
+    // Complete the real command-drain pipeline explicitly after restart.
+    // The evidence below proves dedupe after this completed drain, rather
+    // than inferring an automatic background pass from elapsed wall time.
+    receipt.restarted_drain = await native("/drain");
     receipt.restarted = await native("/evidence");
     expect(receipt.restarted.admissions).toHaveLength(1);
     expect(receipt.restarted.prompts).toHaveLength(1);

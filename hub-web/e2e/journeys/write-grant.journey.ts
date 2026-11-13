@@ -128,7 +128,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(panel.getByRole("textbox", { name: "Reason" })).toHaveValue("");
         await expect(panel.getByRole("combobox", { name: "Task" })).toHaveValue("cas-1234");
         await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveText("cas-1234");
-        await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveCSS("white-space", "nowrap");
+        expect(await rail.locator(".write-grant-result .write-grant-id").evaluate(node => { const range = document.createRange(); range.selectNodeContents(node); return range.getClientRects().length; })).toBe(1);
         // cas-a8d9: compare the receipt with the fade's rendered top, including
         // the sticky pseudo-element's negative margins inside the rail padding.
         if (width === 1280) {

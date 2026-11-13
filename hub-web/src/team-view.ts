@@ -100,6 +100,8 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const list = document.createElement("ul"); list.className = "team-lanes"; list.setAttribute("aria-label", "Worker lanes");
   for (const { worker, state, reason, priority } of lanes) {
     const lane = document.createElement("li"); lane.className = "team-lane"; lane.dataset.worker = worker.name; lane.tabIndex = -1;
+    lane.dataset.liveness = worker.agent?.liveness ?? "unknown";
+    lane.dataset.taskStatus = snapshot.tasks.find(task => task.id === worker.currentTask)?.status ?? "unknown";
     if (reason) lane.dataset.urgency = priority === 2 ? "critical" : "waiting";
     const identity = document.createElement("div"); identity.className = "team-identity";
     const model = text("span", [worker.agent?.harness ?? "Harness not reported", worker.agent?.model ?? "Model not reported"].join(" · "), "team-model");

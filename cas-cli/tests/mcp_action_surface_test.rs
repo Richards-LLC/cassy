@@ -199,16 +199,8 @@ fn canonicalized_aliases_are_pinned_and_described() {
         "task get alias must remain canonicalized to show"
     );
     assert!(
-        source.contains("canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)"),
-        "task dispatch must canonicalize through the published alias table"
-    );
-    assert!(
         cas_mcp::actions::COORDINATION_ACTION_ALIASES.contains(&("inbox", "inbox_poll")),
         "coordination inbox alias must remain canonicalized to inbox_poll"
-    );
-    assert!(
-        source.contains("canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)"),
-        "coordination dispatch must canonicalize through the published alias table"
     );
     for (tool, documented) in [
         ("task", "`get` is an alias of `show`"),

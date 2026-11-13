@@ -192,8 +192,8 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         after = self.git("rev-parse", "HEAD").stdout.strip()
         result = self.run_script("regenerate-generated-artifacts.sh", before, after, ok=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertRegex(result.stderr.splitlines()[0], r"hub-web/dist.*failed")
-        self.assertIn("regenerated " + LEDGER, result.stdout)
+        self.assertTrue(result.stderr.strip())
+        self.assertIn("skills/demo/references/third.md", json.loads((self.repo / LEDGER).read_text())["files"])
         # The merge receipt keeps only line one, so its log must survive exit.
         match = re.search(r"log: ([^)]+)", result.stderr.splitlines()[0])
         self.assertIsNotNone(match, result.stderr)

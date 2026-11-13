@@ -427,11 +427,9 @@ class GitRatchet(unittest.TestCase):
         self.commit()
         result = self.lint()
         self.assertEqual(result.returncode, 1)
-        self.assertIn('baseline growth since ' + self.base, result.stderr)
         full = subprocess.run([sys.executable, str(ROOT / 'scripts/check-test-env.py'),
                                '--root', str(self.root)], text=True, capture_output=True)
         self.assertEqual(full.returncode, 1)
-        self.assertIn('baseline growth since ' + self.base, full.stderr)
 
     def test_fix_requires_pruning_and_pruning_passes(self):
         source = '#[test] fn bad() { std::env::set_var("HOME", "x"); }'

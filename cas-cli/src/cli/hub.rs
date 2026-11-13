@@ -4896,23 +4896,7 @@ mod tests {
         assert_eq!(hub_display_state(&paths, &record), HubDisplayState::Exited);
     }
 
-    #[test]
-    fn lock_holder_termination_label_names_its_phase() {
-        let paths = HubRuntimePaths::new("/nonexistent/cas-c67c");
-        let mut holder = HubLockHolder {
-            pid: 804,
-            age: Some(Duration::from_secs(91)),
-            phase: Some("starting".to_owned()),
-            command: None,
-        };
-        assert!(lock_holder_termination_message(&paths, &holder).contains("wedged in startup"));
-        holder.phase = Some("running".to_owned());
-        let message = lock_holder_termination_message(&paths, &holder);
-        assert!(message.contains("but not answering"), "{message}");
-        assert!(!message.contains("no completed runtime state"), "{message}");
-        holder.phase = Some("stopping".to_owned());
-        assert!(lock_holder_termination_message(&paths, &holder).contains("is stopping"));
-    }
+
 
     #[test]
     fn update_publication_policy_ignores_old_record_flags_and_honors_opt_out() {

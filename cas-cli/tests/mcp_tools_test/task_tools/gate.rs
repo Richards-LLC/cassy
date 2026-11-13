@@ -341,11 +341,7 @@ async fn gate_start_is_supervisor_only_without_weakening_ordinary_start_protecti
         .cas_task_update(Parameters(direct_close))
         .await
         .expect_err("direct status update must not bypass the Gate decision classifier");
-    assert!(
-        direct_close_error.message.contains("GATE UPDATE REJECTED"),
-        "{}",
-        direct_close_error.message
-    );
+    assert_eq!(direct_close_error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     assert_eq!(store.get(&gate.id).unwrap().status, TaskStatus::Open);
 
     let ordinary = cas::types::Task::new("cas-ordinary-supervisor-start".into(), "Work".into());

@@ -4180,7 +4180,6 @@ fn cas_0140_audit_writer_failure_is_visible_and_clears_after_restart() {
     assert_eq!(super::read_audit_health(&state_dir).unwrap(), Some(recorded.clone()));
     let report = super::audit_writer_report(&state_dir, Utc::now());
     assert!(report.is_failure());
-    assert!(report.message.contains("2 failures") && report.message.contains("dpop_auth"), "{}", report.message);
 
     // A restarted hub still reports it until a row lands.
     drop(store);

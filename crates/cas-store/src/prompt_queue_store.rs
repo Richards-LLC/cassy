@@ -12640,9 +12640,7 @@ mod tests {
         assert!(store.claim_recipient_transport(before, "worker-1").unwrap());
         // The daemon wrote the Teams copy and deferred the wake (cas-a1ed).
         store.record_deferred_inbox(before, 0).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         let turn_started_at = Utc::now();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         let decision = store
             .enqueue_with_session("supervisor", "worker-1", "scope decision: take (A)", session)
             .unwrap();
@@ -13001,9 +12999,7 @@ mod tests {
             .enqueue_with_session("sup", "worker-1", "turn prompt", session)
             .unwrap();
         store.mark_transport_delivered(before).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         let turn_started_at = Utc::now();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         let mid_turn = store
             .enqueue_with_session("peer", "worker-1", "peer reply mid-turn", session)
             .unwrap();
@@ -13011,6 +13007,14 @@ mod tests {
         let pending = store
             .enqueue_with_session("sup", "worker-1", "not yet handed off", session)
             .unwrap();
+
+        for (id, at) in [(before, turn_started_at - chrono::Duration::days(1)),
+                         (mid_turn, turn_started_at + chrono::Duration::days(1))] {
+            store.conn.lock().unwrap().execute(
+                "UPDATE prompt_queue SET transport_delivered_at = ?1 WHERE id = ?2",
+                params![at.to_rfc3339(), id],
+            ).unwrap();
+        }
 
         let ids = |rows: Vec<QueuedPrompt>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
         let mut surfaced = ids(store

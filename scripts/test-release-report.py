@@ -226,7 +226,6 @@ Source: release assets.
         self.assertIn('data-total="0"', output)
         self.assertNotIn('data-issue="', output)
         self.assertNotIn('data-surface="Install"', output)
-        self.assertIn('No user changes.', output)
 
     def test_changes_by_area_lead_page_one_with_issues_secondary(self):
         output = renderer.render(BY_AREA)

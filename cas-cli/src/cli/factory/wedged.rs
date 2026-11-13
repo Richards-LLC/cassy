@@ -3402,17 +3402,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let updates = tmp.path().join("updates.jsonl");
         let signals = tmp.path().join("signals.json");
-        // updates.jsonl written first (stale-ish), signals.json touched
-        // just now — the fresher signals.json age must win.
+        // Explicit mtimes make signals.json newer independent of scheduling.
         std::fs::write(&updates, b"{}").unwrap();
-        std::thread::sleep(Duration::from_millis(50));
         std::fs::write(&signals, b"{\"turn\":3}").unwrap();
+        let older = std::time::SystemTime::UNIX_EPOCH;
+        let newer = older + Duration::from_secs(3600);
+        for (path, modified) in [(&updates, older), (&signals, newer)] {
+            std::fs::File::open(path).unwrap().set_times(
+                std::fs::FileTimes::new().set_modified(modified),
+            ).unwrap();
+        }
 
+        let before = newer.elapsed().unwrap();
         let age = grok_activity_age(&updates).expect("signals.json should be found");
-        assert!(
-            age < Duration::from_millis(40),
-            "expected the fresher signals.json mtime to win, got {age:?}"
-        );
+        assert!((before..=newer.elapsed().unwrap()).contains(&age));
     }
 
     /// cas-921f P2: the inverse ordering. Grok appends to `updates.jsonl`
@@ -3427,18 +3430,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let updates = tmp.path().join("updates.jsonl");
         let signals = tmp.path().join("signals.json");
-        // signals.json written first (stale-ish), updates.jsonl touched
-        // just now — the fresher updates.jsonl age must win.
+        // Explicit mtimes make updates.jsonl newer independent of scheduling.
         std::fs::write(&signals, b"{\"turn\":3}").unwrap();
-        std::thread::sleep(Duration::from_millis(50));
         std::fs::write(&updates, b"{}").unwrap();
+        let older = std::time::SystemTime::UNIX_EPOCH;
+        let newer = older + Duration::from_secs(3600);
+        for (path, modified) in [(&signals, older), (&updates, newer)] {
+            std::fs::File::open(path).unwrap().set_times(
+                std::fs::FileTimes::new().set_modified(modified),
+            ).unwrap();
+        }
 
+        let before = newer.elapsed().unwrap();
         let age = grok_activity_age(&updates).expect("updates.jsonl should be found");
-        assert!(
-            age < Duration::from_millis(40),
-            "expected the fresher updates.jsonl mtime to win over a staler \
-             signals.json, got {age:?}"
-        );
+        assert!((before..=newer.elapsed().unwrap()).contains(&age));
     }
 
     #[test]

@@ -136,7 +136,7 @@ mod tests {
 
         // Receive it on the daemon side (should complete immediately)
         let result =
-            tokio::time::timeout(std::time::Duration::from_millis(100), notifier.recv()).await;
+            tokio::time::timeout(std::time::Duration::from_secs(10), notifier.recv()).await;
         assert!(result.is_ok(), "recv should complete within timeout");
         assert!(result.unwrap().is_ok());
     }
@@ -157,21 +157,21 @@ mod tests {
         // First recv registers the tokio socket with the reactor — without
         // this, try_recv inside drain() will never see pending datagrams.
         notify_daemon(dir.path()).unwrap();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), notifier.recv()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), notifier.recv()).await.unwrap().unwrap();
 
         // Now send several more notifications
         for _ in 0..5 {
             notify_daemon(dir.path()).unwrap();
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        notifier.tokio_socket().unwrap().readable().await.unwrap();
 
         // Drain should clear all pending
         notifier.drain();
 
         // After drain, recv should block (no data pending)
-        let result =
-            tokio::time::timeout(std::time::Duration::from_millis(50), notifier.recv()).await;
-        assert!(result.is_err(), "recv should timeout after drain");
+        let mut buf = [0u8; 64];
+        let error = notifier.tokio_socket().unwrap().try_recv(&mut buf).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[tokio::test]

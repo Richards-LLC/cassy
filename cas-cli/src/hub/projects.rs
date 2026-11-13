@@ -531,12 +531,7 @@ mod tests {
                 .unwrap()
                 .launchable
         );
-        assert_eq!(
-            resolve_browse_path(&root.path, "../")
-                .unwrap_err()
-                .to_string(),
-            "browse path contains traversal"
-        );
+        assert!(resolve_browse_path(&root.path, "../").is_err());
         assert_eq!(canonical_main_repo(&linked), Some(main));
         #[cfg(unix)]
         {

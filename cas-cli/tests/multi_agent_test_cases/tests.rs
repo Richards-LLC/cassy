@@ -484,8 +484,10 @@ fn test_expired_lease_makes_task_orphaned() {
 
     agent_store.try_claim(&task_id, &agent_id, 1, None).unwrap();
 
-    // Wait for lease to expire
-    thread::sleep(Duration::from_secs(2));
+    rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap().execute(
+        "UPDATE task_leases SET expires_at = ?1 WHERE task_id = ?2",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(), &task_id],
+    ).unwrap();
 
     // Reclaim expired leases
     agent_store.reclaim_expired_leases().unwrap();

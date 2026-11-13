@@ -147,16 +147,11 @@ test("real-hub candidate assets cannot fall back to external dist", { timeout: 1
   await once(candidate, "listening");
   t.after(() => new Promise(resolve => candidate.close(resolve)));
 
-  const listener = createServer();
-  listener.listen(0, "127.0.0.1");
-  await once(listener, "listening");
-  const port = listener.address().port;
-  await new Promise(resolve => listener.close(resolve));
   const child = spawn(process.execPath, [fileURLToPath(new URL("real-hub-server.mjs", import.meta.url))], {
     env: {
       ...process.env,
       CAS_BIN: process.execPath, // No reset: this route check never launches a CLI.
-      REAL_HUB_CONTROL_PORT: String(port),
+      REAL_HUB_CONTROL_PORT: "0",
       REAL_HUB_PORT: String(candidate.address().port),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -166,12 +161,22 @@ test("real-hub candidate assets cannot fall back to external dist", { timeout: 1
     child.kill("SIGTERM");
     await exited;
   });
-  await Promise.race([
-    once(child.stdout, "data"),
+  const ready = new Promise((resolve, reject) => {
+    let output = "";
+    child.stdout.on("data", bytes => {
+      output += bytes;
+      let end;
+      while ((end = output.indexOf("\n")) >= 0) {
+        const line = output.slice(0, end); output = output.slice(end + 1);
+        try { const event = JSON.parse(line); if (event.event === "ready") resolve(event.origin); } catch {}
+      }
+    });
+    child.once("error", reject);
+  });
+  const origin = await Promise.race([
+    ready,
     exited.then(([code]) => { throw Error(`fixture exited before listening: ${code}`); }),
   ]);
-
-  const origin = `http://127.0.0.1:${port}`;
   const missing = await fetch(`${origin}/commander/app.css`, { signal: AbortSignal.timeout(3000) });
   assert.equal(missing.status, 404, "an external stylesheet must not hide a missing embedded asset");
   assert.equal(await missing.text(), "not embedded");

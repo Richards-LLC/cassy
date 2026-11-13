@@ -1499,8 +1499,7 @@ mod tests {
             )
             .unwrap();
 
-        // Sleep briefly so the short-TTL reminder expires
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Its trigger was already ten seconds overdue, beyond the one-second grace.
 
         let expired = store.expire_stale().unwrap();
         assert_eq!(expired, 1);
@@ -1690,7 +1689,6 @@ mod tests {
                 None,
             )
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         assert_eq!(store.expire_stale().unwrap(), 1);
         store.cancel(cancelled, "supervisor-1").unwrap();
 

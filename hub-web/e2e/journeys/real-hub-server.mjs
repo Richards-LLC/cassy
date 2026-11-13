@@ -34,7 +34,7 @@ const hubPort = Number(process.env.REAL_HUB_PORT ?? 29926);
 const tlsPort = Number(process.env.REAL_HUB_TLS_PORT ?? 29927);
 if (process.env.REAL_HUB_DIST !== undefined)
   throw Error("REAL_HUB_DIST is unsupported: real-hub QA serves only candidate-embedded assets; use a different CAS_BIN for a baseline");
-const origin = `http://127.0.0.1:${port}`;
+let origin = `http://127.0.0.1:${port}`;
 const hubUrl = `https://journey-hub.ts.net:${tlsPort}`;
 let state;
 const delay = (ms) => new Promise((ok) => setTimeout(ok, ms));
@@ -582,6 +582,7 @@ for (const sig of ["SIGTERM", "SIGINT"])
   process.once(sig, () => {
     cleanup().finally(() => server.close(() => process.exit(0)));
   });
-server.listen(port, "127.0.0.1", () =>
-  console.log(`real-hub fixture control and candidate-embedded assets at ${origin}; binary ${cli}`),
-);
+server.listen(port, "127.0.0.1", () => {
+  origin = `http://127.0.0.1:${server.address().port}`;
+  console.log(JSON.stringify({ event: "ready", origin, binary: cli }));
+});

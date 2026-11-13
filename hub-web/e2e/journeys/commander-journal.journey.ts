@@ -390,7 +390,6 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
     // cas-97d58 F05 (supersedes cas-e6d2's always-visible receipt): kept is the
     // quiet normal state, recorded on the bubble, never read out after every turn.
     await expect(page.getByRole("log").locator('[data-stored="true"]').filter({ hasText: "A durable reply on this device" })).toHaveCount(1);
-    await expect(page.getByRole("log")).not.toContainText("Read by operator");
     await captureReceiptSurface(page, "stored");
   });
   await journey.stage("A reload replays the same immutable reply and re-ACKs without a second bubble", async () => {

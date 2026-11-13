@@ -5278,12 +5278,11 @@ echo SMOKE_DONE
     #[tokio::test]
     async fn test_cas_binary_on_path_detects_binary() {
         let mut env = TestEnvGuard::new();
-        let dir = std::env::temp_dir().join("cas-bbc2-preflight-present");
-        std::fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         std::fs::write(dir.join("cas"), b"#!/bin/sh\n").unwrap();
         env.set("PATH", &dir);
         let found = cas_binary_on_path(&PtyConfig::default());
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(found, "cas_binary_on_path must find a `cas` file on PATH");
     }
 
@@ -5292,11 +5291,10 @@ echo SMOKE_DONE
     #[tokio::test]
     async fn test_cas_binary_on_path_absent_when_missing() {
         let mut env = TestEnvGuard::new();
-        let dir = std::env::temp_dir().join("cas-bbc2-preflight-absent");
-        std::fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         env.set("PATH", &dir);
         let found = cas_binary_on_path(&PtyConfig::default());
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(
             !found,
             "cas_binary_on_path must be false when no `cas` is on PATH"

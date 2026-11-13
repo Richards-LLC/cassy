@@ -188,7 +188,7 @@ fn test_agent_b_unaffected_by_agent_a_worktree_blocker() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Agent B's unclaimed task should be in ready list
     assert!(
-        stdout.contains(&task_b2_id) || stdout.contains("Agent B's second task"),
+        stdout.contains(&task_b2_id),
         "Agent B's unclaimed task should be ready"
     );
 }
@@ -503,7 +503,7 @@ fn test_task_listing_isolation() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // All tasks should appear in the list
-    assert!(stdout.contains(&task_normal) || stdout.contains("Normal task"));
+    assert!(stdout.contains(&task_normal));
 
     // Ready tasks should show tasks that aren't blocked by dependencies
     // (verification/worktree blockers are different from dependency blockers)

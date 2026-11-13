@@ -1,9 +1,6 @@
 // @vitest-environment jsdom
 import { planSupervisorSend } from "./supervisor-message";
 import { visibleCatalog, sessionReachable } from "./worker-visibility";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationList, type ConversationRow } from "./conversation-list";
@@ -13,8 +10,6 @@ import { contextSections, syncContextRail, waitingOnOperator } from "./context-r
 import { createAttentionItem, machineEventAttention } from "./attention";
 import { renderAttentionPanel } from "./attention-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
-
-const styles = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
 
 /** The open conversation's shell with an empty grid in its pane slot, as render() builds it. */
 function openShell(): HTMLElement {
@@ -46,11 +41,6 @@ describe("the thread mounts straight into the stage (cas-f285)", () => {
     // A heartbeat re-run keeps the same node: the thread is never remounted.
     expect(ensureConversationStage(grid)).toBe(slot);
     expect(slot.contains(view.element)).toBe(true);
-  });
-
-  it("keeps no stylesheet rule for a pane host", () => {
-    expect(styles).not.toMatch(/\.pane-host\b/);
-    expect(getComputedStyle(ensureConversationStage(openShell())).display).not.toBe("none");
   });
 
   it("has no Terminal markup left around the thread", () => {

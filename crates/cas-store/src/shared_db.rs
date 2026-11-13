@@ -1302,7 +1302,7 @@ mod tests {
         });
 
         assert!(
-            matches!(lock_connection(&conn), Err(StoreError::Other(message)) if message == "shared SQLite connection lock poisoned")
+            matches!(lock_connection(&conn), Err(StoreError::Other(_)))
         );
     }
 

@@ -551,27 +551,40 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
                          ['worker suite estimate + headroom exceeds fresh memory budget', 'admitted'])
 
     def test_proof_priority_blocks_a_second_worker(self):
-        order = []
-        with self.admit('worker'):
-            def proof_waiter():
-                with self.admit('proof'):
-                    order.append('proof')
-                    time.sleep(.08)
-            proof_thread = threading.Thread(target=proof_waiter)
-            proof_thread.start()
-            deadline = time.monotonic() + 1
-            while not self.events or not any(e['role'] == 'proof' for e in self.events):
-                self.assertLess(time.monotonic(), deadline)
-                time.sleep(.01)
-            def worker_waiter():
-                with self.admit('worker'):
-                    order.append('worker')
-            worker_thread = threading.Thread(target=worker_waiter)
-            worker_thread.start()
-            time.sleep(.05)
-        for thread in (proof_thread, worker_thread):
-            thread.join(timeout=2)
-            self.assertFalse(thread.is_alive())
+        order, failures, threads = [], [], []
+        waiting = {'proof': threading.Event(), 'worker': threading.Event()}
+        proof_entered, release_proof = threading.Event(), threading.Event()
+        def report(event):
+            self.events.append(event)
+            if event['reason'] != 'admitted':
+                waiting[event['role']].set()
+        def waiter(role):
+            try:
+                with host.admission(role, self.env, lambda _: HIGH, directory=self.pool,
+                                    wait_secs=5, poll_secs=.02, report=report):
+                    order.append(role)
+                    if role == 'proof':
+                        proof_entered.set()
+                        if not release_proof.wait(5):
+                            raise AssertionError('proof release barrier did not arrive')
+            except BaseException as error:
+                failures.append(error)
+                proof_entered.set()
+        try:
+            with self.admit('worker'):
+                for role in ('proof', 'worker'):
+                    thread = threading.Thread(target=waiter, args=(role,))
+                    threads.append(thread)
+                    thread.start()
+                    self.assertTrue(waiting[role].wait(5))
+            self.assertTrue(proof_entered.wait(5))
+            self.assertEqual(order, ['proof'])
+        finally:
+            release_proof.set()
+            for thread in threads:
+                thread.join(timeout=5)
+        self.assertFalse(failures, failures)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(order, ['proof', 'worker'])
 
     def test_stale_or_unrelated_inherited_admission_does_not_skip(self):
@@ -673,9 +686,8 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
 
     def test_cas_833e_one_bounded_run_is_admitted_beside_a_running_proof(self):
         with self.admit('proof'):
-            started = time.monotonic()
-            with self.taste() as (env, fds):
-                self.assertLess(time.monotonic() - started, .4, 'taste lane waited for the proof')
+            with mock.patch.object(host.time, 'sleep', side_effect=AssertionError('taste lane must not wait')), \
+                 self.taste() as (env, fds):
                 record = json.loads(env[host.LEASE_ENV])
                 self.assertEqual(record.get('lane'), 'taste')
                 self.assertTrue(host.inherited(env, self.pool))
@@ -785,7 +797,6 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
             [sys.executable, str(ROOT / 'scripts/worker-memory.py'), '--shell-command', f'touch {marker} & true'],
             env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 2, result.stderr)
-        time.sleep(.2)
         self.assertFalse(marker.exists(), 'a refused command must not start')
 
 

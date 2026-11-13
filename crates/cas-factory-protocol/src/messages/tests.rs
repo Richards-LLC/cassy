@@ -454,8 +454,8 @@ mod cases {
             target_offset: None,
             request_id: None,
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(!json.contains("cache_window"));
+        let json = serde_json::to_value(&msg).unwrap();
+        assert!(json.get("cache_window").is_none());
     }
 
     #[test]

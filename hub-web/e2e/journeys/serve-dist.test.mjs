@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { createServer } from 'node:net';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,17 +29,13 @@ out.mkdir(parents=True)
   git('init', '-q'); git('config', 'user.name', 'fixture'); git('config', 'user.email', 'fixture@example.test');
   git('add', '.'); git('commit', '-qm', 'source-only fixture');
   const source = git('rev-parse', 'HEAD');
-  const reservation = createServer();
-  reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
-  const port = reservation.address().port;
-  await new Promise((resolve) => reservation.close(resolve));
   const children = [];
   const start = (manifest) => {
     const env = { ...process.env, PATH: `${join(repo, 'tools')}:${process.env.PATH}`,
       RUSTC_WRAPPER: 'sccache', CARGO_BUILD_RUSTC_WRAPPER: 'sccache' };
     delete env.JOURNEY_BUILD_MANIFEST;
     if (manifest) env.JOURNEY_BUILD_MANIFEST = manifest;
-    const child = spawn(process.execPath, [join(repo, 'hub-web/e2e/journeys/serve-dist.mjs'), String(port)], {
+    const child = spawn(process.execPath, [join(repo, 'hub-web/e2e/journeys/serve-dist.mjs'), '0'], {
       cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'],
     });
     children.push(child);
@@ -56,12 +51,20 @@ out.mkdir(parents=True)
     }
   });
   const child = start();
-  await new Promise((resolve, reject) => {
-    child.stdout.on('data', (bytes) => { if (bytes.toString().includes(`at http://127.0.0.1:${port}/commander/`)) resolve(); });
+  const origin = await new Promise((resolve, reject) => {
+    let output = '';
+    child.stdout.on('data', (bytes) => {
+      output += bytes;
+      let end;
+      while ((end = output.indexOf('\n')) >= 0) {
+        const line = output.slice(0, end); output = output.slice(end + 1);
+        try { const event = JSON.parse(line); if (event.event === 'ready') resolve(event.origin); } catch {}
+      }
+    });
     child.once('exit', () => reject(new Error(child.output)));
     child.once('error', reject);
   });
-  const response = await fetch(`http://127.0.0.1:${port}/commander/`);
+  const response = await fetch(`${origin}/commander/`);
   assert.equal(await response.text(), 'current source');
   assert.equal(response.headers.get('x-cassy-source-sha'), source);
   assert.match(response.headers.get('x-cassy-dist-sha256'), /^[a-f0-9]{64}$/);

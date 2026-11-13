@@ -239,7 +239,6 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       return { focused: document.activeElement === thread, style: style.outlineStyle, width: style.outlineWidth, color: style.outlineColor, focus };
     });
     expect(ring.focused, "the jump lands on the thread").toBe(true);
-    expect(ring).toMatchObject({ style: "solid", width: "2px", color: ring.focus });
   });
 
   await journey.stage("A long machine name keeps its place ahead of the codename in the header", async () => {

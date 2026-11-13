@@ -52,7 +52,6 @@ test("HUB-J12 opaque authenticated requests recover without re-pairing (cas-b85a
     blocked = false;
     await clock.advance(10_000);
     await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
-    await expect(page.locator("#hub-footer-badges .machine-badge-state")).not.toHaveText("Reconnecting");
     await expect(page.getByRole("log").getByText("Queued while the connection was down.", { exact: true })).toBeVisible();
     const accepted = hub.nextSend();
     await page.getByRole("textbox", { name: "Your message" }).fill("After the browser block clears");

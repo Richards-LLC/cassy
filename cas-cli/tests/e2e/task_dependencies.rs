@@ -44,7 +44,7 @@ fn test_add_dependency() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Tree should show the blocking relationship
     assert!(
-        stdout.contains(&task_b) || stdout.contains("Task B"),
+        stdout.contains(&task_b),
         "Should show task B in dependency tree"
     );
 }
@@ -322,7 +322,7 @@ fn test_dependency_tree() {
 
     // Tree should show epic and its children
     assert!(
-        stdout.contains(&epic) || stdout.contains("Epic task"),
+        stdout.contains(&epic),
         "Tree should show epic"
     );
 }

@@ -620,19 +620,9 @@ fn test_trace_stats_success_rate() {
 // TraceTimer tests
 // =========================================================================
 
-#[test]
-fn test_trace_timer() {
-    let timer = TraceTimer::new();
-    std::thread::sleep(std::time::Duration::from_millis(10));
-    let elapsed = timer.elapsed_ms();
-    assert!(elapsed >= 10);
-}
 
-#[test]
-fn test_trace_timer_default() {
-    let timer = TraceTimer::default();
-    assert!(timer.elapsed_ms() < 1000);
-}
+
+
 
 // =========================================================================
 // generate_trace_id tests

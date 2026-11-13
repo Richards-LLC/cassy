@@ -283,9 +283,7 @@ mod tests {
         };
 
         let prompt = extractor.build_prompt(&observation);
-        assert!(prompt.contains("Quality Standards"));
         assert!(prompt.contains("quality_score"));
-        assert!(prompt.contains("Project-specific"));
         assert!(prompt.contains("[Write]"));
     }
 

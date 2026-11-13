@@ -140,11 +140,8 @@ fn session_title_on_empty_output_creates_session_start() {
 #[test]
 fn session_title_absent_by_default() {
     let output = HookOutput::with_session_start_context("ctx".into());
-    let json = serde_json::to_string(&output).unwrap();
-    assert!(
-        !json.contains("sessionTitle"),
-        "sessionTitle must be absent when not set: {json}"
-    );
+    let json = serde_json::to_value(&output).unwrap();
+    assert!(json["hookSpecificOutput"].get("sessionTitle").is_none());
 }
 
 /// Long task titles are truncated to ~40 chars in the sessionTitle.

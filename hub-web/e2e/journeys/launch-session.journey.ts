@@ -611,7 +611,7 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
       const dialog = page.getByRole("dialog", { name: "Quality" });
       // Context burn per delivery doubled (14.7M against 5M): the headline names it with a factor on one line.
       const factor = dialog.locator(".quality-factor");
-      await expect(factor).toHaveText("2.9× worse");
+      await expect.poll(async () => Number.parseFloat(await factor.innerText())).toBe(2.9);
       await expect(factor).toBeVisible();
       expect(await factor.evaluate(node => node.getClientRects().length)).toBe(1);
       await expect(dialog.locator(".quality-hero svg")).toBeVisible();

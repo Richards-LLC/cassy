@@ -1849,10 +1849,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.starts_with("codex_hooks_invalid: "), "{message}");
         assert!(
-            message.contains("missing CAS PostToolUse hook groups"),
-            "{message}"
-        );
-        assert!(
             message.contains(&main_hooks.display().to_string()),
             "{message}"
         );

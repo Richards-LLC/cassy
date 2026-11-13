@@ -19,13 +19,13 @@ if (built.error || built.status !== 0) {
 const snapshot = JSON.parse(built.stdout);
 const dist = snapshot.dist_path;
 const port = Number(process.argv[2] ?? process.env.HUB_JOURNEY_PORT);
-if (!Number.isInteger(port) || port <= 0) {
+if (!Number.isInteger(port) || port < 0) {
   console.error('serve-dist: pass the port (playwright.config.ts picks this checkout\'s own; see e2e/checkout-ports.mjs)');
   process.exit(2);
 }
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.wasm': 'application/wasm', '.woff2': 'font/woff2' };
 
-createServer(async (request, response) => {
+const server = createServer(async (request, response) => {
   const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
   if (!path.startsWith('/commander')) { response.writeHead(302, { location: '/commander/' }); response.end(); return; }
   const inner = path.replace(/^\/commander\/?/, '/');
@@ -34,4 +34,5 @@ createServer(async (request, response) => {
   response.writeHead(200, { 'content-type': types[extname(target)] ?? 'application/octet-stream', 'cache-control': 'no-store',
     'x-cassy-source-sha': snapshot.source_sha, 'x-cassy-dist-sha256': snapshot.dist_sha256 });
   response.end(await readFile(target));
-}).listen(port, '127.0.0.1', () => console.log(`serving ${dist} at http://127.0.0.1:${port}/commander/`));
+});
+server.listen(port, '127.0.0.1', () => console.log(JSON.stringify({ event: "ready", origin: `http://127.0.0.1:${server.address().port}`, dist, source_sha: snapshot.source_sha })));

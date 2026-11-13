@@ -2798,11 +2798,8 @@ harness = "codex"
     fn harness_empty_config_roundtrips_and_resolves_worker_codex_supervisor_claude() {
         let llm = LlmConfig::default();
         let serialized = toml::to_string(&llm).expect("serialize default LlmConfig");
-        assert!(
-            !serialized.contains("harness"),
-            "unset top-level harness must be omitted from serialized TOML \
-             (skip_serializing_if), not written as an explicit value; got:\n{serialized}"
-        );
+        let table: toml::Table = toml::from_str(&serialized).unwrap();
+        assert!(!table.contains_key("harness"));
 
         #[derive(serde::Serialize, serde::Deserialize)]
         struct Wrapper {

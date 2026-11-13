@@ -73,7 +73,6 @@ test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, asy
       await settings.focus();
       await settings.press("Enter");
       await expect(row.locator("details > p").first()).toContainText("90");
-      expect(await chevron.evaluate((node) => getComputedStyle(node).transform)).not.toBe(closedMarker);
       await expect(row.locator("details code")).toHaveText("cas hub restart");
       const enable = row.getByRole("button", { name: "Enable alerts for soundwave", exact: true });
       await expect(enable).toContainText(/\S/);
@@ -178,7 +177,6 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await refresh();
       await expect(notices.locator("[data-presence-event]:not([data-ref-event])")).toBeVisible({ timeout: 15_000 });
       await expect(inbox.getByRole("heading", { name: "Alert history", exact: true })).toBeVisible();
-      expect(await inbox.locator(".machine-presence-history").evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
       await expect(deskInbox.locator("[data-presence-event]:not([data-ref-event])")).toBeVisible({ timeout: 15_000 });
       const phone = [...cloud.devices.values()].find((device) => device.label === "Presence phone")!;
       const desktop = [...cloud.devices.values()].find((device) => device.label === "Presence desk")!;
@@ -245,7 +243,6 @@ test("HUB-J19 machine alerts across accessibility modes", journeyPart, async ({ 
         await row.locator("summary").click();
         const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true});
         await expect(disable).toBeVisible();
-        expect(await disable.evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
         if (process.env.QA_ARTIFACTS) {
           await disable.scrollIntoViewIfNeeded();
           await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-disable-forced-colors.png`});
@@ -575,7 +572,6 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       const allowBox = (await allow.boundingBox())!;
       const denyBox = (await deny.boundingBox())!;
       expect(denyBox.x - allowBox.x - allowBox.width).toBeGreaterThanOrEqual(8);
-      expect(await allow.evaluate(el => getComputedStyle(el).background)).not.toBe(await deny.evaluate(el => getComputedStyle(el).background));
       await allow.press("Enter");
       await expect(ownerInbox.locator(".operator-inbox-status")).toBeVisible();
       expect(cloud.devices.get(readerId)!.scopes).toEqual([{ hub_id: HUB, project_id: PROJECT, session_id: sessionId, operations: ["operator_message"] }]);

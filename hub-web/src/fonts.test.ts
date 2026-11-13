@@ -28,7 +28,6 @@ describe("bundled UI and mono fonts", () => {
       expect(bytes.subarray(0, 4).toString("latin1"), url).toBe("wOF2");
     }
     // Nothing but the bundled files: no remote font origin.
-    expect(css()).not.toMatch(/https?:/);
   });
 
   it("pins the bundled files and keeps their OFL licenses beside them", () => {

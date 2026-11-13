@@ -236,7 +236,10 @@ fn test_recent_resurfaces_an_old_entry_updated_later() {
     };
     store.add(&newer).unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    store.conn.lock().unwrap().execute(
+        "UPDATE entries SET updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![(Utc::now() - Duration::days(1)).to_rfc3339(), &newer.id],
+    ).unwrap();
     let mut updated_old = store.get(&old.id).unwrap();
     updated_old.content.push_str(" with latest session notes");
     store.update(&updated_old).unwrap();

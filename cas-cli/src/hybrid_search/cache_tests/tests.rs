@@ -48,15 +48,14 @@ fn test_lru_cache_access_updates_order() {
 
 #[test]
 fn test_lru_cache_ttl_expiration() {
-    let mut cache: LruCache<String, i32> = LruCache::new(10, Duration::from_millis(10));
+    let mut cache: LruCache<String, i32> = LruCache::new(10, Duration::from_secs(60));
 
     cache.insert("a".to_string(), 1);
 
     // Should be present immediately
     assert_eq!(cache.get(&"a".to_string()), Some(1));
 
-    // Wait for expiration
-    std::thread::sleep(Duration::from_millis(20));
+    cache.entries.get_mut("a").unwrap().expires_at = std::time::Instant::now() - Duration::from_secs(1);
 
     // Should be gone after TTL
     assert_eq!(cache.get(&"a".to_string()), None);

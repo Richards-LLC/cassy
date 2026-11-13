@@ -491,17 +491,18 @@ mod tests {
     async fn test_should_generate_keyframe() {
         let dir = TempDir::new().unwrap();
         let mut config = test_config(&dir);
-        config.keyframe_interval_ms = 10; // Very short interval for testing
+        config.keyframe_interval_ms = u64::MAX;
 
-        let writer = RecordingWriter::new(80, 24, "agent-1", "session-123", "worker", config)
+        let mut writer = RecordingWriter::new(80, 24, "agent-1", "session-123", "worker", config)
             .await
             .unwrap();
 
         // Initially no keyframe needed (we're at 0ms)
         assert!(!writer.should_generate_keyframe());
 
-        // Wait for interval to pass
-        tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+        // Advance the recorded-time input without depending on host scheduling.
+        writer.timestamp_offset_ms = 10;
+        writer.keyframe_interval_ms = 10;
 
         assert!(writer.should_generate_keyframe());
 

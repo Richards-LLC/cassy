@@ -128,9 +128,13 @@ printf 'cas %s\n' "$*" >>"$FAKE_LOG"
 target="$(readlink -f "$HOME/.local/lib/cassy/hub/current")"
 if [[ -n "${FAKE_BAD_TARGET:-}" && "$target" == *"$FAKE_BAD_TARGET"* ]]; then exit 1; fi
 # A builtin read leaves no child behind when the fixture kills this process.
-"$target" -c 'read -r -t 300 _ <>"$FAKE_FIFO"; :' >/dev/null 2>&1 &
+ready="$FAKE_FIFO.ready.$$"
+mkfifo "$ready"
+FAKE_READY="$ready" "$target" -c 'printf "%s\n" "$BASHPID" >"$FAKE_READY"; read -r -t 300 _ <>"$FAKE_FIFO"; :' >/dev/null 2>&1 &
 printf '%s\n' "$!" >>"$FAKE_HUB_PIDS"
-sleep 0.2 # Let the fork exec: the real restart returns once the hub answers.
+read -r -t 10 ready_pid <>"$ready"
+rm -f "$ready"
+[[ "$ready_pid" == "$(tail -n 1 "$FAKE_HUB_PIDS")" ]]
 EOF
 chmod +x "$tmp/bin/gh" "$tmp/bin/systemctl" "$tmp/bin/cas"
 

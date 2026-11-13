@@ -547,8 +547,8 @@ mod tests {
     #[test]
     fn test_heartbeat() {
         let mut agent = Agent::new("test".to_string(), "Test".to_string());
+        agent.last_heartbeat = Utc::now() - chrono::Duration::days(1);
         let old_heartbeat = agent.last_heartbeat;
-        std::thread::sleep(std::time::Duration::from_millis(10));
         agent.heartbeat();
         assert!(agent.last_heartbeat > old_heartbeat);
     }

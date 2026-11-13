@@ -89,10 +89,13 @@ describe("F2: Retry cleanup is serialized, guarded and reports rejection", () =>
     const tracker = new PairingCancellationTracker();
     tracker.begin(undefined);
     const ticket = tracker.beginRetry()!;
-    const recover = vi.fn(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); return { pendingCleanup: 0 }; });
+    let complete!: () => void;
+    const completion = new Promise<void>(resolve => { complete = resolve; });
+    const recover = vi.fn(async () => { await completion; return { pendingCleanup: 0 }; });
     const pending = recover();
     // The operator opened a fresh link while the retry was in flight.
     tracker.supersede();
+    complete();
     await pending;
     expect(tracker.finishRetry(ticket)).toBe(false);
     // …and the newer flow may now retry on its own terms.

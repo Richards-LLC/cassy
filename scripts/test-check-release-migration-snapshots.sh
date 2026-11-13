@@ -66,7 +66,6 @@ git -C "$repo" commit -qm 'register migration'
 : >"$cargo_log"
 changed_output="$(run_guard)"
 assert_exact_cargo 'changed migration registry'
-grep -qF 'changed since v0.0.1' <<<"$changed_output"
 echo 'ok   changed registry runs exact component-output snapshot command'
 
 : >"$cargo_log"

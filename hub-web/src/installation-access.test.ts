@@ -1,6 +1,6 @@
 import { webcrypto } from "node:crypto";
 import { beforeAll, afterEach, describe, expect, it, vi } from "vitest";
-import { InstallationAccess, type InstallationRecord, type InstallationStore, type InstallationLock, installationTranscript, installationDeadline } from "./installation-access";
+import { InstallationAccess, type InstallationRecord, type InstallationStore, type InstallationLock, installationTranscript, installationDeadline, installationHash } from "./installation-access";
 import { MachineCatalog, type MachineCatalogRecord } from "./storage";
 import { PairingCleanupError, type ExchangeOptions } from "./pairing-exchange";
 import type { StoredMachine } from "./types";
@@ -110,7 +110,7 @@ describe("installation transaction using real WebCrypto and catalog code", () =>
       expect((await f.catalog.snapshot()).machines).toHaveLength(1);
     }
     expect(f.keys.size).toBe(1);
-    expect(JSON.stringify([...f.keys.values()])).not.toContain(options(f, fetcher).invitation.token);
+    expect([...f.keys.values()].map(record => Object.keys(record).sort())).toEqual([["id", "known", "privateKey", "publicKey"]]);
     expect([...f.keys.values()][0]!.pending).toBeUndefined();
   });
 
@@ -140,17 +140,25 @@ describe("installation transaction using real WebCrypto and catalog code", () =>
     expect([...f.keys.values()][0]!.pending).toBeDefined();
     // Pending recovery keeps a hash commitment, never the invitation bearer.
     const token = options(f, broken).invitation.token;
-    expect(JSON.stringify([...f.keys.values()])).not.toContain(token);
+    expect(Object.keys([...f.keys.values()][0]!).sort()).toEqual(["id", "pending", "privateKey", "publicKey"]);
+    expect([...f.keys.values()][0]!.pending).toEqual({
+      operationId: expect.any(String), baseUrl: "https://soundwave.example", controllerOrigin: "https://commander.example",
+      invitationHash: await installationHash(token), previousKey: undefined,
+    });
     expect([...f.keys.values()][0]!.pending?.invitationHash).toHaveLength(43);
     // The same record remains safe after the ten-minute invitation lifetime.
     vi.useFakeTimers();
     await vi.advanceTimersByTimeAsync(600_001);
-    expect(JSON.stringify([...f.keys.values()])).not.toContain(token);
+    expect(Object.keys([...f.keys.values()][0]!).sort()).toEqual(["id", "pending", "privateKey", "publicKey"]);
+    expect([...f.keys.values()][0]!.pending).toEqual({
+      operationId: expect.any(String), baseUrl: "https://soundwave.example", controllerOrigin: "https://commander.example",
+      invitationHash: await installationHash(token), previousKey: undefined,
+    });
     const recovered: string[] = [];
     expect(await f.access.recover(async (input) => { recovered.push(String(input)); return new Response(null, { status: 204 }); })).toBe(0);
     expect(recovered[0]).toContain("/abort");
     expect([...f.keys.values()][0]!.pending).toBeUndefined();
-    expect(JSON.stringify([...f.keys.values()])).not.toContain(token);
+    expect([...f.keys.values()].map(record => Object.keys(record).sort())).toEqual([["id", "privateKey", "publicKey"]]);
   });
 
   it("two tabs serialize, reread the winner and never stage from a stale generation", async () => {

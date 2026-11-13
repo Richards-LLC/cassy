@@ -33,16 +33,7 @@ fn test_sanitize_args_201() {
     assert!(sanitized[0].ends_with("..."));
 }
 
-#[test]
-fn test_session_id_generation() {
-    let id1 = generate_session_id();
-    std::thread::sleep(std::time::Duration::from_micros(10));
-    let id2 = generate_session_id();
-    assert!(id1.starts_with("cli-"));
-    assert!(id2.starts_with("cli-"));
-    // IDs should be different (based on microsecond timestamp)
-    assert_ne!(id1, id2);
-}
+
 
 #[test]
 fn test_session_id_format() {

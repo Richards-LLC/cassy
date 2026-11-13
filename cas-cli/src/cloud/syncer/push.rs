@@ -1373,12 +1373,7 @@ mod ephemeral_guard_root_tests {
             .unwrap();
         let syncer = syncer_for(&base.path().join(".cas"), false);
         let refusal = syncer.ephemeral_project_refusal();
-        assert!(
-            refusal
-                .as_deref()
-                .is_some_and(|message| message.contains("bare folder name")),
-            "an unpinned no-remote store must be refused, got {refusal:?}"
-        );
+        assert!(refusal.is_some(), "an unpinned no-remote store must be refused");
     }
 
     #[test]

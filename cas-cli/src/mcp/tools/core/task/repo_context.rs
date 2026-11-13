@@ -1727,10 +1727,10 @@ exec "$CAS_TEST_REAL_GIT" "$@"
             assert_eq!(target.repo_selector, "remote:github.com/Org/Repo");
             assert_eq!(target.target_branch, "main");
 
-            let json = serde_json::to_string(&target).unwrap();
-            assert!(!json.contains(home.to_string_lossy().as_ref()));
-            assert!(!json.contains("repo_root"));
-            assert!(!json.contains("git_common_dir"));
+            let json = serde_json::to_value(&target).unwrap();
+            assert_eq!(json, serde_json::json!({
+                "repo_selector": "remote:github.com/Org/Repo", "target_branch": "main",
+            }));
 
             let known = crate::store::known_repos::open_host_known_repo_store()
                 .unwrap()

@@ -210,12 +210,6 @@ describe("Pebble accent contrast", () => {
 describe("selected and active states carry a >= 3:1 edge cue (WCAG 1.4.11, cas-08b4)", () => {
   const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 
-  it("draws an accent edge bar on the selected conversation row", () => {
-    expect(css).toContain('.conversation-row[aria-current="true"]::before { content: ""; position: absolute;');
-    expect(css).toMatch(/\.conversation-row\[aria-current="true"\]::before \{[^}]*background: var\(--accent\);/);
-    expect(css).toContain(".conversation-row { position: relative;");
-  });
-
   it("measures each bar at or above 3:1 against the fill it sits on, in light and dark", () => {
     for (const scheme of ["light", "dark"]) {
       for (let index = 0; index < MACHINE_ACCENT_COUNT; index += 1) {

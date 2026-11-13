@@ -893,16 +893,36 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                     if step.get('uses') == 'actions/checkout@v4')
                 self.assertGreater(bootstrap, checkout)
                 self.assertFalse(any(step.get('run') for step in steps[checkout+1:bootstrap]))
+                for step in steps:
+                    if step.get('uses') == 'taiki-e/install-action@nextest':
+                        context = {'runner.environment': 'self-hosted', 'env.LEGACY_SCOPED': 'true',
+                            'github.event_name': 'push', 'vars.CAS_LANE_SLIM': '',
+                            'needs.ci-diff.outputs.fast-admission': 'false',
+                            'needs.ci-diff.outputs.rust-unaffected': 'false'}
+                        for fast in ['true', 'false']:
+                            context['needs.ci-diff.outputs.fast-admission'] = fast
+                            self.assertFalse(self.gh_expr(step.get('if', 'true'), context))
         (self.root / 'rust-toolchain.toml').write_text('[toolchain]\nchannel = "fixture-pinned"\n')
-        for mode in ['installed', 'missing', 'broken', 'download-failure']:
+        (self.root / '.config').mkdir(exist_ok=True)
+        (self.root / '.config/nextest.toml').write_text('nextest-version = { recommended = "fixture-nextest" }\n')
+        for mode in ['installed', 'missing', 'broken', 'download-failure', 'nextest-missing', 'install-failure']:
             with self.subTest(mode=mode):
                 fixture = self.root / mode; fixture.mkdir()
                 commands = fixture / 'bin'; commands.mkdir()
                 cargo_home = fixture / 'cargo'; (cargo_home / 'bin').mkdir(parents=True)
                 rustup_home = fixture / 'rustup'
-                ready = fixture / 'ready'; calls = fixture / 'calls'; calls.touch()
+                ready = fixture / 'ready'; nextest_ready = fixture / 'nextest-ready'
+                calls = fixture / 'calls'; calls.touch()
                 cargo = fixture / 'cargo-template'
-                cargo.write_text('#!/bin/bash\nprintf "cargo %s\\n" "$*" >> "$CALLS"\ntest -f "$READY"\n')
+                cargo.write_text('''#!/bin/bash
+printf 'cargo %s\\n' "$*" >> "$CALLS"
+case "$1" in
+    --version) test -f "$READY" ;;
+    nextest) test -f "$NEXTEST_READY" ;;
+    install) [[ "$MODE" != install-failure ]] || exit 23; touch "$NEXTEST_READY" ;;
+    *) exit 42 ;;
+esac
+''')
                 rustup = fixture / 'rustup-template'
                 rustup.write_text('#!/bin/bash\nprintf "rustup %s\\n" "$*" >> "$CALLS"\ntouch "$READY"\n')
                 for tool in [cargo, rustup]: tool.chmod(0o755)
@@ -911,16 +931,17 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 curl = commands / 'curl'
                 curl.write_text('#!/bin/bash\nprintf "curl\\n" >> "$CALLS"\n[[ "$MODE" != download-failure ]] || exit 17\ncp "$INITIALIZER" "${@: -1}"\n')
                 curl.chmod(0o755)
-                if mode in ['installed', 'broken']:
+                if mode in ['installed', 'broken', 'nextest-missing', 'install-failure']:
                     shutil.copyfile(cargo, cargo_home / 'bin/cargo'); (cargo_home / 'bin/cargo').chmod(0o755)
                     shutil.copyfile(rustup, cargo_home / 'bin/rustup'); (cargo_home / 'bin/rustup').chmod(0o755)
-                if mode == 'installed': ready.touch()
+                if mode in ['installed', 'nextest-missing', 'install-failure']: ready.touch()
+                if mode == 'installed': nextest_ready.touch()
                 github_path = fixture / 'github-path'; github_env = fixture / 'github-env'
                 result = self.run_body(prepare['run'], {
                     'PATH': str(commands)+':/usr/bin:/bin', 'CARGO_HOME': str(cargo_home),
                     'RUSTUP_HOME': str(rustup_home), 'RUNNER_TEMP': str(fixture),
                     'GITHUB_PATH': str(github_path), 'GITHUB_ENV': str(github_env),
-                    'CALLS': str(calls), 'READY': str(ready), 'MODE': mode,
+                    'CALLS': str(calls), 'READY': str(ready), 'NEXTEST_READY': str(nextest_ready), 'MODE': mode,
                     'INITIALIZER': str(initializer), 'CARGO_TEMPLATE': str(cargo),
                     'RUSTUP_TEMPLATE': str(rustup)})
                 self.assertEqual(github_path.read_text().splitlines(), [str(cargo_home / 'bin')])
@@ -929,11 +950,17 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 if mode == 'download-failure':
                     self.assertEqual(result.returncode, 17)
                     self.assertFalse(ready.exists())
+                elif mode == 'install-failure':
+                    self.assertEqual(result.returncode, 23)
+                    self.assertFalse(nextest_ready.exists())
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue(ready.exists())
-                    self.assertEqual(install in observed, mode != 'installed')
+                    self.assertTrue(nextest_ready.exists())
+                    self.assertEqual(install in observed, mode in ['missing', 'broken'])
                     self.assertEqual('curl' in observed, mode == 'missing')
+                    nextest_install = f'cargo install cargo-nextest --locked --version fixture-nextest --target-dir {fixture}/nextest-build'
+                    self.assertEqual(nextest_install in observed, mode != 'installed')
 
     def test_installed_linkers_skip_unavailable_ubuntu_mirrors(self):
         values = self.dependency_fixture()

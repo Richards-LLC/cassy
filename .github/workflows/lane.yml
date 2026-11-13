@@ -383,9 +383,6 @@ jobs:
           shared-key: fast-validation-suite-build
           cache-save-if: "false"
 
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
       # After the cache restore, which replaces target/.
       - id: plan
         name: Select this delivery's impacted tests
@@ -473,9 +470,6 @@ jobs:
         with:
           toolchain-only: "true"
           cache-key: lane-toolchain
-
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
 
       - name: Download the selection archive
         uses: actions/download-artifact@v4

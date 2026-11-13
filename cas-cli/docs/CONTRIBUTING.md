@@ -3248,6 +3248,10 @@ commands: it publishes `CARGO_HOME/bin` despite runner `.path` snapshots, checks
 `cargo --version` under the shared rustup lock, and installs the repository's
 pinned toolchain if needed. Its `toolchain-only` mode avoids linker, Zig and
 cache work in classification, documentation and ring setup.
+The same lock guards nextest preparation: reuse the installed executable, or
+install the version recommended in `.config/nextest.toml` if it is missing.
+Local jobs avoid the prebuilt installer's shared `HOME/.install-action/tmp`,
+which can corrupt simultaneous ring downloads. Hosted jobs keep that installer.
 
 The six existing `cas-lane-light` listeners reserve GitHub-hosted width for
 release PR checks, frozen-train validation, merge-group validation and Release

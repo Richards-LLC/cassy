@@ -502,6 +502,7 @@ jobs:
       - name: Install nextest
         if: >-
           env.LEGACY_SCOPED == 'true' && (needs.ci-diff.outputs.fast-admission == 'true' && needs.ci-diff.outputs.rust-unaffected != 'true' && vars.CAS_LANE_SLIM != 'true')
+          && runner.environment != 'self-hosted'
         uses: taiki-e/install-action@nextest
 
       - name: Run change-scoped tests with impact evidence
@@ -716,6 +717,7 @@ jobs:
           && (github.event_name != 'push' || needs.ci-diff.outputs.fast-admission != 'true')
           && needs.ci-diff.outputs.rust-unaffected != 'true'
           && (github.event_name != 'push' || vars.CAS_LANE_SLIM != 'true')
+          && runner.environment != 'self-hosted'
         uses: taiki-e/install-action@nextest
 
       - name: Run change-scoped tests with impact evidence

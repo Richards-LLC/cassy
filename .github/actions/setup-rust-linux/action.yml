@@ -57,16 +57,24 @@ runs:
         mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
         exec 9>"$RUSTUP_HOME/cassy-rustup.lock"
         flock -x 9
-        if "$CARGO_HOME/bin/cargo" --version; then exit 0; fi
-        if [[ ! -x "$CARGO_HOME/bin/rustup" ]]; then
-          installer="$(mktemp "$RUNNER_TEMP/rustup-init.XXXXXX")"
-          trap 'rm -f "$installer"' EXIT
-          curl --fail --location --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$installer"
-          sh "$installer" -y --profile minimal --default-toolchain none --no-modify-path
+        if ! "$CARGO_HOME/bin/cargo" --version; then
+          if [[ ! -x "$CARGO_HOME/bin/rustup" ]]; then
+            installer="$(mktemp "$RUNNER_TEMP/rustup-init.XXXXXX")"
+            trap 'rm -f "$installer"' EXIT
+            curl --fail --location --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$installer"
+            sh "$installer" -y --profile minimal --default-toolchain none --no-modify-path
+          fi
+          channel="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          "$CARGO_HOME/bin/rustup" toolchain install "$channel" --profile minimal --component clippy --component rustfmt
+          "$CARGO_HOME/bin/cargo" --version
         fi
-        channel="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
-        "$CARGO_HOME/bin/rustup" toolchain install "$channel" --profile minimal --component clippy --component rustfmt
-        "$CARGO_HOME/bin/cargo" --version
+        # The prebuilt installer uses HOME/.install-action/tmp, shared by all
+        # local listeners. Prepare nextest once under this same setup lock.
+        if ! cargo nextest --version; then
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open(".config/nextest.toml", "rb"))["nextest-version"]["recommended"])')"
+          cargo install cargo-nextest --locked --version "$version" --target-dir "$RUNNER_TEMP/nextest-build"
+          cargo nextest --version
+        fi
 
     - name: Install dependencies
       if: inputs.toolchain-only != 'true'

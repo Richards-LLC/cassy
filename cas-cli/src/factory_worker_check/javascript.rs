@@ -10,6 +10,10 @@ use tree_sitter::{Node, Parser};
 
 use super::stability::{Identity, Proof};
 
+#[derive(Debug, thiserror::Error)]
+#[error("Worker check requires an isolated worktree or a managed review checkout")]
+struct IsolatedCheckoutRequired;
+
 fn safe_path(path: &str) -> bool {
     !path.is_empty()
         && Path::new(path)
@@ -82,8 +86,13 @@ pub(crate) fn changed_tests(
             String::new()
         };
         let all = parsed_tests(path, &source, &[(1, usize::MAX)], false)?;
-        let test_file =
-            path.contains(".test.") || path.contains(".spec.") || path.contains("__tests__/");
+        let stem = Path::new(path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        let test_file = stem.ends_with(".test")
+            || stem.ends_with(".spec")
+            || path.split('/').any(|part| part == "__tests__");
         if test_file && all.is_empty() && !source.trim().is_empty() && !diff.is_empty() {
             bail!(
                 "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
@@ -429,6 +438,13 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         bail!("expected vitest|jest|playwright followed by repository-relative test files");
     }
     let repo = PathBuf::from(super::git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
+    let cas_root = cas_root.canonicalize()?;
+    if !repo.starts_with(cas_root.join("worktrees"))
+        && !crate::factory_review_scratch::is_managed_checkout(&cas_root, &repo)
+    {
+        return Err(IsolatedCheckoutRequired.into());
+    }
+    let cas_root = cas_root.as_path();
     let head = super::clean_head(&repo)?;
     let config = crate::config::Config::load(cas_root)?.factory();
     let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
@@ -983,6 +999,14 @@ mod tests {
             )
             .is_err()
         );
+        let cas_root = tempfile::tempdir().unwrap();
+        let error = execute(
+            cas_root.path(),
+            &["vitest".into(), "a.test.ts".into()],
+            repo.path(),
+        )
+        .unwrap_err();
+        assert!(error.is::<IsolatedCheckoutRequired>());
     }
 
     #[test]

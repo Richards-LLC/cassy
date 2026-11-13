@@ -522,7 +522,7 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     // pin: the recipient executes the advertised MCP command verbatim.
     assert!(prompt.contains("artifact action=fetch task_id=cas-proof id=art-1"), "{prompt}");
     // pin: delivered wording the recipient supervisor acts on.
-    assert!(prompt.ends_with(message), "{prompt}");
+    assert!(prompt.ends_with(text), "{prompt}");
 }
 
 #[test]

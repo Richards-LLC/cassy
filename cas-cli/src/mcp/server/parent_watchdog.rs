@@ -294,7 +294,9 @@ mod tests {
     #[tokio::test]
     async fn an_inert_watchdog_never_trips() {
         let watchdog = ParentWatchdog::inert();
-        let outcome = tokio::time::timeout(Duration::from_millis(50), watchdog.tripped()).await;
-        assert!(outcome.is_err(), "inert watchdog must never resolve");
+        let mut pending = Box::pin(watchdog.tripped());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(pending.as_mut(), &mut context).is_pending());
+        assert!(!watchdog.tripped.load(Ordering::SeqCst));
     }
 }

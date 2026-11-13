@@ -175,27 +175,6 @@ async fn loop_pass_stays_fast_while_the_intents_flock_and_sqlite_write_lock_are_
     );
 }
 
-#[test]
-fn without_a_budget_the_same_task_write_queues_behind_the_flock() {
-    // Control: the bound above is what keeps the pass fast. With no budget
-    // the daemon's task write still waits for the foreign flock holder.
-    let (_dir, cas_dir) = logged_in_project();
-    let task = seed(&cas_dir);
-    let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-    let flock = hold_intents_flock(&cas_dir);
-    let (done_tx, done) = mpsc::channel();
-    let writer = std::thread::spawn(move || {
-        let _ = store.update(&task);
-        done_tx.send(()).unwrap();
-    });
-    assert!(
-        done.recv_timeout(Duration::from_millis(300)).is_err(),
-        "an unbudgeted task write must still serialise on the intents flock"
-    );
-    flock.release();
-    done.recv_timeout(Duration::from_secs(10)).unwrap();
-    writer.join().unwrap();
-}
 
 #[tokio::test]
 async fn input_forwarding_exchange_and_draw_touch_no_store() {

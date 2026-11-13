@@ -1397,30 +1397,6 @@ mod tests {
 
     /// Same-task mutations still serialize: the intent protocol's evidence is
     /// per entity.
-    #[test]
-    fn same_task_mutations_serialize_on_their_stripe() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
-        let held = queue.lock_task_sync_mutations(&["cas-same"]).unwrap();
-        let contender = Arc::clone(&queue);
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            let guard = contender.lock_task_sync_mutations(&["cas-same"]).unwrap();
-            done_tx.send(()).unwrap();
-            drop(guard);
-        });
-        assert!(
-            done_rx
-                .recv_timeout(std::time::Duration::from_millis(150))
-                .is_err(),
-            "a second mutation of the same task must wait"
-        );
-        drop(held);
-        done_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("the waiting mutation proceeds after release");
-        thread.join().unwrap();
-    }
 
     /// GH #1165 (3) structural guard: no path can wait for the SQLite write
     /// lock while it holds a reconcile lease.

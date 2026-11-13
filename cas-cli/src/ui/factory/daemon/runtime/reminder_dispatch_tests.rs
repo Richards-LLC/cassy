@@ -354,7 +354,7 @@ async fn reminder_held_without_turn_end(lines: &[String]) {
         daemon.pane_silent_since.insert(name.clone(), Instant::now());
         daemon.process_prompt_queue().await.unwrap();
         daemon.queue_jobs.flush_for_reexec(&cas, Duration::from_secs(5)).await.unwrap();
-        super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         if queue.message_delivery_report(id).unwrap().unwrap().stage == cas_store::DeliveryStage::Gated {
             break;
         }

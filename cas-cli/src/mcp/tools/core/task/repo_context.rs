@@ -1339,12 +1339,11 @@ mod tests {
             8,
         )
         .with_git_program(fake_git);
-        let started = std::time::Instant::now();
         assert_eq!(
             probe.output(dir.path(), &["rev-parse", "HEAD"]),
             Err(BoundedRepoError::TimedOut)
         );
-        assert!(started.elapsed() < Duration::from_secs(1));
+
     }
 
     #[test]

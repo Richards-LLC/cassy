@@ -1458,14 +1458,13 @@ mod tests {
         )
         .expect("watchdog starts");
 
-        assert!(
-            reason.recv_timeout(Duration::from_millis(750)).is_err(),
-            "a shutdown gets its grace before a forced exit"
-        );
-        assert!(
-            crate::factory_daemon_health::read_status(temp.path(), "gh1363-wedge").is_some(),
-            "the wedge evidence stays in loop.json"
-        );
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        while crate::factory_daemon_health::read_status(temp.path(), "gh1363-wedge").is_none() {
+            assert!(!handle.is_finished(), "watchdog exited before persisting its first pass");
+            assert!(Instant::now() < ready_deadline, "watchdog never persisted its first pass");
+            std::thread::yield_now();
+        }
+        assert!(matches!(reason.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
         clock.advance(WEDGED_SHUTDOWN_EXIT);
         let reason = reason
             .recv_timeout(Duration::from_secs(5))

@@ -5246,12 +5246,7 @@ async fn operations_stale_expected_returns_409_without_side_effects() {
         .map(|row| row["outcome"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(outcomes, ["requested", "stale", "requested", "stale"]);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(200), events.recv())
-            .await
-            .is_err(),
-        "a stale operation changes nothing, so it emits nothing"
-    );
+    assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
 }
 
 fn operate_scopes() -> std::collections::BTreeSet<Scope> {
@@ -5443,12 +5438,7 @@ async fn operations_assign_stale_assignee() {
         .map(|row| row["outcome"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(outcomes, ["requested", "stale", "requested", "stale"]);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(200), events.recv())
-            .await
-            .is_err(),
-        "a stale operation changes nothing, so it emits nothing"
-    );
+    assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
 }
 
 fn add_epic(fixture: &OpsFixture, id: &str) {

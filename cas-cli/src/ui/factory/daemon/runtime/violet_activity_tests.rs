@@ -679,24 +679,8 @@ fn cas_639c_review_clean_end_stops_only_own_watches_and_blocks_later_ticks() {
     );
     assert!(saved.watch("C2", "second").unwrap().is_active());
     let before = std::fs::read(&fx.watch_path).unwrap();
-    let requests = std::thread::spawn(move || {
-        let request = server.recv_timeout(Duration::from_millis(200)).unwrap();
-        if let Some(request) = request {
-            request
-                .respond(tiny_http::Response::from_string(
-                    r#"{"events":[],"denied":[]}"#,
-                ))
-                .unwrap();
-            true
-        } else {
-            false
-        }
-    });
     assert!(runtime.tick_blocking().0.errors.is_empty());
-    assert!(
-        !requests.join().unwrap(),
-        "stopped runtime contacted Cloud with valid credentials"
-    );
+    assert!(server.try_recv().unwrap().is_none(), "stopped runtime contacted Cloud");
     assert_eq!(std::fs::read(&fx.watch_path).unwrap(), before);
 }
 

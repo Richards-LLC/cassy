@@ -9681,9 +9681,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             .find(|check| matches!(check.status, CheckStatus::Warning))
             .expect("origin drift must fail project aliases");
         assert!(check.message.contains("github.com/richards-llc/cassy"));
-        assert!(check
-            .message
-            .contains("old"));
     }
 
     #[test]

@@ -3554,7 +3554,7 @@ mod tests {
     #[test]
     fn concurrent_project_config_updates_are_serialized_and_preserve_sections() {
         use std::sync::mpsc;
-        use std::time::Duration;
+        use fs2::FileExt;
 
         let temp = tempfile::tempdir().unwrap();
         let cas_root = temp.path().to_path_buf();
@@ -3591,7 +3591,10 @@ mod tests {
         });
         first_read_rx.recv().unwrap();
 
-        let (second_read_tx, second_read_rx) = mpsc::channel();
+        let lock_probe = std::fs::OpenOptions::new().read(true).write(true)
+            .open(cas_root.join(".config.toml.cas-write.lock")).unwrap();
+        let refused = lock_probe.try_lock_exclusive().unwrap_err();
+        assert!(matches!(refused.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ResourceBusy));
         let second_root = cas_root.clone();
         let second = std::thread::spawn(move || {
             update_project_config_toml_with(
@@ -3608,22 +3611,16 @@ mod tests {
                     );
                     Ok(true)
                 },
-                || second_read_tx.send(()).unwrap(),
+                || {},
             )
             .unwrap();
         });
 
-        let second_read_while_first_was_paused = second_read_rx
-            .recv_timeout(Duration::from_millis(100))
-            .is_ok();
         release_first_tx.send(()).unwrap();
         first.join().unwrap();
         second.join().unwrap();
 
-        assert!(
-            !second_read_while_first_was_paused,
-            "a second updater reached the commit boundary while the first still held stale state"
-        );
+
         let content = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&content).unwrap();
         assert_eq!(parsed["hooks"]["ai_context"].as_bool(), Some(false));

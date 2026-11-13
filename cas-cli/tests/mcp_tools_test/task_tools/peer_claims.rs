@@ -1367,12 +1367,18 @@ async fn a_restart_during_a_timed_out_rollback_keeps_its_fresh_claim_cas_da31() 
 
     db.execute_batch("DROP TRIGGER refuse_start;").unwrap();
     let mut restart = Box::pin(start(&alpha.core, "cas-restart", false));
-    // Give the restart time to claim if nothing holds it back.
-    let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut restart).await;
+    // Start the real restart while rollback is held. Either completion or
+    // Pending is valid; the persisted fresh claim is checked after both finish.
+    let early = std::future::poll_fn(|cx| std::task::Poll::Ready(
+        match std::future::Future::poll(restart.as_mut(), cx) {
+            std::task::Poll::Ready(result) => Some(result),
+            std::task::Poll::Pending => None,
+        }
+    )).await;
     resume.send(()).unwrap();
     let restarted = match early {
-        Ok(result) => result,
-        Err(_) => restart.await,
+        Some(result) => result,
+        None => restart.await,
     };
     restarted.expect("the same agent restarts the task");
 

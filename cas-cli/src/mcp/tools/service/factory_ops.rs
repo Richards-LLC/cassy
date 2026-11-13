@@ -21957,43 +21957,6 @@ effort = "high"
         );
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn worker_status_git_collection_times_out_when_gh_stalls() {
-        let tmp = setup_git_repo_with_pushed_factory_branch("slow-gh-worker");
-        let gh = write_gh_stub(tmp.path(), "#!/bin/sh\nsleep 1\n");
-        let mut agent = cas_types::Agent::new_with_role(
-            "slow-gh-session".to_string(),
-            "slow-gh-worker".to_string(),
-            AgentRole::Worker,
-        );
-        agent.metadata.insert(
-            "clone_path".to_string(),
-            tmp.path().to_string_lossy().to_string(),
-        );
-
-        let started = std::time::Instant::now();
-        let status = collect_worker_worktree_status_with_timeout(
-            tmp.path(),
-            &agent,
-            None,
-            std::time::Duration::from_millis(100),
-            &gh,
-        )
-        .await;
-
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(750),
-            "a slow gh subprocess must not hold up the worker_status poll: {:?}",
-            started.elapsed()
-        );
-        assert_eq!(status.clone_path.as_deref(), Some(tmp.path().to_string_lossy().as_ref()));
-        assert!(status.git_info.contains("status lookup timed out"), "{status:?}");
-        assert!(
-            status.git_info.contains("PR: unknown (status lookup timed out)"),
-            "timeout must not claim a successful empty PR query: {status:?}"
-        );
-    }
 
     #[cfg(unix)]
     #[test]

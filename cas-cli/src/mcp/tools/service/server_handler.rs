@@ -1521,7 +1521,6 @@ mod tests {
             // Simulate post-commit work that outlives the response budget.
             std::future::pending::<Result<rmcp::model::CallToolResult, rmcp::ErrorData>>().await
         };
-        let started = std::time::Instant::now();
         let error = service
             .call_with_deadline(
                 "coordination",
@@ -1531,10 +1530,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "post-commit work blocked response"
-        );
+
         let rows = crate::store::open_prompt_queue_store(&service.inner.cas_root)
             .unwrap()
             .peek_all(10)

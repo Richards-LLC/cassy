@@ -350,6 +350,9 @@ fn fetch(
         "task artifact directory escapes its configured namespace"
     );
     let destination = task_dir.join(file_name);
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut staging = tempfile::NamedTempFile::new_in(task_dir)?;
     std::io::Write::write_all(&mut staging, &bytes)?;
     staging.persist(&destination)?;
@@ -440,11 +443,37 @@ struct EvidenceSync {
     files: Vec<SyncedFile>,
 }
 
+/// One evidence file by its `/`-separated path under the task evidence
+/// directory. Empty files carry no artifact: their bytes are the hash.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SyncedFile {
     name: String,
     sha256: String,
-    artifact_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_id: Option<String>,
+}
+
+/// A manifest path is task-relative and stays inside the directory.
+fn safe_relative(name: &str) -> bool {
+    !name.is_empty()
+        && Path::new(name).components().all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+/// Every regular file under `dir`, recursively, by task-relative path.
+fn evidence_files(dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(dir).min_depth(1).sort_by_file_name() {
+        let entry = entry.map_err(std::io::Error::other)?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(dir).map_err(std::io::Error::other)?;
+        let name = relative.to_str().filter(|name| safe_relative(name)).ok_or_else(|| {
+            std::io::Error::other(format!("{} has no portable task-relative name", entry.path().display()))
+        })?;
+        files.push((name.replace(std::path::MAIN_SEPARATOR, "/"), entry.path().to_path_buf()));
+    }
+    Ok(files)
 }
 
 fn evidence_dir(cas_root: &Path, task: &cas_types::Task) -> anyhow::Result<PathBuf> {
@@ -466,16 +495,11 @@ pub(crate) fn publish_routed_evidence(cas_root: &Path, task: &cas_types::Task) -
         "EVIDENCE SYNC FAILED: {detail}. This build was routed from {source}, whose reviewer reads \
          the task evidence directory under {source}'s artifacts root; this machine's is {}. \
          Re-run close once Cloud accepts the upload.", dir.display());
-    let mut paths = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(fail(format!("cannot read {}: {error}", dir.display()))),
-    };
-    paths.sort();
+    if !dir.exists() {
+        return Ok(());
+    }
+    let paths = evidence_files(&dir)
+        .map_err(|error| fail(format!("cannot read {}: {error}", dir.display())))?;
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
@@ -487,14 +511,15 @@ pub(crate) fn publish_routed_evidence(cas_root: &Path, task: &cas_types::Task) -
     };
     let published = store.list_for_task(&task.id).map_err(|error| fail(error.to_string()))?;
     let mut files = Vec::new();
-    for path in paths {
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+    for (name, path) in paths {
         let (sha256, size) = digest_file(&path).map_err(|error| fail(error.to_string()))?;
         if size == 0 {
+            files.push(SyncedFile { name, sha256, artifact_id: None });
             continue;
         }
+        let leaf = path.file_name().and_then(|leaf| leaf.to_str()).unwrap_or_default();
         let reused = published.iter().find(|record| {
-            record.name == name && record.sha256 == sha256 && validate(record, &task.id).is_ok()
+            record.name == leaf && record.sha256 == sha256 && validate(record, &task.id).is_ok()
         });
         let artifact_id = match reused {
             Some(record) => record.id.clone(),
@@ -507,7 +532,7 @@ pub(crate) fn publish_routed_evidence(cas_root: &Path, task: &cas_types::Task) -
                 outcome.artifact.id
             }
         };
-        files.push(SyncedFile { name, sha256, artifact_id });
+        files.push(SyncedFile { name, sha256, artifact_id: Some(artifact_id) });
     }
     let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files };
     let note = format!(
@@ -538,14 +563,23 @@ fn materialize_manifest(
         digest_file(&dir.join(&file.name)).is_ok_and(|(sha256, _)| sha256 == file.sha256)
     };
     for file in &sync.files {
+        if !safe_relative(&file.name) {
+            missing.push(format!("{} (unsafe path)", file.name));
+            continue;
+        }
         if identical(file) {
             continue;
         }
         let fetched = (|| -> anyhow::Result<()> {
-            anyhow::ensure!(Path::new(&file.name).file_name() == Some(file.name.as_ref()), "unsafe name");
-            let artifact = from_notes(&task.notes, &file.artifact_id, &task.id)?
-                .ok_or_else(|| anyhow::anyhow!("no synced artifact record {}", file.artifact_id))?;
-            anyhow::ensure!(artifact.sha256 == file.sha256, "artifact {} has other bytes", file.artifact_id);
+            let Some(id) = &file.artifact_id else {
+                let path = dir.join(&file.name);
+                std::fs::create_dir_all(path.parent().unwrap_or(&dir))?;
+                std::fs::write(path, b"")?;
+                return Ok(());
+            };
+            let artifact = from_notes(&task.notes, id, &task.id)?
+                .ok_or_else(|| anyhow::anyhow!("no synced artifact record {id}"))?;
+            anyhow::ensure!(artifact.sha256 == file.sha256, "artifact {id} has other bytes");
             fetch(&store, cloud.as_ref(), &roots, artifact, &file.name)?;
             Ok(())
         })();

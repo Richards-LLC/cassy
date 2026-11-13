@@ -29099,12 +29099,13 @@ mod merge_state_gate_tests {
     }
 
     /// cas-e571 (the cas-0fc56 incident): a build routed here from another
-    /// machine parks, and that machine's pre-merge review finds the ledger
+    /// machine parks, and that machine's pre-merge review finds its whole
+    /// evidence tree (the ledger, nested qa/ captures and empty files)
     /// byte-identical where its verifier reads. Before the bytes can be
     /// fetched, the review refuses loudly, naming both evidence directories.
     #[tokio::test(flavor = "multi_thread")]
     async fn routed_park_evidence_reaches_the_peer_reviewer_cas_e571() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{body_partial_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         let mut fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
@@ -29122,19 +29123,33 @@ mod merge_state_gate_tests {
         fixture.store.update(&task).unwrap();
         let worker_evidence =
             crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&root, &task).unwrap();
-        std::fs::create_dir_all(&worker_evidence).unwrap();
         let ledger = crate::qa_ledger::scaffold(&task, &[], &fixture.local).into_bytes();
-        std::fs::write(worker_evidence.join("LEDGER.md"), &ledger).unwrap();
-        let blob = format!("{}/blob", server.uri());
-        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "artifact_id": "cloud-routed", "upload_url": blob, "required_headers": {}})))
-            .expect(1).mount(&server).await;
-        Mock::given(method("PUT")).and(path("/blob"))
-            .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
-        Mock::given(method("POST")).and(path("/api/artifacts/cloud-routed/complete"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
-            .expect(1).mount(&server).await;
+        let evidence: [(&str, Vec<u8>); 4] = [
+            ("LEDGER.md", ledger),
+            ("qa/bundle.json", br#"{"captures":["shot.png"]}"#.to_vec()),
+            ("qa/captures/shot.png", b"\x89PNG capture".to_vec()),
+            ("qa/captures/empty.log", Vec::new()),
+        ];
+        for (index, (name, bytes)) in evidence.iter().enumerate() {
+            let file = worker_evidence.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, bytes).unwrap();
+            if bytes.is_empty() {
+                continue;
+            }
+            let leaf = std::path::Path::new(name).file_name().unwrap().to_str().unwrap();
+            let blob = format!("{}/blob/{index}", server.uri());
+            Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                .and(body_partial_json(serde_json::json!({"name": leaf})))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{index}"), "upload_url": blob, "required_headers": {}})))
+                .expect(1).mount(&server).await;
+            Mock::given(method("PUT")).and(path(format!("/blob/{index}")))
+                .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("/api/artifacts/cloud-{index}/complete")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+                .expect(1).mount(&server).await;
+        }
 
         let (is_error, text) = close_text(&fixture).await;
         assert_eq!(is_error, Some(true), "{text}");
@@ -29157,15 +29172,20 @@ mod merge_state_gate_tests {
         assert!(refusal.contains(&worker_evidence.display().to_string())
             && refusal.contains(&reviewer_evidence.display().to_string()), "{refusal}");
 
-        Mock::given(method("GET")).and(path("/api/artifacts/cloud-routed/url"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "artifact_id": "cloud-routed", "url": blob, "size_bytes": ledger.len()})))
-            .mount(&server).await;
-        Mock::given(method("GET")).and(path("/blob"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(ledger.clone()))
-            .mount(&server).await;
+        for (index, (_, bytes)) in evidence.iter().enumerate().filter(|(_, (_, bytes))| !bytes.is_empty()) {
+            let blob = format!("{}/blob/{index}", server.uri());
+            Mock::given(method("GET")).and(path(format!("/api/artifacts/cloud-{index}/url")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{index}"), "url": blob, "size_bytes": bytes.len()})))
+                .mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("/blob/{index}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+                .mount(&server).await;
+        }
         attempt(reviewer.clone()).await.unwrap().expect("review dispatches once the bytes arrive");
-        assert_eq!(std::fs::read(reviewer_evidence.join("LEDGER.md")).unwrap(), ledger);
+        for (name, bytes) in &evidence {
+            assert_eq!(&std::fs::read(reviewer_evidence.join(name)).unwrap(), bytes, "{name}");
+        }
     }
 
     /// cas-b0a5: an amended commit hook anchor is now unreachable, while the

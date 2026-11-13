@@ -85,7 +85,7 @@ pub fn handle_message_display(
 
     if modified {
         let mut output = HookOutput::with_message_display_transform(text);
-        output.system_message = evidence_reason;
+        output.system_message = evidence_reason.map(|reason| crate::gates::tag("H-47", reason));
         Ok(output)
     } else {
         // Guard on, but nothing to transform — passthrough.

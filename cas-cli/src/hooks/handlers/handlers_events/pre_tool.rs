@@ -502,7 +502,7 @@ fn handle_pre_tool_use_checked(
     };
 
     if let Some(reason) = crate::hooks::handlers::operator_evidence::outgoing_denial(input) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-47", reason)));
     }
 
     // Run before factory auto-approval and the missing-root early return.

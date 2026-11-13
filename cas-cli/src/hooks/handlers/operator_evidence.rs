@@ -303,8 +303,7 @@ pub(super) fn denial(input: &HookInput, text: &str) -> Option<String> {
             || !numbers_match
             || (clipboard && !evidence.iter().any(|call| call.clipboard_read))
         {
-            return Some(crate::gates::tag(
-                "H-47",
+            return Some(String::from(
                 "Operator claim lacks matching same-turn evidence. Cite [evidence:<tool-use-id>] from a successful tool result in this turn for each factual paragraph, or prefix that paragraph with [unverified]. Numbers must occur in the cited result; calculate conversions with a tool. Clipboard claims need a wl-paste or pbpaste read after the latest overwrite.",
             ));
         }

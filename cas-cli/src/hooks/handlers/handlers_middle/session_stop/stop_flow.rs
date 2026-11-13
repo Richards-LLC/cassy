@@ -54,9 +54,9 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     // re-block a continuation; retain a visible uncertainty notice instead.
     if let Some(reason) = crate::hooks::handlers::operator_evidence::pane_denial(input) {
         return Ok(if stop_is_reentrant {
-            HookOutput::with_system_context(format!("[unverified] {reason}"))
+            HookOutput::with_system_context(format!("[unverified] {}", crate::gates::tag("H-47", reason)))
         } else {
-            HookOutput::block_stop(reason)
+            HookOutput::block_stop(crate::gates::tag("H-47", reason))
         });
     }
 

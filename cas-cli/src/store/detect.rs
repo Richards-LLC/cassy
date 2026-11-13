@@ -600,6 +600,19 @@ pub fn open_task_store(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     Ok(base_store)
 }
 
+/// cas-a836: request_changes, reopen and proof-scope corrections commit
+/// through cas-store directly and bypass the syncing wrapper. Queue the
+/// committed row so peer machines see it; the local write stands either way.
+pub fn publish_direct_task_write(cas_dir: &Path, task_id: &str) -> std::result::Result<(), String> {
+    let published = open_task_store(cas_dir)
+        .map_err(|error| error.to_string())
+        .and_then(|store| store.publish_current_row(task_id).map_err(|error| error.to_string()));
+    if let Err(error) = &published {
+        tracing::warn!(%task_id, %error, "cas-a836: direct task write not queued for cloud sync");
+    }
+    published
+}
+
 /// Open task store without cloud SyncQueue wrappers (cas-7fbb).
 pub fn open_task_store_local(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     open_task_store_base(cas_dir)

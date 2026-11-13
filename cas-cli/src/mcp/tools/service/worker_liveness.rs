@@ -673,7 +673,7 @@ pub(crate) fn child_progress(agent: &cas_types::Agent, now: DateTime<Utc>) -> Op
         return None;
     }
     let root = if let Some(parent) = agent.ppid {
-        if wedged::process_parent(registered) != Some(parent) { return None; }
+        if !descends_from_harness(registered, parent) { return None; }
         parent
     } else { registered };
     if !wedged::process_commandline(root).is_some_and(|raw| is_harness_command(&raw)) { return None; }
@@ -700,6 +700,31 @@ pub(crate) fn child_progress(agent: &cas_types::Agent, now: DateTime<Utc>) -> Op
     }
     *samples = next;
     samples.values().filter_map(|sample| sample.advanced).filter(|at| *at <= now).max()
+}
+
+/// The registered PID is the MCP child. `cas serve` runs a frontend that owns
+/// a `--backend` grandchild, so the harness the row names as `ppid` can sit two
+/// hops above the registered PID (cas-8ea3). Only `cas serve` hops may sit
+/// between them, so an unrelated process is never mistaken for the owner.
+fn descends_from_harness(registered: u32, harness: u32) -> bool {
+    use crate::cli::factory::wedged;
+    let mut at = registered;
+    for _ in 0..3 {
+        let Some(up) = wedged::process_parent(at) else { return false };
+        if up == harness { return true; }
+        if !wedged::process_commandline(up).is_some_and(|raw| is_cas_serve(&raw)) { return false; }
+        at = up;
+    }
+    false
+}
+
+fn is_cas_serve(raw: &[u8]) -> bool {
+    let mut parts = raw.split(|byte| *byte == 0);
+    parts.next()
+        .and_then(|arg| std::str::from_utf8(arg).ok())
+        .and_then(|arg| Path::new(arg).file_name()?.to_str())
+        .is_some_and(|name| name == "cas" || name.starts_with("cas-"))
+        && parts.any(|part| part == b"serve")
 }
 
 /// A cold probe has no delta. Keep sampling separate from classification so

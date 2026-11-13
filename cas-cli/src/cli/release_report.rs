@@ -2204,15 +2204,7 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
         .unwrap_or(&[]);
     let selected = entries
         .iter()
-        .filter(|entry| {
-            if user_facing {
-                entry.category.eq_ignore_ascii_case("Added")
-                    || entry.category.eq_ignore_ascii_case("Changed")
-                    || entry.category.eq_ignore_ascii_case("Fixed")
-            } else {
-                true
-            }
-        })
+        .filter(|entry| is_non_shipped_category(&entry.category) != user_facing)
         .take(80)
         .collect::<Vec<_>>();
     let mut groups: HashMap<&str, Vec<&ChangelogEntry>> = HashMap::new();
@@ -2249,9 +2241,12 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
         for entry in category_entries {
             let now = clean_markdown_text(&entry.text);
             let title = heading_from_entry(&now);
+            let (was, now) = parse_release_note_values(&now).unwrap_or_else(|| (
+                "The prior behavior is not stated in the available release sources.".to_string(),
+                now,
+            ));
             output.push_str(&format!(
-                "#### {}\n\nWas: The prior behavior is not stated in the available release sources.\n\nNow: {}\n\n",
-                title, now
+                "#### {title}\n\nWas: {was}\n\nNow: {now}\n\n"
             ));
         }
     }
@@ -2296,6 +2291,19 @@ fn report_group_heading(group: &str, user_facing: bool) -> String {
 }
 
 fn parse_release_note_draft(content: &str) -> ReleaseNoteDraft {
+    // Violet drafts store the exact payload. Its text is authoritative; blocks
+    // repeat it, while replies carry separate messages in the same thread.
+    let json_fences = Regex::new(r"(?ms)^[ \t]*```json[ \t]*\r?\n(.*?)^[ \t]*```[ \t]*\r?$")
+        .expect("JSON draft fence regex");
+    let content = json_fences.replace_all(content, |capture: &regex::Captures<'_>| {
+        serde_json::from_str::<Value>(&capture[1]).ok().map(|payload| {
+            std::iter::once(&payload)
+                .chain(payload.get("replies").and_then(Value::as_array).into_iter().flatten())
+                .filter_map(|message| message.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        }).unwrap_or_default()
+    });
     let mut draft = ReleaseNoteDraft::default();
     let mut audience = None;
     let mut group = None;
@@ -2386,7 +2394,8 @@ fn parse_release_note_values_with_offset(text: &str) -> Option<(String, String, 
     let after_was = was_start + "was:".len();
     let now_relative = find_marker(&text[after_was..], "now:")?;
     let now_start = after_was + now_relative;
-    let was = clean_release_note_value(&text[after_was..now_start]);
+    let was = clean_release_note_value(&text[after_was..now_start])
+        .trim_end_matches('→').trim_end().to_string();
     let now = clean_release_note_value(&text[now_start + "now:".len()..]);
     if was.is_empty() || now.is_empty() {
         return None;
@@ -2399,7 +2408,7 @@ fn release_note_title(value: &str) -> String {
         .trim()
         .trim_start_matches(['•', '-', '*'])
         .trim()
-        .trim_end_matches('—')
+        .trim_end_matches(['—', ':'])
         .trim()
         .trim_matches('*')
         .trim()
@@ -3066,7 +3075,7 @@ fn heading_from_entry(text: &str) -> String {
     let text = text.trim_start_matches(['*', '[']);
     let text = text.split_once(':').map(|(head, _)| head).unwrap_or(text);
     let text = text.split_once(" — ").map(|(head, _)| head).unwrap_or(text);
-    let mut heading = text.trim().to_string();
+    let mut heading = text.trim().trim_end_matches('*').trim_end().to_string();
     if heading.len() > 100 {
         let mut end = 97;
         while !heading.is_char_boundary(end) {
@@ -3647,6 +3656,57 @@ Dev reply
             format_publication_line("2026-09-09T16:51:40Z"),
             "Published 9 September 2026 · 12:51 PM ET"
         );
+    }
+
+    #[test]
+    fn json_slack_draft_and_changelog_fallback_preserve_source_values_cas_0831() {
+        let punch = "Report fixture 1893.";
+        let title = "change-1893";
+        let was = "before-1893";
+        let now = "after-1893";
+        let top = format!("*Live on production — User — Cassy v9.99.1*\nWas: {was} → Now: {punch}");
+        let reply = format!("• *{title}*: Was: {was} → Now: {now}");
+        let payload = serde_json::json!({
+            "text": top, "blocks": [{"type": "section", "text": top}],
+            "replies": [{"text": reply, "blocks": [{"type": "section", "text": reply}]}]
+        });
+        let text_draft = format!("## User thread\n\n```text\n{top}\n```\n\n```text\n{reply}\n```\n");
+        let json_draft = format!("## User thread\n\n```json\n{}\n```\n", serde_json::to_string_pretty(&payload).unwrap());
+        let mut sources = AcquiredSources {
+            project: "fixture".into(), changes: Vec::new(), release_pr: None,
+            closure_window: None, issues_still_open: Vec::new(), issues_closed_outside: Vec::new(),
+            changelog: None, changelog_path: None, release_notes: None,
+            release_note_articles: Vec::new(), release_note_user_punch: None,
+            release: None, issues: Vec::new(), assets: Vec::new(),
+            release_evidence: ReleaseEvidence::default(), github_repo: None,
+            issue_count: 0, warnings: Vec::new(), retrieved_at: "2026-11-12T00:00:00Z".into(),
+        };
+        // Caller payload values are data; blocks repeat text and must not add articles.
+        for draft in [&json_draft, &text_draft] {
+            let parsed = parse_release_note_draft(draft);
+            assert_eq!(parsed.user_punch.as_deref(), Some(punch));
+            assert_eq!(parsed.articles.len(), 1);
+            let article = &parsed.articles[0];
+            assert_eq!((&article.title[..], &article.was[..], &article.now[..]), (title, was, now));
+            sources.release_note_articles = parsed.articles;
+            sources.release_note_user_punch = parsed.user_punch;
+            let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
+            assert!(report.lines().any(|line| line == punch));
+        }
+
+        let detail = "detail-1893";
+        let changelog = format!("## [9.99.1]\n\n### Fixed\n- **{title}** — Was: {was} Now: {now}\n\n### Documentation\n- **{detail}** — Was: {was} Now: {now}\n");
+        sources.changelog = parse_changelog_section(&changelog, "9.99.1");
+        sources.release_note_articles.clear();
+        sources.release_note_user_punch = None;
+        let user = was_now_sections(&sources, true);
+        let dev = was_now_sections(&sources, false);
+        // The report renderer consumes these Markdown headings and Was/Now fields.
+        for (heading, audience, other) in [(title, &user, &dev), (detail, &dev, &user)] {
+            let expected = format!("#### {heading}\n\nWas: {was}\n\nNow: {now}\n");
+            assert!(audience.contains(&expected), "{audience}");
+            assert_eq!(other.matches(heading).count(), 0);
+        }
     }
 
     #[test]

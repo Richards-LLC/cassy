@@ -120,11 +120,6 @@ class TrainReceipts(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             return dict(line.split('=',1) for line in output.read_text().splitlines())
         for slot,status in [('scripts','success'),('rust','failure')]:
-            recovery=self.repo/'target/queue-flakes/step/receipt.json'
-            recovery.parent.mkdir(parents=True,exist_ok=True)
-            recovery.write_text(json.dumps({'schema':1,'run_id':'101','head':producer,
-                'tree':self.git('rev-parse','HEAD^{tree}'),'outcome':'FLAKY','runner':'step',
-                'shard':slot,'flaky':[],'attempts':[]}))
             reports=self.repo/'target/train-suite/1'
             reports.mkdir(parents=True,exist_ok=True)
             (reports/'shard.json').write_text(json.dumps({'schema':1,'run_id':'101','run_attempt':1,
@@ -146,23 +141,15 @@ class TrainReceipts(unittest.TestCase):
         shutil.rmtree(self.repo/'target')
         def check(slot, selection=inputs,requires=''):
             return composite('restore',slot,selection=selection,requires=requires)['reused']=='true'
+        legacy=self.root/'scripts/receipt.json'
+        record=json.loads(legacy.read_text())
+        legacy.write_text(json.dumps({**record,'recovery':[{'outcome':'FLAKY'}]}))
+        self.assertFalse(check('scripts'))
+        legacy.write_text(json.dumps(record))
         self.assertTrue(check('scripts'))
         self.assertFalse(check('rust'))
-        restored=json.loads((self.repo/'target/queue-flakes/reused/0/receipt.json').read_text())
-        self.assertEqual((restored['run_id'],restored['observation_run_id']),('102','101'))
         self.assertEqual(json.loads((reports/'shard.json').read_text())['head'],self.env['GITHUB_SHA'])
         self.assertEqual((reports/'native.log').read_bytes(),original_log)
-        # Two jobs of one run record the same script step; publication keeps both.
-        for job in ('scripts','ci-tiers'):
-            self.run_cli('job-save','--repo',self.repo,'--job',job,'--job-name',job,
-                '--inputs',inputs,'--status','success','--out',self.repo/f'target/full-gate-job-{job}')
-        exported=self.run_cli('job-export','--repo',self.repo,'--evidence',self.repo/'target',
-            '--out',self.root/'exported')
-        self.assertEqual(exported['observations'],2)
-        published=subprocess.run([sys.executable,str(SCRIPT.parent/'ci-queue-flakes.py'),'reconcile',
-            '--issues-repo','fixture/repo','--receipts',str(self.root/'exported')],
-            env={**self.env,'GITHUB_EVENT_NAME':'merge_group'},capture_output=True,text=True)
-        self.assertEqual(published.returncode,0,published.stdout+published.stderr)
         self.assertFalse(check('scripts','{"selection":"changed"}'))
         self.assertFalse(check('scripts',requires='expired-suite-archive'))
         forge=self.root/'forge.json'

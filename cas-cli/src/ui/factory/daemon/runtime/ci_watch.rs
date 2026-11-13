@@ -189,7 +189,10 @@ pub(crate) fn ci_completed_runs(
         .runs_for_sha(&condition.sha)?
         .into_iter()
         .filter(|run| match &condition.workflow {
-            Some(workflow) => &run.name == workflow,
+            Some(workflow) => match workflow.parse::<u64>() {
+                Ok(id) => run.workflow_id == Some(id),
+                Err(_) => &run.name == workflow, // Existing reminders retain name matching.
+            },
             None => run.event != "schedule",
         })
         .collect();
@@ -291,6 +294,8 @@ impl CiWake {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CiRun {
     pub id: u64,
+    #[serde(default)]
+    pub workflow_id: Option<u64>,
     #[serde(default)]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
@@ -951,6 +956,32 @@ impl GhCiTransport {
             cwd: project.to_path_buf(),
             gh_binary,
             completed: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Bind a selector to GitHub's workflow identity before persisting a wake.
+    /// Duplicate display names are ambiguous; file paths and IDs remain usable.
+    pub(crate) fn resolve_workflow(&self, selector: &str) -> Result<Option<u64>, CiWatchError> {
+        #[derive(Deserialize)]
+        struct Workflow { id: u64, name: String, path: String }
+        #[derive(Deserialize)]
+        struct Page { workflows: Vec<Workflow> }
+        let pages: Vec<Page> = self.gh_json(&[
+            "api".into(), "-X".into(), "GET".into(),
+            format!("repos/{}/actions/workflows", self.repo),
+            "-f".into(), "per_page=100".into(), "--paginate".into(), "--slurp".into(),
+        ])?;
+        let mut matches = pages.into_iter().flat_map(|page| page.workflows).filter(|workflow| {
+            if let Ok(id) = selector.parse::<u64>() {
+                workflow.id == id
+            } else {
+                workflow.name == selector || workflow.path == selector
+                    || workflow.path.rsplit('/').next() == Some(selector)
+            }
+        });
+        Ok(match (matches.next(), matches.next()) {
+            (Some(workflow), None) => Some(workflow.id),
+            _ => None,
         })
     }
 
@@ -1941,6 +1972,7 @@ mod tests {
     fn run_with(branch: &str, head_sha: &str, id: u64, conclusion: Option<&str>) -> CiRun {
         CiRun {
             id,
+            workflow_id: None,
             created_at: None,
             name: "CI".to_string(),
             head_branch: branch.to_string(),

@@ -21,15 +21,20 @@
       "url": "https://api.githubcopilot.com/mcp/"
     },
     "playwright": {
+      "command": "npx",
       "args": [
-        "-y",
-        "@playwright/mcp@latest",
-        "--user-data-dir",
-        "${HOME}/.playwright-mcp-profile",
+        "--prefix",
+        "hub-web",
+        "--no-install",
+        "playwright",
+        "mcp",
+        "--isolated",
+        "--headless",
         "--browser",
-        "chrome"
-      ],
-      "command": "npx"
+        "chromium",
+        "--output-dir",
+        "target/artifacts/playwright-mcp"
+      ]
     }
   }
 }

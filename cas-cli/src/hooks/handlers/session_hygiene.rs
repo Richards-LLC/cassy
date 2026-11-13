@@ -1605,6 +1605,7 @@ mod tests {
             cwd: cas_root.clone(),
             pid: self_pid,
             pgid: None,
+            process_group_scope: None,
             pid_starttime: crate::mcp::daemon::read_pid_starttime(self_pid),
             expected_port: Some(5173),
             owner_task: None,

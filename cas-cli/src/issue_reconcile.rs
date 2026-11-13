@@ -491,7 +491,6 @@ fn reconcile_issues(
     close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
     tasks: &BTreeMap<String, Task>,
 ) -> Vec<IssueOutcome> {
-    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
     let default_repo = Some(inventory.scope.repository.as_str());
     let mut issues = BTreeMap::new();
     for delivery in &inventory.deliveries {
@@ -504,6 +503,49 @@ fn reconcile_issues(
     if issues.is_empty() {
         return Vec::new();
     }
+    // GH #1830: a reference is context, not ownership. Only the configured
+    // project and component repositories may receive a GitHub write.
+    let owned = match crate::config::Config::load(root) {
+        Ok(config) => owned_issue_repos(&config.issue_repo_registry()),
+        Err(error) => return issues.into_values().map(|issue| IssueOutcome {
+            issue: issue.display(), action: IssueAction::Failed,
+            comment_or_error: format!("Issue repositories could not be read from config: {error}"),
+            task_ids: tasks.values().filter(|t| references_issue(t, &issue, default_repo)).map(|t| t.id.clone()).collect(),
+        }).collect(),
+    };
+    let (issues, foreign): (BTreeMap<_, _>, BTreeMap<_, _>) =
+        issues.into_iter().partition(|((repo, _), _)| owned.contains(repo));
+    let mut outcomes: Vec<IssueOutcome> = foreign.into_values().map(|issue| IssueOutcome {
+        issue: issue.display(), action: IssueAction::Skipped,
+        comment_or_error: "Not in a configured issue repository (issues.repo or issues.components); left untouched.".into(),
+        task_ids: tasks.values().filter(|t| references_issue(t, &issue, default_repo)).map(|t| t.id.clone()).collect(),
+    }).collect();
+    if issues.is_empty() {
+        return outcomes;
+    }
+    outcomes.extend(reconcile_owned_issues(root, repo, inventory, close_results, tasks, issues));
+    outcomes
+}
+
+/// Lower-case `owner/repo` keys of the project's configured issue destinations.
+fn owned_issue_repos(registry: &crate::config::IssueRepoRegistry) -> BTreeSet<String> {
+    registry.project.iter().chain([&registry.cassy, &registry.violet, &registry.cloud])
+        .filter_map(|repo| repo.trim().split_once('/'))
+        .filter(|(owner, name)| !owner.is_empty() && !name.is_empty())
+        .map(|(owner, name)| repo_key(owner, name))
+        .collect()
+}
+
+fn reconcile_owned_issues(
+    root: &Path,
+    repo: &Path,
+    inventory: &crate::qa_batch::ReleaseInventory,
+    close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
+    tasks: &BTreeMap<String, Task>,
+    issues: BTreeMap<(String, u64), IssueRef>,
+) -> Vec<IssueOutcome> {
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    let default_repo = Some(inventory.scope.repository.as_str());
     // Terminal fixes from older releases may be outside the incoming scope;
     // include every referencing task before asking the same resolver again.
     let mut scope = inventory.scope.clone();
@@ -848,6 +890,69 @@ mod tests {
         let outcomes = reconcile_release_issues(&root, dir.path(), &inventory(&["cas-ship", "cas-gone"]), &BTreeMap::new());
         assert_eq!(outcomes.iter().map(|o| (&o.action, o.task_ids.clone())).collect::<Vec<_>>(),
             [(&IssueAction::Failed, vec!["cas-gone".to_string()])], "a gone delivery stays explicit, alone");
+    }
+
+    /// GH #1830 (v4.16 closeout): a task's contextual external_ref to a
+    /// third-party issue reached `gh issue close actions/runner-images#15296`.
+    #[test]
+    fn release_closeout_writes_only_to_configured_issue_repositories() {
+        use cas_types::{FactoryBranchStart, WorkTarget};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("release");
+        std::fs::create_dir_all(&repo).unwrap();
+        let root = crate::store::init_cas_dir(&repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", &repo);
+        std::fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id='issue-fixture'\n[issues]\nrepo='example/issue-fixture'\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["remote", "add", "origin", "https://github.com/example/issue-fixture.git"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-m", "release"]);
+        let published = git(&["rev-parse", "HEAD"]);
+        let log = env.home().join("gh.log");
+        let gh = env.home().join("gh");
+        std::fs::write(&gh, format!("#!/bin/sh\necho \"$@\" >> '{}'\n\
+            [ \"$2\" = list ] && echo '[{{\"number\":7}},{{\"number\":9}},{{\"number\":15296}}]'\nexit 0\n",
+            log.display())).unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        env.set(GH_BIN_ENV, &gh);
+
+        let mut fix = task("cas-5eef", TaskStatus::Closed, "GH #7: release repair");
+        fix.description = "Also routes Richards-LLC/violet_ps#9.".into();
+        fix.external_ref = Some("https://github.com/actions/runner-images/issues/15296".into());
+        fix.origin_project = Some("issue-fixture".into());
+        fix.deliverables.factory_branch_anchor = Some(published.clone());
+        fix.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget { repo_selector: "project:issue-fixture".into(), target_branch: "main".into() },
+            branch: "factory/worker".into(), assignee: "worker".into(), base_sha: published.clone(),
+        });
+        crate::store::open_task_store(&root).unwrap().add(&fix).unwrap();
+        let scope = crate::qa_batch::ReleaseScope {
+            project_id: "issue-fixture".into(), repository: "example/issue-fixture".into(),
+            release_id: "v9.99.0".into(), reviewed_sha: published.clone(), final_release_sha: published,
+            promotion_pr: None, release_tag: None, constituent_epic_ids: vec![],
+            included_task_ids: vec![fix.id.clone()], no_code_members: BTreeMap::new(), proof_refs: vec![],
+        };
+        let inventory = crate::qa_batch::resolve_release_inventory(&root, &repo, &scope).unwrap();
+
+        let outcomes = reconcile_release_issues(&root, &repo, &inventory, &BTreeMap::new());
+        let actions: BTreeMap<_, _> = outcomes.iter().map(|o| (o.issue.as_str(), &o.action)).collect();
+        assert_eq!(actions, BTreeMap::from([
+            ("actions/runner-images#15296", &IssueAction::Skipped),
+            ("Richards-LLC/violet_ps#9", &IssueAction::Closed),
+            ("example/issue-fixture#7", &IssueAction::Closed),
+        ]), "{outcomes:?}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(!calls.to_ascii_lowercase().contains("runner-images"), "{calls}");
     }
 
     #[test]

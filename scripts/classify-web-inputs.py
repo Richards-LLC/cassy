@@ -41,7 +41,7 @@ WEB_INPUTS = (
     'scripts/visual-qa.mjs',
     # Run inside the CI Commander step.
     'scripts/test-ci-journey-evidence-upload.sh',
-    # Runs each CI Commander journey shard (queue retry and quarantine).
+    # Runs each CI Commander journey shard (first-failure receipts).
     'scripts/ci-queue-flakes.py',
     # Builds and verifies the journey dist hub-web/e2e/journeys/serve-dist.mjs
     # serves.

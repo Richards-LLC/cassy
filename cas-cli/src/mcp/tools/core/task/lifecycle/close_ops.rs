@@ -9574,6 +9574,14 @@ impl CasCore {
                         )
                         && tip != recorded
                         && park_anchor.as_deref() == Some(recorded)
+                        // A fresh park can retain a first-parent delivery
+                        // boundary while merge rejects its later continuation.
+                        // A checkpoint restored only as a side parent cannot
+                        // supply that boundary or its focused-test proof.
+                        && (task.status == TaskStatus::AwaitingMerge
+                            || crate::qa_evidence::receipt_on_first_parent(
+                                &close_project_root, recorded, tip,
+                            ) != Some(true))
                     {
                         let foreign_since = self.sibling_lease_boundary(task_store.as_ref(), &task);
                         let (target, _) = preferred_live_target_ref_for_delivery(
@@ -9608,13 +9616,11 @@ impl CasCore {
                     // exact tip, read (never run) while the worker can still
                     // fix them; cas-d6eb: the blast-radius module check before
                     // parking locks the proof scope.
-                    // A refused attempt skips speculative anchor advancement, but
-                    // still checks proof against the pushed tip on an owned task
-                    // branch. A deliberately retained shared-lane boundary keeps
-                    // proof scoped to that delivery, not its stacked successor.
-                    let receipt_tip = if (task.status == TaskStatus::AwaitingMerge || !own_task_branch)
-                        && tip_is_pushed && gate_refusals.is_empty()
-                    {
+                    // Proof follows the accepted delivery boundary. An
+                    // unattributed continuation cannot borrow its own receipt
+                    // to prove the retained checkpoint. A genuine restoration
+                    // merge has already advanced that boundary to the tip.
+                    let receipt_tip = if tip_is_pushed && gate_refusals.is_empty() {
                         park_anchor.as_deref()
                     } else { anchor.as_deref() };
                     if (task.status != TaskStatus::AwaitingMerge

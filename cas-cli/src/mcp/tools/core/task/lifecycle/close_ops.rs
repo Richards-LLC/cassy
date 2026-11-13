@@ -6640,10 +6640,24 @@ impl CasCore {
         parent_branch: &str,
         candidate: Option<&str>,
     ) -> Option<String> {
-        let candidate = candidate?;
         if task.status != TaskStatus::AwaitingMerge {
             return None;
         }
+        self.eligible_same_delivery_advance(task_store, task, repo_path, parent_branch, candidate)
+    }
+
+    /// Shared structural proof for a parked retry or an owned fresh checkpoint.
+    /// The caller establishes lifecycle state; patch, push and sibling fences
+    /// remain the same for either entry point.
+    fn eligible_same_delivery_advance(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        parent_branch: &str,
+        candidate: Option<&str>,
+    ) -> Option<String> {
+        let candidate = candidate?;
         let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
         // cas-43d2: a pushed delivery is what origin holds. An unpushed local
@@ -7129,6 +7143,13 @@ impl CasCore {
                 || (named_final_tip
                     && self.receipt_tip_supersedes_foreign_anchor(task_store, task, repo_path, &tip, &target))
         };
+        // A rebase followed by an identical-tree merge restores the old
+        // checkpoint as a side parent. Reuse the parked delivery's positive
+        // patch/ancestry proof, rather than silently keeping that checkpoint.
+        let advance = advance || (task.status == TaskStatus::InProgress && named_final_tip
+            && self.eligible_same_delivery_advance(
+                task_store, task, repo_path, parent_branch, Some(&tip),
+            ).as_deref() == Some(tip.as_str()));
         if !advance {
             return parking;
         }
@@ -9528,10 +9549,10 @@ impl CasCore {
                             }
                         }
                     }
-                    // cas-a58cc: a rejected continuation must not look like
-                    // a successful re-park of the pushed tip. Shared advance
-                    // callers still retain their silent attribution fence.
-                    if task.status == TaskStatus::AwaitingMerge
+                    // A fresh checkpoint that cannot advance needs the same
+                    // attribution refusal as a parked retry, before proof is
+                    // read. Other collected refusals did not attempt advance.
+                    if (task.status == TaskStatus::AwaitingMerge || gate_refusals.is_empty())
                         && tip_is_pushed
                         && let (Some(recorded), Some(tip)) = (
                             task.deliverables.factory_branch_anchor.as_deref(), anchor.as_deref(),
@@ -9556,7 +9577,7 @@ impl CasCore {
                         let remedy = self.refused_advance_sibling(
                             task_store.as_ref(), &task, &close_project_root, &offending, foreign_since,
                         ).map(|sibling| format!(
-                            "The advance belongs to task {sibling}. Deliver that task on its own branch; the parked delivery remains valid."
+                            "The advance belongs to task {sibling}. Deliver that task on its own branch; this task's recorded boundary remains unchanged."
                         )).unwrap_or_else(||
                             "Ask the supervisor to request changes and review the replacement delivery.".to_string()
                         );
@@ -9574,7 +9595,9 @@ impl CasCore {
                     // parking locks the proof scope.
                     // A refused attempt skips speculative anchor advancement, but
                     // still checks proof against the pushed tip, not its old anchor.
-                    let receipt_tip = if tip_is_pushed && gate_refusals.is_empty() {
+                    let receipt_tip = if task.status == TaskStatus::AwaitingMerge
+                        && tip_is_pushed && gate_refusals.is_empty()
+                    {
                         park_anchor.as_deref()
                     } else { anchor.as_deref() };
                     if (task.status != TaskStatus::AwaitingMerge

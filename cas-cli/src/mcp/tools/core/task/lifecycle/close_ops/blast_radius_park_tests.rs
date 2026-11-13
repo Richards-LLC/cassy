@@ -1246,8 +1246,17 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
             work_target: task.deliverables.work_target.clone().unwrap(),
         });
         tasks.update(&task).unwrap();
-        std::fs::write(repo.join("target-sync.txt"), "synced main\n").unwrap();
-        git(repo, &["add", "target-sync.txt"]);
+        if !live_proof {
+            crate::factory_worker_check::record_passing_test_for_tests(
+                &f.cas_dir(), &f.worker_path, &checkpoint, "widget", "test(gear)",
+            );
+        }
+        // The synced target changes compiled crate inputs: an old receipt
+        // cannot be reused through the documentation-only proof shortcut.
+        let lib = repo.join("crates/widget/src/lib.rs");
+        let body = std::fs::read_to_string(&lib).unwrap();
+        std::fs::write(lib, format!("{body}pub const SYNCED: bool = true;\n")).unwrap();
+        git(repo, &["add", "crates/widget/src/lib.rs"]);
         git(repo, &["commit", "-q", "-m", "fix(cas-a0b1): target update"]);
         git(repo, &["push", "-q", "origin", "main"]);
         git(&f.worker_path, &["rebase", "origin/main"]);
@@ -1262,9 +1271,11 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         }
         let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
         git(&f.worker_path, &["push", "-q", "origin", &branch]);
-        crate::factory_worker_check::record_passing_test_for_tests(
-            &f.cas_dir(), &f.worker_path, if live_proof { &tip } else { &checkpoint }, "widget", "test(gear)",
-        );
+        if live_proof {
+            crate::factory_worker_check::record_passing_test_for_tests(
+                &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+            );
+        }
         let mut request = serde_json::json!({"action":"close", "id":ID, "reason":"Gear repair complete"});
         if explicit { request["commit_receipt"] = tip.clone().into(); }
         let output = call(&f.worker, request).await;
@@ -1278,6 +1289,7 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
             assert!(codes.contains(&"G-61"), "{case}: {output}");
             assert!(output.contains(&tip[..12]), "proof must name the measured commit: {output}");
             assert_eq!(parked.status, TaskStatus::InProgress);
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
         } else {
             assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{case}: {output}");
             assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));

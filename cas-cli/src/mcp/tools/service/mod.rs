@@ -1805,6 +1805,7 @@ mod memory_lifecycle_tests;
 mod pattern_ops;
 mod qa_pass_ops;
 mod server_handler;
+mod merge_response;
 pub(crate) use server_handler::potentially_mutating_call;
 /// cas-7c93 (GH #87): server_start / server_stop / server_list.
 mod server_ops;

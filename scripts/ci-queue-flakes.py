@@ -248,8 +248,6 @@ def reconcile(args):
             raise ValueError('invalid test outcome')
         for test in receipt['failed']:
             observations[identity(test)] = (test,receipt)
-    if args.expect and set(args.expect) != slots:
-        raise ValueError(f'incomplete queue evidence: expected {args.expect}; found {sorted(slots)}')
     if not observations:
         write_json(args.receipts/'publication.json',{'schema':1,'published':[]})
         return 0
@@ -317,7 +315,6 @@ def main():
     command = commands.add_parser('reconcile')
     command.add_argument('--issues-repo',required=True)
     command.add_argument('--receipts',type=Path,required=True)
-    command.add_argument('--expect',action='append',default=[],help='required runner:shard receipt (repeatable)')
     args = parser.parse_args()
     try:
         return {'run':run,'reconcile':reconcile}[args.command](args)

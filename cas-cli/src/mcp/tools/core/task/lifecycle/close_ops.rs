@@ -6724,10 +6724,24 @@ impl CasCore {
         parent_branch: &str,
         candidate: Option<&str>,
     ) -> Option<String> {
-        let candidate = candidate?;
         if task.status != TaskStatus::AwaitingMerge {
             return None;
         }
+        self.eligible_same_delivery_advance(task_store, task, repo_path, parent_branch, candidate)
+    }
+
+    /// Shared structural proof for a parked retry or an owned fresh checkpoint.
+    /// The caller establishes lifecycle state; patch, push and sibling fences
+    /// remain the same for either entry point.
+    fn eligible_same_delivery_advance(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        parent_branch: &str,
+        candidate: Option<&str>,
+    ) -> Option<String> {
+        let candidate = candidate?;
         let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
         // cas-43d2: a pushed delivery is what origin holds. An unpushed local
@@ -7213,6 +7227,21 @@ impl CasCore {
                 || (named_final_tip
                     && self.receipt_tip_supersedes_foreign_anchor(task_store, task, repo_path, &tip, &target))
         };
+        // A rebase followed by an identical-tree merge restores the old
+        // checkpoint as a side parent. Reuse the parked delivery's positive
+        // patch/ancestry proof, rather than silently keeping that checkpoint.
+        // Only that merge shape needs this exception. Ordinary shared-lane
+        // continuations retain the stricter fresh subject-ownership checks.
+        let advance = advance || (task.status == TaskStatus::InProgress && named_final_tip
+            && resolve_branch_sha(repo_path, &format!("{tip}^1")).is_some_and(|rebased| {
+                restored_anchor_merge_is_attributable(
+                    repo_path, recorded, &rebased, &tip, &task.id,
+                    self.sibling_lease_boundary(task_store, task),
+                )
+            })
+            && self.eligible_same_delivery_advance(
+                task_store, task, repo_path, parent_branch, Some(&tip),
+            ).as_deref() == Some(tip.as_str()));
         if !advance {
             return parking;
         }
@@ -9638,16 +9667,31 @@ impl CasCore {
                             }
                         }
                     }
-                    // cas-a58cc: a rejected continuation must not look like
-                    // a successful re-park of the pushed tip. Shared advance
-                    // callers still retain their silent attribution fence.
-                    if task.status == TaskStatus::AwaitingMerge
+                    // A per-task branch identifies the delivery being replaced.
+                    // A shared lane can deliberately retain task A's boundary
+                    // while task B is stacked above it; that is still a valid park.
+                    let own_task_branch = measured_branch.as_deref().is_some_and(|branch| {
+                        task.assignee.as_deref().is_some_and(|assignee| {
+                            branch.strip_prefix("origin/").unwrap_or(branch)
+                                == crate::factory_isolation::worker_task_branch(assignee, &task.id)
+                        })
+                    });
+                    if (task.status == TaskStatus::AwaitingMerge
+                        || (own_task_branch && gate_refusals.is_empty()))
                         && tip_is_pushed
                         && let (Some(recorded), Some(tip)) = (
                             task.deliverables.factory_branch_anchor.as_deref(), anchor.as_deref(),
                         )
                         && tip != recorded
                         && park_anchor.as_deref() == Some(recorded)
+                        // A fresh park can retain a first-parent delivery
+                        // boundary while merge rejects its later continuation.
+                        // A checkpoint restored only as a side parent cannot
+                        // supply that boundary or its focused-test proof.
+                        && (task.status == TaskStatus::AwaitingMerge
+                            || crate::qa_evidence::receipt_on_first_parent(
+                                &close_project_root, recorded, tip,
+                            ) != Some(true))
                     {
                         let foreign_since = self.sibling_lease_boundary(task_store.as_ref(), &task);
                         let (target, _) = preferred_live_target_ref_for_delivery(
@@ -9666,7 +9710,7 @@ impl CasCore {
                         let remedy = self.refused_advance_sibling(
                             task_store.as_ref(), &task, &close_project_root, &offending, foreign_since,
                         ).map(|sibling| format!(
-                            "The advance belongs to task {sibling}. Deliver that task on its own branch; the parked delivery remains valid."
+                            "The advance belongs to task {sibling}. Deliver that task on its own branch; this task's recorded boundary remains unchanged."
                         )).unwrap_or_else(||
                             "Ask the supervisor to request changes and review the replacement delivery.".to_string()
                         );
@@ -9682,8 +9726,10 @@ impl CasCore {
                     // exact tip, read (never run) while the worker can still
                     // fix them; cas-d6eb: the blast-radius module check before
                     // parking locks the proof scope.
-                    // A refused attempt skips speculative anchor advancement, but
-                    // still checks proof against the pushed tip, not its old anchor.
+                    // Proof follows the accepted delivery boundary. An
+                    // unattributed continuation cannot borrow its own receipt
+                    // to prove the retained checkpoint. A genuine restoration
+                    // merge has already advanced that boundary to the tip.
                     let receipt_tip = if tip_is_pushed && gate_refusals.is_empty() {
                         park_anchor.as_deref()
                     } else { anchor.as_deref() };

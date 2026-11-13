@@ -2320,6 +2320,19 @@ the existing ancestry, ownership, fast-row and local-gate checks.
 
 At park, `receipt_scope::park_refusal` reads passing capped test receipts for
 every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
+A fresh park evaluates focused proof at the accepted delivery boundary. A
+rebase that restores the checkpoint through
+an identical-tree merge uses the same patch, ownership and sibling checks as
+a parked retry, advancing that boundary to the measured pushed tip. A retained
+checkpoint reachable only through a side parent reports an attribution refusal
+before proof advice; it never asks for tests at the older checkpoint. An
+ordinary first-parent checkpoint can remain the parked boundary when a later
+continuation is rejected; proof stays bound to that checkpoint, and merge
+independently refuses the untrusted continuation. A shared
+lane that intentionally retains task A's boundary while task B is stacked above
+it still parks and scopes proof to A. Ordinary shared-lane corrections retain
+their subject-ownership checks; a foreign task named in the subject cannot be
+adopted by mentioning this task in the commit body.
 Park executes neither checks nor tests. Local fast-row receipts are not park
 proof because workers can write them, and park reads no fast-row exception
 file. CI runs the fast rows before merge admission; the pre-push hook provides

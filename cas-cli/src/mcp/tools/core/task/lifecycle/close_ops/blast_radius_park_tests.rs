@@ -1266,6 +1266,88 @@ async fn peer_premerge_case(case: PeerReceiptCase) {
 
 }
 
+/// cas-28c5 / GH #1895: ef33 preserved its pushed checkpoint as a side
+/// parent after rebasing onto synced main. Proof belongs to the live merge tip.
+#[tokio::test]
+async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
+    let mut env = TestEnvGuard::temp_home();
+    for (case, explicit, foreign, live_proof) in [
+        ("measured tip", false, false, true),
+        ("explicit receipt", true, false, true),
+        ("foreign continuation", true, true, true),
+        ("old proof only", false, false, false),
+    ] {
+        let f = fixture(&mut env);
+        let repo = f.dir.path();
+        let branch = format!("{LANE}-{ID}");
+        let base = git(repo, &["rev-parse", "main"]);
+        git(&f.worker_path, &["branch", "-m", &branch]);
+        std::fs::create_dir_all(f.worker_path.join("changelog.d")).unwrap();
+        std::fs::write(f.worker_path.join(format!("changelog.d/{ID}.md")),
+            "### Fixed — Widget\n\n- **Gear turns** — Repair the gear.\n").unwrap();
+        git(&f.worker_path, &["add", "changelog.d"]);
+        git(&f.worker_path, &["commit", "-q", "--amend", "--no-edit"]);
+        let checkpoint = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(&f.worker_path, &["push", "-q", "origin", &branch]);
+        let tasks = open_task_store(&f.cas_dir()).unwrap();
+        let mut task = f.task();
+        task.deliverables.factory_branch_anchor = Some(checkpoint.clone());
+        task.deliverables.parked_branch = Some(branch.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            assignee: WORKER.into(), branch: branch.clone(), base_sha: base,
+            work_target: task.deliverables.work_target.clone().unwrap(),
+        });
+        tasks.update(&task).unwrap();
+        if !live_proof {
+            crate::factory_worker_check::record_passing_test_for_tests(
+                &f.cas_dir(), &f.worker_path, &checkpoint, "widget", "test(gear)",
+            );
+        }
+        // The synced target changes compiled crate inputs: an old receipt
+        // cannot be reused through the documentation-only proof shortcut.
+        std::fs::write(repo.join("crates/widget/src/embedded.md"), "synced compiled input\n").unwrap();
+        git(repo, &["add", "crates/widget/src/embedded.md"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-a0b1): target update"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(&f.worker_path, &["rebase", "origin/main"]);
+        let rebased = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        assert_ne!(rebased, checkpoint);
+        git(&f.worker_path, &["merge", "-q", "--no-ff", &checkpoint, "-m", "Merge preserved checkpoint"]);
+        assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD^{tree}"]), git(&f.worker_path, &["rev-parse", &format!("{rebased}^{{tree}}")]), "restoring ancestry must preserve the rebased tree");
+        if foreign {
+            std::fs::write(f.worker_path.join("foreign.txt"), "sibling work\n").unwrap();
+            git(&f.worker_path, &["add", "foreign.txt"]);
+            git(&f.worker_path, &["commit", "-q", "-m", "fix(cas-abcd): sibling delivery"]);
+        }
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(&f.worker_path, &["push", "-q", "origin", &branch]);
+        if live_proof {
+            crate::factory_worker_check::record_passing_test_for_tests(
+                &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+            );
+        }
+        let mut request = serde_json::json!({"action":"close", "id":ID, "reason":"Gear repair complete"});
+        if explicit { request["commit_receipt"] = tip.clone().into(); }
+        let output = call(&f.worker, request).await;
+        let codes = crate::gates::codes_in(&output);
+        let parked = f.task();
+        if foreign {
+            assert_eq!(parked.status, TaskStatus::InProgress, "{case}: {output}");
+            assert!(!codes.contains(&"G-61"), "attribution must refuse before stale proof advice: {output}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
+        } else if !live_proof {
+            assert!(codes.contains(&"G-61"), "{case}: {output}");
+            assert!(output.contains(&tip[..12]), "proof must name the measured commit: {output}");
+            assert_eq!(parked.status, TaskStatus::InProgress);
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
+        } else {
+            assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{case}: {output}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+            assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(branch.as_str()));
+        }
+    }
+}
+
 /// cas-3d70, through the real close: the commit-time anchor names a commit on
 /// a separate pushed helper branch, the worker's own lane has since synced the
 /// target, and park refuses because that anchor is absent from the lane. The

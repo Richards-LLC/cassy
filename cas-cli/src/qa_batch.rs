@@ -504,7 +504,7 @@ fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String
 
 /// A release member's generation: its delivery cycle (design rev 3.1 §2.5).
 pub(crate) fn delivery_generation(task: &Task) -> String {
-    task.updated_at.to_rfc3339()
+    format!("cycle:{}", task.deliverables.delivery_cycle)
 }
 
 /// The delivery identity every receipt consumer shares: the recorded anchor, or,

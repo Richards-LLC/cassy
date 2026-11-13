@@ -98,12 +98,18 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
         # Execute the actual workflow bodies, refusing any npm package download.
         # npm ci has already installed hub-web's locked CLI before these steps.
         self.write('bin/npm', '''#!/usr/bin/env python3
-import os,sys
+import json,os,sys
+from pathlib import Path
 assert '--package' not in ' '.join(sys.argv), 'browser install must use the locked local CLI'
 assert sys.argv[1:] in (['exec', '--', 'playwright', 'install', '--no-shell', 'chromium'],
                         ['exec', '--', 'playwright', 'install', '--with-deps', '--no-shell', 'chromium'],
                         ['ci'], ['run', 'visual-qa'],
-                        ['run', 'journeys', '--', '--workers=2', '--shard=1/6']), sys.argv
+                        ['run', 'journeys', '--', '--workers=2', '--retries=0', '--shard=1/6']), sys.argv
+if 'journeys' in sys.argv:
+    report = Path(os.environ['JOURNEY_OUTPUT'])/'report.json'
+    report.parent.mkdir(parents=True,exist_ok=True)
+    report.write_text(json.dumps({'suites':[{'title':'fixture','specs':[{'title':'test','file':'fixture.ts',
+        'tests':[{'projectName':'journeys','results':[{'status':'passed','retry':0}]}]}]}]}))
 if sys.argv[1:] == ['run', 'visual-qa']:
     assert os.environ.get('CHROME_PATH') == '/locked/chromium', 'visual QA must launch the installed full browser'
 ''')
@@ -239,9 +245,6 @@ if os.environ.get('EXTRA_OUTPUT') == 'true':
     Path('dist/new-chunk.js').write_text('new chunk')
 ''')
         (self.repo / 'bin/npm').chmod(0o755)
-        # The build body runs through the real queue step; this models a
-        # non-queue event, where that step runs the build once.
-        self.write('scripts/ci-queue-flakes.py', (ROOT / 'scripts/ci-queue-flakes.py').read_text())
         self.commit()
         seed = self.git('rev-parse', 'HEAD').stdout.strip()
         workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())

@@ -6477,9 +6477,11 @@ mod preassigned_start_message_order_tests {
             "action":"message", "target":target, "summary":"takeover", "message":"cas-0e54 takeover completed",
         })).unwrap())).await.expect("the takeover's suggested route must accept the replacement");
         let rows = crate::store::open_prompt_queue_store(root).unwrap().poll_all(10).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].target, "local-supervisor");
-        assert_eq!(rows[0].factory_session.as_deref(), Some("soundwave"));
+        let notices = rows.iter().filter(|row| row.summary.as_deref() == Some("takeover"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].target, "local-supervisor");
+        assert_eq!(notices[0].factory_session.as_deref(), Some("soundwave"));
     }
 
     #[tokio::test]

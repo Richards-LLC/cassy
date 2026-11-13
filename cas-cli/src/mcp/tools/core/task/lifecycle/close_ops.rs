@@ -8131,7 +8131,7 @@ impl CasCore {
         }
 
         // An expired task-only review can be requested again, never waived.
-        // Receipt-bound deliveries and epic recovery retain their exact boundary.
+        // Shipped, receipt-bound and epic recovery retain their exact boundary.
         let mut renew_expired_task_dispatch = None;
 
         // An explicitly persisted proof cycle is stronger than configuration,
@@ -8154,6 +8154,9 @@ impl CasCore {
                 Ok(Some(dispatch))
                     if task.task_type != TaskType::Epic
                         && task.status != TaskStatus::AwaitingMerge
+                        && task.deliverables.delivery_pr_merged_at.is_none()
+                        && task.deliverables.delivery_pr_merge_commit.is_none()
+                        && task.deliverables.green_merge_commit.is_none()
                         && dispatch.receipt_id.is_none()
                         && dispatch.delivery_transaction_id.is_none()
                         && (dispatch.state == cas_types::VerificationDispatchState::TimedOut
@@ -31524,12 +31527,16 @@ esac
         // Another task's commit on origin/main is not this task's shipped receipt.
         let foreign = accepted.clone();
         let (refused, text) = close(named.clone(), &foreign).await;
-        assert!(refused && text.contains("VERIFICATION TIMED OUT"), "{text}");
+        assert!(refused, "{text}");
+        let latest = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id).unwrap().unwrap();
+        assert_eq!(latest.id, dispatch.id);
+        assert_eq!(latest.state, cas_types::VerificationDispatchState::TimedOut);
 
         let (refused, text) = close("shipped by PR 1513".into(), &receipt).await;
         assert!(refused, "{text}");
-        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &dispatch.id).unwrap().state,
-            cas_types::VerificationDispatchState::TimedOut);
+        let latest = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id).unwrap().unwrap();
+        assert_eq!(latest.id, dispatch.id);
+        assert_eq!(latest.state, cas_types::VerificationDispatchState::TimedOut);
         assert!(!text.contains("blocking dependencies"), "shipped blocker must not hold: {text}");
         assert_ne!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
 

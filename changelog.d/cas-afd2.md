@@ -4,5 +4,5 @@
   blocked every later close and left a corrected no-code report behind the
   proof scope lock. Now: close requests a fresh pending review for an expired,
   unparked task-only cycle; a corrected portable `external_ref` can be supplied
-  inline and is saved with that dispatch. Active reviews, receipt-bound
+  inline and is saved with that dispatch. Active reviews, shipped or receipt-bound
   deliveries and epic recovery keep their existing protections.

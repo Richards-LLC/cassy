@@ -146,8 +146,14 @@ def referencing_tests(text, paths):
         return set()
     ts = tokens(text)
     ps = pairs(ts)
+    # Preserve source offsets while removing the whitespace/comment gaps
+    # already recognized by the Rust tokenizer, including nested block comments.
+    code, end = [], 0
+    for token in ts:
+        code.extend((" " * (token.start - end), text[token.start:token.end]))
+        end = token.end
     tests = {match.start(1) for match in re.finditer(
-        r"#\[(?:\w+::)*test(?:\([^]]*\))?\]\s*(?:#\[[^]]*\]\s*)*(?:async\s+)?fn\s+(\w+)\s*\(", text)}
+        r"#\[(?:\w+::)*test(?:\([^]]*\))?\]\s*(?:#\[[^]]*\]\s*)*(?:async\s+)?fn\s+(\w+)\s*\(", "".join(code))}
     functions = []
     for i, token in enumerate(ts[:-1]):
         if token.string or token.value != "fn" or not SAFE.fullmatch(ts[i + 1].value):

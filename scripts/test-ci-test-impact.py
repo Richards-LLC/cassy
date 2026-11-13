@@ -183,7 +183,18 @@ pub fn run() { nested::launch(); }
         self.put("scripts/tool.py", "fixture\n")
         self.put(".github/workflows/tool.yml", "fixture\n")
         self.put("cas-cli/src/alpha.rs", 'const SCRIPT: &str = include_str!("../../scripts/tool.py");\nfn contents(_: fn()) { let _ = SCRIPT; }\n#[test] fn reads_script() { contents(|| {}); }\n#[test] fn unrelated_unit() {}\n')
-        self.put("cas-cli/tests/alpha_test.rs", '#[test] fn reads_workflow() { std::fs::read_to_string(".github/workflows/tool.yml"); }\n#[test] fn unrelated_integration() {}\n')
+        self.put("cas-cli/tests/alpha_test.rs", '''
+#[test] fn reads_workflow() { std::fs::read_to_string(".github/workflows/tool.yml"); }
+#[tokio::test]
+// cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+async fn annotated_script_reader() { std::fs::read_to_string("scripts/tool.py"); }
+#[tokio::test(flavor = "multi_thread")]
+/* outer comment /* #[test] fn decoy() {} */ still a comment */
+#[serial]
+/* fn and { } here are not tokens */
+async fn block_annotated_script_reader() { std::fs::read_to_string("scripts/tool.py"); }
+#[test] fn unrelated_integration() {}
+''')
         self.commit()
         self.base = self.git("rev-parse", "HEAD")
         self.put("scripts/tool.py", "changed\n")
@@ -194,6 +205,9 @@ pub fn run() { nested::launch(); }
         split = impact.lane_split(self.root, selection)
         self.assertIn("reads_script", split["own"])
         self.assertIn("reads_workflow", split["own"])
+        self.assertIn("annotated_script_reader", split["own"])
+        self.assertIn("block_annotated_script_reader", split["own"])
+        self.assertNotIn("decoy", split["selected"])
         self.assertNotIn("unrelated", split["selected"])
         self.assertNotIn("all()", split["selected"])
 

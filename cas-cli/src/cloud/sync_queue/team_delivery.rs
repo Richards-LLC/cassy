@@ -317,31 +317,12 @@ impl SyncQueue {
         ids: &[i64],
         dry_run: bool,
     ) -> Result<Vec<TeamOwnedCleanupRow>, CasError> {
-        use crate::cloud::syncer::pull::deserialize_pulled_entity;
-        use crate::types::Task;
         if !dry_run && ids.is_empty() {
             return Err(CasError::Other(
                 "cleanup requires explicit --ids; preview with --purge-pull-echoes --dry-run".into(),
             ));
         }
-        let live_edges: std::collections::BTreeMap<String, Option<DateTime<Utc>>> = cloud_dependencies
-            .iter()
-            .filter(|row| {
-                row.get("deleted").and_then(serde_json::Value::as_bool) != Some(true)
-                    && row.get("deleted_at").is_none_or(serde_json::Value::is_null)
-                    && !row
-                        .get("operation")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|op| op.eq_ignore_ascii_case("delete"))
-            })
-            .filter_map(|row| {
-                let field = |key: &str| row.get(key).and_then(serde_json::Value::as_str);
-                Some((
-                    format!("{}:{}:{}", field("from_id")?, field("to_id")?, field("dep_type")?),
-                    field("created_at").and_then(|at| at.parse().ok()),
-                ))
-            })
-            .collect();
+        let live_edges = live_team_edges(cloud_dependencies);
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let items = personal_rows(&tx)?;
@@ -360,38 +341,10 @@ impl SyncQueue {
             if (!ids.is_empty() && !ids.contains(&item.id)) || (ids.is_empty() && !candidate) {
                 continue;
             }
-            let payload = item.payload.as_deref().unwrap_or_default();
-            let reason = if !candidate {
-                "not_a_pull_echo_candidate"
-            } else if item.entity_type == EntityType::Task {
-                let remote = cloud_tasks
-                    .iter()
-                    .find(|row| row.get("id").and_then(serde_json::Value::as_str) == Some(&item.entity_id));
-                match (serde_json::from_str::<Task>(payload), remote) {
-                    (Err(_), _) => "unreadable_payload",
-                    (_, None) => "cloud_row_absent",
-                    (Ok(local), Some(remote)) => match deserialize_pulled_entity::<Task>(remote.clone(), "task") {
-                        Err(_) => "unreadable_cloud_row",
-                        Ok(mut remote) => {
-                            remote.updated_at = local.updated_at;
-                            remote.team_id = local.team_id.clone();
-                            if serde_json::to_value(&remote).ok() == serde_json::to_value(&local).ok() {
-                                "matches_cloud_team_row"
-                            } else {
-                                "differs_from_cloud_team_row"
-                            }
-                        }
-                    },
-                }
+            let reason = if candidate {
+                pull_echo_reason(&item, cloud_tasks, &live_edges)
             } else {
-                let created = serde_json::from_str::<serde_json::Value>(payload).ok().and_then(|edge| {
-                    edge.get("created_at")?.as_str()?.parse::<DateTime<Utc>>().ok()
-                });
-                match live_edges.get(&item.entity_id) {
-                    None => "cloud_row_absent",
-                    Some(at) if created.is_some() && *at == created => "matches_cloud_team_row",
-                    Some(_) => "differs_from_cloud_team_row",
-                }
+                "not_a_pull_echo_candidate"
             };
             let eligible = reason == "matches_cloud_team_row";
             rows.push(TeamOwnedCleanupRow {
@@ -407,5 +360,72 @@ impl SyncQueue {
         }
         tx.commit()?;
         Ok(rows)
+    }
+}
+
+/// Live team dependency edges keyed `from:to:type`, with their creation time.
+pub(super) fn live_team_edges(
+    cloud_dependencies: &[serde_json::Value],
+) -> std::collections::BTreeMap<String, Option<DateTime<Utc>>> {
+    cloud_dependencies
+        .iter()
+        .filter(|row| {
+            row.get("deleted").and_then(serde_json::Value::as_bool) != Some(true)
+                && row.get("deleted_at").is_none_or(serde_json::Value::is_null)
+                && !row
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|op| op.eq_ignore_ascii_case("delete"))
+        })
+        .filter_map(|row| {
+            let field = |key: &str| row.get(key).and_then(serde_json::Value::as_str);
+            Some((
+                format!("{}:{}:{}", field("from_id")?, field("to_id")?, field("dep_type")?),
+                field("created_at").and_then(|at| at.parse().ok()),
+            ))
+        })
+        .collect()
+}
+
+/// Whether one personal task/dependency upsert equals the team's current row
+/// (`matches_cloud_team_row`) or why it does not. Shared by the purge and the
+/// migration so both name the same rows as echoes.
+pub(super) fn pull_echo_reason(
+    item: &QueuedSync,
+    cloud_tasks: &[serde_json::Value],
+    live_edges: &std::collections::BTreeMap<String, Option<DateTime<Utc>>>,
+) -> &'static str {
+    use crate::cloud::syncer::pull::deserialize_pulled_entity;
+    use crate::types::Task;
+    let payload = item.payload.as_deref().unwrap_or_default();
+    if item.entity_type == EntityType::Task {
+        let remote = cloud_tasks
+            .iter()
+            .find(|row| row.get("id").and_then(serde_json::Value::as_str) == Some(&item.entity_id));
+        match (serde_json::from_str::<Task>(payload), remote) {
+            (Err(_), _) => "unreadable_payload",
+            (_, None) => "cloud_row_absent",
+            (Ok(local), Some(remote)) => match deserialize_pulled_entity::<Task>(remote.clone(), "task") {
+                Err(_) => "unreadable_cloud_row",
+                Ok(mut remote) => {
+                    remote.updated_at = local.updated_at;
+                    remote.team_id = local.team_id.clone();
+                    if serde_json::to_value(&remote).ok() == serde_json::to_value(&local).ok() {
+                        "matches_cloud_team_row"
+                    } else {
+                        "differs_from_cloud_team_row"
+                    }
+                }
+            },
+        }
+    } else {
+        let created = serde_json::from_str::<serde_json::Value>(payload).ok().and_then(|edge| {
+            edge.get("created_at")?.as_str()?.parse::<DateTime<Utc>>().ok()
+        });
+        match live_edges.get(&item.entity_id) {
+            None => "cloud_row_absent",
+            Some(at) if created.is_some() && *at == created => "matches_cloud_team_row",
+            Some(_) => "differs_from_cloud_team_row",
+        }
     }
 }

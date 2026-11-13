@@ -90,8 +90,6 @@ pub mod trace_archive;
 pub mod tracing;
 mod verification_store;
 mod version_store;
-mod viktor_inbound_store;
-mod viktor_watch_store;
 mod worktree_store;
 
 // Mock stores for testing
@@ -281,12 +279,6 @@ pub use verification_store::{
     resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
     save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
-};
-
-// Durable Viktor thread watches used by the embedded daemon's inbound bridge.
-pub use viktor_inbound_store::{SqliteViktorInboundStore, ViktorInboundMessage};
-pub use viktor_watch_store::{
-    DEFAULT_VIKTOR_WATCH_TTL_SECS, SqliteViktorWatchStore, ViktorThreadWatch, ViktorWatchStatus,
 };
 
 // Worktree store for git worktree tracking
@@ -650,6 +642,22 @@ pub trait TaskStore: Send + Sync {
         Err(StoreError::Other(
             "atomic task mutation receipts are unsupported by this store".to_string(),
         ))
+    }
+
+    /// Bind a mutation receipt to the row's current revision. A syncing
+    /// wrapper uses it to publish a lifecycle write that another store module
+    /// committed directly (cas-a836).
+    fn record_mutation_receipt(&self, _task_id: &str, _receipt_id: &str) -> Result<()> {
+        Err(StoreError::Other(
+            "task mutation receipts are unsupported by this store".to_string(),
+        ))
+    }
+
+    /// Queue the row's current state for cloud sync after a write that
+    /// bypassed this store, such as `request_changes` (cas-a836). Stores
+    /// without cloud sync have nothing to publish.
+    fn publish_current_row(&self, _task_id: &str) -> Result<()> {
+        Ok(())
     }
 
     /// Canonical project identity attached to this store, when available.

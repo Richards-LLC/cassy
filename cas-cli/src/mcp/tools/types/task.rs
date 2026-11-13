@@ -426,14 +426,14 @@ pub struct TaskUpdateRequest {
     #[serde(default)]
     pub priority: Option<u8>,
 
-    /// Add labels, replace supplied triage axes, or reset user labels.
-    #[schemars(description = "Comma-separated labels to add; severity:, reach: and journey: replace that axis. Empty clears user labels; findings retain provenance and reset to broken/theoretical.")]
+    /// Replace user labels; retain finding provenance and omitted triage axes.
+    #[schemars(description = "Comma-separated replacement labels, trimmed and deduplicated. Omitted leaves labels unchanged. Findings retain provenance and omitted severity:, reach: and journey: axes. Empty clears user labels; findings reset to broken/theoretical.")]
     #[serde(default)]
     pub labels: Option<String>,
 
     /// Add blocking dependencies (cas-d45f / GH #98).
     ///
-    /// Additive, like `labels`: each listed task becomes a blocker of this
+    /// Additive: each listed task becomes a blocker of this
     /// task (`this blocked_by that`). Existing blockers are left in place;
     /// use `dep_remove` to drop one.
     #[schemars(

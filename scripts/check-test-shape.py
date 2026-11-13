@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic test-shape lint; no compiler or third-party packages.
 
-Scan Rust tests for constant/literal equality pins and Rust source reads, and
+Scan Rust tests for constant/literal equality pins and non-fixture Rust source reads, and
 test files in any language for exact prose snapshots or source/workflow text
 needles. Prose pins cannot be waived by comments. Vendor code is excluded. Integration tests under cas-cli/tests and
 crates/*/tests must resolve Cargo binaries at runtime rather than through
@@ -14,6 +14,7 @@ by a released-trunk sync merge.
 """
 import argparse
 import ast
+from html import escape
 from functools import cache
 import os
 from pathlib import Path
@@ -114,6 +115,51 @@ def python_bindings(scope):
             for element in node.iter.elts:
                 bind(node.target, element)
     return bound
+
+
+def python_escaped_payloads(tree):
+    """Positive substring checks of an exact encoded, supplied local fixture.
+
+    A single immutable literal must reach a fixture field before the assertion.
+    Neither escaped prose alone nor the same name in another scope qualifies.
+    """
+    def local_nodes(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                yield from local_nodes(child)
+
+    for scope in [tree, *(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))]:
+        nodes = list(local_nodes(scope))
+        writes = {}
+        for node in nodes:
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                writes[node.id] = writes.get(node.id, 0) + 1
+        bindings = {}
+        supplied = {}
+        for node in nodes:
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if (isinstance(target, ast.Name) and writes[target.id] == 1
+                    and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                bindings[target.id] = (node.value.value, node.lineno)
+            elif isinstance(target, (ast.Subscript, ast.Attribute)) and isinstance(node.value, ast.Name):
+                supplied.setdefault(node.value.id, []).append(node.lineno)
+        for node in nodes:
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'assertIn' and len(node.args) >= 2
+                    and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                continue
+            literal = node.args[0]
+            for name, (raw, line) in bindings.items():
+                if not any(line < used < node.lineno for used in supplied.get(name, [])):
+                    continue
+                encoded = escape(raw)
+                markdown = re.sub(r'([\\`*_{}\[\]()#+.!|~-])', r'\\\1', encoded)
+                if literal.value != raw and literal.value in (encoded, markdown):
+                    yield literal
+                    break
 
 
 def rust_bindings(ts, ps, begin, end):
@@ -302,6 +348,7 @@ def message_assertions(source, path, changed_lines=None):
             tree = ast.parse(source)
         except SyntaxError:
             return []
+        escaped_payloads = set(python_escaped_payloads(tree))
         scopes = {}
         for scope in [tree, *(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))]:
             bindings = python_bindings(scope)
@@ -318,6 +365,8 @@ def message_assertions(source, path, changed_lines=None):
         def substring_values(literal):
             """A substring operand's literal value(s): its own, or what a bound name
             holds unless the test also passes that name in (payload preservation)."""
+            if literal in escaped_payloads:
+                return []
             if isinstance(literal, ast.Name):
                 if (id(scopes.get(literal)), literal.id) in supplied:
                     return []
@@ -683,7 +732,7 @@ def js_assertion_diagnostics(source, path):
 
 
 def python_runtime_inputs(source):
-    """File paths and explicit recorded argv comparisons are machine data."""
+    """File paths, encoded fixtures and recorded argv comparisons are machine data."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -697,6 +746,8 @@ def python_runtime_inputs(source):
         # AST columns count UTF-8 bytes; text_literals uses character offsets.
         return starts[line - 1] + len(lines[line - 1].encode('utf-8')[:byte_column].decode('utf-8'))
 
+    for node in python_escaped_payloads(tree):
+        yield offset(node.lineno, node.col_offset), offset(node.end_lineno, node.end_col_offset)
     def file_read(node):
         return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == 'read_text' and not node.args and not node.keywords)
@@ -846,6 +897,53 @@ def pinned(source, start):
     return False
 
 
+def fixture_source_rewrite(ts, ps, read, end):
+    """Recognize a read consumed only by the next same-path fixture rewrite.
+
+    Keep this narrow: an immutable read binding, format! input, and no later
+    use of the source value. Comparisons, aliases and other consumers still lint.
+    """
+    start = read - 1
+    while start >= 0 and (ts[start].string or ts[start].value not in (';', '{', '}')):
+        start -= 1
+    head = ts[start + 1:read]
+    if (len(head) < 5 or [t.value for t in head[:1]] != ['let']
+            or head[2].value != '='
+            or [t.value for t in head[3:]] not in (['fs', '::'], ['std', '::', 'fs', '::'])):
+        return False
+    name = head[1].value
+    close = ps[read + 1]
+    tail = [t.value for t in ts[close + 1:close + 6]]
+    if tail != ['.', 'unwrap', '(', ')', ';']:
+        return False
+    write = close + 6
+    if [t.value for t in ts[write:write + 2]] == ['std', '::']:
+        write += 2
+    if [t.value for t in ts[write:write + 4]] != ['fs', '::', 'write', '('] or write + 3 not in ps:
+        return False
+    opening = write + 3
+    stop = ps[opening]
+    comma = opening + 1
+    while comma < stop and ts[comma].value != ',':
+        comma = ps.get(comma, comma) + 1
+    def path_arg(items):
+        return [(t.value, t.string) for t in items if t.value != '&']
+    if path_arg(ts[read + 2:close]) != path_arg(ts[opening + 1:comma]):
+        return False
+    data = ts[comma + 1:stop]
+    if (len(data) < 5 or [t.value for t in data[:3]] != ['format', '!', '(']
+            or not data[3].string or data[-1].value != ')'):
+        return False
+    # Accept the incident's named capture and its positional equivalent, but
+    # never hide an assertion/comparison nested in a write expression.
+    capture = re.compile(r'(?<!\{)\{' + re.escape(name) + r'(?:[}:])')
+    args = [t.value for t in data[4:-1]]
+    if not (not args and capture.search(data[3].value) or args in ([',', name], [',', '&', name])):
+        return False
+    return not any((not t.string and t.value == name)
+                   or (t.string and capture.search(t.value)) for t in ts[stop + 1:end])
+
+
 def lint(source, path, check_text_pins=True, changed_text_lines=None):
     comments = []
     ts = tokens(source, comments)
@@ -926,7 +1024,6 @@ def lint(source, path, check_text_pins=True, changed_text_lines=None):
                     kind = 'Rust source as text'
             if t.value in ('read_to_string',) and i + 1 in ps:
                 args = ts[i+2:ps[i+1]]
-                # A .rs fixture read is still structural and must explain why.
                 # Resolve simple local path bindings, rather than flag every
                 # unrelated read in a function which happens to create a .rs.
                 names = {x.value for x in args if not x.string}
@@ -936,7 +1033,8 @@ def lint(source, path, check_text_pins=True, changed_text_lines=None):
                         if ts[j].value == 'let' and j+1 < i and ts[j+1].value == name:
                             stop = next((k for k in range(j+2, i) if ts[k].value == ';' and not ts[k].string), i)
                             direct |= any(x.string and '.rs' in x.value for x in ts[j:stop])
-                if direct:
+                scope_end = min(right for _, left, right in scopes if left < i < right)
+                if direct and not fixture_source_rewrite(ts, ps, i, scope_end):
                     kind = 'Rust source as text'
             if kind and i not in seen:
                 seen.add(i)

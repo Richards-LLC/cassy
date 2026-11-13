@@ -299,7 +299,9 @@ pub struct HookInput {
     ///
     /// Read this through [`HookInput::display_text`], which also enforces the
     /// chunk-boundary rule documented on [`Self::message_is_final`].
-    #[serde(default, alias = "delta")]
+    /// Stop supplies the complete reply as `last_assistant_message`; evidence
+    /// checks use it even when the transcript tail lacks the turn boundary.
+    #[serde(default, alias = "delta", alias = "last_assistant_message")]
     pub message: Option<String>,
 
     /// `MessageDisplay`: true on the last chunk of an assistant message
@@ -1389,15 +1391,11 @@ mod tests {
     #[test]
     fn stop_payload_carries_stop_hook_active() {
         let quiet: HookInput = serde_json::from_str(
-            r#"{"session_id":"fc70e6f3","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
-                "prompt_id":"d323a56b","permission_mode":"default","hook_event_name":"Stop",
-                "stop_hook_active":false,"last_assistant_message":"DONE",
-                "background_tasks":[{"id":"a24c4ba99866d62e3","type":"subagent",
-                    "status":"running","description":"Reply with pong",
-                    "agent_type":"general-purpose"}],
-                "session_crons":[]}"#,
+            include_str!("fixtures/cas-f3e3-stop.json"),
         )
         .expect("the real Stop payload must deserialize");
+        // Exact wire payload integrity: Stop evidence must inspect this reply.
+        assert_eq!(quiet.message.as_deref(), Some("DONE"));
         assert_eq!(quiet.stop_hook_active, Some(false));
         assert!(!quiet.stop_hook_is_reentrant());
 

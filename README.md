@@ -50,7 +50,7 @@ A supervisor plans epics, cuts tasks, assigns them, reviews the work and merges 
 | **Task coordination** | Tasks carry dependencies, priorities, leases and close gates — a close is refused when the branch is unmerged or the tree is unverifiable |
 | **Session control** | `cas list`, `cas attach`, `cas kill`, `cas kill-all`; `--notify` for desktop alerts, `--record` for replayable sessions |
 | **Liveness triage** | `cas factory is-wedged`, `debug`, `kill` classify and recover a stuck worker; `cas factory preflight` reports readiness before spawning |
-| **Headless control** | `cas factory status|agents|activity|message` drive a running session without attaching a terminal |
+| **Headless control** | `cas factory status\|agents\|activity\|message` drive a running session without attaching a terminal |
 
 ### Bare Claude account picker
 
@@ -107,12 +107,12 @@ the account you picked.
 
 `cas serve` speaks [MCP](https://modelcontextprotocol.io/). It exposes twelve umbrella tools — each dispatching dozens of actions — plus two proxy tools when upstream MCP servers are configured:
 
-```
+```text
 coordination, knowledge, memory, pattern, rule, search,
 skill, spec, system, task, team, verification
 ```
 
-```
+```text
 # Remember something across sessions
 mcp__cas__memory action=remember content="This project uses Zod for validation"
 
@@ -174,7 +174,7 @@ Knowledge stays local-first: the SQLite metadata and markdown bodies are the sou
 curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 
 # Complete the machine setup and initialize this project — login, pairing,
-# hub service, optional Viktor, hooks, builtins, and cloud sync are guided here
+# hub service, hooks, builtins, and cloud sync are guided here
 cd your-project
 cas setup --project "$PWD"
 
@@ -289,20 +289,6 @@ cas cloud sync        # push + pull (optional)
 
 Cassy ships builtin skills (`cas-code-review`, `cas-worker`, `cas-github-issues`, `codemap`, …) in Claude, Codex and Grok flavors, kept in lockstep by a parity test. If they crowd your context, Claude Code's `skillOverrides` in `settings.json` can set any skill to `"off"`, `"user-invocable-only"`, or `"name-only"` without disabling Cassy.
 
-### Viktor delegation
-
-`cas init` installs the `cas-viktor` skill in the Claude, Codex, and Grok mirrors. For a
-credential-safe setup check, run `cas viktor`. If no credential is configured, get an
-operator-issued key and enter it once with `cas viktor key` (paste it when prompted); Cassy validates
-the non-spending MCP handshake before storing the key only for this machine. Invalid or expired
-keys are not saved. Start a new CAS session after setup. `cas viktor` identifies the managed user
-configuration and explains any project policy override without printing the key. `cas serve`
-loads the machine credential into its managed, credential-reference-only Viktor upstream and exact
-conversation allowlist. Agents use the proxy's `mcp_search`/`mcp_execute` surface, and CAS delivers
-completed answers as inbound notifications instead of requiring agent-side polling. A committed
-`.cas/proxy.toml` opts out of the managed default, so it must explicitly configure the required
-Viktor server and routes.
-
 ## Diagnostics
 
 ```bash
@@ -317,7 +303,7 @@ Doctor reports which cloud bucket the project resolves to and why, warns when tw
 
 ### On disk
 
-```
+```text
 .cas/
 ├── cas.db          # SQLite — memories, tasks, rules, skills, entities, agents
 ├── config.toml     # project configuration

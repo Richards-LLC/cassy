@@ -1209,6 +1209,11 @@ fn create_verification_dispatch_bound_in_transaction(
     if let Some(existing) = get_latest_verification_dispatch_with_conn(&conn, task_id)?
         && existing.state == VerificationDispatchState::TimedOut
         && !supervisor_recovery
+        // A task-only retry requests a new review; it grants no approval and
+        // leaves the expired row available for audit. Delivery receipt recovery
+        // still requires supervisor authority, including partial boundaries.
+        && (existing.receipt_id.is_some() || existing.delivery_transaction_id.is_some()
+            || boundary.receipt_id.is_some() || boundary.delivery_transaction_id.is_some())
     {
         return Err(StoreError::Parse(format!(
             "verification dispatch {} timed out; registered-supervisor recovery must name it",
@@ -1263,8 +1268,8 @@ fn create_verification_dispatch_bound_in_transaction(
 
 /// Backward-compatible task-only dispatch creation.
 ///
-/// This cannot recover a timed-out cycle; registered-supervisor recovery must
-/// use the explicit bound API and server-derived authority.
+/// A timed-out task-only cycle may request a fresh pending review. Receipt-bound
+/// delivery recovery requires the explicit bound API and supervisor authority.
 pub fn create_verification_dispatch(
     cas_dir: &Path,
     task_id: &str,
@@ -2374,11 +2379,31 @@ fn correct_parked_delivery_proof_scope_inner(
 
     let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![corrected_task.id], |row| row.get(0))?;
     let safe_notes = crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
+    let cleared_artifact_scope = corrected_task.execution_note.as_deref() == Some("no-code")
+        && corrected_task.external_ref.as_deref().is_some_and(|reference| !reference.trim().is_empty())
+        && corrected_task.deliverables.work_target.is_none()
+        && corrected_task.deliverables.work_target_cleared
+        && corrected_task.deliverables.factory_branch_anchor.is_none()
+        && corrected_task.deliverables.historical_factory_branch_anchors.is_empty()
+        && corrected_task.deliverables.files_changed.is_empty()
+        && corrected_task.deliverables.commit_hash.is_none()
+        && corrected_task.deliverables.merge_commit.is_none()
+        && corrected_task.deliverables.delivery_pr_merge_commit.is_none();
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
          , execution_note = ?8, external_ref = ?9
-         WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress', 'blocked') AND updated_at = ?7",
+         WHERE id = ?1 AND updated_at = ?7 AND (
+           status IN ('awaiting_merge', 'in_progress', 'blocked') OR (
+             status = 'open' AND ?10 AND execution_note = 'no-code'
+             AND json_extract(deliverables, '$.work_target') IS NULL
+             AND json_extract(deliverables, '$.work_target_cleared') = 1
+             AND (json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL
+               OR json_array_length(deliverables, '$.historical_factory_branch_anchors') > 0
+               OR json_array_length(deliverables, '$.files_changed') > 0
+               OR json_extract(deliverables, '$.commit_hash') IS NOT NULL
+               OR json_extract(deliverables, '$.merge_commit') IS NOT NULL
+               OR json_extract(deliverables, '$.delivery_pr_merge_commit') IS NOT NULL)))",
         params![
             corrected_task.id,
             safe_notes.as_ref(),
@@ -2404,11 +2429,12 @@ fn correct_parked_delivery_proof_scope_inner(
             expected_updated_at.to_rfc3339(),
             corrected_task.execution_note,
             corrected_task.external_ref,
+            cleared_artifact_scope,
         ],
     )?;
     if changed != 1 {
         return Err(StoreError::Other(
-            "proof-scope correction requires the unchanged AwaitingMerge, InProgress, or Blocked task".to_string(),
+            "proof-scope correction requires an unchanged active delivery or previously cleared artifact scope".to_string(),
         ));
     }
     let event = Event::new(
@@ -3858,6 +3884,38 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = SqliteVerificationStore::open(dir.path()).unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn open_artifact_scope_repair_keeps_status_and_revision_guards_cas_3ff6() {
+        for (reviewed, raced) in [(true, false), (false, false), (true, true)] {
+            let dir = TempDir::new().unwrap();
+            let store = SqliteTaskStore::open(dir.path()).unwrap();
+            store.init().unwrap();
+            let mut task = Task::new("cas-8156".into(), "Artifact design".into());
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some("artifact:art-current-design".into());
+            task.deliverables.work_target_cleared = reviewed;
+            task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+            store.add(&task).unwrap();
+            let mut corrected = store.get(&task.id).unwrap();
+            let expected = corrected.updated_at;
+            corrected.deliverables.factory_branch_anchor = None;
+            corrected.deliverables.work_target_cleared = true;
+            corrected.updated_at = Utc::now();
+            if raced {
+                let mut newer = store.get(&task.id).unwrap();
+                newer.title = "Concurrent update".into();
+                store.update(&newer).unwrap();
+            }
+            let result = correct_parked_delivery_proof_scope(
+                dir.path(), &corrected, expected, "supervisor", "Retire measured documentation source",
+            );
+            assert_eq!(result.is_ok(), reviewed && !raced, "{result:?}");
+            let saved = store.get(&task.id).unwrap();
+            assert_eq!(saved.status, TaskStatus::Open);
+            assert_eq!(saved.deliverables.factory_branch_anchor.is_none(), reviewed && !raced);
+        }
     }
 
     #[test]
@@ -5318,13 +5376,38 @@ mod tests {
                 .state,
             VerificationDispatchState::Pending
         );
-        create_verification_dispatch_bound(
+        // Task-only expiry must never become a route around receipt-bound
+        // recovery, including an inconsistent partial boundary on either side.
+        for (receipt, transaction) in [(true, false), (false, true), (true, true)] {
+            let boundary = VerificationProofBoundary {
+                receipt_id: receipt.then(|| "receipt-bound".into()),
+                delivery_transaction_id: transaction.then(|| "transaction-bound".into()),
+                repository: None,
+            };
+            assert!(create_verification_dispatch_bound(
+                dir.path(), "cas-timeout-a", "worker-a", "supervisor-a",
+                &boundary, future, false,
+            ).is_err());
+            let id = format!("cas-bound-{receipt}-{transaction}");
+            create_verification_dispatch_bound(
+                dir.path(), &id, "worker-a", "supervisor-a", &boundary, past, false,
+            ).unwrap();
+            timeout_verification_dispatch(dir.path(), &id, Utc::now()).unwrap().unwrap();
+            assert!(create_verification_dispatch_bound(
+                dir.path(), &id, "worker-a", "supervisor-a",
+                &VerificationProofBoundary::task(), future, false,
+            ).is_err());
+        }
+        let renewed = create_verification_dispatch_bound(
             dir.path(), "cas-timeout-a", "worker-a", "supervisor-a",
-            &VerificationProofBoundary::default(), future, true,
-        ).expect("supervisor recovery starts a fresh cycle");
+            &VerificationProofBoundary::default(), future, false,
+        ).expect("a task-only timeout starts a fresh pending cycle without approval");
+        assert_ne!(renewed.id, timed_out.id);
+        assert_eq!(renewed.state, VerificationDispatchState::Pending);
         assert!(expired_verification_dispatches(
             dir.path(), past - Duration::seconds(1), Utc::now(), 10,
-        ).unwrap().is_empty(), "a superseded timeout must not page for the new cycle");
+        ).unwrap().iter().all(|dispatch| dispatch.task_id != "cas-timeout-a"),
+            "a superseded timeout must not page for the new cycle");
     }
 
     #[test]

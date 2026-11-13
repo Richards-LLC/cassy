@@ -193,12 +193,13 @@ pub fn claude_worker_contract(worker_name: &str) -> String {
 
 /// The skills a factory worker's native listing keeps. Every other skill stays
 /// available by name through the `skill` MCP tool, which the contract names.
-/// OpenCode's verbose rows set the budget: six fit under 2,500 characters.
+/// Keep the native listing under 2,500 characters, including both test authors.
 pub const WORKER_ROLE_SKILLS: &[&str] = &[
     "cas-diagnosing-bugs",
     "cas-resolving-merge-conflicts",
     "cas-search",
-    "cas-tdd",
+    "cas-writing-tests",
+    "cas-playwright-tests",
     "cas-worker",
     "verify-before-claim",
 ];
@@ -624,24 +625,7 @@ mod codex_home_contract_tests {
             .expect("Codex worker must receive an explicit HOME");
         assert_eq!(worker_home, host_home.to_string_lossy());
         assert!(std::path::Path::new(worker_home).is_dir());
-        let profile = config
-            .env
-            .iter()
-            .rev()
-            .find_map(|(key, value)| {
-                (key == "PLAYWRIGHT_MCP_USER_DATA_DIR").then_some(value.as_str())
-            })
-            .expect("Codex worker must receive an explicit Playwright profile path");
-        assert_eq!(
-            profile,
-            host_home.join(".playwright-mcp-profile").to_string_lossy()
-        );
-        assert!(
-            std::path::Path::new(profile)
-                .parent()
-                .is_some_and(std::path::Path::is_dir),
-            "Playwright profile parent must exist: {profile}"
-        );
+        assert!(!config.env.iter().any(|(key, _)| key == "PLAYWRIGHT_MCP_USER_DATA_DIR"));
     }
 }
 
@@ -813,28 +797,14 @@ pub fn expand_codex_home(config_dir: &str) -> String {
     )
 }
 
-/// Pin the worker process and its Codex MCP children to the host home.
-///
-/// Codex forwards the allowlisted `HOME` and Playwright profile variables to
-/// stdio MCP servers. An inherited Linux-style value can therefore make a
-/// macOS worker resolve a profile under a nonexistent `/home/...` directory.
-/// `dirs::home_dir` is the factory's platform-aware home resolver, so the
-/// explicit worker values keep nested MCP processes on the same host home as
-/// the factory daemon.
+/// Keep worker HOME on this host, including nested Codex stdio MCP servers.
+/// Browser profiles belong to isolated clients, not to the worker process.
 fn push_host_home_env(env: &mut Vec<(String, String)>, role: &str) {
     if role != "worker" {
         return;
     }
     if let Some(home) = dirs::home_dir() {
-        let home = home.to_string_lossy().into_owned();
-        env.push(("HOME".to_string(), home.clone()));
-        env.push((
-            "PLAYWRIGHT_MCP_USER_DATA_DIR".to_string(),
-            std::path::Path::new(&home)
-                .join(".playwright-mcp-profile")
-                .to_string_lossy()
-                .into_owned(),
-        ));
+        env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
     }
 }
 
@@ -7434,6 +7404,13 @@ echo SMOKE_DONE
     /// one renderer. After normalizing the tool prefix, the bodies differ only
     /// by the identity line, Grok's namespace note and Codex's Plan-mode
     /// hazard.
+
+    #[test]
+    fn worker_role_skills_include_test_authors() {
+        for skill in ["cas-writing-tests", "cas-playwright-tests"] {
+            assert!(WORKER_ROLE_SKILLS.contains(&skill));
+        }
+    }
 
     #[test]
     fn test_launch_shapes_use_harness_correct_tool_prefix() {

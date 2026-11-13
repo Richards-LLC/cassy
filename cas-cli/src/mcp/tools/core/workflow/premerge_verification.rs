@@ -1075,7 +1075,7 @@ impl CasCore {
             return match automatic::launch(self, task, dispatch) {
                 Ok(handle) => Ok(handle),
                 Err(error) => {
-                    automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}"))
+                    automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}. {}", automatic::recovery(&self.cas_root, dispatch)))
                         .map_err(fail)?;
                     Ok(None)
                 }
@@ -1294,12 +1294,9 @@ impl CasCore {
                 }
                 if dispatch.state == cas_types::VerificationDispatchState::TimedOut {
                     return Err(fail(format!(
-                        "exact dispatch {} timed out. A registered supervisor must recover it. Re-dispatch task-verifier for task {} on this dispatch, or record its verdict directly: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<review and verdict>\". Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
+                        "exact dispatch {} timed out. A registered supervisor must recover it. {} Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
                         dispatch.id,
-                        task.id,
-                        crate::mcp::tools::core::guidance::supervisor_prefix(),
-                        task.id,
-                        dispatch.id,
+                        automatic::direct_verdict(dispatch),
                         crate::mcp::tools::core::guidance::supervisor_prefix(),
                         source,
                         task.id,
@@ -1388,9 +1385,8 @@ impl CasCore {
             )));
         }
         Err(fail(format!(
-            "task {}: merge held on verification dispatch {}. Spawn task-verifier: prompt=\"Verify task {}\"; read `{}verification action=latest task_id={}`",
-            task.id, dispatch.id, task.id,
-            crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
+            "task {}: merge held on verification dispatch {}. {}",
+            task.id, dispatch.id, automatic::direct_verdict(&dispatch)
         )))
     }
 
@@ -2202,6 +2198,80 @@ mod tests {
             row.summary.as_deref() == Some("premerge_candidate_ready")).collect();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].target, "supervisor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_merge_candidate_returns_durable_receipt_and_later_notice_cas_f39e() {
+        use crate::mcp::tools::service::CasService;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        let target = commit_file(repo, ".gitignore", ".cas/\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
+        run(repo, &["checkout", "-q", "main"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("merge-owner".into());
+        core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+            "merge-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        )).unwrap();
+        let mut task = Task::new("cas-f39e".into(), "Slow merge candidate".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(source.clone());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let digest = context_digest(&root, &task).unwrap();
+        let key = bound_candidate_key(&task.id, &repo.canonicalize().unwrap(),
+            "factory/w", &source, "main", &target, &digest, None).unwrap();
+        let directory = root.join("verification-candidates").join(key);
+        let held = crate::worktree::target_lock::lock_delivery_target(
+            &root, repo, &format!("candidate:{}", directory.display()),
+        ).unwrap();
+        let service = CasService::new(core.clone(), #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({"action":"worktree_merge", "id":"factory/w", "task_id":task.id});
+        let worker = core.clone();
+        let build_repo = repo.to_path_buf();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let future = async move {
+            crate::mcp::tools::service::mutation_receipt::run_on_blocking_pool(async move {
+                let result = worker.build_verification_candidate_sync(&task, &build_repo,
+                    "factory/w", "main", digest, None).map(|candidate| {
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(candidate.source_sha)])
+                });
+                let _ = done.send(());
+                result
+            }).await.unwrap()
+        };
+        let answer = service.call_with_deadline_and_grace("factory", arguments.as_object(),
+            std::time::Duration::from_millis(20), std::time::Duration::ZERO, future).await;
+        let pending = answer.as_ref().ok().and_then(|answer| answer.structured_content.as_ref())
+            .and_then(|data| data["receipt_path"].as_str())
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        // Release the real candidate lock before any assertion, including red.
+        drop(held);
+        finished.await.unwrap();
+        service.tool_work.wait_idle().await;
+        let data = answer.expect("slow merge must return a receipt, not UNKNOWN").structured_content.unwrap();
+        assert_eq!(data["mutation_outcome"], "IN_PROGRESS");
+        assert_eq!(data["state"], "preparing");
+        let pending = pending.expect("receipt must exist before candidate preparation finishes");
+        assert_eq!(pending["state"], "preparing");
+        assert_eq!(pending["receipt_id"], data["receipt_id"]);
+        let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            data["receipt_path"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(stored["state"], "completed");
+        assert_eq!(stored["result"]["ok"]["content"][0]["text"], source);
+        let rows = crate::store::open_supervisor_queue_store(&root).unwrap().poll("merge-owner", 10).unwrap();
+        let notices: Vec<serde_json::Value> = rows.iter().map(|row| serde_json::from_str(&row.payload).unwrap()).collect();
+        assert!(notices.iter().any(|notice| notice["kind"] == "merge_outcome"
+            && notice["context"]["receipt_id"] == data["receipt_id"]));
+        assert!(directory.join("candidate.json").exists());
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
     }
 
     #[test]

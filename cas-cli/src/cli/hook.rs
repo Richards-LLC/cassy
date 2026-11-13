@@ -76,6 +76,9 @@ pub enum HookCommand {
     PreCompact,
     /// Handle MessageDisplay hook event (Ink-crash guard + assistant-text redaction, opt-in)
     MessageDisplay,
+    /// Validate a non-fast-forward checkpoint push against live task/delivery state.
+    #[command(name = "WorkerCheckpointPush")]
+    WorkerCheckpointPush,
     /// Record a factory worker pre-push refusal for supervisor activity views.
     #[command(name = "WorkerPushRejected")]
     WorkerPushRejected,
@@ -115,7 +118,65 @@ pub fn execute(args: &HookArgs, cli: &Cli) -> anyhow::Result<()> {
         HookCommand::PreCompact => execute_event("PreCompact", cli),
         HookCommand::MessageDisplay => execute_event("MessageDisplay", cli),
         HookCommand::WorkerPushRejected => execute_worker_push_rejected(),
+        HookCommand::WorkerCheckpointPush => execute_worker_checkpoint_push(),
     }
+}
+
+/// H-40's narrow exception for a supervisor-directed rebase of live work.
+/// Commit-time branch/anchor capture is task identity, not a parked receipt.
+fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
+    use anyhow::{Context, ensure};
+    use cas_types::{QaPassState, TaskStatus};
+    let required = |key: &str| std::env::var(key).with_context(|| format!("H-40: missing {key}; checkpoint ownership is unproven"));
+    let root = std::path::PathBuf::from(required("CAS_ROOT")?);
+    let worker = required("CAS_AGENT_NAME")?;
+    let branch = required("CAS_PUSH_GUARD_BRANCH")?;
+    let remote_ref = required("CAS_PUSH_GUARD_REMOTE_REF")?;
+    let local = required("CAS_PUSH_GUARD_LOCAL_SHA")?;
+    let remote = required("CAS_PUSH_GUARD_REMOTE_SHA")?;
+    let sha = |value: &str| matches!(value.len(), 40 | 64)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit()) && value.bytes().any(|byte| byte != b'0');
+    ensure!(sha(&local) && sha(&remote), "H-40: checkpoint pushes cannot delete or use unknown tips");
+    ensure!(!worker.is_empty() && crate::factory_isolation::classify_worker_binding(&worker, Some(&branch))
+        == crate::factory_isolation::WorkerBinding::Own && remote_ref == format!("refs/heads/{branch}"),
+        "H-40: checkpoint source and destination must be the worker's own branch");
+    let git = crate::worktree::GitOperations::new(std::env::current_dir()?);
+    ensure!(git.resolve_commit(&branch).as_deref() == Some(local.as_str()), "H-40: checkpoint push must publish the current worker branch tip");
+    let tasks = store::open_task_store(&root)?.list(None)?;
+    let mut checkpoint = false;
+    for task in tasks.iter().filter(|task| {
+        task.deliverables.parked_branch.as_deref() == Some(branch.as_str())
+            || task.deliverables.factory_branch_start.as_ref().is_some_and(|start| start.branch == branch)
+            || task.deliverables.handoff_branches.contains(&branch)
+    }) {
+        ensure!(task.status != TaskStatus::AwaitingMerge && (task.is_terminal()
+            || (!task.pending_verification && task.deliverables.review_envelope.is_none())),
+            "H-40: {} is parked or under review; merge the target into its branch", task.id);
+        if task.is_terminal() && let Some(anchor) = &task.deliverables.factory_branch_anchor {
+            ensure!(git.is_ancestor(anchor, &local), "H-40: {} has a recorded delivered anchor that must remain reachable", task.id);
+        }
+        if let Some((receipt, transaction)) = cas_store::get_latest_worker_delivery(&root, &task.id)?
+            && receipt.source_branch == branch && !transaction.state.is_recoverable_failure()
+        {
+            ensure!(git.is_ancestor(&receipt.commit_sha, &local), "H-40: {} has an immutable delivery receipt; merge the target instead", task.id);
+        }
+        for pass in cas_store::list_qa_passes(&root, &task.id)? {
+            if pass.branch == branch && matches!(pass.state, QaPassState::Pending | QaPassState::Claimed | QaPassState::Passed | QaPassState::Waived) {
+                ensure!(git.is_ancestor(&pass.bound_head, &local), "H-40: {} has a bound review tip; merge the target instead", task.id);
+            }
+        }
+        let owner = task.assignee.as_deref().is_some_and(|owner| owner == worker
+            || store::open_agent_store(&root).ok().and_then(|agents| agents.get(owner).ok()).is_some_and(|agent| agent.name == worker));
+        if task.status == TaskStatus::InProgress && owner
+            && let Some(start) = &task.deliverables.factory_branch_start
+            && start.branch == branch && Some(start.assignee.as_str()) == task.assignee.as_deref()
+            && sha(&start.base_sha) && git.is_ancestor(&start.base_sha, &remote) && git.is_ancestor(&start.base_sha, &local)
+        {
+            checkpoint = true;
+        }
+    }
+    ensure!(checkpoint, "H-40: cannot prove an owned InProgress checkpoint with its recorded start ancestry; no rewrite permitted");
+    Ok(())
 }
 
 /// Persist a pre-push guard refusal without making the guard depend on the

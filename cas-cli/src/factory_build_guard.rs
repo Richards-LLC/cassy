@@ -168,6 +168,8 @@ impl BuildGuardSnapshot {
             load_1m: self.load_1m, cpu_count: self.cpu_count,
             cpu_psi_avg10: self.pressure.cpu_some_avg10,
             memory_psi_avg10: self.pressure.memory_some_avg10,
+            live_workers: None,
+            max_workers: None,
         }
     }
 

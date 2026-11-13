@@ -8148,10 +8148,18 @@ impl FactoryDaemon {
         anyhow::ensure!(
             row.target.eq_ignore_ascii_case("operator")
                 && (row.recipient_device_id.as_deref() == Some(device_id)
-                    || (row.recipient_device_id.is_none() && device_id == "*")),
+                    || (row.recipient_device_id.is_none() && device_id == "*")
+                    // A "*" mirror is addressed to whichever device the hub
+                    // reached, as the persistence receipt already allows.
+                    || (row.recipient_device_id.as_deref() == Some("*") && device_id != "*")),
             "operator reply {notification_id} receipt does not match its paired device"
         );
-        if row.processed_at.is_none() {
+        // GH #1829: a receipt after the delivery deadline still proves receipt.
+        let expired = queue.message_delivery_report(notification_id)?.is_some_and(|report| {
+            report.stage == cas_store::DeliveryStage::Abandoned
+                && report.pending_reason == Some(cas_store::PendingReason::OperatorDeliveryExpired)
+        });
+        if row.processed_at.is_none() || expired {
             queue.mark_transport_delivered(notification_id)?;
         }
         self.queue_jobs.operator_reply_retries.clear();
@@ -14331,17 +14339,8 @@ mod tests {
             attempts,
             "reconnected device starts at one second"
         );
-        daemon
-            .acknowledge_operator_reply(id, "wrong-device")
-            .unwrap_err();
-        daemon.forward_operator_replies(vec![reply.clone()]);
-        assert_eq!(
-            log_count(),
-            attempts,
-            "invalid receipts cannot reset retries"
-        );
-        // A valid receipt proves the transport recovered; other pending replies
-        // should immediately retry with a fresh one-second schedule.
+        // Broadcast replies accept any paired device. Use an addressed row
+        // to check that a misrouted receipt cannot reset another row's retry.
         let other = queue
             .enqueue_with_session(
                 "supervisor",
@@ -14350,6 +14349,16 @@ mod tests {
                 "provision-test",
             )
             .unwrap();
+        queue.stamp_recipient_device(other, "paired-device").unwrap();
+        daemon
+            .acknowledge_operator_reply(other, "wrong-device")
+            .unwrap_err();
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        assert_eq!(
+            log_count(),
+            attempts,
+            "invalid receipts cannot reset retries"
+        );
         daemon
             .persist_operator_reply_receipt(other, "*")
             .unwrap_err();

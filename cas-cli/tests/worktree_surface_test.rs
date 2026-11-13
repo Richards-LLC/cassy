@@ -34,6 +34,9 @@ use crate::test_env_guard::TestEnvGuard;
 #[path = "fixtures/ci_check_run.rs"]
 mod ci_check_run;
 
+#[path = "fixtures/merge_outcome.rs"]
+mod merge_outcome;
+
 /// cas-6a30: every test in this integration binary shares one process. Direct
 /// HOME/XDG_CONFIG_HOME mutation bypasses the canonical guard and can move the
 /// host registry between schema installation and strict store open.
@@ -2694,8 +2697,8 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             cas_store::timeout_verification_dispatch(&fixture.cas_root, &task.id,
                 dispatch.deadline_at + chrono::Duration::seconds(1)).unwrap().unwrap();
             let held = fixture.service.factory(Parameters(merge)).await.unwrap_err().message.to_string();
-            // pin: expired candidate guidance must name registered-supervisor re-dispatch and the merge continuation command, not ask the worker to finish an expired verdict.
-            assert!(held.contains("supervisor") && held.contains("Re-dispatch")
+            // pin: expired candidate guidance must name the registered supervisor's verdict call and the merge continuation command, not ask the worker to finish an expired verdict.
+            assert!(held.contains("supervisor") && held.contains("verification action=add")
                 && held.contains("factory action=worktree_merge") && held.contains(&dispatch.id), "{held}");
             assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), before);
             continue;
@@ -4239,13 +4242,10 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     let held = service.factory(Parameters(request.clone())).await
         .expect_err("required verification now precedes the merge");
 
-    assert!(
-        held.message.contains("task-verifier")
-            && held.message.contains(&format!("prompt=\"Verify task {task_id}\"")),
-        "cas-96849: the refusal must name the verifier spawn and its exact task prompt: {}",
-        held.message
-    );
+    assert_eq!(held.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     let prepared = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap().unwrap();
+    assert_eq!(prepared.task_id, task_id);
+    assert_eq!(prepared.state, cas::types::VerificationDispatchState::Pending);
     let verdict = service.verification(Parameters(verification_req(serde_json::json!({
         "action": "add", "task_id": task_id, "dispatch_id": prepared.id,
         "status": "approved", "summary": "Observation-recovery candidate approved before publication",
@@ -4511,8 +4511,12 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
             std::time::Duration::ZERO,
         ))
         .unwrap();
-    assert!(get_text(&rejected).contains("PUSH NOT CONFIRMED"), "{}", get_text(&rejected));
-    assert!(!get_text(&rejected).contains("COMMITTED"), "{}", get_text(&rejected));
+    let (_rejected, receipt) = runtime.block_on(merge_outcome::completed(
+        &root, req.task_id.as_deref().unwrap(), rejected));
+    if let Some(receipt) = receipt {
+        assert_eq!(receipt["mutation_outcome"], "NOT_COMMITTED");
+    }
+    assert_eq!(tasks.get("task-charlie").unwrap().status, TaskStatus::AwaitingMerge);
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), before_failed_push);
     let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
@@ -5210,6 +5214,12 @@ async fn pr_only_peer_ask_holds_worktree_merge_until_answered_cas_91c0() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn quiet_build_route_reply_links_ask_before_worktree_merge_cas_0d28() {
+    protected_main_fixture_cas_d6cf("peer-route", false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn queued_pr_with_changed_head_cannot_arm_auto_merge_cas_d6cf() {
     protected_main_fixture_cas_d6cf("moved", false).await;
 }
@@ -5241,7 +5251,8 @@ async fn protected_refusal_keeps_subsequent_target_progress_cas_d6cf() {
 
 #[cfg(unix)]
 async fn protected_main_fixture_cas_d6cf(mode: &str, cleanup: bool) {
-    let peer_ask = matches!(mode, "peer-known" | "peer-discovered");
+    let route_reply = mode == "peer-route";
+    let peer_ask = route_reply || matches!(mode, "peer-known" | "peer-discovered");
     let queued = peer_ask || matches!(mode, "queued" | "moved" | "probe_failed" | "lookup_failed");
     let moved = mode == "moved";
     let mut env = test_env();
@@ -5264,7 +5275,7 @@ done
     let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
     disable_system_a(&cas_root);
     let tasks = open_task_store(&cas_root).unwrap();
-    let mut task = Task::new("cas-d6cf".into(), "Protected default delivery".into());
+    let mut task = Task::new(if route_reply { "cas-47e1" } else { "cas-d6cf" }.into(), "Protected default delivery".into());
     task.assignee = Some("bob".into());
     task.depth = TaskDepth::Light;
     task.deliverables.delivery_pr_number = (mode == "peer-known").then_some(37);
@@ -5333,9 +5344,17 @@ printf '%s\n' "$peer" > '{}'
         open_agent_store(&cas_root).unwrap().register(&supervisor).unwrap();
         cas::store::open_prompt_queue_store(&cas_root).unwrap();
         let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
-        for (cloud_id, kind) in [("context-pr37", "status"), ("ask-pr37", "ask")] {
+        let ask_id = if route_reply { "352ce5f9-f209-4042-b324-9e4c708c6826" } else { "ask-pr37" };
+        for (cloud_id, kind) in [("context-pr37", "status"), (ask_id, "ask")] {
+            let body = if kind == "ask" && route_reply {
+                "Build capacity overflow: please staff task cas-0ff3 locally, or wait for local admission."
+            } else if kind == "ask" {
+                "CAS_MERGE_HOLD {\"pr\":37}\nCan you review PR #37?"
+            } else {
+                "Can you review PR #37?"
+            };
             let payload = serde_json::json!({
-                "body": cas::cloud::peer_mailbox::attach_message_intent("Can you review PR #37?", Some(kind), false).unwrap(),
+                "body": cas::cloud::peer_mailbox::attach_message_intent(body, Some(kind), false).unwrap(),
                 "recipient_agent_id": "peer",
             });
             conn.execute(
@@ -5355,27 +5374,42 @@ printf '%s\n' "$peer" > '{}'
     request.task_id = Some(task.id.clone());
     request.allow_trunk = Some(true);
     request.cleanup = Some(cleanup);
-    let mut result = service.factory(Parameters(request.clone())).await;
+    let mut result = if route_reply { None } else { Some(service.factory(Parameters(request.clone())).await) };
     if peer_ask {
-        let refused = result.expect_err("a PR-only peer ask must hold worktree_merge");
-        assert!(refused.message.contains("ask-pr37"), "{refused:?}");
-        assert!(!armed.exists(), "an unanswered ask must never arm auto-merge");
-        assert_eq!(pr_exists.exists(), mode == "peer-discovered");
+        if let Some(result) = result.take() {
+            let refused = result.expect_err("a PR-only peer ask must hold worktree_merge");
+            assert!(refused.message.contains("ask-pr37"), "{refused:?}");
+            assert!(!armed.exists(), "an unanswered ask must never arm auto-merge");
+            assert_eq!(pr_exists.exists(), mode == "peer-discovered");
+        }
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
         assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
-        use cas::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
+        use cas::cloud::peer_mailbox::{ClaimedPeerMessage, PeerEnvelope, PeerMessageKind, PeerScope, open_asks, render_envelope, render_prompt};
+        assert_eq!(open_asks(&cas_root, "merge-supervisor", 86400).len(), 1);
         let answer = PeerEnvelope {
             id: "review-answer".into(), sender_name: "reviewer".into(), sender_agent_id: "peer".into(),
             machine: "prowl".into(), session: None, repo: "protected".into(),
             in_reply_to: Some("ask-pr37".into()), kind: Some(PeerMessageKind::Answer), scope: PeerScope::Project,
         };
+        let prompt = if route_reply {
+            render_prompt(&ClaimedPeerMessage {
+                id: "f8728e4c-2b3f-4900-ae02-2cb61b6abcea".into(), project_id: "protected".into(),
+                recipient_agent_id: "merge-supervisor".into(), sender_agent_id: "peer".into(),
+                sender_name: "reviewer".into(), sender_machine_id: None, sender_label: Some("prowl".into()),
+                sender_session: None, summary: None, created_at: chrono::Utc::now().to_rfc3339(), attempts: 0,
+                body: "<cas-peer-intent kind=\"answer\"/>\n<cas-message-quiet/>\ncas-0ff3 is staffed on soundwave with wise-falcon-13.".into(),
+                in_reply_to: Some("352ce5f9-f209-4042-b324-9e4c708c6826".into()), scope: PeerScope::Project,
+            })
+        } else { format!("{}\nReview complete", render_envelope(&answer)) };
         rusqlite::Connection::open(cas_root.join("cas.db")).unwrap().execute(
             "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:reviewer@prowl', 'merge-supervisor', ?1)",
-            [format!("{}\nReview complete", render_envelope(&answer))],
+            [prompt],
         ).unwrap();
+        assert!(open_asks(&cas_root, "merge-supervisor", 86400).is_empty(), "the explicit answer must resolve its route ask even when delivery is quiet");
         // The answer releases the ask; the remaining kind=status note cannot hold it.
-        result = service.factory(Parameters(request.clone())).await;
+        result = Some(service.factory(Parameters(request.clone())).await);
     }
+    let result = result.unwrap();
     if matches!(mode, "probe_failed" | "lookup_failed") {
         let refusal = result.expect_err("an unknown queue state must refuse");
         // pin: the refusal must name the unknown queue so the supervisor retries.

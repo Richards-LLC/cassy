@@ -2360,6 +2360,55 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[test]
+    fn changed_tests_need_five_consecutive_capped_passes_cas_9e02e() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let root = env.home().join("project/.cas");
+        for seeded_failure in [true, false] {
+            let repo = root.join(format!("worktrees/worker-{seeded_failure}"));
+            fixture_commit(&repo);
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), "pub fn existing() {}\n").unwrap();
+            fixture_commit_as(&repo, "base");
+            let base = fixture_head(&repo);
+            git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
+            std::fs::write(repo.join("src/lib.rs"), "pub fn existing() {}\n#[test]\nfn owned_new() {}\n").unwrap();
+            fixture_commit_as(&repo, "new test");
+            env.set_current_dir(&repo);
+            let cargo = repo.join("target/fake-cargo");
+            std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+            fake_cargo(&cargo, &format!(r#"python3 - <<'PY'
+from pathlib import Path
+p = Path('target/attempts')
+n = int(p.read_text()) + 1 if p.exists() else 1
+p.write_text(str(n))
+if {seeded_failure} and n % 3 == 0:
+    print('        FAIL [ 0.01s] (1/1) fixture owned_new')
+    print('     Summary [ 0.01s] 1 test run: 0 passed, 1 failed')
+    raise SystemExit(1)
+print('        PASS [ 0.01s] (1/1) fixture owned_new')
+print('     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped')
+PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
+            let args = ["nextest", "run", "-p", "fixture", "--lib", "-E", "test(owned_new)"].map(str::to_owned);
+            let result = execute_at(&root, &args, &repo, &cargo);
+            if seeded_failure {
+                assert!(result.is_err());
+                assert_eq!(std::fs::read_to_string(repo.join("target/attempts")).unwrap(), "3");
+                assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
+            } else {
+                result.unwrap();
+                assert_eq!(std::fs::read_to_string(repo.join("target/attempts")).unwrap(), "5");
+                let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &fixture_head(&repo), &targeted_test(&args).unwrap());
+                let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 5);
+                assert_eq!(receipt["test"]["stability"]["tests"][0]["name"], "owned_new");
+            }
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b() {
         use std::time::{Duration, Instant};

@@ -29182,7 +29182,7 @@ mod merge_state_gate_tests {
         let worker_evidence =
             crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&root, &task).unwrap();
         std::fs::create_dir_all(&worker_evidence).unwrap();
-        let ledger = b"# QA ledger\n\n| Row | Status |\n| --- | --- |\n| probe | PASS |\n".to_vec();
+        let ledger = crate::qa_ledger::scaffold(&task, &[], &fixture.local).into_bytes();
         std::fs::write(worker_evidence.join("LEDGER.md"), &ledger).unwrap();
         let blob = format!("{}/blob", server.uri());
         Mock::given(method("POST")).and(path("/api/artifacts/begin"))

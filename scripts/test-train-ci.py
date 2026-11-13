@@ -20,7 +20,7 @@ data=json.loads((root/'forge.json').read_text())
 if args[:2]==['repo','view']: print('fixture/repo')
 elif args[:2]==['run','download']:
  name=args[args.index('--name')+1]
- source=data.get('job_downloads',{}).get(name,data.get('artifact',''))
+ source=data.get('run_downloads',{}).get(args[2],data.get('job_downloads',{}).get(name,data.get('artifact','')))
  if source is None: sys.exit(1)
  shutil.copytree(root/source,pathlib.Path(args[args.index('--dir')+1]),dirs_exist_ok=True)
 elif args[0]=='api':
@@ -30,7 +30,7 @@ elif args[0]=='api':
  elif '/actions/runs/' in endpoint and endpoint.rsplit('/',1)[-1].isdigit(): print(json.dumps(data['job_run']))
  elif '/pulls?' in endpoint: print('[]')
  elif '/pulls/' in endpoint: print(json.dumps(data['pr']))
- elif '/statuses?' in endpoint: print(json.dumps(data['statuses']))
+ elif '/statuses?' in endpoint: print(json.dumps(data.get('statuses_by_head',{}).get(endpoint.split('/commits/')[1].split('/')[0],data['statuses'])))
  elif endpoint.endswith('/logs'): sys.stdout.buffer.write((root/'logs.zip').read_bytes())
  elif endpoint.split('?')[0].endswith('/jobs'): print(json.dumps({'jobs':data.get('job_jobs',[{'name':'Shared train and queue graph / Full-set gate','conclusion':data.get('fanin','success')}])}))
  else: print(json.dumps({'workflow_runs':data['runs']}))
@@ -330,6 +330,11 @@ class TrainReceipts(unittest.TestCase):
         manifest = self.repo/'cas-cli/Cargo.toml'
         manifest.parent.mkdir()
         manifest.write_text('[package]\nname="cas"\nversion="1.0.0"\n')
+        scripts = self.repo/'scripts'
+        scripts.mkdir()
+        for name in ('train-ci.py', 'check-ci-merge-queue-validation.sh'):
+            shutil.copyfile(SCRIPT.parent/name, scripts/name)
+        (self.repo/'.gitignore').write_text('target/\n')
         self.git('add', '.')
         self.git('commit', '-qm', 'manifest baseline')
         source = self.git('rev-parse', 'HEAD')
@@ -338,6 +343,12 @@ class TrainReceipts(unittest.TestCase):
         self.forge('full')
         manifest.write_text('[package]\nname="cas"\nversion="1.1.0"\n')
         (self.repo/'CHANGELOG.md').write_text('Release notes')
+        for name in ('docs/PRODUCT_OVERVIEW.md', 'docs/qa/journeys.yaml',
+                     'docs/product-overview.d/report.md', 'docs/qa/bug-families/case.yaml',
+                     'docs/release-reports/report.md'):
+            path = self.repo/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('Compiled release documentation')
         self.git('add', '.')
         self.git('commit', '-qm', f'release: v1.1.0\n\nRelease-Version: 1.1.0\nTrain-CI-Head: {source}')
         release_head = self.git('rev-parse', 'HEAD')
@@ -351,11 +362,18 @@ class TrainReceipts(unittest.TestCase):
         self.env.update(GITHUB_EVENT_NAME='merge_group', GITHUB_REF='refs/heads/gh-readonly-queue/main/pr-1-'+'a'*40,
                         QUEUE_BASE_SHA=main)
         output = self.root/'queue-output'
-        def attempt(expected=0):
-            output.write_text('run-fast-validation=true\n')
-            self.run_cli('reuse', '--repo', self.repo, '--gh', self.gh,
-                         '--out', self.root/'reuse-cache', '--github-output', output, expected=expected)
-            return 'run-fast-validation=false' in output.read_text()
+        def attempt():
+            output.write_text('')
+            result = subprocess.run(['bash', str(scripts/'check-ci-merge-queue-validation.sh')],
+                cwd=self.repo, env={**self.env, 'GH_BIN':str(self.gh), 'GITHUB_OUTPUT':str(output)},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            values = dict(line.split('=',1) for line in output.read_text().splitlines())
+            reused = values['run-fast-validation'] == 'false'
+            if reused:
+                self.assertEqual((values['receipt-head'], values['validating-run-id'], values['receipt-tree']),
+                                 (source, '101', self.git('rev-parse', source+'^{tree}')))
+            return reused
         self.assertTrue(attempt())
         # Explicit hotfixes cannot borrow a train's result, and a status alone
         # cannot substitute for a complete artifact.
@@ -370,17 +388,59 @@ class TrainReceipts(unittest.TestCase):
         data['statuses'] = saved_statuses
         data['artifact'] = 'absent'
         data_path.write_text(json.dumps(data))
-        shutil.rmtree(self.root/'reuse-cache')
-        self.assertFalse(attempt(expected=1))
+        shutil.rmtree(self.repo/'.git/cas/train-ci')
+        self.assertFalse(attempt())
         data['artifact'] = 'full'
         data_path.write_text(json.dumps(data))
         (self.repo/'.claude').mkdir()
         (self.repo/'.claude/CODEMAP.md').write_text('Release navigation')
         self.git('add', '.')
         self.git('commit', '-qm', 'release plumbing continuation')
-        data['pr']['head']['sha'] = self.git('rev-parse', 'HEAD')
-        data_path.write_text(json.dumps(data))
+        # Queue-only documentation may differ from the PR tree.
         self.assertTrue(attempt())
+        # The prepared train push must also adopt, and its completed run must
+        # retain a durable reference instead of claiming to have run the suite.
+        docs_head = self.git('rev-parse', 'HEAD')
+        self.env.update(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
+                        GITHUB_SHA=docs_head, GITHUB_RUN_ID='102')
+        self.assertTrue(attempt())
+        jobs = yaml.safe_load((SCRIPT.parent.parent/'.github/workflows/ci.yml').read_text())['jobs']
+        publication = next(step for step in jobs['fast-validation-main-push-dedupe']['steps']
+                           if step.get('with', {}).get('name') == 'train-full-gate')
+        adoption = self.repo/publication['with']['path']/'receipt.json'
+        record = json.loads(adoption.read_text())
+        self.assertEqual((record['scope'], record['head'], record['source_head'], record['source_run_id']),
+                         ('full-set-adoption', docs_head, source, '101'))
+        shutil.copytree(adoption.parent, self.root/'adopted')
+        data['run_downloads'] = {'101':'full', '102':'adopted'}
+        data['runs'].insert(0, {**data['runs'][0], 'id':102, 'head_sha':docs_head})
+        data['statuses_by_head'] = {docs_head:[{'context':'cas/full-gate','state':'success',
+            'description':'PASS tree='+self.git('rev-parse', docs_head+'^{tree}')}]}
+        data_path.write_text(json.dumps(data))
+        def check_adoption(expected=0):
+            shutil.rmtree(self.root/'adoption-check', ignore_errors=True)
+            return self.run_cli('check', '--repo', self.repo, '--head', docs_head,
+                '--out', self.root/'adoption-check', '--gh', self.gh, expected=expected)
+        adopted = check_adoption()
+        self.assertEqual((adopted['head'], adopted['release_head'], adopted['run_id']), (source, docs_head, '101'))
+        # A reference to some other successful run cannot replace X's proof.
+        (self.root/'adopted/receipt.json').write_text(json.dumps({**record, 'source_run_id':'999'}))
+        check_adoption(expected=1)
+        (self.root/'adopted/receipt.json').write_text(json.dumps(record))
+        data['runs'][0]['conclusion'] = 'failure'
+        data_path.write_text(json.dumps(data))
+        check_adoption(expected=1)
+        data['runs'][0]['conclusion'] = 'success'
+        data_path.write_text(json.dumps(data))
+        self.env.update(GITHUB_EVENT_NAME='merge_group',
+                        GITHUB_REF='refs/heads/gh-readonly-queue/main/pr-1-'+'a'*40)
+        self.assertTrue(attempt())
+        # An adoption also retains the native producer's tree-bound status.
+        data['statuses'] = []
+        data_path.write_text(json.dumps(data))
+        self.assertFalse(attempt())
+        data['statuses'] = saved_statuses
+        data_path.write_text(json.dumps(data))
         self.env['QUEUE_BASE_SHA'] = 'f'*40
         self.assertFalse(attempt())
         self.env['QUEUE_BASE_SHA'] = main
@@ -393,10 +453,19 @@ class TrainReceipts(unittest.TestCase):
         data_path.write_text(json.dumps(data))
         self.assertFalse(attempt())
         self.git('reset', '--hard', plumbing_head)
-        self.commit('product change')
-        data['pr']['head']['sha'] = self.git('rev-parse', 'HEAD')
+        # A source edit on the synthetic queue tree must run the suite even
+        # when the PR's own release tree is still plumbing-only.
+        (self.repo/'product.rs').write_text('pub fn changed() {}\n')
+        self.git('add', 'product.rs')
+        self.git('commit', '-qm', 'queue source change')
+        data['pr']['head']['sha'] = plumbing_head
         data_path.write_text(json.dumps(data))
         self.assertFalse(attempt())
+        self.env.update(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
+                        GITHUB_SHA=self.git('rev-parse', 'HEAD'), GITHUB_RUN_ID='103')
+        self.assertFalse(attempt())
+        self.assertFalse(adoption.exists())
+
 
     def test_queue_wall_clock_requires_the_completed_matching_tree(self):
         queue_timing = runpy.run_path(str(SCRIPT))['queue_timing']

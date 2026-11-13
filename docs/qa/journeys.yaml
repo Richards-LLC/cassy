@@ -1587,6 +1587,97 @@ bug_families:
     tasks: [cas-5ff7]
     invariants: [HUB-J25-GOAL]
     journeys: [HUB-J25]
+  artifact-close-stale-documentation-anchor:
+    title: Artifact-only scope correction retires old documentation inputs while refusing retained code
+    tasks: [cas-3ff6]
+    journeys: [FACTORY-MERGE]
+  checkpoint-versus-parked-push:
+    title: Checkpoint rebases preserve delivery review and Git ownership boundaries
+    tasks: [cas-ddde]
+    journeys: [FACTORY-SUPERVISE]
+  ci-reminder-workflow-selectors:
+    title: CI reminder workflow selectors resolve before registration and follow workflow identity
+    tasks: [cas-4329e]
+    journeys: [FACTORY-SUPERVISE]
+  clean-task-lane-refresh:
+    title: Clean task lanes refresh after review holds while uncommitted work retains its start boundary
+    tasks: [cas-e421]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+  disposable-rust-fixture-rewrite:
+    title: Disposable Rust fixture read-to-write mutations remain admissible while source comparisons and extra source-value consumers are refused
+    tasks: [cas-81b7]
+    journeys: [FACTORY-CLOSE]
+  expired-task-verification:
+    title: Expired unparked task-only reviews renew without granting approval or replacing active or receipt-bound proof
+    tasks: [cas-afd2]
+    journeys: [FACTORY-MERGE]
+  extensionless-ledger-citations:
+    title: QA ledgers accept extensionless source citations without accepting URLs or times
+    tasks: [cas-a0e9]
+    journeys: [FACTORY-QA-RECEIPT]
+  locked-isolated-playwright:
+    title: Locked headless Playwright clients isolate browser state while worker homes and real test-job liveness remain correct
+    tasks: [cas-0010]
+    invariants: [FACTORY-ISOLATED-PLAYWRIGHT]
+    journeys: [FACTORY-SPAWN]
+  operator-claim-evidence:
+    title: Supervisor operator claims carry current-turn tool evidence or explicit uncertainty
+    tasks: [cas-ab79]
+    journeys: [FACTORY-SUPERVISE]
+  park-proof-after-checkpoint-rebase:
+    title: Fresh park evaluates the measured delivery after a checkpoint rebase and ancestry restore
+    tasks: [cas-28c5]
+    journeys: [FACTORY-MERGE]
+  peer-repark-source-ref:
+    title: Anchored peer re-parks advance stale ancestor refs while divergent local work remains protected
+    tasks: [cas-8eb3]
+    journeys: [FACTORY-MERGE]
+  peer-task-session-start:
+    title: Session startup preserves peer task ownership while recovering abandoned local work
+    tasks: [cas-0ff3]
+    journeys: [FACTORY-SPAWN]
+  quiet-peer-answer-link:
+    title: Quiet peer answers resolve their outgoing route ask through the explicit Cloud reply link before worktree_merge
+    tasks: [cas-0d28]
+    journeys: [FACTORY-MERGE]
+  recovered-worker-receipt-scope:
+    title: Recovered merged deliveries count supervisor-recorded module receipts from the assigned worker checkout
+    tasks: [cas-231c]
+    invariants: [FACTORY-SELECTED-TEST-LOG]
+    journeys: [FACTORY-CLOSE]
+  relay-token-rotation:
+    title: Daemon adoption rejects stale relay credentials and the hub refreshes once without losing verified operator delivery or image previews
+    tasks: [cas-ef33]
+    journeys: [HUB-J11, HUB-J24, HUB-J27]
+  retained-local-only-inventory:
+    title: Retired primary checkout does not become whole-history retained work without a remote
+    tasks: [cas-6a12]
+    journeys: [FACTORY-SUPERVISE]
+  slow-merge-response:
+    title: Slow merge preparation returns a durable state receipt and later outcome notice
+    tasks: [cas-f39e]
+    journeys: [FACTORY-MERGE]
+  task-label-replacement:
+    title: Task label replacement removes a release train cut marker without retaining duplicates
+    tasks: [cas-182e]
+    journeys: [FACTORY-SUPERVISE, FACTORY-MERGE]
+  test-authoring-skills:
+    title: Native workers install and expose canonical general and browser test authoring skills
+    tasks: [cas-2092]
+    invariants: [FACTORY-TEST-AUTHORING-SKILLS]
+    journeys: [FACTORY-SPAWN]
+  verifier-simplicity-class-sweep:
+    title: Simplicity review reports every instance of a finding class in the inspected file
+    tasks: [cas-4de4]
+    journeys: [FACTORY-MERGE]
+  verifier-supervisor-answer:
+    title: Supervisor answers continue independent verification on the same dispatch
+    tasks: [cas-d5bb]
+    journeys: [FACTORY-MERGE]
+  release-plumbing-suite-adoption:
+    title: Prepared train pushes and queue entries adopt full-suite proof only across verified release plumbing
+    tasks: [cas-976f]
+    journeys: [FACTORY-MERGE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

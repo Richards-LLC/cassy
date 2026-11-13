@@ -6449,7 +6449,7 @@ mod preassigned_start_message_order_tests {
                  "metadata":{"role":"worker", "factory_session":"soundwave", "canonical_id":"cas-src", "hostname":"soundwave"}}
             ]}))).mount(&server).await;
         Mock::given(method("GET")).and(path("/api/agents/locks"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"locks":[]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"success", "locks":[]})))
             .mount(&server).await;
 
         let refusal = core.cas_task_start_with_options(Parameters(TaskStartRequest {

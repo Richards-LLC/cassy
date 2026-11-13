@@ -2723,8 +2723,12 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             candidate_tree = git_stdout(&fixture.repo.root,
                 &["merge-tree", "--write-tree", "epic/rebound", &fixture.tip]);
         }
+        let notes_before_continuation = tasks.get(&task.id).unwrap().notes;
         let continued = fixture.service.factory(Parameters(merge.clone())).await;
         if verdict == "approved" {
+            let notes = tasks.get(&task.id).unwrap().notes;
+            let audit = notes.strip_prefix(&notes_before_continuation).unwrap();
+            assert!(audit.contains(&dispatch.id), "carried approval must identify its dispatch: {audit}");
             assert_eq!(
                 git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound^{tree}"]),
                 candidate_tree,
@@ -3111,6 +3115,36 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
             task = tasks.get(&task.id).unwrap();
             task.deliverables.factory_branch_anchor = Some(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
             tasks.update(&task).unwrap();
+        }
+        if !registry && case == "full-context" {
+            // cas-c896 / afd2: a clean same-file merge keeps the own patch,
+            // but its immutable rebuild can outlive the response budget.
+            use sha2::{Digest, Sha256};
+            let proof = dispatch.repository.as_ref().unwrap();
+            let message = git_stdout(&fixture.repo.root, &["show", "-s", "--format=%B", &proof.head_commit]);
+            let old_key = message.split_whitespace().last().unwrap();
+            let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                fixture.cas_root.join("verification-candidates").join(old_key).join("candidate.json")
+            ).unwrap()).unwrap();
+            let target = git_stdout(&fixture.repo.root, &["rev-parse", "refs/remotes/origin/epic/rebound"]);
+            let repository = fixture.repo.root.canonicalize().unwrap();
+            let key = format!("{:x}", Sha256::digest(serde_json::to_vec(&(
+                "premerge-v1", &task.id, &repository, &fixture.branch, &tip,
+                "epic/rebound", &target, manifest["context_digest"].as_str().unwrap(),
+            )).unwrap()));
+            let directory = fixture.cas_root.join("verification-candidates").join(key);
+            let held = cas::worktree::target_lock::lock_delivery_target(
+                &fixture.cas_root, &repository, &format!("candidate:{}", directory.display()),
+            ).unwrap();
+            let pending = fixture.service.factory(Parameters(merge.clone())).await;
+            let retained = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+            drop(held);
+            assert!(pending.is_err());
+            assert_eq!(retained.id, dispatch.id);
+            assert_eq!(retained.state, cas::types::VerificationDispatchState::Resolved,
+                "pending preparation must retain approval: {pending:?}");
+            assert_eq!(cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id)
+                .unwrap().unwrap().status, VerificationStatus::Approved);
         }
         let result = fixture.service.factory(Parameters(merge)).await;
         let text = match &result { Ok(result) => get_text(result), Err(error) => error.message.to_string() };

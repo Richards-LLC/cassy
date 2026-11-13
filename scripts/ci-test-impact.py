@@ -114,6 +114,28 @@ def full(plan, reason):
     return plan
 
 
+def integration_text(root, stem):
+    """Conservatively include a suite's Rust modules and shared helpers."""
+    tests = root / "cas-cli/tests"
+    pending = [tests / f"{stem}.rs", *sorted((tests / stem).rglob("*.rs"))]
+    seen, texts = set(), []
+    while pending:
+        path = pending.pop().resolve()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        text = path.read_text()
+        texts.append(text)
+        pending.extend(path.parent / relative for matches in re.findall(
+            r'#\[path\s*=\s*"([^"]+)"\]|\binclude!\s*\(\s*"([^"]+)"', text)
+            for relative in matches if relative)
+        for module in re.findall(r"\bmod\s+(\w+)\s*;", text):
+            # Both crate-root and ordinary module layouts; over-selection is safe.
+            for directory in {path.parent, path.with_suffix("")}:
+                pending.extend([directory / f"{module}.rs", directory / module / "mod.rs"])
+    return "\n".join(texts)
+
+
 def plan(root, base, zero, history):
     result = {"version": VERSION, "mode": "scoped", "head": git(root, "rev-parse", "HEAD"), "reasons": [], "commands": [], "paths": []}
     try:
@@ -133,6 +155,12 @@ def plan(root, base, zero, history):
         result["paths"] = output.decode().split("\0")[:-1]
         crates, edges = workspace(root)
         mapping = inventory(root, crates["cas"][1])
+        texts = {stem: integration_text(root, stem) for stem in mapping}
+        # Binary contracts depend on every cas source module, even when a
+        # helper hides process construction behind command(). Keep a superset.
+        subprocess_stems = sorted(stem for stem, text in texts.items() if re.search(
+            r"\b(?:cargo_bin|cas_binary|Command|assert_cmd)\b|\bcommand\s*\(", text))
+        result["subprocess_stems"] = subprocess_stems
         changes = {name: [] for name in crates}
         for path in result["paths"]:
             if path in {"Cargo.toml", "Cargo.lock", ".config/nextest.toml"} or path.startswith((".cargo/", "vendor/", ".github/", "scripts/")):
@@ -169,9 +197,10 @@ def plan(root, base, zero, history):
             test_paths = [p for p in paths if p.startswith("cas-cli/tests/")]
             shared_test_input = any(not any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for stem in mapping) for p in test_paths)
             selected = set(mapping) if shared_test_input else set()
+            if production:
+                selected.update(subprocess_stems)
             for stem in mapping:
-                files = [root / f"cas-cli/tests/{stem}.rs"] + list((root / f"cas-cli/tests/{stem}").rglob("*.rs"))
-                text = "\n".join(p.read_text() for p in files if p.is_file())
+                text = texts[stem]
                 imports = set(re.findall(r"\bcas::([A-Za-z_][A-Za-z_0-9]*)::", text))
                 opaque = not imports or re.search(r"\b(?:cargo_bin|Command|assert_cmd)\b|\bcas::(?:[A-Z]|\{|\*|[A-Za-z_]\w*\s*(?:;|,|\bas\b))", text)
                 if wide or (production and (opaque or imports & changed_modules)) or any(p.startswith(f"cas-cli/tests/{stem}/") or p == f"cas-cli/tests/{stem}.rs" for p in paths):
@@ -365,6 +394,7 @@ def lane(root, args):
         write(out, {"plan": selection, "split": split})
         outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": source}
         print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")
+        print("Subprocess suites: " + ", ".join(selection.get("subprocess_stems", [])))
         status = 0
     else:
         saved = json.loads(out.read_text())

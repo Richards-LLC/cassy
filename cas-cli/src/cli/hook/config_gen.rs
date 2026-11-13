@@ -1154,10 +1154,11 @@ mod codex_provision_tests {
 
     #[test]
     fn codex_pre_tool_hook_also_guards_apply_patch_cas_49c0() {
-        assert_eq!(
-            codex_hook_matcher("PreToolUse", CodexHookLayer::Project),
-            "^(Bash|apply_patch)$"
-        );
+        let project = regex::Regex::new(&codex_hook_matcher("PreToolUse", CodexHookLayer::Project)).unwrap();
+        for tool in ["Bash", "apply_patch"] {
+            assert!(project.is_match(tool));
+        }
+        assert!(!project.is_match("mcp__cs__coordination"));
         assert_eq!(
             codex_hook_matcher("PostToolUse", CodexHookLayer::User),
             "^Bash$"
@@ -1171,6 +1172,7 @@ mod codex_provision_tests {
             "apply_patch",
             "mcp__violet__violet_post",
             "mcp__cs__artifact",
+            "mcp__cs__coordination",
         ] {
             assert!(
                 re.is_match(tool),

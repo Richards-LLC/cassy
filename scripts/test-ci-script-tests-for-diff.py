@@ -167,7 +167,7 @@ class Selection(unittest.TestCase):
                       selected[0][1])
         self.assertEqual(SELECTOR.select(TIER, ["hub-web/src/app.ts"]), [])
 
-    def test_suites_inside_a_train_step_ignore_the_outer_job_cas_f235(self):
+    def test_suites_on_a_train_run_once_and_ignore_the_outer_job_cas_f235(self):
         # Train run 42351777395: suites inherited FULL_SET and the train event,
         # so fixture repositories classified as the outer full set or re-wrapped
         # their selector in a queue step that the fixture does not contain.
@@ -177,15 +177,17 @@ class Selection(unittest.TestCase):
             (repo / 'scripts').mkdir()
             (repo / 'cas-cli/Makefile').write_text('test-ci-tiers:\n\tcd .. && python3 scripts/test-probe.py\n')
             (repo / 'scripts/test-probe.py').write_text(
-                "import os, pathlib\nassert not {'FULL_SET', 'BASE_SHA'} & set(os.environ), os.environ\n"
-                "pathlib.Path('scripts/probe-ran').touch()\n")
+                "import os, pathlib, sys\nassert not {'FULL_SET', 'BASE_SHA'} & set(os.environ), os.environ\n"
+                "attempt = pathlib.Path('scripts/probe-ran')\nfailed = not attempt.exists()\n"
+                "with attempt.open('a') as out: out.write('attempt\\n')\n"
+                "sys.exit(int(failed))\n")
             env = dict(os.environ, GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/epic/release-train-x',
-                       CAS_QUEUE_STEP='scripts/test-fast-release-rows.py', FULL_SET='true', BASE_SHA='abc')
+                       FULL_SET='true', BASE_SHA='abc')
             result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all',
                                      '--only', 'scripts/test-probe.py'],
                                     env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertTrue((repo / 'scripts/probe-ran').exists(), result.stdout)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual((repo / 'scripts/probe-ran').read_text().splitlines(), ['attempt'])
 
     def test_a_failing_suite_repeats_its_last_lines_after_later_suites_cas_5365(self):
         # Run 42415112049: test-release-scratch.py failed, a later suite's
@@ -200,7 +202,7 @@ class Selection(unittest.TestCase):
                 "import sys\nfor n in range(80):\n    print(f'broken line {n}')\nsys.exit('FAIL: test_named_failure')\n")
             (repo / 'scripts/test-later.py').write_text("for n in range(40):\n    print('later ok')\n")
             env = {key: value for key, value in os.environ.items()
-                   if key not in {'GITHUB_EVENT_NAME', 'GITHUB_REF', 'CAS_QUEUE_STEP'}}
+                   if key not in {'GITHUB_EVENT_NAME', 'GITHUB_REF'}}
             result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all'],
                                     env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)

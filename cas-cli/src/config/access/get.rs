@@ -35,9 +35,14 @@ impl Config {
                 self.hub.as_ref().cloned().unwrap_or_default().transport_mode().as_str().into(),
             ),
             "hub.tailscale_serve" => Some(
-                self.hub.as_ref().cloned().unwrap_or_default().transport_mode().publishes().to_string(),
+                self.hub
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_default()
+                    .transport_mode()
+                    .publishes()
+                    .to_string(),
             ),
-            "viktor.enabled" => Some(self.viktor_enabled().to_string()),
             key if key.starts_with("fast_lane.") => {
                 let lane = self.fast_lane.clone().unwrap_or_default();
                 match key {
@@ -176,6 +181,7 @@ impl Config {
             "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
             "factory.commander_mirror_enabled" => Some(factory.commander_mirror_enabled.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
+            "factory.max_workers" => Some(factory.max_workers.to_string()),
             "factory.auto_route_builds" => Some(factory.auto_route_builds.to_string()),
             "factory.build_guard.max_load_ratio" => Some(format!("{:?}", factory.build_guard.max_load_ratio)),
             "factory.build_guard.max_cpu_pressure_percent" => Some(format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),

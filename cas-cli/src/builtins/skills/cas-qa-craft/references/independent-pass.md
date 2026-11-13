@@ -76,7 +76,7 @@ lockfile and execution environment. Cite the original receipt/log paths in the
 round bundle and ledger; preserve their producer and timestamps. Reuse matching
 unit/typecheck receipts as well. Run independent adjacent/demo/visual cells in
 steps 3–4; the automated selection is the worker's responsibility. Read the
-tests the delivery adds against [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
+tests the delivery adds against [Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests):
 bloat, restated implementation, sleeps and retry-wrapped flakes are Normal findings.
 Rate a delivery test that steps around its asserted invariant at least Normal.
 For example, re-picking the sender after a 409 masks whether the chosen sender

@@ -11,6 +11,7 @@ import shlex
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -726,6 +727,61 @@ esac
         pushed = self.push()
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
         self.assertTrue(ran.exists(), pushed.stderr)
+
+    def test_epic_push_refuses_stale_hub_web_dist_cas_1efb(self):
+        remote = Path(self.scratch.name) / "remote.git"
+        command(self.repo, "git", "init", "-q", "--bare", str(remote))
+        command(self.repo, "git", "remote", "add", "origin", str(remote))
+        self.copy_hook_installer()
+        self.write("hub-web/package.json", '{"name":"fixture","private":true}\n')
+        self.write("hub-web/package-lock.json", '{}\n')
+        self.write("hub-web/dist/app.js", "signup\n")
+        self.write("npm-fixture", '#!/bin/sh\ncase "$1" in\n'
+                   'ci) exit 0;;\nrun) cp src/signup.ts dist/app.js;;\n*) exit 1;;\nesac\n')
+        (self.repo / "npm-fixture").chmod(0o755)
+        self.commit()
+        branch = "refs/heads/epic/release-train-fixture"
+        pushed = command(self.repo, "git", "push", "origin", "HEAD:" + branch)
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        baseline = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(self.install_hooks().returncode, 0)
+        # The engine integrates a proven lane; its new merge tip needs no
+        # second copy of the lane's fast checks.
+        command(self.repo, "git", "checkout", "-qb", "factory/proven")
+        self.write("lane.txt", "proven delivery\n")
+        self.commit()
+        self.base = baseline
+        self.assertEqual(self.fast().returncode, 0)
+        command(self.repo, "git", "checkout", "-q", "target")
+        merged = command(self.repo, "git", "merge", "--no-ff", "factory/proven", "-m", "integration")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        integration = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        env = dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"),
+                   NPM=str(self.repo / "npm-fixture"),
+                   CAS_PROVEN_MERGE_HEAD=integration, CAS_PROVEN_MERGE_BASE=baseline)
+        started = time.monotonic()
+        pushed = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        elapsed = time.monotonic() - started
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertFalse((self.repo / f".git/cas/fast-rows/{integration}.pass").exists())
+        self.assertLess(elapsed, 1.0)
+        print(f"integration_push_seconds={elapsed:.3f}")
+
+        # Even inherited engine markers cannot authorize new authored content.
+        draft = "docs/release-notes/2099-01-01-v9.99.8-slack.md"
+        self.write(draft, "# Invalid release draft\n")
+        self.commit()
+        refused = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("FAIL release-notes-draft", refused.stderr)  # machine row identifier
+        (self.repo / draft).unlink()
+        self.write("hub-web/src/signup.ts", "changed signup\n")
+        self.commit()
+        refused = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("FAIL hub-web-dist-drift", refused.stderr)  # machine row identifier
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", branch).stdout.split()[0], integration)
+        self.assertFalse((self.repo / "cargo-called").exists())
 
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"

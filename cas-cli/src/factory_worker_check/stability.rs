@@ -2,6 +2,8 @@
 //! Park reads immutable-tip evidence; adapters own discovery and execution.
 use super::*;
 
+pub(crate) mod rust;
+
 pub(crate) const REQUIRED_PASSES: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,9 +52,27 @@ fn records(cas_root: &Path, repo: &Path, head: &str) -> Result<Vec<(PathBuf, Che
 
 pub(crate) fn missing(cas_root: &Path, repo: &Path, head: &str, tests: &[Identity]) -> Result<Vec<Identity>> {
     let covered = records(cas_root, repo, head)?.into_iter()
-        .filter_map(|(_, record)| record.test.and_then(|test| test.stability))
+        .filter_map(|(_, record)| record.test.filter(|test| test.count > 0).and_then(|test| test.stability))
         .filter(valid).flat_map(|proof| proof.tests).collect::<BTreeSet<_>>();
     Ok(tests.iter().filter(|test| !covered.contains(*test)).cloned().collect())
+}
+
+pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
+    ranges: Option<&[(String, String)]>) -> Result<Vec<Identity>> {
+    let fallback;
+    let ranges = if let Some(ranges) = ranges { ranges } else {
+        let base = git(repo, &["merge-base", target, head])
+            .or_else(|_| git(repo, &["merge-base", &format!("refs/remotes/origin/{target}"), head]))?;
+        fallback = vec![(base, head.to_owned())];
+        &fallback
+    };
+    let live = rust::live(repo, head, paths)?;
+    let mut required = BTreeSet::new();
+    for (from, to) in ranges {
+        required.extend(rust::changed(repo, from, to, paths)?.into_iter()
+            .map(|test| test.identity).filter(|identity| live.contains(identity)));
+    }
+    Ok(required.into_iter().collect())
 }
 
 /// A failed rerun may not leave an earlier overlapping five-pass proof usable.

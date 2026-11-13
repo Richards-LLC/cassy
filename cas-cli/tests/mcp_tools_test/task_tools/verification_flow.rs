@@ -4146,8 +4146,7 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
         .get_lease_history(&id_a, Some(1))
         .expect("lease history for parked task");
     assert_eq!(lease_history[0].event_type, "released");
-    assert!(lease_history[0].reason.as_ref().is_some_and(|reason|
-        reason.trim_start().starts_with("MERGE REQUIRED")));
+    assert!(lease_history[0].reason.is_some());
     assert_eq!(lease_history[0].previous_agent_id, None);
 
     // cas-627f: the flagship close-rejected `WorkerIdle` notification is

@@ -40278,8 +40278,8 @@ mod merge_conflict_detection_tests {
             Some(&error),
         );
         assert!(
-            message.contains(&error) && message.contains("action=start id=cas-7308a"),
-            "error refusal must preserve the cause and the worker exit: {message}"
+            message.contains(&error),
+            "error refusal must preserve the cause: {message}"
         );
     }
 

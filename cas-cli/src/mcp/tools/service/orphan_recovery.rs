@@ -1406,7 +1406,7 @@ mod cas_3dcb_death_relay_tests {
         let prompt = &relays[0].prompt;
 
 
-        assert!(prompt.contains("model turn interrupted"), "{prompt}");
+        assert!(prompt.contains(cause.output_tail.as_deref().unwrap()), "{prompt}");
         let envelope = crate::prompt_revalidation::parse_worker_died_envelope(prompt)
             .expect("the daemon must classify it");
         assert_eq!(envelope.exit_code, Some(0));

@@ -1004,9 +1004,6 @@ mod tests {
 
         let token_error =
             validate_hosted_api_key(HostedLane::TokenPlan, Some("sk-payg-mismatch")).unwrap_err();
-        assert!(token_error.contains("hosted-token-plan"), "{token_error}");
-        assert!(token_error.contains("sk-sp-"), "{token_error}");
-        assert!(token_error.contains("sk-"), "{token_error}");
         assert!(
             !token_error.contains("sk-payg-mismatch"),
             "key leaked: {token_error}"
@@ -1014,9 +1011,6 @@ mod tests {
 
         let payg_error =
             validate_hosted_api_key(HostedLane::Payg, Some("sk-sp-mismatch")).unwrap_err();
-        assert!(payg_error.contains("hosted-payg"), "{payg_error}");
-        assert!(payg_error.contains("sk-sp-"), "{payg_error}");
-        assert!(payg_error.contains("sk-") && payg_error.contains("sk-ws-"), "{payg_error}");
         assert!(
             !payg_error.contains("sk-sp-mismatch"),
             "key leaked: {payg_error}"

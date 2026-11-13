@@ -6281,7 +6281,7 @@ mod related_recall_response_tests {
         );
         let warning = core.cas_task_create(Parameters(request.clone())).await
             .expect_err("the peer's reworded open epic must warn before writing");
-        for required in ["cas-e88d", "patient-badger-31", "cas-open-child", "Retire superseded legacy routes", "confirm_warning=true"] {
+        for required in [epic.id.as_str(), epic.epic_verification_owner.as_deref().unwrap(), child.id.as_str(), child.title.as_str(), "confirm_warning=true"] {
             assert!(warning.message.contains(required), "missing {required}: {warning:?}");
         }
         assert!(!warning.message.contains("cas-closed-child"), "{warning:?}");

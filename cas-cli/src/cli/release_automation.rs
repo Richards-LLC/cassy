@@ -94,8 +94,6 @@ impl ReleasePreview {
         }
         value
     }
-
-
 }
 
 fn preview_scope(root: &Path, repo: &Path, scope: ReleaseScope) -> Result<ReleasePreview> {
@@ -975,11 +973,14 @@ pub(super) mod tests {
         env.set("CAS_AGENT_NAME", &owner.name);
         env.set("CAS_AGENT_ROLE", "supervisor");
         let tasks = open_task_store(&root).unwrap();
-        for id in ["cas-e3041", "cas-ef2b", "cas-undeclared"] {
+        for id in ["cas-e3041", "cas-ef2b", "cas-undeclared", "cas-closed"] {
             let mut task = Task::new(id.into(), "No-code report".into());
             task.origin_project = Some("release-fixture".into());
             task.execution_note = Some("no-code".into());
-            task.status = TaskStatus::AwaitingMerge;
+            task.status = if id == "cas-closed" { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
+            if id == "cas-closed" {
+                task.external_ref = Some("https://example.slack.com/archives/reports/p123456789".into());
+            }
             task.risk = vec![cas_types::TaskRisk::None];
             tasks.add(&task).unwrap();
         }
@@ -1004,7 +1005,7 @@ pub(super) mod tests {
         };
         let inputs = root.join("input-audit.json");
         fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
-            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041", "cas-closed"],
         })).unwrap()).unwrap();
         args.inputs = Some(inputs.clone());
         let train = tasks.get("cas-a001").unwrap();
@@ -1034,7 +1035,7 @@ pub(super) mod tests {
         member.external_ref = Some(artifact.id.clone());
         tasks.update(&member).unwrap();
         fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
-            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041", "cas-closed"],
         })).unwrap()).unwrap();
         let mut foreign = tasks.get("cas-e3041").unwrap();
         foreign.origin_project = Some("other-project".into());
@@ -1045,8 +1046,14 @@ pub(super) mod tests {
             &tasks.get(&train.id).unwrap()));
         foreign.origin_project = Some("release-fixture".into());
         tasks.update(&foreign).unwrap();
-        // Portable report bytes alone do not approve its delivery.
-        assert!(track_on_train(&args, &root, repo, &train).is_err());
+        // Tracking records review debt; report bytes do not close the delivery.
+        track_on_train(&args, &root, repo, &train).unwrap();
+        assert_eq!(tasks.get("cas-e3041").unwrap().status, TaskStatus::AwaitingMerge);
+        let pending = cut_scope(&root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref()).unwrap();
+        assert!(!pending.no_code_members.contains_key("cas-closed"));
+        let preview = preview_scope(&root, repo, pending).unwrap();
+        assert_eq!(preview.review_missing, vec!["cas-e3041"]);
+        assert!(matches!(preview.members_by_id.get("cas-closed"), Some(CassyMergeClose::AlreadyClosed)));
         let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
             peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
             head_commit: args.commit.clone(), state_digest: String::new(), target_branch: None,

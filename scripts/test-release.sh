@@ -562,6 +562,11 @@ hotfix_fallback() {
 train_receipt_cut() {
     local fixture="$tmp/train-ci-cut" status=0 before after
     clone_epic "$fixture" epic/release-train-fixture train-ci
+    mkdir -p "$fixture/docs/product-overview.d"
+    printf '# Overview\n\n## Pitch\n\nBase pitch.\n' >"$fixture/docs/PRODUCT_OVERVIEW.md"
+    printf '## Pitch\n\nCompiled at the cut.\n' >"$fixture/docs/product-overview.d/report.md"
+    git -C "$fixture" add docs
+    git -C "$fixture" commit --quiet -m 'overview inputs before green train receipt'
     write_valid_draft "$tmp/train-ci-notes.md"
     before="$(git -C "$fixture" rev-parse HEAD)"
     mkdir -p "$tmp/train-ci-artifact"

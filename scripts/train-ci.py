@@ -31,7 +31,8 @@ MANIFESTS = {'cas-cli/Cargo.toml': 'cas', **{f'crates/{name}/Cargo.toml': name f
 
 # Shared by release preparation, train admission and queue plumbing checks.
 def release_asset(path):
-    return path in ('CHANGELOG.md', '.claude/CODEMAP.md', 'cas-cli/src/builtins/reference-history.json') or path.startswith(
+    return path in ('CHANGELOG.md', '.claude/CODEMAP.md', 'docs/PRODUCT_OVERVIEW.md',
+                    'docs/qa/journeys.yaml', 'cas-cli/src/builtins/reference-history.json') or path.startswith(
         ('changelog.d/', 'docs/release-notes/', 'docs/release-reports/',
          'docs/qa/bug-families/', 'docs/product-overview.d/', 'hub-web/dist/'))
 

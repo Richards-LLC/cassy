@@ -425,6 +425,10 @@ class TrainReceipts(unittest.TestCase):
         manifest = self.repo/'cas-cli/Cargo.toml'
         manifest.parent.mkdir()
         manifest.write_text('[package]\nname="cas"\nversion="1.0.0"\n')
+        for name in ('docs/PRODUCT_OVERVIEW.md', 'docs/qa/journeys.yaml', 'docs/product-overview.d/report.md'):
+            path = self.repo/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('before compilation')
         self.git('add', '.')
         self.git('commit', '-qm', 'manifest baseline')
         source = self.git('rev-parse', 'HEAD')
@@ -440,6 +444,9 @@ class TrainReceipts(unittest.TestCase):
         self.assertEqual(preparation()[0], 1)
         self.git('reset', '--hard', source)
         manifest.write_text('[package]\nname="cas"\nversion="1.1.0"\n')
+        (self.repo/'docs/PRODUCT_OVERVIEW.md').write_text('compiled overview')
+        (self.repo/'docs/qa/journeys.yaml').write_text('compiled bug families')
+        (self.repo/'docs/product-overview.d/report.md').unlink()
         self.git('add', '.')
         self.git('commit', '-qm', trailers)
         self.assertEqual(preparation(), (0, source))

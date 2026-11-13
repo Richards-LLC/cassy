@@ -40,6 +40,9 @@ impl ReleaseScope {
         self.no_code_members.clear();
         for id in &self.included_task_ids {
             let Ok(task) = tasks.get(id) else { continue; };
+            // Terminal members need no new proof to be closed again. Their
+            // external_ref may identify the original request, not report bytes.
+            if task.is_terminal() { continue; }
             if crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some() {
                 self.no_code_members.insert(id.clone(), no_code_proofs(root, self, &task)?);
             }

@@ -1726,6 +1726,7 @@ mod tests {
             let mut task = cas_types::Task::new(id.into(), "receipt delivery".into());
             task.assignee = Some("implementer".into());
             task.origin_project = Some("batch-response".into());
+            task.execution_note = Some("no-code".into());
             task.deliverables.factory_branch_anchor = Some(head.clone());
             tasks.add(&task).unwrap();
         }

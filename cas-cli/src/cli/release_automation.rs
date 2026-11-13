@@ -96,6 +96,9 @@ impl ReleasePreview {
     }
 
     fn allow_cut(&self) -> Result<()> {
+        let missing: Vec<_> = self.review_missing.iter().filter(|id|
+            self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.contains(id)).collect();
+        ensure!(missing.is_empty(), "REVIEW_MISSING: {}", missing.into_iter().cloned().collect::<Vec<_>>().join(", "));
         ensure!(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0),
             "release cut refused: {} members, zero would-close; by_reason {:?}; review_missing {:?}",
             self.members, self.by_reason, self.review_missing);
@@ -958,6 +961,10 @@ pub(super) mod tests {
         assert!(preview.allow_cut().is_err());
         preview.members_by_id.insert("cas-0004".into(), CassyMergeClose::Closed { notice: String::new() });
         preview = ReleasePreview::from_members(preview.scope, preview.members_by_id);
+        preview.scope.included_task_ids = vec!["cas-0001".into(), "cas-0004".into()];
+        assert!(preview.allow_cut().is_err());
+        // Residuals outside this cut remain nonblocking.
+        preview.scope.included_task_ids = vec!["cas-0004".into()];
         assert!(preview.allow_cut().is_ok());
         assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (4, 1, 1, 1, 1));
         assert_eq!(preview.by_reason["REVIEW_MISSING"], 1);

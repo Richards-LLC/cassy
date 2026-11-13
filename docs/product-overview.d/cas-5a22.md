@@ -1,0 +1,1 @@
+Code deliveries receive their review before merge, including Tier 1 in batch QA mode. A release cut combines those approvals (local or peer) with the green frozen-train run, naming any missing approval before push. It requires no separate release-review ledger or recorder identity. Batch QA remains independent evidence and the merge queue remains the gate to main.

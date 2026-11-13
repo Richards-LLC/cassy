@@ -431,20 +431,28 @@ mod tests {
         let latest = rows.iter().filter(|row| row.payload.contains("batch_receipt_offer"))
             .max_by_key(|row| row.id).unwrap();
         assert!(!latest.payload.contains("cas-live"), "covered anchor cannot be re-offered: {latest:?}");
-        let reviewed = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("release"))).await.unwrap());
+        let refused = service.verification(rmcp::handler::server::wrapper::Parameters(request("release"))).await.unwrap_err();
+        assert!(refused.message.contains("RELEASE_REVIEW_COMPUTED"));
+        assert!(cas_store::release_verdicts_for_task(&cas, "batch-offer-fixture", "cas-live").unwrap().is_empty());
+        // Existing delivery approvals, rather than a new release reviewer,
+        // complete the already recorded QA receipt's close callback.
+        let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
         for id in ["cas-live", "cas-retired"] {
-            assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::Closed, "{reviewed}");
+            let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+                peer_premerge: None, repository_root: project.display().to_string(), worktree_root: project.display().to_string(),
+                head_commit: live.clone(), state_digest: String::new(), target_branch: None, anchor_commits: vec![live.clone()],
+            });
+            let dispatch = cas_store::create_verification_dispatch_bound(&cas, id, "worker", "supervisor", &boundary,
+                chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+            conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
+            conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES (?1,?2,'reviewer','task','approved','pass','[]',?3,?4)",
+                rusqlite::params![format!("ver-{id}"), id, chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
         }
-        let verdict = cas_store::release_verdicts_for_task(&cas, "batch-offer-fixture", "cas-live").unwrap().remove(0);
-        let notices = pending_holds();
-        assert_eq!(notices.len(), 3);
-        let payload: serde_json::Value = notices.iter().map(|row| serde_json::from_str::<serde_json::Value>(&row.payload).unwrap())
-            .find(|payload| payload["context"]["receipt_id"] == verdict.id).unwrap();
-        assert_eq!(payload["context"]["closed_count"], 2);
-        assert_eq!(payload["context"]["held_by_kind"]["RELEASE_MEMBER_HELD"].as_array().unwrap().len(), 2);
-        service.inner.close_release_covered_deliveries(&verdict).await;
-        assert_eq!(pending_holds().len(), 3);
-        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "closed delivery has no further QA offer");
+        service.inner.close_release_covered_deliveries(&receipt).await;
+        for id in ["cas-live", "cas-retired"] {
+            assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::Closed);
+        }
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
 
     }
 

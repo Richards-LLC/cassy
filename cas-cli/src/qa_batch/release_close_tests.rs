@@ -326,12 +326,12 @@ fn published_train_closes_members_independently_cas_734b() {
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. })), "{id}: {:?}", result.members.get(id));
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed);
     }
-    assert!(matches!(result.members.get("cas-closed"), Some(CassyMergeClose::AlreadyClosed)));
+    assert!(matches!(result.members.get("cas-closed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
     assert!(matches!(result.members.get("cas-unreviewed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
     for id in ["cas-unshipped", "cas-other-source"] {
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
     }
-    assert_eq!(result.residuals.len(), 3);
+    assert_eq!(result.residuals.len(), 4);
     for id in &scope.included_task_ids {
         let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
         assert_eq!(revision(id) - revisions[id], i64::from(closed_now));
@@ -339,7 +339,7 @@ fn published_train_closes_members_independently_cas_734b() {
     // A batch ledger cannot replace the missing code delivery approvals.
     let mut later = receipt;
     later.id = "qab-later".into();
-    later.task_heads = ["cas-unreviewed", "cas-unshipped", "cas-other-source"].map(|id| (id.into(), anchor.clone())).into();
+    later.task_heads = ["cas-unreviewed", "cas-unshipped", "cas-other-source", "cas-closed"].map(|id| (id.into(), anchor.clone())).into();
     cas_store::import_qa_batch_receipt(&root, &later).unwrap();
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
     let held = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();

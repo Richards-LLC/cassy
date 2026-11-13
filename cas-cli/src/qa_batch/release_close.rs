@@ -637,9 +637,9 @@ pub(crate) fn reconcile_members(
     for id in ids {
         let mut evaluate = || -> Result<CassyMergeClose, String> {
             let task = match tasks.get(&id) { Ok(task) => task, Err(_) => return Ok(CassyMergeClose::NotEligible) };
-            if task.status == TaskStatus::Closed { return Ok(CassyMergeClose::AlreadyClosed); }
-            if task.is_terminal() { return Ok(CassyMergeClose::NotEligible); }
-            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id) {
+            let already_closed = task.status == TaskStatus::Closed;
+            if task.is_terminal() && !already_closed { return Ok(CassyMergeClose::NotEligible); }
+            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id).filter(|_| !already_closed) {
                 return Err(format!("RELEASE_MEMBER_HELD: {:?}", exception.code));
             }
             let delivery = inventory.deliveries.iter().find(|d| d.task_id == id).ok_or("RELEASE_MEMBERSHIP_MISSING")?;
@@ -674,12 +674,13 @@ pub(crate) fn reconcile_members(
                     // The stamp is read only after the exact verdict resolves.
                     let _registry_version = &approval.registry_version;
                 }
-                approved &= tier_zero || dispatch_approval.is_some() || receipts.iter().any(|receipt| {
+                approved &= tier_zero || dispatch_approval.is_some() || (delivery.membership == ReleaseMembership::ExplicitNoCode && receipts.iter().any(|receipt| {
                     matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
                         && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)
-                });
+                }));
             }
             if !approved { return Err("REVIEW_MISSING".into()); }
+            if already_closed { return Ok(CassyMergeClose::AlreadyClosed); }
             if write {
                 let mut closed = task.clone();
                 closed.status = TaskStatus::Closed;

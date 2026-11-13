@@ -1209,9 +1209,8 @@ impl CasCore {
                 .is_some();
         if !recorded
             && !fast_lane
-            && (review_tier::tier_for_delivery(task, repo)
+            && review_tier::tier_for_delivery(task, repo)
                 .is_some_and(|tier| tier.tier == review_tier::VerificationTier::Mechanical)
-                || review_tier::release_verdict_owns(&self.cas_root, task, repo))
         {
             return Ok(None);
         }
@@ -2138,6 +2137,7 @@ mod tests {
         let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
         run(repo, &["checkout", "-q", "main"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='fixture'\n[qa]\nmode='batch'\n[verification]\nenabled=true\n").unwrap();
         env.set("CAS_ROOT", &root);
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("candidate-owner".into());
@@ -2145,6 +2145,7 @@ mod tests {
             "candidate-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
         )).unwrap();
         let mut task = Task::new("cas-352b".into(), "Slow immutable candidate".into());
+        task.origin_project = Some("fixture".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(source.clone());
         task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {

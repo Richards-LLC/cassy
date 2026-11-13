@@ -16,6 +16,30 @@ impl CasService {
         -> Result<CallToolResult, McpError> {
         let reject = |reason: String| Self::error(ErrorCode::INVALID_PARAMS,
             crate::gates::tag("G-116", format!("batch_receipt rejected: {reason}")));
+        // Code is approved by the pre-merge verifier. Refuse the retired
+        // release-ledger route before resolving any recorder/author identity.
+        if req.verification_type.as_deref() == Some("release") {
+            let ids = req.task_ids.clone().filter(|ids| !ids.is_empty()).or_else(|| {
+                let body = std::fs::read_to_string(req.ledger_path.as_deref()?).ok()?;
+                crate::qa_ledger::coverage(&body).covers
+            }).unwrap_or_default();
+            let tasks = self.inner.open_task_store()?;
+            for id in ids {
+                let task = tasks.get(&id).map_err(|e| reject(e.to_string()))?;
+                if crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some() {
+                    continue;
+                }
+                let (repo, _) = crate::qa_batch::task_context(&self.inner.cas_root, &task).map_err(reject)?;
+                use crate::mcp::tools::core::task::lifecycle::review_tier::{tier_for_delivery, VerificationTier};
+                let mechanical = tier_for_delivery(&task, &repo)
+                    .is_some_and(|tier| tier.tier == VerificationTier::Mechanical)
+                    || task.deliverables.factory_branch_start.as_ref().is_some_and(|start|
+                        task.deliverables.factory_branch_anchor.as_deref() == Some(start.base_sha.as_str()));
+                if !mechanical {
+                    return Err(reject(format!("RELEASE_REVIEW_COMPUTED: {id} uses its existing merge approval and the green frozen-train receipt; no release review ledger is accepted")));
+                }
+            }
+        }
         let recorder = self.inner.resolve_live_supervisor_authority()
             .map_err(|_| reject("requires a live registered supervisor".into()))?;
         let config = crate::config::Config::load(&self.inner.cas_root).map_err(|e| reject(e.to_string()))?;

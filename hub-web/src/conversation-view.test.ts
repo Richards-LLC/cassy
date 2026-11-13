@@ -47,13 +47,14 @@ describe("ConversationView (Pebble thread)", () => {
     snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, ended_at: "2026-10-28T12:00:46Z" } };
     view.update();
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:46");
-    expect(livePhase(null, { ...state, now, working: true })).toMatchObject({ active: false, unavailable: false });
+    expect(livePhase(null, { ...state, now, receivedAt: now, working: true })).toMatchObject({ active: true, unavailable: false });
     expect(livePhase({ ...snapshot, lifecycle: { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" } }, { ...state, now })?.active).toBe(false);
   });
   it("keeps an open turn busy between tools and expires even a completed status", () => {
     vi.useFakeTimers();
-    onTestFinished(() => vi.useRealTimers());
+    onTestFinished(() => { vi.useRealTimers(); });
     const history = new ConversationHistory();
+    history.reply(reply(1, "status", "Working turn"), at(9, 0));
     let now = 0;
     let snapshot: Record<string, unknown> = { kind: "tool", lifecycle: { id: "tool", stage: "end" },
       turn: { id: "turn", stage: "start", started_at: "2026-11-13T12:00:00Z" },
@@ -63,12 +64,13 @@ describe("ConversationView (Pebble thread)", () => {
     const line = () => view.element.querySelector<HTMLElement>(".phase-line")!;
     expect(line().dataset.state).toBe("busy");
     expect(line().querySelector(".phase-step")?.textContent).toBe("exec_command");
-    expect(line().querySelector("time")?.dateTime).toBe("2026-11-13T12:00:01Z");
+    expect(line().querySelector<HTMLTimeElement>("time")?.dateTime).toBe("2026-11-13T12:00:01Z");
     now = 1000; vi.advanceTimersByTime(1000);
     expect(line().querySelector(".phase-clock")?.textContent).toBe("0:03");
     snapshot = { ...snapshot, turn: { id: "turn", stage: "end", started_at: "2026-11-13T12:00:00Z", ended_at: "2026-11-13T12:02:00Z" }, step: undefined };
     view.refreshWorking();
     expect(line().dataset.state).toBe("idle");
+    expect(livePhase(snapshot, { connected: true, daemonRunning: false, now, receivedAt: now })?.state).toBe("unknown");
     now = 16_000; vi.advanceTimersByTime(1000);
     expect(line().dataset.state).toBe("unknown");
     expect(line().dataset.active).toBe("false");

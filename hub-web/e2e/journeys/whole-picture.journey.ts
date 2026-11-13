@@ -337,12 +337,40 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(line.locator(".phase-clock")).not.toHaveText(before);
         expect(hub.frames.filter(frame => ["WorkEventsRequest", "WorkEventDetailRequest", "ScrollbackRequest"].includes(frame.kind))).toEqual([]);
       });
+      await journey.stage("A two-minute command remains busy across tool boundaries", async () => {
+        const started = journeyStamp();
+        world.supervisor_phase = { event_id: "command", kind: "tool", lifecycle: { id: "command", stage: "start", started_at: started },
+          turn: { id: "long-turn", stage: "start", started_at: started }, step: "exec_command", last_activity_at: started, observed_at: started, stale: false };
+        await refresh();
+        await expect(line).toHaveAttribute("data-state", "busy", { timeout: 5_000 });
+        await expect(line.locator(".phase-step")).toHaveText("exec_command");
+        await expect(line.locator("time")).toHaveAttribute("datetime", started);
+        const before = await line.locator(".phase-clock").innerText();
+        await page.clock.runFor(1000);
+        await expect(line.locator(".phase-clock")).not.toHaveText(before);
+        // Protocol fixture: report the native command's two-minute completion.
+        // A real harness command and daemon kill belong to release batch QA.
+        const ended = new Date(Date.parse(started) + 120_000).toISOString();
+        world.supervisor_phase.lifecycle = { id: "command", stage: "end", started_at: started, ended_at: ended };
+        world.supervisor_phase.observed_at = ended;
+        world.supervisor_phase.last_activity_at = ended;
+        delete world.supervisor_phase.step;
+        await refresh();
+        await expect(line).toHaveAttribute("data-state", "busy");
+        await expect(line.locator(".phase-clock")).toHaveText(/^2:\d{2}$/);
+        world.supervisor_phase.turn = { id: "long-turn", stage: "end", started_at: started, ended_at: ended };
+        await refresh();
+        await expect(line).toHaveAttribute("data-state", "idle", { timeout: 5_000 });
+        await expect(line.locator(".phase-clock")).toHaveText("2:00");
+        world.supervisor_phase = { event_id: "phase-1", kind: "notice", lifecycle: { id: "turn-1", stage: "phase", phase: "setting_up", started_at: journeyStamp(-42_000) }, observed_at: journeyStamp(), stale: false };
+        await refresh();
+      });
       await journey.stage("Compacting changes live; waiting has no moving dots", async () => {
         world.supervisor_phase!.lifecycle.phase = "compacting";
         // Native lifecycle changes need no unrelated fleet event, and Show
         // work is still off. The existing machine heartbeat owns refresh.
         await page.clock.runFor(5_000);
-        await expect(line).toContainText("Compacting", { timeout: 5_000 });
+        await expect(line).toHaveAttribute("data-state", "busy", { timeout: 5_000 });
         await page.emulateMedia({ reducedMotion: "reduce", forcedColors: "active" });
         expect(await line.locator(".dots i").first().evaluate(node => getComputedStyle(node).animationName)).toBe("none");
         await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
@@ -363,11 +391,12 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         world.supervisor_phase!.stale = false;
         world.supervisor_phase!.lifecycle = { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" };
         await refresh(); await expect(line).toBeVisible();
-        await expect(line).not.toContainText("Compacting");
+        await expect(line).toHaveAttribute("data-active", "false");
         await expect(line.locator(".phase-clock")).toHaveCount(0);
         // The machine hub can stay live while this supervisor's stream is gone.
         hub.hold(PELICAN); hub.drop(PELICAN);
-
+        await page.clock.runFor(16_000);
+        await expect(line).toHaveAttribute("data-state", "unknown");
         await expect(line).toHaveAttribute("data-active", "false");
         await hub.down("atlas", { sockets: "close" });
 

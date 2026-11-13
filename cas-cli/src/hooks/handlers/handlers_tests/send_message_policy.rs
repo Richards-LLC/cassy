@@ -139,8 +139,12 @@ fn operator_claims_require_same_turn_evidence_gh1887() {
         (vec![user.clone()], "Deleted 133 branches, SHAs saved", true),
         (vec![user.clone()], "[unverified] 12:20 → 12:38 PM ET", false),
         (vec![user.clone(), call.clone(), result.clone()], "11:20 AM ET [evidence:tool-clock]", false),
+        (vec![user.clone(), call.clone(), result.clone()], "11:20 AM ET (`date`)", false),
+        (vec![user.clone(), call.clone(), result.clone(), user.clone()], "11:20 AM ET (`date`)", true),
+        (vec![user.clone(), call.clone(), result.clone()], "12:20 PM ET (`date`)", true),
         (vec![user.clone(), call.clone(), result.clone(), user.clone()], "11:20 AM ET [evidence:tool-clock]", true),
-        (vec![user.clone(), call.clone(), failed], "SHAs saved [evidence:tool-clock]", true),
+        (vec![user.clone(), call.clone(), failed.clone()], "SHAs saved [evidence:tool-clock]", true),
+        (vec![user.clone(), call.clone(), failed], "SHAs saved", true),
         (vec![user.clone(), call.clone(), result.clone()], "11:20 AM ET [evidence:invented]", true),
         (vec![user.clone(), call.clone(), result.clone()], "12:20 PM ET [evidence:tool-clock]", true),
         (vec![user.clone(), call.clone(), result.clone()], "Still in your clipboard [evidence:tool-clock]", true),
@@ -185,14 +189,16 @@ fn clipboard_evidence_expires_after_overwrite_gh1887() {
     ] {
         std::fs::write(&transcript, records.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")).unwrap();
         for target in ["operator", "commander:phone"] {
-            let input: HookInput = serde_json::from_value(serde_json::json!({
-                "session_id":"evidence-session", "hook_event_name":"PreToolUse",
-                "transcript_path":transcript, "cwd":tmp.path(),
-                "tool_name":"mcp__cs__coordination", "tool_input":{
-                    "action":"message", "target":target, "summary":"status", "message":"Still in your clipboard [evidence:paste]"
-                }
-            })).unwrap();
-            assert_eq!(deny_reason(&handle_pre_tool_use(&input, Some(tmp.path())).unwrap()).is_some(), denied);
+            for message in ["Still in your clipboard [evidence:paste]", "Still in your clipboard"] {
+                let input: HookInput = serde_json::from_value(serde_json::json!({
+                    "session_id":"evidence-session", "hook_event_name":"PreToolUse",
+                    "transcript_path":transcript, "cwd":tmp.path(),
+                    "tool_name":"mcp__cs__coordination", "tool_input":{
+                        "action":"message", "target":target, "summary":"status", "message":message
+                    }
+                })).unwrap();
+                assert_eq!(deny_reason(&handle_pre_tool_use(&input, Some(tmp.path())).unwrap()).is_some(), denied);
+            }
         }
     }
 }
@@ -276,6 +282,8 @@ fn pane_stop_matches_visible_result_without_tool_id_gh1915() {
     for (message, denied) in [
         ("`git log -1 --oneline` and `git rev-list --count HEAD`: d39a718, 133 commits.", false),
         ("`git rev-list --count HEAD`: 134 commits.", true),
+        ("`git log -2 --oneline`: 133 commits.", true),
+        ("`git log -1 --oneline`: abcdefa.", true),
         // Same digit fragments as the real SHA must not prove a different SHA.
         ("`git log -1 --oneline`: e39b718.", true),
     ] {

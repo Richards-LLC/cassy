@@ -28,6 +28,7 @@ elif args[0]=='api':
  if '/actions/artifacts?' in endpoint: print(json.dumps({'artifacts':data.get('job_artifacts',[])}))
  elif endpoint.endswith('/artifacts'): print(json.dumps({'artifacts':data.get('job_outputs',[])}))
  elif '/actions/runs/' in endpoint and endpoint.rsplit('/',1)[-1].isdigit(): print(json.dumps(data['job_run']))
+ elif endpoint.split('?')[0].endswith('/pulls'): print('[]')
  elif '/pulls/' in endpoint: print(json.dumps(data['pr']))
  elif '/statuses?' in endpoint: print(json.dumps(data.get('statuses_by_head',{}).get(endpoint.split('/commits/')[1].split('/')[0],data['statuses'])))
  elif endpoint.endswith('/logs'): sys.stdout.buffer.write((root/'logs.zip').read_bytes())
@@ -176,7 +177,7 @@ class TrainReceipts(unittest.TestCase):
     def forge(self, artifact, status='completed', conclusion='success', fanin='success'):
         (self.root/'forge.json').write_text(json.dumps({'artifact': artifact, 'fanin': fanin, 'runs': [{
             'id': int(self.env['GITHUB_RUN_ID']), 'run_attempt': int(self.env['GITHUB_RUN_ATTEMPT']), 'head_sha': self.env['GITHUB_SHA'],
-            'head_branch': self.env['GITHUB_REF_NAME'], 'event': 'push', 'status': status, 'conclusion': conclusion}]}))
+            'head_branch': self.env['GITHUB_REF_NAME'], 'event': 'workflow_dispatch', 'status': status, 'conclusion': conclusion}]}))
 
     def observe(self, check=False, expected=0):
         return self.run_cli('check' if check else 'observe', '--repo', self.repo, '--head', self.env['GITHUB_SHA'],
@@ -367,10 +368,10 @@ class TrainReceipts(unittest.TestCase):
         self.git('commit', '-qm', 'release plumbing continuation')
         # Queue-only documentation may differ from the PR tree.
         self.assertTrue(attempt())
-        # The prepared train push must also adopt, and its completed run must
+        # A dispatch at a plumbing-only frozen tip can adopt; its completed run must
         # retain a durable reference instead of claiming to have run the suite.
         docs_head = self.git('rev-parse', 'HEAD')
-        self.env.update(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
+        self.env.update(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
                         GITHUB_SHA=docs_head, GITHUB_RUN_ID='102')
         self.assertTrue(attempt())
         jobs = yaml.safe_load((SCRIPT.parent.parent/'.github/workflows/ci.yml').read_text())['jobs']
@@ -430,7 +431,7 @@ class TrainReceipts(unittest.TestCase):
         data['pr']['head']['sha'] = plumbing_head
         data_path.write_text(json.dumps(data))
         self.assertFalse(attempt())
-        self.env.update(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
+        self.env.update(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
                         GITHUB_SHA=self.git('rev-parse', 'HEAD'), GITHUB_RUN_ID='103')
         self.assertFalse(attempt())
         self.assertFalse(adoption.exists())
@@ -466,6 +467,9 @@ class TrainReceipts(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-qm', 'manifest baseline')
         source = self.git('rev-parse', 'HEAD')
+        self.env['GITHUB_SHA'] = source
+        self.evidence('full')
+        self.forge('full')
 
         def preparation():
             result = subprocess.run([sys.executable, str(SCRIPT), 'prepared', '--repo', str(self.repo)],
@@ -473,7 +477,7 @@ class TrainReceipts(unittest.TestCase):
             return result.returncode, result.stdout.strip()
 
         trailers = f'release: v1.1.0\n\nRelease-Version: 1.1.0\nTrain-CI-Head: {source}'
-        # Copied release trailers on a docs commit cannot suppress the suite.
+        # Copied release trailers cannot borrow the starting tip's receipt.
         self.git('commit', '--allow-empty', '-qm', trailers)
         self.assertEqual(preparation()[0], 1)
         self.git('reset', '--hard', source)
@@ -481,6 +485,12 @@ class TrainReceipts(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-qm', trailers)
         self.assertEqual(preparation(), (0, source))
+        self.git('checkout', '--detach', '-q')
+        # Y has no run or adoption artifact; the consumer fetches X directly.
+        state = self.run_cli('check', '--repo', self.repo, '--branch', self.env['GITHUB_REF_NAME'],
+                             '--head', self.git('rev-parse', 'HEAD'), '--gh', self.gh)
+        self.assertEqual((state['head'], state['release_head'], state['run_id']),
+                         (source, self.git('rev-parse', 'HEAD'), '101'))
         # A genuine version bump cannot launder an older ancestor's receipt.
         stale = self.git('rev-parse', f'{source}^')
         self.git('commit', '--amend', '-qm', trailers.replace(source, stale))

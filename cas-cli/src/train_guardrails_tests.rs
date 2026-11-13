@@ -150,31 +150,38 @@ fn tip_receipt(repo: &Path, cas_dir: &Path, outcome: &str) {
     std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
 }
 
+/// GH #1635: no notice asks for a cut without a green verdict at the tip.
+/// cas-0fc56: an unfrozen train has no train suite, so its notice asks for
+/// the freeze that starts one; once frozen, only green at the current tip notifies.
 #[test]
-fn red_or_missing_train_tip_verdict_sends_no_cut_notice_gh_1635() {
+fn frozen_train_cut_notice_waits_for_green_at_its_tip_gh_1635() {
     let _env = TestEnvGuard::temp_home();
     let (dir, _origin) = repo_with_origin();
     let repo = dir.path();
     let cas_dir = train(repo, &[("cas-a", TaskStatus::Closed), ("cas-b", TaskStatus::InProgress)]);
     merge_child(repo, &cas_dir, "cas-a", &[]);
     let sq = open_supervisor_queue_store(&cas_dir).unwrap();
+    let notices = || sq.peek("sup-id", 10).unwrap().len();
     let none = BTreeSet::new();
     let late = Utc::now() + chrono::Duration::hours(3);
 
     notify_train_cuts(&cas_dir, &none, late).unwrap();
-    assert!(sq.peek("sup-id", 10).unwrap().is_empty(), "no verdict: no max-age notice");
+    assert_eq!(notices(), 1, "unfrozen: the max-age notice asks for the freeze");
+    crate::mcp::tools::core::workflow::release_freeze::freeze(&cas_dir, EPIC, "operator", None).unwrap();
+    notify_train_cuts(&cas_dir, &none, late).unwrap();
+    assert_eq!(notices(), 1, "frozen, no verdict yet: no cut notice");
     tip_receipt(repo, &cas_dir, "FAIL");
     notify_train_cuts(&cas_dir, &none, late).unwrap();
-    assert!(sq.peek("sup-id", 10).unwrap().is_empty(), "red tip: no max-age notice");
+    assert_eq!(notices(), 1, "red tip: no cut notice");
 
     tip_receipt(repo, &cas_dir, "PASS");
     merge_child(repo, &cas_dir, "cas-c", &[]);
     notify_train_cuts(&cas_dir, &none, late).unwrap();
-    assert!(sq.peek("sup-id", 10).unwrap().is_empty(), "green at an older tip does not count");
+    assert_eq!(notices(), 1, "green at an older tip does not count");
 
     tip_receipt(repo, &cas_dir, "PASS");
     notify_train_cuts(&cas_dir, &none, late).unwrap();
-    assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 1, "green at the current tip notifies");
+    assert_eq!(notices(), 2, "green at the current frozen tip notifies");
 
     // The max-age notice is per tip, not per train: a changed tip that goes green notifies again.
     merge_child(repo, &cas_dir, "cas-d", &[]);
@@ -182,7 +189,7 @@ fn red_or_missing_train_tip_verdict_sends_no_cut_notice_gh_1635() {
     for _ in 0..2 {
         notify_train_cuts(&cas_dir, &none, late).unwrap();
     }
-    assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 2, "a new green tip notifies once more");
+    assert_eq!(notices(), 3, "a new green tip notifies once more");
 }
 
 #[test]

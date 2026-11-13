@@ -72,8 +72,8 @@ case "$1 $2" in
   "release preview")
     jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" \
       --argjson missing "${FAKE_REVIEW_MISSING:-$(printf '%s' '["cas-dead"]')}" \
-      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" \
-      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)),would_close:$n,would_hold:($missing|length),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),ALREADY_CLOSED:$closed},review_missing:$missing}' ;;
+      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" --argjson ci "${FAKE_CI_MISSING:-[]}" \
+      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)+($ci|length)),would_close:$n,would_hold:(($missing|length)+($ci|length)),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),LANE_CI_MISSING:($ci|length),ALREADY_CLOSED:$closed},review_missing:$missing,lane_ci_missing:$ci}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
@@ -568,7 +568,7 @@ train_receipt_cut() {
 import json, os, pathlib, subprocess, sys, zipfile
 head=sys.argv[1]
 repo=sys.argv[2]
-json.dump({'workflow_runs':[{'id':123,'run_attempt':1,'head_sha':head,'head_branch':'epic/release-train-fixture','event':'push','status':'completed','conclusion':'success'}]},open(os.environ['FAKE_TRAIN_RUN'],'w'))
+json.dump({'workflow_runs':[{'id':123,'run_attempt':1,'head_sha':head,'head_branch':'epic/release-train-fixture','event':'workflow_dispatch','status':'completed','conclusion':'success'}]},open(os.environ['FAKE_TRAIN_RUN'],'w'))
 jobs={name:'success' for name in ('fast-validation-preflight','fast-validation-ci-tiers','fast-validation-web','fast-validation-suite','fast-validation-docs','queue-flake-publication')}
 receipt={'schema':2,'scope':'full-set','head':head,'branch':'epic/release-train-fixture','run_id':'123','run_attempt':1,'outcome':'PASS','failures':[],
          'tree':subprocess.check_output(['git','-C',repo,'rev-parse','HEAD^{tree}'],text=True).strip(),
@@ -590,6 +590,8 @@ PY
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     after="$(git -C "$fixture" rev-parse HEAD)"
     [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
+    # There is deliberately no Y run/artifact: retry must fetch X again.
+    rm -rf "$fixture/.git/cas/train-ci"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]]
 }
@@ -677,6 +679,10 @@ cut_own_review_missing() {
     write_valid_draft "$tmp/own-review-notes.md"
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
+    FAKE_REVIEW_MISSING='[]' FAKE_CI_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
+        run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review-ci.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'LANE_CI_MISSING.*cas-000a, cas-000b' "$tmp/own-review-ci.log" || return 1
+    status=0
     FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
     # REVIEW_MISSING is the machine refusal identifier; a trailing gate frame

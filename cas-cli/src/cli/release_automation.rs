@@ -66,6 +66,8 @@ pub(super) struct ReleasePreview {
     not_eligible: usize,
     by_reason: BTreeMap<String, usize>,
     review_missing: Vec<String>,
+    #[serde(default)]
+    lane_ci_missing: Vec<String>,
     members_by_id: BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
     #[serde(default)]
     candidate_build_seconds: u64,
@@ -77,7 +79,7 @@ impl ReleasePreview {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut value = Self { scope, members: members_by_id.len(), would_close: 0,
             would_hold: 0, already_closed: 0, not_eligible: 0, by_reason: BTreeMap::new(),
-            review_missing: vec![], members_by_id, candidate_build_seconds: 0 };
+            review_missing: vec![], lane_ci_missing: vec![], members_by_id, candidate_build_seconds: 0 };
         for (id, outcome) in &value.members_by_id {
             let reason = match outcome {
                 CassyMergeClose::Closed { .. } => { value.would_close += 1; "WOULD_CLOSE" }
@@ -87,6 +89,7 @@ impl ReleasePreview {
                     value.would_hold += 1;
                     let code = reason.split(':').next().unwrap_or(reason).trim();
                     if code == "REVIEW_MISSING" { value.review_missing.push(id.clone()); }
+                    if code == "LANE_CI_MISSING" { value.lane_ci_missing.push(id.clone()); }
                     if code == "RELEASE_MEMBER_HELD" { reason.as_str() } else { code }
                 }
             };
@@ -96,6 +99,12 @@ impl ReleasePreview {
     }
 
     fn allow_cut(&self) -> Result<()> {
+        let missing: Vec<_> = self.review_missing.iter().filter(|id|
+            self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.contains(id)).collect();
+        ensure!(missing.is_empty(), "REVIEW_MISSING: {}", missing.into_iter().cloned().collect::<Vec<_>>().join(", "));
+        let missing: Vec<_> = self.lane_ci_missing.iter().filter(|id|
+            self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.contains(id)).collect();
+        ensure!(missing.is_empty(), "LANE_CI_MISSING: {}", missing.into_iter().cloned().collect::<Vec<_>>().join(", "));
         ensure!(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0),
             "release cut refused: {} members, zero would-close; by_reason {:?}; review_missing {:?}",
             self.members, self.by_reason, self.review_missing);
@@ -958,7 +967,14 @@ pub(super) mod tests {
         assert!(preview.allow_cut().is_err());
         preview.members_by_id.insert("cas-0004".into(), CassyMergeClose::Closed { notice: String::new() });
         preview = ReleasePreview::from_members(preview.scope, preview.members_by_id);
+        preview.scope.included_task_ids = vec!["cas-0001".into(), "cas-0004".into()];
+        assert!(preview.allow_cut().is_err());
+        // Residuals outside this cut remain nonblocking.
+        preview.scope.included_task_ids = vec!["cas-0004".into()];
         assert!(preview.allow_cut().is_ok());
+        preview.lane_ci_missing = vec!["cas-0004".into()];
+        assert!(preview.allow_cut().is_err());
+        preview.lane_ci_missing.clear();
         assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (4, 1, 1, 1, 1));
         assert_eq!(preview.by_reason["REVIEW_MISSING"], 1);
         super::track_on_train(&args, &root, temp.path(), &train, preview.clone()).unwrap();

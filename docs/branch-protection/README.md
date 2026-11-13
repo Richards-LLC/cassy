@@ -180,10 +180,11 @@ ref becomes unmergeable until it is fixed. GH #138 already renamed these jobs on
 
 ## 3. One full validation graph for train and queue
 
-`.github/workflows/full-validation.yml` handles release-train pushes and
+`.github/workflows/full-validation.yml` handles the release-train run and
 `merge_group` through the same reusable `.github/workflows/ci.yml`. Its outer
-`Fast Validation` job preserves the required context. A newer train push cancels
-its predecessor. Both events select Commander journeys against the last release,
+`Fast Validation` job preserves the required context. A train merge starts no
+run: Cassy dispatches the workflow once per frozen train tip, so no run is
+cancelled by a later merge. Both events select Commander journeys against the last release,
 run every registered script/CI-tier test, Commander vitest/typecheck/build,
 preflight, doctests and the complete Rust archive/shards. Quarantine and one
 rerun, including durable flake publication, apply equally to train and queue.
@@ -195,7 +196,9 @@ a successful completed GitHub workflow and its `Full-set gate` job; a status
 alone, legacy Rust-only artifact or missing job cannot authorize a cut or reuse.
 `scripts/release.sh` checks this receipt for a train’s starting tree before preparing
 release metadata. An explicit non-train hotfix keeps its emergency path, discloses
-that it has no train receipt, and receives the complete queue graph without reuse. An unchanged prepared retry retains the original starting tip.
+that it has no train receipt, and receives the complete queue graph without reuse. A prepared release push starts no train workflow. An unchanged prepared retry
+resolves `Train-CI-Head` directly to the original starting tip and its green
+receipt, without requiring a run or adoption artifact at the release head.
 
 ### Queue reuse
 
@@ -210,15 +213,15 @@ only with a version bump and is rebuilt and checked in the queue compile step.
 Any product change, moved main, partial/legacy proof or uncertainty runs the full
 graph. A release-plumbing continuation can reuse the source's earlier receipt.
 
-A plumbing-only push to the train uses the same consumer before scheduling tests.
+A dispatched train run at a plumbing-only frozen tip uses the same consumer before scheduling tests.
 The existing dedupe job publishes a `train-full-gate` artifact with scope
 `full-set-adoption`: the adopting head/tree, main baseline, and original native
 source head, run and attempt. It becomes usable only after that workflow and its
 full-set fan-in succeed. Cut retries and later queue entries revalidate the
 original full-set artifact, complete logs, plumbing delta and both run identities;
 they retain the native producer's tree and executable identity. A missing or
-mismatched reference runs the full graph. This keeps prepared pushes and queue
-entries from repeating a successful source suite while compile, launch, asset
+mismatched reference runs the full graph. This keeps dispatched plumbing-only
+freezes and queue entries from repeating a successful source suite while compile, launch, asset
 rebuild and Release Prebuild checks continue on the release tree.
 
 On reuse, preflight first restores `preflight-cli` from the validated full-gate

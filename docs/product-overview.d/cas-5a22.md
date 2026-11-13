@@ -1,0 +1,5 @@
+## Core Concepts
+
+Code deliveries receive their review before merge, including Tier 1 in batch QA mode. A release cut combines those approvals (local or peer) with the green frozen-train run, naming any missing approval before push. It requires no separate release-review ledger or recorder identity. Batch QA remains independent evidence and the merge queue remains the gate to main.
+
+Deliberate depth=light, rapid-response sampling and Tier 0 exemptions use green lane CI plus the green frozen-train run. Pending or rejected reviews retain their authority. Missing lane CI is named separately from a missing required review.

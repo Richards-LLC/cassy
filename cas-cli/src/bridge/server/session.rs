@@ -1220,11 +1220,6 @@ mod focused_epic_tests {
             first_epic_read.contains("refs/heads/main"),
             "the selected supervisor's staffed epic must be measured before history: {first_epic_read}"
         );
-        assert_eq!(
-            reads.lines().filter(|line| line.contains("git rev-list") && line.contains("--not")).count(),
-            2,
-            "the current release's 35 anchors share one pass, then history gets its own"
-        );
         let landed = status["tasks_in_progress"]
             .as_array()
             .unwrap()

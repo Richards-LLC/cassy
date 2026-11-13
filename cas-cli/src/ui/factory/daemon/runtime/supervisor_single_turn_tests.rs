@@ -321,8 +321,18 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
         "UPDATE prompt_queue SET created_at=?1, first_attempt_at=?1, delivery_attempts=119 WHERE id=?2",
         rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(16)).to_rfc3339(), id],
     ).unwrap();
-    daemon.process_prompt_queue().await.unwrap();
-    settle_injected_writes(&mut daemon).await;
+    // Selection and its admission probe finish on different daemon turns.
+    // Wait for the durable safety hold, then inspect its outcome once.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            settle_injected_writes(&mut daemon).await;
+            if queue.message_delivery_report(id).unwrap().unwrap().stage == cas_store::DeliveryStage::Gated {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("the protected draft reaches its durable hold");
     let report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(report.stage, cas_store::DeliveryStage::Gated, "protected draft must not abandon a relay: {report:?}");
     assert!(report.delivered_at.is_none() && report.confirmed_at.is_none());

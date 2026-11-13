@@ -1,11 +1,12 @@
 //! Auto-cut (cas-e060): Cassy cuts a green release train itself.
 //!
-//! The daemon's cut-notice poll calls [`attempt`] for each uncut train whose
-//! exact tip holds a green train-suite receipt. When the tip carries
-//! changelog fragments, no merge-queue run is in flight, the operator has not
-//! paused auto-cut in Commander and the cadence allows it, Cassy freezes the
-//! train (cas-2f4d) and runs the repository's own `scripts/release.sh` with
-//! the supervisor's notes draft. That script already arms the landing and
+//! The daemon's cut-notice poll calls [`attempt`] for each uncut train that
+//! is unfrozen, or frozen with a green train-suite receipt at its exact tip.
+//! When the tip carries changelog fragments, no merge-queue run is in flight,
+//! the operator has not paused auto-cut in Commander and the cadence allows
+//! it, Cassy freezes the train (cas-2f4d), which starts its one train suite
+//! (cas-0fc56). On that run's green it runs the repository's own
+//! `scripts/release.sh` with the supervisor's notes draft. That script already arms the landing and
 //! publication reminders, and publication sends the post-release notice
 //! that has the supervisor post the approved notes. Cassy never writes or posts
 //! notes: without a draft it waits, and wakes the supervisor once per tip.
@@ -120,10 +121,11 @@ fn cadence(root: &Path, train: &Task, now: DateTime<Utc>) -> Result<Option<Strin
 }
 
 // gate[C-36 release]: Auto-cut of green release trains (daemon)
-/// One poll for a train whose exact tip `tip` is green. `queue_busy` is true
-/// while any merge-queue run is in flight.
+/// One poll for a train at `tip`; `green` is its train-suite verdict there.
+/// `queue_busy` is true while any merge-queue run is in flight.
 // gate-audit[queue_busy]: input Measured merge-queue state prevents release; never an override.
-pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_busy: bool, now: DateTime<Utc>) -> Result<Outcome> {
+// gate-audit[green]: input Measured train-suite verdict at the tip; never an override.
+pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: bool, queue_busy: bool, now: DateTime<Utc>) -> Result<Outcome> {
     // gate[G-122 release-verdict]: Auto-cut preconditions (setup, owner, fragments, queue, cadence, notes draft)
     if let Some(reason) = declined_setup(root, train) {
         return Ok(Outcome::Declined(reason));
@@ -154,7 +156,7 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             root,
             &train.id,
             "Cassy auto-cut",
-            Some(format!("auto-cut: green train suite at {tip}, {count} changelog fragments").as_str()),
+            Some(format!("auto-cut: {count} changelog fragments at {tip}").as_str()),
         )?;
     }
     let draft = notes_draft(root, &train.id)?;
@@ -166,13 +168,18 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             ReleaseNoticePhase::CutReady,
             &format!("auto-cut-notes:{tip}"),
             &crate::gates::tag("G-122", format!(
-                "Release train {lane} ({}) is green at {tip} with {count} changelog fragments and is frozen for its \
+                "Release train {lane} ({}) is frozen at {tip} with {count} changelog fragments for its \
                  auto-cut. Write the release-notes draft at {} by {deadline} (docs/release-notes/RUBRIC.md; \
-                 `{{{{VERSION}}}}` becomes the version). Cassy cuts once it exists, and never writes or posts notes.",
+                 `{{{{VERSION}}}}` becomes the version). Cassy cuts once it exists and the train suite at the tip \
+                 is green, and never writes or posts notes.",
                 train.id,
                 draft.display()
             )),
         )?;
+        return Ok(Outcome::Handled);
+    }
+    if !green {
+        // The freeze just started the tip's one train suite.
         return Ok(Outcome::Handled);
     }
     let log = train_dir(root, &train.id)?.join("auto-cut.log");

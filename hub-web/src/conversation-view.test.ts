@@ -50,6 +50,29 @@ describe("ConversationView (Pebble thread)", () => {
     expect(livePhase(null, { ...state, now, working: true })).toMatchObject({ active: false, unavailable: false });
     expect(livePhase({ ...snapshot, lifecycle: { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" } }, { ...state, now })?.active).toBe(false);
   });
+  it("keeps an open turn busy between tools and expires even a completed status", () => {
+    vi.useFakeTimers();
+    onTestFinished(() => vi.useRealTimers());
+    const history = new ConversationHistory();
+    let now = 0;
+    let snapshot: Record<string, unknown> = { kind: "tool", lifecycle: { id: "tool", stage: "end" },
+      turn: { id: "turn", stage: "start", started_at: "2026-11-13T12:00:00Z" },
+      step: "exec_command", last_activity_at: "2026-11-13T12:00:01Z", observed_at: "2026-11-13T12:00:02Z" };
+    const view = new ConversationView(document, history, { supervisor: "sup", phase: () => livePhase(snapshot, { connected: true, now, receivedAt: 0 }) });
+    onTestFinished(() => view.dispose()); document.body.replaceChildren(view.element); view.update();
+    const line = () => view.element.querySelector<HTMLElement>(".phase-line")!;
+    expect(line().dataset.state).toBe("busy");
+    expect(line().querySelector(".phase-step")?.textContent).toBe("exec_command");
+    expect(line().querySelector("time")?.dateTime).toBe("2026-11-13T12:00:01Z");
+    now = 1000; vi.advanceTimersByTime(1000);
+    expect(line().querySelector(".phase-clock")?.textContent).toBe("0:03");
+    snapshot = { ...snapshot, turn: { id: "turn", stage: "end", started_at: "2026-11-13T12:00:00Z", ended_at: "2026-11-13T12:02:00Z" }, step: undefined };
+    view.refreshWorking();
+    expect(line().dataset.state).toBe("idle");
+    now = 16_000; vi.advanceTimersByTime(1000);
+    expect(line().dataset.state).toBe("unknown");
+    expect(line().dataset.active).toBe("false");
+  });
   it("keeps a short fenced status as a code frame with exact Copy and retained Wrap", async () => {
     const source = '\tconst literal = "雪";  \r\n| literal | source |\r\n| --- | --- |\r\n\r\n  done();';
     const writeText = vi.fn().mockResolvedValue(undefined);

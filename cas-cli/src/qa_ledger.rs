@@ -710,7 +710,7 @@ mod tests {
             ("schema: 2", "Usage [source: README:3]", "terminal: Usage: app", "PASS", None),
             ("schema: 2", "Usage (skills/local-image/scripts/gen:0)", "terminal: Usage: app", "PASS", Some("expectation_source")),
             ("schema: 2", "Usage at 12:30", "terminal: Usage: app", "PASS", Some("expectation_source")),
-            ("schema: 2", "Usage https://example.com/scripts/gen:213", "terminal: Usage: app", "PASS", Some("expectation_source")),
+            ("schema: 2", "Usage https://example.com/scripts/gen.py:213", "terminal: Usage: app", "PASS", Some("expectation_source")),
             ("schema: 2", "Hook [source: docs/guide.md:0]", "visible: revised card", "PASS", Some("expectation_source")),
             ("schema: 3", "Hook", "database: row saved", "PASS", Some("ledger_schema")),
             ("schema: 1", "Legacy expectation", "database: row saved", "PASS", None),

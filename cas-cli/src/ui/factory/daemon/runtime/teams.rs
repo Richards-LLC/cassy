@@ -5110,48 +5110,76 @@ mod tests {
             .output();
     }
 
+    /// cas-ddde / GH #1894: ef33's checkpoint existed on origin before the
+    /// supervisor requested a rebase. Exercise Git, the installed hook and
+    /// the compiled CLI handler; a pushed commit-time anchor alone is not a park.
     #[test]
-    fn worker_pre_push_hook_refuses_rewriting_a_parked_delivery_anchor() {
-        let (_repo_tmp, worker_tmp, remote_tmp, cas_root) = make_parked_delivery_push_fixture();
-        let repo = worker_tmp.path().join("worker");
-        let remote = remote_tmp.path().join("origin.git");
-        let git = |dir: &std::path::Path, args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .current_dir(dir)
-                .output()
-                .unwrap()
-        };
-        let parked = String::from_utf8_lossy(
-            &git(&remote, &["rev-parse", "refs/heads/factory/w"]).stdout,
-        ).trim().to_string();
-        let rebase = git(&repo, &["rebase", "-q", "origin/main"]);
-        assert!(rebase.status.success(), "rebase: {}", String::from_utf8_lossy(&rebase.stderr));
-        let rewritten = String::from_utf8_lossy(&git(&repo, &["rev-parse", "HEAD"]).stdout)
-            .trim().to_string();
-        assert_ne!(parked, rewritten, "the fixture must rewrite the parked commit SHA");
-
-        let push = std::process::Command::new("git")
-            .args(["push", "--force", "origin", "factory/w"])
-            .env("CAS_AGENT_NAME", "w")
-            .env("CAS_ROOT", cas_root.path())
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("CAS_SESSION_ID")
-            .env_remove("CAS_FACTORY_SESSION")
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&push.stderr);
-        assert!(!push.status.success(), "a rewritten delivery must be refused: {stderr}");
-
-        assert_eq!(
-            String::from_utf8_lossy(&git(&remote, &["rev-parse", "refs/heads/factory/w"]).stdout).trim(),
-            parked,
-            "refusal must leave the published delivery anchor unchanged"
-        );
+    fn worker_pre_push_hook_distinguishes_checkpoint_from_parked_cas_ddde() {
+        use clap::Parser;
+        if std::env::var_os("CAS_TEST_CHECKPOINT_HOOK_CHILD").is_some() {
+            let cli = crate::cli::Cli::try_parse_from(["cas", "hook", "WorkerCheckpointPush"]).unwrap();
+            let Some(crate::cli::Commands::Hook(args)) = &cli.command else { unreachable!() };
+            std::process::exit(if crate::cli::hook::execute(args, &cli).is_ok() { 0 } else { 1 });
+        }
+        let _home = crate::test_support::TestEnvGuard::temp_home();
+        for (case, status, reviewed, foreign_owner, bound, stale_lease, allow) in [
+            ("ef33 checkpoint", cas_types::TaskStatus::InProgress, false, false, true, false, true),
+            ("parked", cas_types::TaskStatus::AwaitingMerge, false, false, true, false, false),
+            ("reviewed in progress", cas_types::TaskStatus::InProgress, true, false, true, false, false),
+            ("foreign task owner", cas_types::TaskStatus::InProgress, false, true, true, false, false),
+            ("missing start binding", cas_types::TaskStatus::InProgress, false, false, false, false, false),
+            ("stale lease", cas_types::TaskStatus::InProgress, false, false, true, true, false),
+        ] {
+            let (_repo_tmp, worker_tmp, remote_tmp, cas_root) = make_parked_delivery_push_fixture();
+            let repo = worker_tmp.path().join("worker");
+            let remote = remote_tmp.path().join("origin.git");
+            let git = |dir: &std::path::Path, args: &[&str]| {
+                let output = std::process::Command::new("git").args(args)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+                    .current_dir(dir).output().unwrap();
+                assert!(output.status.success(), "{case}: git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            let branch = "factory/w-cas-ef33";
+            git(&repo, &["branch", "-m", branch]);
+            let checkpoint = git(&repo, &["rev-parse", "HEAD"]);
+            let base = git(&repo, &["rev-parse", "HEAD^"]);
+            let store = crate::store::open_task_store(cas_root.path()).unwrap();
+            let mut task = cas_types::Task::new("cas-ef33".into(), "Checkpoint repair".into());
+            task.status = status;
+            task.assignee = Some(if foreign_owner { "other" } else { "w" }.into());
+            task.deliverables.parked_branch = Some(branch.into());
+            task.deliverables.factory_branch_anchor = Some(checkpoint.clone());
+            if bound {
+                task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                    assignee: task.assignee.clone().unwrap(), branch: branch.into(), base_sha: base.clone(),
+                    work_target: cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() },
+                });
+            }
+            if reviewed { task.deliverables.review_envelope = Some("reviewed".into()); }
+            store.add(&task).unwrap();
+            // Publish a per-task checkpoint, then bring in tonight's main sync.
+            let bin = worker_tmp.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            let exe = std::env::current_exe().unwrap().to_string_lossy().replace('\'', "'\"'\"'");
+            crate::test_paths::warm_stub(&bin.join("cas"), &format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = \"hook WorkerCheckpointPush\" ]; then\nCAS_TEST_CHECKPOINT_HOOK_CHILD=1 exec '{exe}' --exact ui::factory::daemon::runtime::teams::tests::worker_pre_push_hook_distinguishes_checkpoint_from_parked_cas_ddde --nocapture\nfi\nexit 0\n"
+            ));
+            let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+            let push = |args: &[&str]| std::process::Command::new("git").args(args)
+                .env("CAS_AGENT_NAME", "w").env("CAS_ROOT", cas_root.path()).env("PATH", &path)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env_remove("CAS_SESSION_ID").env_remove("CAS_FACTORY_SESSION")
+                .current_dir(&repo).output().unwrap();
+            assert!(push(&["push", "-q", "origin", branch]).status.success());
+            git(&repo, &["rebase", "-q", "origin/main"]);
+            let rewritten = git(&repo, &["rev-parse", "HEAD"]);
+            assert_ne!(checkpoint, rewritten);
+            let lease = format!("--force-with-lease=refs/heads/{branch}:{}", if stale_lease { &base } else { &checkpoint });
+            let result = push(&["push", &lease, "origin", branch]);
+            assert_eq!(result.status.success(), allow, "{case}: {}", String::from_utf8_lossy(&result.stderr));
+            assert_eq!(git(&remote, &["rev-parse", &format!("refs/heads/{branch}")]), if allow { rewritten } else { checkpoint });
+        }
     }
 
     #[test]

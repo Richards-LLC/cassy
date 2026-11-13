@@ -867,9 +867,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             }
             if status == "target_move" {
                 // GH #1837: the approved review is about to finish against an
-                // old target. This adjacent edit preserves the delivery's own
-                // patch, so main's approval rebind carries the reviewed result
-                // to a fresh candidate without claiming another verifier ran.
+                // old target. The adjacent edit touches the delivered path,
+                // so the stale result cannot approve or publish a new candidate.
                 super::super::tests::commit_file(repo, "README.md",
                     "new heading\n\nbase\n\nfooter\n", "target moved during review");
             }
@@ -885,12 +884,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             let settled = || {
                 child_done()
                     && match status {
-                        "approved" | "target_move" => Command::new("git")
+                        "approved" => Command::new("git")
                             .current_dir(repo)
                             .args(["merge-base", "--is-ancestor", &source, "epic/train"])
                             .status()
                             .is_ok_and(|s| s.success()),
-                        "rejected" | "supervisor_call" => !crate::store::open_prompt_queue_store(&root)
+                        "rejected" | "supervisor_call" | "target_move" => !crate::store::open_prompt_queue_store(&root)
                             .unwrap()
                             .peek_all(10)
                             .unwrap()
@@ -913,28 +912,14 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             );
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             if status == "target_move" {
-                let rebound = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
-                assert_ne!(rebound.id, dispatch.id);
-                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Invalidated);
-                let next_candidate = candidate_for_dispatch(&root, &rebound).unwrap().unwrap();
-                assert_ne!(next_candidate.target_sha, candidate.target_sha);
-                assert_eq!(next_candidate.source_sha, source);
-                let verdict = cas_store::get_verification_for_dispatch(&root, &rebound.id).unwrap().unwrap();
-                assert_eq!(verdict.dispatch_id.as_deref(), Some(rebound.id.as_str()));
-                assert_eq!(verdict.status, VerificationStatus::Approved);
-                assert_eq!(verdict.provenance, cas_types::VerificationProvenance::System);
-                assert_eq!(verdict.agent_id.as_deref(), Some(owner.id.as_str()));
-                assert_eq!(verdict.issuer_agent_id.as_deref(), Some(owner.id.as_str()));
-                assert_eq!(rebound.receipt().unwrap(), claimed.receipt().unwrap());
-                assert_eq!(super::super::own_patch_id(repo, &source, &next_candidate.target_sha),
-                    super::super::own_patch_id(repo, &source, &candidate.target_sha));
-                assert_eq!(next_candidate.tree,
-                    super::super::tests::run(repo, &["rev-parse", "epic/train^{tree}"]));
-                assert!(rebound.verifier_agent_id.is_none());
-                assert_ne!(verdict.agent_id, claimed.verifier_agent_id);
-                assert!(!owns(&root, &rebound));
-                eprintln!("TARGET_MOVE prior={} rebound={} verifier={:?} verdict={}",
-                    dispatch.id, rebound.id, verdict.agent_id, verdict.id);
+                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Pending);
+                assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
+                assert!(!Command::new("git").current_dir(repo)
+                    .args(["merge-base", "--is-ancestor", &source, "epic/train"])
+                    .status().unwrap().success());
+                assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id,
+                    dispatch.id);
+                continue;
             }
             if matches!(status, "harness_failed" | "malformed") {
                 assert_eq!(claimed.state, cas_types::VerificationDispatchState::Pending);
@@ -974,7 +959,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 .unwrap()
                 .peek_all(20)
                 .unwrap();
-            if matches!(status, "approved" | "target_move") {
+            if status == "approved" {
                 assert!(
                     super::super::tests::run(
                         repo,

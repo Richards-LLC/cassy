@@ -93,8 +93,8 @@ pub(crate) struct ReleaseInventory {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReleaseDelivery {
     pub task_id: String,
-    /// Conservative task snapshot token. ANY intervening task mutation means
-    /// the consumer must re-evaluate; this is not a lease generation number.
+    /// The member's delivery cycle (`delivery_generation`). A new cycle is a
+    /// new delivery; an anchor change inside a cycle is checked at close.
     pub generation: String,
     pub anchor: Option<String>,
     pub base_sha: Option<String>,
@@ -290,11 +290,7 @@ pub(crate) fn resolve_release_inventory(
         let d = &t.deliverables;
         let base = d.factory_branch_start.as_ref()
             .and_then(|start| recorded_commit(&start.base_sha));
-        let recorded = d.factory_branch_anchor.as_ref()
-            .or(d.green_merge_commit.as_ref())
-            .or(d.delivery_pr_merge_commit.as_ref())
-            .or(d.merge_commit.as_ref());
-        let anchor = recorded.and_then(|sha| recorded_commit(sha));
+        let anchor = resolved_delivery_anchor(repo, t, &scope.final_release_sha);
         let valid_base = |anchor: &str| base.as_deref()
             .is_some_and(|base| ancestor(repo, base, anchor) == Some(true));
         let shipped_mapping = |anchor: &str| {
@@ -384,7 +380,7 @@ pub(crate) fn resolve_release_inventory(
         };
         inventory.deliveries.push(ReleaseDelivery {
             task_id: id,
-            generation: t.updated_at.to_rfc3339(),
+            generation: delivery_generation(t),
             anchor,
             base_sha: base,
             shipped_commit,
@@ -446,13 +442,14 @@ pub(crate) fn commit(repo: &Path, rev: &str) -> Option<String> {
 /// Recovery retires the active merge authority, but retains delivery identity.
 /// QA may attest that same immutable delivery after an evidence-only restart.
 /// Prefer an active anchor; otherwise use only the latest recorded history.
-/// An unresolvable newer anchor must never resurrect an older reviewed tip.
+/// An unresolvable newer anchor must never resurrect an older reviewed tip,
+/// and a recorded anchor is a commit id, never a ref name.
 pub(crate) fn delivery_anchor(repo: &Path, task: &Task) -> Option<String> {
     task.deliverables
         .factory_branch_anchor
         .as_ref()
         .or_else(|| task.deliverables.historical_factory_branch_anchors.last())
-        .and_then(|head| commit(repo, head))
+        .and_then(|head| commit(repo, head).filter(|resolved| resolved.eq_ignore_ascii_case(head)))
 }
 
 /// GH #1641: a task merged through a GitHub PR has no recorded anchor. Resolve
@@ -505,6 +502,11 @@ fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String
     None
 }
 
+/// A release member's generation: its delivery cycle (design rev 3.1 §2.5).
+pub(crate) fn delivery_generation(task: &Task) -> String {
+    format!("cycle:{}", task.deliverables.delivery_cycle)
+}
+
 /// The delivery identity every receipt consumer shares: the recorded anchor, or,
 /// when none was ever recorded (PR merge), the merged branch tip. Invalid
 /// recorded anchors never fall back.
@@ -512,7 +514,11 @@ pub(crate) fn resolved_delivery_anchor(repo: &Path, task: &Task, target: &str) -
     delivery_anchor(repo, task).or_else(|| {
         let d = &task.deliverables;
         (d.factory_branch_anchor.is_none() && d.historical_factory_branch_anchors.is_empty())
-            .then(|| merged_branch_anchor(repo, task, target))
+            .then(|| merged_branch_anchor(repo, task, target).or_else(|| {
+                [&d.green_merge_commit, &d.delivery_pr_merge_commit, &d.merge_commit]
+                    .into_iter().flatten()
+                    .find_map(|sha| commit(repo, sha).filter(|resolved| resolved.eq_ignore_ascii_case(sha)))
+            }))
             .flatten()
     })
 }

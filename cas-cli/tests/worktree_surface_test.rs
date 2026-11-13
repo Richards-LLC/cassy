@@ -3013,14 +3013,13 @@ printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
     }
 }
 
-/// cas-d4b7, cas-0208 replay the manual rebinds and the Nov 10 re-reviews
-/// (cas-bcf0, cas-36cb, cas-0d5e): after approval a sibling lands an edit
-/// beside a delivered hunk, so the reviewed tree no longer recomputes, yet
-/// the delivery's own patch-id is unchanged and the merge is clean. The one
-/// approval rebinds with a receipt and the task closes on it. A change to
-/// the delivered patch itself gets a fresh review.
+/// cas-03bc (design rev 3.1 §1.3, option A): after approval a sibling lands
+/// an edit beside a delivered hunk. The delivery's own patch-id is unchanged
+/// and the merge is clean, but the target move touched a delivered path, so
+/// the approval does not carry: a fresh review is dispatched and nothing
+/// publishes before it. The only pre-merge carry is `tree_on` validation.
 #[tokio::test]
-async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unchanged() {
+async fn approval_redispatches_when_the_target_touched_a_delivered_path() {
     let mut env = test_env();
     let shared = |edits: &[(usize, &str)]| {
         (1..=20)
@@ -3028,13 +3027,11 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
                 .map_or(format!("line {n}\n"), |(_, text)| format!("{text}\n")))
             .collect::<String>()
     };
-    let cases: [(&str, &str, &[(usize, &str)]); 6] = [
+    let cases: [(&str, &str, &[(usize, &str)]); 4] = [
         ("full-context", "shared.rs", &[(18, "target 18")]),
         ("context edit", "shared.rs", &[(5, "target 5")]),
-        ("patch changed", "shared.rs", &[(18, "target 18")]),
         ("full-context", "docs/qa/journeys.yaml", &[(18, "target 18")]),
         ("context edit", "docs/qa/journeys.yaml", &[(5, "target 5")]),
-        ("patch changed", "docs/qa/journeys.yaml", &[(18, "target 18")]),
     ];
     for (case, path, target_edits) in cases {
         let registry = path == "docs/qa/journeys.yaml";
@@ -3104,14 +3101,6 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         run_git(&["commit", "-am", "Sibling edits the shared file"], &writer);
         run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &writer);
         sync_target();
-        if case == "patch changed" {
-            std::fs::write(fixture.worker.join("delivery.txt"), "changed after approval\n").unwrap();
-            run_git(&["commit", "-am", "cas-e429: change the approved patch"], &fixture.worker);
-            run_git(&["push", "origin", &fixture.branch], &fixture.worker);
-            task = tasks.get(&task.id).unwrap();
-            task.deliverables.factory_branch_anchor = Some(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
-            tasks.update(&task).unwrap();
-        }
         let result = fixture.service.factory(Parameters(merge)).await;
         let text = match &result { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
         let latest = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
@@ -3121,39 +3110,20 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         let landed = std::process::Command::new("git").arg("-C").arg(&fixture.repo.root)
                 .args(["merge-base", "--is-ancestor", &tip, &published]).status().unwrap().success();
         if registry && case == "full-context" {
-            assert_eq!(latest.id, dispatch.id, "disjoint registry upkeep retains its dispatch: {text}");
+            // tree_on still permits disjoint registry upkeep with unchanged context.
+            assert_eq!(latest.id, dispatch.id, "{case}: {text}");
             assert_eq!(latest.repository, dispatch.repository);
+            assert_eq!(latest.state, cas::types::VerificationDispatchState::Resolved, "{text}");
+            assert_eq!(handoffs, 1, "{text}");
+            assert!(landed, "{text}");
+            assert_eq!(git_stdout(fixture.origin.path(), &["show", &format!("refs/heads/epic/rebound:{path}")]),
+                content(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end());
         } else {
             assert_ne!(latest.id, dispatch.id, "{case}: the drifted proof is not reused: {text}");
-        }
-        // cas-0208's cycle approval carries unchanged own patches, including
-        // sibling context edits; a changed source still requires fresh review.
-        if case == "patch changed" {
             assert_eq!(latest.state, cas::types::VerificationDispatchState::Pending, "{case}: {text}");
-            assert_eq!(handoffs, 2, "{case}: a changed delivered patch gets a fresh review: {text}");
+            assert_eq!(handoffs, 2, "{case}: a target move on a delivered path gets a fresh review: {text}");
             assert!(!landed, "{case}: nothing publishes before that review: {text}");
-            continue;
         }
-        let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &latest.id).unwrap().unwrap();
-        assert_eq!(latest.state, cas::types::VerificationDispatchState::Resolved, "{case}: {text}");
-        assert_eq!(verdict.status, cas::types::VerificationStatus::Approved);
-
-        assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
-        // c9e368c6d6 keeps the original dispatch for disjoint registry upkeep;
-        // d52358b7ed requires a task audit only when approval is rebound.
-        if latest.id != dispatch.id {
-            assert!(tasks.get(&task.id).unwrap().notes.contains(&latest.id),
-                "{case}: {path}: the carry-forward is audited on the task");
-        }
-        assert!(landed, "{case}: the rebound approval publishes: {text}");
-        assert_eq!(git_stdout(fixture.origin.path(), &["show", &format!("refs/heads/epic/rebound:{path}")]),
-            content(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");
-        // Close consumes the carried approval through its landed mapping.
-        let closed = fixture.service.task(Parameters(task_req(serde_json::json!({
-            "action": "close", "id": task.id, "reason": "rebound approval landed",
-        })))).await;
-        let closed = match &closed { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
-        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{case}: {closed}");
     }
 }
 

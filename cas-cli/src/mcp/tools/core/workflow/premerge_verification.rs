@@ -268,35 +268,6 @@ fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>
     Ok(Some(key.to_string()))
 }
 
-/// Outputs scripts/regenerate-generated-artifacts.sh commits after a merge.
-fn is_regenerated_output(path: &str) -> bool {
-    path.starts_with("hub-web/dist/")
-        || matches!(
-            path,
-            "cas-cli/src/builtins/reference-history.json"
-                | "cas-cli/src/builtins/codex/agents/task-verifier.toml"
-                | ".codex/agents/task-verifier.toml"
-        )
-}
-
-/// cas-0208: generated output a delivery's own patch-id leaves out. A target
-/// move regenerates these, so they never mean the reviewed change moved.
-const OWN_PATCH_EXCLUDED: &[&str] = &[
-    "hub-web/dist",
-    ".claude/CODEMAP.md",
-    "cas-cli/src/builtins/reference-history.json",
-    "cas-cli/src/builtins/codex/agents/task-verifier.toml",
-    ".codex/agents/task-verifier.toml",
-];
-
-/// cas-0208: patch-id of the delivery's own change (`source` over its merge
-/// base with `target`), whitespace-exact with three lines of context and
-/// without generated output. Unchanged target edits elsewhere, even beside a
-/// delivered hunk, leave it equal; any edit to the delivered change does not.
-fn own_patch_id(repo: &Path, source: &str, target: &str) -> Option<String> {
-    crate::qa_pass::change_patch_id_excluding(repo, source, target, OWN_PATCH_EXCLUDED)
-}
-
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     if args.first() == Some(&"merge-tree") {
         // Candidate preparation precedes the manager's merge preflight.
@@ -776,7 +747,7 @@ impl Candidate {
                 &["diff", "--name-only", "--no-renames", parent, &landed],
             )?
             .lines()
-            .all(is_regenerated_output);
+            .all(crate::qa_pass::is_generated_artifact);
             if !generated_only
                 || git(
                     &self.repository,
@@ -823,7 +794,7 @@ impl Candidate {
             &["diff", "--name-only", "--no-renames", &expected, landed],
         )?;
         if changed.lines().any(|path| {
-            !is_regenerated_output(path) || path.starts_with("hub-web/dist/")
+            !crate::qa_pass::is_generated_artifact(path) || path.starts_with("hub-web/dist/")
         }) {
             return Err(
                 "landed tree differs from the recomputed approved delivery; publication refused"
@@ -1312,11 +1283,6 @@ impl CasCore {
                     "transactional candidate drifted; request changes and submit a fresh receipt against the current target before another review",
                 ));
             }
-            if let Some(approval) =
-                self.rebind_unchanged_patch(task, repo, source, target, &digest, dispatch, &candidate)?
-            {
-                return Ok(Some(approval));
-            }
             inherited_supervisor_call = self.inherited_supervisor_call_for_target(
                 task,
                 repo,
@@ -1388,112 +1354,6 @@ impl CasCore {
             "task {}: merge held on verification dispatch {}. {}",
             task.id, dispatch.id, automatic::direct_verdict(&dispatch)
         )))
-    }
-
-    /// cas-d4b7, cas-0208: the target moved under an approved candidate, so
-    /// the reviewed tree no longer recomputes ("target changed reviewed
-    /// delivery files" in `tree_on`). When the plan context and the delivery's
-    /// own patch-id are unchanged and the new candidate merges cleanly, the
-    /// approval is rebound to the new candidate with a receipt and no verifier
-    /// runs. A conflict or any change to the delivered patch returns None and
-    /// the caller dispatches a fresh review.
-    #[allow(clippy::too_many_arguments)]
-    fn rebind_unchanged_patch(
-        &self,
-        task: &Task,
-        repo: &Path,
-        source: &str,
-        target: &str,
-        digest: &str,
-        dispatch: &VerificationDispatch,
-        prior: &Candidate,
-    ) -> Result<Option<Approval>, McpError> {
-        let Some(verdict) = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
-            .map_err(fail)?
-            .filter(|verdict| verdict.status == VerificationStatus::Approved)
-        else {
-            return Ok(None);
-        };
-        let repository = repo.canonicalize().map_err(|error| {
-            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
-        })?;
-        if dispatch.state != cas_types::VerificationDispatchState::Resolved
-            || matches!(dispatch.receipt().map_err(fail)?, cas_types::VerificationReceipt::TransactionReceipt { .. })
-            || prior.context_digest != digest
-            || prior.repository != repository
-            || prior.source_branch != source
-            || prior.target_branch != target
-            || git(repo, &["rev-parse", source]).ok().as_deref()
-                != task.deliverables.factory_branch_anchor.as_deref()
-            || review_target(repo, target).ok().as_deref() == Some(prior.target_sha.as_str())
-        {
-            return Ok(None);
-        }
-        let Some(approved) = own_patch_id(repo, &prior.source_sha, &prior.target_sha) else {
-            return Ok(None);
-        };
-        // The fresh-review path enforces this gate; a rebind may not skip it.
-        if crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::ledger_preflight(
-            &self.cas_root,
-            task,
-            true,
-        )
-        .is_err()
-        {
-            return Ok(None);
-        }
-        // cas-d4b7 requires a proven patch match. A conflicting/unbuildable
-        // candidate must fall through so the caller invalidates the old approval
-        // before the fresh-review path reports the candidate error.
-        let Ok(candidate) =
-            self.build_verification_candidate(task, repo, source, target, digest.to_string(), None)
-        else {
-            return Ok(None);
-        };
-        if candidate.validate(&self.cas_root, task).is_err() {
-            return Ok(None);
-        }
-        if own_patch_id(repo, &candidate.source_sha, &candidate.target_sha).as_deref()
-            != Some(approved.as_str())
-        {
-            return Ok(None);
-        }
-        let receipt = format!(
-            "VERDICT REBIND: approved verdict {} (dispatch {}) carried to candidate {} with no verifier; source {} -> {}, target {} -> {}, clean merge, delivery's own patch-id {approved} (generated output excluded) identical.",
-            verdict.id,
-            dispatch.id,
-            candidate.proof.head_commit,
-            prior.source_sha,
-            candidate.source_sha,
-            prior.target_sha,
-            candidate.target_sha,
-        );
-        let requester = self.get_agent_id()?;
-        let owner = self.verification_dispatch_owner(&requester)?;
-        let (rebound, approval) = cas_store::rebind_approved_verification_dispatch(
-            &self.cas_root,
-            &dispatch.id,
-            &verdict.id,
-            &requester,
-            &owner,
-            &cas_types::VerificationProofBoundary { receipt_id: dispatch.receipt_id.clone(),
-                ..cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()) },
-            &receipt,
-            &candidate.source_sha,
-        )
-        .map_err(fail)?;
-        let store = self.open_task_store()?;
-        let mut current = store.get(&task.id).map_err(fail)?;
-        let expected = current.clone();
-        current.notes.push_str(&format!("\n\n{receipt} Rebound dispatch {}.", rebound.id));
-        if let Err(error) = store.update_if_current(&current, &expected) {
-            tracing::warn!(task_id = %task.id, %error, "cas-d4b7: verdict rebind receipt note not written");
-        }
-        Ok(Some(Approval {
-            candidate,
-            dispatch_id: rebound.id,
-            verdict_id: approval.id,
-        }))
     }
 
     pub(crate) fn build_completion_candidate(

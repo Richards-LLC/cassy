@@ -3310,12 +3310,11 @@ impl CasCore {
                 }
                 Acquire::PeerHolds(hold) => {
                     peer_notes.push_str(&format!(
-                        "\n\n⚠️  PEER CLAIM OVERRIDE — {} holds the claim on {} until {}; started anyway (force=true). Tell them, so you don't both work it: {}coordination action=message target={} summary=\"took over {}\" message=\"...\"",
+                        "\n\n⚠️  PEER CLAIM OVERRIDE — {} holds the claim on {} until {}; started anyway (force=true). Tell your supervisor to coordinate the handoff: {}coordination action=message target=supervisor summary=\"took over {}\" message=\"...\"",
                         hold.describe(),
                         req.id,
                         hold.until(),
                         crate::mcp::tools::core::guidance::caller_prefix(),
-                        hold.name(),
                         req.id,
                     ));
                 }

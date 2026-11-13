@@ -14,6 +14,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod stability;
+
 #[cfg(unix)]
 static WORKER_WAIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
 #[cfg(unix)]
@@ -125,6 +127,8 @@ struct TestReceipt {
     filter: String,
     harness: Option<String>,
     count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stability: Option<stability::Proof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_log: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -496,6 +500,7 @@ pub(crate) fn record_supervisor_test(
             filter: test.filter,
             harness: test.harness,
             count,
+            stability: None,
             selected_log: Some(provenance.log_path.clone()),
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
@@ -1522,6 +1527,7 @@ pub(crate) fn record_passing_test_for_tests(
             filter: filter.to_string(),
             harness: None,
             count: 1,
+            stability: None,
             selected_log: None,
             host_path_opt_out: None,
             supervisor_recorded: None,
@@ -2329,6 +2335,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 filter: test.filter,
                 harness: test.harness,
                 count,
+                stability: None,
                 selected_log,
                 host_path_opt_out,
                 supervisor_recorded: None,

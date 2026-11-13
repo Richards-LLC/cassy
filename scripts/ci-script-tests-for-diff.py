@@ -252,16 +252,7 @@ def main() -> int:
             print(f"ci-script-tests-changed: would run {command}")
             continue
         started = time.monotonic()
-        recovering = not os.environ.get('CAS_QUEUE_STEP') and (
-            os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or
-            (os.environ.get('GITHUB_EVENT_NAME') == 'push' and
-             os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-')))
-        if recovering:
-            returncode, tail = run_streaming([sys.executable, str(repo/'scripts/ci-queue-flakes.py'),
-                'step', '--repo', str(repo), '--id', test, '--',
-                'bash', '-e', '-o', 'pipefail', '-c', command], repo, env)
-        else:
-            returncode, tail = run_streaming(command, repo, env, shell=True)
+        returncode, tail = run_streaming(command, repo, env, shell=True)
         took = time.monotonic() - started
         status = "PASS" if returncode == 0 else f"FAIL (exit {returncode})"
         print(f"ci-script-tests-changed: {status} {command} ({took:.1f}s)", flush=True)

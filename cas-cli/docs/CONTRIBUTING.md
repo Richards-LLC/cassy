@@ -3152,7 +3152,8 @@ selector's failure history. Release-train pushes and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.
-Both share quarantine plus one rerun. The schema-2 `train-full-gate` artifact
+Both preserve the first failure, publish P0 repair issues and run without retries
+or test exclusions. The schema-2 `train-full-gate` artifact
 binds every required job to the source tree and main baseline; train cuts refuse
 legacy or partial receipts. The queue can reuse this complete proof after only
 release-plumbing changes with main unchanged, then runs compile/source-built
@@ -3949,44 +3950,29 @@ Standing operator policy: factory/* pushes and epic-targeted PRs run
 import/dependency-selected tests in Scoped Validation. Protected-default PRs run
 the required Fast Validation admission lane and an advisory macOS notice. The release
 merge queue runs the complete workspace suite on its synthetic tree once. Only
-at this queue stage, `scripts/ci-queue-flakes.py run` reruns the exact failed Rust
-tests or failed journey specs once in the same job on the same tracked tree.
-The Rust recovery attempt has a 29-second execution deadline and bounded child
-cleanup, keeping its added time below 30 seconds; passing suites add no rerun.
-A second failure still ejects the queue entry. Fail-then-pass is **FLAKY**, and
-both attempts' reports, output and journey traces remain in the queue artifacts.
-The required Fast Validation fan-in refuses green until `reconcile` has durably
-filed or updated a `priority:p1`, `flaky` issue in the configured Cassy issue
-route (`Richards-LLC/cassy` here), with its test identity, run link and original
-failure. Impact recall still records the original failing status and log.
+at this queue stage, `scripts/ci-queue-flakes.py run` executes each native shard
+once with retries disabled. Every nonzero exit fails the shard, including cleanup
+errors after a passing test summary. The queue never excludes tests based on
+issue labels. Native reports and original output remain in the shard artifacts.
 
-Open issues labeled `flaky-quarantine` are the quarantine source of truth. Each
-has one `<!-- cas-queue-flake: JSON -->` test identity/observation line. Shards
-read them with an issues-read `GITHUB_TOKEN`, exclude only those identities and
-print the issue links in the job summary. State/label-filtered GitHub lists can
-lag acknowledged updates, so discovery enumerates unfiltered issue history and
-reads each flake candidate directly before deciding its open state and labels.
-Reconciliation adds that label to native test identities after
-two distinct GitHub run IDs; duplicate shards, cached observations and run attempts count once.
-Individual script and web test commands retry once through the same publication
-fan-in. A recovered command receives the label immediately, but remains covered
-on later trees: quarantining a command never excludes its whole suite.
-Only recognized cleanup diagnostics after a positive all-pass summary become
-warnings; mixed pass/fail summaries and later assertions retain failure.
-The fix PR uses `Fixes #N`: closing the issue removes the exclusion from the next
-queue run. No bot PR, new credential or evaluated-tree edit is needed.
+The hosted `queue-flake-publication` fan-in reads those artifacts and creates or
+updates one `priority:p0`, `flaky` repair issue per failed native test identity in
+the configured route (`Richards-LLC/cassy` here). The issue names the test, links
+the run and failure output, and carries a fix-or-delete deadline on the next
+working day (Monday through Friday, UTC date). Later observations preserve the
+original deadline. Normal issue intake creates and staffs the repair task ahead
+of feature work. If its owner deletes the test, the task must record the behaviour
+it covered. CI never deletes source or changes the evaluated tree.
 
-The hosted publication fan-in alone has issues-write and contents-write. An
-atomic `heads/cas-queue-flake-publication-lock` ref serializes issue creation
-and updates across runs without changing the evaluated tree. Concurrent writers
-fail closed and retain their receipts. If a cancelled publisher leaves this ref,
-confirm the owning run (named in its commit) has finished before deleting the
-ref and reconciling the retained receipts. Transport, malformed quarantine and
-missing-shard evidence failures also refuse green. Workers, lane CI, schedules,
-main/tag pushes and ordinary manual checks keep zero retries and ignore queue
-quarantine. The explicit `test-ci-queue-flakes.py --live-acceptance <dir>` mode is
-only a throwaway-branch workflow proof using synthetic native runner fixtures;
-normal script tests use local HTTP fixtures and never create live issues.
+Only the hosted publisher has issues-write and contents-write. Its atomic
+`heads/cas-queue-flake-publication-lock` ref serializes issue updates across runs.
+After a lost create response it reads the acknowledged issue instead of creating
+a duplicate. A cancelled publisher can leave this lock; confirm the owning run
+(named in its commit) has finished before deleting the ref and reconciling its
+retained receipts. Successful exact-tree job reuse carries no new failure
+observations. Legacy job receipts containing recovered failures are not reused.
+Each native shard's first result still independently gates Fast Validation.
+Local script tests exercise runner and HTTP fixtures without creating live issues.
 
 When the queue's successful tree is pushed unchanged to main, the main-push Fast Validation lane
 reuses that receipt and names the validating run. `macOS Check` is advisory and

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub(crate) mod stability;
+pub(crate) mod javascript;
 
 #[cfg(unix)]
 static WORKER_WAIT_SIGNAL: AtomicI32 = AtomicI32::new(0);

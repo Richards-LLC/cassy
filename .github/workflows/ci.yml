@@ -56,12 +56,11 @@ on:
   workflow_dispatch:
 
 # cas-12ab: a newer push to the same factory/* branch cancels the run it
-# supersedes (one worker pushed 6 times in 31 minutes: 12 workflow runs). Every
-# release-train ref keeps one running and the newest pending run (cas-43ab).
-# Other events keep a run-id group, so main, ordinary epics, tags and the merge
-# queue remain independent.
+# supersedes (one worker pushed 6 times in 31 minutes: 12 workflow runs). Other
+# events keep a run-id group, so main, ordinary epics, tags, the merge queue and
+# the one train run dispatched at a release freeze (cas-0fc56) stay independent.
 concurrency:
-  group: ${{ (startsWith(github.ref, 'refs/heads/factory/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && format('ci-branch-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  group: ${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-branch-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/factory/') }}
 
 env:
@@ -261,8 +260,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs: ci-diff
     runs-on: ubuntu-latest
     outputs:
@@ -295,8 +293,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs: ci-diff
     runs-on: ubuntu-latest
     outputs:
@@ -327,7 +324,7 @@ jobs:
         run: scripts/check-ci-merge-queue-validation.sh
       - name: Publish adopted train full-set identity
         if: >-
-          github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+          github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
           && steps.tree-dedupe.outputs.reuse-source == 'full-gate'
         uses: actions/upload-artifact@v4
         with:
@@ -784,8 +781,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
       && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
       || (github.event_name == 'merge_group'
       && github.repository == 'Richards-LLC/cassy'
@@ -1028,8 +1024,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
@@ -1100,8 +1095,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
@@ -1157,8 +1151,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     defaults:
@@ -1263,8 +1256,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs: [ci-diff, fast-validation-main-push-dedupe]
     permissions:
       contents: read
@@ -1355,8 +1347,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
       && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
       || (github.event_name == 'merge_group'
       && github.repository == 'Richards-LLC/cassy'
@@ -1491,7 +1482,7 @@ jobs:
           python3 scripts/ci-queue-flakes.py step --id suite-archive -- cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst 2>&1 | tee target/train-suite-build/build.log
 
       - name: Preserve complete train suite build log
-        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')) }}"
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')) }}"
         uses: actions/upload-artifact@v4
         with:
           name: train-suite-build
@@ -1610,8 +1601,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs: [ci-diff, fast-validation-suite-build, fast-validation-main-push-dedupe]
     strategy:
       fail-fast: false
@@ -1694,7 +1684,7 @@ jobs:
             --issues-repo Richards-LLC/cassy --out "target/queue-flakes/rust-$SHARD"
           suite_status=$?
           set -e
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/epic/release-train-* ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/epic/release-train-* ]]; then
             python3 scripts/train-ci.py shard --status "$suite_status" --shard "$SHARD/3" \
               --log "$VERIFIED_TEST_LOG" --junit target/nextest/queue/junit.xml \
               --out "target/train-suite/$SHARD"
@@ -1712,7 +1702,7 @@ jobs:
           exit "$suite_status"
 
       - name: Preserve complete train shard evidence
-        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
         uses: actions/upload-artifact@v4
         with:
           name: train-suite-shard-${{ matrix.shard }}
@@ -1744,7 +1734,7 @@ jobs:
           python3 scripts/ci-queue-flakes.py step --id real-store-guard -- make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'test(mcp_protocol_test::)'"
 
       - name: Publish queue rust recovery receipts
-        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))) }}"
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')))) }}"
         uses: actions/upload-artifact@v4
         with:
           name: queue-flakes-rust-${{ matrix.shard }}
@@ -1771,7 +1761,7 @@ jobs:
   queue-flake-publication:
     name: Queue flake publication
     if: >-
-      always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
+      always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
       && needs.ci-diff.outputs.class != 'docs-only'
     needs: [ci-diff, fast-validation-main-push-dedupe, fast-validation-preflight, fast-validation-ci-tiers, fast-validation-slack-bridge, fast-validation-web, fast-validation-suite-build, fast-validation-suite-shards, fast-validation-docs, fast-validation-journeys]
     runs-on: ubuntu-latest
@@ -1828,22 +1818,21 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs: [ci-diff, fast-validation-suite-build, fast-validation-suite-shards, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
-        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
         with:
           pattern: train-suite-*
           path: target/train-suite-evidence
       - name: Record train full-suite result
-        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
           BUILD_RESULT: ${{ needs.fast-validation-suite-build.result }}
@@ -1852,7 +1841,7 @@ jobs:
           python3 scripts/train-ci.py collect --evidence target/train-suite-evidence \
             --build-status "$BUILD_RESULT" --shards-status "$SHARDS_RESULT"
       - name: Publish train receipt and complete logs
-        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
         uses: actions/upload-artifact@v4
         with:
           name: train-rust-suite
@@ -1880,8 +1869,7 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
       && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
       || (github.event_name == 'merge_group'
       && github.repository == 'Richards-LLC/cassy'
@@ -2014,8 +2002,7 @@ jobs:
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+      || startsWith(github.ref, 'refs/tags/'))))
     needs:
       - ci-diff
       - scoped-validation-fast
@@ -2067,7 +2054,7 @@ jobs:
           echo "Fast Validation is deferred to the canonical merge-queue tree."
 
       - name: Require durable queue flake publication
-        if: github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-'))
+        if: github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))
         env:
           PUBLICATION: ${{ needs.queue-flake-publication.result }}
         run: |
@@ -2118,7 +2105,7 @@ jobs:
       - name: Report the adopted train full-set receipt
         if: >-
           (github.event_name == 'merge_group'
-          || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
+          || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
           && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
           && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
         env:
@@ -2204,7 +2191,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Publish tree-bound full gate status
-        if: inputs.full-set && github.event_name == 'push' && success()
+        if: inputs.full-set && github.event_name == 'workflow_dispatch' && success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2219,7 +2206,7 @@ jobs:
   clippy:
     name: Clippy (advisory, compiles only — no test suite)
     if: >-
-      !startsWith(github.ref, 'refs/heads/precheck/') && (
+      !startsWith(github.ref, 'refs/heads/precheck/') && !inputs.full-set && (
       needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
@@ -2275,7 +2262,7 @@ jobs:
   macos-check:
     name: macOS Check
     if: >-
-      always() && needs.ci-diff.outputs.class != 'docs-only'
+      always() && !inputs.full-set && needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'pull_request'
       || (github.event_name == 'push' && github.ref == 'refs/heads/main')
       || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true')
@@ -2458,7 +2445,7 @@ jobs:
   test-compile-guard:
     name: Test Compile Guard (compile-only, executes nothing)
     if: >-
-      !startsWith(github.ref, 'refs/heads/precheck/') && (
+      !startsWith(github.ref, 'refs/heads/precheck/') && !inputs.full-set && (
       needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
@@ -2530,7 +2517,7 @@ jobs:
   panic-isolation-release:
     name: Panic Isolation — release profile (named subset, not the suite)
     if: >-
-      !startsWith(github.ref, 'refs/heads/precheck/') && (
+      !startsWith(github.ref, 'refs/heads/precheck/') && !inputs.full-set && (
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       )
     concurrency:
@@ -2569,7 +2556,7 @@ jobs:
   panic-isolation-release-fast:
     name: Panic Isolation — release-fast profile (named subset, not the suite)
     if: >-
-      !startsWith(github.ref, 'refs/heads/precheck/') && (
+      !startsWith(github.ref, 'refs/heads/precheck/') && !inputs.full-set && (
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       )
     concurrency:
@@ -2616,7 +2603,7 @@ jobs:
   build-benchmark:
     name: Build Benchmark & Timings (measurement only, no test suite)
     if: >-
-      !startsWith(github.ref, 'refs/heads/precheck/') && (
+      !startsWith(github.ref, 'refs/heads/precheck/') && !inputs.full-set && (
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       )
     concurrency:

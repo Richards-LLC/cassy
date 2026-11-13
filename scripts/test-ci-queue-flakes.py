@@ -173,12 +173,12 @@ class QueueRecovery(unittest.TestCase):
 
     def test_train_uses_queue_recovery_and_publication(self):
         self.env['GITHUB_REF'] = 'refs/heads/epic/release-train-fixture'
-        self.env['GITHUB_EVENT_NAME'] = 'push'
+        self.env['GITHUB_EVENT_NAME'] = 'workflow_dispatch'
         for engine in ('rust', 'playwright'):
             with self.subTest(engine=engine):
                 (self.repo/'attempts.jsonl').unlink(missing_ok=True)
                 shutil.rmtree(self.repo/'receipts', ignore_errors=True)
-                result = self.run_queue(engine, event='push')
+                result = self.run_queue(engine, event='workflow_dispatch')
                 self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
                 self.assertEqual(len(self.calls()), 2)
                 receipt = json.loads((self.repo/'receipts/receipt.json').read_text())

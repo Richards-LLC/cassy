@@ -274,7 +274,7 @@ def step(args):
     if not command:
         raise ValueError('step requires a test command after --')
     recovering = (os.environ.get('GITHUB_EVENT_NAME')=='merge_group' or
-        (os.environ.get('GITHUB_EVENT_NAME')=='push' and os.environ.get('GITHUB_REF','').startswith('refs/heads/epic/release-train-')))
+        (os.environ.get('GITHUB_EVENT_NAME')=='workflow_dispatch' and os.environ.get('GITHUB_REF','').startswith('refs/heads/epic/release-train-')))
     if not recovering:
         return subprocess.run(command, cwd=Path.cwd()).returncode
     head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
@@ -315,7 +315,7 @@ def run(args):
     repo = args.repo.resolve()
     out = args.out.resolve()
     queued = os.environ.get('GITHUB_EVENT_NAME') == 'merge_group'
-    train = (os.environ.get('GITHUB_EVENT_NAME') == 'push'
+    train = (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
              and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))
     head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
     if subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
@@ -418,7 +418,7 @@ def run(args):
 
 
 def reconcile(args):
-    if not (os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or (os.environ.get('GITHUB_EVENT_NAME') == 'push' and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))):
+    if not (os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))):
         raise ValueError('flake publication requires a train or merge-queue run')
     receipts = sorted(args.receipts.rglob('receipt.json'))
     if not receipts:

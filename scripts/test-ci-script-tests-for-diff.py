@@ -178,7 +178,7 @@ class Selection(unittest.TestCase):
             (repo / 'scripts/test-probe.py').write_text(
                 "import os, pathlib\nassert not {'FULL_SET', 'BASE_SHA'} & set(os.environ), os.environ\n"
                 "pathlib.Path('scripts/probe-ran').touch()\n")
-            env = dict(os.environ, GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/epic/release-train-x',
+            env = dict(os.environ, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/epic/release-train-x',
                        CAS_QUEUE_STEP='scripts/test-fast-release-rows.py', FULL_SET='true', BASE_SHA='abc')
             result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all',
                                      '--only', 'scripts/test-probe.py'],

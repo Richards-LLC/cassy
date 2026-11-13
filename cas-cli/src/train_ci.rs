@@ -239,12 +239,50 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
                 String::from_utf8_lossy(&output.stderr)
             );
             let mut state: Value = serde_json::from_slice(&output.stdout)?;
+            if let Err(error) = dispatch_frozen(root, &epic, &repo, branch, &head, &state) {
+                tracing::warn!(train=%epic.id, %error, "train suite dispatch deferred");
+            }
             scan_result(root, &epic, branch, previous.as_ref(), &mut state)
         })();
         if let Err(error) = result {
             tracing::warn!(train=%epic.id, %error, "train CI scan deferred");
         }
     }
+    Ok(())
+}
+
+/// cas-0fc56: the train suite runs once per frozen tip, never per merge. Lane
+/// CI proved each delivery; a frozen train accepts no merge that could
+/// supersede the run. A repair or plumbing commit on a frozen train is a new
+/// tip and gets its own single run.
+fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &str, head: &str, state: &Value) -> Result<()> {
+    if state["outcome"] != "PENDING"
+        || crate::mcp::tools::core::workflow::release_freeze::active(root, epic).is_none()
+    {
+        return Ok(());
+    }
+    let marker = directory(root, &epic.id)?.join("dispatched-head");
+    if std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == head) {
+        return Ok(());
+    }
+    let mut command = Command::new(crate::github_repo::gh_binary());
+    command
+        .args(["workflow", "run", "full-validation.yml", "--ref", branch])
+        .current_dir(repo);
+    let timeout = Duration::from_secs(30);
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(timeout),
+        timeout,
+    )
+    .map_err(|error| anyhow::anyhow!("train suite dispatch failed: {error:?}"))?;
+    ensure!(
+        output.status.success(),
+        "train suite dispatch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::write(&marker, head)?;
+    tracing::info!(train=%epic.id, %head, "train suite dispatched at frozen tip");
     Ok(())
 }
 
@@ -447,6 +485,87 @@ print(json.dumps(state))\n");
         assert_eq!(wakes(), 1, "the green frozen tip wakes its supervisor");
         observe(&root, "session").unwrap();
         assert_eq!(wakes(), 1, "once per tip");
+    }
+
+    /// cas-0fc56, Nov 12: each train merge started a full suite and the next
+    /// merge cancelled it; the first green came about 9 h later. Merges into
+    /// an unfrozen train now start nothing, the freeze starts exactly one run
+    /// at its tip, and that run's red is the train_ci_red notice.
+    #[cfg(unix)]
+    #[test]
+    fn train_suite_runs_once_at_freeze_not_per_merge() {
+        use cas_types::{Agent, AgentRole, TaskType};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let status = Command::new("git").current_dir(repo).args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.test")
+                .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.test")
+                .status().unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        // The observer contract: PENDING until the run reports; FAIL once red.
+        std::fs::write(repo.join("scripts/train-ci.py"), "import argparse, json, os, pathlib\n\
+p = argparse.ArgumentParser(); p.add_argument('cmd')\n\
+for flag in ('--repo', '--branch', '--head', '--out'): p.add_argument(flag)\n\
+a = p.parse_args()\n\
+state = {'branch': a.branch, 'head': a.head, 'outcome': 'PENDING'}\n\
+if pathlib.Path(os.environ['TRAIN_CI_VERDICT']).exists():\n\
+    state.update(outcome='FAIL', run_id='31', run_attempt=1, red_since=a.head, red_head=a.head,\n\
+                 merge_range=[], failures=['suite'])\n\
+pathlib.Path(a.out, 'state.json').write_text(json.dumps(state))\n\
+print(json.dumps(state))\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "train CI observer"]);
+        let lane = "epic/release-train-vnext-cas-train";
+        git(&["switch", "-q", "-c", lane]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        let mut owner = Agent::new_with_role("sup".into(), "sup".into(), AgentRole::Supervisor);
+        owner.factory_session = Some("session".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let mut epic = cas_types::Task::new("cas-train".into(), "Release train".into());
+        epic.task_type = TaskType::Epic;
+        epic.labels.push(crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_LABEL.into());
+        epic.branch = Some(lane.into());
+        epic.epic_verification_owner = Some(owner.id.clone());
+        crate::store::open_task_store(&root).unwrap().add(&epic).unwrap();
+        let fixtures = tempfile::tempdir().unwrap();
+        let (gh, calls, verdict) =
+            (fixtures.path().join("gh"), fixtures.path().join("gh-calls"), fixtures.path().join("verdict"));
+        crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", calls.display()));
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        env.set("TRAIN_CI_VERDICT", &verdict);
+        let dispatches = || std::fs::read_to_string(&calls).unwrap_or_default().lines().count();
+
+        for merge in ["merge one", "merge two", "merge three"] {
+            git(&["commit", "-q", "--allow-empty", "-m", merge]);
+            observe(&root, "session").unwrap();
+        }
+        assert_eq!(dispatches(), 0, "merges into an unfrozen train start no train suite");
+
+        crate::mcp::tools::core::workflow::release_freeze::freeze(&root, "cas-train", "sup", Some("cut")).unwrap();
+        observe(&root, "session").unwrap();
+        observe(&root, "session").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&calls).unwrap(),
+            format!("workflow run full-validation.yml --ref {lane}\n"),
+            "the freeze starts exactly one run"
+        );
+        let train = crate::store::open_task_store(&root).unwrap().get("cas-train").unwrap();
+        let frozen = crate::mcp::tools::core::workflow::release_freeze::freeze_of(&train).unwrap();
+        assert_eq!(std::fs::read_to_string(directory(&root, "cas-train").unwrap().join("dispatched-head")).unwrap(), frozen.tip);
+
+        std::fs::write(&verdict, "FAIL").unwrap();
+        observe(&root, "session").unwrap();
+        let red = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
+            .into_iter().filter(|row| row.prompt.contains("train_ci_red")).count();
+        assert_eq!(red, 1, "red at freeze raises train_ci_red");
+        assert_eq!(dispatches(), 1);
     }
 
     #[test]

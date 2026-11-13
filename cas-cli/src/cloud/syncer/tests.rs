@@ -5720,3 +5720,178 @@ async fn personal_pull_of_a_team_owned_project_stages_nothing_cas_abad() {
     );
     assert_eq!(task_store.list_dependencies(None).unwrap().len(), 1, "local edges are untouched");
 }
+
+/// cas-a836 (Nov 12, 2:33 PM ET): soundwave's supervisor ran request_changes
+/// on cas-98d2 and cas-e50f, deliveries parked on prowl. request_changes
+/// commits through cas-store directly, so nothing was queued for Cloud and
+/// prowl kept both tasks AwaitingMerge until a supervisor mirrored the verdict.
+/// Reopen and standalone verification verdicts share the direct-write path;
+/// no later note or request_changes may mask a verdict that was never queued.
+#[tokio::test]
+async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
+    use rmcp::handler::server::wrapper::Parameters;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    let row = |id: &str, status: TaskStatus| {
+        let mut task = Task::new(id.into(), "Peer-owned delivery".into());
+        task.origin_project = Some("review-project".into());
+        task.status = status;
+        task.assignee = Some("owner-worker".into());
+        task.updated_at -= chrono::Duration::hours(1);
+        task
+    };
+    let (parked, closed) = (row("cas-a836-parked", TaskStatus::AwaitingMerge), row("cas-a836-closed", TaskStatus::Closed));
+    let verdict_cases = [
+        ("cas-a836-approved-delivery", "approved", true, TaskStatus::AwaitingMerge),
+        ("cas-a836-rejected-delivery", "rejected", true, TaskStatus::Blocked),
+        ("cas-a836-approved-task", "approved", false, TaskStatus::InProgress),
+        ("cas-a836-rejected-task", "rejected", false, TaskStatus::InProgress),
+    ];
+    let machine = |logged_in: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"review-project\"\n").unwrap();
+        if logged_in {
+            CloudConfig {
+                endpoint: server.uri(), token: Some("test-token".into()),
+                team_id: Some("review-team".into()), ..Default::default()
+            }.save_to_cas_dir(&root).unwrap();
+        }
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        tasks.add(&parked).unwrap();
+        tasks.add(&closed).unwrap();
+        for (id, _, delivery, _) in verdict_cases {
+            let mut task = row(id, TaskStatus::InProgress);
+            task.pending_verification = true;
+            if !delivery {
+                task.task_type = cas_types::TaskType::Epic;
+            }
+            tasks.add(&task).unwrap();
+        }
+        let mut invalid_proof = row("cas-a836-invalid-proof", TaskStatus::InProgress);
+        invalid_proof.pending_verification = true;
+        tasks.add(&invalid_proof).unwrap();
+        (dir, root)
+    };
+    let (_reviewer_dir, reviewer) = machine(true);
+    let (_owner_dir, owner) = machine(false);
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let core = crate::mcp::CasCore::with_daemon(reviewer.clone(), None, None);
+    core.set_agent_id_for_testing("peer-supervisor".into());
+    core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+        "peer-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+    )).unwrap();
+    for (id, status, delivery, expected) in verdict_cases {
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let dispatch = if delivery {
+            let input = cas_types::WorkerCompletionReceiptInput {
+                task_id: id.into(), worker_agent_id: "owner-worker".into(),
+                repo_selector: "remote:github.com/org/review".into(),
+                source_branch: "factory/owner-worker".into(), commit_sha: "a".repeat(40),
+                merge_base_sha: "b".repeat(40), target_branch: "epic/review".into(),
+                target_sha: "c".repeat(40), proof_reference: "proof:review".into(),
+                scope_summary: "review".into(), artifact_path: None,
+            };
+            let receipt = cas_store::build_worker_completion_receipt(&input, "owner-worker", chrono::Utc::now());
+            cas_store::create_worker_delivery_with_dispatch(
+                &reviewer, &receipt, cas_types::WorkerDeliveryState::AwaitingVerification,
+                "owner-worker", "peer-supervisor", deadline,
+            ).unwrap().1
+        } else {
+            cas_store::create_verification_dispatch_bound(
+                &reviewer, id, "owner-worker", "peer-supervisor",
+                &cas_types::VerificationProofBoundary::task(), deadline, false,
+            ).unwrap()
+        };
+        let result = core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
+            "task_id": id, "dispatch_id": dispatch.id, "status": status,
+            "verification_type": if delivery { "task" } else { "epic" },
+            "summary": "Standalone peer verdict",
+        })).unwrap())).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{id}: {result:?}");
+        let local = crate::store::open_task_store_local(&reviewer).unwrap().get(id).unwrap();
+        assert_eq!(local.status, expected, "{id}");
+        assert!(!local.pending_verification, "{id}");
+        let queue = SyncQueue::open(&reviewer).unwrap();
+        let queued = queue.pending_for_team("review-team", 20, 5).unwrap();
+        assert!(queued.iter().any(|item| item.entity_id == id), "verdict not queued: {id}");
+    }
+    // A rejected stale proof takes an early return before the verdict
+    // transaction. Its direct pending-flag clear must also reach the owner.
+    let missing = reviewer.join("unavailable-proof-root").to_string_lossy().into_owned();
+    let invalid_dispatch = cas_store::create_verification_dispatch_bound(
+        &reviewer, "cas-a836-invalid-proof", "owner-worker", "peer-supervisor",
+        &cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+            peer_premerge: None, repository_root: missing.clone(), worktree_root: missing,
+            head_commit: "d".repeat(40), state_digest: "e".repeat(64),
+            target_branch: None, anchor_commits: Vec::new(),
+        }), chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    assert!(core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
+        "task_id": "cas-a836-invalid-proof", "dispatch_id": invalid_dispatch.id,
+        "status": "approved", "summary": "Proof is no longer available",
+    })).unwrap())).await.is_err());
+    assert_eq!(cas_store::get_verification_dispatch(&reviewer, &invalid_dispatch.id).unwrap().state,
+        cas_types::VerificationDispatchState::Invalidated);
+    core.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+        id: parked.id.clone(),
+        reason: "Verifier rejected the delivery; add the missing guard.".into(),
+    })).await.unwrap();
+    // Check before appending a note: append_note already syncs, which would
+    // otherwise hide a request_changes write that never queued its own row.
+    let verdict_queue = SyncQueue::open(&reviewer).unwrap();
+    let verdict_rows = verdict_queue.pending_for_team("review-team", 10, 5).unwrap();
+    assert!(verdict_rows.iter().any(|item| item.entity_id == parked.id));
+    let discovery = "Peer verifier found the guard missing on the retry path.";
+    core.cas_task_notes(Parameters(crate::mcp::tools::TaskNotesRequest {
+        id: parked.id.clone(), note_type: "discovery".into(),
+        note: discovery.into(),
+        supervisor_override: None, reason: None,
+    })).await.unwrap();
+    core.cas_task_reopen(Parameters(crate::mcp::tools::TaskReopenRequest {
+        id: closed.id.clone(), reason: Some("Regression found after release.".into()),
+    })).await.unwrap();
+
+    let queued = SyncQueue::open(&reviewer).unwrap().pending_for_team("review-team", 10, 5).unwrap();
+    let rows: Vec<serde_json::Value> = queued.iter()
+        .filter_map(|item| item.payload.as_deref())
+        .map(|payload| serde_json::from_str(payload).unwrap())
+        .collect();
+    Mock::given(method("GET")).and(path("/api/teams/review-team/sync/pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": rows, "pulled_at": "2026-11-12T19:34:00Z",
+            "team_id": "review-team", "status": "ok"
+        }))).mount(&server).await;
+    let queue = Arc::new(SyncQueue::open(&owner).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
+        endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default(), "review-project".into(), &owner);
+    let tasks = crate::store::open_task_store_local(&owner).unwrap();
+    let result = syncer.pull_team(
+        "review-team", "review-project",
+        &*crate::store::open_store_local(&owner).unwrap(), &*tasks,
+        &*crate::store::open_rule_store_local(&owner).unwrap(),
+        &*crate::store::open_skill_store_local(&owner).unwrap(),
+    ).unwrap();
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let returned = tasks.get(&parked.id).unwrap();
+    assert_eq!(returned.status, TaskStatus::Open, "request_changes never reached the owner");
+    assert!(returned.notes.contains(discovery), "discovery note lost");
+    assert_eq!(returned.assignee, parked.assignee);
+    assert_eq!(tasks.get(&closed.id).unwrap().status, TaskStatus::Open, "reopen never reached the owner");
+    for (id, _, _, expected) in verdict_cases {
+        let received = tasks.get(id).unwrap();
+        assert_eq!(received.status, expected, "{id}");
+        assert!(!received.pending_verification, "{id}");
+        assert_eq!(received.assignee.as_deref(), Some("owner-worker"));
+    }
+    let invalidated = tasks.get("cas-a836-invalid-proof").unwrap();
+    assert_eq!(invalidated.status, TaskStatus::InProgress);
+    assert!(!invalidated.pending_verification);
+}

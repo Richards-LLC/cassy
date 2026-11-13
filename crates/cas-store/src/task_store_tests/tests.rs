@@ -13,6 +13,32 @@ fn create_test_store() -> (TempDir, SqliteTaskStore) {
 }
 
 #[test]
+fn direct_write_receipt_binds_current_revision_cas_a836() {
+    let (temp, store) = create_test_store();
+    let mut task = Task::new("cas-a836".into(), "Peer verdict".into());
+    task.status = TaskStatus::AwaitingMerge;
+    store.add(&task).unwrap();
+    crate::request_changes_for_parked_delivery(temp.path(), &task.id, "reviewer", "retry").unwrap();
+    let returned = store.get(&task.id).unwrap();
+
+    store.record_mutation_receipt(&task.id, "peer-verdict").unwrap();
+    // SyncQueue's recovery classifier consumes this binding. Publishing must
+    // not advance the task revision or rewrite its already committed verdict.
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    let (receipt, current): (i64, i64) = conn.query_row(
+        "SELECT r.revision, t.revision FROM task_mutation_receipts r
+         JOIN task_mutation_revisions t ON t.entity_id = r.entity_id
+         WHERE r.receipt_id = ?1",
+        ["peer-verdict"], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(receipt, current);
+    assert_eq!(serde_json::to_value(store.get(&task.id).unwrap()).unwrap(), serde_json::to_value(&returned).unwrap());
+    assert_eq!(returned.status, TaskStatus::Open);
+    store.delete(&task.id).unwrap();
+    assert!(store.record_mutation_receipt(&task.id, "deleted-verdict").is_err());
+}
+
+#[test]
 fn test_task_crud() {
     let (_temp, store) = create_test_store();
 

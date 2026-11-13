@@ -951,7 +951,7 @@ mod tests {
         std::fs::write(repo.path().join("src/child.rs"), "#[test]\nfn untouched() {}\n#[test]\nfn owned() {}\n").unwrap();
         let head = commit_changelog_fixture(repo.path(), "add owned test");
         let mut task = Task::new("cas-9e02e".into(), "stability fixture".into());
-        task.notes = "no changelog: test-only stability fixture".into();
+        task.notes = "[2026-11-13 10:00] ✅ DECISION no changelog: test-only stability fixture".into();
         let paths = vec![identity.path.clone()];
         crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(child)");
         let started = std::time::Instant::now();

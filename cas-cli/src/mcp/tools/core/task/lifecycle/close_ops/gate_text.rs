@@ -243,7 +243,7 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
 pub(crate) const WORKER_CLOSE_OWNERSHIP: &str = "Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.";
 
 pub(crate) const SUPERVISOR_CLOSE_RECOVERY: &str = "Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.";
-pub(crate) const BATCH_CLOSE_RULE: &str = "In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.";
+pub(crate) const BATCH_CLOSE_RULE: &str = "In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.";
 
 /// cas-5597: a successful park answers the worker as done. It keeps the
 /// `MERGE REQUIRED` head that runtime detectors read, drops the merge/retry
@@ -330,13 +330,6 @@ pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> 
 
 /// cas-5597: the one completion signal a worker sends (or does not).
 pub(crate) const PARK_SIGNAL: &str = "The park relay is the completion signal; send merge_request=true only for local_merge.";
-
-/// A Tier 1 delivery in release QA mode, waiting on the one verdict that names it.
-pub(crate) fn waiting_for_release_verdict(task_id: &str, tip: &str, supervisor_prefix: &str) -> String {
-    format!(
-        "⏳ WAITING FOR RELEASE VERDICT\n\nTask {task_id} is Tier 1 in qa.mode=batch at {tip}, so it opens no verifier of its own. The supervisor runs one review of the assembled tip, publishes a report naming every delivery, then records {supervisor_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>. {BATCH_CLOSE_RULE}"
-    )
-}
 
 /// VERIFICATION REQUIRED as a factory worker sees it: the gate line with its
 /// handoff, and nothing addressed to the verifier or the supervisor.

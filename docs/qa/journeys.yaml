@@ -1678,6 +1678,21 @@ bug_families:
     title: Prepared train pushes and queue entries adopt full-suite proof only across verified release plumbing
     tasks: [cas-976f]
     journeys: [FACTORY-MERGE]
+  claude-visible-operator-evidence:
+    title: Claude Code supervisor replies use visible same-turn evidence without hidden tool-use IDs
+    statement: Matching numbers and SHAs pass; unsupported literals, failed or stale results, and clipboard claims without a fresh read remain refused.
+    tasks: [cas-1f5f]
+    journeys: [HUB-J5]
+  deterministic-history-recovery:
+    title: History recovery keeps fixed chronological timestamps and settles scroll before viewport checks
+    tasks: [cas-4452f]
+    invariants: [HUB-J23-HISTORY-FAILURE]
+    journeys: [HUB-J23]
+  supervisor-command-open-turn-queue:
+    title: Supervisor commands sent during an open native turn queue until the turn ends
+    statement: A command sent while the supervisor's native turn is open is queued, typed exactly once after the turn completes and replays return the same receipt; drafts and native modals still refuse.
+    tasks: [cas-4e11]
+    journeys: [HUB-J27]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

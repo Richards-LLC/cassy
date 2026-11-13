@@ -52,7 +52,7 @@
 - `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` — artifact publication, proof capture and report finalization; `cas-cli/src/artifacts/proof.rs` restores a peer's committed evidence before review.
 - `cas-cli/src/builtins/` — canonical skills, agents, harness catalogs and reference-history manifest.
 - `cas-cli/src/builtins/skills/cas-writing-tests/`, `cas-cli/src/builtins/skills/cas-playwright-tests/` — general test quality and browser Faith contracts; old names redirect.
-- `cas-cli/src/builtins/skills/cas-test-audit/`, `cas-cli/src/builtins/skills/cas-playwright-debug/` — read-only coverage audits and measured failure diagnosis.
+- `cas-cli/src/builtins/skills/cas-test-audit/`, `cas-cli/src/builtins/skills/cas-playwright-debug/` — test value and flake audit (`scripts/audit.py` detectors, `scripts/history.py` CI/issue history) and measured failure diagnosis.
 - `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` — rule-marker navigation.
 - `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` — dataset proofs and verifier replay fixtures.
 
@@ -130,7 +130,7 @@
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/release-reports/`.
 - **Generated docs:** `docs/product-overview.d/`, `docs/qa/bug-families/`, `scripts/doc-fragments.py` — fragments, lane lint and release compilation.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml`.
-- **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py`, `scripts/check-changed-markdown.py`.
+- **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py`, `scripts/check-changed-markdown.py`; `scripts/test-test-audit.py` with `scripts/fixtures/test-audit/` covers the audit detectors.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/`, `hub-web/DESIGN.md`.
 
 ## Entrypoints

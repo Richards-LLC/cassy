@@ -474,8 +474,26 @@ def observe(args):
         return json.loads(command([gh, 'api', '-X', 'GET', f'repos/{slug}/{endpoint}', *fields], args.repo))
 
     runs = api(f'actions/workflows/{WORKFLOW}/runs', '-f', f'branch={branch}', '-f', f'event={TRAIN_EVENT}', '-f', 'per_page=100')['workflow_runs']
-    candidates = [run for run in runs if run['head_sha'] == head and run['head_branch'] == branch and run['event'] == TRAIN_EVENT]
-    run = max(candidates, key=lambda item: (item['id'], item.get('run_attempt', 1)), default=None)
+    candidates = [run for run in runs if run['head_branch'] == branch and run['event'] == TRAIN_EVENT]
+    # Keep only each head's latest attempt; a failed rerun cannot lend old green proof.
+    latest = {}
+    for candidate in sorted(candidates, key=lambda item: (item['id'], item.get('run_attempt', 1))):
+        latest[candidate['head_sha']] = candidate
+    run = latest.get(head)
+    if getattr(args, 'command', None) == 'check' and (not run or run['status'] != 'completed'
+                                   or run['conclusion'] in ('cancelled', 'skipped')):
+        # Walk nearest first, checking each commit so a reverted source edit
+        # cannot hide in a net diff. Our validated version preparation may sit
+        # between a documentation follow-up and its original green source.
+        for ancestor in git(args.repo, 'rev-list', '--first-parent', head).splitlines():
+            candidate = latest.get(ancestor)
+            if candidate and candidate['status'] == 'completed' and candidate['conclusion'] == 'success':
+                head, run = ancestor, candidate
+                break
+            paths = git(args.repo, 'diff-tree', '--root', '--no-commit-id', '--name-only',
+                        '--no-renames', '-r', '-m', '--first-parent', ancestor).splitlines()
+            if not all(release_asset(path) for path in paths) and not prepared(args.repo, ancestor):
+                break
     state = {**previous, 'branch': branch, 'head': head, 'outcome': 'PENDING'}
     if not run or run['status'] != 'completed' or run['conclusion'] in ('cancelled', 'skipped'):
         write(state_path, state)

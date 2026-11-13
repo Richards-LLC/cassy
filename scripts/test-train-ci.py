@@ -28,6 +28,7 @@ elif args[0]=='api':
  if '/actions/artifacts?' in endpoint: print(json.dumps({'artifacts':data.get('job_artifacts',[])}))
  elif endpoint.endswith('/artifacts'): print(json.dumps({'artifacts':data.get('job_outputs',[])}))
  elif '/actions/runs/' in endpoint and endpoint.rsplit('/',1)[-1].isdigit(): print(json.dumps(data['job_run']))
+ elif endpoint.split('?')[0].endswith('/pulls'): print('[]')
  elif '/pulls/' in endpoint: print(json.dumps(data['pr']))
  elif '/statuses?' in endpoint: print(json.dumps(data.get('statuses_by_head',{}).get(endpoint.split('/commits/')[1].split('/')[0],data['statuses'])))
  elif endpoint.endswith('/logs'): sys.stdout.buffer.write((root/'logs.zip').read_bytes())
@@ -218,6 +219,36 @@ class TrainReceipts(unittest.TestCase):
         self.assertNotIn('red_since', fixed)
         self.assertEqual(fixed['last_green'], self.env['GITHUB_SHA'])
 
+    def test_cut_reuses_green_ancestor_only_for_release_assets(self):
+        self.evidence('green')
+        self.forge('green')
+        source = self.env['GITHUB_SHA']
+        for name in ('.claude/CODEMAP.md', 'CHANGELOG.md', 'changelog.d/delivery.md',
+                     'docs/release-notes/draft.md', 'docs/release-reports/report.md',
+                     'docs/qa/bug-families/incident.yaml', 'docs/product-overview.d/delivery.md'):
+            path = self.repo/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('Release documentation')
+            self.git('add', name)
+            self.git('commit', '-qm', 'release documentation')
+        docs = self.git('rev-parse', 'HEAD')
+        self.env['GITHUB_SHA'] = docs
+        result = self.observe(check=True)
+        self.assertEqual((result['head'], result['release_head'], result['run_id']), (source, docs, '101'))
+        # Observation and the queue's exact probe still need the actual tip.
+        self.assertEqual(self.observe()['outcome'], 'PENDING')
+        # Source edits, even reverted in a later commit, need fresh proof.
+        self.commit('product change')
+        self.env['GITHUB_SHA'] = self.git('rev-parse', 'HEAD')
+        self.observe(check=True, expected=1)
+        self.git('revert', '--no-edit', 'HEAD')
+        self.env['GITHUB_SHA'] = self.git('rev-parse', 'HEAD')
+        self.observe(check=True, expected=1)
+        # A moved main invalidates otherwise reusable proof.
+        self.env['GITHUB_SHA'] = docs
+        self.git('update-ref', 'refs/remotes/origin/main', docs)
+        self.observe(check=True, expected=1)
+
     def test_missing_or_foreign_shard_cannot_produce_green(self):
         self.evidence('evidence')
         out = self.root/'evidence'
@@ -367,7 +398,7 @@ class TrainReceipts(unittest.TestCase):
         self.git('commit', '-qm', 'release plumbing continuation')
         # Queue-only documentation may differ from the PR tree.
         self.assertTrue(attempt())
-        # The prepared train push must also adopt, and its completed run must
+        # A dispatch at a plumbing-only frozen tip can adopt; its completed run must
         # retain a durable reference instead of claiming to have run the suite.
         docs_head = self.git('rev-parse', 'HEAD')
         self.env.update(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
@@ -463,9 +494,16 @@ class TrainReceipts(unittest.TestCase):
         manifest = self.repo/'cas-cli/Cargo.toml'
         manifest.parent.mkdir()
         manifest.write_text('[package]\nname="cas"\nversion="1.0.0"\n')
+        for name in ('docs/PRODUCT_OVERVIEW.md', 'docs/qa/journeys.yaml', 'docs/product-overview.d/report.md'):
+            path = self.repo/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('before compilation')
         self.git('add', '.')
         self.git('commit', '-qm', 'manifest baseline')
         source = self.git('rev-parse', 'HEAD')
+        self.env['GITHUB_SHA'] = source
+        self.evidence('full')
+        self.forge('full')
 
         def preparation():
             result = subprocess.run([sys.executable, str(SCRIPT), 'prepared', '--repo', str(self.repo)],
@@ -473,14 +511,23 @@ class TrainReceipts(unittest.TestCase):
             return result.returncode, result.stdout.strip()
 
         trailers = f'release: v1.1.0\n\nRelease-Version: 1.1.0\nTrain-CI-Head: {source}'
-        # Copied release trailers on a docs commit cannot suppress the suite.
+        # Copied release trailers cannot borrow the starting tip's receipt.
         self.git('commit', '--allow-empty', '-qm', trailers)
         self.assertEqual(preparation()[0], 1)
         self.git('reset', '--hard', source)
         manifest.write_text('[package]\nname="cas"\nversion="1.1.0"\n')
+        (self.repo/'docs/PRODUCT_OVERVIEW.md').write_text('compiled overview')
+        (self.repo/'docs/qa/journeys.yaml').write_text('compiled bug families')
+        (self.repo/'docs/product-overview.d/report.md').unlink()
         self.git('add', '.')
         self.git('commit', '-qm', trailers)
         self.assertEqual(preparation(), (0, source))
+        self.git('checkout', '--detach', '-q')
+        # Y has no run or adoption artifact; the consumer fetches X directly.
+        state = self.run_cli('check', '--repo', self.repo, '--branch', self.env['GITHUB_REF_NAME'],
+                             '--head', self.git('rev-parse', 'HEAD'), '--gh', self.gh)
+        self.assertEqual((state['head'], state['release_head'], state['run_id']),
+                         (source, self.git('rev-parse', 'HEAD'), '101'))
         # A genuine version bump cannot launder an older ancestor's receipt.
         stale = self.git('rev-parse', f'{source}^')
         self.git('commit', '--amend', '-qm', trailers.replace(source, stale))

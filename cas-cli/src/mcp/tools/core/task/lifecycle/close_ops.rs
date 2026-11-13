@@ -7881,7 +7881,7 @@ impl CasCore {
         result
     }
 
-    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-67,G-68,G-71,G-74,G-61,G-76,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
+    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-68,G-71,G-74,G-61,G-76,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
     // gate-audit[stranded_branch_override]: bypass G-125 A live supervisor accepts measured stranded children; malformed waiver authority still refuses.
     // gate-audit[skip_verification]: selector Derived waiver outcome; the external supervisor_override acceptor supplies G-68 exactly once.
     // gate-audit[bypass_close_gates]: selector A measured non-delivery disposition selects applicable checks; it does not waive a delivered-code check.
@@ -8182,23 +8182,11 @@ impl CasCore {
             gate_refusals.push(message);
         }
 
-        // cas-d8b2: an exact release verdict recorded after an expired Tier 1
-        // cycle can satisfy it. Resolve this before the timeout early return;
-        // it never waives integration/content, QA, or dedicated-review gates.
-        // gate[G-35 park as-of]: Release verdict supersedes stale dispatch / shipped-timeout waiver
-        let superseding_release_verdict = if close_disposition.requires_delivery_gates() {
-            match crate::qa_batch::release_supersedes_stale_dispatch(&self.cas_root, &task) {
-                Ok(receipt) => receipt,
-                Err(error) => return Ok(Self::tool_error(crate::gates::tag("G-35", format!(
-                    "VERIFICATION DISPATCH INVALID: cannot validate release recovery for {}: {error}", task.id
-                )))),
-            }
-        } else { None };
+        // gate[G-35 park as-of]: Shipped-timeout waiver
         // cas-4b22: supervisor policy. Shipped work may pass a timed-out
         // verifier dispatch only on a supervisor_override close whose reason
         // names that dispatch. Ordinary closes keep every timeout.
         let shipped_timeout_waiver = (supervisor_override
-            && superseding_release_verdict.is_none()
             && close_disposition.requires_delivery_gates())
         .then(|| shipped_timeout_waiver(&self.cas_root, &task, req.commit_receipt.as_deref(), req.reason.as_deref()))
         .flatten();
@@ -8224,7 +8212,6 @@ impl CasCore {
         // close projection may proceed until that exact dispatch resolves.
         // This guard also protects internal post-merge re-close calls.
         if close_disposition != TaskCloseDisposition::Decision
-            && superseding_release_verdict.is_none()
             && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, &task.id)
             && shipped_timeout_waiver.is_none()
         {
@@ -9753,6 +9740,13 @@ impl CasCore {
                             ).as_deref(),
                         ));
                     }
+                    // cas-e571: a build routed from another machine ships
+                    // its evidence to that machine's reviewer before parking.
+                    if gate_refusals.is_empty()
+                        && let Err(refusal) = crate::artifacts::proof::publish_routed_evidence(&self.cas_root, &task)
+                    {
+                        gate_refusals.push(refusal);
+                    }
                     if !gate_refusals.is_empty() {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
@@ -9788,9 +9782,12 @@ impl CasCore {
                         // first park. Re-anchor before the retry returns its
                         // merge-required refusal so the queued request and
                         // supervisor status describe the current tip.
+                        // cas-e571: evidence publication only appended notes.
+                        let current = task_store.get(&task.id).ok()
+                            .filter(|current| same_except_close_audit(&task, current));
                         if let Err(error) = self.advance_awaiting_merge_anchor(
                             task_store.as_ref(),
-                            &task,
+                            current.as_ref().unwrap_or(&task),
                             &close_project_root,
                             &resolved_parent_branch,
                             anchor.as_deref(),
@@ -10074,56 +10071,10 @@ impl CasCore {
         {
             close_notes.record(&mut task, &decision.note());
         }
-        // cas-ce5e: in release QA mode a Tier 1 delivery opens no verifier of its own;
-        // one verdict of the assembled tip names it. A dispatch or verdict already on
-        // record keeps its authority below, and Tier 2 never takes this path.
+        // Code delivery approvals already exist at merge. Parent acceptance
+        // retains its separate explicit release-evidence boundary.
         let parent_release_review = crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id);
-        let release_verdict_covers = parent_release_review.is_some() || !fast_lane_receipt_passed && (superseding_release_verdict.is_some() || (!rapid_unsampled
-            && no_verification_on_record
-            && verification_tier.is_some()
-            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root)));
-        // gate[G-67 close-after-merge as-of]: Waiting for release verdict (Tier 1 in qa.mode=batch)
-        if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers && parent_release_review.is_none()) {
-            match crate::qa_batch::satisfying_release_verdict(
-                &self.cas_root,
-                &task,
-                &close_project_root,
-                &resolved_parent_branch,
-                &decision.tip,
-            ) {
-                Ok(Some(verdict)) => close_notes.record(
-                    &mut task,
-                    &format!("Release verdict {} covers this delivery at {}.", verdict.id, decision.tip),
-                ),
-                // cas-bc15: a live supervisor's reasoned override waives the
-                // release verdict for this delivery, and the task records it.
-                Ok(None) if supervisor_override => {
-                    accepted_override_codes.push("G-67");
-                    close_notes.record(
-                    &mut task,
-                    &format!(
-                        "[{}] ✅ DECISION supervisor_override waived the release verdict at {}: {}",
-                        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-                        decision.tip,
-                        req.reason.as_deref().unwrap_or_default().trim(),
-                    ),
-                );
-                },
-                Ok(None) => {
-                    return Ok(Self::tool_error(crate::gates::tag("G-67", gate_text::waiting_for_release_verdict(
-                        &req.id,
-                        &decision.tip,
-                        crate::mcp::tools::core::guidance::supervisor_prefix(),
-                    ))));
-                }
-                Err(error) => {
-                    return Ok(Self::tool_error(crate::gates::tag("G-67", format!(
-                        "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable release verdict state: {error}. Cassy refuses to infer close authority.",
-                        req.id
-                    ))));
-                }
-            }
-        }
+        let release_verdict_covers = parent_release_review.is_some();
         // gate[G-68 park as-of]: Verification jail (VERIFICATION REQUIRED / FAILED / timed out)
         if renew_expired_task_dispatch.is_some()
             || (verification_enabled
@@ -29145,6 +29096,96 @@ mod merge_state_gate_tests {
             "{}",
             stored.notes
         );
+    }
+
+    /// cas-e571 (the cas-0fc56 incident): a build routed here from another
+    /// machine parks, and that machine's pre-merge review finds its whole
+    /// evidence tree (the ledger, nested qa/ captures and empty files)
+    /// byte-identical where its verifier reads. Before the bytes can be
+    /// fetched, the review refuses loudly, naming both evidence directories.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn routed_park_evidence_reaches_the_peer_reviewer_cas_e571() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let mut fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
+        git(fixture.dir.path(), &["push", "-q", "origin", &fixture.branch]);
+        let root = fixture.dir.path().join(".cas");
+        std::fs::write(root.join("cloud.json"),
+            serde_json::json!({"endpoint": server.uri(), "token": "test-token"}).to_string()).unwrap();
+        let mut task = fixture.store.get(&fixture.task_id).unwrap();
+        task.notes = format!(
+            "BUILD_ROUTE: {}",
+            serde_json::json!({"key": "build-route:p:cas-anchor", "source_machine_id": "routing-peer",
+                "sender_agent_id": "s", "recipient_agent_id": "r", "recipient": "w@here",
+                "free_slots": 1, "load_per_cpu": null}),
+        );
+        fixture.store.update(&task).unwrap();
+        let worker_evidence =
+            crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&root, &task).unwrap();
+        let ledger = crate::qa_ledger::scaffold(&task, &[], &fixture.local).into_bytes();
+        let evidence: [(&str, Vec<u8>); 4] = [
+            ("LEDGER.md", ledger),
+            ("qa/bundle.json", br#"{"captures":["shot.png"]}"#.to_vec()),
+            ("qa/captures/shot.png", b"\x89PNG capture".to_vec()),
+            ("qa/captures/empty.log", Vec::new()),
+        ];
+        for (index, (name, bytes)) in evidence.iter().enumerate() {
+            let file = worker_evidence.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, bytes).unwrap();
+            if bytes.is_empty() {
+                continue;
+            }
+            let leaf = std::path::Path::new(name).file_name().unwrap().to_str().unwrap();
+            let blob = format!("{}/blob/{index}", server.uri());
+            Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+                .and(body_partial_json(serde_json::json!({"name": leaf})))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{index}"), "upload_url": blob, "required_headers": {}})))
+                .expect(1).mount(&server).await;
+            Mock::given(method("PUT")).and(path(format!("/blob/{index}")))
+                .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("/api/artifacts/cloud-{index}/complete")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+                .expect(1).mount(&server).await;
+        }
+
+        let (is_error, text) = close_text(&fixture).await;
+        assert_eq!(is_error, Some(true), "{text}");
+        assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
+        let mut parked = fixture.store.get(&fixture.task_id).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{}", parked.notes);
+
+        // The routing machine holds only the synced task row, targeting its
+        // own fixture checkout.
+        parked.deliverables.work_target = None;
+        let reviewer = crate::artifacts::proof::PeerReviewer::new(&server.uri(), parked);
+        let reviewer_evidence = reviewer.evidence_dir();
+        fixture._env.set("CAS_ROOT", &reviewer.root);
+        fixture._env.set("CAS_AGENT_ROLE", "supervisor");
+        let reviewer = std::sync::Arc::new(reviewer);
+        let attempt = |reviewer: std::sync::Arc<crate::artifacts::proof::PeerReviewer>| {
+            tokio::task::spawn_blocking(move || reviewer.attempt())
+        };
+        let refusal = attempt(reviewer.clone()).await.unwrap().unwrap_err();
+        assert!(refusal.contains(&worker_evidence.display().to_string())
+            && refusal.contains(&reviewer_evidence.display().to_string()), "{refusal}");
+
+        for (index, (_, bytes)) in evidence.iter().enumerate().filter(|(_, (_, bytes))| !bytes.is_empty()) {
+            let blob = format!("{}/blob/{index}", server.uri());
+            Mock::given(method("GET")).and(path(format!("/api/artifacts/cloud-{index}/url")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id": format!("cloud-{index}"), "url": blob, "size_bytes": bytes.len()})))
+                .mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("/blob/{index}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+                .mount(&server).await;
+        }
+        attempt(reviewer.clone()).await.unwrap().expect("review dispatches once the bytes arrive");
+        for (name, bytes) in &evidence {
+            assert_eq!(&std::fs::read(reviewer_evidence.join(name)).unwrap(), bytes, "{name}");
+        }
     }
 
     /// cas-b0a5: an amended commit hook anchor is now unreachable, while the

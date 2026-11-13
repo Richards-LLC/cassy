@@ -637,9 +637,9 @@ pub(crate) fn reconcile_members(
     for id in ids {
         let mut evaluate = || -> Result<CassyMergeClose, String> {
             let task = match tasks.get(&id) { Ok(task) => task, Err(_) => return Ok(CassyMergeClose::NotEligible) };
-            if task.status == TaskStatus::Closed { return Ok(CassyMergeClose::AlreadyClosed); }
-            if task.is_terminal() { return Ok(CassyMergeClose::NotEligible); }
-            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id) {
+            let already_closed = task.status == TaskStatus::Closed;
+            if task.is_terminal() && !already_closed { return Ok(CassyMergeClose::NotEligible); }
+            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id).filter(|_| !already_closed) {
                 return Err(format!("RELEASE_MEMBER_HELD: {:?}", exception.code));
             }
             let delivery = inventory.deliveries.iter().find(|d| d.task_id == id).ok_or("RELEASE_MEMBERSHIP_MISSING")?;
@@ -660,26 +660,44 @@ pub(crate) fn reconcile_members(
                     && (delivery.base_sha.as_deref() == Some(anchor)
                         || review_tier::tier_for_delivery(&task, repo).is_some_and(|d| d.tier == VerificationTier::Mechanical))
             });
+            let conn = read_connection(root)?;
+            let mut no_review = true;
+            for table in ["verification_dispatches", "verifications"] {
+                if conn.table_exists(None, table).map_err(|e| e.to_string())? {
+                    no_review &= !conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE task_id=?)"),
+                        [&task.id], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string())?;
+                }
+            }
+            let exempt = delivery.membership != ReleaseMembership::ExplicitNoCode && no_review
+                && !task.labels.iter().any(|label| label == review_tier::FORCE_VERIFIER_LABEL)
+                && (tier_zero || task.depth == cas_types::TaskDepth::Light
+                    || crate::rapid_response::verification_was_exempted(root, repo, &task));
             let mut approved = !anchors.is_empty();
             for anchor in anchors {
                 if ancestor(repo, anchor, &inventory.scope.final_release_sha) != Some(true) {
                     return Err("RELEASE_ANCHOR_NOT_SHIPPED".into());
                 }
-                let dispatch_approval = if tier_zero { None } else {
-                    crate::mcp::tools::core::workflow::premerge_verification::cycle::approved(
-                        root, repo, &task, anchor, &inventory.scope.final_release_sha)?
-                };
+                let dispatch_approval = crate::mcp::tools::core::workflow::premerge_verification::cycle::approved(
+                    root, repo, &task, anchor, &inventory.scope.final_release_sha)?;
                 if let Some(approval) = &dispatch_approval {
                     legacy_approvals += usize::from(approval.legacy);
                     // The stamp is read only after the exact verdict resolves.
                     let _registry_version = &approval.registry_version;
                 }
-                approved &= tier_zero || dispatch_approval.is_some() || receipts.iter().any(|receipt| {
+                if exempt && !task.deliverables.green_merge_commit.as_deref().is_some_and(|merge| {
+                    task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Green
+                        && ancestor(repo, anchor, merge) == Some(true)
+                        && ancestor(repo, merge, &inventory.scope.final_release_sha) == Some(true)
+                }) {
+                    return Err("LANE_CI_MISSING".into());
+                }
+                approved &= exempt || dispatch_approval.is_some() || (delivery.membership == ReleaseMembership::ExplicitNoCode && receipts.iter().any(|receipt| {
                     matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
                         && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)
-                });
+                }));
             }
             if !approved { return Err("REVIEW_MISSING".into()); }
+            if already_closed { return Ok(CassyMergeClose::AlreadyClosed); }
             if write {
                 let mut closed = task.clone();
                 closed.status = TaskStatus::Closed;

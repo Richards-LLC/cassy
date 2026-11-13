@@ -794,8 +794,8 @@ export class ConversationView {
     this.renderLoadEarlier(loadingEarlier);
     const ended = this.options.sessionEnd?.();
     this.phase = ended ? undefined : this.options.phase?.();
-    const working = !ended && (this.phase !== undefined || this.options.working?.() === true);
-    if (!this.phase && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
+    const working = !ended && (this.phase !== undefined || (!this.options.phase && this.options.working?.() === true));
+    if (!this.phase?.active && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
     if (!reuseModel || !this.model) {
@@ -1408,8 +1408,8 @@ export class ConversationView {
     const newest = this.history.visibleEvents().at(-1);
     const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
     const phase = this.options.phase?.();
-    const working = !this.options.sessionEnd?.() && (phase !== undefined || this.options.working?.() === true) && !sending;
-    const signature = (value?: PhaseLine): string => JSON.stringify([value?.label, value?.active, value?.unavailable, value?.elapsed !== undefined, value?.state, value?.step, value?.lastActivityAt]);
+    const working = !this.options.sessionEnd?.() && (phase !== undefined || (!this.options.phase && this.options.working?.() === true)) && !sending;
+    const signature = (value?: PhaseLine): string => JSON.stringify([value?.label, value?.active, value?.unavailable, value?.elapsed !== undefined]);
     if (working !== this.nodes.has("working") || signature(phase) !== signature(this.phase)) this.update();
     else {
       const clock = this.nodes.get("working")?.querySelector(".phase-clock");
@@ -1419,7 +1419,7 @@ export class ConversationView {
 
   private renderItem(node: HTMLElement, item: ThreadItem): void {
     const rows = this.options.workRows;
-    const signature = item.type === "working" ? JSON.stringify([this.phase?.label, this.phase?.active, this.phase?.unavailable, this.phase?.elapsed !== undefined, this.phase?.state, this.phase?.step, this.phase?.lastActivityAt])
+    const signature = item.type === "working" ? JSON.stringify([this.phase?.label, this.phase?.active, this.phase?.unavailable, this.phase?.elapsed !== undefined])
       : item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
     if (node.dataset.signature === signature) {
       if (item.type === "working") {
@@ -1463,7 +1463,7 @@ export class ConversationView {
     node.className = "turn working-turn";
     const phase = this.phase;
     const line = document.createElement("div"); line.className = phase?.unavailable ? "phase-line" : phase ? "working phase-line" : "working"; line.setAttribute("role", "status");
-    if (phase) { line.dataset.active = String(phase.active); line.dataset.state = phase.state; }
+    if (phase) line.dataset.active = String(phase.active);
     const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
     dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
     line.append(dots, document.createTextNode(phase?.label ?? "working"));
@@ -1471,21 +1471,12 @@ export class ConversationView {
       const clock = document.createElement("span"); clock.className = "phase-clock"; clock.setAttribute("role", "timer"); clock.setAttribute("aria-live", "off"); clock.textContent = phase.elapsed;
       line.append(document.createTextNode(" · "), clock);
     }
-    if (phase?.step) {
-      const step = document.createElement("span"); step.className = "phase-step"; step.textContent = phase.step;
-      line.append(document.createTextNode(" · "), step);
-    }
-    if (phase?.lastActivityAt) {
-      const time = document.createElement("time"); time.dateTime = phase.lastActivityAt;
-      time.textContent = new Date(phase.lastActivityAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "shortGeneric" });
-      line.append(document.createTextNode(" · Last activity "), time);
-    }
     node.replaceChildren(line);
-    if (phase && this.phaseClock === undefined) {
+    if (phase?.active && phase.elapsed !== undefined && this.phaseClock === undefined) {
       this.phaseClock = setInterval(() => {
-        // Freshness can expire even after a turn ends and even when no new
-        // transport event arrives. Recompute state, not just the moving clock.
-        if (this.element.isConnected) this.refreshWorking();
+        const clock = this.nodes.get("working")?.querySelector(".phase-clock");
+        const current = this.options.phase?.();
+        if (this.element.isConnected && clock && current?.active && current.elapsed !== undefined) clock.textContent = current.elapsed;
       }, 1000);
     }
   }

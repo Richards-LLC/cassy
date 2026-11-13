@@ -3174,18 +3174,22 @@ non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
 Slim lanes omit broad Rust tests for factory pushes, but run the train's
-impact selection (`scripts/ci-test-impact.py`, unchanged) for the delivery's
-range on hosted runners (cas-2e1b). The range starts at the delivery's
-recorded start base when `refs/cas/delivery-base/<branch>` exists and is an
-ancestor of the pushed head (task start pushes that ref, best effort, each
-time it records a new start base); otherwise it uses the classifier's inferred
-comparison base. The plan step logs which one it used. `Scoped Validation — impact own tests`
-builds the selection and runs the changed modules' unit tests, edited
-integration suites and directly changed crates first; up to three `impact ring`
-shards then run the rest of the selection from its archive, only after the own
-tests pass. A workspace plan (build/test policy, `scripts/`, `.github/` or an
-unmappable path) runs the whole workspace, still own tests first, exactly as
-the selector decided. A failed test fails the lane only when it passes (or
+impact selection (`scripts/ci-test-impact.py`) for the delivery's range on hosted
+runners (cas-2e1b). Selection compares the pushed head with its merge-base with
+the live target, as resolved by the classifier. Content merged in from the
+train is excluded. The recorded start base in `refs/cas/delivery-base/<branch>`
+is used only for failure attribution, falling back to the inferred base when
+missing or not an ancestor. The plan logs both bases separately.
+`Scoped Validation — impact own tests` builds the selection and runs the changed
+modules' unit tests, edited integration suites, directly changed crates and
+explicit file-reading contracts first; up to three `impact ring` shards run the
+rest from its archive after own tests pass. Agent/config roots `.claude/`,
+`.codex/`, `.grok/`, `docs/` and `changelog.d/` select no Rust tests. Script and
+workflow inputs use their existing script/CI contract tier plus Rust test
+functions with matching file literals, including local helper/constant reads.
+Cargo manifests/lockfiles, nextest configuration, `.cargo/`, `vendor/` and
+unmapped code retain conservative workspace/crate selection. No Rust match
+produces an explicit empty selection and invokes no Cargo. A failed test fails the lane only when it passes (or
 does not exist) at the delivery's base. The same job first looks for explicit
 failure receipts from existing CI runs at that exact SHA, matching package,
 binary, test, compiler, nextest, runner image and profile/configuration. A prior

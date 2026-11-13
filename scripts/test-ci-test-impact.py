@@ -155,13 +155,47 @@ pub fn run() { nested::launch(); }
         self.select()
         self.assertEqual(impact.plan(self.root, "0" * 40, self.base, None)["mode"], "scoped")
 
-    def test_unmapped_input_runs_workspace(self):
-        # cas-eac2: Commander package scripts are not compiled input.
-        self.put("hub-web/package.json", '{}\n')
-        self.assertEqual(self.select()["mode"], "scoped")
-        self.put("unknown.bin", 'new input\n')
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+    def test_non_code_roots_skip_rust_but_unknown_code_stays_conservative(self):
+        for path in [".claude/settings.json", ".codex/config.toml", ".grok/config.json", "docs/policy.yaml", "changelog.d/entry.md"]:
+            with self.subTest(path=path):
+                self.put(path, "fixture\n")
+                self.commit()
+                selection = impact.plan(self.root, self.base, "", None)
+                self.assertEqual((selection["mode"], selection["commands"]), ("scoped", []))
+                self.base = self.git("rev-parse", "HEAD")
+        split = impact.lane_split(self.root, selection)
+        state = self.root / "output/non-rust.json"
+        impact.write(state, {"plan": selection, "split": split})
+        from argparse import Namespace
+        with patch.object(impact.subprocess, "check_output", side_effect=AssertionError("Cargo must not run")):
+            self.assertEqual(impact.lane(self.root, Namespace(out=str(state), phase="own", github_output="")), 0)
+        self.assertEqual((split["build"], split["ring"]), ([], ""))
+        for path in ["unknown.rs", "Cargo.lock", ".config/nextest.toml", ".cargo/config.toml", "vendor/fixture.rs"]:
+            with self.subTest(path=path):
+                self.put(path, "fixture\n")
+                self.commit()
+                self.assertEqual(impact.plan(self.root, self.base, "", None)["mode"], "workspace")
+                self.base = self.git("rev-parse", "HEAD")
+
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+    def test_script_paths_select_only_referencing_rust_contracts(self):
+        self.put("scripts/tool.py", "fixture\n")
+        self.put(".github/workflows/tool.yml", "fixture\n")
+        self.put("cas-cli/src/alpha.rs", 'const SCRIPT: &str = include_str!("../../scripts/tool.py");\nfn contents(_: fn()) { let _ = SCRIPT; }\n#[test] fn reads_script() { contents(|| {}); }\n#[test] fn unrelated_unit() {}\n')
+        self.put("cas-cli/tests/alpha_test.rs", '#[test] fn reads_workflow() { std::fs::read_to_string(".github/workflows/tool.yml"); }\n#[test] fn unrelated_integration() {}\n')
         self.commit()
-        self.assertEqual(impact.plan(self.root, self.base, "", None)["mode"], "workspace")
+        self.base = self.git("rev-parse", "HEAD")
+        self.put("scripts/tool.py", "changed\n")
+        self.put(".github/workflows/tool.yml", "changed\n")
+        self.commit()
+        selection = impact.plan(self.root, self.base, "", None)
+        self.assertEqual(selection["mode"], "scoped")
+        split = impact.lane_split(self.root, selection)
+        self.assertIn("reads_script", split["own"])
+        self.assertIn("reads_workflow", split["own"])
+        self.assertNotIn("unrelated", split["selected"])
+        self.assertNotIn("all()", split["selected"])
 
     def test_bad_history_widens_scope(self):
         self.history.write_text('{broken')
@@ -412,7 +446,8 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertNotEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0,
                             "an unsuccessful outcome with no parsed test line stays red")
         del env["RING_UNPARSED"], env["BASE_FAILS"]
-        self.select("scripts/release.sh")
+        self.put("Cargo.lock", "# shared build input\n")
+        self.select("Cargo.lock")
         self.assertEqual(phase("plan").returncode, 0)
         split = json.loads(state.read_text())["split"]
         self.assertEqual((split["build"], split["ring"]), (["--workspace"], f"(all()) and not ({own})"), "a workspace plan runs whole, own first")
@@ -483,25 +518,36 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertEqual((receipt["inherited"], receipt["caused"], receipt["unresolved"]), ([], [], [failure]))
         self.assertEqual(receipt["status"], "unresolved")
 
-    def test_lane_binds_to_the_recorded_start_base_and_logs_a_fallback(self):
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+    def test_lane_uses_live_target_range_and_recorded_base_only_for_attribution(self):
+        self.git("checkout", "-qb", "delivery")
         self.select("cas-cli/src/alpha.rs")
-        recorded = self.git("rev-parse", "HEAD")
-        self.select("cas-cli/src/gamma.rs")
         state = self.root / "output/lane.json"
-        def plan_with(ref):
-            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", "plan", "--base-sha", self.base, "--history", str(self.history),
-                       "--out", str(state), "--recorded-base-ref", ref]
+        ref = "refs/cas/delivery-base/lane"
+        self.git("update-ref", ref, self.base)
+        def plan_with(target):
+            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", "plan", "--base-sha", target, "--history", str(self.history), "--out", str(state), "--recorded-base-ref", ref]
             self.assertEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
-            return json.loads(state.read_text())["plan"]
-        self.git("update-ref", "refs/cas/delivery-base/lane", recorded)
-        bound = plan_with("refs/cas/delivery-base/lane")
-        self.assertEqual((bound["base"], bound["base_source"]), (recorded, "recorded start base"))
-        self.assertEqual(bound["paths"], ["cas-cli/src/gamma.rs"], "the start base excludes work merged before it")
-        unrelated = self.git("commit-tree", "HEAD^{tree}", "-m", "unrelated root")
-        self.git("update-ref", "refs/cas/delivery-base/lane", unrelated)
-        fallback = plan_with("refs/cas/delivery-base/lane")
-        self.assertEqual(fallback["base"], self.base)
-        self.assertTrue(fallback["base_source"].startswith("inferred"), fallback["base_source"])
+            return json.loads(state.read_text())
+        before = plan_with(self.base)
+        self.git("checkout", "-qb", "train", self.base)
+        self.put("cas-cli/src/gamma.rs", "// train-owned change\n")
+        self.put(".claude/settings.json", "{}\n")
+        self.commit()
+        target = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "delivery")
+        self.git("merge", "--no-edit", "train")
+        after = plan_with(target)
+        self.assertEqual(after["plan"]["paths"], ["cas-cli/src/alpha.rs"])
+        self.assertEqual(after["plan"]["commands"], before["plan"]["commands"])
+        self.assertEqual(after["plan"]["base"], target)
+        self.assertEqual(after["plan"]["attribution_base"], self.base)
+        receipt = state.with_name("own-receipt.json")
+        receipt.write_text(json.dumps({"failures": [], "configuration": {}}))
+        from argparse import Namespace
+        with patch.object(impact, "lane_attribute", return_value=0) as attribute:
+            self.assertEqual(impact.lane(self.root, Namespace(out=str(state), phase="attribute", receipt="own")), 0)
+        self.assertEqual(attribute.call_args.args[1], self.base)
 
 
 if __name__ == "__main__":

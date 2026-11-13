@@ -364,9 +364,8 @@ jobs:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
-        # The delivery's recorded start base binds the selection when its
-        # record ref exists and is an ancestor of HEAD; otherwise the inferred
-        # comparison base is used. The step log names which one ran.
+        # Selection uses the classifier's merge-base with the live target.
+        # The recorded start base is retained only for failure attribution.
         run: |
           record="refs/cas/delivery-base/$GITHUB_REF_NAME"
           git fetch --no-tags --quiet origin "+$record:$record" 2>/dev/null || true

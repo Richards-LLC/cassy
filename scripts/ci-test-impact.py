@@ -20,6 +20,7 @@ import tomllib
 import urllib.request
 from urllib.parse import urlparse
 import zipfile
+from rust_test_source import tokens, pairs
 
 VERSION = 1
 SAFE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
@@ -138,14 +139,78 @@ def integration_text(root, stem):
     return "\n".join(texts)
 
 
-def plan(root, base, zero, history):
+# cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+def referencing_tests(text, paths):
+    """Follow explicit file literals, local helpers and constants to test bodies."""
+    if not any(Path(path).name in text for path in paths):
+        return set()
+    ts = tokens(text)
+    ps = pairs(ts)
+    tests = {match.start(1) for match in re.finditer(
+        r"#\[(?:\w+::)*test(?:\([^]]*\))?\]\s*(?:#\[[^]]*\]\s*)*(?:async\s+)?fn\s+(\w+)\s*\(", text)}
+    functions = []
+    for i, token in enumerate(ts[:-1]):
+        if token.string or token.value != "fn" or not SAFE.fullmatch(ts[i + 1].value):
+            continue
+        brace = next((j for j in range(i + 2, len(ts)) if not ts[j].string and ts[j].value in {"{", ";"}), None)
+        if brace is not None and ts[brace].value == "{" and brace in ps:
+            functions.append((ts[i + 1].value, brace, ps[brace], ts[i + 1].start in tests))
+    hits = {i for i, token in enumerate(ts) if token.string and any(
+        path in token.value or token.value.strip('"') == Path(path).name for path in paths)}
+    dependent = {name for name, begin, end, _ in functions if any(begin < i < end for i in hits)}
+    for hit in hits:
+        if any(begin < hit < end for _, begin, end, _ in functions):
+            continue
+        owner = next((i for i in range(hit - 1, -1, -1) if not ts[i].string and ts[i].value in {"const", "static", ";", "}"}), None)
+        if owner is not None and ts[owner].value in {"const", "static"}:
+            dependent.add(ts[owner + 1].value)
+    while True:
+        expanded = dependent | {name for name, begin, end, _ in functions if any(
+            not ts[i].string and ts[i].value in dependent for i in range(begin + 1, end))}
+        if expanded == dependent:
+            return {name for name, _, _, test in functions if test and name in dependent}
+        dependent = expanded
+
+
+# cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+def file_contracts(root, paths, crates, mapping, texts):
+    commands, identities = [], []
+    for package, (member, manifest) in crates.items():
+        units = set()
+        for source in (root / member / "src").rglob("*.rs"):
+            units.update(referencing_tests(source.read_text(), paths))
+        targets = {}
+        suites = texts if package == "cas" else {source.stem: source.read_text() for source in (root / member / "tests").glob("*.rs")}
+        for stem, text in suites.items():
+            names = referencing_tests(text, paths)
+            if names:
+                targets.setdefault(mapping[stem] if package == "cas" else stem, set()).update(names)
+        args, expressions = ["-p", package], []
+        if units:
+            args.append("--lib")
+            targets[None] = units
+        for target, names in sorted(targets.items(), key=lambda item: item[0] or ""):
+            if target is not None:
+                args.extend(["--test", target])
+            binary = package if target is None else f"{package}::{target}"
+            for name in sorted(names):
+                expression = f"(binary_id(={binary}) and test(/(^|::){name}$/))"
+                expressions.append(expression)
+                identities.append({"package": package, "binary": binary, "test": name, "filter": expression})
+        if expressions:
+            commands.append({"package": package, "args": args + ["-E", " or ".join(expressions)], "stems": [], "targets": sorted(target for target in targets if target is not None), "modules": []})
+    return commands, identities
+
+
+# cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+def plan(root, base, zero, history, delivery=False):
     result = {"version": VERSION, "mode": "scoped", "head": git(root, "rev-parse", "HEAD"), "reasons": [], "commands": [], "paths": []}
     try:
         if not base or set(base) == {"0"}:
             base = zero
         base = git(root, "rev-parse", "--verify", f"{base}^{{commit}}")
         parents = git(root, "rev-list", "--parents", "-n", "1", "HEAD").split()[1:]
-        if len(parents) > 1 and base == parents[0]:
+        if not delivery and len(parents) > 1 and base == parents[0]:
             # On a merge push, GitHub's before SHA is the first parent. That
             # parent can already contain the changed source, so diffing from it
             # hides the change from this merge's selection. Compare from the
@@ -164,8 +229,14 @@ def plan(root, base, zero, history):
             r"\b(?:cargo_bin|cas_binary|Command|assert_cmd)\b|\bcommand\s*\(", text))
         result["subprocess_stems"] = subprocess_stems
         changes = {name: [] for name in crates}
+        contract_paths = []
         for path in result["paths"]:
-            if path in {"Cargo.toml", "Cargo.lock", ".config/nextest.toml"} or path.startswith((".cargo/", "vendor/", ".github/", "scripts/")):
+            if path.startswith((".claude/", ".codex/", ".grok/", "docs/", "changelog.d/")):
+                continue
+            if path.startswith(("scripts/", ".github/")):
+                contract_paths.append(path)
+                continue
+            if path in {"Cargo.toml", "Cargo.lock", ".config/nextest.toml"} or path.startswith((".cargo/", "vendor/")):
                 return full(result, "shared build/test policy changed")
             owners = [name for name, (member, _) in crates.items() if path.startswith(member + "/")]
             if not owners:
@@ -248,8 +319,23 @@ def plan(root, base, zero, history):
                 return full(result, "no provable affected test target")
             args.extend(["-E", " or ".join(expressions)])
             result["commands"].append({"package": "cas", "args": args, "stems": sorted(selected), "targets": sorted({mapping[s] for s in selected}), "modules": unit_modules if production or wide or lib_failed else []})
-        if not result["commands"]:
-            return full(result, "no Rust tests selected; caller requested Rust validation")
+        contracts, identities = file_contracts(root, contract_paths, crates, mapping, texts) if contract_paths else ([], [])
+        result["file_contracts"] = identities
+        for contract in contracts:
+            previous = next((command for command in result["commands"] if command["package"] == contract["package"]), None)
+            if previous is None:
+                result["commands"].append(contract)
+            elif previous["stems"] is not None:
+                split = previous["args"].index("-E")
+                prefix = previous["args"][:split]
+                incoming = contract["args"][:contract["args"].index("-E")]
+                for index, arg in enumerate(incoming[2:], 2):
+                    if arg == "--lib" and arg not in prefix:
+                        prefix.append(arg)
+                    elif arg == "--test" and incoming[index + 1] not in previous.get("targets", []):
+                        prefix.extend([arg, incoming[index + 1]])
+                previous["args"] = prefix + ["-E", f"({previous['args'][split + 1]}) or ({contract['args'][-1]})"]
+                previous["targets"] = sorted(set(previous.get("targets", [])) | set(contract["targets"]))
         if len(result["commands"]) > 1 and all(command["stems"] is None for command in result["commands"]):
             packages = sorted(command["package"] for command in result["commands"])
             result["commands"] = [{"package": "*", "packages": packages, "args": [arg for package in packages for arg in ["-p", package]], "stems": None}]
@@ -259,6 +345,7 @@ def plan(root, base, zero, history):
         return full(result, "uncertain graph/diff/history: " + str(error))
 
 
+# cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 def lane_split(root, selection):
     """Order the unchanged selection for lane CI, fail-fast (cas-2e1b).
 
@@ -279,10 +366,10 @@ def lane_split(root, selection):
                 selected += [f"package({package})" for package in packages]
                 continue
             args = command["args"]
-            build += ["-p", "cas"] if multiple else args[:args.index("-E")]
-            selected.append(f"(package(cas) and ({args[args.index('-E') + 1]}))")
+            build += ["-p", command["package"]] if multiple else args[:args.index("-E")]
+            selected.append(f"(package({command['package']}) and ({args[args.index('-E') + 1]}))")
         selected = " or ".join(selected)
-    own = []
+    own = [row["filter"] for row in selection.get("file_contracts", [])]
     try:
         crates, _ = workspace(root)
         direct = sorted(name for name, (member, _) in crates.items() if any(p.startswith(member + "/") for p in paths))
@@ -303,8 +390,11 @@ def lane_split(root, selection):
     own = " or ".join(own) or None
     return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
 
+# cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 def lane_count(root, source, expression):
     """Count the non-ignored tests a filter selects, so no phase runs empty."""
+    if not expression:
+        return 0
     output = subprocess.check_output([os.environ.get("CARGO", "cargo"), "nextest", "list", *source, "-E", expression, "--message-format", "json"], cwd=root, text=True)
     suites = json.loads(output)["rust-suites"].values()
     return sum(1 for suite in suites for case in suite["testcases"].values() if case["filter-match"]["status"] == "matches" and not case.get("ignored"))
@@ -553,7 +643,7 @@ def lane_attribute(root, base, failures, destination, configuration=None):
 
 
 def lane_base(root, recorded_ref, inferred):
-    """Prefer the delivery's recorded start base over the ref-inferred fork.
+    """Resolve the recorded attribution base without changing the impact range.
 
     A record that is missing or not an ancestor of HEAD falls back to the
     inferred base; the returned source names which one was used.
@@ -569,6 +659,7 @@ def lane_base(root, recorded_ref, inferred):
     return recorded, "recorded start base"
 
 
+# cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 def lane(root, args):
     """Lane CI phases: plan, own (builds and runs own tests), ring shards and
     attribute (rerun a phase's failures at the base)."""
@@ -576,13 +667,16 @@ def lane(root, args):
     outputs = {}
     if args.phase == "plan":
         base, source = lane_base(root, args.recorded_base_ref, args.base_sha)
-        print(f"Lane impact base: {base or args.zero_base_ref} ({source})")
-        selection = plan(root, base, args.zero_base_ref, args.history)
-        selection["base_source"] = source
+        selection = plan(root, args.base_sha, args.zero_base_ref, args.history, delivery=True)
+        selection["attribution_base"] = base
+        selection["base_source"] = "live target merge-base"
+        selection["attribution_base_source"] = source
+        print(f"Lane impact base: {selection.get('base', args.base_sha)} (live target merge-base)")
+        print(f"Lane attribution base: {base or args.zero_base_ref} ({source})")
         selection["configuration"] = proof_configuration(root)
         split = lane_split(root, selection)
         write(out, {"plan": selection, "split": split})
-        outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": source}
+        outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": selection["base_source"]}
         print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")
         print("Subprocess suites: " + ", ".join(selection.get("subprocess_stems", [])))
         status = 0
@@ -591,7 +685,7 @@ def lane(root, args):
         selection, split = saved["plan"], saved["split"]
         if args.phase == "attribute":
             receipt = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())
-            return lane_attribute(root, selection["base"], receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"), receipt.get("configuration"))
+            return lane_attribute(root, selection.get("attribution_base", selection["base"]), receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"), receipt.get("configuration"))
         source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
         receipt = out.with_name(f"{args.phase}-receipt.json")
         status, failed = 0, False

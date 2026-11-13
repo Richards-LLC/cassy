@@ -2,6 +2,7 @@
 """Exercise the real atomic cache publisher with fake Cargo; no Rust builds."""
 import hashlib
 import importlib.util
+import json
 import os
 import select
 import shlex
@@ -223,7 +224,7 @@ echo 'Published worker target baseline: ours'
                           f"    pathlib.Path({str(stopped)!r}).touch()\n"
                           "    raise SystemExit(0)\n"
                           "signal.signal(signal.SIGTERM, stop)\n"
-                          "print('ready', flush=True)\n"
+                          "print('{\"event\":\"ready\"}', flush=True)\n"
                           "signal.pause()\n"
                           f"pathlib.Path({str(marker)!r}).touch()\n")
         popen = host_update.subprocess.Popen
@@ -238,7 +239,8 @@ echo 'Published worker target baseline: ours'
                 if first:
                     first = False
                     self.assertTrue(select.select([child.stdout], [], [], 5)[0])
-                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    event = json.loads(child.stdout.readline())
+                    self.assertEqual(event['event'], 'ready')
                     raise subprocess.TimeoutExpired(command, timeout)
                 return communicate(timeout=timeout)
             child.communicate = communicate_after_ready

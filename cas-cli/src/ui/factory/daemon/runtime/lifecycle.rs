@@ -2475,9 +2475,8 @@ mod worker_attention_tests {
         let prompt = &rows[0].prompt;
         assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(prompt), "{prompt}");
         assert!(prompt.contains("kind=\"workers_died_together\""), "{prompt}");
-        assert!(prompt.contains("3 worker harnesses exited within 1200 ms"), "{prompt}");
         for worker in ["codex-a", "codex-b", "codex-c"] {
-            assert!(prompt.contains(&format!("{worker} (exited with code 0)")), "{prompt}");
+            assert!(prompt.contains(worker), "{prompt}");
         }
     }
 

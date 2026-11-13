@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import io
+from html.parser import HTMLParser
 import re
 from pathlib import Path
 import tempfile
@@ -84,6 +85,40 @@ Source: release assets.
 '''
 
 
+class RenderedElements(HTMLParser):
+    """Read semantic values from the emitted document, independently of HTML bytes."""
+    VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+            'link', 'meta', 'param', 'source', 'track', 'wbr'}
+
+    def __init__(self, source):
+        super().__init__(convert_charrefs=True)
+        self.nodes, self.stack = [], []
+        self.feed(source)
+
+    def handle_starttag(self, tag, attrs):
+        node = {'tag': tag, 'text': '', 'children': [],
+                'parent': self.stack[-1] if self.stack else None}
+        if self.stack:
+            self.stack[-1]['children'].append(node)
+        self.nodes.append(node)
+        if tag not in self.VOID:
+            self.stack.append(node)
+
+    def handle_data(self, text):
+        for node in self.stack:
+            node['text'] += text
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index]['tag'] == tag:
+                del self.stack[index:]
+                break
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+
 class ReleaseRendererTests(unittest.TestCase):
     def test_exemplar_accounts_for_every_closure_and_change(self):
         output = renderer.render(EXEMPLAR, project_root=ROOT)
@@ -121,16 +156,22 @@ class ReleaseRendererTests(unittest.TestCase):
             source = EXEMPLAR.replace("| Green to published |",
                 f"| Manual interventions | {value} | Distinct rescued stages plus recorded hand fixes |\n| Green to published |")
             output = renderer.render(source, project_root=ROOT)
-            self.assertIn(f'<span class="stat-value">{value}</span><span class="stat-label">Manual interventions</span>', output)
-            self.assertIn("Manual interventions", output)
+            elements = RenderedElements(output).nodes
+            pairs = {(node['children'][0]['text'].strip(), node['children'][1]['text'].strip())
+                     for node in elements if len(node['children']) >= 2
+                     and [child['tag'] for child in node['children'][:2]] == ['span', 'span']}
+            self.assertIn((value, 'Manual interventions'), pairs)
 
     def test_different_project_and_partial_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'design-tokens.json').write_text('{"color":{"light":{"verdict":{"$value":"#123456"}}}}')
             output = renderer.render(EXEMPLAR.replace('Cassy', 'Orchard').replace('v3.19.0', 'v9.99.1'), project_root=root)
-            self.assertIn('Orchard v9.99.1', output)
-            self.assertNotIn('Cassy', output)
+            titles = [node['text'].strip() for node in RenderedElements(output).nodes
+                      if node['tag'] == 'title' and node['parent']
+                      and node['parent']['tag'] == 'head']
+            self.assertEqual(len(titles), 1)
+            self.assertTrue(titles[0].startswith('Orchard v9.99.1'))
             css = brand.resolve(root, defaults=DEFAULTS)['css']
             self.assertIn('--verdict:#123456', css)
             self.assertIn('--bg:#F7F4EE', css)

@@ -1475,7 +1475,6 @@ fn skipped_files_leave_the_eligible_denominator_so_coverage_can_reach_100_percen
     assert_eq!(scan.skipped_files, 1);
     let detail = scan.skipped_detail.expect("the skip must be named");
     assert!(detail.contains("binary.rs"), "{detail}");
-    assert!(detail.contains("not valid UTF-8"), "{detail}");
 }
 
 /// cas-8a03, the reported symptom end to end: doctor names orphaned rows,

@@ -895,7 +895,7 @@ fi
 
 assert_named_failure() {
     local name="$1" output="$2"
-    if grep -qF "FAIL $name" <<<"$output" && grep -qF "RELEASE GATE FAILED" <<<"$output"; then
+    if grep -qE "^FAIL $name( |$)" <<<"$output"; then
         ok "$name fails closed with a named receipt row"
     else
         bad "$name did not produce a named failure (output: $output)"

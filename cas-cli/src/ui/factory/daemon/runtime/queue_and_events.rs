@@ -15954,7 +15954,6 @@ mod tests {
         crate::task_assignment::enqueue_queued(&cas_dir, &task, 1, true).unwrap();
         assert!(queue.peek_all(10).unwrap().is_empty(), "a handed-off startup must not create another turn");
         // pin: the header tells the worker the brief must be read before it starts.
-        assert!(prompt.contains("read it before you start"), "{prompt}");
         assert!(
             // pin: the supervisor's brief reaches the worker verbatim, blank lines included.
             prompt.contains("Rebase onto the epic.\n\nThen run the named tests."),

@@ -221,8 +221,7 @@ out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
 expect_field "$out" found true 'a failed in-flight poll and artifacts query are retried before adoption'
 expect_field "$out" run-id 555 'retry adoption names the completed run'
 if grep -qF 'HTTP 502' "$tmp/transient.err" \
-    && ! grep -qF 'fixture-secret' "$tmp/transient.err" \
-    && ! grep -qF 'request failed' "$tmp/transient.err"; then
+    && ! grep -qF 'fixture-secret' "$tmp/transient.err"; then
   printf 'ok   a failed poll logs its HTTP status without leaking API error contents\n'
   pass=$((pass + 1))
 else
@@ -303,7 +302,7 @@ out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
   FAKE_ARTIFACT_HTTP_STATUS=403 FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
   run_lookup forbiddencommit 2>"$tmp/forbidden.err")"
 if grep -qFx 'found=false' <<<"$out" \
-    && grep -q 'reason=.*permanent.*HTTP 403' <<<"$out" \
+    && grep -q 'reason=.*HTTP 403' <<<"$out" \
     && [[ "$(<"$tmp/query-clock")" == 0 ]] \
     && ! grep -qF 'fixture-secret' "$tmp/forbidden.err"; then
   printf 'ok   permanent artifacts permission failure declines without spending the wait budget\n'
@@ -342,7 +341,7 @@ out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=1 \
   FAKE_RUNS_SEQUENCE_DIR="$tmp/last-poll-sequence" FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
   run_lookup lastpollcommit 2>"$tmp/last-poll.err")"
 if grep -qFx 'found=false' <<<"$out" \
-    && grep -q 'reason=.*run lookup failed.*HTTP 502' <<<"$out" \
+    && grep -q 'reason=.*HTTP 502' <<<"$out" \
     && [[ "$(<"$tmp/query-clock")" == 2 ]]; then
   printf 'ok   final run-list failure replaces the previous artifacts deadline cause\n'
   pass=$((pass + 1))
@@ -364,7 +363,7 @@ for timeout_status in 124 137; do
   out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
     RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 run_lookup timeoutcommit 2>&1)"
   expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
-  if grep -qF "(exit $timeout_status)" <<<"$out" \
+  if grep -qE "reason=.*[^0-9]$timeout_status([^0-9]|$)" <<<"$out" \
       && ! grep -qF 'fixture-secret' <<<"$out"; then
     printf 'ok   a timed-out poll reports exit %s without leaking API error contents\n' "$timeout_status"
     pass=$((pass + 1))

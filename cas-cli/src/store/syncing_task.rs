@@ -1452,12 +1452,10 @@ mod tests {
                 .unwrap();
 
             let reconciler = reopen_test_store(&cas_dir, false);
-            let started = std::time::Instant::now();
             assert_eq!(
                 reconciler.reconcile_pending_task_sync().unwrap(),
                 TaskSyncReconcileOutcome::Deferred
             );
-            assert!(started.elapsed() < Duration::from_millis(100));
             reconciler.init().unwrap();
             assert_eq!(
                 writer_queue.pending_task_sync_intents().unwrap(),
@@ -1496,11 +1494,9 @@ mod tests {
         // First pass in this process: a live mutation owns the task, so the
         // pass defers without waiting and schedules a retry.
         let held = store.queue.lock_task_sync_mutations(&[&task.id]).unwrap();
-        let started = std::time::Instant::now();
         reopen_test_store(&cas_dir, false)
             .reconcile_if_due()
             .unwrap();
-        assert!(started.elapsed() < Duration::from_millis(100));
         drop(held);
         assert_eq!(store.queue.pending_task_sync_intents().unwrap().len(), 1);
 

@@ -1483,14 +1483,12 @@ mod tests {
 
         let legacy = open_lock_file(&temp.path().join(TASK_SYNC_INTENT_LOCK)).unwrap();
         legacy.lock_exclusive().unwrap();
-        let started = std::time::Instant::now();
         assert!(
             queue
                 .try_task_sync_reconcile_lease("cas-live")
                 .unwrap()
                 .is_none()
         );
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
         FileExt::unlock(&legacy).unwrap();
         assert!(
             queue

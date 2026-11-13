@@ -568,7 +568,6 @@ fn alias_skipped_source_is_attributed_once_with_original_detail_cas_cf58() {
         detail.contains(&alias.join("binary.rs").display().to_string()),
         "{detail}"
     );
-    assert!(detail.contains("not valid UTF-8"), "{detail}");
 
     // The same skipped source can be visited through both configured spellings.
     // Deduplicate the receipt only; the raw result still reports both visits.

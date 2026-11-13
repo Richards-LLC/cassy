@@ -3650,6 +3650,57 @@ Dev reply
     }
 
     #[test]
+    fn json_slack_draft_and_changelog_fallback_preserve_source_values_cas_0831() {
+        let punch = "Report fixture 1893.";
+        let title = "change-1893";
+        let was = "before-1893";
+        let now = "after-1893";
+        let top = format!("*Live on production — User — Cassy v9.99.1*\nWas: {was} → Now: {punch}");
+        let reply = format!("• *{title}*: Was: {was} → Now: {now}");
+        let payload = serde_json::json!({
+            "text": top, "blocks": [{"type": "section", "text": top}],
+            "replies": [{"text": reply, "blocks": [{"type": "section", "text": reply}]}]
+        });
+        let text_draft = format!("## User thread\n\n```text\n{top}\n```\n\n```text\n{reply}\n```\n");
+        let json_draft = format!("## User thread\n\n```json\n{}\n```\n", serde_json::to_string_pretty(&payload).unwrap());
+        let mut sources = AcquiredSources {
+            project: "fixture".into(), changes: Vec::new(), release_pr: None,
+            closure_window: None, issues_still_open: Vec::new(), issues_closed_outside: Vec::new(),
+            changelog: None, changelog_path: None, release_notes: None,
+            release_note_articles: Vec::new(), release_note_user_punch: None,
+            release: None, issues: Vec::new(), assets: Vec::new(),
+            release_evidence: ReleaseEvidence::default(), github_repo: None,
+            issue_count: 0, warnings: Vec::new(), retrieved_at: "2026-11-12T00:00:00Z".into(),
+        };
+        // Caller payload values are data; blocks repeat text and must not add articles.
+        for draft in [&json_draft, &text_draft] {
+            let parsed = parse_release_note_draft(draft);
+            assert_eq!(parsed.user_punch.as_deref(), Some(punch));
+            assert_eq!(parsed.articles.len(), 1);
+            let article = &parsed.articles[0];
+            assert_eq!((&article.title[..], &article.was[..], &article.now[..]), (title, was, now));
+            sources.release_note_articles = parsed.articles;
+            sources.release_note_user_punch = parsed.user_punch;
+            let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
+            assert!(report.lines().any(|line| line == punch));
+        }
+
+        let detail = "detail-1893";
+        let changelog = format!("## [9.99.1]\n\n### Fixed\n- **{title}** — Was: {was} Now: {now}\n\n### Documentation\n- **{detail}** — Was: {was} Now: {now}\n");
+        sources.changelog = parse_changelog_section(&changelog, "9.99.1");
+        sources.release_note_articles.clear();
+        sources.release_note_user_punch = None;
+        let user = was_now_sections(&sources, true);
+        let dev = was_now_sections(&sources, false);
+        // The report renderer consumes these Markdown headings and Was/Now fields.
+        for (heading, audience, other) in [(title, &user, &dev), (detail, &dev, &user)] {
+            let expected = format!("#### {heading}\n\nWas: {was}\n\nNow: {now}\n");
+            assert!(audience.contains(&expected), "{audience}");
+            assert_eq!(other.matches(heading).count(), 0);
+        }
+    }
+
+    #[test]
     fn reply_was_now_headings_do_not_become_release_groups() {
         let draft = r#"## User thread
 

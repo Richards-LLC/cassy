@@ -1444,8 +1444,8 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 | Tier | Paths | Verification | QA |
 | --- | --- | --- | --- |
 | 0 | `docs/**` except `docs/design`, `docs/review` and the QA catalog, Markdown outside `src/` that does not instruct agents, `CHANGELOG.md`, `hub-web/e2e/**`, `**/tests/**` | No independent verifier; CI and mechanical close gates still run | No journeys and no ledger row |
-| 1 | Everything else, including skills, agents and an unmeasurable diff | In `qa.mode=batch`, one release verdict naming every delivery; an unmeasurable diff, `force-verifier` or `qa.mode=per_task` gets its own verifier | The impacted journeys |
-| 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | Its own verifier plus an adversarial probe, even when a release verdict names it | An `Adversarial probe:` row in the task ledger, in batch mode too |
+| 1 | Everything else, including skills, agents and an unmeasurable diff | One pre-merge verifier, including in `qa.mode=batch` | The impacted journeys |
+| 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | Its own pre-merge verifier plus an adversarial probe | An `Adversarial probe:` row in the task ledger, in batch mode too |
 
 A missing assignment, expired heartbeat or retired worker never waives required
 verification, including a no-code task carrying external proof. Close reports a
@@ -1503,7 +1503,7 @@ availability failures remain unacknowledged for retry.
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one. Every covered hold also queues an owner-addressed supervisor action with the complete gate and an ordinary close retry command, even after the implementer retires. Replaying the same receipt does not duplicate its task outcome; repeated evidence for the same anchor and gate does not repeat the supervisor action.
+The release verdict is computed from each code delivery's existing approved merge verdict, local or peer, and the green full-set receipt for the frozen train tip. The cut names members missing an approval and stops before push or enqueue. There is no separate release review, published review ledger or recorder identity for code deliveries. Batch QA remains separate evidence; its ledger cannot approve code. The merge queue remains the final gate to `main`. Deliberate depth=light, rapid-response sampling and Tier 0 exemptions use green lane CI plus the green frozen-train run. Pending or rejected reviews retain their authority. Missing lane CI is named separately from a missing required review.
 
 Verifier improvements stay in the verdict; verifiers never file or request tasks. A supervisor staffs a follow-up for a reproduced defect affecting someone today, carrying `repro` and `affected` plus severity, reach and journey. Code-read findings remain theoretical P4 backlog, except theoretical money/data loss on a declared main journey is P2. Visible main-journey failures rank ahead of those hypotheses. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 

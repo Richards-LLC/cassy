@@ -389,7 +389,7 @@ fn refusal_text(joined: &Result<ToolResult, tokio::task::JoinError>) -> Option<&
 }
 
 /// First line of a late close's answer, bounded for a task note.
-fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> String {
+pub(super) fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> String {
     let text = match joined {
         Ok(Ok(result)) => {
             let text = first_tool_text(result).unwrap_or_default();
@@ -509,6 +509,18 @@ impl CasService {
             .unwrap_or_default();
         let registration = tool_name == "coordination" && matches!(action, "register" | "session_start");
         let continuation_id = registration.then(|| uuid::Uuid::new_v4().to_string());
+        let merge = tool_name == "factory" && action == "worktree_merge";
+        // Candidate/Git/CI waits have separate local bounds, not a bound on
+        // their combined duration. Persist before starting non-cancellable work.
+        let merge_receipt = if merge {
+            Some(super::merge_response::MergeReceipt::begin(&self.inner.cas_root, arguments)
+                .map_err(|error| rmcp::ErrorData {
+                    code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                    message: format!("Merge receipt could not be persisted; no merge started: {error}").into(),
+                    data: None,
+                })?)
+        } else { None };
+        let budget = if merge { budget.min(std::time::Duration::from_secs(5)) } else { budget };
         let grace = if tool_name == "verification" && action == "batch_receipt" {
             grace.min(BATCH_RECEIPT_POST_COMMIT_GRACE)
         } else {
@@ -528,13 +540,13 @@ impl CasService {
             let _tool_work = tool_work;
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             let _memory_call = crate::mcp::server::memory::Call::started();
-            if registration {
+            if registration || merge {
                 // Aborting an async task cannot cancel synchronous startup or
                 // SQLite work. Keep runtime workers free to answer on time.
                 super::mutation_receipt::run_on_blocking_pool(future).await
                     .unwrap_or_else(|error| Err(rmcp::ErrorData {
                         code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-                        message: format!("Registration handler ended abnormally: {error}").into(),
+                        message: format!("Tool handler ended abnormally: {error}").into(),
                         data: None,
                     }))
             } else {
@@ -569,6 +581,13 @@ impl CasService {
         };
         match won {
             Won::Handler(joined) => {
+                if let Some(durable) = &merge_receipt {
+                    durable.finish(&joined, &receipt).map_err(|error| rmcp::ErrorData {
+                        code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                        message: format!("Merge finished but its receipt could not be updated: {error}").into(),
+                        data: None,
+                    })?;
+                }
                 let elapsed = start.elapsed();
                 if elapsed.as_secs() >= 5 {
                     info!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, "MCP slow request");
@@ -592,6 +611,11 @@ impl CasService {
                 }
             }
             Won::Grace => {
+                if let Some(durable) = merge_receipt {
+                    let answer = durable.answer(&receipt);
+                    durable.watch(self.clone(), handle, receipt);
+                    return Ok(answer);
+                }
                 let elapsed = start.elapsed();
                 let description = receipt.outcome.get().cloned().or_else(|| receipt
                     .commit
@@ -642,6 +666,11 @@ impl CasService {
                 ))]))
             }
             Won::Deadline => {
+                if let Some(durable) = merge_receipt {
+                    let answer = durable.answer(&receipt);
+                    durable.watch(self.clone(), handle, receipt);
+                    return Ok(answer);
+                }
                 let elapsed = start.elapsed();
                 let commit = receipt.commit.get();
                 // cas-24d8: a close commits intermediate writes (a gate note,
@@ -1650,46 +1679,31 @@ mod tests {
     /// success once the post-commit grace runs out. Never UNKNOWN.
     #[tokio::test]
     async fn a_committed_merge_with_a_slow_close_reports_its_outcome_cas_3937() {
-        use crate::mcp::server::CasCore;
-        use crate::mcp::tools::service::CasService;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
-        let service = CasService::new(
-            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
-            #[cfg(feature = "mcp-proxy")]
-            None,
-        );
-        let arguments =
-            serde_json::json!({"action": "worktree_merge", "id": "sharp-cobra-83", "task_id": "cas-3fb4"});
-        let merge_then_slow_close = || async {
-            super::super::mutation_receipt::merge_committed("4dd898a71", "epic/v57", "pushed to origin");
-            std::future::pending().await
-        };
-
-        let error = service
-            .call_with_deadline(
-                "factory",
-                arguments.as_object(),
-                std::time::Duration::from_millis(50),
-                merge_then_slow_close(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.data.as_ref().unwrap()["mutation_outcome"], "COMMITTED", "{error:?}");
-        assert!(error.message.contains("4dd898a71"), "{error:?}");
-
-        let answered = service
-            .call_with_deadline_and_grace(
-                "factory",
-                arguments.as_object(),
-                std::time::Duration::from_secs(30),
-                std::time::Duration::from_millis(50),
-                merge_then_slow_close(),
-            )
-            .await
-            .expect("a committed merge answers once its grace runs out");
-        let text = format!("{answered:?}");
-        assert_eq!(answered.is_error, Some(false));
-        assert!(text.contains("4dd898a71"), "{text}");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        core.open_task_store().unwrap().add(&crate::types::Task::new(
+            "cas-3fb4".into(), "published merge".into())).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({"action":"worktree_merge", "id":"sharp-cobra-83", "task_id":"cas-3fb4"});
+        for (budget, grace) in [
+            (std::time::Duration::from_millis(50), std::time::Duration::from_secs(30)),
+            (std::time::Duration::from_secs(30), std::time::Duration::from_millis(50)),
+        ] {
+            let (resume, held) = tokio::sync::oneshot::channel();
+            let answer = service.call_with_deadline_and_grace("factory", arguments.as_object(),
+                budget, grace, async move {
+                    super::super::mutation_receipt::merge_committed("4dd898a71", "epic/v57", "pushed to origin");
+                    held.await.unwrap();
+                    Ok(rmcp::model::CallToolResult::success(vec![]))
+                }).await;
+            resume.send(()).unwrap();
+            service.tool_work.wait_idle().await;
+            let answered = answer.expect("published merge must return its receipt");
+            assert_eq!(answered.structured_content.as_ref().unwrap()["mutation_outcome"], "COMMITTED");
+            assert_eq!(answered.structured_content.as_ref().unwrap()["state"], "merged");
+            assert!(format!("{answered:?}").contains("4dd898a71"));
+        }
     }
 
     /// The real receipt handler must release its response budget once its

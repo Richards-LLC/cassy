@@ -323,3 +323,79 @@ fn git(repo: &Path, args: &[&str], deadline: Instant) -> Result<String, String> 
     }
     String::from_utf8(output.stdout).map_err(|error| format!("git {}: {error}", args[0]))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cas_types::{Agent, AgentStatus, TaskStatus, WorkTarget};
+
+    fn commit_git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git").args(args).current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "CAS Test").env("GIT_AUTHOR_EMAIL", "cas@example.test")
+            .env("GIT_COMMITTER_NAME", "CAS Test").env("GIT_COMMITTER_EMAIL", "cas@example.test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn local_only_primary_is_not_retained_but_worker_work_is_cas_6a12() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for remote in [None, Some("upstream")] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let root = repo.join(".cas");
+            std::fs::create_dir(&root).unwrap();
+            env.set("CAS_ROOT", &root);
+            commit_git(repo, &["init", "-qb", "main"]);
+            std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+            commit_git(repo, &["add", ".gitignore"]);
+            commit_git(repo, &["commit", "-qm", "seed"]);
+            commit_git(repo, &["commit", "--allow-empty", "-qm", "second local commit"]);
+            let bare = tempfile::tempdir().unwrap();
+            if let Some(remote) = remote {
+                commit_git(bare.path(), &["init", "-q", "--bare"]);
+                commit_git(repo, &["remote", "add", remote, bare.path().to_str().unwrap()]);
+                commit_git(repo, &["push", "-q", remote, "main"]);
+            }
+            let agents = crate::store::open_agent_store(&root).unwrap();
+            agents.init().unwrap();
+            let tasks = crate::store::open_task_store(&root).unwrap();
+            tasks.init().unwrap();
+            let register = |worker: &str, path: &Path, branch: &str| {
+                let mut agent = Agent::new_with_role(worker.into(), worker.into(), AgentRole::Worker);
+                agent.status = AgentStatus::Shutdown;
+                agent.metadata.insert("clone_path".into(), path.display().to_string());
+                agents.register(&agent).unwrap();
+                let mut task = Task::new(format!("cas-{worker}"), worker.into());
+                task.status = TaskStatus::Closed;
+                task.assignee = Some(worker.into());
+                task.deliverables.parked_branch = Some(branch.into());
+                task.deliverables.work_target = Some(WorkTarget {
+                    repo_selector: "project:retained-local-fixture".into(), target_branch: "main".into(),
+                });
+                tasks.add(&task).unwrap();
+            };
+            register("retired-primary", repo, "main");
+            let scan_now = || scan_until(&root, Instant::now() + Duration::from_secs(20));
+            let clean = scan_now();
+            assert!(!clean.is_partial(), "{clean:?}");
+            assert!(clean.entries.is_empty(), "{clean:?}");
+            let worker = root.join("retained-worker");
+            commit_git(repo, &["worktree", "add", "-qb", "factory/retired-worker", worker.to_str().unwrap(), "main"]);
+            register("retired-worker", &worker, "factory/retired-worker");
+            std::fs::write(worker.join("local.txt"), "retained work\n").unwrap();
+            commit_git(&worker, &["add", "local.txt"]);
+            commit_git(&worker, &["commit", "-qm", "worker ahead"]);
+            std::fs::write(worker.join("dirty.txt"), "uncommitted\n").unwrap();
+            let retained = scan_now();
+            assert!(!retained.is_partial(), "{retained:?}");
+            assert_eq!(retained.entries.len(), 1, "{retained:?}");
+            let entry = &retained.entries[0];
+            assert_eq!(entry.path, worker);
+            assert_eq!(entry.unpushed, Some(1));
+            assert_eq!(entry.dirty, Some(1));
+        }
+    }
+}

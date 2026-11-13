@@ -66,7 +66,7 @@ A successful park reads `PARKED <sha> on <branch>; awaiting merge verdict; nothi
 Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
 The park relay is the completion signal; send merge_request=true only for local_merge.
 A dispatched verifier reviews the candidate before publication; PASS publishes
-and closes, FAIL reopens it to you with findings. In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.
+and closes, FAIL reopens it to you with findings. In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.
 MERGE REQUIRED is a genuine refusal, such as unpushed or unattributable work:
 
 1. Drain `coordination action=inbox_poll` to `No unread messages`; act on

@@ -385,6 +385,33 @@ pub fn verification_sampled(task_id: &str) -> bool {
     hash % VERIFY_SAMPLE_EVERY == 0
 }
 
+/// A recorded sampling exemption survives the operator closing its window.
+/// Read-only release replay binds it to the delivery's current cycle and
+/// rechecks the content floor; an old skip cannot approve a reopened task.
+pub(crate) fn verification_was_exempted(root: &Path, repo: &Path, task: &Task) -> bool {
+    use cas_store::TaskStore;
+    let recorded = || -> Option<bool> {
+        if verification_sampled(&task.id) || !floor_clear(&recorded_delivery(repo, task)?, &[]) {
+            return Some(false);
+        }
+        let parent = crate::qa_batch::release_close::read_tasks(root).ok()?
+            .get_parent_epic(&task.id).ok()??;
+        let conn = crate::qa_batch::release_close::read_connection(root).ok()?;
+        let anchor = task.deliverables.factory_branch_anchor.as_deref()?;
+        let cycle = crate::mcp::tools::core::workflow::premerge_verification::cycle::current(&conn, task, anchor).ok()?;
+        let since = match cycle {
+            Some(cycle) => conn.query_row("SELECT created_at FROM delivery_cycles WHERE cycle_id=?", [cycle],
+                |row| row.get::<_, String>(0)).ok()?.parse::<DateTime<Utc>>().ok()?,
+            None => task.created_at,
+        };
+        Some(load(root).ok()?.windows.iter().filter(|window| window.epic == parent.id).any(|window| {
+            ledger(root, window).iter().any(|skip| skip.task == task.id && skip.check == "verification"
+                && skip.at >= since && skip.at >= window.enabled_at && skip.at < window.closed_at())
+        }))
+    };
+    recorded().unwrap_or(false)
+}
+
 /// Append one skipped check to the window's back-fill ledger, once per task
 /// and check (dispatch and close both see the same skip). Returns whether the
 /// row is on record: a caller relaxes its gate only when it is, so a skip

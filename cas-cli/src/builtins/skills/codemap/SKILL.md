@@ -1,6 +1,6 @@
 ---
 name: codemap
-description: Use when the user asks for a codemap, when .claude/CODEMAP.md is missing or stale, or when task close refuses with CODEMAP DRIFT.
+description: Use when the user asks for a codemap, when .claude/CODEMAP.md is missing or stale, or when preparing a release.
 metadata:
   managed_by: cas
 ---
@@ -29,7 +29,7 @@ cas knowledge search "codemap module layout workspace"
 - **A page comes back and its sources are current** (the paths it cites have not moved since it was written) — read it with `cas knowledge read <id-or-path>` and use it as your draft. You are reconciling a document, not writing one from scratch.
 - **Nothing comes back, or the page cites paths that no longer exist** — the store has nothing usable. Do the full read order below.
 
-Never skip writing `.claude/CODEMAP.md` just because a page exists. The page is the distilled form; the file is the artifact the freshness gate and other agents read.
+Never skip writing `.claude/CODEMAP.md` just because a page exists. The page is the distilled form; the file is the artifact the freshness check and other agents read.
 
 ## Read order (highest signal first)
 
@@ -103,7 +103,7 @@ Follow [references/doc-hygiene.md](references/doc-hygiene.md) for the three step
 
 - **Keep-blocks** most often wrap `## Cross-cutting` notes (hot paths, migration gotchas). Put them back in the section they came from.
 - **Pointer memory title:** `project_<slug>_codemap` (slug = lowercase kebab-case of project name). Body example: ``See [.claude/CODEMAP.md](.claude/CODEMAP.md) — Rust workspace + TS frontend; CLI lives in `cas-cli/`, hooks in `crates/cas-core/`.``
-- **Commit** `.claude/CODEMAP.md`. The freshness gate (SessionStart hook + `cas codemap status`) uses **git history** as the sole authority, so the commit is what resets the signal. Verify with `cas codemap status` → `Status: up to date`. No manual `cas codemap clear` is required.
+- **Commit** `.claude/CODEMAP.md`. The freshness check (SessionStart hook + `cas codemap status`) uses **git history** as the sole authority, so the commit is what resets the signal. Verify with `cas codemap status` → `Status: up to date`. No manual `cas codemap clear` is required.
 - **Report back:** (a) total line count, (b) how many top-level subsystems are mapped, (c) anything notable about the layout (workspace? monorepo? polyglot?).
 
 ### Seed the knowledge store
@@ -131,8 +131,8 @@ If the store is not initialized in this project, the command says so and there i
 ## When to run
 
 - **Missing:** `.claude/CODEMAP.md` does not exist → SessionStart fires a `severity="high"` banner. Nothing is blocked. Generate from scratch.
-- **Stale:** SessionStart reports structural changes since CODEMAP.md was last updated → regenerate, keep-blocks survive. Only once staleness reaches `SignificantlyStale` does PreToolUse gate a supervisor's `task create` / `spawn_workers`; a missing CODEMAP never does.
-- **Drift at park (G5):** task close refuses `CODEMAP DRIFT`, naming paths this delivery deleted or renamed that the map names, or new directories under a directory the map enumerates. Edit only those rows in the same branch (drop or rename the path, add the directory with a one-liner), commit, and retry close; this is a targeted edit, not a regeneration. When the map stays true (the path was never worth mapping, or is generated), record `task action=notes note_type=decision notes="codemap unchanged: <reason>"` instead. A new file inside a mapped directory is advisory only.
+- **Stale:** SessionStart reports structural changes since CODEMAP.md was last updated → regenerate at the next release prep; keep-blocks survive. Nothing is blocked.
+- **Release prep:** the supervisor regenerates the map once on the release branch before the cut. Factory deliveries never edit `.claude/CODEMAP.md`, so parallel work cannot conflict on it.
 - **Manual:** user invokes `/codemap` or asks to refresh the codemap.
 - **After refactors:** modules were added, removed, or renamed across more than a handful of files.
 

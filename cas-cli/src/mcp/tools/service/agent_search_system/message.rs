@@ -1424,7 +1424,7 @@ impl CasService {
             } else if target.eq_ignore_ascii_case("all_workers") {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
-                    "Workers cannot broadcast to all_workers",
+                    crate::gates::tag("H-45", "Workers cannot broadcast to all_workers"),
                 ));
             } else {
                 let supervisor_name = resolve_supervisor_name();
@@ -1986,6 +1986,7 @@ impl CasService {
             let held = operator_turn_waiting_for_commander(
                 &self.inner.cas_root, factory_session, chrono::Utc::now(),
             );
+            // gate[N-31 notice]: Agent message to the operator
             let reply = queue
                 .record_operator_turn(&cas_store::OperatorTurn {
                     source: "supervisor",

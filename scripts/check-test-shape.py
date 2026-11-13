@@ -14,10 +14,41 @@ by a released-trunk sync merge.
 """
 import argparse
 import ast
+from html import escape
+from functools import cache
+import os
 from pathlib import Path
 import re
 import subprocess
 from rust_test_source import tokens, pairs
+
+
+@cache
+def registered_gate_codes():
+    """Read the declarations that generate gates::REGISTRY in cas-cli/build.rs."""
+    repo = Path(__file__).resolve().parent.parent
+    codes = set()
+    delivery_stages = {'park', 'close-after-merge', 'epic-close', 'merge-admission', 'train-merge'}
+    declaration = re.compile(
+        r'^[ \t]*(?:///|//!|//|#|<!--|\*)[ \t]*gate\[([GHWNC]-[0-9]{2,3})'
+        r'[ \t]+([a-z-]+)(?:[ \t]+(integrity|as-of))?[ \t]*\]:([^\n]*)$', re.MULTILINE)
+    for root in ('cas-cli/src', 'crates', 'scripts'):
+        for directory, children, files in os.walk(repo / root):
+            children[:] = [name for name in children
+                           if name not in {'target', 'node_modules', 'tests', 'fixtures', 'gates'}]
+            for name in files:
+                if (Path(name).suffix not in {'.rs', '.sh', '.py', '.registry'}
+                        or name.endswith('_tests.rs') or name == 'tests.rs'):
+                    continue
+                try:
+                    source = (Path(directory) / name).read_text()
+                except (OSError, UnicodeError):
+                    continue
+                for code, stage, policy, title in declaration.findall(source):
+                    if (bool(policy) == (stage in delivery_stages)
+                            and title.strip().removesuffix('-->').removesuffix('*/').strip()):
+                        codes.add(code)
+    return frozenset(codes)
 
 
 def human_message_literal(value):
@@ -27,6 +58,9 @@ def human_message_literal(value):
     their wire spelling includes spaces. No English vocabulary is consulted.
     """
     if not isinstance(value, str) or not value.strip():
+        return False
+    gate = re.fullmatch(r'\[([GHWNC]-[0-9]{2,3})\]', value)
+    if gate and gate[1] in registered_gate_codes():
         return False
     static = re.sub(r'\$?\{[^{}]*\}', '', value)
     if not any(char.isalpha() for char in static):
@@ -81,6 +115,51 @@ def python_bindings(scope):
             for element in node.iter.elts:
                 bind(node.target, element)
     return bound
+
+
+def python_escaped_payloads(tree):
+    """Positive substring checks of an exact encoded, supplied local fixture.
+
+    A single immutable literal must reach a fixture field before the assertion.
+    Neither escaped prose alone nor the same name in another scope qualifies.
+    """
+    def local_nodes(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                yield from local_nodes(child)
+
+    for scope in [tree, *(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))]:
+        nodes = list(local_nodes(scope))
+        writes = {}
+        for node in nodes:
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                writes[node.id] = writes.get(node.id, 0) + 1
+        bindings = {}
+        supplied = {}
+        for node in nodes:
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if (isinstance(target, ast.Name) and writes[target.id] == 1
+                    and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                bindings[target.id] = (node.value.value, node.lineno)
+            elif isinstance(target, (ast.Subscript, ast.Attribute)) and isinstance(node.value, ast.Name):
+                supplied.setdefault(node.value.id, []).append(node.lineno)
+        for node in nodes:
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'assertIn' and len(node.args) >= 2
+                    and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                continue
+            literal = node.args[0]
+            for name, (raw, line) in bindings.items():
+                if not any(line < used < node.lineno for used in supplied.get(name, [])):
+                    continue
+                encoded = escape(raw)
+                markdown = re.sub(r'([\\`*_{}\[\]()#+.!|~-])', r'\\\1', encoded)
+                if literal.value != raw and literal.value in (encoded, markdown):
+                    yield literal
+                    break
 
 
 def rust_bindings(ts, ps, begin, end):
@@ -269,6 +348,7 @@ def message_assertions(source, path, changed_lines=None):
             tree = ast.parse(source)
         except SyntaxError:
             return []
+        escaped_payloads = set(python_escaped_payloads(tree))
         scopes = {}
         for scope in [tree, *(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))]:
             bindings = python_bindings(scope)
@@ -285,6 +365,8 @@ def message_assertions(source, path, changed_lines=None):
         def substring_values(literal):
             """A substring operand's literal value(s): its own, or what a bound name
             holds unless the test also passes that name in (payload preservation)."""
+            if literal in escaped_payloads:
+                return []
             if isinstance(literal, ast.Name):
                 if (id(scopes.get(literal)), literal.id) in supplied:
                     return []
@@ -650,7 +732,7 @@ def js_assertion_diagnostics(source, path):
 
 
 def python_runtime_inputs(source):
-    """Path literals consumed by file reads are inputs, not returned-text pins."""
+    """File paths, encoded fixtures and recorded argv comparisons are machine data."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -664,12 +746,99 @@ def python_runtime_inputs(source):
         # AST columns count UTF-8 bytes; text_literals uses character offsets.
         return starts[line - 1] + len(lines[line - 1].encode('utf-8')[:byte_column].decode('utf-8'))
 
+    for node in python_escaped_payloads(tree):
+        yield offset(node.lineno, node.col_offset), offset(node.end_lineno, node.end_col_offset)
+    def file_read(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'read_text' and not node.args and not node.keywords)
+
+    def shell_split(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == 'shlex'
+                and node.func.attr == 'split' and len(node.args) == 1 and not node.keywords)
+
+    def recorded_argv(node, many=False):
+        if not many:
+            return shell_split(node) and file_read(node.args[0])
+        if not isinstance(node, ast.ListComp) or len(node.generators) != 1:
+            return False
+        loop = node.generators[0]
+        return (isinstance(loop.target, ast.Name) and not loop.ifs and not loop.is_async
+                and shell_split(node.elt) and isinstance(node.elt.args[0], ast.Name)
+                and node.elt.args[0].id == loop.target.id
+                and isinstance(loop.iter, ast.Call) and isinstance(loop.iter.func, ast.Attribute)
+                and loop.iter.func.attr == 'splitlines' and not loop.iter.args and not loop.iter.keywords
+                and file_read(loop.iter.func.value))
+
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    bindings = {}
+
+    def function_of(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node
+            if isinstance(node, (ast.ClassDef, ast.Lambda)):
+                return None
+        return None
+
+    def recorded_operand(node, many):
+        if not isinstance(node, ast.Name):
+            return recorded_argv(node, many)
+        function = function_of(node)
+        if function is None:
+            return False
+        if function not in bindings:
+            writes = {}
+            for item in ast.walk(function):
+                if function_of(item) is not function:
+                    continue
+                names, assignment = [], None
+                if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
+                    names = [item.id]
+                    parent = parents[item]
+                    if isinstance(parent, ast.Assign) and len(parent.targets) == 1 and parent.targets[0] is item:
+                        assignment = parent
+                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    names = [item.name]
+                elif isinstance(item, (ast.Import, ast.ImportFrom)):
+                    names = [alias.asname or alias.name.split('.')[0] for alias in item.names]
+                elif isinstance(item, ast.ExceptHandler) and item.name:
+                    names = [item.name]
+                for name in names:
+                    write = assignment or item
+                    writes.setdefault(name, []).append(((write.end_lineno, write.end_col_offset), assignment))
+            bindings[function] = writes
+        preceding = [write for write in bindings[function].get(node.id, [])
+                     if write[0] < (node.lineno, node.col_offset)]
+        assignment = max(preceding, key=lambda write: write[0], default=(None, None))[1]
+        return (assignment is not None
+                and recorded_argv(assignment.value, many))
+
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in ('read_text', 'read_bytes')):
             for value in ast.walk(node.func.value):
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
                     yield offset(value.lineno, value.col_offset), offset(value.end_lineno, value.end_col_offset)
+        operands, many = [], False
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and len(node.args) >= 2:
+            if node.func.attr == 'assertEqual':
+                operands = [node.args[:2], node.args[:2][::-1]]
+            elif node.func.attr in ('assertIn', 'assertNotIn'):
+                operands, many = [node.args[:2]], True
+        elif isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare) and len(node.test.ops) == 1:
+            expected, actual = node.test.left, node.test.comparators[0]
+            if isinstance(node.test.ops[0], ast.Eq):
+                operands = [(expected, actual), (actual, expected)]
+            elif isinstance(node.test.ops[0], (ast.In, ast.NotIn)):
+                operands, many = [(expected, actual)], True
+        for expected, actual in operands:
+            if (isinstance(expected, ast.List) and expected.elts
+                    and all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in expected.elts)
+                    and recorded_operand(actual, many)):
+                for item in expected.elts:
+                    yield offset(item.lineno, item.col_offset), offset(item.end_lineno, item.end_col_offset)
 
 
 def lint_text_pins(source, path, ranges=None, changed_lines=None):
@@ -897,7 +1066,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--changed-since')
     parser.add_argument('--messages-only', action='store_true')
+    parser.add_argument('--print-gate-codes', action='store_true')
     args = parser.parse_args()
+    if args.print_gate_codes:
+        print('\n'.join(sorted(registered_gate_codes())))
+        return 0
     try:
         if args.changed_since:
             base = subprocess.check_output(['git', 'merge-base', args.changed_since, 'HEAD'], text=True).strip()

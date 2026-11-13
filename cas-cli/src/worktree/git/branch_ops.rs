@@ -892,7 +892,12 @@ impl GitOperations {
                 reason: first_line(&error.to_string()),
             };
         }
+        self.reconcile_target_with_fetched_origin(target)
+    }
 
+    /// The reconcile above, against an `origin/<target>` the caller already
+    /// fetched under the same target lock: merge admission's one origin read.
+    pub(crate) fn reconcile_target_with_fetched_origin(&self, target: &str) -> TargetReconcile {
         let remote_ref = format!("origin/{target}");
         let Some(remote) = self.resolve_commit(&remote_ref) else {
             return TargetReconcile::NoRemote;

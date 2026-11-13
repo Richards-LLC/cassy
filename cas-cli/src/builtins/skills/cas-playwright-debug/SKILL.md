@@ -1,180 +1,65 @@
 ---
 name: cas-playwright-debug
-description: Use when a Playwright test fails, flakes, or times out and you need the root cause and a fix — trace CLI triage, `--debug=cli` stepping, and flake control for Playwright 1.59+.
+description: Use when a Playwright test fails, flakes or times out and needs trace evidence, a root cause or a measured flake diagnosis; authoring/configuration uses cas-playwright-tests.
 metadata:
   managed_by: cas
 ---
 
 # Playwright debugging
 
-Work from evidence in this order: the retained trace, then an interactive
-repro, then the fix, then flake proof. Do not edit a test before step 1 names
-the failing action.
+Read retained evidence before editing. Use the current stable locked install and matching browsers under the project's supported runtime; [cas-playwright-tests](../cas-playwright-tests/SKILL.md) owns configuration, targets, locators and test-agent policy.
 
-Check `node --version` and `npx playwright --version` first:
+## Read the failure
 
-| Feature or runtime | Playwright required |
-| --- | --- |
-| Trace CLI and `--debug=cli` | 1.59+ |
-| `npx playwright cli attach` (§2), `retryStrategy` | 1.62+ |
-| Test locks, `locator.visible()` | 1.63+ |
-| Node 26, including trace recording | **1.65+** |
-
-On older Playwright, use `npx playwright show-trace <trace.zip>` and upgrade.
-If assertions pass but teardown times out, rerun the named test with `--trace off`,
-then on Node 22 before blaming the product.
-
-For coding-agent browser work, default to `npx playwright cli`: snapshots live
-in files and element refs keep tool output small. Use Playwright MCP for a long
-exploratory walk that needs its persistent session. Neither replaces the named
-test run or the project's evidence bundle. See the [official CLI guide](https://playwright.dev/docs/getting-started-cli).
-
-## Playwright 1.64–1.65 recording and upgrades
-
-- `test.skip/fixme/fail/slow` add a description-only form in 1.65; boolean/conditional forms remain supported, including conditional skip/slow. Class fields follow `useDefineForClassFields`: page-object fields initialized from `this.page` can throw; initialize them in the constructor instead.
-- Cookie matching follows RFC 6265; `APIRequestContext` params append to the existing query; actions wait for non-inert elements. Node 20 is no longer tested.
-- Since 1.64, device `screen` is forwarded and elements inside hidden iframes are hidden.
-
-- Videos use VP9 automatically. `use.video`, `recordVideo` and
-  `page.screencast.start()` accept `fps`; keep QA at **10 fps** until a measured
-  shard justifies raising it. Firefox and WebKit capture at most 25 fps.
-- `showActions({ style: { title: 'font-size: 16px' } })` replaces deprecated
-  `fontSize`; `style.point` and `style.highlight` also take CSS declarations.
-  Chapter captions still follow the project's DESIGN.md and CSP.
-- After a Playwright update, run `npx playwright init-agents --loop=claude`
-  (or the project's harness) in scratch and review the regenerated definitions.
-  Trial the healer only on a named failure in scratch. Accept locator-only
-  patches after a real rerun; reject assertion edits, retries, sleeps, timeout
-  increases and `skip`/`fixme`. Its upstream instructions permit skipping a
-  correct failing test, so never install it as an unattended repair gate.
-- WebMCP is for testing tools the app registers with the experimental browser
-  API; ordinary UI walks need no WebMCP configuration.
-
-API details: [1.64 release notes](https://playwright.dev/docs/release-notes#version-164),
-[test agents](https://playwright.dev/docs/test-agents).
-
-## 1. Read the trace from the terminal
-
-The trace path is printed under the failure, usually
-`test-results/<test>/trace.zip`. If no trace was kept, rerun only that test
-with `--trace=retain-on-failure`.
+Open the named failure's retained trace. If absent, reproduce that selection with --trace=retain-on-failure and preserve the original result. The failures reporter keeps console output small without filtering full journey reports.
 
 ```bash
-npx playwright trace open test-results/<test>/trace.zip   # metadata + counts
-npx playwright trace actions --errors-only                # the failing action id
-npx playwright trace action <id>                          # params, call log, source line
-npx playwright trace snapshot <id> --phase before         # aria snapshot of the page
+npx playwright trace open test-results/<test>/trace.zip
+npx playwright trace actions --errors-only
+npx playwright trace action <id>
+npx playwright trace snapshot <id> --phase before
 npx playwright trace snapshot <id> --phase after
-npx playwright trace snapshot <id> -- eval "document.querySelector('#status').textContent"
-npx playwright trace requests --failed                    # 4xx/5xx
+npx playwright trace screenshot <id>
+npx playwright trace attachments
+npx playwright trace snapshot <id> --serve
+npx playwright trace requests --failed
 npx playwright trace console --errors-only
-npx playwright trace errors                               # every error with its stack
+npx playwright trace errors
 npx playwright trace close
 ```
 
-`trace actions --grep <regex>` filters by title. `trace action <id>` shows
-which snapshot phases exist. The flag is `--phase`: `before`, `action`, or
-`after`. `test-results/<test>/error-context.md` holds the page state at failure.
+The action records params, call log, source and available phases (before/action/after). Use --grep to narrow actions/requests; inspect error-context.md beside the trace. Serve snapshots only on a local fixture port and retain captures in task artifacts.
 
-Classify the failure from the call log before you touch code:
+Classify the failed action: locator ambiguity/missing match; actionability including inert controls; wrong contract value; missing/wrong-origin route/auth; or shared-resource interference. Compare base/tip under the same seed, runtime and target before calling a regression. When correct assertions expose a product bug, file it and keep the failure; an assertion rewrite cannot repair the product.
 
-| The trace shows | Cause | Go to |
-| --- | --- | --- |
-| Locator resolved to 0 elements, or to several (strict mode) | Locator drift | §3 |
-| Locator resolved, but the value differs (`"Saved!"` vs `"Saved"`) | The app changed, or the assertion is wrong | Decide which, then §3 |
-| An unmocked request failed, or the page lands on sign-in | A route mock missed | §5 |
-| The test fails in the suite and passes alone or on retry | A flake | §4 |
+## Step through a named failure
 
-When the app is wrong and the test is right, the test stays red. File the bug
-instead.
-
-## 2. Reproduce interactively with `--debug=cli`
-
-Start the paused test **in the background**. It waits indefinitely and would
-block your pane.
+--debug=cli runs headed: on these hosts wrap it in xvfb-run -a and background it with a log. Never open a visible desktop browser.
 
 ```bash
-PLAYWRIGHT_HTML_OPEN=never npx playwright test tests/x.spec.ts:42 --debug=cli > /tmp/pw-debug.log 2>&1 &
-# wait until the log prints: Run "playwright-cli attach tw-XXXXXX"
+xvfb-run -a npx playwright test tests/x.spec.ts:42 --debug=cli > target/pw-debug.log 2>&1 &
 npx playwright cli attach tw-XXXXXX
-npx playwright cli -s=tw-XXXXXX step-over            # run the next test call
+npx playwright cli -s=tw-XXXXXX step-over
 npx playwright cli -s=tw-XXXXXX pause-at x.spec.ts:57
-npx playwright cli -s=tw-XXXXXX snapshot             # aria tree with element refs
-npx playwright cli -s=tw-XXXXXX eval "document.title"
+npx playwright cli -s=tw-XXXXXX snapshot
 npx playwright cli -s=tw-XXXXXX console
 npx playwright cli -s=tw-XXXXXX resume
 ```
 
-- Every command after `attach` needs `-s=<session>`. A bare `step-over`
-  targets the `default` session and fails with "browser 'default' is not open".
-- Refs like `e4` expire when the page changes. Take a new `snapshot` before
-  `generate-locator <ref>` or `click <ref>`.
-- Actions you run through the CLI print equivalent Playwright code. Paste that
-  code into the test rather than hand-writing locators.
-- Stop the background run with `resume` or by killing the process, then rerun
-  the single test normally to confirm the fix.
+Use the session id after attach; snapshot refs expire after changes. Translate generated action code into the canonical semantic locator policy rather than pasting a fragile ref. Resume/close only the owned run. cli kill-all stops sessions globally: use it only in an isolated scratch home where every session is yours. PLAYWRIGHT_DASHBOARD=1 with cli show is an optional dashboard branch, also isolated under xvfb on these hosts.
 
-## 3. Write the fix with web-first idioms
-
-| Instead of | Write |
-| --- | --- |
-| `page.waitForLoadState('networkidle')` | A web-first assertion on the element the next step needs, e.g. `await expect(page.getByRole('table')).toBeVisible()` |
-| `page.waitForTimeout(n)` or a sleep | `await expect(locator).toHaveText(...)`, or `await expect.poll(fn).toBe(...)` for non-DOM state |
-| `locator('button:visible')` | `page.locator('button').visible()` |
-| `frameLocator('#outer').frameLocator('#inner')` when the frame does not matter | `page.frameLocator().getByRole(...)`, which searches every frame |
-| `.btn-primary.submit` CSS | `getByRole('button', { name: 'Submit' })`, `getByLabel`, or `getByTestId` |
-| `.first()` to silence strict mode | A narrower locator (`{ exact: true }`, `.filter({ hasText })`, or scope to a region) |
-
-Never fix a failure by raising a timeout, adding a sleep, or wrapping tests in
-`test.describe.serial`. Each of those hides the cause the trace already showed.
-
-## 4. Prove or kill a flake
+## Measure a flake
 
 ```bash
-npx playwright test tests/x.spec.ts:42 --repeat-each=20 --workers=4   # repro rate under load
-npx playwright test --last-failed                                     # rerun only the failures
+npx playwright test tests/x.spec.ts:42 --repeat-each=20 --workers=4 --shuffle 1729 --add-reporter failures
 ```
 
-Make the config separate flakes from real failures:
+Record failures/executions, seed, workers and the original failure signature. A single pass or failure cannot prove/disprove contention. Inspect shared identities, ports, mutable data and order-dependent setup; fix isolation first. For trace/runtime hangs, compare base/runtime controls and a labelled trace-off diagnostic without claiming it satisfies evidence requirements.
 
-```ts
-export default defineConfig({
-  retries: process.env.CI ? 2 : 0,
-  retryStrategy: 'isolated',          // retries run last, one at a time
-  failOnFlakyTests: !!process.env.CI, // a pass-on-retry still fails CI
-  use: {
-    trace: {
-      mode: 'retain-on-failure-and-retries',
-      snapshots: { dom: true, aria: true, screen: true },
-    },
-  },
-});
-```
+Locks are per Playwright run, not distributed coordination. Outside fullyParallel a lock may span the whole file; a named resource lock or -exclusive- belongs only to intentionally shared resources. See [current-api.md](../cas-playwright-tests/references/current-api.md) for the complete caveat.
 
-- A test that fails in the suite but passes on an isolated retry is contending
-  for something shared. Examples are a seeded account, a DB row, or a settings
-  page. Give every test that touches that resource the same lock:
-  `test('…', { lock: 'user-settings' }, async ({ page }) => { … })`. Other
-  tests stay parallel, including tests in other files and projects.
-- A test that also fails on the isolated retry is not a flake. Go back to §1.
-- `retain-on-failure-and-retries` keeps a trace for each attempt. Compare the
-  first attempt with the retry using `trace actions`.
+Banned fixes: retries, raised timeouts, sleeps/waitForTimeout, networkidle, strictness-silencing .first(), swallowed catches, skipped product failures and weakened assertions. Repeated diagnostics retain failures; they never turn a failed CI run green.
 
-## 5. Recurring root causes
+Done when retained evidence names the cause, the fix preserves the title's promise, the affected selection passes and the chosen repeated/order-varied diagnostic reports its actual result. Use the project's existing integration owner for broad proof.
 
-- **Route mock misses its origin.** The app calls its deployed API origin, and
-  the mock pins `localhost`. Match on the path instead:
-  `page.route('**/api/users', …)`. Confirm the miss with
-  `trace requests --grep api`.
-- **Seeded auth arrives late.** `page.addInitScript` must run before
-  `page.goto()`. Mock every endpoint the page calls on load. An unmocked 4xx
-  often redirects to sign-in.
-- **The response shape changed.** Update the mock body, the assertions, and any
-  frontend consumer that still reads the old shape.
-
-## Done when
-
-- The single test passes with `--repeat-each=3`.
-- The task note records the failing action id, the cause from the trace, and
-  the fix.
-- The diff adds no sleeps, no `networkidle`, and no raised timeouts.
+Sources: [agent CLI](https://playwright.dev/docs/agent-cli/introduction), [release notes](https://playwright.dev/docs/release-notes), [test locks](https://playwright.dev/docs/test-parallel#test-locks).

@@ -199,6 +199,8 @@ impl DedupResult {
 }
 
 /// Check what to do with new content based on similarity
+// gate-audit[force]: selector Chooses deduplication policy for a memory write; not factory task/agent admission.
+// gate-audit[skip_if_similar]: selector Chooses memory-write deduplication behavior; not a factory policy waiver.
 pub fn check_dedup<S: SearchIndexTrait>(
     store: &dyn Store,
     search: &S,

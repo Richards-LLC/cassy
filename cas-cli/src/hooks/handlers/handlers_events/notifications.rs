@@ -306,6 +306,7 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
 /// 4. Optionally generate pre-compaction summary
 ///
 /// Returns additionalContext with preserved memories
+// gate[N-103 notice]: PreCompact preservation
 pub fn handle_pre_compact(
     input: &HookInput,
     cas_root: Option<&Path>,
@@ -513,6 +514,7 @@ pub(crate) fn resolve_worker_active_task(
 ///
 /// Other harnesses do not expose a mechanically detectable pre-compaction
 /// event, so this function is deliberately invoked only from `PreCompact`.
+// gate[N-104 notice]: Factory compaction checkpoint
 pub(crate) fn checkpoint_worker_before_compaction(
     input: &HookInput,
     cas_root: &Path,

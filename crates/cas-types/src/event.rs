@@ -83,6 +83,14 @@ pub enum EventType {
     // Audit / integrity events
     /// Worker-owned verification Skipped row could not be written — audit trail gap
     AuditTrailGap,
+
+    // Gate registry facts (cas-b5cd), keyed by the gate code as entity id
+    /// A registered check refused an action
+    GateRefused,
+    /// A supervisor override passed a registered check
+    GateOverridden,
+    /// A supervisor declared a refusal a false positive
+    GateFalsePositive,
 }
 
 impl fmt::Display for EventType {
@@ -118,6 +126,9 @@ impl fmt::Display for EventType {
             EventType::VerificationStarted => write!(f, "verification_started"),
             EventType::VerificationAdded => write!(f, "verification_added"),
             EventType::AuditTrailGap => write!(f, "audit_trail_gap"),
+            EventType::GateRefused => write!(f, "gate_refused"),
+            EventType::GateOverridden => write!(f, "gate_overridden"),
+            EventType::GateFalsePositive => write!(f, "gate_false_positive"),
         }
     }
 }
@@ -157,6 +168,9 @@ impl FromStr for EventType {
             "verification_started" => Ok(EventType::VerificationStarted),
             "verification_added" => Ok(EventType::VerificationAdded),
             "audit_trail_gap" => Ok(EventType::AuditTrailGap),
+            "gate_refused" => Ok(EventType::GateRefused),
+            "gate_overridden" => Ok(EventType::GateOverridden),
+            "gate_false_positive" => Ok(EventType::GateFalsePositive),
             _ => Err(TypeError::Parse(format!("invalid event type: {s}"))),
         }
     }
@@ -173,6 +187,7 @@ pub enum EventEntityType {
     Skill,
     Session,
     Verification,
+    Gate,
 }
 
 impl fmt::Display for EventEntityType {
@@ -185,6 +200,7 @@ impl fmt::Display for EventEntityType {
             EventEntityType::Skill => write!(f, "skill"),
             EventEntityType::Session => write!(f, "session"),
             EventEntityType::Verification => write!(f, "verification"),
+            EventEntityType::Gate => write!(f, "gate"),
         }
     }
 }
@@ -201,6 +217,7 @@ impl FromStr for EventEntityType {
             "skill" => Ok(EventEntityType::Skill),
             "session" => Ok(EventEntityType::Session),
             "verification" => Ok(EventEntityType::Verification),
+            "gate" => Ok(EventEntityType::Gate),
             _ => Err(TypeError::Parse(format!("invalid entity type: {s}"))),
         }
     }
@@ -294,6 +311,9 @@ impl Event {
             EventType::VerificationStarted => "🔍",       // Magnifying glass (verifying)
             EventType::VerificationAdded => "📋",         // Clipboard (result recorded)
             EventType::AuditTrailGap => "⚠",             // Warning (audit gap)
+            EventType::GateRefused => "⛔",
+            EventType::GateOverridden => "⤼",
+            EventType::GateFalsePositive => "≠",
         }
     }
 }

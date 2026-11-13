@@ -1977,6 +1977,27 @@ fn is_known_sidecar_commandline(command: &str, raw: &[u8]) -> bool {
     {
         return true;
     }
+    // The locked Playwright CLI bundles MCP. Its browser server is a sidecar;
+    // `playwright test` remains an actual worker job. npm may rewrite argv[0]
+    // into a process title instead of retaining the original argument vector.
+    let argv: Vec<_> = raw.split(|byte| *byte == 0).collect();
+    let bundled_cli = argv.windows(2).any(|pair| {
+        pair[1] == b"mcp" && std::str::from_utf8(pair[0]).is_ok_and(|arg| {
+            let path = Path::new(arg);
+            path.file_name().is_some_and(|name| name == "playwright")
+                || path.ends_with("playwright/cli.js")
+        })
+    });
+    let npm_title = argv.first().is_some_and(|arg| {
+        std::str::from_utf8(arg).is_ok_and(|title| {
+            title.split_whitespace().take(4).eq(["npm", "exec", "playwright", "mcp"])
+        })
+    });
+    if (command == "node" || command == "npx" || command.starts_with("npm"))
+        && (bundled_cli || npm_title)
+    {
+        return true;
+    }
     let commandline = String::from_utf8_lossy(raw).to_ascii_lowercase();
     [
         "@playwright/mcp",
@@ -2385,6 +2406,7 @@ fn verify_death(pid: u32) -> bool {
 /// refused (fingerprint mismatch / no fingerprint) or that demonstrably
 /// didn't take never resets the task lease out from under a still-running
 /// worker.
+// gate-audit[fingerprint_override]: selector Derived G-143 acceptance from the explicit force request; final producer tags that exception.
 pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
@@ -2445,6 +2467,7 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                 } else {
                     kill_verdict(pid, w.pid_starttime, force)
                 };
+                let fingerprint_override=force && !scan_confirmed && matches!(kill_verdict(pid,w.pid_starttime,false), KillVerdict::RefuseFingerprintMismatch|KillVerdict::RefuseNoFingerprint);
                 let death_after_attempt = match &verdict {
                     KillVerdict::Go => {
                         // cas-a91b: convert to the actual process GROUP
@@ -2459,6 +2482,7 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                         let group_pid = resolve_group_leader_pid(pid).unwrap_or(pid);
                         match send_sigkill(group_pid) {
                             Ok(()) => {
+                                if fingerprint_override {summary.push(crate::gates::override_tag("G-143",""));}
                                 summary.push(format!(
                                     "SIGKILL delivered to process group {group_pid}"
                                 ));
@@ -2478,12 +2502,14 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                         true
                     }
                     KillVerdict::RefuseFingerprintMismatch => {
+                        summary.push(crate::gates::refusal_tag("G-143",""));
                         summary.push(format!(
                             "pid {pid} SKIPPED: starttime fingerprint mismatch (PID recycled). Pass --force to override."
                         ));
                         false
                     }
                     KillVerdict::RefuseNoFingerprint => {
+                        summary.push(crate::gates::refusal_tag("G-143",""));
                         summary.push(format!(
                             "pid {pid} SKIPPED: no starttime fingerprint recorded (legacy agent). Pass --force to override."
                         ));
@@ -2530,6 +2556,8 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
         ));
     }
 
+    let response=summary.join("\n");
+    crate::gates::facts::observe_cli_output(cas_root,&response);
     println!("kill-worker `{}` completed:", w.name);
     for line in summary {
         println!("  - {line}");
@@ -2553,6 +2581,10 @@ pub(crate) enum KillVerdict {
     RefuseNoFingerprint,
 }
 
+// gate[G-143 kill]: Worker PID fingerprint safety
+// gate-audit[force]: bypass G-143 CLI producer tags accepted PID-fingerprint overrides.
+// gate-audit[accepted_by]: execute_kill
+// gate-audit[forward]: G-143 Pure PID-fingerprint verdict; execute_kill emits the refusal code.
 fn kill_verdict(pid: u32, expected_starttime: Option<u64>, force: bool) -> KillVerdict {
     if !crate::mcp::daemon::pid_alive(pid) {
         return KillVerdict::AlreadyDead;
@@ -4276,6 +4308,14 @@ mod tests {
             "node",
             b"node\0.../@playwright/mcp/cli.js\0"
         ));
+        for (command, raw) in [
+            ("node", b"node\0node_modules/playwright/cli.js\0mcp\0".as_slice()),
+            ("node", b"node\0node_modules/.bin/playwright\0mcp\0".as_slice()),
+            ("npm", b"npm\0exec\0--prefix\0hub-web\0playwright\0mcp\0".as_slice()),
+            ("npm exec playwr", b"npm exec playwright mcp --headless\0".as_slice()),
+        ] {
+            assert!(is_known_sidecar_commandline(command, raw));
+        }
         assert!(is_known_sidecar_commandline("cas", b"cas\0serve\0"));
         assert!(!is_known_sidecar_commandline("node", b"node\0server.js\0"));
         for (command, raw) in [

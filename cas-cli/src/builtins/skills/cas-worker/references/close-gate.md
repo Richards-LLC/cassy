@@ -86,14 +86,12 @@ unpublished tip for candidate verification. A following task starts its own
 branch from the epic tip (`factory/<name>-<task-id>`), preserving the parked
 one. Never set `status=closed` or invent a verification record to bypass close.
 
-## Upkeep refusals at park
+## Shared docs
 
-At park, close checks that the delivery kept the journey registry, `.claude/CODEMAP.md`
-and `docs/PRODUCT_OVERVIEW.md` true for the paths it changed. Fix a refusal in
-this branch. When the change truly needs no upkeep, record the gate's token from
-the [escape vocabulary](../../cas-qa-craft/references/journeys.md#escape-vocabulary)
-as a decision note with a specific reason; reviewers see each escape. Never
-hand-write the `UPKEEP ESCAPE` or `UPKEEP OBSERVE` notes.
+Never edit `.claude/CODEMAP.md` or `docs/PRODUCT_OVERVIEW.md`; release prep
+regenerates them. Add a bug case as its own `docs/qa/bug-families/<slug>.yaml`
+and, where `docs/product-overview.d/` exists, product changes as
+`docs/product-overview.d/<task-id>.md`. Park does not check these files.
 
 ## Changelog at park
 

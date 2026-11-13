@@ -229,6 +229,7 @@ pub(crate) fn spawn() -> ParentWatchdog {
                 Observation::Owned => consecutive = 0,
                 Observation::Orphaned => consecutive += 1,
             }
+            // gate[W-61 watchdog]: MCP server parent-harness watchdog
             if consecutive < CONFIRMATIONS {
                 continue;
             }

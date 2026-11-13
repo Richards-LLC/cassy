@@ -110,7 +110,7 @@ impl CasCore {
         recovered
             .deliverables
             .retain_factory_branch_anchor_as_history();
-        recovered.deliverables.factory_branch_anchor = Some(head.clone());
+        recovered.deliverables.mint_or_append(&head);
         recovered.deliverables.green_merge_commit = None;
         recovered.updated_at = chrono::Utc::now();
         let audit = serde_json::json!({

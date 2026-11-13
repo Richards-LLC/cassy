@@ -1,5 +1,7 @@
 # Visual QA receipt
 
+Historical evidence only; current authoring policy is `cas-playwright-tests`. Older version numbers below record the measured run and are not supported-version advice.
+
 Strict visual QA passed with Playwright 1.63.0 and headless Chrome.
 
 | Viewports | Schemes | Screenshots | Findings |

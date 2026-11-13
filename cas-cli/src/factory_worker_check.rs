@@ -622,14 +622,15 @@ pub(crate) fn admit_daemon_build(cas_root: &Path) -> std::result::Result<File, S
         std::fs::create_dir_all(&slots)?;
         let admission = lock_file(&slots.join("admission.lock"))?;
         admission.lock_exclusive()?;
-        let violations =
-            crate::factory_build_guard::inspect(cas_root, &config, 1).violations();
+        let snapshot = crate::factory_build_guard::inspect(cas_root, &config, 1);
+        let violations = snapshot.violations();
         if !violations.is_empty() {
             return Ok(Err(violations.join("; ")));
         }
         for index in 0..config.max_concurrent_builders {
             let slot = lock_file(&slots.join(format!("slot-{index}.lock")))?;
             if slot.try_lock_exclusive().is_ok() {
+                report_disabled_admission(cas_root, &snapshot);
                 return Ok(Ok(slot));
             }
         }
@@ -639,6 +640,15 @@ pub(crate) fn admit_daemon_build(cas_root: &Path) -> std::result::Result<File, S
         )))
     };
     admit().unwrap_or_else(|error| Err(format!("{error:#}")))
+}
+
+// gate-audit[forward]: A completed admission can suppress the soft capacity policy through the operator env setting; hard slots have already been acquired.
+fn report_disabled_admission(root: &Path, snapshot: &crate::factory_build_guard::BuildGuardSnapshot) {
+    if snapshot.disabled {
+        let tag = crate::gates::override_tag("G-135", "Build admission accepted with CAS_FACTORY_BUILD_GUARD=off");
+        crate::gates::facts::observe_cli_output(root, &tag);
+        eprintln!("{tag}");
+    }
 }
 
 fn available_slot_count(root: &Path, cap: usize) -> Result<usize> {
@@ -2129,6 +2139,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
             return Err(error);
         }
     };
+    report_disabled_admission(&cas_root, &snapshot);
     if let Err(error) = crate::factory_capacity_wait::admitted(&cas_root, &repo) {
         tracing::warn!(%error, "capacity wait clear failed; continuing admitted build");
     }
@@ -2804,6 +2815,35 @@ exec "$@" > target/raw.log 2>&1"#);
         evidence["log_path"] = serde_json::json!(&selected);
         record_supervisor_test(&core, "cas-70b8", &evidence.to_string()).unwrap();
         assert_eq!(passing_test_packages(&root, &repo, &head), vec!["cas"]);
+
+        // Use actual registered gate identities in the admission fixture;
+        // bracket syntax alone must never authorize prose assertions.
+        std::fs::create_dir(repo.join("cas-cli/src")).unwrap();
+        std::fs::create_dir(repo.join("cas-cli/tests")).unwrap();
+        let declarations = ["G-28", "G-86"].map(|code| {
+            let gate = crate::gates::find(code).unwrap();
+            format!("// gate[{} {} integrity]: Fixture gate\n", gate.code, gate.stage)
+        }).join("");
+        std::fs::write(repo.join("cas-cli/src/receipt.rs"), declarations).unwrap();
+        for (token, admitted) in [
+            ("[G-28]", true),
+            ("[G-86]", true),
+            ("[G-999]", false),
+            ("[delivery rejected]", false),
+            ("[G-28] delivery rejected", false),
+        ] {
+            std::fs::write(repo.join("cas-cli/tests/receipt.rs"), format!(
+                "#[test] fn receipt() {{ assert!(error.contains({token:?})); }}\n"
+            )).unwrap();
+            fixture_commit_as(&repo, "gate token admission");
+            std::fs::remove_file(repo.join("target/invocations")).ok();
+            let result = execute_at(&root, &args, &repo, &fake);
+            assert_eq!(result.is_ok(), admitted, "token={token}: {result:?}");
+            assert_eq!(repo.join("target/invocations").exists(), admitted);
+            assert_eq!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty(), !admitted);
+        }
+        std::fs::remove_file(repo.join("cas-cli/tests/receipt.rs")).unwrap();
+        fixture_commit_as(&repo, "remove admission probe");
         fake_cargo(&fake, r#"case "$*" in
     *test_support::*) printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n' ;;
     *) printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n' ;;

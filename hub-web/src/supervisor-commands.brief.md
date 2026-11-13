@@ -22,7 +22,7 @@ No terminal textbox, arbitrary arguments, or guessed support: the hub owns the a
 
 ## Component and state ownership
 
-The command palette owns filtering and keyboard selection. The existing conversation boundary supplies the selected machine/session and sends only structured controls through its lease. The hub checks scope, lease, allowlist and confirmation before forwarding. The daemon resolves the actual supervisor, checks readiness and owns command identity and execution evidence. Receipts remain tied to their conversation across selection changes.
+The command palette owns filtering and keyboard selection. The existing conversation boundary supplies the selected machine/session and sends only structured controls through its lease. The hub checks scope, lease, allowlist and confirmation before forwarding. The daemon resolves the actual supervisor, checks readiness and owns command identity and execution evidence. Receipts remain tied to their conversation across selection changes. Choosing autocomplete consumes its unchanged slash prefix; the header preserves unrelated draft text. Both paths show a content-width receipt. Finish keeps bounded read-only status recovery after the short confirmation timeout so a long native turn can settle without resending.
 
 A submission progresses through submitted, observed, refused or unconfirmed. Native model controls use a separate fixed allowlist while the model chooser is open. Output evidence names an opened chooser or displayed usage; only a native confirmation can claim a changed model. Exit follows the authenticated session-ended receipt. Finish requires its own completed native request; its receipt asks the operator to review the reply for the wrap-up result and does not imply session exit.
 

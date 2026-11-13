@@ -33,6 +33,10 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             "npx playwright test qa/real-walk.spec.js --full",
             // A later --help can be an option's value, and these still run the suite.
             "npx playwright test --grep-invert --help",
+            // GH #1852: --list as an option value or file filter still runs.
+            "npx playwright test --grep-invert --list",
+            "npx playwright test -- --list",
+            "npx playwright test --list --full",
             "npx playwright test --reporter --help",
             "npx playwright test -- --help",
             "npx playwright test --help --full",
@@ -121,6 +125,8 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "npx playwright test -h",
         "node node_modules/@playwright/test/cli.js test --help",
         "npx playwright test --help 2>&1 | head -40",
+        // GH #1852: collection only; nothing launches.
+        "pnpm exec playwright test --list > target/collection.log 2>&1",
         "npx vitest run",
         "npx tsc --noEmit",
         "cat > README.md <<'EOF'\nnpx playwright test\nEOF",

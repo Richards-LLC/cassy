@@ -180,6 +180,7 @@ pub enum EpicCompletionRoute {
 /// 5. Epic absent from snapshot → deliver unresolved (legacy/tests)
 ///
 /// Concurrent supervisors: a non-owning session always gets `Suppress`.
+// gate-audit[allow_unreachable_fallback]: selector Chooses a local notification fallback for unreachable routing; task/release gates remain enforced.
 pub fn route_epic_completion(
     supervisor_name: &str,
     supervisor_id: Option<&str>,

@@ -451,7 +451,7 @@ pub struct SyncConfig {
 /// even when stack detection does not find their usual language/framework.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillsConfig {
-    /// Optional builtin skill ids, such as `fallow`, `cas-nuxt-playwright`, or
+    /// Optional builtin skill ids, such as `fallow`, the legacy `cas-nuxt-playwright` redirect, or
     /// `cas-playwright-debug`.
     #[serde(default)]
     pub optional: Vec<String>,
@@ -1011,6 +1011,10 @@ pub struct FactoryConfig {
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 
+    /// Machine-wide live worker cap used by local admission and peer routing.
+    #[serde(default = "default_max_workers")]
+    pub max_workers: usize,
+
     /// Route spawned build tasks to a fresh same-account, same-repository
     /// peer when local admission is saturated. Disable to release routes.
     #[serde(default = "default_true")]
@@ -1270,6 +1274,10 @@ fn default_max_concurrent_builders() -> usize {
     4
 }
 
+fn default_max_workers() -> usize {
+    8
+}
+
 fn default_spawn_min_free_gib() -> u32 {
     25
 }
@@ -1395,6 +1403,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            max_workers: default_max_workers(),
             auto_route_builds: true,
             build_guard: BuildGuardConfig::default(),
             worker_memory_high_gib: 0,

@@ -169,14 +169,14 @@ pub(crate) fn check_merge(root: &Path, target: &str, task_id: Option<&str>) -> R
     let task = task_id.and_then(|id| store.get(id).ok());
     let Some(task) = task.filter(is_repair) else {
         let subject = task_id.map_or("this merge names no task".to_string(), |id| format!("{id} stays parked"));
-        return Err(refusal(&train, &freeze, &subject));
+        return Err(crate::gates::tag("G-100", refusal(&train, &freeze, &subject)));
     };
     let Some(red) = red_evidence(root, &train, &freeze) else {
-        return Err(refusal(
+        return Err(crate::gates::tag("G-100", refusal(
             &train,
             &freeze,
             &format!("{} is marked {REPAIR_LABEL}, but no red is recorded at or after the frozen tip", task.id),
-        ));
+        )));
     };
     let line = format!("FREEZE REPAIR: {} admitted into frozen {} under {red}", task.id, train.id);
     if !train.notes.contains(&line) {
@@ -202,7 +202,7 @@ pub(crate) fn check_staffing(root: &Path, task_id: &str) -> Result<()> {
         return Ok(());
     };
     match active(root, &train) {
-        Some(freeze) => anyhow::bail!(refusal(&train, &freeze, &subject).replace(" No merge was attempted.", "")),
+        Some(freeze) => anyhow::bail!(crate::gates::tag("G-06", refusal(&train, &freeze, &subject).replace(" No merge was attempted.", ""))),
         None => Ok(()),
     }
 }
@@ -514,10 +514,10 @@ mod tests {
         let now = Utc::now();
         assert_eq!(remaining_minutes(&root, &train, now), Err("train suite"));
         for (key, payload) in [
-            ("a", cas_store::QualityPayload::CheckRun { check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(20.0) }),
-            ("b", cas_store::QualityPayload::CheckRun { check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(30.0) }),
-            ("c", cas_store::QualityPayload::CheckRun { check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(90.0) }),
-            ("d", cas_store::QualityPayload::CheckRun { check_id: "merge_queue".into(), stage: cas_store::CheckStage::Queue, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(10.0) }),
+            ("a", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(20.0) }),
+            ("b", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(30.0) }),
+            ("c", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(90.0) }),
+            ("d", cas_store::QualityPayload::CheckRun { review: None, check_id: "merge_queue".into(), stage: cas_store::CheckStage::Queue, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(10.0) }),
             ("e", cas_store::QualityPayload::Release { commit_to_main_minutes: None, main_to_published_minutes: Some(5.0), ejections: 0, rescues: 0 }),
         ] {
             let mut event = cas_store::NewQualityEvent::new(key, payload);

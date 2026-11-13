@@ -306,6 +306,7 @@ fn render_template(template: &str, repo: &RepoRef) -> String {
 /// Resolve a `RepoRef` from either an explicit override or `git remote -v`.
 /// `Ok(None)` means "no GitHub remote and no override" — caller maps to
 /// `Skipped`. `Err` means the override string is malformed.
+// gate-audit[flag_override]: selector Explicit repository selection replaces discovery, not authority.
 fn resolve_repo(
     repo_root: &Path,
     flag_override: Option<&str>,

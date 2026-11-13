@@ -13,7 +13,8 @@ pub fn handle_post_tool_use(
         })?;
     // cas-9734: a tool call that starts a tagged operation (release cut,
     // spawn, report, epic close, merge) surfaces that operation's lessons.
-    let lessons = cas_root.and_then(|root| {
+    // gate[N-93 notice]: Operation lessons
+    let lessons =cas_root.and_then(|root| {
         crate::hooks::operation_lessons::context_for_tool(root, &normalize_post_tool_input(input))
     });
     // cas-1f0c: the lessons and the guardrail warning share this output with
@@ -89,6 +90,7 @@ fn handle_post_tool_use_with_guardrail(
     // === TMPFS/RAMFS LARGE-WRITE GUARDRAIL ===
     // Warning-only: never deny a tool. Gate before config and mount/state I/O
     // so unrelated PostToolUse calls do not pay the tmpfs guardrail cost.
+    // gate[N-95 notice]: tmpfs and ramfs large-write guardrail
     let tmpfs_guardrail_warning = if guardrail_tool {
         guardrail(cas_root, input, &mut stores)
     } else {
@@ -98,6 +100,7 @@ fn handle_post_tool_use_with_guardrail(
     // === RIPPLE CHECK (file-to-task/spec consistency reminder) ===
     // When a file linked to a task or spec is modified, remind agent to check consistency
     if tool_name == "Write" || tool_name == "Edit" {
+        // gate[N-94 notice]: Ripple check
         if let Some(reminder) = check_ripple_consistency(&mut stores, input) {
             return Ok(HookOutput::with_post_tool_context(
                 merge_post_tool_contexts(tmpfs_guardrail_warning.as_ref(), reminder),

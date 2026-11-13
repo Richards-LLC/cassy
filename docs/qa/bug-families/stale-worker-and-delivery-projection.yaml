@@ -1,4 +1,0 @@
-title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
-tasks: [cas-0a75]
-invariants: [HUB-J17-STATUS-TRUTH]
-journeys: [HUB-J17]

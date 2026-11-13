@@ -36,6 +36,53 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       if (phone) await page.getByRole("button", { name: "More conversation actions", exact: true }).click();
       await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
     };
+    test("HUB-J27 autocomplete Finish clears the composer like the Commands menu", journeyPart, async ({ page, journey }) => {
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
+      const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });
+      const input = page.locator("#message-text");
+      const mutations = () => hub.frames.filter(frame => frame.kind === "SupervisorCommand");
+      await journey.stage("Run Finish from the header menu", async () => {
+        await journey.open();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await openCommands(page);
+        await page.locator('[data-supervisor-command="finish"]').click();
+        await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
+        await expect.poll(() => mutations().length).toBe(1);
+        const request = mutations()[0].body as { client_ref: string; command: string };
+        expect(request.command).toBe("finish");
+        const receipt = page.locator(".supervisor-command-receipt");
+        await expect(receipt).toHaveAttribute("data-phase", "submitted");
+        if (!phone) {
+          const [status, transcript] = await Promise.all([receipt.boundingBox(), receipt.locator("..").boundingBox()]);
+          expect(status!.width).toBeLessThan(transcript!.width * 0.9);
+        }
+        await captureReload(page, "finish-menu-requested", viewport.width);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
+        await expect(page.locator(".supervisor-command-receipt")).toHaveCount(0);
+      });
+      await journey.stage("Pick Finish from /fin autocomplete and settle its outcome", async () => {
+        await input.fill("/fin");
+        await page.locator('[data-supervisor-command="finish"]').click();
+        await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
+        await expect.poll(() => mutations().length).toBe(2);
+        const request = mutations()[1].body as { client_ref: string; command: string; confirmed: boolean };
+        expect(request).toMatchObject({ command: "finish", confirmed: true });
+        expect(hub.sends).toHaveLength(0);
+        await captureReload(page, "finish-autocomplete-requested", viewport.width);
+        await expect(input).toHaveValue("");
+        await expect(page.locator("#supervisor-command-palette")).toBeHidden();
+        const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
+        // Replay the daemon's short timeout before the incident's 103-second completion.
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "unconfirmed", detail: "Outcome not observed yet", output: "", interactive: false } } });
+        await expect(page.locator(".supervisor-command-receipt")).toHaveAttribute("data-phase", "unconfirmed");
+        const before = statusReads();
+        await expect.poll(statusReads).toBeGreaterThan(before);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
+        await expect(page.locator(".supervisor-command-receipt")).toHaveCount(0);
+        expect(mutations()).toHaveLength(2);
+        await captureReload(page, "finish-autocomplete-completed", viewport.width);
+      });
+    });
     test("HUB-J27 completed Claude turn accepts commands once and shows a compact native command receipt (cas-99e7)", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN],

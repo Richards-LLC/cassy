@@ -289,10 +289,11 @@ pub(crate) fn observe(root: &Path, task_id: &str) -> Result<()> {
     refresh_at(root, task_id, Utc::now()).map(|_| ())
 }
 
+// gate[G-06 start]: Release freeze / epic design-review staffing pause
 pub(crate) fn ensure_staffing_allowed(root: &Path, task_id: &str) -> Result<()> {
     crate::mcp::tools::core::workflow::release_freeze::check_staffing(root, task_id)?;
     if let Some((epic, pause)) = refresh_at(root, task_id, Utc::now())? {
-        anyhow::bail!(pause.message(&epic));
+        anyhow::bail!(crate::gates::tag("G-06", pause.message(&epic)));
     }
     Ok(())
 }

@@ -22,7 +22,12 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         .map(|call| serde_json::to_string(&call).map_err(|e| e.to_string()))
         .transpose()?
         .unwrap_or_else(|| "none".into());
-    Ok(format!(
+    let supervisor_calls = core.open_verification_store().map_err(|e| e.to_string())?
+        .get_for_task(&task.id).map_err(|e| e.to_string())?.into_iter()
+        .filter(|call| call.dispatch_id.as_deref() == Some(dispatch.id.as_str())
+            && call.status == VerificationStatus::SupervisorCall)
+        .collect::<Vec<_>>();
+    let body = format!(
         "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Use qa.mode in the structured review context below. In batch mode, approve when the only open evidence is a NOT EXERCISED journey assigned solely to release batch QA and every other criterion is VERIFIED; record each deferred row and its owner. Other missing evidence, per_task unexercised journeys and any question beyond that policy still require supervisor_call. Never waive rejection conditions or treat a deferred walk as PASS.\nAn inherited supervisor call is present only when the value below is not `none`. It carries a prior answer for an unchanged delivery and must be applied only to that exact NOT EXERCISED row/question. Cite that inherited answer in your verdict; if the current question is different, make a new supervisor_call.\nInherited supervisor call: {}\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\nReview context:\n{}\n",
         include_str!("../../../../../builtins/agents/task-verifier.body.md"),
         include_str!(
@@ -37,8 +42,10 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         serde_json::to_string(task).map_err(|e| e.to_string())?,
         serde_json::to_string(&parent).map_err(|e| e.to_string())?,
         serde_json::to_string(dispatch).map_err(|e| e.to_string())?,
-        serde_json::json!({"qa": {"mode": core.load_config().qa().mode}}),
-    ))
+        serde_json::json!({"qa": {"mode": core.load_config().qa().mode},
+            "supervisor_calls": supervisor_calls}),
+    );
+    Ok(format!("{body}\nThe supervisor_calls array is this dispatch's persisted questions and answers. Apply supervisor_direct answers as scope context, then independently review and return the final verdict; an answer is not an approval.\n"))
 }
 
 /// The account spawn_workers would launch (cas-c386). With no eligible home,
@@ -1010,6 +1017,52 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                             .contains(diagnostics.lines().next().unwrap())
                     );
                 }
+            }
+            if status == "supervisor_call" {
+                // cas-d5bb / cas-44eb: an answer is context for the verifier,
+                // not a supervisor-authored final approval.
+                let question = cas_store::get_verification_for_dispatch(&root, &dispatch.id)
+                    .unwrap().unwrap().summary;
+                let answer = "Scope reviewed: preserve drafts and use the existing scoped receipt.";
+                std::fs::write(&response_path, serde_json::json!({
+                    "status":"approved", "summary":"Independent verdict after scope answer",
+                    "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
+                }).to_string()).unwrap();
+                env.set("CAS_TEST_VERIFIER_STATUS", "approved");
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let request = serde_json::from_value(serde_json::json!({
+                    "task_id":task.id, "dispatch_id":dispatch.id,
+                    "status":"supervisor_call", "summary":answer,
+                })).unwrap();
+                runtime.block_on(core.cas_verification_add(
+                    rmcp::handler::server::wrapper::Parameters(request),
+                )).unwrap();
+                let resumed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+                assert_eq!(resumed.id, dispatch.id);
+                assert_ne!(resumed.verifier_agent_id, claimed.verifier_agent_id);
+                for _ in 0..600 {
+                    if settled() { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert!(settled());
+                let final_dispatch = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+                let final_verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+                assert_eq!(final_dispatch.state, cas_types::VerificationDispatchState::Resolved);
+                assert_eq!(final_verdict.status, VerificationStatus::Approved);
+                assert_eq!(final_verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
+                assert_eq!(final_verdict.agent_id, resumed.verifier_agent_id);
+                let conversation = std::fs::read_dir(root.join("verification-runs").join(&dispatch.id))
+                    .unwrap().map(|entry| entry.unwrap().path().join("prompt.txt"))
+                    .filter(|path| path != &output.with_file_name("prompt.txt"))
+                    .map(|path| std::fs::read_to_string(path).unwrap())
+                    .find_map(|body| body.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                        .find_map(|value| value.get("supervisor_calls").cloned()))
+                    .unwrap();
+                let summaries = conversation.as_array().unwrap().iter()
+                    .map(|call| call["summary"].as_str().unwrap()).collect::<Vec<_>>();
+                assert!(summaries.contains(&question.as_str()));
+                assert!(summaries.contains(&answer));
+                assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().is_some());
             }
             if status == "harness_failed" {
                 let old_child = dispatch.verifier_agent_id.as_deref().unwrap();

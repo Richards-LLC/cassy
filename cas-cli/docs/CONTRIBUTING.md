@@ -2642,6 +2642,13 @@ A hub that crashes without an explicit stop remains eligible for update recovery
 
 ## Build, assembly and CI policy
 
+`task action=update labels=...` replaces ordinary labels with trimmed, unique
+values. Omit `labels` to preserve them, or pass an empty value to clear them.
+Finding provenance is retained; nonempty corrections preserve omitted triage
+axes, while an empty correction resets findings to broken/theoretical. This
+same handler serves MCP and CLI task updates, including removal of a release
+train's `release-train-cut` label.
+
 While a release train is open in the target repository, `worktree_merge` refuses
 direct main/trunk merges, including `allow_trunk=true`. Merge fixes into the
 train; ship a one-item hotfix train with `scripts/release.sh --hotfix` from its

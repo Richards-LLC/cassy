@@ -1597,13 +1597,21 @@ impl CasCore {
                     triaged_labels.extend(["from-finding".into(), "reach:theoretical".into()]);
                 }
             } else {
-                let additions: Vec<_> = labels.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                let replacement: Vec<_> = labels.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                // Replace user labels without erasing finding provenance or
+                // omitted triage axes used to derive the finding's priority.
+                triaged_labels.retain(|label| label == "from-finding"
+                    || ["severity:", "reach:", "journey:"].iter().any(|axis| label.starts_with(axis)));
                 for axis in ["severity:", "reach:", "journey:"] {
-                    if additions.iter().any(|label| label.starts_with(axis)) {
+                    if replacement.iter().any(|label| label.starts_with(axis)) {
                         triaged_labels.retain(|label| !label.starts_with(axis));
                     }
                 }
-                triaged_labels.extend(additions.into_iter().map(str::to_owned));
+                for label in replacement {
+                    if !triaged_labels.iter().any(|existing| existing == label) {
+                        triaged_labels.push(label.to_owned());
+                    }
+                }
             }
         }
         if req.labels.is_some()

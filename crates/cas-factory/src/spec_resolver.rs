@@ -698,6 +698,7 @@ const SUPERVISOR_LABEL: &str = "SUPERVISOR";
 /// logged in" / "codex fully available" without depending on real host
 /// state, and `role_label` so the notice/error wording distinguishes a
 /// worker rewrite from the (louder, higher-stakes) supervisor rewrite.
+// gate-audit[home_override]: selector Injected probe home for deterministic fallback selection; no authentication or work policy is waived.
 fn apply_codex_fallback_with(
     specs: &mut [WorkerSpec],
     strict: bool,

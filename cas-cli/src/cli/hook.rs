@@ -183,26 +183,40 @@ fn execute_event(event: &str, cli: &Cli) -> anyhow::Result<()> {
     let mut input_json = String::new();
     io::stdin().read_to_string(&mut input_json)?;
 
-    // Parse the hook input
-    let mut input: HookInput = serde_json::from_str(&input_json)
-        .map_err(|e| anyhow::anyhow!("Failed to parse hook input: {e}"))?;
-
-    // Harness-side population: snapshot CAS_AGENT_ROLE into the HookInput so
-    // downstream handlers read the role explicitly from the request rather
-    // than re-reading process-global env at call time. Makes the contract
-    // robust against inline hook dispatch from long-lived MCP processes
-    // where other tools mutate env concurrently.
-    if input.agent_role.is_none() {
-        input.agent_role = std::env::var("CAS_AGENT_ROLE").ok();
-    }
-
-    // Handle the hook event
-    let output = handle_hook(event, input)?;
+    let output = process_hook_input(event, Ok(input_json), false)?;
 
     // Output JSON to stdout
     println!("{}", serde_json::to_string(&output)?);
 
     Ok(())
+}
+
+/// Shared entry enclosing native fast validation and ordinary hook handlers.
+/// Native failures become a fail-closed H-01 output before leaving this entry.
+// gate-audit[native]: selector Chooses the harness projection; both routes share this final fact observer.
+pub(crate) fn process_hook_input(
+    event: &str,
+    input: Result<String, io::Error>,
+    native: bool,
+) -> anyhow::Result<crate::hooks::HookOutput> {
+    let output = if native {
+        input.map_err(anyhow::Error::from)
+            .and_then(|text| native_pre_tool::process_native_input(&text))
+            .unwrap_or_else(|_| crate::hooks::HookOutput::with_pre_tool_permission(
+                "deny", &crate::gates::tag("H-01", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive."),
+            ))
+    } else {
+        let mut input: HookInput = serde_json::from_str(&input?)
+            .map_err(|error| anyhow::anyhow!("Failed to parse hook input: {error}"))?;
+        if input.agent_role.is_none() {
+            input.agent_role = std::env::var("CAS_AGENT_ROLE").ok();
+        }
+        handle_hook(event, input)?
+    };
+    if let Ok(root) = store::find_cas_root() {
+        crate::gates::facts::observe_hook_output(&root, &output);
+    }
+    Ok(output)
 }
 
 /// Initialize logging for hook execution
@@ -464,6 +478,7 @@ fn find_settings_files_with_cas_hooks(
 }
 
 /// Configure Claude Code hooks
+// gate-audit[force]: selector Chooses replacement of an existing hook configuration rather than leaving it unchanged; no running factory work is admitted.
 fn execute_configure(force: bool, cli: &Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
 
@@ -685,6 +700,8 @@ pub(crate) fn configure_claude_hooks_for_index(
     configure_claude_hooks_at(target, false, &[], project)
 }
 
+// gate-audit[force]: selector Replaces hook configuration instead of merging it; generated hook permissions remain enforced.
+// gate-audit[allow_arr]: selector Installs the explicitly requested optional automatic-response route; no policy refusal is bypassed.
 fn configure_claude_hooks_at(
     project_root: &Path,
     force: bool,

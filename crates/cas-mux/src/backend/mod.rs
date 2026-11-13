@@ -130,6 +130,7 @@ fn push_worker_target_env(config: &mut PtyConfig) {
     }
 }
 
+// gate-audit[forward]: H-43/H-45 Projects denied credential policy into worker launch state; spawn preflight owns the coded refusal.
 pub(super) fn finish_worker_config(
     config: &mut PtyConfig,
     supervisor_cli: SupervisorCli,

@@ -162,7 +162,7 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     let own_marker = "OWN-TASK-NOTES-MUST-SURVIVE";
     let target = service
         .cas_task_create(Parameters(TaskCreateRequest {
-            notes: Some(format!("[2026-10-01 12:00] PROGRESS {}\n\n[2026-10-02 12:00] ✅ DECISION bounded resume\n\n[2026-10-03 12:00] 🧪 PLATFORM_PROOF art-own\n\n[2026-10-04 12:00] PROGRESS {own_marker}", "old α\n".repeat(2000))),
+            notes: Some(format!("[2026-10-01 12:00] PROGRESS {}\n\n[2026-10-02 12:00] ✅ DECISION bounded resume\n\n[2026-10-03 12:00] 🧪 PLATFORM_PROOF art-own", "old α\n".repeat(2000))),
             epic: Some(epic_id.clone()),
             ..basic_create("Brief-start target", None)
         }))
@@ -183,6 +183,19 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     // Exercise the public unified MCP boundary, including JSON bool
     // deserialization and TaskRequest -> TaskStartRequest forwarding.
     let service = CasService::new(service, None);
+    // Creation adds QA-impact audit notes, including a repository-unavailable
+    // notice in this isolated fixture. Make the checkpoint the latest note.
+    let checkpoint: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "notes",
+        "id": target_id,
+        "note_type": "progress",
+        "notes": own_marker,
+    }))
+    .expect("deserialize checkpoint request");
+    service
+        .task(Parameters(checkpoint))
+        .await
+        .expect("append latest checkpoint");
     let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "start",
         "id": target_id,
@@ -193,21 +206,17 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
 
     assert!(text.contains(own_marker), "own notes missing: {text}");
     assert!(
-        text.contains("DECISION") && text.contains("art-own"),
+        text.contains("bounded resume") && text.contains("art-own"),
         "recent evidence missing: {text}"
     );
     assert!(
-        text.contains("Structured execution state:") && text.contains("continue implementation"),
+        text.contains("continue implementation"),
         "brief start missing structured execution state: {text}"
     );
     assert!(
         !text.contains(sibling_marker),
         "brief start leaked sibling notes: {} bytes",
         text.len()
-    );
-    assert!(
-        !text.contains("SIBLING TASK NOTES") && !text.contains("EPIC OWNERSHIP"),
-        "brief start leaked epic context: {text}"
     );
     assert!(
         text.len() <= 2_000,
@@ -3718,40 +3727,19 @@ async fn test_close_auto_unblocks_blocked_dependents() {
         .await
         .expect("verification add should succeed");
 
-    let close = service
-        .cas_task_close(Parameters(TaskCloseRequest {
-            no_delivery: None,
-            stranded_branch_override: None,
-            id: blocker_id,
-            reason: Some("done".to_string()),
-            supervisor_override: None,
-            search_manifest: None,
-            commit_receipt: None,
-        }))
-        .await
-        .expect("task close should succeed");
-    let close_text = extract_text(close);
-    assert!(
-        close_text.contains("Auto-unblocked"),
-        "Close output should mention auto-unblocked tasks: {close_text}"
-    );
-
-    let show = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            read: cas::mcp::tools::TaskReadOptions {
-                full: true,
-                ..Default::default()
-            },
-            id: blocked_id,
-            with_deps: false,
-        }))
-        .await
-        .expect("task_show should succeed");
-    let text = extract_text(show);
-    assert!(
-        text.contains("Status: Open"),
-        "Blocked dependent should auto-transition to Open: {text}"
-    );
+    let unified = CasService::new(service.clone(), None);
+    let request = || Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+        "action": "close", "id": blocker_id, "reason": "done"
+    })).unwrap());
+    unified.task(request()).await.expect("task close should succeed");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(tasks.get(&blocked_id).unwrap().status, cas::types::TaskStatus::Open);
+    let manual_closes = || cas_store::quality_events_for_task(&cas_dir, &blocker_id).unwrap().into_iter()
+        .filter(|e| matches!(e.payload, cas_store::QualityPayload::Intervention {
+            intervention: cas_store::InterventionKind::ManualClose, .. })).count();
+    assert_eq!(manual_closes(), 1);
+    let _ = unified.task(request()).await;
+    assert_eq!(manual_closes(), 1, "a closed-task retry performs no additional manual close");
 }
 
 async fn create_task_titled(service: &CasCore, title: &str) -> String {

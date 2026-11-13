@@ -242,6 +242,7 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
 /// `branch` lacks, and whether merging it in is clean or would conflict.
 /// Read-only: nothing is merged here, and a conflict is refused with the
 /// files it would touch. Empty when the successor already has every commit.
+// gate-audit[input]: Renders an advisory freshness note for the assigned branch; does not admit or refuse a request.
 pub(crate) fn stale_base_note(
     repo: &Path,
     branch: &str,

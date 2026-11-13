@@ -3,7 +3,8 @@
 # Every push to refs/heads/factory/** lands here; ci.yml no longer triggers on
 # those pushes directly. With CAS_LANE_SLIM=true a slim lane runs only the jobs
 # that still do work: classify with no-build fast rows, the two "Scoped
-# Validation" checks (Docs Lint for a docs-only diff). Their job names match ci.yml's, so worktree_merge's
+# Validation" checks (Docs Lint for a docs-only diff) and, for a Rust diff, the
+# impact-selected tests (cas-2e1b). Their job names match ci.yml's, so worktree_merge's
 # admission and the CI watchers read them unchanged. Skipped ci.yml jobs used
 # to resolve one by one (~30 s each, 13.3 min for run 39285508460 that did 21 s
 # of work); this workflow has none to wait for.
@@ -57,6 +58,7 @@ jobs:
     outputs:
       comparison-base: ${{ steps.classify-diff.outputs.comparison-base }}
       class: ${{ steps.classify-diff.outputs.class }}
+      rust-unaffected: ${{ steps.classify-diff.outputs.rust-unaffected }}
       web-check-needed: ${{ steps.classify-diff.outputs.web-check-needed }}
       bridge-check-needed: ${{ steps.classify-diff.outputs.bridge-check-needed }}
       fast-admission: ${{ steps.classify-diff.outputs.fast-admission }}
@@ -222,8 +224,8 @@ jobs:
         if: >-
           env.LEGACY_SCOPED == 'true'
         run: >-
-          echo "No Rust tests ran here: worker focused-test receipts at this
-          SHA (checked at park) and the merge-queue full suite own them."
+          echo "No Rust tests ran here: the impact jobs run this delivery's
+          selected tests and the merge-queue full suite owns the rest."
           >> "$GITHUB_STEP_SUMMARY"
 
   scoped-validation:
@@ -308,5 +310,173 @@ jobs:
           if [[ "$PR_COVERED" == "true" ]]; then
             echo "Skipped: a pull request event is validating this exact head SHA." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Skipped: CAS_LANE_SLIM; worker focused-test receipts (checked at park) and the merge-queue full suite own Rust." >> "$GITHUB_STEP_SUMMARY"
+            echo "Skipped: CAS_LANE_SLIM; the impact jobs run this delivery's selected Rust tests and the merge-queue full suite owns the rest." >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  # cas-2e1b: the train's impact selector (scripts/ci-test-impact.py), scoped
+  # to this delivery's range, runs here before merge instead of surfacing as a
+  # train red. Fail fast: this job builds the selection and runs the changed
+  # modules' own tests; the ring shards below start only if those pass. A
+  # workspace plan (build/test policy, scripts or an unmappable path) runs
+  # whole, as the train's selector decided, still own tests first.
+  lane-impact:
+    name: Scoped Validation — impact own tests
+    if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.rust-unaffected != 'true'
+    needs: ci-diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env: &lane-impact-env
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "cas-v2"
+      # The train archive profile, so the main-primed dependency cache applies.
+      ZIG: ${{ github.workspace }}/.context/zig/zig
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: debuginfo
+      CARGO_PROFILE_TEST_STRIP: debuginfo
+      INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
+    outputs:
+      ring-shards: ${{ steps.own.outputs.ring-shards }}
+      ring-total: ${{ steps.own.outputs.ring-total }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: fast-validation-suite-archive
+          shared-key: fast-validation-suite-build
+          cache-save-if: "false"
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      # After the cache restore, which replaces target/.
+      - id: plan
+        name: Select this delivery's impacted tests
+        env:
+          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        # The delivery's recorded start base binds the selection when its
+        # record ref exists and is an ancestor of HEAD; otherwise the inferred
+        # comparison base is used. The step log names which one ran.
+        run: |
+          record="refs/cas/delivery-base/$GITHUB_REF_NAME"
+          git fetch --no-tags --quiet origin "+$record:$record" 2>/dev/null || true
+          python3 scripts/ci-test-impact.py history
+          python3 scripts/ci-test-impact.py lane --phase plan --out target/ci-impact/lane.json \
+            --recorded-base-ref "$record" --github-output "$GITHUB_OUTPUT"
+
+      - id: own
+        name: Build the selection and run own tests
+        run: python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json --github-output "$GITHUB_OUTPUT"
+
+      - name: Archive the selection for the ring shards
+        if: steps.own.outputs.ring-shards != '' && steps.own.outputs.ring-shards != '[]'
+        env:
+          BUILD_ARGS: ${{ steps.plan.outputs.build-args }}
+        run: |
+          read -ra build <<< "$BUILD_ARGS"
+          cargo nextest archive "${build[@]}" --archive-file lane-impact.tar.zst
+          # Integration tests spawn target/debug/cas; artifacts drop mode bits.
+          if [[ -x target/debug/cas ]]; then
+            tar -C target/debug --transform='s,^cas$,target/debug/cas,' -czf lane-impact-runner.tar.gz cas
+          fi
+
+      - name: Upload the selection archive
+        if: steps.own.outputs.ring-shards != '' && steps.own.outputs.ring-shards != '[]'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-impact-archive
+          path: |
+            lane-impact.tar.zst
+            lane-impact-runner.tar.gz
+            target/ci-impact/lane.json
+          if-no-files-found: error
+          retention-days: 1
+
+      # A red own test fails the job only if it passes at the delivery's base;
+      # a base failure is reported as inherited, by name. Runs after the
+      # archive because the base build replaces target/debug/cas.
+      - name: Attribute own failures at the base
+        if: steps.own.outputs.failed == 'true'
+        run: python3 scripts/ci-test-impact.py lane --phase attribute --receipt own --out target/ci-impact/lane.json
+
+      # Not named ci-test-impact-*: a delivery's own red must not widen every
+      # other plan through failure history.
+      - name: Publish lane impact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-impact-${{ github.run_id }}-own
+          path: target/ci-impact/
+          if-no-files-found: ignore
+
+      - name: Report sccache stats
+        if: always()
+        run: ./scripts/ci-sccache-summary.sh "Scoped Validation — impact own tests"
+
+  lane-impact-ring:
+    name: Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}
+    if: needs.lane-impact.outputs.ring-shards != '' && needs.lane-impact.outputs.ring-shards != '[]'
+    needs: lane-impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.lane-impact.outputs.ring-shards) }}
+    env: *lane-impact-env
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Download the selection archive
+        uses: actions/download-artifact@v4
+        with:
+          name: lane-impact-archive
+          path: .
+
+      # Results live outside target/, which the attribution cache restore replaces.
+      - id: ring
+        name: Run ring shard ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}
+        env:
+          SHARD: ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}
+        run: |
+          if [[ -f lane-impact-runner.tar.gz ]]; then
+            tar -xzf lane-impact-runner.tar.gz
+          fi
+          mkdir -p lane-impact && cp target/ci-impact/lane.json lane-impact/
+          python3 scripts/ci-test-impact.py lane --phase ring --shard "$SHARD" \
+            --archive lane-impact.tar.zst --out lane-impact/lane.json --github-output "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-rust-linux
+        if: steps.ring.outputs.failed == 'true'
+        with:
+          cache-key: fast-validation-suite-archive
+          shared-key: fast-validation-suite-build
+          cache-save-if: "false"
+
+      - name: Attribute ring failures at the base
+        if: steps.ring.outputs.failed == 'true'
+        run: python3 scripts/ci-test-impact.py lane --phase attribute --receipt ring --out lane-impact/lane.json
+
+      - name: Publish lane impact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-impact-${{ github.run_id }}-ring-${{ matrix.shard }}
+          path: lane-impact/
+          if-no-files-found: ignore

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate[C-41 qa]: Journey selection for QA (journeys-for-diff.py)
 """Map changed paths to the user journeys they touch (docs/qa/journeys.md).
 
 Usage:
@@ -846,5 +847,10 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except BaseException as error:
+        if not isinstance(error, SystemExit) or error.code:
+            print("[C-41]", file=sys.stderr)
+        raise

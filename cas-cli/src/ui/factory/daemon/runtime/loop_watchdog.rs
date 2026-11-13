@@ -825,6 +825,7 @@ impl LoopProgress {
     /// job past both that and its budget, or a store writer that has kept a
     /// write job waiting that long, wedges the jobs lane.
     /// The watchdog calls this every [`LANE_HEARTBEAT_MS`].
+    // gate[W-58 watchdog]: Daemon loop wedge watchdog
     pub(crate) fn check_wedge(&self) -> Option<WedgeCheck> {
         let now = self.clock.now();
         let wedge_after = Duration::from_millis(LANE_WEDGE_MS);
@@ -1229,6 +1230,7 @@ fn spawn_watchdog_with_exit(
                         break;
                     };
                     let since = *shutdown_seen.get_or_insert(now);
+                    // gate[W-59 watchdog]: Wedged-shutdown forced exit and hung helper kill
                     if now.saturating_duration_since(since) >= WEDGED_SHUTDOWN_EXIT {
                         let reason = format!(
                             "shutdown was requested {} s ago but the daemon loop is wedged in \

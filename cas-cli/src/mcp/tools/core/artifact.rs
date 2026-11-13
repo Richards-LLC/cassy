@@ -37,7 +37,7 @@ impl CasCore {
             };
             McpError {
                 code: ErrorCode::INVALID_REQUEST,
-                message: format!("Artifact revocation requires a live registered supervisor ({stage}): {cause}").into(),
+                message: crate::gates::tag("H-45", format!("Artifact revocation requires a live registered supervisor ({stage}): {cause}")).into(),
                 data: Some(serde_json::json!({
                     "rule_id": "artifact_revoke_supervisor_only", "authority_stage": stage,
                 })),

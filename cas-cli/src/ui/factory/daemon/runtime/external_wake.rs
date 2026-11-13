@@ -92,6 +92,7 @@ impl ExternalWakeBackoff {
 
 /// Probe each candidate once against one view of origin, skipping refs still
 /// in backoff, then record this scan's read outcomes in `backoff`.
+// gate[W-51 watchdog]: External-wake scan (branch contained or tag exists)
 pub(crate) fn probe_external_wakes<R>(
     probe: &mut ExternalWakeProbe<R>,
     candidates: Vec<(cas_store::Reminder, ExternalWakeCondition)>,

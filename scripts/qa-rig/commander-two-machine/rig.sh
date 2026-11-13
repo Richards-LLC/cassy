@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate-audit[CAS_SKIP_FACTORY_TOOLING]: selector Preserves prebuilt tooling in disposable QA setup; does not disable admission hooks.
 # Reusable two-machine Commander QA rig: a candidate `cas hub serve` on each of
 # two real machines, each with its own saved state, beside (never instead of)
 # the operator's live hub. See README.md beside this script.

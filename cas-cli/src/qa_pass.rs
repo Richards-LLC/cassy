@@ -508,7 +508,7 @@ fn repo_git(repo: &Path) -> Command {
 /// (top-anchored pathspecs, whatever directory `repo` names), leaving out
 /// `excluded` paths. `--stable` ignored whitespace, and the relative `.`
 /// pathspec cut the patch to the caller's directory.
-fn change_patch_id_excluding(
+pub(crate) fn change_patch_id_excluding(
     repo: &Path,
     head: &str,
     target: &str,

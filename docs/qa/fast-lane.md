@@ -66,8 +66,6 @@ path.
 
 | Stage | Normal path | Fast lane |
 | --- | --- | --- |
-| Park: upkeep G1, G2, G5, G6 | refuse | a notice, plus one follow-up task |
-| Park: bug case G3 | refuse | deferred; enforced at the post-merge close |
 | Park: QA evidence | refuse without evidence | deferred to the receipt |
 | Merge CI | every check run on the tip | `merge_checks` only |
 | Close after merge | QA evidence gate and independent QA | own pre-merge PASS plus trusted post-merge receipt; no batch release wait |

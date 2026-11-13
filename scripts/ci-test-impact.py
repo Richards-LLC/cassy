@@ -228,6 +228,172 @@ def plan(root, base, zero, history):
         return full(result, "uncertain graph/diff/history: " + str(error))
 
 
+def lane_split(root, selection):
+    """Order the unchanged selection for lane CI, fail-fast (cas-2e1b).
+
+    Own tests come first: unit tests of the directly changed top-level modules,
+    edited integration suites, and directly changed crates. The ring follows:
+    everything else the plan selected, including a whole workspace plan.
+    """
+    paths = selection["paths"]
+    if selection["mode"] != "scoped":
+        build, selected = ["--workspace"], "all()"
+    else:
+        build, selected = [], []
+        multiple = len(selection["commands"]) > 1
+        for command in selection["commands"]:
+            packages = command.get("packages", [command["package"]])
+            if command["stems"] is None:
+                build += [arg for package in packages for arg in ("-p", package)]
+                selected += [f"package({package})" for package in packages]
+                continue
+            args = command["args"]
+            build += ["-p", "cas"] if multiple else args[:args.index("-E")]
+            selected.append(f"(package(cas) and ({args[args.index('-E') + 1]}))")
+        selected = " or ".join(selected)
+    own = []
+    try:
+        crates, _ = workspace(root)
+        direct = sorted(name for name, (member, _) in crates.items() if any(p.startswith(member + "/") for p in paths))
+        mapping = inventory(root, crates["cas"][1]) if "cas" in direct else {}
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        direct = []
+    for name in direct:
+        if name != "cas":
+            own.append(f"package({name})")
+            continue
+        modules = sorted({p.split("/")[2].removesuffix(".rs") for p in paths if p.startswith("cas-cli/src/")} - {"lib", "main"})
+        parts = [f"(binary(cas) and test(/^{module}::/))" for module in modules if SAFE.fullmatch(module) and "-" not in module]
+        for stem, target in sorted(mapping.items()):
+            if any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for p in paths):
+                parts.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
+        if parts:
+            own.append("(package(cas) and (" + " or ".join(parts) + "))")
+    own = " or ".join(own) or None
+    return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
+
+def lane_count(root, source, expression):
+    """Count the non-ignored tests a filter selects, so no phase runs empty."""
+    output = subprocess.check_output([os.environ.get("CARGO", "cargo"), "nextest", "list", *source, "-E", expression, "--message-format", "json"], cwd=root, text=True)
+    suites = json.loads(output)["rust-suites"].values()
+    return sum(1 for suite in suites for case in suite["testcases"].values() if case["filter-match"]["status"] == "matches" and not case.get("ignored"))
+
+
+def lane_run(root, selection, source, expression, extra, destination, role):
+    """Run one phase. Parsed test failures wait for base attribution; a
+    failure without a parsed failed test fails the phase at once."""
+    log = Path(destination).parent / f"{role}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
+    status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), "nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"], cwd=root, env=env).returncode
+    receipt = record(selection, [str(log)], status, time.monotonic() - started, destination, role)
+    # Attribution may clear the status only when every unsuccessful test is
+    # named: the summary's run-minus-passed count must match the parsed set.
+    counts = re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:\s+(\d+) passed", strip_ansi(log.read_text()))
+    named = {(f["package"], f["binary"], f["test"]) for f in receipt["failures"]}
+    unsuccessful = sum(int(run) - int(passed) for run, passed in counts)
+    accounted = bool(named) and len(counts) > 0 and unsuccessful == len(named)
+    if status and named and not accounted:
+        print(f"Lane impact: {unsuccessful} unsuccessful tests but {len(named)} named; the unaccounted outcomes keep this phase red", file=sys.stderr)
+    return status, bool(status and accounted)
+
+
+def lane_attribute(root, base, failures, destination):
+    """Rerun the failed tests at the delivery's base. Only tests that do not
+    fail there fail the lane; base failures are reported as inherited."""
+    work = Path(os.environ.get("RUNNER_TEMP") or root / "target") / "lane-impact-base"
+    subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True)
+    subprocess.check_call(["git", "worktree", "add", "--detach", str(work), base], cwd=root)
+    subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"], cwd=work)
+    failures = list({(f["package"], f["binary"], f["test"]): f for f in failures}.values())
+    packages = sorted({failure["package"] for failure in failures})
+    build = ["--workspace"] if len(packages) > 1 else ["-p", packages[0]]
+    if len(packages) == 1:
+        targets = sorted({failure["binary"] for failure in failures})
+        build += [arg for target in targets for arg in (["--lib"] if target == packages[0] else ["--test", target])]
+    identity = lambda failure: failure["package"] if failure["binary"] == failure["package"] else f"{failure['package']}::{failure['binary']}"
+    expression = " or ".join(f"(binary_id({identity(failure)}) and test(={failure['test']}))" for failure in failures)
+    env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
+    run = subprocess.run([os.environ.get("CARGO", "cargo"), "nextest", "run", *build, "-E", expression, "--no-fail-fast", "--no-tests=pass"], cwd=work, env=env, capture_output=True, text=True)
+    Path(destination).with_suffix(".log").write_text(run.stdout + run.stderr)
+    at_base = {(f["package"], f["binary"], f["test"]) for f in parse_failures(strip_ansi(run.stdout + run.stderr))}
+    if run.returncode and not at_base:
+        at_base = set()
+        print("Lane impact: the base run failed without a test result; no failure is attributed to the base", file=sys.stderr)
+    inherited = [f for f in failures if (f["package"], f["binary"], f["test"]) in at_base]
+    caused = [f for f in failures if f not in inherited]
+    write(destination, {"base": base, "inherited": inherited, "caused": caused})
+    lines = [f"Lane impact: inherited from base {base[:12]} (fails there too): {f['binary']} {f['test']}" for f in inherited]
+    lines += [f"Lane impact: caused by this delivery (passes or is absent at base): {f['binary']} {f['test']}" for f in caused]
+    print("\n".join(lines))
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+            handle.write("\n" + "\n".join(f"- {line}" for line in lines) + "\n")
+    subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True)
+    return 1 if caused else 0
+
+
+def lane_base(root, recorded_ref, inferred):
+    """Prefer the delivery's recorded start base over the ref-inferred fork.
+
+    A record that is missing or not an ancestor of HEAD falls back to the
+    inferred base; the returned source names which one was used.
+    """
+    if not recorded_ref:
+        return inferred, "inferred: no record requested"
+    found = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{recorded_ref}^{{commit}}"], cwd=root, capture_output=True, text=True)
+    if found.returncode:
+        return inferred, f"inferred: no record at {recorded_ref}"
+    recorded = found.stdout.strip()
+    if subprocess.run(["git", "merge-base", "--is-ancestor", recorded, "HEAD"], cwd=root).returncode:
+        return inferred, f"inferred: recorded start base {recorded[:12]} is not an ancestor of HEAD"
+    return recorded, "recorded start base"
+
+
+def lane(root, args):
+    """Lane CI phases: plan, own (builds and runs own tests), ring shards and
+    attribute (rerun a phase's failures at the base)."""
+    out = Path(args.out)
+    outputs = {}
+    if args.phase == "plan":
+        base, source = lane_base(root, args.recorded_base_ref, args.base_sha)
+        print(f"Lane impact base: {base or args.zero_base_ref} ({source})")
+        selection = plan(root, base, args.zero_base_ref, args.history)
+        selection["base_source"] = source
+        split = lane_split(root, selection)
+        write(out, {"plan": selection, "split": split})
+        outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": source}
+        print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")
+        status = 0
+    else:
+        saved = json.loads(out.read_text())
+        selection, split = saved["plan"], saved["split"]
+        if args.phase == "attribute":
+            failures = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())["failures"]
+            return lane_attribute(root, selection["base"], failures, out.with_name(f"{args.receipt}-attribution.json"))
+        source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
+        receipt = out.with_name(f"{args.phase}-receipt.json")
+        status, failed = 0, False
+        if args.phase == "ring":
+            status, failed = lane_run(root, selection, source, split["ring"], ["--partition", f"count:{args.shard}"], receipt, "lane-ring")
+        elif split["own"] and lane_count(root, source, split["own"]):
+            status, failed = lane_run(root, selection, source, split["own"], [], receipt, "lane-own")
+        else:
+            print("Lane impact: no own tests; the ring follows")
+        outputs = {"failed": str(failed).lower()}
+        if args.phase == "own" and (status == 0 or failed):
+            ring = lane_count(root, source, split["ring"])
+            shards = min(3, -(-ring // 1500))
+            outputs.update({"ring-shards": json.dumps(list(range(1, shards + 1))), "ring-total": str(shards), "ring-tests": str(ring)})
+        if failed:
+            status = 0
+    if args.github_output:
+        with open(args.github_output, "a") as handle:
+            handle.writelines(f"{key}={value}\n" for key, value in outputs.items())
+    return status
+
+
 def collect_history(destination):
     """Read bounded recent artifacts. History only adds tests or widens scope."""
     records = []
@@ -299,10 +465,12 @@ def strip_ansi(text):
 
 
 def parse_failures(text):
-    """FAIL lines of an ANSI-stripped nextest log. nextest 0.9.100+ prints a
-    `( 3528/11850)` progress counter after the duration (cas-38ac)."""
+    """Unsuccessful-test lines of an ANSI-stripped nextest log: FAIL, TIMEOUT,
+    a signal (SIGSEGV, SIGABRT, ...), ABORT and LEAK-FAIL (cas-2e1b). nextest
+    0.9.100+ prints a `( 3528/11850)` progress counter after the duration
+    (cas-38ac)."""
     failures = []
-    for binary, test in re.findall(r"^\s*FAIL\s+\[[^\]]*\]\s+(?:\(\s*\d+/\d+\)\s+)?(\S+)\s+(\S+)\s*$", text, re.M):
+    for binary, test in re.findall(r"^\s*(?:FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK-FAIL)\s+\[[^\]]*\]\s+(?:\(\s*\d+/\d+\)\s+)?(\S+)\s+(\S+)\s*$", text, re.M):
         package, separator, target = binary.partition("::")
         if not separator:
             target = package
@@ -331,7 +499,13 @@ def record(plan, logs, status, elapsed, destination, role):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize"])
+    parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize", "lane"])
+    parser.add_argument("--phase", choices=["plan", "own", "ring", "attribute"], default="plan")
+    parser.add_argument("--receipt", choices=["own", "ring"], default="own")
+    parser.add_argument("--archive", default="lane-impact.tar.zst")
+    parser.add_argument("--shard", default="1/1")
+    parser.add_argument("--github-output", default="")
+    parser.add_argument("--recorded-base-ref", default="")
     parser.add_argument("--base-sha", default=os.environ.get("BASE_SHA", ""))
     parser.add_argument("--zero-base-ref", default=os.environ.get("ZERO_BASE_REF", ""))
     parser.add_argument("--history", default="target/ci-impact/history.json")
@@ -354,6 +528,8 @@ def main():
         collect_history(args.history)
         return 0
     root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    if args.mode == "lane":
+        return lane(root, args)
     selection = plan(root, args.base_sha, args.zero_base_ref, args.history)
     if args.mode == "plan":
         write(args.out, selection)

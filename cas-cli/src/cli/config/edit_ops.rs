@@ -35,6 +35,7 @@ pub(crate) fn execute_edit_line_based(
     execute_edit_line_based_with_input(args, cli, cas_root, &mut stdin.lock())
 }
 
+// gate-audit[has_override]: selector Reports whether this config value overrides its default; does not waive operator-only config policy.
 fn execute_edit_line_based_with_input(
     args: &ConfigEditArgs,
     cli: &Cli,

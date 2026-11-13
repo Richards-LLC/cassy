@@ -599,10 +599,9 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
   for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
     await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme });
     await journey.stage(`Quality at ${width} ${colorScheme}`, async () => {
-      // Ctrl/Cmd+K lands in the list search; pressed again, it opens the palette.
       const palette = page.locator("#command-palette");
-      await page.keyboard.press("ControlOrMeta+k");
-      if (!await palette.isVisible()) await page.keyboard.press("ControlOrMeta+k");
+      await page.locator("#command-palette-toggle").click();
+      await expect(palette).toBeVisible();
       await palette.getByRole("button", { name: /^Quality/ }).click();
       const dialog = page.getByRole("dialog", { name: "Quality" });
       // Context burn per delivery doubled (14.7M against 5M): the headline names it with a factor on one line.

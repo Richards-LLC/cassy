@@ -1,5 +1,0 @@
-## Core Concepts
-
-Supervisor operator messages use `[evidence:<tool-use-id>]` beside factual paragraphs or begin uncertain paragraphs with `[unverified]`. The hook accepts only paired, successful tool results after the current user-turn boundary, and numeric literals must appear in the cited result. Perform time conversions and calculations with a tool before citing them. Clipboard claims need a `wl-paste` or `pbpaste` result after the latest clipboard write. Missing transcripts or a turn start outside the bounded transcript tail cannot establish evidence.
-
-This is a structural provenance check, not semantic fact verification: a citation identifies the result the operator can inspect. Claude MessageDisplay labels unsupported replies; Stop refuses unsupported final replies on the first attempt and emits an uncertainty notice on reentrant attempts to avoid a continuation loop. Streaming content may already be visible before Stop runs. Direct transports outside the configured hooks are outside this guard.

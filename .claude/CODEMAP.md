@@ -45,7 +45,7 @@
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` — exact-SHA prechecks and dispatch recovery.
 - `cas-cli/src/cli/release_automation.rs`, `cas-cli/src/cli/release_adapters.rs` — release inventory, promotion and reconciliation adapters; shared default-train election in `cas-cli/src/mcp/tools/core/task/release_train.rs` uses origin history and cut admission markers.
 - `cas-cli/src/cli/release_notice_failure.rs`, `cas-cli/src/issue_reconcile.rs` — exhausted release notices and issue reconciliation.
-- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch, handlers and shared schemas; `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs` classifies HEAD navigation separately from ref/path mutation and preserves checkout-specific containment remedies.
+- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch, handlers and shared schemas; `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs` classifies HEAD navigation separately from ref/path mutation and preserves checkout-specific containment remedies. `cas-cli/src/hooks/handlers/operator_evidence.rs` checks that supervisor operator replies carry same-turn evidence for numbers, times and completion claims; Stop-hook fixtures live in `crates/cas-core/src/hooks/fixtures/`.
 - `cas-cli/src/config/`, `cas-cli/src/harness_policy.rs` — runtime settings and harness policy projections.
 - `cas-cli/src/hybrid_search/`, `cas-cli/src/knowledge/`, `cas-cli/src/extraction/` — composed retrieval, distillation and extraction.
 - `cas-cli/src/consolidation/`, `cas-cli/src/sync/`, `cas-cli/src/memory_migration/` — memory maintenance and harness synchronization.
@@ -85,7 +85,7 @@
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` — stdio transport, independent sync scheduling, caller identity and backend replacement.
 - `cas-cli/src/cloud/`, `cas-cli/src/cloud/sync_lease.rs` — Cloud clients, entity/knowledge/quality sync and cursor leases.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` — operations, registrations and bounded tool futures.
-- `cas-cli/src/mcp/tools/service/server_handler.rs`, `cas-cli/src/mcp/tools/service/mutation_receipt.rs` — response budgets and mutation receipts.
+- `cas-cli/src/mcp/tools/service/server_handler.rs`, `cas-cli/src/mcp/tools/service/mutation_receipt.rs`, `cas-cli/src/mcp/tools/service/merge_response.rs` — response budgets, mutation receipts and durable merge-state receipts returned before the response deadline (fixtures in `cas-cli/tests/fixtures/merge_outcome.rs`).
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` — park/close orchestration, ownership and timeout recovery.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` — attribution (including cancelled-to-successor delivery receipts), receipts, report quality, proof claims and reviewed corrections.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` — supervisor-approved merge imports and linked-checkout WIP/checkpoint attribution.

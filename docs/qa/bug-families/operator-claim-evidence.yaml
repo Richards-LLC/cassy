@@ -1,4 +1,3 @@
 title: Supervisor operator claims carry current-turn tool evidence or explicit uncertainty
 tasks: [cas-ab79]
-invariants: [SUPERVISOR-OPERATOR-CLAIM-EVIDENCE]
-journeys: [FACTORY-SPAWN]
+journeys: [FACTORY-SUPERVISE]

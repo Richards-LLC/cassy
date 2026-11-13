@@ -4868,7 +4868,10 @@ lane (through `check_cut_merge`, before and under the target lock), CI retry
 arming (`factory_ci_retry::arm`) and staffing (`ensure_staffing_allowed`,
 covering spawn, assignment and start of tasks that are still open). A
 `release-repair` task is admitted only while the train is red, and each
-admission is noted on the train. Task create retargets new work aimed at a
+admission is noted on the train. A cut train also admits its own nonterminal
+`release-repair` child while its freeze is active and its red is recorded.
+This leaves both cut and freeze markers intact; ordinary work, another
+train's repair, and repairs without red evidence remain refused. Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), or through Commander

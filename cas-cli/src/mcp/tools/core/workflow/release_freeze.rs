@@ -689,7 +689,7 @@ mod tests {
         git(temp.path(), &["add", "repair.txt"]);
         git(temp.path(), &["commit", "-qm", "repair the red train"]);
         let repair_tip = git(temp.path(), &["rev-parse", "HEAD"]);
-        assert!(crate::mcp::tools::core::task::release_train::check_cut_merge(&root, lane, Some("cas-fix")).is_err());
+        assert!(crate::mcp::tools::core::task::release_train::check_cut_merge(&root, lane, Some("cas-feat")).is_err());
         let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
         let request = |reason: Option<&str>| serde_json::from_value(serde_json::json!({
             "action":"train_freeze", "id":"cas-tr", "decision":"lift", "reason":reason,
@@ -726,7 +726,7 @@ mod tests {
         let train = store.get("cas-tr").unwrap();
         assert!(freeze_of(&train).is_none(), "real MCP lift must clear the gate");
         assert!(!is_cut_train(&train));
-        crate::mcp::tools::core::task::release_train::check_cut_merge(&root, lane, Some("cas-fix")).unwrap();
+        crate::mcp::tools::core::task::release_train::check_cut_merge(&root, lane, Some("cas-feat")).unwrap();
         git(temp.path(), &["checkout", "-q", lane]);
         git(temp.path(), &["merge", "--ff-only", "factory/repair"]);
         assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), repair_tip);

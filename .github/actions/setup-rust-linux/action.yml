@@ -46,14 +46,15 @@ runs:
       id: self-hosted-rust
       if: runner.environment == 'self-hosted'
       shell: bash
+      env:
+        LANE_TEMP_ROOT: /var/tmp
       run: |
         # PrivateTmp is RAM-backed on the local listeners. Keep compiler,
-        # test and installer temporaries on disk, outside the checkout so
-        # disposable test roots cannot discover its Git/CAS state. A short
-        # path also leaves room for fixture Unix-domain socket names.
-        runner_root="$(cd "$RUNNER_TEMP/../.." && pwd)"
-        export TMPDIR="$runner_root/t"
-        export CARGO_TARGET_TMPDIR="$runner_root/ct"
+        # test and installer temporaries in its disk-backed /var/tmp view,
+        # outside both the checkout and service HOME's CAS state. These short
+        # paths leave room for fixture Unix-domain socket names.
+        export TMPDIR="$LANE_TEMP_ROOT/t"
+        export CARGO_TARGET_TMPDIR="$LANE_TEMP_ROOT/ct"
         mkdir -p "$TMPDIR" "$CARGO_TARGET_TMPDIR"
         printf 'TMPDIR=%s\nCARGO_TARGET_TMPDIR=%s\n' "$TMPDIR" "$CARGO_TARGET_TMPDIR" >> "$GITHUB_ENV"
         export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"

@@ -875,6 +875,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                        if step.get('id') == 'self-hosted-rust')
         self.assertTrue(self.gh_expr(prepare['if'], {'runner.environment': 'self-hosted'}))
         self.assertFalse(self.gh_expr(prepare['if'], {'runner.environment': 'github-hosted'}))
+        self.assertEqual(prepare['env']['LANE_TEMP_ROOT'], '/var/tmp')
         for step in setup['runs']['steps'][1:]:
             self.assertFalse(self.gh_expr(step.get('if', 'true'),
                 {'inputs.toolchain-only': 'true', 'env.RUSTC_WRAPPER': ''}))
@@ -908,8 +909,12 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         for mode in ['installed', 'missing', 'broken', 'download-failure', 'nextest-missing', 'install-failure']:
             with self.subTest(mode=mode):
                 fixture = self.root / mode; fixture.mkdir()
-                runner = fixture / 'runner'
+                service_home = fixture / 'service-home'
+                (service_home / '.cas').mkdir(parents=True)
+                (service_home / '.cas/cas.db').touch()
+                runner = service_home / 'runner'
                 workspace = runner / '_work/repo/repo'; workspace.mkdir(parents=True)
+                private_var_tmp = fixture / 'private-var-tmp'
                 runner_temp = runner / '_work/_temp'; runner_temp.mkdir()
                 git_env = os.environ.copy()
                 for key in subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).splitlines():
@@ -947,19 +952,21 @@ esac
                 result = self.run_body(prepare['run'], {
                     'PATH': str(commands)+':/usr/bin:/bin', 'CARGO_HOME': str(cargo_home),
                     'RUSTUP_HOME': str(rustup_home), 'RUNNER_TEMP': str(runner_temp),
-                    'GITHUB_WORKSPACE': str(workspace),
+                    'GITHUB_WORKSPACE': str(workspace), 'LANE_TEMP_ROOT': str(private_var_tmp),
                     'GITHUB_PATH': str(github_path), 'GITHUB_ENV': str(github_env),
                     'CALLS': str(calls), 'READY': str(ready), 'NEXTEST_READY': str(nextest_ready), 'MODE': mode,
                     'INITIALIZER': str(initializer), 'CARGO_TEMPLATE': str(cargo),
                     'RUSTUP_TEMPLATE': str(rustup)})
                 self.assertEqual(github_path.read_text().splitlines(), [str(cargo_home / 'bin')])
                 published = dict(line.split('=', 1) for line in github_env.read_text().splitlines())
-                disk_temp = runner / 't'
+                disk_temp = private_var_tmp / 't'
                 self.assertEqual(published['TMPDIR'], str(disk_temp))
-                self.assertEqual(published['CARGO_TARGET_TMPDIR'], str(runner / 'ct'))
+                self.assertEqual(published['CARGO_TARGET_TMPDIR'], str(private_var_tmp / 'ct'))
                 self.assertTrue(disk_temp.is_dir())
-                self.assertTrue((runner / 'ct').is_dir())
+                self.assertTrue((private_var_tmp / 'ct').is_dir())
                 self.assertFalse(disk_temp.is_relative_to(workspace))
+                self.assertFalse(disk_temp.is_relative_to(service_home))
+                self.assertFalse(any((parent / '.cas').exists() for parent in disk_temp.parents))
                 discovery = subprocess.run(['git', 'rev-parse', '--show-toplevel'],
                     cwd=disk_temp, env=git_env, text=True, capture_output=True)
                 self.assertNotEqual(discovery.returncode, 0, 'empty temp fixtures must not inherit the checkout')

@@ -949,6 +949,35 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     view.element.dispatchEvent(new Event("scroll"));
   };
 
+  it("keeps a revealed older-history failure in view across a queued activity pin", () => {
+    const flush = frames();
+    const history = new ConversationHistory();
+    let error: { detail: string; before?: number } | undefined;
+    const view = new ConversationView(document, history, {
+      supervisor: "sup", working: () => true, phase: () => undefined,
+      historyError: () => error, hasEarlier: () => true,
+    });
+    onTestFinished(() => view.dispose());
+    document.body.replaceChildren(view.element);
+    layout(view, { height: 1400 });
+    for (let turn = 1; turn <= 14; turn++) history.reply(reply(turn, "answer"), at(10, turn));
+    view.update();
+    expect(view.element.scrollTop).toBe(1200);
+    const failure = view.element.querySelector<HTMLElement>('[role="alert"]')!;
+    // jsdom has no layout: model the browser revealing the error beside Load earlier.
+    failure.scrollIntoView = () => { view.element.scrollTop = 0; };
+    error = { detail: "fixture:history-timeout", before: 42 };
+    view.update();
+    expect(failure.hidden).toBe(false);
+    expect(view.element.scrollTop).toBe(0);
+    flush(); flush();
+    expect(view.element.scrollTop).toBe(0);
+    view.update();
+    flush(); flush();
+    expect(view.element.scrollTop).toBe(0);
+    expect(view.element.querySelectorAll(".working")).toHaveLength(1);
+  });
+
   // HUB-J9 under load: the reader scrolls up within the two frames that
   // follow the pin of the newest turn. The scroll was dropped while the pin
   // was pending, and the pending re-pin then took the reader back down.

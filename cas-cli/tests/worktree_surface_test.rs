@@ -2810,7 +2810,10 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
 #[tokio::test]
 async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() {
     let mut env = test_env();
-    for landing in ["worktree_merge", "merge queue"] {
+    for (landing, changed) in [
+        ("worktree_merge", None), ("merge queue", None),
+        ("worktree_merge", Some("source")), ("worktree_merge", Some("context")),
+    ] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2849,11 +2852,53 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
         let candidate = &dispatch.repository.as_ref().expect("candidate proof").head_commit;
         assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", &format!("{candidate}^1")]), shared[0],
             "{landing}: the candidate is built on the fetched origin target, not the stale local ref");
+        // cas-efde / GH1835: replay the child's question and the supervisor's
+        // terminal answer before rebuilding an identical-tree candidate.
+        let child = "answered-reviewer";
+        open_agent_store(&fixture.cas_root).unwrap().register(&Agent::new_sub_agent(
+            child.into(), "task-verifier".into(), "rebound-supervisor".into(),
+        )).unwrap();
+        cas_store::issue_server_verifier_handoff(&fixture.cas_root, &task.id, &dispatch.id,
+            "rebound-supervisor", "answered-review-tool").unwrap();
+        cas_store::bind_server_verifier_handoff(&fixture.cas_root, "rebound-supervisor", child).unwrap();
+        let question = "May staging proof remain deferred, and does the PR explain the nightly rationale?";
+        delivery_service(&fixture.cas_root, child).verification(Parameters(verification_req(serde_json::json!({
+            "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+            "status": "supervisor_call", "summary": question,
+        })))).await.unwrap();
+        let call = cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap();
+        assert_eq!(call.status, VerificationStatus::SupervisorCall);
+        assert_eq!(call.provenance, cas::types::VerificationProvenance::TaskVerifier);
         let approved = fixture.service.verification(Parameters(verification_req(serde_json::json!({
             "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
-            "status": "approved", "summary": "Approve the candidate once",
+            "status": "approved", "summary": "Staging proof deferred to release batch QA; PR rationale recorded in proof:nightly-rationale.",
         })))).await.unwrap();
         assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
+        let answer = cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap();
+        assert_eq!(answer.status, VerificationStatus::Approved);
+        assert_eq!(answer.provenance, cas::types::VerificationProvenance::SupervisorDirect);
+        assert_eq!(cas_store::get_verification_dispatch(&fixture.cas_root, &dispatch.id).unwrap().state,
+            cas::types::VerificationDispatchState::Resolved);
+        if let Some(changed) = changed {
+            if changed == "source" {
+                std::fs::write(fixture.worker.join("delivery.txt"), "unreviewed replacement\n").unwrap();
+                run_git(&["commit", "-am", "cas-e429: change reviewed source"], &fixture.worker);
+                run_git(&["push", "origin", &fixture.branch], &fixture.worker);
+                task = tasks.get(&task.id).unwrap();
+                task.deliverables.factory_branch_anchor = Some(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
+            } else {
+                task = tasks.get(&task.id).unwrap();
+                task.acceptance_criteria = "Additional material review requirement".into();
+            }
+            tasks.update(&task).unwrap();
+            let held = fixture.service.factory(Parameters(merge)).await;
+            let latest = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+            assert_ne!(latest.id, dispatch.id, "{changed}: {held:?}");
+            assert_eq!(latest.state, cas::types::VerificationDispatchState::Pending);
+            assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), shared[0]);
+            eprintln!("GH1835 changed={changed}: fresh dispatch={}, prior={}, publication held", latest.id, dispatch.id);
+            continue;
+        }
         // Only the target ref moves: A2 is already inside the reviewed source.
         let landed = if landing == "merge queue" {
             let queued = git_stdout(&fixture.repo.root, &["commit-tree", &tip_tree, "-p", &shared[1], "-p", &tip,
@@ -2879,6 +2924,12 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
         run_git(&["merge-base", "--is-ancestor", &tip, &published], &fixture.repo.root);
         assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound^{tree}"]), tip_tree,
             "{landing}: the target holds exactly the approved tree");
+        let conn = rusqlite::Connection::open(fixture.cas_root.join("cas.db")).unwrap();
+        let count: i64 = conn.query_row("SELECT count(*) FROM verification_dispatches WHERE task_id=?1",
+            [&task.id], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        eprintln!("GH1835 landing={landing}: dispatches={count}, dispatch={}, question={}, approved={}, provenance={:?}, tree={tip_tree}",
+            dispatch.id, call.id, answer.id, answer.provenance);
     }
 }
 

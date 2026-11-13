@@ -376,7 +376,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             body = body[3:-2]
         elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
             return body  # a literal such as runs-on: ubuntu-latest
-        body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
+        body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env|runner)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('cancelled()', 'False').replace('success()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
         return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads,
@@ -869,11 +869,78 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         return {'PATH': f'{commands}:/usr/bin:/bin', 'CALLS': str(calls),
                 'SHARD': '1', 'GITHUB_WORKSPACE': str(self.root)}
 
+    def test_self_hosted_cargo_path_and_pinned_fallback(self):
+        setup = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        prepare = next(step for step in setup['runs']['steps']
+                       if step.get('id') == 'self-hosted-rust')
+        self.assertTrue(self.gh_expr(prepare['if'], {'runner.environment': 'self-hosted'}))
+        self.assertFalse(self.gh_expr(prepare['if'], {'runner.environment': 'github-hosted'}))
+        for step in setup['runs']['steps'][1:]:
+            self.assertFalse(self.gh_expr(step.get('if', 'true'),
+                {'inputs.toolchain-only': 'true', 'env.RUSTC_WRAPPER': ''}))
+        for source in ['lane.yml', 'ci.yml']:
+            jobs = policy.load(self.root / '.github/workflows' / source)['jobs']
+            for name, job in jobs.items():
+                if source == 'lane.yml' and name == 'full':
+                    continue
+                if source == 'ci.yml' and name not in ['ci-diff', 'docs-lint', 'scoped-validation-fast', 'scoped-validation']:
+                    continue
+                steps = job['steps']
+                bootstrap = next(i for i, step in enumerate(steps)
+                    if step.get('uses') == './.github/actions/setup-rust-linux'
+                    and step.get('with', {}).get('toolchain-only') == 'true')
+                checkout = next(i for i, step in enumerate(steps)
+                    if step.get('uses') == 'actions/checkout@v4')
+                self.assertGreater(bootstrap, checkout)
+                self.assertFalse(any(step.get('run') for step in steps[checkout+1:bootstrap]))
+        (self.root / 'rust-toolchain.toml').write_text('[toolchain]\nchannel = "fixture-pinned"\n')
+        for mode in ['installed', 'missing', 'broken', 'download-failure']:
+            with self.subTest(mode=mode):
+                fixture = self.root / mode; fixture.mkdir()
+                commands = fixture / 'bin'; commands.mkdir()
+                cargo_home = fixture / 'cargo'; (cargo_home / 'bin').mkdir(parents=True)
+                rustup_home = fixture / 'rustup'
+                ready = fixture / 'ready'; calls = fixture / 'calls'; calls.touch()
+                cargo = fixture / 'cargo-template'
+                cargo.write_text('#!/bin/bash\nprintf "cargo %s\\n" "$*" >> "$CALLS"\ntest -f "$READY"\n')
+                rustup = fixture / 'rustup-template'
+                rustup.write_text('#!/bin/bash\nprintf "rustup %s\\n" "$*" >> "$CALLS"\ntouch "$READY"\n')
+                for tool in [cargo, rustup]: tool.chmod(0o755)
+                initializer = fixture / 'initializer'
+                initializer.write_text('mkdir -p "$CARGO_HOME/bin"\ncp "$CARGO_TEMPLATE" "$CARGO_HOME/bin/cargo"\ncp "$RUSTUP_TEMPLATE" "$CARGO_HOME/bin/rustup"\n')
+                curl = commands / 'curl'
+                curl.write_text('#!/bin/bash\nprintf "curl\\n" >> "$CALLS"\n[[ "$MODE" != download-failure ]] || exit 17\ncp "$INITIALIZER" "${@: -1}"\n')
+                curl.chmod(0o755)
+                if mode in ['installed', 'broken']:
+                    shutil.copyfile(cargo, cargo_home / 'bin/cargo'); (cargo_home / 'bin/cargo').chmod(0o755)
+                    shutil.copyfile(rustup, cargo_home / 'bin/rustup'); (cargo_home / 'bin/rustup').chmod(0o755)
+                if mode == 'installed': ready.touch()
+                github_path = fixture / 'github-path'; github_env = fixture / 'github-env'
+                result = self.run_body(prepare['run'], {
+                    'PATH': str(commands)+':/usr/bin:/bin', 'CARGO_HOME': str(cargo_home),
+                    'RUSTUP_HOME': str(rustup_home), 'RUNNER_TEMP': str(fixture),
+                    'GITHUB_PATH': str(github_path), 'GITHUB_ENV': str(github_env),
+                    'CALLS': str(calls), 'READY': str(ready), 'MODE': mode,
+                    'INITIALIZER': str(initializer), 'CARGO_TEMPLATE': str(cargo),
+                    'RUSTUP_TEMPLATE': str(rustup)})
+                self.assertEqual(github_path.read_text().splitlines(), [str(cargo_home / 'bin')])
+                observed = calls.read_text().splitlines()
+                install = 'rustup toolchain install fixture-pinned --profile minimal --component clippy --component rustfmt'
+                if mode == 'download-failure':
+                    self.assertEqual(result.returncode, 17)
+                    self.assertFalse(ready.exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(ready.exists())
+                    self.assertEqual(install in observed, mode != 'installed')
+                    self.assertEqual('curl' in observed, mode == 'missing')
+
     def test_installed_linkers_skip_unavailable_ubuntu_mirrors(self):
         values = self.dependency_fixture()
         setup = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
         prebuild = policy.load(self.root / '.github/workflows/release-prebuild.yml')
-        linker = setup['runs']['steps'][0]
+        linker = next(s for s in setup['runs']['steps']
+                      if s.get('uses') == './.github/actions/setup-linux-linker')
         release_linker = next(s for s in prebuild['jobs']['build']['steps']
                               if s.get('uses') == linker.get('uses'))
         self.assertEqual(release_linker['uses'], linker['uses'])

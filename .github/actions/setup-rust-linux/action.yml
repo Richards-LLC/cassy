@@ -5,6 +5,9 @@ description: >-
   with Zig even for cargo check), sccache, and the cargo cache.
 
 inputs:
+  toolchain-only:
+    description: Prepare the self-hosted Cargo PATH without linker, Zig or cache work.
+    default: "false"
   cache-key:
     description: >-
       Discriminator appended to the cargo cache key. Jobs that compile a
@@ -39,15 +42,43 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Prepare self-hosted Rust
+      id: self-hosted-rust
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+        export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+        export PATH="$CARGO_HOME/bin:$PATH"
+        printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+        printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "$CARGO_HOME" "$RUSTUP_HOME" >> "$GITHUB_ENV"
+        # Runner .path snapshots can omit Cargo even when the service PATH
+        # includes it. Serialize first-use rustup writes across listeners.
+        mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
+        exec 9>"$RUSTUP_HOME/cassy-rustup.lock"
+        flock -x 9
+        if "$CARGO_HOME/bin/cargo" --version; then exit 0; fi
+        if [[ ! -x "$CARGO_HOME/bin/rustup" ]]; then
+          installer="$(mktemp "$RUNNER_TEMP/rustup-init.XXXXXX")"
+          trap 'rm -f "$installer"' EXIT
+          curl --fail --location --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$installer"
+          sh "$installer" -y --profile minimal --default-toolchain none --no-modify-path
+        fi
+        channel="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+        "$CARGO_HOME/bin/rustup" toolchain install "$channel" --profile minimal --component clippy --component rustfmt
+        "$CARGO_HOME/bin/cargo" --version
+
     - name: Install dependencies
+      if: inputs.toolchain-only != 'true'
       uses: ./.github/actions/setup-linux-linker
 
     - name: Install Zig
+      if: inputs.toolchain-only != 'true'
       shell: bash
       run: ./scripts/bootstrap-zig.sh
 
     - name: Setup sccache
-      if: env.RUSTC_WRAPPER != ''
+      if: inputs.toolchain-only != 'true' && env.RUSTC_WRAPPER != ''
       # v0.0.5 speaks GitHub's retired cache-service protocol and silently
       # fell back to a runner-local cache (0 hits across repeated CI runs).
       # v0.0.9+ uses ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN (cache v2).
@@ -58,7 +89,7 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.11
 
     - name: Probe sccache backend
-      if: env.RUSTC_WRAPPER != ''
+      if: inputs.toolchain-only != 'true' && env.RUSTC_WRAPPER != ''
       shell: bash
       run: |
         if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
@@ -69,6 +100,7 @@ runs:
         fi
 
     - name: Cache cargo
+      if: inputs.toolchain-only != 'true'
       id: cargo-cache
       uses: Swatinem/rust-cache@v2
       with:

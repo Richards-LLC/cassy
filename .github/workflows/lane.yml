@@ -79,6 +79,11 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
+
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
@@ -122,6 +127,11 @@ jobs:
 
       # The classification job already ran Markdown lint and the release-note
       # draft check through the fast rows.
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
+
       - name: Instruction files are current and within the size cap
         env:
           GH_TOKEN: ${{ github.token }}
@@ -163,6 +173,11 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
 
       - uses: ./.github/actions/run-script-suite-tests
         if: needs.ci-diff.outputs.script-tests-needed == 'true'
@@ -253,6 +268,11 @@ jobs:
 
       # As in ci.yml: stand down when a pull request event already validates
       # this exact head SHA.
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
+
       - id: pr-dedupe
         name: Skip when a pull request event validates this head SHA
         env:
@@ -354,6 +374,11 @@ jobs:
 
       - uses: ./.github/actions/setup-rust-linux
         with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
           cache-key: fast-validation-suite-archive
           shared-key: fast-validation-suite-build
           cache-save-if: "false"
@@ -443,6 +468,11 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest

@@ -3243,6 +3243,11 @@ Both compiler wrappers are empty and the sccache backend is disabled on these
 shared-host lanes, including own/ring and legacy checks. The shared Rust setup
 skips its sccache installation/probe, and cache reporting never starts a server.
 Hosted validation retains its normal sccache backend.
+Every local lane job prepares Cargo through `setup-rust-linux` before other
+commands: it publishes `CARGO_HOME/bin` despite runner `.path` snapshots, checks
+`cargo --version` under the shared rustup lock, and installs the repository's
+pinned toolchain if needed. Its `toolchain-only` mode avoids linker, Zig and
+cache work in classification, documentation and ring setup.
 
 The six existing `cas-lane-light` listeners reserve GitHub-hosted width for
 release PR checks, frozen-train validation, merge-group validation and Release

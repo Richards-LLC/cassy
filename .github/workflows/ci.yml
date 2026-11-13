@@ -107,6 +107,12 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - uses: ./.github/actions/setup-rust-linux
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
+
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
@@ -143,6 +149,12 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: ./.github/actions/setup-rust-linux
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
 
       - name: Run no-build release gate rows
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM != 'true'
@@ -393,6 +405,12 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - uses: ./.github/actions/setup-rust-linux
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
+
       - uses: ./.github/actions/run-script-suite-tests
         if: needs.ci-diff.outputs.script-tests-needed == 'true'
         with:
@@ -578,6 +596,12 @@ jobs:
       # itself and always exits 0, so it deliberately does NOT fail open with
       # `continue-on-error`: a guard that genuinely broke should redden this
       # lane rather than quietly decide for itself.
+      - uses: ./.github/actions/setup-rust-linux
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')
+        with:
+          toolchain-only: "true"
+          cache-key: lane-toolchain
+
       - id: pr-dedupe
         name: Skip when a pull request event validates this head SHA
         if: github.event_name == 'push'

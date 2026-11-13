@@ -490,8 +490,9 @@ impl CasService {
     /// - once the request's terminal mutation has committed, post-commit work
     ///   that outlives `grace` gets a COMMITTED success answer, and the work
     ///   keeps running to completion (one mutation, no retry invited);
-    /// - the budget elapsing first returns the error it always did (COMMITTED
-    ///   or UNKNOWN) and cancels the handler only when nothing committed.
+    /// - slow merges return a durable state receipt, retaining execution and
+    ///   recording its eventual outcome in a supervisor notice;
+    /// - other budgets elapsing first return the usual timeout disposition.
     pub(crate) async fn call_with_deadline_and_grace<F>(
         &self,
         tool_name: &str,

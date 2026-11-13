@@ -2248,6 +2248,10 @@ mod tests {
         };
         let answer = service.call_with_deadline_and_grace("factory", arguments.as_object(),
             std::time::Duration::from_millis(20), std::time::Duration::ZERO, future).await;
+        let pending = answer.as_ref().ok().and_then(|answer| answer.structured_content.as_ref())
+            .and_then(|data| data["receipt_path"].as_str())
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         // Release the real candidate lock before any assertion, including red.
         drop(held);
         finished.await.unwrap();
@@ -2255,9 +2259,13 @@ mod tests {
         let data = answer.expect("slow merge must return a receipt, not UNKNOWN").structured_content.unwrap();
         assert_eq!(data["mutation_outcome"], "IN_PROGRESS");
         assert_eq!(data["state"], "preparing");
+        let pending = pending.expect("receipt must exist before candidate preparation finishes");
+        assert_eq!(pending["state"], "preparing");
+        assert_eq!(pending["receipt_id"], data["receipt_id"]);
         let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(
             data["receipt_path"].as_str().unwrap()).unwrap()).unwrap();
         assert_eq!(stored["state"], "completed");
+        assert_eq!(stored["result"]["ok"]["content"][0]["text"], source);
         let rows = crate::store::open_supervisor_queue_store(&root).unwrap().poll("merge-owner", 10).unwrap();
         let notices: Vec<serde_json::Value> = rows.iter().map(|row| serde_json::from_str(&row.payload).unwrap()).collect();
         assert!(notices.iter().any(|notice| notice["kind"] == "merge_outcome"

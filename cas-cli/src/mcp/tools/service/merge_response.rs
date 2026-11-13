@@ -81,7 +81,8 @@ impl MergeReceipt {
                 if let Some(task) = &self.task {
                     let noted = (|| -> Result<(), String> {
                         let store = service.inner.open_task_store().map_err(|error| error.to_string())?;
-                        store.append_note(task, &format!("[{}] POST_COMMIT_OUTCOME: {detail}", chrono::Utc::now().format("%Y-%m-%d %H:%M")))
+                        // qa_evidence::is_system_outcome_note consumes this prefix.
+                        store.append_note(task, &format!("[{}] 📝 PROGRESS POST_COMMIT_OUTCOME: {detail}", chrono::Utc::now().format("%Y-%m-%d %H:%M")))
                             .map(|_| ()).map_err(|error| error.to_string())
                     })();
                     if let Err(error) = noted {

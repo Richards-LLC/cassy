@@ -16,7 +16,7 @@ const BUDGET: Duration = Duration::from_secs(20);
 const ARTIFACT_DAYS: i64 = 14;
 pub(crate) const PRESSURE_PERCENT: u8 = 80;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct SweepReport {
     pub at: i64,
     pub applied: bool,
@@ -26,7 +26,7 @@ pub(crate) struct SweepReport {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Row {
     pub project: PathBuf,
     pub category: String,

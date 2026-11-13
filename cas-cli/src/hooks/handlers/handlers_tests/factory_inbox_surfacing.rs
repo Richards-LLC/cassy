@@ -717,6 +717,43 @@ fn busy_worker_sees_a_mid_turn_message_at_the_next_tool_boundary_cas_b5e4() {
         again.hook_specific_output.is_none(),
         "a surfaced message is delivered once"
     );
+
+    // GH #1924: mail committed after the drain's query but stamped in the
+    // drain's own millisecond leaves a signal equal to the reader's cursor.
+    let late = store
+        .enqueue_with_session("gold-fox", WORKER, "late: v2 columns are nullable", SESSION)
+        .unwrap();
+    store.mark_transport_delivered(late).unwrap();
+    pin_inbox_signal_to_cursor(&cas_root, &hook);
+    let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    let rendered = serde_json::to_string(&output).unwrap();
+    assert_eq!(
+        rendered.matches("late: v2 columns are nullable").count(),
+        1,
+        "same-millisecond mail reaches the next tool boundary once: {rendered}"
+    );
+    pin_inbox_signal_to_cursor(&cas_root, &hook);
+    let again = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    assert!(
+        again.hook_specific_output.is_none(),
+        "an equal signal never re-shows surfaced mail"
+    );
+}
+
+/// Stamp the worker's inbox signal with the tool-boundary cursor, as a
+/// producer whose clock read the drain's millisecond would (GH #1924).
+fn pin_inbox_signal_to_cursor(cas_root: &std::path::Path, hook: &HookInput) {
+    use sha2::Digest;
+    let key = format!("{:x}", sha2::Sha256::digest(hook.session_id.as_bytes()));
+    let receipt = std::fs::read(cas_root.join("turn-context").join(format!("{key}.json"))).unwrap();
+    let cursor = serde_json::from_slice::<serde_json::Value>(&receipt).unwrap()["mail_checked_at"]
+        .as_i64()
+        .unwrap();
+    std::fs::write(
+        cas_root.join("inbox-signal").join(cas_store::inbox_signal_file_name(WORKER)),
+        cursor.to_string(),
+    )
+    .unwrap();
 }
 
 fn store_at_root(cas_root: &std::path::Path) -> SqlitePromptQueueStore {

@@ -1608,13 +1608,7 @@ fn factory_pane_configs_codex_worker_home_is_existing_host_home() {
         std::path::Path::new(home).is_dir(),
         "Codex worker HOME must exist on the host: {home}"
     );
-    let profile = spawned_env(worker_config, "PLAYWRIGHT_MCP_USER_DATA_DIR")
-        .expect("Codex worker Playwright profile must be set");
-    assert_eq!(
-        std::path::Path::new(profile).parent(),
-        Some(std::path::Path::new(home)),
-        "Playwright profile must be rooted under worker HOME: {profile}"
-    );
+    assert_eq!(spawned_env(worker_config, "PLAYWRIGHT_MCP_USER_DATA_DIR"), None);
 }
 
 fn codex_factory_session_arg(config: &crate::pty::PtyConfig) -> Option<&str> {

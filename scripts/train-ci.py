@@ -3,7 +3,7 @@
 """Whole-set CI receipts, release admission and checked queue reuse.
 
 This never launches tests. CI owns execution; the daemon and release command
-consume its exact-head artifact instead of running another local suite.
+consume verified artifacts instead of running another local suite.
 """
 import argparse
 from datetime import datetime, timezone
@@ -27,6 +27,14 @@ REQUIRED_JOBS = ('fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-
 PREFIX = 'epic/release-train-'
 MANIFESTS = {'cas-cli/Cargo.toml': 'cas', **{f'crates/{name}/Cargo.toml': name for name in
              ('cas-types', 'cas-search', 'cas-store', 'cas-core', 'cas-mcp')}}
+
+
+# Shared by release preparation, train admission and queue plumbing checks.
+def release_asset(path):
+    return path in ('CHANGELOG.md', '.claude/CODEMAP.md', 'docs/PRODUCT_OVERVIEW.md',
+                    'docs/qa/journeys.yaml', 'cas-cli/src/builtins/reference-history.json') or path.startswith(
+        ('changelog.d/', 'docs/release-notes/', 'docs/release-reports/',
+         'docs/qa/bug-families/', 'docs/product-overview.d/', 'hub-web/dist/'))
 
 
 def command(args, cwd=None, output=None):
@@ -85,8 +93,7 @@ def prepared(repo, head):
                     package['version'] = version[1]
             if before != after:
                 return None
-        elif path not in ('CHANGELOG.md', '.claude/CODEMAP.md', 'cas-cli/src/builtins/reference-history.json') and not path.startswith(
-                ('changelog.d/', 'docs/release-notes/', 'hub-web/dist/')):
+        elif not release_asset(path):
             return None
     return source[1]
 
@@ -177,13 +184,8 @@ def job_save(args):
     previous=args.out/'receipt.json'
     reused=json.loads(previous.read_text()) if previous.is_file() else {}
     if any(reused.get(key)!=value for key,value in expected.items()): reused={}
-    recovery=[]
-    for path in (args.repo/'target/queue-flakes').rglob('receipt.json'):
-        record=json.loads(path.read_text())
-        if record.get('schema')==1 and record.get('run_id')==os.environ['GITHUB_RUN_ID']:
-            recovery.append(record)
     result={**identity(),**expected,'outcome':'PASS' if args.status=='success' else 'FAIL',
-        'recovery':recovery,'producer_run':reused.get('producer_run',os.environ['GITHUB_RUN_ID'])}
+        'producer_run':reused.get('producer_run',os.environ['GITHUB_RUN_ID'])}
     if reused.get('reused_from'):
         result['reused_from']=reused['reused_from']
     # Keep the native train reports with their job, so a cache hit can feed
@@ -233,7 +235,8 @@ def job_check(args):
                 outputs=api('actions/runs/'+str(producer)+'/artifacts')['artifacts']
                 if not any(item['name']==args.requires_artifact and not item.get('expired') for item in outputs):
                     continue
-            if any(item.get('tree')!=expected['tree'] or item.get('outcome') not in ('PASS','FLAKY') for item in record.get('recovery',[])):
+            # Legacy recovered failures are not successful reusable proof.
+            if record.get('recovery'):
                 continue
             native=[json.loads(body) for name,body in reports.items() if name.endswith('shard.json')]
             if any(row.get('head')!=record['head'] or row.get('run_id')!=run_id or
@@ -247,13 +250,6 @@ def job_check(args):
                     write(target,{**row,**identity(),'reused_from':run_id})
                 else:
                     target.write_bytes(body)
-            # Rebind transport identity only. Keep the observation's original
-            # run so a cached flake never counts as a new independent failure.
-            for index,recovery in enumerate(record.get('recovery',[])):
-                rebound={**recovery,'head':os.environ['GITHUB_SHA'],'tree':expected['tree'],
-                    'run_id':os.environ['GITHUB_RUN_ID'],
-                    'observation_run_id':recovery.get('observation_run_id',recovery['run_id'])}
-                write(args.repo/'target/queue-flakes/reused'/str(index)/'receipt.json',rebound)
             result.update(reused=True,reused_from=run_id,producer_run=record.get('producer_run',run_id))
             write(args.out/'receipt.json',{**record,**identity(),'reused_from':run_id})
             break
@@ -261,28 +257,6 @@ def job_check(args):
         # Cache outage or malformed evidence means execution, never approval.
         print('Job receipt unavailable; executing: '+str(error),file=sys.stderr)
     return result
-
-
-def job_export(args):
-    """Feed this run's per-job observations into the existing flake fan-in."""
-    tree=git(args.repo,'rev-parse','HEAD^{tree}')
-    count=0
-    for path in args.evidence.rglob('receipt.json'):
-        record=json.loads(path.read_text())
-        if record.get('scope')!='job' or record.get('schema')!=2:
-            continue
-        if record.get('run_id')!=os.environ['GITHUB_RUN_ID'] or record.get('tree')!=tree:
-            raise ValueError('job receipt does not belong to the evaluated run/tree')
-        for recovery in record.get('recovery',[]):
-            if recovery.get('tree')!=tree or recovery.get('run_id')!=os.environ['GITHUB_RUN_ID'] or recovery.get('head')!=os.environ['GITHUB_SHA']:
-                raise ValueError('recovery observation does not belong to the evaluated run/tree')
-            # Two jobs may run the same script step (preflight's source-built
-            # terminal test and the CI tiers); each is its own reconcile slot.
-            if recovery.get('runner')=='step':
-                recovery={**recovery,'shard':record['job']+'/'+recovery['shard']}
-            write(args.out/str(count)/'receipt.json',recovery)
-            count+=1
-    return {'observations':count}
 
 
 def full_collect(args):
@@ -363,25 +337,44 @@ def plumbing_only(repo, source, head):
             # Only version-generated bundles can join release plumbing. The
             # reuse compile job rebuilds them and checks their committed bytes.
             continue
-        elif path not in ('CHANGELOG.md', '.claude/CODEMAP.md', 'cas-cli/src/builtins/reference-history.json') and not path.startswith(('changelog.d/', 'docs/release-notes/')):
+        elif not release_asset(path):
             return False
     return version_changed or not any(path.startswith('hub-web/dist/') for path in paths)
 
 
 def reuse(args):
     """Consume the same verified artifact as release admission, never a bare status."""
+    if args.adoption_out:
+        (args.adoption_out/'receipt.json').unlink(missing_ok=True)
     ref = os.environ.get('GITHUB_REF', '')
-    match = re.fullmatch(r'refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]{40}', ref)
-    if not match: return
+    event = os.environ.get('GITHUB_EVENT_NAME', '')
     gh, slug = args.gh, os.environ['GITHUB_REPOSITORY']
     def api(endpoint):
         return json.loads(command([gh, 'api', f'/repos/{slug}/{endpoint}'], args.repo))
-    pr = api('pulls/'+match[1])
-    head = pr['head']['sha']
-    queue_main = os.environ.get('QUEUE_BASE_SHA') or pr['base']['sha']
+    def green_status(source, tree):
+        latest = next((row for row in api(f'commits/{source}/statuses?per_page=100')
+                       if row.get('context') == 'cas/full-gate'), {})
+        return latest.get('state') == 'success' and latest.get('description') == 'PASS tree=' + tree
+    head = git(args.repo, 'rev-parse', 'HEAD')
+    if event == 'push' and ref.startswith('refs/heads/' + PREFIX):
+        branch = ref.removeprefix('refs/heads/')
+        pr_head = head
+        queue_main = os.environ.get('MAIN_BASELINE') or git(args.repo, 'rev-parse',
+            'origin/' + os.environ.get('GITHUB_DEFAULT_BRANCH', 'main'))
+    else:
+        match = re.fullmatch(r'refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]{40}', ref)
+        if event != 'merge_group' or not match: return
+        pr = api('pulls/'+match[1])
+        pr_head = pr['head']['sha']
+        queue_main = os.environ.get('QUEUE_BASE_SHA') or pr['base']['sha']
+        branch = pr['head']['ref']
     queue_tree = git(args.repo, 'rev-parse', 'HEAD^{tree}')
-    if git(args.repo, 'rev-parse', head + '^{tree}') != queue_tree: return
-    branch = pr['head']['ref']
+    # Check the actual synthetic queue tree, including other queued entries.
+    # Both the PR and the declared base must belong to this evaluated history.
+    for required in (pr_head, queue_main):
+        if subprocess.run(['git', 'merge-base', '--is-ancestor', required, head], cwd=args.repo,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            return
     if not branch.startswith(PREFIX): return
     runs = api(f'actions/workflows/{WORKFLOW}/runs?branch={branch}&event=push&per_page=100')['workflow_runs']
     candidates = sorted((run for run in runs if run['status'] == 'completed' and run['conclusion'] == 'success'),
@@ -389,19 +382,28 @@ def reuse(args):
     for candidate in candidates:
         source = candidate['head_sha']
         if not plumbing_only(args.repo, source, head): continue
-        latest = next((row for row in api(f'commits/{source}/statuses?per_page=100')
-                       if row.get('context') == 'cas/full-gate'), {})
         source_tree = git(args.repo, 'rev-parse', source + '^{tree}')
-        if latest.get('state') != 'success' or latest.get('description') != 'PASS tree=' + source_tree:
-            continue
+        if not green_status(source, source_tree): continue
         probe = argparse.Namespace(repo=args.repo, branch=branch, head=source, gh=gh, out=args.out, command='observe', exact=True)
         state = observe(probe)
         if state.get('outcome') != 'PASS' or state.get('main_baseline') != queue_main: continue
+        # An adopted run resolves to the original native producer, whose CLI
+        # and tree remain the authority even after several plumbing pushes.
+        original = source
+        source, source_tree = state['head'], state['tree']
+        if source != original and not green_status(source, source_tree): continue
+        if not plumbing_only(args.repo, source, head): continue
+        if event == 'push' and args.adoption_out:
+            write(args.adoption_out/'receipt.json', {**identity(), 'schema':2,
+                'scope':'full-set-adoption', 'head':head, 'branch':branch, 'tree':queue_tree,
+                'artifact':ARTIFACT, 'outcome':'PASS', 'main_baseline':queue_main,
+                'source_head':source, 'source_run_id':state['run_id'],
+                'source_run_attempt':state['run_attempt']})
         with args.github_output.open('a') as output:
             output.write('run-fast-validation=false\nreuse-source=full-gate\njourneys-reuse=true\n')
             output.write(f'validating-run-id={state["run_id"]}\nprior-run-url={state["run_url"]}\n')
             output.write(f'journeys-prior-url={state["run_url"]}\nreceipt-head={source}\nreceipt-tree={source_tree}\n')
-        print(f'Full-set receipt {state["run_id"]} covers queue tree {queue_tree} after release plumbing from {source_tree}; main is unchanged.')
+        print(f'Full-set receipt {state["run_id"]} covers queue tree {queue_tree} after release plumbing from {source} (tree {source_tree}); main is unchanged.')
         return
 
 
@@ -517,13 +519,34 @@ def observe(args):
     expected = {'schema': 2, 'head': head, 'branch': branch, 'run_id': run_id, 'run_attempt': attempt}
     if any(receipt.get(key) != value for key, value in expected.items()):
         raise ValueError('suite artifact does not match the evaluated GitHub run and head')
-    validate_full(receipt, git(args.repo, 'rev-parse', head + '^{tree}'))
+    adopted = receipt.get('scope') == 'full-set-adoption'
+    if not adopted:
+        validate_full(receipt, git(args.repo, 'rev-parse', head + '^{tree}'))
     if receipt.get('outcome') not in ('PASS', 'FAIL'):
         raise ValueError('suite receipt has no conclusive result')
     jobs = api(f'actions/runs/{run_id}/jobs', '-f', 'filter=latest', '-f', 'per_page=100')['jobs']
     fanin = [job for job in jobs if job['name'].split(' / ')[-1] == 'Full-set gate']
     if len(fanin) != 1 or (receipt['outcome'] == 'PASS' and (fanin[0]['conclusion'] != 'success' or run['conclusion'] != 'success')):
         raise ValueError('full-set artifact lacks its successful completed GitHub fan-in/run')
+    if adopted:
+        source = receipt.get('source_head', '')
+        if (receipt.get('outcome') != 'PASS' or source == head
+                or receipt.get('tree') != git(args.repo, 'rev-parse', head+'^{tree}')
+                or not plumbing_only(args.repo, source, head)):
+            raise ValueError('adoption does not identify a plumbing-only ancestor')
+        original = observe(argparse.Namespace(repo=args.repo, branch=branch, head=source,
+            gh=gh, out=out, command='observe', exact=True))
+        if (original.get('outcome') != 'PASS' or original.get('scope') != 'full-set'
+                or original['head'] != source or original['run_id'] != receipt.get('source_run_id')
+                or original['run_attempt'] != receipt.get('source_run_attempt')
+                or original['main_baseline'] != receipt.get('main_baseline')):
+            raise ValueError('adoption does not bind its original successful full-set receipt')
+        state = {**original, 'release_head':requested_head, 'adoption_receipt':str(receipt_path),
+                 'adoption_head':head, 'adoption_run_id':run_id}
+        write(state_path, state)
+        return state
+    for key in ('adoption_receipt', 'adoption_head', 'adoption_run_id'):
+        state.pop(key, None)
     state = {**state, **receipt, 'receipt': str(receipt_path),
              'complete_log': str(destination/'complete-workflow-logs.zip')}
     if receipt['outcome'] == 'PASS':
@@ -575,6 +598,7 @@ def main():
     reuse_parser.add_argument('--repo', type=Path, default=Path.cwd())
     reuse_parser.add_argument('--gh', default=os.environ.get('GH_BIN', 'gh'))
     reuse_parser.add_argument('--out', type=Path)
+    reuse_parser.add_argument('--adoption-out', type=Path)
     reuse_parser.add_argument('--github-output', type=Path, required=True)
     for name in ('observe', 'check'):
         read = sub.add_parser(name)
@@ -594,13 +618,9 @@ def main():
         job.add_argument('--gh',default=os.environ.get('GH_BIN','gh'))
         job.add_argument('--requires-artifact')
         if name=='job-save': job.add_argument('--status',required=True)
-    export=sub.add_parser('job-export')
-    export.add_argument('--repo',type=Path,default=Path.cwd())
-    export.add_argument('--evidence',type=Path,required=True)
-    export.add_argument('--out',type=Path,required=True)
     args = parser.parse_args()
-    if args.command in ('job-check','job-save','job-export'):
-        result={'job-check':job_check,'job-save':job_save,'job-export':job_export}[args.command](args)
+    if args.command in ('job-check','job-save'):
+        result={'job-check':job_check,'job-save':job_save}[args.command](args)
         if getattr(args,'github_output',None):
             with args.github_output.open('a') as stream:
                 for key in ('reused','artifact','producer_run'):

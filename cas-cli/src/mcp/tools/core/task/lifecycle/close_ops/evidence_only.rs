@@ -181,7 +181,7 @@ fn workflow_path(path: &str) -> bool {
         && matches!(Path::new(path).extension().and_then(|ext| ext.to_str()), Some("yml" | "yaml"))
 }
 
-fn measure_paths(repo: &Path, comparisons: &[(String, String)], workflow_only: bool) -> Result<Vec<String>, String> {
+pub(super) fn measure_paths(repo: &Path, comparisons: &[(String, String)], workflow_only: bool) -> Result<Vec<String>, String> {
     let mut paths = BTreeSet::new();
     for (base, tip) in comparisons {
         // Disabling rename detection measures both original and destination

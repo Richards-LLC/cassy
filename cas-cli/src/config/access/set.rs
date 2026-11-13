@@ -166,13 +166,6 @@ impl Config {
                     MemError::Parse("Invalid boolean for hub.tailscale_serve".into())
                 })?);
             }
-            "viktor.enabled" => {
-                self.viktor
-                    .get_or_insert_with(ViktorConfig::default)
-                    .enabled = Some(value.parse().map_err(|_| {
-                    MemError::Parse("Invalid boolean for viktor.enabled".into())
-                })?);
-            }
             "slack.transport" => {
                 self.slack
                     .get_or_insert_with(SlackConfig::default)
@@ -340,6 +333,12 @@ impl Config {
                         "Invalid integer value for factory.max_concurrent_builders: {value}"
                     ))
                 })?;
+            }
+            "factory.max_workers" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).max_workers =
+                    value.parse().map_err(|_| MemError::Parse(format!(
+                        "Invalid integer value for factory.max_workers: {value}"
+                    )))?;
             }
             "factory.auto_route_builds" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).auto_route_builds =

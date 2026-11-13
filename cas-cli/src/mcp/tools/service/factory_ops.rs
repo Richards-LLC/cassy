@@ -328,7 +328,30 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
             crate::capability::probe_account_auth(cli, account_dir, deadline)
         },
         || installed_codex_version(deadline),
-    )
+    )?;
+    preflight_codex_exec_host(specs, deadline)
+}
+
+/// GH #1870: a logged-in account still cannot run a command when Codex's
+/// shell-execution host never starts. Refused as its own failure, so it never
+/// reads as a login problem.
+fn preflight_codex_exec_host(
+    specs: &[cas_mux::WorkerSpec],
+    deadline: crate::bounded_process::Deadline,
+) -> Result<(), String> {
+    if !specs.iter().any(|spec| spec.cli == cas_mux::SupervisorCli::Codex) {
+        return Ok(());
+    }
+    let host = crate::capability::probe_codex_exec_host(deadline);
+    if host.availability != cas_factory::CapabilityAvailability::Unavailable {
+        return Ok(());
+    }
+    Err(format!(
+        "spawn refused: Codex shell execution is unavailable — {}. {} \
+         No worktree was created and no task was assigned.",
+        host.reason.unwrap_or_default(),
+        host.remediation.unwrap_or_default(),
+    ))
 }
 
 /// Probe-injected core of [`preflight_account_auth`], so the refusal policy is
@@ -3141,8 +3164,7 @@ impl CasService {
         );
         let force_build_guard = req.force.unwrap_or(false);
         // Route only a single task, never silently split an ordered worker queue.
-        // Run even after admission recovers: an earlier routed request must
-        // replay its existing ask rather than queue a second local worker.
+        // Accepted asks retain ownership; unsent asks yield to recovered local capacity.
         if req.task_ids.is_none()
             && let Some(task_id) = req.task_id.as_deref()
         {
@@ -3174,6 +3196,14 @@ impl CasService {
                 ErrorCode::INVALID_REQUEST,
                 crate::gates::tag("G-135", build_guard.refusal_message()),
             ));
+        }
+        let live_workers = crate::factory_build_routing::live_worker_count(&self.inner.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
+        if live_workers.saturating_add(slots) > factory_config.max_workers && !force_build_guard {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
+                "Worker capacity: {live_workers}/{} live on this machine; {slots} requested",
+                factory_config.max_workers,
+            )));
         }
         let mut build_guard_notice = build_guard.receipt_notice(force_build_guard);
         if build_guard.disabled || (force_build_guard && !build_guard.violations().is_empty()) {
@@ -4401,6 +4431,24 @@ impl CasService {
                 ),
             ));
         }
+        // GH #1870: a relaunch on an account or Codex install that cannot run
+        // commands only advertises another dead worker; refuse it like a spawn.
+        // Unlike a spawn, the recorded account is not re-selected: only an
+        // affirmative probe verdict refuses.
+        let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+        let specs = std::slice::from_ref(&spec);
+        preflight_account_auth_with(
+            specs,
+            |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+            || installed_codex_version(deadline),
+        )
+        .and_then(|()| preflight_codex_exec_host(specs, deadline))
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("recycle_worker refused for {worker_name}: {error} Nothing was stopped or queued."),
+            )
+        })?;
         let mut spec_payload = serde_json::to_value(&spec).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -7479,10 +7527,6 @@ impl CasService {
             )
         })?;
         let pending_prompts = prompt_queue.pending_count().unwrap_or(0);
-        let live_viktor_watches = cas_store::SqliteViktorWatchStore::open(&self.inner.cas_root)
-            .and_then(|store| store.list_live())
-            .unwrap_or_default();
-
         let worktree_store = open_worktree_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -7549,11 +7593,10 @@ impl CasService {
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
-            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nLive Viktor watches: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\nOrphan processes in worktrees: {}\nStale server registrations: {}\nReapable orphans: {}\n",
+            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\nOrphan processes in worktrees: {}\nStale server registrations: {}\nReapable orphans: {}\n",
             stale_after,
             stale_agents.len(),
             pending_prompts,
-            live_viktor_watches.len(),
             active_worktrees.len(),
             orphan_worktrees.len(),
             orphan_process_groups.len(),
@@ -7665,22 +7708,6 @@ impl CasService {
             }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Simulator inventory worker failed: {error}")))?;
             host.push_str(&text);
-        }
-
-        if !live_viktor_watches.is_empty() {
-            out.push_str("\nLive Viktor watches:\n");
-            for watch in &live_viktor_watches {
-                out.push_str(&format!(
-                    "  - #{} thread={} run={} requester={} task={} polls={} expires={}\n",
-                    watch.id,
-                    watch.thread_id,
-                    watch.run_id,
-                    watch.requesting_agent_name,
-                    watch.task_id.as_deref().unwrap_or("-"),
-                    watch.poll_count,
-                    watch.expires_at.to_rfc3339(),
-                ));
-            }
         }
 
         if !stale_agents.is_empty() {

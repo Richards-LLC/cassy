@@ -29,10 +29,34 @@ pub(crate) fn build_route_recent_peers(root: &Path, since: i64) -> Result<std::c
     read().map_err(|error| error.to_string())
 }
 
-pub(crate) fn cancel_build_route(root: &Path, sender: &str, key: &str) -> Result<(), String> {
-    let cancel = || -> anyhow::Result<()> {
-        connection(root)?.execute("UPDATE peer_message_outbox SET state='abandoned',last_error='build route expired; local admission restored' WHERE sender_agent_id=?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key')=?2 AND cloud_id IS NULL AND state IN ('pending','retrying')", params![sender,key])?;
-        Ok(())
+/// Accepted asks and active transport leases withhold local dispatch. This is
+/// task-keyed, independent of a replacement source supervisor or peer directory.
+pub(crate) fn build_route_ownership(root: &Path, key: &str) -> Result<Option<(String, String)>, String> {
+    let read = || -> anyhow::Result<_> {
+        route_ownership(&connection(root)?, key)
+    };
+    read().map_err(|error| error.to_string())
+}
+
+fn route_ownership(conn: &Connection, key: &str) -> anyhow::Result<Option<(String, String)>> {
+    Ok(conn.query_row(
+        "SELECT recipient,COALESCE(cloud_id,'peer-outbox:' || id) FROM peer_message_outbox
+         WHERE json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?1
+         AND (cloud_id IS NOT NULL OR state='sent' OR
+              (state='retrying' AND last_error IS NULL AND next_attempt_at>?2)) LIMIT 1",
+        params![key, chrono::Utc::now().timestamp()], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?)
+}
+
+/// False means a transport lease or accepted ask won the race with cancellation.
+pub(crate) fn cancel_build_route(root: &Path, sender: &str, key: &str) -> Result<bool, String> {
+    let cancel = || -> anyhow::Result<bool> {
+        let mut conn = connection(root)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if route_ownership(&tx, key)?.is_some() { return Ok(false); }
+        tx.execute("UPDATE peer_message_outbox SET state='abandoned',last_error='build route expired; local admission restored' WHERE sender_agent_id=?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key')=?2 AND cloud_id IS NULL AND state IN ('pending','retrying')", params![sender,key])?;
+        tx.commit()?;
+        Ok(true)
     };
     cancel().map_err(|error| error.to_string())
 }
@@ -110,10 +134,10 @@ fn enqueue_with_recovery(
         if !message.dedupe_key.is_empty() {
             let existing: Option<(i64, Option<String>, String)> = tx.query_row(
                 "SELECT id,cloud_id,state FROM peer_message_outbox
-                 WHERE sender_agent_id=?1
+                 WHERE (sender_agent_id=?1 OR ?4)
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?2
-                 AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 LIMIT 1",
-                params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id],
+                 AND (json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 OR ?4) LIMIT 1",
+                params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id, message.dedupe_key.starts_with("build-route:")],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional()?;
             if let Some((id, cloud_id, state)) = existing {
@@ -198,7 +222,7 @@ fn attempt(
     // row. The cloud key also protects against a crash after cloud acceptance.
     let claimed: Option<(String, u32)> = conn
         .query_row(
-            "UPDATE peer_message_outbox SET state='retrying',attempts=attempts+1,next_attempt_at=?2
+            "UPDATE peer_message_outbox SET state='retrying',attempts=attempts+1,next_attempt_at=?2,last_error=NULL
          WHERE id=?1 AND state IN ('pending','retrying') AND next_attempt_at<=?3 AND created_at>?4
          RETURNING payload,attempts",
             params![id, now + SEND_LEASE_SECS, now, now - OUTBOX_TTL_SECS],
@@ -456,7 +480,6 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
         let Some(reply) = parse_envelope(&prompt) else { continue; };
         if source != format!("peer:{}@{}", reply.sender_name, reply.machine)
             || !seen.insert(reply.id.clone())
-            || matches!(reply.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet | PeerMessageKind::Status))
         {
             continue;
         }
@@ -485,6 +508,11 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
                     }
                 }
             }
+            continue;
+        }
+        // Wake intent must not discard an explicit Cloud answer link. These
+        // kinds still cannot answer an ask through implicit correlation.
+        if matches!(reply.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet | PeerMessageKind::Status)) {
             continue;
         }
         let candidates: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {

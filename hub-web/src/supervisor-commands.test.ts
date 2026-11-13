@@ -34,6 +34,12 @@ describe("supervisor slash commands", () => {
     input.dispatchEvent(partial);
     expect(partial.defaultPrevented).toBe(false);
     expect(run).not.toHaveBeenCalled();
+    document.querySelector<HTMLButtonElement>("[data-supervisor-command]")!.click();
+    await Promise.resolve();
+    expect(run).toHaveBeenCalledWith("usage", false);
+    expect(input.value).toBe("");
+    expect(document.querySelector<HTMLElement>("#supervisor-command-palette")!.hidden).toBe(true);
+    run.mockClear();
     input.value = "/usage"; input.dispatchEvent(new Event("input"));
     const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
     input.dispatchEvent(enter);
@@ -342,12 +348,23 @@ describe("supervisor command receipts", () => {
       expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(1);
       session.receive({ client_ref: ref, command: "finish", phase: "submitted", detail: "Command submitted", output: "", interactive: false });
       send.mockClear();
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(97_000);
+      expect(session.receipts.get(ref)?.phase).toBe("unconfirmed");
+      session.receive({ ...session.receipts.get(ref)!, phase: "unconfirmed" });
+      const reads = send.mock.calls.filter(([message]) => "SupervisorCommandStatus" in message).length;
+      await vi.advanceTimersByTimeAsync(8_000);
       expect(send.mock.calls.filter(([message]) => "SupervisorCommand" in message)).toHaveLength(0);
-      expect(send.mock.calls.filter(([message]) => "SupervisorCommandStatus" in message)).toHaveLength(2);
+      expect(send.mock.calls.filter(([message]) => "SupervisorCommandStatus" in message).length).toBeGreaterThan(reads);
+      const sent = send.mock.calls.length;
       session.receive({ client_ref: ref, command: "finish", phase: "observed", detail: "Harness completed Finish", output: "", interactive: false });
+      expect(session.visibleReceipts).toEqual([]);
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(send).toHaveBeenCalledTimes(2);
-    } finally { vi.useRealTimers(); }
+      expect(send).toHaveBeenCalledTimes(sent);
+      await session.run("finish", true);
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 5_000);
+      const expired = send.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(send).toHaveBeenCalledTimes(expired);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 });

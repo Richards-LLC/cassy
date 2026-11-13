@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Merge-queue-only failure recovery; preserve both attempts and the tested tree."""
+"""Run native tests once and publish first-failure repair issues."""
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from datetime import date, datetime, timedelta, timezone
 from contextlib import contextmanager
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -44,7 +43,7 @@ class GitHub:
             body = response.read()
             return json.loads(body) if body else None
 
-    def issues(self, label=None):
+    def issues(self):
         result = []
         for page in range(1,1001):
             # State/label-filtered lists lag behind acknowledged mutations.
@@ -55,10 +54,9 @@ class GitHub:
             batch = self.api('/issues?'+urlencode(query))
             for issue in batch:
                 if 'pull_request' in issue: continue
-                labels = [l['name'] for l in issue['labels']]
-                if not MARKER.search(issue.get('body') or '') and 'flaky-quarantine' not in labels: continue
+                if not MARKER.search(issue.get('body') or ''): continue
                 current = self.api(f'/issues/{issue["number"]}')
-                if current['state']=='open' and (not label or label in [l['name'] for l in current['labels']]):
+                if current['state']=='open':
                     result.append(current)
             if len(batch)<100: return result
         raise ValueError('issue pagination exceeded safety bound')
@@ -88,7 +86,7 @@ class GitHub:
             self.api('/git/refs/'+ref,'DELETE')
 
     def ensure_labels(self):
-        for label,color in [('flaky','fbca04'),('flaky-quarantine','d93f0b'),('priority:p1','b60205')]:
+        for label,color in [('flaky','fbca04'),('priority:p0','b60205')]:
             try: self.api('/labels/'+label)
             except HTTPError as error:
                 if error.code != 404: raise
@@ -115,41 +113,6 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False)+'\n')
 
 
-def quarantine(api):
-    tests = []
-    seen = {}
-    try:
-        issues = list(api.issues('flaky-quarantine'))
-    except Exception as error:
-        print(f'WARNING: quarantine read failed for {api.repo}: {error}; running without exclusions',file=sys.stderr)
-        return tests
-    for issue in issues:
-        number = issue.get('number','unknown') if isinstance(issue,dict) else 'unknown'
-        try:
-            data = issue_state(issue)
-            entry = {**data['test'],'issue':issue['html_url'],'runs':data['runs']}
-            key = identity(entry)
-            expected = f'https://github.com/{api.repo}/issues/{number}'
-            if not isinstance(entry['issue'],str) or entry['issue'].casefold() != expected.casefold():
-                raise ValueError('invalid linked fix issue URL')
-            fields = {'rust':('binary','name'),'playwright':('project','file'),'step':('name',)}[entry['runner']]
-            if any(not isinstance(entry.get(field),str) or not entry[field] for field in fields):
-                raise ValueError('test identity fields must be nonempty strings')
-            if entry['runner']=='playwright':
-                titles = entry.get('titles')
-                if not isinstance(titles,list) or not titles or not all(isinstance(t,str) and t for t in titles):
-                    raise ValueError('test titles must be nonempty strings')
-                playwright_list([entry])
-            if key in seen:
-                raise ValueError(f'duplicate test identity already linked to issue #{seen[key]}: {key}')
-        except Exception as error:
-            print(f'WARNING: quarantine issue #{number} skipped: {error}',file=sys.stderr)
-            continue
-        seen[key] = number
-        tests.append(entry)
-    return tests
-
-
 def identity(test):
     if test['runner'] == 'rust':
         return json.dumps(['rust', test['binary'], test['name']], ensure_ascii=False)
@@ -157,7 +120,7 @@ def identity(test):
         return json.dumps(['playwright', test['project'], test['file'], test['titles']], ensure_ascii=False)
     if test['runner'] == 'step':
         return json.dumps(['step', test['name']], ensure_ascii=False)
-    raise ValueError('unknown quarantine runner')
+    raise ValueError('unknown test runner')
 
 
 def label(test):
@@ -167,22 +130,6 @@ def label(test):
     if test['runner'] == 'playwright':
         return ' > '.join([test['project'], test['file'], *test['titles']])
     return test['name']
-
-
-def rust_filter(tests):
-    def escape(s):
-        return ''.join('\\'+c if c in '\\),' else c for c in s)
-    return ' | '.join(f'(binary_id(={escape(t["binary"])}) & test(={escape(t["name"])}))' for t in tests)
-
-
-def playwright_list(tests):
-    rows = []
-    for test in tests:
-        parts = [f'[{test["project"]}]', test['file'], *test['titles']]
-        if any('\n' in p or '›' in p for p in parts):
-            raise ValueError('test identity cannot be represented by Playwright test-list')
-        rows.append(' › '.join(parts))
-    return '\n'.join(rows)+'\n'
 
 
 def read_results(engine, report):
@@ -222,199 +169,62 @@ def read_results(engine, report):
     return tests
 
 
-def execute(command, cwd, env, log, timeout=None):
-    started = time.monotonic()
-    with log.open('w') as output:
-        child = subprocess.Popen(command,cwd=cwd,env=env,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
-        try:
-            status = child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # The session belongs to this launch. Leave room inside the 30s
-            # total budget for nextest's child cleanup, then kill this group.
-            os.killpg(child.pid,signal.SIGTERM)
-            try:
-                child.wait(timeout=.4)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid,signal.SIGKILL)
-                child.wait(timeout=.4)
-            status = 124
-    return status,time.monotonic()-started
-
-
-def cleanup_after_pass(log):
-    """Only a harness success summary followed by known cleanup diagnostics.
-
-    A nested child summary or an assertion after a summary cannot forgive the
-    parent failure. Unknown infrastructure errors retain their failure status.
-    """
-    lines = re.sub(r'\x1b\[[0-9;]*m','',log.read_text(errors='replace')).splitlines()
-    failed = re.compile(r'\bFAIL(?:ED)?\b|\b[1-9]\d*\s+failed\b|\bAssertionError\b|'
-        r'(?i:\bassertion\b|^\s*assert\s)')
-    if any(failed.search(line) for line in lines):
-        return False
-    summary = re.compile(r'^(?:\s*[1-9]\d* passed,\s*0 failed|\s*Tests\s+[1-9]\d* passed(?:\s+\(\d+\))?|'
-        r'\s*Summary\s+\[[^\]]+\]\s+[1-9]\d* tests? run:\s+[1-9]\d* passed(?:, 0 failed)?(?:, \d+ skipped)?|'
-        r'test result: ok\. [1-9]\d* passed; 0 failed;[^\n]*|OK)\s*$')
-    cleanup = re.compile(r'^(?:rm:|rmdir:|cleanup(?: error| warning| failed)?:)', re.I)
-    vitest_footer = re.compile(r'(?:Start at\s+\d{2}:\d{2}:\d{2}|Duration\s+[\d.]+(?:ms|s)(?:\s+\([^\n]*\))?)')
-    for index in range(len(lines)-1, -1, -1):
-        if summary.fullmatch(lines[index]):
-            if lines[index]=='OK' and not any(re.fullmatch(r'Ran [1-9]\d* tests? in .+', row) for row in lines[:index]):
-                return False
-            tail = [row.strip() for row in lines[index+1:] if row.strip()]
-            vitest = lines[index].lstrip().startswith('Tests ')
-            return any(cleanup.match(row) for row in tail) and all(
-                cleanup.match(row) or (vitest and vitest_footer.fullmatch(row)) for row in tail)
-    return False
-
-
-def step(args):
-    repo = args.repo.resolve()
-    command = args.exec_args[1:] if args.exec_args[:1]==['--'] else args.exec_args
-    if not command:
-        raise ValueError('step requires a test command after --')
-    recovering = (os.environ.get('GITHUB_EVENT_NAME')=='merge_group' or
-        (os.environ.get('GITHUB_EVENT_NAME')=='push' and os.environ.get('GITHUB_REF','').startswith('refs/heads/epic/release-train-')))
-    if not recovering:
-        return subprocess.run(command, cwd=Path.cwd()).returncode
-    head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
-    out = args.out or repo/'target/queue-flakes/steps'/hashlib.sha256(args.id.encode()).hexdigest()[:20]
-    if (out/'receipt.json').exists():
-        raise ValueError('refusing to overwrite earlier step evidence')
-    attempts=[]
-    for index in range(2):
-        attempt=out/('initial' if index==0 else 'rerun')
-        attempt.mkdir(parents=True,exist_ok=True)
-        log=attempt/'console.log'
-        # CAS_QUEUE_STEP tells a nested selector that this step owns recovery.
-        status,seconds=execute(command,Path.cwd(),{**os.environ,'CAS_QUEUE_STEP':args.id},log,300 if index else None)
-        raw=status
-        warning=status>0 and cleanup_after_pass(log)
-        if warning:
-            print('::warning::Harness passed; post-result cleanup failed. Full diagnostic: '+str(log),flush=True)
-            status=0
-        sys.stdout.write(log.read_text(errors='replace'))
-        attempts.append({'status':status,'raw_status':raw,'seconds':seconds,
-            'tests':[{'runner':'step','name':args.id,'passed':status==0,
-                      'output':log.read_text(errors='replace')[-16000:]}]})
-        if status==0:
-            break
-    if git(repo,'rev-parse','HEAD')!=head or git(repo,'rev-parse','HEAD^{tree}')!=tree or subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
-        raise ValueError('the tested tree changed during execution')
-    success=attempts[-1]['status']==0
-    flakes=attempts[0]['tests'] if success and len(attempts)>1 else []
-    receipt={'schema':1,'head':head,'tree':tree,'runner':'step','shard':args.id,
-        'run_id':os.environ['GITHUB_RUN_ID'],'outcome':('FLAKY' if flakes else 'PASS') if success else 'FAIL',
-        'initial_status':attempts[0]['raw_status'],'flaky':flakes,'quarantine':[], 'attempts':attempts}
-    write_json(out/'receipt.json',receipt)
-    print(f'{receipt["outcome"]}: step {args.id}; receipt {out/"receipt.json"}')
-    return 0 if success else 1
-
-
 def run(args):
-    repo = args.repo.resolve()
-    out = args.out.resolve()
-    queued = os.environ.get('GITHUB_EVENT_NAME') == 'merge_group'
-    train = (os.environ.get('GITHUB_EVENT_NAME') == 'push'
-             and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))
-    head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
+    repo, out = args.repo.resolve(), args.out.resolve()
+    head, tree = git(repo,'rev-parse','HEAD'), git(repo,'rev-parse','HEAD^{tree}')
     if subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
-        raise ValueError('queue tests require a clean tracked tree')
-    recovering = queued or train
-    active = []
-    if recovering:
-        try:
-            active = quarantine(GitHub(args.issues_repo))
-        except (OSError,ValueError) as error:
-            print(f'WARNING: quarantine read unavailable for {args.issues_repo}: {error}; running without exclusions',file=sys.stderr)
-    excluded = [t for t in active if t['runner']==args.runner]
-    summary = f'Queue quarantine: {len(excluded)} {args.runner} test(s)\n'+''.join(f'- {identity(t)} — {t["issue"]}\n' for t in excluded)
-    print(summary,flush=True)
-    if os.environ.get('GITHUB_STEP_SUMMARY'):
-        with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as stream:stream.write(summary)
-    base_env = {**os.environ,'VERIFIED_TEST_REPO_ROOT':str(repo)}
-    original_log = base_env.get('VERIFIED_TEST_LOG')
+        raise ValueError('tests require a clean tracked tree')
+    if (out/'receipt.json').exists():
+        raise ValueError('refusing to overwrite earlier test evidence')
+    attempt = out/'initial'
+    attempt.mkdir(parents=True,exist_ok=True)
+    env = {**os.environ,'VERIFIED_TEST_REPO_ROOT':str(repo),
+           'VERIFIED_TEST_LOG':str(attempt/'native.log'),'JOURNEY_OUTPUT':str(attempt/'playwright')}
     if args.runner == 'rust':
         cwd = repo
-        command = [str(HERE/'run-verified-tests.sh'),'nextest','run','--archive-file',str(repo/'fast-validation-suite.tar.zst'),
-                   '--workspace-remap',str(repo),'--no-fail-fast']
-        if recovering:command += ['--profile','queue','--retries','0']
+        command = [str(HERE/'run-verified-tests.sh'),'nextest','run',
+                   '--archive-file',str(repo/'fast-validation-suite.tar.zst'),
+                   '--workspace-remap',str(repo),'--no-fail-fast','--profile','queue',
+                   '--retries','0','--partition',f'count:{args.shard}']
+        native = repo/'target/nextest/queue/junit.xml'
+        native.unlink(missing_ok=True)
     else:
         cwd = repo/'hub-web'
-        command = ['npm','run','journeys','--','--workers=2']
-        if recovering:command += ['--retries=0']
-    # Strict non-queue callers retain the original command, including their
-    # native zero-test guard. No quarantine or additional attempt applies.
-    partition = ['--partition',f'count:{args.shard}'] if args.runner=='rust' else [f'--shard={args.shard}']
-    if not recovering:
-        return subprocess.run(command+partition,cwd=cwd,env=base_env).returncode
-    if (out/'receipt.json').exists():
-        raise ValueError('refusing to overwrite earlier queue evidence')
-    attempts = []
-    for index in range(2):
-        attempt = out/('initial' if index==0 else 'rerun')
-        attempt.mkdir(parents=True,exist_ok=True)
-        env = {**base_env,'VERIFIED_TEST_REPO_ROOT':str(repo),'VERIFIED_TEST_LOG':str(attempt/'native.log'),
-               'JOURNEY_OUTPUT':str(attempt/'playwright')}
-        selection = list(partition) if index==0 else []
-        if args.runner=='rust':
-            native = repo/'target/nextest/queue/junit.xml'
-            native.unlink(missing_ok=True)
-            if index:selection += ['-E',rust_filter(failed)]
-            elif excluded:selection += ['-E',f'not ({rust_filter(excluded)})']
-        else:
-            native = attempt/'playwright/report.json'
-            if index:selection += sorted({'(^|/)'+re.escape(t['file'])+'$' for t in failed})+['--workers=1']
-            if excluded:
-                skip = attempt/'quarantine.txt'
-                skip.write_text(playwright_list(excluded))
-                selection += ['--test-list-invert',str(skip)]
-        status,elapsed = execute(command+selection,cwd,env,attempt/'console.log',29 if index and args.runner=='rust' else None)
-        report = attempt/('report.xml' if args.runner=='rust' else 'report.json')
-        if native.is_file():shutil.copyfile(native,report)
-        if index and not report.is_file():
-            # A timeout can kill the runner before it writes its report. Keep
-            # the original failures and record an incomplete, failing rerun.
-            print('FAIL: rerun produced no report; initial failures: '+', '.join(identity(t) for t in failed),file=sys.stderr)
-            tests = []
-        else:
-            tests = read_results(args.runner,report)
-        attempts.append({'status':status,'seconds':elapsed,'tests':tests})
-        if index==0:
-            if original_log and (attempt/'native.log').is_file():shutil.copyfile(attempt/'native.log',original_log)
-            failed = [t for t in tests if not t['passed']]
-            if status==0:
-                if failed:raise ValueError('successful runner reported failed tests')
-                break
-            if not failed:
-                if cleanup_after_pass(attempt/'console.log'):
-                    print('::warning::Native harness passed; post-result cleanup failed')
-                    attempts[-1]['raw_status']=status
-                    attempts[-1]['status']=0
-                    break
-                raise ValueError('runner failed without an executed failed test')
-    final_tests = {identity(t):t for t in attempts[-1]['tests']}
-    flakes = [t for t in failed if final_tests.get(identity(t),{}).get('passed')] if len(attempts)>1 else []
-    complete = all(identity(t) in final_tests for t in failed) if len(attempts)>1 else True
-    success = attempts[-1]['status']==0 and complete and all(t['passed'] for t in final_tests.values())
+        command = ['npm','run','journeys','--','--workers=2','--retries=0',f'--shard={args.shard}']
+        native = attempt/'playwright/report.json'
+    started = time.monotonic()
+    log = attempt/'console.log'
+    with log.open('w') as output:
+        status = subprocess.run(command,cwd=cwd,env=env,stdout=output,stderr=subprocess.STDOUT).returncode
+    sys.stdout.write(log.read_text(errors='replace'))
+    original_log = os.environ.get('VERIFIED_TEST_LOG')
+    if original_log and (attempt/'native.log').is_file():
+        shutil.copyfile(attempt/'native.log',original_log)
+    report = attempt/('report.xml' if args.runner=='rust' else 'report.json')
+    tests, error = [], None
+    try:
+        shutil.copyfile(native,report)
+        tests = read_results(args.runner,report)
+    except (OSError,ValueError,KeyError,ET.ParseError) as problem:
+        error = str(problem)
+    failed = [test for test in tests if not test['passed']]
+    success = status==0 and not failed and error is None
     if git(repo,'rev-parse','HEAD')!=head or git(repo,'rev-parse','HEAD^{tree}')!=tree or subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
         raise ValueError('the tested tree changed during execution')
     receipt = {'schema':1,'head':head,'tree':tree,'runner':args.runner,'shard':args.shard,
-               'run_id':os.environ.get('GITHUB_RUN_ID',''),'run_url':f'https://github.com/{os.environ.get("GITHUB_REPOSITORY","")}/actions/runs/{os.environ.get("GITHUB_RUN_ID","")}',
-               'outcome':('FLAKY' if flakes else 'PASS') if success else 'FAIL',
-               'initial_status':attempts[0]['status'],'rerun_seconds':attempts[-1]['seconds'] if len(attempts)>1 else 0,
-               'flaky':flakes,'quarantine':excluded,'attempts':attempts}
+               'run_id':os.environ.get('GITHUB_RUN_ID',''),'outcome':'PASS' if success else 'FAIL',
+               'initial_status':status,'failed':failed,'report_error':error,
+               'attempts':[{'status':status,'seconds':time.monotonic()-started,'tests':tests}]}
     write_json(out/'receipt.json',receipt)
-    if success:
-        print(f'{receipt["outcome"]}: {len(flakes)} flaky test(s); receipt {out/"receipt.json"}')
-    else:
-        # cas-c6e3: name what still fails (or never reran), not a flaky count.
-        failing = [t for t in final_tests.values() if not t['passed']]
-        failing += [t for t in failed if identity(t) not in final_tests]
-        names = [label(t) for t in failing[:10]]
-        more = f' (+{len(failing)-10} more)' if len(failing) > 10 else ''
-        print(f'FAIL: {len(failing)} failing test(s): {", ".join(names) or "none recorded"}{more}; receipt {out/"receipt.json"}')
-    return 0 if success else 1
+    print(f'{receipt["outcome"]}: {", ".join(label(t) for t in failed) or error or args.shard}; receipt {out/"receipt.json"}')
+    return 0 if success else (status if status>0 else 1)
+
+
+def next_working_day(today):
+    deadline = today + timedelta(days=1)
+    while deadline.weekday() >= 5:
+        deadline += timedelta(days=1)
+    return deadline.isoformat()
 
 
 def reconcile(args):
@@ -434,12 +244,12 @@ def reconcile(args):
         slot = receipt['runner']+':'+receipt['shard']
         if slot in slots: raise ValueError('duplicate shard receipt: '+slot)
         slots.add(slot)
-        for test in receipt['flaky']:
+        if receipt.get('outcome') not in ('PASS','FAIL'):
+            raise ValueError('invalid test outcome')
+        for test in receipt['failed']:
             observations[identity(test)] = (test,receipt)
-    if args.expect and (not set(args.expect).issubset(slots) or any(not slot.startswith('step:') for slot in slots-set(args.expect))):
-        raise ValueError(f'incomplete queue evidence: expected {args.expect}; found {sorted(slots)}')
     if not observations:
-        print('Queue flake publication: no recovered failures')
+        write_json(args.receipts/'publication.json',{'schema':1,'published':[]})
         return 0
     api = GitHub(args.issues_repo)
     published = []
@@ -453,21 +263,23 @@ def reconcile(args):
             issue,state = matches[0] if matches else (None,{'schema':1,'runs':[]})
             # Store the actual identity fields, not the presentation JSON list.
             state['test'] = {k:test[k] for k in ({'rust':('runner','binary','name'),'playwright':('runner','project','file','titles'),'step':('runner','name')}[test['runner']])}
-            run_id = receipt.get('observation_run_id',receipt['run_id'])
+            run_id = receipt['run_id']
             if not re.fullmatch(r'[1-9]\d*',run_id): raise ValueError('invalid GitHub run id')
             if run_id not in state['runs']: state['runs'].append(run_id)
+            state.setdefault('repair_deadline',next_working_day(datetime.now(timezone.utc).date()))
+            date.fromisoformat(state['repair_deadline'])
             labels = set(l['name'] for l in issue['labels']) if issue else set()
-            labels.update(['flaky','priority:p1'])
-            if test['runner']=='step' or len(set(state['runs']))>=2: labels.add('flaky-quarantine')
+            labels.discard('priority:p1')
+            labels.update(['flaky','priority:p0'])
             runs = '\n'.join(f'- https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{r}' for r in state['runs'])
-            body = ('Merge-queue fail-then-pass: **FLAKY**. Fix this test; close this issue with the fix PR.\n\n'+
-                    ('The step remains covered on later trees; its quarantine issue tracks the recovered failure.\n\n' if test['runner']=='step' else
-                     'An open `flaky-quarantine` issue excludes this identity from subsequent queue trees.\n\n')+
-                    f'Test id: `{key}`\n\nIndependent runs:\n{runs}\n\n'
-                    f'Evaluated commit: {receipt["head"]}\n\nLatest initial failure:\n'
+            body = ('First native test failure. Staff this P0 repair ahead of feature work.\n\n'
+                    f'Owner: issue assignee, staffed through issue intake. Fix or delete by {state["repair_deadline"]} (UTC date). '
+                    'If deleted, record the behaviour this test covered in the repair task.\n\n'
+                    f'Test id: `{key}`\n\nObserved runs:\n{runs}\n\n'
+                    f'Evaluated commit: {receipt["head"]}\n\nLatest failure:\n'
                     '```text\n'+test['output'][:16000].replace('```','` ` `').replace('<!--','&lt;!--')+'\n```\n\n'
                     '<!-- cas-queue-flake: '+json.dumps(state,ensure_ascii=True)+' -->\n')
-            payload = {'title':('Flaky queue test: '+(test['name'] if test['runner'] in ('rust','step') else ' › '.join(test['titles'])))[:240],
+            payload = {'title':('Repair failing test: '+label(test))[:240],
                        'body':body,'labels':sorted(labels)}
             if issue:
                 issue = api.api(f'/issues/{issue["number"]}','PATCH',payload)
@@ -480,15 +292,15 @@ def reconcile(args):
                     issue = found[0]
                 issues.append(issue)
             saved = issue_state(issue)
-            if run_id not in saved['runs'] or ((test['runner']=='step' or len(set(state['runs']))>=2) and 'flaky-quarantine' not in [l['name'] for l in issue['labels']]):
-                raise ValueError('GitHub did not persist the flake observation/quarantine')
+            if run_id not in saved['runs'] or saved.get('repair_deadline')!=state['repair_deadline'] or 'priority:p0' not in [l['name'] for l in issue['labels']]:
+                raise ValueError('GitHub did not persist the repair observation/deadline')
             published.append({'test':key,'issue':issue['html_url'],'runs':saved['runs'],
-                              'quarantined':'flaky-quarantine' in [l['name'] for l in issue['labels']]})
+                              'repair_deadline':saved['repair_deadline']})
     write_json(args.receipts/'publication.json',{'schema':1,'published':published})
-    for item in published: print(f'FLAKY: {item["test"]} — {item["issue"]}; quarantine={item["quarantined"]}')
+    for item in published: print(f'Repair: {item["test"]} — {item["issue"]}; due={item["repair_deadline"]}')
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
-            summary.write('### Queue flakes\n'+''.join(f'- {p["issue"]}; quarantine={p["quarantined"]}\n' for p in published))
+            summary.write('### Test repairs\n'+''.join(f'- {p["issue"]}; due={p["repair_deadline"]}\n' for p in published))
     return 0
 
 
@@ -500,19 +312,12 @@ def main():
     command.add_argument('--repo',type=Path,default=HERE.parent)
     command.add_argument('--shard',required=True)
     command.add_argument('--out',type=Path,required=True)
-    command.add_argument('--issues-repo',default=os.environ.get('CASSY_ISSUES_REPO',os.environ.get('GITHUB_REPOSITORY','')))
-    command = commands.add_parser('step')
-    command.add_argument('--repo',type=Path,default=HERE.parent)
-    command.add_argument('--id',required=True)
-    command.add_argument('--out',type=Path)
-    command.add_argument('exec_args',nargs=argparse.REMAINDER)
     command = commands.add_parser('reconcile')
     command.add_argument('--issues-repo',required=True)
     command.add_argument('--receipts',type=Path,required=True)
-    command.add_argument('--expect',action='append',default=[],help='required runner:shard receipt (repeatable)')
     args = parser.parse_args()
     try:
-        return {'run':run,'step':step,'reconcile':reconcile}[args.command](args)
+        return {'run':run,'reconcile':reconcile}[args.command](args)
     except (OSError,ValueError,KeyError,ET.ParseError,subprocess.SubprocessError) as error:
         print(f'ERROR: {error}',file=sys.stderr)
         return 1

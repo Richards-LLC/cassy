@@ -38,7 +38,7 @@ One event gets one message. A close is the lifecycle report; never send a post-c
 summary or echo the close relay. After a merge request, wait for the supervisor's
 response; send no follow-up update.
 
-Stay available after handoff. Never self-dispatch: every time you go idle, use assigned work;
+Stay available after handoff. Never self-dispatch: use assigned work when idle;
 `ready` and `available` are backlog
   visibility, not authorization.
 
@@ -58,13 +58,13 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
 
 | Phase or trigger | Read before acting |
 | --- | --- |
-| Test design/review | [Fewest tests](../cas-tdd/SKILL.md#fewest-tests) |
+| Test design/review | [Fewest tests](../cas-writing-tests/SKILL.md#fewest-tests) |
 | Before checks/tests | [discipline.md](references/discipline.md) |
 | Browser changes/journeys | [Browser checks](references/discipline.md#browser-checks) |
 | Delivery | [close-gate.md](references/close-gate.md); [Batch QA](references/details.md#batch-qa) when `qa.mode=batch` |
 | Capacity refusal (not a blocker) | [Capacity waits](references/discipline.md#capacity-waits) |
-| Review or other blocker | [Blockers and review waits](references/recovery.md#blockers-and-review-waits), before `task action=update id=<task-id> status=blocked` or `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."` with `blocker: <cause>` |
-| Queued, reused or returned branch | [recovery](references/recovery.md#queued-successor-and-branch-reuse); checkpoint before an allowed `git rebase <target>` |
+| Review or other blocker | [Blockers and review waits](references/recovery.md#blockers-and-review-waits), before blocking the task or notifying the supervisor |
+| Queued, reused or returned branch | [recovery](references/recovery.md#queued-successor-and-branch-reuse); checkpoint before an allowed `git rebase <target>`; a checkpoint push alone is not a park |
 | Detach or checkpoint | [reminders.md](../cas-supervisor/references/reminders.md) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
 | Evidence, sync or resume | [details.md](references/details.md) |

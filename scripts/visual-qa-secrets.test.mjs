@@ -72,7 +72,7 @@ test('signed-in trace and in-flight route teardown contain no seeded credentials
         else await context.close();
         await new Promise(resolve => setTimeout(resolve, 50));
         await qa.runVisualQa({
-          urls: [url], journey: { states: [{ name: 'signed-in', steps: [{ wait: 1 }] }] },
+          urls: [url], journey: { states: [{ name: 'signed-in', steps: [{ waitFor: 'body' }] }] },
           schemes: ['light'], viewports: ['390x800'], artifactDir: ${JSON.stringify(join(dir, 'report'))},
           extraHTTPHeaders: { Authorization: 'Bearer ' + tokens.idToken },
           storageState: { cookies: [], origins: [{ origin: url, localStorage: [{ name: 'firebase:authUser:fixture', value: JSON.stringify(tokens) }] }] },
@@ -145,7 +145,7 @@ test('runner-owned tracing continues journeys with one safe warning and no harne
       };
       const result = await qa.runVisualQa({
         urls: [${JSON.stringify(new URL('./visual-qa-fixtures/clean.html', import.meta.url).pathname)}],
-        journey: { states: [{ name: 'first', steps: [{ wait: 1 }] }, { name: 'second', steps: [{ wait: 1 }] }] },
+        journey: { states: [{ name: 'first', steps: [{ waitFor: 'body' }] }, { name: 'second', steps: [{ waitFor: 'body' }] }] },
         schemes: ['light'], viewports: ['390x800'], artifactDir: ${JSON.stringify(dir)},
       });
       if (result.journeyRuns.some(run => run.trace || run.steps.some(step => step.status !== 'ok'))) throw new Error('Journey did not complete without a harness trace');

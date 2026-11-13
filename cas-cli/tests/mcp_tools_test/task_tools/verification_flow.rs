@@ -11265,10 +11265,10 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
         .await
         .expect("first close returns a result");
 
-    // Expire the authoritative typed deadline so the retry auto-escalates.
+    // Bind receipt recovery and expire its typed deadline; task-only expiry renews.
     let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
     conn.execute(
-        "UPDATE verification_dispatches SET deadline_at = ?2 WHERE task_id = ?1",
+        "UPDATE verification_dispatches SET deadline_at = ?2, receipt_id = 'dc-timeout-alias' WHERE task_id = ?1",
         rusqlite::params![
             id,
             (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()

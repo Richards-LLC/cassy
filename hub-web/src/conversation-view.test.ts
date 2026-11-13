@@ -17,9 +17,10 @@ describe("ConversationView (Pebble thread)", () => {
     const history = new ConversationHistory();
     history.reply(reply(1, "status", "A real lifecycle follows."), at(9, 0));
     let now = 1000;
+    let activity = false;
     let state = { connected: true, stale: false, waiting: false, now, receivedAt: now };
     let snapshot = { event_id: "phase", kind: "notice", lifecycle: { id: "turn", stage: "phase", phase: "compacting", started_at: "2026-10-28T12:00:00Z", ended_at: undefined as string | undefined }, observed_at: "2026-10-28T12:00:42Z", stale: false };
-    const view = new ConversationView(document, history, { supervisor: "sup", working: () => true, ...{ phase: () => livePhase(snapshot, { ...state, now }) } });
+    const view = new ConversationView(document, history, { supervisor: "sup", working: () => activity, ...{ phase: () => livePhase(snapshot, { ...state, now }) } });
     onTestFinished(() => view.dispose()); document.body.replaceChildren(view.element); view.update();
     expect(view.element.querySelector(".phase-line")?.textContent).toBeTruthy();
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:42");
@@ -52,6 +53,13 @@ describe("ConversationView (Pebble thread)", () => {
       snapshot = missing as typeof snapshot;
       view.refreshWorking();
       expect(livePhase(snapshot, { ...state, now, working: true })).toBeUndefined();
+      expect(view.element.querySelector(".working-turn")).toBeNull();
+      activity = true;
+      view.refreshWorking();
+      expect(view.element.querySelectorAll(".working")).toHaveLength(1);
+      expect(view.element.querySelector(".phase-line, .phase-clock")).toBeNull();
+      activity = false;
+      view.refreshWorking();
       expect(view.element.querySelector(".working-turn")).toBeNull();
     }
     snapshot = measured;

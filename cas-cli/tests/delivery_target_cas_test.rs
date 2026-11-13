@@ -2022,7 +2022,7 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
             // GH #1899: a gh api error or timeout is no CI answer. The armed
             // intent survives without a notice and lands on the later green.
             let green = std::fs::read(&response).unwrap();
-            for failure in ["gh-failure", "gh-timeout"] {
+            for failure in ["gh-timeout", "gh-failure"] {
                 std::fs::write(&response, failure).unwrap();
                 cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
                 assert!(request.exists(), "{failure}: armed retry must survive a gh lookup failure");

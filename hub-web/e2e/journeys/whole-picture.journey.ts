@@ -353,14 +353,14 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         // Protocol fixture: report the native command's two-minute completion.
         // A real harness command and daemon kill belong to release batch QA.
         const ended = new Date(Date.parse(started) + 120_000).toISOString();
-        world.supervisor_phase.lifecycle = { id: "command", stage: "end", started_at: started, ended_at: ended };
-        world.supervisor_phase.observed_at = ended;
-        world.supervisor_phase.last_activity_at = ended;
-        delete world.supervisor_phase.step;
+        world.supervisor_phase!.lifecycle = { id: "command", stage: "end", started_at: started, ended_at: ended };
+        world.supervisor_phase!.observed_at = ended;
+        world.supervisor_phase!.last_activity_at = ended;
+        delete world.supervisor_phase!.step;
         await refresh();
         await expect(line).toHaveAttribute("data-state", "busy");
         await expect(line.locator(".phase-clock")).toHaveText(/^2:\d{2}$/);
-        world.supervisor_phase.turn = { id: "long-turn", stage: "end", started_at: started, ended_at: ended };
+        world.supervisor_phase!.turn = { id: "long-turn", stage: "end", started_at: started, ended_at: ended };
         await refresh();
         await expect(line).toHaveAttribute("data-state", "idle", { timeout: 5_000 });
         await expect(line.locator(".phase-clock")).toHaveText("2:00");

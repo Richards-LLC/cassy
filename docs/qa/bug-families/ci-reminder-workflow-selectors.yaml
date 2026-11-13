@@ -1,0 +1,3 @@
+title: CI reminder workflow selectors resolve before registration and follow workflow identity
+tasks: [cas-4329e]
+journeys: [FACTORY-SUPERVISE]

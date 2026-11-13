@@ -560,6 +560,25 @@ impl CasService {
             if let Some(filter) = filter.as_mut() {
                 normalize_external_filter(&event_type, filter);
             }
+            if event_type == EXTERNAL_CI_COMPLETED_EVENT
+                && let Some(filter) = filter.as_mut()
+                && let Some(selector) = external_filter_string(filter, &["workflow"])
+            {
+                let project = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root).to_path_buf();
+                let lookup = selector.clone();
+                let workflow = tokio::task::spawn_blocking(move || {
+                    let transport = crate::ui::factory::daemon::runtime::ci_watch::GhCiTransport::from_project(&project)?;
+                    transport.resolve_workflow(&lookup)
+                }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                        format!("Cannot resolve CI workflow: {error}")))?;
+                let workflow = workflow.ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: format!("Unknown or ambiguous workflow selector {selector:?}; use an exact workflow name, file path or numeric ID").into(),
+                    data: Some(serde_json::json!({"error_code": "workflow_selector_invalid", "workflow": selector})),
+                })?;
+                filter["workflow"] = workflow.to_string().into();
+            }
 
             let id = store
                 .create_with_scope(

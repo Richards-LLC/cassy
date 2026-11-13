@@ -7,6 +7,179 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.21.0] - 2026-11-12
+
+### Changed — Factory
+
+- **Approvals survive train moves** — Was: every target move that touched a
+  reviewed file re-dispatched pre-merge review unless the full patch the merge
+  added, generated output included, kept its patch-id; on Nov 10 three
+  deliveries were reviewed 2–3 times each only because siblings landed. Now: an
+  approval carries forward, with an audit note and no new dispatch, when the
+  delivery's own patch-id (generated output excluded) is unchanged and the new
+  candidate merges cleanly. A conflict or a changed delivery patch still gets a
+  fresh review.
+- **Shared docs are generated at the release cut** — Was: every delivery had to
+  edit `docs/qa/journeys.yaml`, `.claude/CODEMAP.md` and
+  `docs/PRODUCT_OVERVIEW.md`, park refused with CODEMAP DRIFT, PRODUCT_OVERVIEW
+  DRIFT or registry upkeep findings, and parallel deliveries conflicted on those
+  files. Now: deliveries add their own `docs/qa/bug-families/<slug>.yaml` and
+  `docs/product-overview.d/<task-id>.md` fragments, `scripts/release.sh` folds
+  them in once, the `journey-catalog` lane lint checks the registry and
+  fragments, and park, the supervisor task-create gate and the stop hook no
+  longer check CODEMAP.
+
+### Changed — Release inputs
+
+- **Derived release inputs** — Release cuts bind report proof from each member's recorded external reference. Release review receipts can derive member IDs and the reviewed commit from their published ledger. Candidate previews flow directly into tracking and are saved on the release operation, whose identity uses the final tree and permits a later review of that tree.
+
+### Added — Friction ledger
+
+- **Delivery review and intervention detail** — The ledger shows review rounds by delivery cycle and verdict provenance, wakes by authenticated notice kind, and Commander/manual supervisor interventions. Backfill preserves sourced manual repairs and enriches legacy facts without counting them twice. Commit-to-main measures individual deliveries inside a release train.
+- **Scorers with cited hits** — Was: the ledger report listed review rounds, verdicts and notices, and nobody graded them. Now: `cas ledger report` scores five rubrics per release. They cover review rounds per delivery, decision verdicts graded by the supervisor alone, hold notices per release receipt, minutes a train sat green and uncut, and minutes workers sat held or idle while their epic had ready work. Each rubric has four scored labels, and every hit names its delivery, receipt, train or worker with evidence ids. The scorers only measure; nothing gates or refuses on them.
+
+### Fixed — Release checks
+
+- **Registry validation in clean checkouts** — Legacy validators use the registry's explicit policy without requiring a local Cassy store. Missing policy still needs configuration, and strict policy still requires a validator supporting base comparisons.
+
+### Fixed — Release preview
+
+- **Linked worktree project identity** — Release previews in linked worktrees without local Cassy configuration inherit the main checkout's canonical project identity through Git's common directory, avoiding false foreign-scope holds. An explicit local project pin keeps precedence.
+- **Replay stores outside Git** — Release preview can read a relocated copied store from the original repository without losing the repository, candidate key, source or tree validation.
+
+### Fixed — CI
+
+- **Journey-catalog row explains a missing registry policy** — Was: in a
+  checkout with no Cassy store, a registry file without an `enforce:` header
+  failed the journey-catalog row with no message once the store lookup
+  failed, and an unrecognised stored policy failed the same silent way.
+  Registries that declare the header already skip the store. Now: both
+  failures still fail closed, and they name the revision whose header is
+  missing (or the bad value) and the fix: add the header, or run where the
+  store answers.
+
+### Added — Factory
+
+- **Approval policy registry API** — Delivery-stage checks now declare integrity or as-of policy. Approval writers can capture a registry membership version and use the stamp-based applicability reader to retain integrity checks while excluding later requirements. Approval-by-cycle persistence and runtime integration follow separately.
+- **Every factory check has a stable code** — Was: refusals were free-text
+  headings with no way to count them per check. Now: each gate, guard,
+  watchdog, notice and CI check declares a code at its source, `cas gates list`
+  prints the registry measured from code, refusals end with their `[CODE]`, and
+  `cas gates report --since <tag>` counts refusals, overrides and
+  `cas gates false-positive` declarations per code.
+
+- **Count script and merge decisions** — Script failures emit their registered
+  codes; merge CI refusals and accepted overrides, including pre-push fast-row
+  skips, record typed per-code facts. One MCP router boundary observes every
+  tool's coded refusal or tagged accepted override; one outer hook entry covers
+  ordinary and native fast paths. Release/pre-push reporters retain refusal exits.
+
+- **Measure actual policy exceptions** — Successful accepting producers emit
+  explicit override tags, including stored operator approvals; quoted codes and
+  read-only approval replay add no facts. A test-only AST inventory generates
+  refusal/override sites, candidate exclusions and recording boundaries, and
+  rejects unclassified or uncovered factory-policy candidates.
+
+### Changed — CI
+
+- **Lane CI runs the delivery's impacted tests** — Was: a factory push proved
+  only the tests its worker named; the train's impact selection ran after
+  merge, so a change that broke a test outside its own module showed up as a
+  train red about 35 minutes later. Now: the slim lane runs that same
+  selection for the delivery's range, from the start base recorded at task
+  start, on hosted runners, the changed modules'
+  own tests first and the remaining selected tests in up to three shards only
+  after those pass. When the selector cannot narrow a change (build policy,
+  scripts or workflow edits), the lane runs the whole suite in the same order.
+  A test that already fails on the branch the delivery started from is named
+  as inherited and does not block that delivery.
+
+### Fixed — Factory
+
+- **Checkout refusals name the checkout fix** — Was: a worker `git checkout`
+  outside its assigned worktree was refused with commit guidance ("switch to
+  your lane, then retry your commit"). Now: the refusal
+  (`WORKER_CHECKOUT_OUTSIDE_WORKTREE`) gives the checkout to run inside the
+  assigned worktree, for a revision or a path restore (`git checkout -- <path>`).
+  Commit refusals keep their commit guidance, and the ownership rule is
+  unchanged.
+- **Adopt a commit named for another task** — Was: when a follow-up task's lane
+  was fast-forwarded onto a commit whose subject named the original task, close
+  and merge refused it as foreign work. The push guard also blocked rewriting the
+  lane, so the only way out was to cancel and recreate the task. Separately, a
+  logged-in supervisor's `merge_source` grant on an active task failed before it
+  was saved. Now: the grant is saved through the syncing store's guarded update,
+  and a supervisor's `merge_source=<full SHA>` change-request grant adopts that
+  commit and its ancestors. Later commits on the lane are still checked.
+
+### Added — Delivery identity
+
+- **Every delivery records its cycle** — Was: an ordinary park left no
+  per-delivery record, so each stage re-derived identity from task fields and
+  live Git. Now: every anchor write, including a task created or updated by
+  sync, records the task's delivery cycle and appends later tips to it, and
+  open deliveries parked earlier are backfilled. Request-changes and reopen
+  start the next cycle, machines that sync the task number its cycles the same
+  way, and a completion receipt from a later cycle gets its own id.
+
+### Fixed — Ledger
+
+- **Release check rates count real runs** — Was: `cas ledger report` added
+  every project's `worktree_merge` admissions and success-only duration samples
+  to the lane pass/fail row, and counted one failed merge-queue run once per
+  ejected delivery plus every unlinked ejection notice; v4.0.0 read lane 153/34
+  and queue 23/13 with no failed lane workflow. Now: `checks` holds only this
+  project's workflow, job and review results, a failed queue run counts once,
+  and each row shows observed minutes with an explicit untimed count.
+  `check_runs` keeps each run's id, workflow/job title and link, and
+  `check_cohorts` lists merge admissions, queue notices, duration samples and
+  downstream projects' rows separately.
+
+### Fixed — Developer checks
+
+- **Recorded CLI arguments** — Test-shape lint recognizes explicit `shlex.split` projections of recorded caller arguments, including quoted payload text, while continuing to reject raw prose pins.
+- **Gate token assertions** — Named test admission and test-shape lint accept bracketed gate codes declared in the registry while continuing to reject unknown tokens and prose assertions.
+
+### Fixed — Task delivery
+
+- **Published start bases and successor deliveries** — Worker starts use the origin target when a local epic has unpublished commits. A cancelled task's recorded unmerged commits can be delivered unchanged by its explicitly named successor, while unrelated work keeps its ownership checks.
+
+### Changed — Merge admission
+
+- **One origin read per merge** — Was: a merge asked origin about its target up to four times, and a three-entry train merge made 24 origin reads (8 per entry). Now: the fetch under the target lock is the only merge read. The target sync, its containment re-check, the train's publication check, promotion recovery and the close's integration proof reuse it. The close reads origin only when the tracking ref cannot prove the delivery, and then at most once. The same train makes 3 reads (1 per entry). A new pre-merge review still refreshes the target before it is dispatched.
+- **Session ownership checked once** — Was: the foreign-session check ran before and after parked-delivery inference. Now: it runs once, after inference, and still comes before any effect or inference refusal.
+- **Registry** — The containment-freshness code G-105 is folded into G-110. Both reported the target's freshness from the same read. The registry drops from 401 to 400 checks.
+
+### Fixed — Release
+
+- **No-code report deliveries can close at release again** — Was: once
+  verdicts were bound to delivery cycles, an explicit no-code delivery (which
+  never has a cycle) could not be approved by its verifier, so the release
+  cut held it as missing review and refused with "zero would-close". Now: a
+  delivery with no cycle is approved by the verdict for the commit its
+  dispatch reviewed, as before; cycle-bound deliveries are unchanged. The
+  cut refusal also lists the hold reasons and the members missing review.
+
+### Fixed — Friction ledger
+
+- **Count rebinds once** — Live branch rebinds and retained audit backfills share one identity. Reports recognize historical duplicate aliases without deleting ledger history or merging unrelated actions.
+
+### Fixed — Factory gate audit
+
+- **Ratchet uncoded caller-authority refusals** — The mechanical gate audit traces caller identity into refusal conditions, while excluding ordinary errors and unrelated role/owner metadata. Mutable, shadowed and destructured bindings retain their provenance at each scope and read position. Existing uncoded sites are recorded in a counted landed baseline that can only shrink, including after file deletion; new uncoded sites fail the audit. No gate codes or runtime policy are added.
+
+### Fixed — Delivery approvals
+
+- **Keep approvals attached to their delivery cycle** — New candidate approvals retain their cycle and registry version when carried. Release close finds the approved delivery even when a newer task review exists; historical candidate approvals retain their source and shipped-tree checks.
+
+### Fixed — Factory checks
+
+- **Count each surviving rule once** — Test-shape lint stays in CI instead of rerunning at park. Shared proof-scope and independent-QA guards use one stable code each. Retired CI prose pins and repeated per-prompt role reminders no longer add friction. Workers can message their own recorded native subagent IDs while factory traffic remains on Cassy coordination.
+
+### Fixed — Repository identity
+
+- **One project resolver** — Selector stamping now uses the same ordered repository identities as scope matching, including the primary project pin for linked worktrees without local configuration.
+
 ## [4.20.0] - 2026-11-12
 
 ### Fixed — Release trains

@@ -35,4 +35,4 @@ Anything real found along the way (tests that cannot fail, a possible network de
 
 ## Decisions the operator must make
 
-Numbered, each with a recommendation. At least: approve the deletion batch, confirm style pinning is deleted, and pick which speed-ups to take first. Phase 2 starts only after approval.
+Numbered, each with a recommendation. At least: approve the deletion batch, confirm implementation pins are removed while accessibility contracts stay, and pick which speed-ups to take first. Phase 2 starts only after approval.

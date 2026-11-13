@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-34 release-script]: One-command release cut (scripts/release.sh)
 #
 # One-command release for CAS (cas-f95b). Run it from the epic branch (or a
 # train branch) once the work is code-done:
@@ -14,7 +15,8 @@
 #   2. computes the next version from the base branch's version;
 #   3. bumps the release crates and Cargo.lock, promotes CHANGELOG
 #      [Unreleased] and the changelog.d fragments to a dated [x.y.z]
-#      section, and names the release-notes draft
+#      section, folds the journey bug-family and product-overview
+#      fragments into their docs (scripts/doc-fragments.py), names the release-notes draft
 #      docs/release-notes/<date>-v<x.y.z>-slack.md, then rebuilds the
 #      embedded Commander bundle with the new version;
 #   4. commits "release: v<x.y.z>", pushes, opens/reuses the train PR,
@@ -34,6 +36,22 @@
 # 3 no queue admission after the enqueue request; 4 non-release merge conflict.
 
 set -Eeuo pipefail
+
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then
+        printf '\n%s\n' "$@" >&2
+        # Reporting is best effort and must preserve the refusal's exit code.
+        local bin="${CAS_BIN:-cas}"
+        if command -v "$bin" >/dev/null 2>&1; then
+            "$bin" gates record-refusal --message "script exit $status $*" >/dev/null 2>&1 || :
+        fi
+    fi
+}
+trap 'gate_exit "$?" "[C-34]"' EXIT
+
 # prepare runs in a command substitution; keep errexit there too.
 shopt -s inherit_errexit
 # Include commands inside prepare's substitution: Git and gh can fail without
@@ -41,7 +59,7 @@ shopt -s inherit_errexit
 trap 'printf "error: command failed (exit %s) at line %s: %s\n" "$?" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 usage() {
-    sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,34p' "$0" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
 Options:
   --hotfix            bump the patch version instead of the minor version
@@ -294,6 +312,21 @@ lint_release_draft() {
         verify-deliveries "$remote/$base" --notes "$draft" --report "$release_input_report" >&2
 }
 
+# cas-4b33: deliveries never edit .claude/CODEMAP.md, so the supervisor
+# regenerates it (/codemap) on the train before the cut. Refuse a map that
+# predates a file added or removed since it was last committed; per-task
+# fragments and release notes do not change the structure.
+require_current_codemap() {
+    local mapped stale
+    git ls-files --error-unmatch .claude/CODEMAP.md >/dev/null 2>&1 || return 0
+    mapped="$(git log -1 --format=%H -- .claude/CODEMAP.md)"
+    stale="$(git diff --no-renames --name-only --diff-filter=AD "$mapped" HEAD -- . \
+        ':(exclude).claude/CODEMAP.md' ':(exclude)changelog.d' ':(exclude)docs/qa/bug-families' \
+        ':(exclude)docs/product-overview.d' ':(exclude)docs/release-notes')"
+    stale="$(printf '%s\n' "$stale" | sed -n '1,5p')"
+    [[ -z "$stale" ]] || die ".claude/CODEMAP.md predates files added or removed since ${mapped:0:12} (${stale//$'\n'/, }); regenerate it with /codemap, commit it on $branch and rerun"
+}
+
 # Steps 1-3 plus the commit. Prints the version prepared.
 prepare() {
     local base_version version current prepared_commit drafts=() prepared_drafts=()
@@ -328,6 +361,7 @@ prepare() {
         printf '%s\n' "$version"
         return 0
     fi
+    require_current_codemap
     local source
     source="$(draft_source "$version")"
     lint_release_draft "$source"
@@ -340,8 +374,17 @@ prepare() {
         || die "Commander build failed; release was not committed"
     python3 "$script_dir/release_changelog.py" promote CHANGELOG.md "$version" "$(release_date)" "$base_version" \
         || die "CHANGELOG.md promotion failed"
+    # cas-4b33: deliveries add per-task doc fragments; fold them in once here.
+    python3 "$script_dir/doc-fragments.py" compile >&2 \
+        || die "doc fragment compile failed; fix what scripts/doc-fragments.py check reports"
     place_draft "$version" "$source"
     git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}" hub-web/dist
+    local doc
+    for doc in docs/qa/journeys.yaml docs/qa/bug-families docs/PRODUCT_OVERVIEW.md docs/product-overview.d; do
+        if git ls-files --error-unmatch "$doc" >/dev/null 2>&1; then
+            git add -A -- "$doc"
+        fi
+    done
     # Promotion deleted the changelog.d fragments it folded in (cas-f2be).
     if git ls-files --error-unmatch changelog.d >/dev/null 2>&1; then
         git add -- changelog.d
@@ -467,23 +510,22 @@ preview_cut() {
     release_candidate="$candidate"
     local train_args=()
     "$train_tracking" && train_args=(--train "$task")
-    "$candidate" release preview --commit "$sha" --version "$version" \
-        --inputs "$release_input_report" "${train_args[@]}" >"$candidate_dir/preview.raw.json"
-    release_close_preview="$candidate_dir/preview.json"
-    jq --argjson seconds "$build_seconds" '. + {candidate_build_seconds:$seconds}' \
-        "$candidate_dir/preview.raw.json" >"$release_close_preview"
+    release_close_preview="$("$candidate" release preview --commit "$sha" --version "$version" \
+        --inputs "$release_input_report" "${train_args[@]}")"
+    release_close_preview="$(jq --argjson seconds "$build_seconds" '. + {candidate_build_seconds:$seconds}' \
+        <<<"$release_close_preview")"
     jq -e --arg sha "$sha" '.scope.final_release_sha == $sha and (.members|type)=="number" and (.would_close|type)=="number"' \
-        "$release_close_preview" >/dev/null || die "invalid candidate preview; nothing pushed"
-    say "close preview: $(jq -c '{members,would_close,would_hold,already_closed,not_eligible,by_reason,review_missing,candidate_build_seconds}' "$release_close_preview")"
+        <<<"$release_close_preview" >/dev/null || die "invalid candidate preview; nothing pushed"
+    say "close preview: $(jq -c '{members,would_close,would_hold,already_closed,not_eligible,by_reason,review_missing,candidate_build_seconds}' <<<"$release_close_preview")"
     local unreviewed
     unreviewed="$(jq -r --slurpfile inputs "$release_input_report" '
         ($inputs[0].included_task_ids // []) as $included |
         [(.review_missing // [])[] | select(. as $id | $included | index($id))] | join(", ")
-    ' "$release_close_preview")"
+    ' <<<"$release_close_preview")"
     [[ -z "$unreviewed" ]] \
-        || die "release cut refused: REVIEW_MISSING for $unreviewed; record verification action=batch_receipt verification_type=release task_ids=<release-member-ids> staging_sha=<reviewed-sha> ledger_artifact_id=<artifact-id> ledger_path=<ledger-path> ledger_author=<reviewer>; see docs/qa/batch-qa.md and $release_close_preview; nothing pushed or enqueued"
-    jq -e '.members == 0 or .would_close > 0 or (.would_hold == 0 and .not_eligible == 0)' "$release_close_preview" >/dev/null \
-        || die "release cut refused: zero would-close; inspect $release_close_preview; nothing pushed or enqueued"
+        || die "release cut refused: REVIEW_MISSING for $unreviewed; record verification action=batch_receipt verification_type=release task_ids=<release-member-ids> staging_sha=<reviewed-sha> ledger_artifact_id=<artifact-id> ledger_path=<ledger-path> ledger_author=<reviewer>; see docs/qa/batch-qa.md and the close preview above; nothing pushed or enqueued"
+    jq -e '.members == 0 or .would_close > 0 or (.would_hold == 0 and .not_eligible == 0)' <<<"$release_close_preview" >/dev/null \
+        || die "release cut refused: zero would-close; inspect the close preview above; nothing pushed or enqueued"
 }
 
 # Advisory once per invocation, including dry-run and version preview. Never
@@ -550,7 +592,7 @@ done
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
     if ! tracking="$("$release_candidate" release track --commit "$(git rev-parse HEAD)" --version "$version" \
-        --inputs "$release_input_report" --first-child "$first_child" --preview "$release_close_preview" 2>&1)"; then
+        --inputs "$release_input_report" --first-child "$first_child" <<<"$release_close_preview" 2>&1)"; then
         retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
         die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"
     fi

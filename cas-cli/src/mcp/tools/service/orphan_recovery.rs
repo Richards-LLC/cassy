@@ -241,6 +241,7 @@ fn recover_worker_inner(
 /// Recover tasks whose leases just expired, but only when the holder is dead
 /// or heartbeat-stale (worker vanished) — not when a live agent simply failed
 /// to renew mid-turn.
+// gate[W-21 watchdog]: Expired lease with a dead holder
 pub fn recover_expired_leases_for_dead_holders(
     cas_root: &Path,
     agent_store: &dyn AgentStore,
@@ -481,6 +482,7 @@ fn emit_worker_died_signals(
     );
 }
 
+// gate[W-19 watchdog]: Heartbeat-stale worker reap (worker_died)
 fn emit_worker_died_signals_with_exit(
     cas_root: &Path,
     agent_store: &dyn AgentStore,

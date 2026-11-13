@@ -160,6 +160,10 @@ pub(crate) fn spill_message_to_artifact(
 ///
 /// The return value records whether a supervisor override was accepted so the
 /// caller can include its reason in the durable activity event metadata.
+// gate[G-131 note]: Appended task note body limit
+// gate-audit[supervisor_override]: bypass G-131 Pure validation helper; note producer tags accepted oversized notes.
+// gate-audit[registered_supervisor]: input Authenticated role, not a caller-provided admission flag.
+// gate-audit[accepted_by]: cas_task_notes
 pub(crate) fn validate_note_body(
     note_type: &str,
     body: &str,
@@ -195,7 +199,7 @@ pub(crate) fn validate_note_body(
     let limit = note_body_limit(config);
     let actual = body.chars().count();
     if actual > limit {
-        return Err(body_limit_error("Task note", limit, actual, task_id));
+        return Err(crate::gates::tag("G-131", body_limit_error("Task note", limit, actual, task_id)));
     }
     Ok(false)
 }

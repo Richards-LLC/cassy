@@ -205,6 +205,11 @@ fn prepare_finish(harness: SupervisorCli, target_dir: &Path) -> std::io::Result<
 
 /// All built-in skills managed by Cassy
 pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
+    BuiltinFile { path: "skills/cas-playwright-tests/SKILL.md", content: include_str!("builtins/skills/cas-playwright-tests/SKILL.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/configuration.md", content: include_str!("builtins/skills/cas-playwright-tests/references/configuration.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/locators-and-accessibility.md", content: include_str!("builtins/skills/cas-playwright-tests/references/locators-and-accessibility.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/current-api.md", content: include_str!("builtins/skills/cas-playwright-tests/references/current-api.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile {
         path: "skills/finish/SKILL.md",
         content: include_str!("builtins/skills/finish/SKILL.md"),
@@ -790,21 +795,18 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-github-issues/SKILL.md",
         content: include_str!("builtins/skills/cas-github-issues/SKILL.md"),
     },
-    // cas-nuxt-playwright skill: unified Nuxt 3 + Playwright E2E testing
-    // guide covering writing and Nuxt-specific debugging. Modeled after the
-    // gabber-studio production test suite; Firebase-focused. Stack-neutral
-    // failure triage lives in the cas-playwright-debug builtin (cas-5e54).
+    // Legacy Nuxt redirect and corrected stack reference; authoring is stack-neutral.
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/SKILL.md",
         content: include_str!("builtins/skills/cas-nuxt-playwright/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
+        path: "skills/cas-playwright-tests/references/nuxt-quasar-firebase.md",
         content: include_str!(
-            "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+            "builtins/skills/cas-playwright-tests/references/nuxt-quasar-firebase.md"
         ),
     },
-    // cas-playwright-debug skill (cas-5e54): stack-neutral Playwright 1.59+
+    // cas-playwright-debug skill: current-stable failure diagnosis
     // failure triage — trace CLI, `--debug=cli` stepping, flake control.
     // Optional project skill, detected from a Playwright dependency/config.
     BuiltinFile {
@@ -906,10 +908,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },
     BuiltinFile { path: "skills/cas-codebase-design/references/design-it-twice.md", content: include_str!("builtins/skills/cas-codebase-design/references/design-it-twice.md") },
     BuiltinFile { path: "skills/cas-codebase-design/references/principles.md", content: include_str!("builtins/skills/cas-codebase-design/references/principles.md") },
-    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/LICENSE", content: include_str!("builtins/skills/cas-tdd/LICENSE") },
-    BuiltinFile { path: "skills/cas-tdd/references/tests.md", content: include_str!("builtins/skills/cas-tdd/references/tests.md") },
-    BuiltinFile { path: "skills/cas-tdd/references/mocking.md", content: include_str!("builtins/skills/cas-tdd/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/SKILL.md", content: include_str!("builtins/skills/cas-writing-tests/SKILL.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/LICENSE", content: include_str!("builtins/skills/cas-writing-tests/LICENSE") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/tests.md", content: include_str!("builtins/skills/cas-writing-tests/references/tests.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/mocking.md", content: include_str!("builtins/skills/cas-writing-tests/references/mocking.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
@@ -956,6 +958,14 @@ pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
 /// (prefix-neutral, audit D1) files plus the Codex-tailored
 /// `cas-codex-supervisor-checklist` and the `agents/openai.yaml` policies.
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
+    BuiltinFile { path: "skills/cas-playwright-tests/SKILL.md", content: include_str!("builtins/skills/cas-playwright-tests/SKILL.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/configuration.md", content: include_str!("builtins/skills/cas-playwright-tests/references/configuration.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/locators-and-accessibility.md", content: include_str!("builtins/skills/cas-playwright-tests/references/locators-and-accessibility.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/current-api.md", content: include_str!("builtins/skills/cas-playwright-tests/references/current-api.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-writing-tests/agents/openai.yaml") },
+    BuiltinFile { path: "skills/cas-playwright-tests/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-playwright-tests/agents/openai.yaml") },
+    BuiltinFile { path: "skills/cas-tdd/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-tdd/agents/openai.yaml") },
     BuiltinFile {
         path: "skills/finish/SKILL.md",
         content: include_str!("builtins/skills/finish/SKILL.md"),
@@ -1529,9 +1539,9 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-nuxt-playwright/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
+        path: "skills/cas-playwright-tests/references/nuxt-quasar-firebase.md",
         content: include_str!(
-            "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+            "builtins/skills/cas-playwright-tests/references/nuxt-quasar-firebase.md"
         ),
     },
     // Codex ignores `disable-model-invocation`; `agents/openai.yaml` is its
@@ -1637,10 +1647,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },
     BuiltinFile { path: "skills/cas-codebase-design/references/design-it-twice.md", content: include_str!("builtins/skills/cas-codebase-design/references/design-it-twice.md") },
     BuiltinFile { path: "skills/cas-codebase-design/references/principles.md", content: include_str!("builtins/skills/cas-codebase-design/references/principles.md") },
-    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/LICENSE", content: include_str!("builtins/skills/cas-tdd/LICENSE") },
-    BuiltinFile { path: "skills/cas-tdd/references/tests.md", content: include_str!("builtins/skills/cas-tdd/references/tests.md") },
-    BuiltinFile { path: "skills/cas-tdd/references/mocking.md", content: include_str!("builtins/skills/cas-tdd/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/SKILL.md", content: include_str!("builtins/skills/cas-writing-tests/SKILL.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/LICENSE", content: include_str!("builtins/skills/cas-writing-tests/LICENSE") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/tests.md", content: include_str!("builtins/skills/cas-writing-tests/references/tests.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/mocking.md", content: include_str!("builtins/skills/cas-writing-tests/references/mocking.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
@@ -1703,6 +1713,11 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
 /// supervisor checklist is the Claude one (not Codex's tailored twin), since
 /// Grok's SessionStart hooks follow the Claude contract.
 pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
+    BuiltinFile { path: "skills/cas-playwright-tests/SKILL.md", content: include_str!("builtins/skills/cas-playwright-tests/SKILL.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/configuration.md", content: include_str!("builtins/skills/cas-playwright-tests/references/configuration.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/locators-and-accessibility.md", content: include_str!("builtins/skills/cas-playwright-tests/references/locators-and-accessibility.md") },
+    BuiltinFile { path: "skills/cas-playwright-tests/references/current-api.md", content: include_str!("builtins/skills/cas-playwright-tests/references/current-api.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile {
         path: "skills/finish/SKILL.md",
         content: include_str!("builtins/skills/finish/SKILL.md"),
@@ -2282,9 +2297,9 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-nuxt-playwright/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
+        path: "skills/cas-playwright-tests/references/nuxt-quasar-firebase.md",
         content: include_str!(
-            "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+            "builtins/skills/cas-playwright-tests/references/nuxt-quasar-firebase.md"
         ),
     },
     // cas-playwright-debug skill (cas-5e54) — grok mirror, byte-identical.
@@ -2378,10 +2393,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },
     BuiltinFile { path: "skills/cas-codebase-design/references/design-it-twice.md", content: include_str!("builtins/skills/cas-codebase-design/references/design-it-twice.md") },
     BuiltinFile { path: "skills/cas-codebase-design/references/principles.md", content: include_str!("builtins/skills/cas-codebase-design/references/principles.md") },
-    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/LICENSE", content: include_str!("builtins/skills/cas-tdd/LICENSE") },
-    BuiltinFile { path: "skills/cas-tdd/references/tests.md", content: include_str!("builtins/skills/cas-tdd/references/tests.md") },
-    BuiltinFile { path: "skills/cas-tdd/references/mocking.md", content: include_str!("builtins/skills/cas-tdd/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/SKILL.md", content: include_str!("builtins/skills/cas-writing-tests/SKILL.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/LICENSE", content: include_str!("builtins/skills/cas-writing-tests/LICENSE") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/tests.md", content: include_str!("builtins/skills/cas-writing-tests/references/tests.md") },
+    BuiltinFile { path: "skills/cas-writing-tests/references/mocking.md", content: include_str!("builtins/skills/cas-writing-tests/references/mocking.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
     BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
@@ -2716,6 +2731,8 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         grok: Some("skills/cas-qa-craft"),
         note: "",
     },
+    RequiredCapability { id: "cas-writing-tests", claude: Some("skills/cas-writing-tests"), codex: Some("skills/cas-writing-tests"), grok: Some("skills/cas-writing-tests"), note: "" },
+    RequiredCapability { id: "cas-playwright-tests", claude: Some("skills/cas-playwright-tests"), codex: Some("skills/cas-playwright-tests"), grok: Some("skills/cas-playwright-tests"), note: "" },
     RequiredCapability {
         id: "cas-nuxt-playwright",
         claude: Some("skills/cas-nuxt-playwright"),
@@ -3777,8 +3794,8 @@ const OPTIONAL_PROJECT_SKILLS: &[&str] = &["fallow", "cas-nuxt-playwright", "cas
 /// Sync project builtins while keeping stack-specific skills opt-in.
 ///
 /// The user-level sync functions intentionally retain the complete catalog.
-/// Project sync is different: `fallow` belongs in JavaScript/TypeScript
-/// projects, `cas-nuxt-playwright` belongs in Nuxt projects, and
+/// Test authoring skills are installed for every project. `fallow` belongs in JavaScript/TypeScript
+/// projects, the legacy `cas-nuxt-playwright` redirect remains in Nuxt projects, and
 /// `cas-playwright-debug` belongs in projects that run Playwright Test. A
 /// project can explicitly enable any of these ids in `[skills].optional` when
 /// detection cannot see an indirect or generated dependency.
@@ -4247,6 +4264,13 @@ fn tracked_builtin_paths(project_root: &Path, entries: &[String]) -> Vec<String>
 /// slice. Builtin skill paths look like `skills/<dir>/SKILL.md` (or a nested
 /// `references/...`); we extract `<dir>` so the prune below can recognize the
 /// dirs Cassy just wrote and never remove them.
+/// Whether `name` is a skill directory the builtin writer owns. A database
+/// skill that maps to one never writes it: the builtin wins (GH #1777), so
+/// `cas update` and `cas doctor` judge the same file against the same body.
+pub fn is_builtin_skill_dir_name(name: &str) -> bool {
+    builtin_skill_dir_names(BUILTIN_SKILLS).contains(name)
+}
+
 fn builtin_skill_dir_names(skills: &[BuiltinFile]) -> HashSet<String> {
     skills
         .iter()
@@ -7433,10 +7457,47 @@ This is the body content."#;
     }
 
     #[test]
+    fn test_authoring_skills_install_and_allow_implicit_invocation() {
+        for (harness, dir) in [
+            (SupervisorCli::Claude, ".claude"),
+            (SupervisorCli::Codex, ".codex"),
+            (SupervisorCli::Grok, ".grok"),
+            (SupervisorCli::OpenCode, ".opencode"),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let legacy_refs = project.path().join(dir).join("skills/cas-tdd/references");
+            std::fs::create_dir_all(&legacy_refs).unwrap();
+            std::fs::write(legacy_refs.join("tests.md"),
+                include_str!("builtins/skills/cas-writing-tests/references/tests.md")).unwrap();
+            let custom = [35_u8, 32_u8, 88_u8, 10_u8];
+            std::fs::write(legacy_refs.join("custom.md"), custom).unwrap();
+            sync_all_builtins_for_project(harness, project.path()).unwrap();
+            assert!(!legacy_refs.join("tests.md").exists());
+            assert_eq!(std::fs::read(legacy_refs.join("custom.md")).unwrap(), custom);
+            assert!(project.path().join(dir).join("skills/cas-tdd/SKILL.md").is_file());
+            for name in ["cas-writing-tests", "cas-playwright-tests"] {
+                let skill_dir = project.path().join(dir).join("skills").join(name);
+                let body = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+                let frontmatter = body.strip_prefix("---\n").unwrap().split("\n---").next().unwrap();
+                let metadata: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap();
+                assert_eq!(metadata["name"].as_str(), Some(name));
+                assert_ne!(metadata["disable-model-invocation"].as_bool(), Some(true));
+                let policy_path = skill_dir.join("agents/openai.yaml");
+                if policy_path.exists() {
+                    let policy: serde_yaml::Value = serde_yaml::from_str(
+                        &std::fs::read_to_string(policy_path).unwrap(),
+                    ).unwrap();
+                    assert_ne!(policy["policy"]["allow_implicit_invocation"].as_bool(), Some(false));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_builtin_skills_contains_cas_nuxt_playwright() {
         let expected = [
             "skills/cas-nuxt-playwright/SKILL.md",
-            "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
+            "skills/cas-playwright-tests/references/nuxt-quasar-firebase.md",
         ];
         for p in expected {
             assert!(
@@ -7472,15 +7533,15 @@ This is the body content."#;
 
         let claude_ref = BUILTIN_SKILLS
             .iter()
-            .find(|b| b.path == "skills/cas-nuxt-playwright/references/auth-fixture-template.md")
-            .expect("BUILTIN_SKILLS missing auth-fixture-template.md");
+            .find(|b| b.path == "skills/cas-playwright-tests/references/nuxt-quasar-firebase.md")
+            .expect("BUILTIN_SKILLS missing nuxt-quasar-firebase.md");
         let codex_ref = CODEX_BUILTIN_SKILLS
             .iter()
-            .find(|b| b.path == "skills/cas-nuxt-playwright/references/auth-fixture-template.md")
-            .expect("CODEX_BUILTIN_SKILLS missing auth-fixture-template.md");
+            .find(|b| b.path == "skills/cas-playwright-tests/references/nuxt-quasar-firebase.md")
+            .expect("CODEX_BUILTIN_SKILLS missing nuxt-quasar-firebase.md");
         assert_eq!(
             claude_ref.content, codex_ref.content,
-            "auth-fixture-template.md .claude and .codex copies must be byte-identical",
+            "nuxt-quasar-firebase.md .claude and .codex copies must be byte-identical",
         );
     }
 

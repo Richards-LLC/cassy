@@ -257,9 +257,5 @@ mod tests {
             "{\"changes\":[{\"type\":\"D\",\"path\":\"src/old.rs\"}],\"commit\":\"def5678\",\"recorded_at\":\"2026-04-03T19:00:00Z\"}\n",
         )).unwrap();
         assert_eq!(count_pending_changes(&pending), 2);
-        assert_eq!(
-            crate::hooks::handlers::handlers_events::codemap::codemap_stop_reminder(root.path()).as_deref(),
-            Some("Note: CODEMAP.md has 2 pending structural change(s) that should be updated.")
-        );
     }
 }

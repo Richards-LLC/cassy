@@ -1131,6 +1131,64 @@ async fn no_code_spike_closes_when_its_target_exists_only_on_origin_gh1167() {
     assert_closed_without_lane(&f, id, &response);
 }
 
+/// GH #1766, #1817: a no-code spike's audit report is named LEDGER.md. Start
+/// announces how close classifies that file; close accepts the report unless
+/// it declares the canonical QA matrix, which stays validated.
+#[tokio::test]
+async fn no_code_audit_ledger_closes_unless_it_declares_the_qa_matrix_gh1766() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&agent).unwrap();
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    let id = "cas-c766";
+    let mut spike = no_code_spike(id, "main");
+    spike.status = TaskStatus::Open;
+    f.put(&spike);
+    let started = call(&f.worker, serde_json::json!({"action": "start", "id": id})).await;
+    for marker in crate::qa_ledger::DECLARATION_MARKERS {
+        assert!(started.contains(marker), "start must announce the QA declaration: {started}");
+    }
+    let config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    let dir = &crate::config::resolved_factory_artifact_paths(
+        &f.cas_dir(), config.factory().artifacts_root.as_deref(),
+    ).task_dirs(id)[0];
+    std::fs::create_dir_all(dir).unwrap();
+    // The two original report shapes: #1766's cost tables with source links
+    // and #1817's id-keyed audit rows (`L2`).
+    let cost_report = "# Test audit\n\n| item | cost |\n|---|---|\n| [a.rs:1](https://example.test/a.rs) | 3m |\n";
+    let value_report = "# Test audit\n\n| layer | cost | where |\n|---|---|---|\n| unit | 3m | ci |\n\n\
+        | id | item | verdict | tests | evidence | fix | covering | confidence |\n\
+        |---|---|---|---|---|---|---|---|\n| L2 | a.rs:1 | dup | t | e | f | none | high |\n";
+    let foreign = crate::qa_ledger::scaffold(&no_code_spike("cas-other", "main"), &[], "deadbeef");
+    let request = serde_json::json!({
+        "action": "close", "id": id, "reason": "Audit report published",
+        "execution_note": "no-code", "external_ref": "art-c766",
+    });
+    // Canonical declarations stay validated: a declared-but-invalid ledger,
+    // and a well-formed canonical ledger written for another task.
+    for (case, body) in [
+        ("declared and invalid", format!("schema: 2\n{value_report}")),
+        ("foreign canonical", foreign),
+    ] {
+        std::fs::write(dir.join("LEDGER.md"), body).unwrap();
+        let refused = call(&f.worker, request.clone()).await;
+        assert!(refused.contains("QA LEDGER REJECTED"), "{case}: {refused}");
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{case}");
+    }
+    for report in [cost_report, value_report] {
+        std::fs::write(dir.join("LEDGER.md"), report).unwrap();
+        let response = call(&f.worker, request.clone()).await;
+        assert!(!response.contains("QA LEDGER REJECTED"), "{response}");
+        assert!(response.contains("VERIFICATION"), "the report reaches ordinary verification: {response}");
+    }
+}
+
 /// GH #1167 (2): the supervisor's evidence_only close of an artifact-only
 /// no-code spike succeeds even when the worker lane holds an unnamed commit.
 /// The supervisor reviewed the artifact; the lane is not measured.
@@ -2072,64 +2130,6 @@ async fn integrated_parked_receipt_survives_reused_lane_cas_79fc() {
     }
 }
 
-/// Upkeep writes its audit before the terminal CAS, through the real handler.
-#[tokio::test]
-async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main");
-    env.set("CAS_AGENT_ROLE", "supervisor");
-    let repo = f.dir.path();
-    let id = "cas-90ea-upkeep";
-    // Registry escapes and documentation warnings persist audit notes before
-    // the terminal write, without a later close-note writer to mask duplication.
-    std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
-    std::fs::create_dir_all(repo.join(".claude")).unwrap();
-    std::fs::write(repo.join("docs/qa/journeys.yaml"), "journeys: [broken\n").unwrap();
-    std::fs::write(repo.join(".claude/CODEMAP.md"), "- `src/` — Product\n").unwrap();
-    git(repo, &["add", "."]);
-    git(repo, &["commit", "-q", "-m", "seed upkeep inputs"]);
-    let base = git(repo, &["rev-parse", "HEAD"]);
-    std::fs::create_dir_all(repo.join("src/new")).unwrap();
-    std::fs::write(repo.join("src/new/entry.rs"), "pub fn entry() {}\n").unwrap();
-    git(repo, &["add", "."]);
-    git(repo, &["commit", "-q", "-m", "fix(cas-90ea-upkeep): delivered entry"]);
-    let receipt = git(repo, &["rev-parse", "HEAD"]);
-    git(repo, &["push", "-q", "origin", "main"]);
-    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
-    config.set("qa.evidence_gate", "false").unwrap();
-    config.set("qa.independent_pass", "false").unwrap();
-    config.set("qa.registry.enforce", "enforce").unwrap();
-    config.save(&f.cas_dir()).unwrap();
-    let mut task = assigned(id, TaskType::Task, "main");
-    task.assignee = None;
-    task.deliverables.factory_branch_anchor = Some(receipt.clone());
-    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-        work_target: task.deliverables.work_target.clone().unwrap(),
-        assignee: WORKER.into(), branch: "main".into(), base_sha: base,
-    });
-    f.put(&task);
-    let response = call(&f.supervisor, serde_json::json!({
-        "action": "close", "id": id, "commit_receipt": receipt,
-        "supervisor_override": true, "reason": "Reviewed integrated delivery and upkeep debt",
-    })).await;
-    assert!(!response.contains("UPKEEP WARNING") && !response.contains("UPKEEP ESCAPE"), "upkeep belongs in receipt details: {response}");
-    // pin: the immutable close receipt reference is a durable tool-response contract.
-    let path = response.lines().find_map(|line| line.strip_prefix("Details: "))
-        .and_then(|line| line.split(" (SHA-256 ").next()).expect("receipt reference");
-    // pin: upkeep warnings must be recoverable in the immutable receipt instead of the response.
-    assert!(std::fs::read_to_string(path).unwrap().contains("UPKEEP WARNING"));
-    let closed = f.task(id);
-    assert_eq!(closed.status, TaskStatus::Closed, "{response}");
-    let upkeep: Vec<_> = closed.notes.split("\n\n")
-        .filter(|note| note.contains("UPKEEP WARNING") || note.contains("UPKEEP ESCAPE"))
-        .collect();
-    assert!(closed.notes.contains("UPKEEP ESCAPE G1"), "registry writer must run: {}", closed.notes);
-    assert!(closed.notes.contains("UPKEEP WARNING"), "docs writer must run: {}", closed.notes);
-    for note in upkeep {
-        assert_eq!(closed.notes.matches(note).count(), 1, "persisted upkeep must appear once: {}", closed.notes);
-    }
-}
-
 /// cas-3d57 (cas-985f follow-ups), through the close handler: a worker on an
 /// epic-bound lane merges released origin/main (no rebase) and parks; after
 /// park it merges a newer origin/main and re-parks, both without override.
@@ -3054,10 +3054,69 @@ async fn queued_stale_tasks_are_skipped_with_notes_cas_8488() {
     assert!(!queue.starting);
 }
 
+/// GH #1863, through real task close: the reported delivery extended an
+/// existing inline family's statement (same task, same invariant) and was
+/// refused G3. That extension now parks. An unchanged family still refuses,
+/// and an unsupported family field is refused by the registry schema.
+#[tokio::test]
+async fn bug_family_statement_extension_parks_through_close_cas_f63f() {
+    let family = |statement: &str, extra: &str| format!(
+        "version: 1\nupdated: '2026-11-12'\ninvariants:\n  am-payment-to-qbo-2: {{statement: Arrived, check: Read state}}\nbug_families:\n  paid-invoice-duplicated-by-manual-sync:\n    title: Paid invoice duplicated by manual sync\n    statement: {statement}\n{extra}    tasks: [cas-f63f]\n    invariants: [am-payment-to-qbo-2]\n    journeys: [FLOW]\njourneys:\n  - id: FLOW\n    status: live\n    entry: {{url: /flow, trigger: Open}}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [am-payment-to-qbo-2]\n"
+    );
+    let base = "Manual sync never duplicates a paid invoice";
+    let extended = format!("{base}, including linked off-platform PENDING bitcoin webhook evidence and typed-discount exclusion");
+    for (registry, parks, code) in [
+        (family(&extended, ""), true, None),
+        (family(base, ""), false, Some("G3")),
+        (family(&extended, "").replace("tasks: [cas-f63f]", "tasks: [cas-other]"), false, Some("G3")),
+        (family(base, "    note: changed\n"), false, Some("unsupported_bug_family_field")),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        std::fs::create_dir_all(checkout.join("docs/qa")).unwrap();
+        std::fs::write(checkout.join("docs/qa/journeys.yaml"), family(base, "")).unwrap();
+        git(&checkout, &["add", "."]);
+        git(&checkout, &["commit", "-qm", "docs: base registry"]);
+        git(&checkout, &["push", "-q", "origin", LANE]);
+        git(f.dir.path(), &["merge", "-q", "--ff-only", LANE]);
+        git(f.dir.path(), &["push", "-q", "origin", "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        for (key, value) in [("qa.mode", "batch"), ("qa.evidence_gate", "false"),
+            ("qa.independent_pass", "false"), ("qa.registry.enforce", "enforce")] {
+            config.set(key, value).unwrap();
+        }
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        let id = "cas-f63f";
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::write(checkout.join("src/flow.ts"), "export const flow = true;\n").unwrap();
+        std::fs::write(checkout.join("docs/qa/journeys.yaml"), &registry).unwrap();
+        git(&checkout, &["add", "."]);
+        git(&checkout, &["commit", "-qm", "fix: manual sync never duplicates a paid invoice"]);
+        let tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", LANE]);
+        let reply = call(&f.worker, serde_json::json!({"action":"close", "id":id, "reason":format!("PASS {tip}")})).await;
+        let status = f.task(id).status;
+        assert_eq!(status == TaskStatus::AwaitingMerge, parks, "{reply}");
+        if let Some(code) = code {
+            assert!(reply.to_string().contains(code), "{reply}");
+        }
+    }
+}
+
 /// GH #1596/#1597: refusing A must leave B editable and preserve its owner
 /// across the supervisor's correction round; a foreign descendant is refused.
 #[tokio::test]
-async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
+async fn refused_close_keeps_correction_tip_and_restart_cas_56f1() {
     for foreign in [false, true] {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture(&mut env, "main");
@@ -3072,22 +3131,22 @@ async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
         agents.update(&agent).unwrap();
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         for (key, value) in [("qa.mode", "batch"), ("qa.evidence_gate", "false"),
-            ("qa.independent_pass", "false"), ("qa.registry.enforce", "enforce")] {
+            ("qa.independent_pass", "false")] {
             config.set(key, value).unwrap();
         }
         config.save(&f.cas_dir()).unwrap();
         env.set("CAS_AGENT_ROLE", "worker");
         let id = "cas-56f1";
-        let mut task = assigned(id, TaskType::Bug, "main");
+        let mut task = assigned(id, TaskType::Task, "main");
         task.status = TaskStatus::Open;
         f.put(&task);
         call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
         let start = f.task(id).deliverables.factory_branch_start.unwrap();
         std::fs::create_dir_all(checkout.join("src")).unwrap();
-        std::fs::create_dir_all(checkout.join("docs/qa/bug-families")).unwrap();
         std::fs::write(checkout.join("src/flow.ts"), "export const flow = true;\n").unwrap();
-        std::fs::write(checkout.join("docs/qa/journeys.yaml"), "version: 1\nupdated: '2026-11-09'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\nbug_families:\n  correction: {title: Flow correction, tasks: [cas-56f1], invariants: [INV], journeys: [FLOW]}\njourneys:\n  - id: FLOW\n    status: live\n    entry: {url: /flow, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [INV]\n").unwrap();
-        std::fs::write(checkout.join("docs/qa/bug-families/correction.yaml"), "title: Flow correction\ntasks: [cas-56f1]\ninvariants: [INV]\njourneys: [FLOW]\n").unwrap();
+        // Keep the restart/ownership regression on a live park refusal;
+        // registry upkeep now belongs to the lane lint (cas-4b33).
+        std::fs::write(checkout.join("HANDOFF.md"), "fixture checkpoint\n").unwrap();
         git(&checkout, &["add", "."]);
         git(&checkout, &["commit", "-qm", "fix: repair flow"]);
         let a = git(&checkout, &["rev-parse", "HEAD"]);
@@ -3098,13 +3157,14 @@ async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
         f.put(&task);
         let close = |tip: &str| serde_json::json!({"action":"close", "id":id, "reason":format!("PASS {tip}")});
         let refused = call(&f.worker, close(&a)).await;
+        assert!(refused.contains("ROOT_HANDOFF_COMMITTED"), "{refused}");
         let after = f.task(id);
         assert_eq!(after.status, TaskStatus::InProgress, "{refused}");
         assert!(after.deliverables.parked_branch.is_none(), "{refused}");
         assert!(!after.pending_verification);
         assert!(cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap().is_none());
-        git(&checkout, &["rm", "docs/qa/bug-families/correction.yaml"]);
-        git(&checkout, &["commit", "-qm", "docs: keep one canonical flow family"]);
+        git(&checkout, &["rm", "HANDOFF.md"]);
+        git(&checkout, &["commit", "-qm", "docs: remove the root checkpoint"]);
         let b = git(&checkout, &["rev-parse", "HEAD"]);
         git(&checkout, &["push", "-q", "origin", LANE]);
         let parked = call(&f.worker, close(&b)).await;

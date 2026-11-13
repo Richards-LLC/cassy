@@ -49,6 +49,7 @@ pub(crate) fn execute_export(
     Ok(())
 }
 
+// gate-audit[force]: selector Confirms configuration replacement after preview; operator-only configuration guards still run.
 pub(crate) fn execute_import(
     args: &ConfigImportArgs,
     cli: &Cli,

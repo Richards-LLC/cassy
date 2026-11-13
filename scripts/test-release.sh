@@ -120,7 +120,7 @@ write_tree() {
 
 - The base release.
 EOF2
-    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/find-release-prebuild.sh" "$root/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/doc-fragments.py" "$script_dir/find-release-prebuild.sh" "$root/scripts/"
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
@@ -330,6 +330,31 @@ dry_release_rebuilds_commander() {
 }
 check 'dry_release_rebuilds_commander' 'cas-56bbc: dry release commits Commander dist identical to a fresh post-bump build'
 
+# cas-4b33: shared docs are generated at the cut. A stale CODEMAP stops prep;
+# once regenerated, the release commit carries the compiled overview fragment.
+docs_generated_at_the_cut() {
+    local fixture="$tmp/docs-cut" before status=0
+    clone_epic "$fixture" epic/docs-cut docs-cut
+    mkdir -p "$fixture/.claude" "$fixture/docs/product-overview.d"
+    printf '# Map\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" add .claude && git -C "$fixture" commit --quiet -m 'map'
+    printf '# Overview\n\n## Pitch\n\nBase pitch.\n' >"$fixture/docs/PRODUCT_OVERVIEW.md"
+    printf '## Pitch\n\nFragment pitch line.\n' >"$fixture/docs/product-overview.d/cas-0006.md"
+    git -C "$fixture" add docs && git -C "$fixture" commit --quiet -m 'overview and fragment'
+    write_valid_draft "$tmp/docs-cut-draft.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || status=$?
+    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+        grep -q 'CODEMAP.md predates' "$tmp/docs-cut.log" || return 1
+    printf '# Map\n\n- docs/ - overview\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" commit --quiet -am 'regenerate map'
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >>"$tmp/docs-cut.log" 2>&1 || return 1
+    git -C "$fixture" show HEAD:docs/PRODUCT_OVERVIEW.md | grep -q 'Fragment pitch line.' &&
+        ! git -C "$fixture" cat-file -e HEAD:docs/product-overview.d/cas-0006.md 2>/dev/null &&
+        [[ -z "$(git -C "$fixture" status --porcelain)" ]]
+}
+check 'docs_generated_at_the_cut || { cat "$tmp/docs-cut.log"; false; }' 'cas-4b33: stale CODEMAP stops prep; the release commit carries compiled doc fragments'
+
 commander_build_failure_stops_release() {
     local fixture="$tmp/web-failure" before status=0
     clone_epic "$fixture" epic/web-failure web-failure
@@ -425,7 +450,7 @@ check 'grep -q "^pr create --base main --head epic/alpha --title Release v9.100.
 check 'grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'auto-merge is enabled'
 check '! grep -q "^pr checks\|^run view" "$FAKE_GH_LOG"' 'cas-61e0: queue admission never waits for a second PR CI proof'
 check 'grep -q "^release track --commit $(git -C "$epic" rev-parse HEAD) --version 9.100.0" "$FAKE_CAS_LOG"' 'cas-61e0: --no-watch automatically arms durable landing and publication reminders'
-check 'grep -q -- "--first-child $epic_first_child --preview " "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
+check 'grep -q -- "--first-child $epic_first_child" "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
 check '! git -C "$tmp/origin.git" show-ref --tags | grep -q v9.100.0' 'nothing is tagged'
 
 # 4. cas-3873: after an ejection repair, rerun the same command even on a
@@ -642,7 +667,7 @@ one_item_hotfix_train() {
 check 'one_item_hotfix_train' 'cas-d725: one-item hotfix train cuts, queues once and publishes through the normal release path'
 
 cut_own_review_missing() {
-    local fixture="$tmp/own-review" status=0
+    local fixture="$tmp/own-review" status=0 refusal
     clone_epic "$fixture" epic/own-review own-review
     mkdir -p "$fixture/changelog.d"
     printf '### Fixed — Review fixture\n\n- **First** — First delivery.\n' >"$fixture/changelog.d/cas-000a.md"
@@ -654,10 +679,13 @@ cut_own_review_missing() {
     : >"$FAKE_GH_LOG"
     FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
+    # REVIEW_MISSING is the machine refusal identifier; a trailing gate frame
+    # must not hide its task IDs or turn the unrelated preview member into one.
+    refusal="$(grep -F 'REVIEW_MISSING' "$tmp/own-review.log" | tail -1)"
     [[ "$status" == 1 ]] &&
-        tail -1 "$tmp/own-review.log" | grep -q 'cas-000a' &&
-        tail -1 "$tmp/own-review.log" | grep -q 'cas-000b' &&
-        ! tail -1 "$tmp/own-review.log" | grep -q 'cas-dead' &&
+        grep -q 'cas-000a' <<<"$refusal" &&
+        grep -q 'cas-000b' <<<"$refusal" &&
+        ! grep -q 'cas-dead' <<<"$refusal" &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/own-review &&
         ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
         ! grep -Eq '^pr (create|merge) ' "$FAKE_GH_LOG"
@@ -687,7 +715,7 @@ cut_preview_gate() {
     [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/preview-cut)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
         [[ "$(grep -c '^qa candidate build ' "$FAKE_CAS_LOG")" == 1 ]] &&
         grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
-        grep -q '^release track .* --preview ' "$FAKE_CAS_LOG"
+        grep -q '^release track .* --first-child ' "$FAKE_CAS_LOG"
 }
 check 'cut_preview_gate' 'cut refuses all-held members, permits all-already-closed members and keeps older-release residuals nonblocking'
 

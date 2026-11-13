@@ -260,6 +260,7 @@ fn notify_held_sender(
 /// QueueSelect runs on the store job lane. Only ordinary directed messages are
 /// batched here; envelopes requiring per-task revalidation retain their own row.
 /// Such action events still use the existing wake slot and pane safety gate.
+// gate[N-06 notice]: Directed-message burst wake
 pub(crate) fn schedule(
     cas: &Path,
     session: &str,
@@ -346,6 +347,7 @@ pub(crate) fn schedule(
         capped[sender].is_some() && wants_wake(row) && !waking_kind(&row.prompt)
     };
     for (row, sender) in &candidates {
+        // gate[N-07 notice]: Wake-cap notice
         if held(row, sender) {
             let notice = format!(
                 "Wake cap: messages from {} to {supervisor} reached {cap} wakes/hour. Batched into this turn; read the pending messages before replying.",

@@ -1,5 +1,9 @@
 # Verifier dispatch trace — `cas_task_close` regression memo
 
+> Historical (April 2026). Superseded by cas-e50f: a native Task/Agent
+> `task-verifier` shares its parent's MCP caller and cannot record a verdict.
+> Cassy's daemon-owned verifier reviews close and merge dispatches.
+
 Task: cas-09f3 (epic cas-cd8b)
 Author: ready-sparrow-3
 Date: 2026-04-08

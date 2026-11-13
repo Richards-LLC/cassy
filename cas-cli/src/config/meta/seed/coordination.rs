@@ -1,6 +1,7 @@
 use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
+// gate-audit[input]: Registers configuration documentation containing refusal examples; it makes no request decision.
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
     // Runtime FactoryConfig fields must also be discoverable and settable.
     for (key, name, description, value_type, default, constraint) in [
@@ -325,6 +326,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         requires_feature: None,
         keywords: &["factory", "task", "notes", "cap", "characters", "traffic"],
         use_cases: &["Keep task timelines readable", "Use supervisor review overrides for durable discovery or decision evidence"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.max_workers",
+        section: "factory",
+        name: "Maximum Workers",
+        description: "Machine-wide live worker cap for spawn admission and advertised peer capacity. Counts current heartbeats and live harness processes across local factory sessions.",
+        value_type: ConfigType::Int,
+        default: "8",
+        constraint: Constraint::Range(1, 256),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "workers", "routing", "capacity"],
+        use_cases: &["Keep task placement within the host's worker capacity"],
     });
 
     registry.register(ConfigMeta {

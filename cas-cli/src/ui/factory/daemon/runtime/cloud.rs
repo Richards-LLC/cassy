@@ -90,6 +90,7 @@ impl FactoryDaemon {
     /// Push lifecycle events to the cloud.
     ///
     /// Called after event detection when cloud phone-home is active.
+    // gate[N-35 notice]: Director events to Cloud
     pub(super) fn push_cloud_events(&self, events: &[DirectorEvent]) {
         if let Some(ref handle) = self.cloud_handle {
             for event in events {

@@ -588,6 +588,7 @@ pub fn index_code_files(files: &[PathBuf], cas_root: &Path) -> Result<CodeIndexR
 /// `force` exists for `cas index code`: the content-hash skip is the right call for the watcher,
 /// but it would make a rebuild of a lost or corrupted BM25 index a no-op, since the SQLite rows
 /// it compares against would still be present.
+// gate-audit[force]: selector Reindexes unchanged files; no policy refusal is bypassed.
 pub fn index_code_files_with(
     files: &[PathBuf],
     cas_root: &Path,
@@ -823,6 +824,7 @@ pub fn index_code_files_with(
 /// that were never queued survive every rerun (cas-8a03). Dropped rows also
 /// lose their cached vector here, so a retired symbol cannot keep answering
 /// semantic queries.
+// gate-audit[force]: selector Requeues data-index work instead of reusing cached state; no factory policy waiver.
 pub fn reconcile_code_vector_queue(cas_root: &Path, force: bool, result: &mut CodeIndexResult) {
     let store = match cas_store::SqliteCodeVectorStore::open(cas_root) {
         Ok(store) => store,

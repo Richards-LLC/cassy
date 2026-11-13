@@ -377,8 +377,6 @@ def plumbing_only(repo, source, head):
 
 def reuse(args):
     """Consume the same verified artifact as release admission, never a bare status."""
-    if args.adoption_out:
-        (args.adoption_out/'receipt.json').unlink(missing_ok=True)
     ref = os.environ.get('GITHUB_REF', '')
     event = os.environ.get('GITHUB_EVENT_NAME', '')
     gh, slug = args.gh, os.environ['GITHUB_REPOSITORY']
@@ -388,19 +386,13 @@ def reuse(args):
         latest = next((row for row in api(f'commits/{source}/statuses?per_page=100')
                        if row.get('context') == 'cas/full-gate'), {})
         return latest.get('state') == 'success' and latest.get('description') == 'PASS tree=' + tree
+    match = re.fullmatch(r'refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]{40}', ref)
+    if event != 'merge_group' or not match: return
+    pr = api('pulls/'+match[1])
+    pr_head = pr['head']['sha']
+    queue_main = os.environ.get('QUEUE_BASE_SHA') or pr['base']['sha']
+    branch = pr['head']['ref']
     head = git(args.repo, 'rev-parse', 'HEAD')
-    if event == 'push' and ref.startswith('refs/heads/' + PREFIX):
-        branch = ref.removeprefix('refs/heads/')
-        pr_head = head
-        queue_main = os.environ.get('MAIN_BASELINE') or git(args.repo, 'rev-parse',
-            'origin/' + os.environ.get('GITHUB_DEFAULT_BRANCH', 'main'))
-    else:
-        match = re.fullmatch(r'refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]{40}', ref)
-        if event != 'merge_group' or not match: return
-        pr = api('pulls/'+match[1])
-        pr_head = pr['head']['sha']
-        queue_main = os.environ.get('QUEUE_BASE_SHA') or pr['base']['sha']
-        branch = pr['head']['ref']
     queue_tree = git(args.repo, 'rev-parse', 'HEAD^{tree}')
     # Check the actual synthetic queue tree, including other queued entries.
     # Both the PR and the declared base must belong to this evaluated history.
@@ -420,18 +412,6 @@ def reuse(args):
         probe = argparse.Namespace(repo=args.repo, branch=branch, head=source, gh=gh, out=args.out, command='observe', exact=True)
         state = observe(probe)
         if state.get('outcome') != 'PASS' or state.get('main_baseline') != queue_main: continue
-        # An adopted run resolves to the original native producer, whose CLI
-        # and tree remain the authority even after several plumbing pushes.
-        original = source
-        source, source_tree = state['head'], state['tree']
-        if source != original and not green_status(source, source_tree): continue
-        if not plumbing_only(args.repo, source, head): continue
-        if event == 'push' and args.adoption_out:
-            write(args.adoption_out/'receipt.json', {**identity(), 'schema':2,
-                'scope':'full-set-adoption', 'head':head, 'branch':branch, 'tree':queue_tree,
-                'artifact':ARTIFACT, 'outcome':'PASS', 'main_baseline':queue_main,
-                'source_head':source, 'source_run_id':state['run_id'],
-                'source_run_attempt':state['run_attempt']})
         with args.github_output.open('a') as output:
             output.write('run-fast-validation=false\nreuse-source=full-gate\njourneys-reuse=true\n')
             output.write(f'validating-run-id={state["run_id"]}\nprior-run-url={state["run_url"]}\n')
@@ -552,34 +532,13 @@ def observe(args):
     expected = {'schema': 2, 'head': head, 'branch': branch, 'run_id': run_id, 'run_attempt': attempt}
     if any(receipt.get(key) != value for key, value in expected.items()):
         raise ValueError('suite artifact does not match the evaluated GitHub run and head')
-    adopted = receipt.get('scope') == 'full-set-adoption'
-    if not adopted:
-        validate_full(receipt, git(args.repo, 'rev-parse', head + '^{tree}'))
+    validate_full(receipt, git(args.repo, 'rev-parse', head + '^{tree}'))
     if receipt.get('outcome') not in ('PASS', 'FAIL'):
         raise ValueError('suite receipt has no conclusive result')
     jobs = api(f'actions/runs/{run_id}/jobs', '-f', 'filter=latest', '-f', 'per_page=100')['jobs']
     fanin = [job for job in jobs if job['name'].split(' / ')[-1] == 'Full-set gate']
     if len(fanin) != 1 or (receipt['outcome'] == 'PASS' and (fanin[0]['conclusion'] != 'success' or run['conclusion'] != 'success')):
         raise ValueError('full-set artifact lacks its successful completed GitHub fan-in/run')
-    if adopted:
-        source = receipt.get('source_head', '')
-        if (receipt.get('outcome') != 'PASS' or source == head
-                or receipt.get('tree') != git(args.repo, 'rev-parse', head+'^{tree}')
-                or not plumbing_only(args.repo, source, head)):
-            raise ValueError('adoption does not identify a plumbing-only ancestor')
-        original = observe(argparse.Namespace(repo=args.repo, branch=branch, head=source,
-            gh=gh, out=out, command='observe', exact=True))
-        if (original.get('outcome') != 'PASS' or original.get('scope') != 'full-set'
-                or original['head'] != source or original['run_id'] != receipt.get('source_run_id')
-                or original['run_attempt'] != receipt.get('source_run_attempt')
-                or original['main_baseline'] != receipt.get('main_baseline')):
-            raise ValueError('adoption does not bind its original successful full-set receipt')
-        state = {**original, 'release_head':requested_head, 'adoption_receipt':str(receipt_path),
-                 'adoption_head':head, 'adoption_run_id':run_id}
-        write(state_path, state)
-        return state
-    for key in ('adoption_receipt', 'adoption_head', 'adoption_run_id'):
-        state.pop(key, None)
     state = {**state, **receipt, 'receipt': str(receipt_path),
              'complete_log': str(destination/'complete-workflow-logs.zip')}
     if receipt['outcome'] == 'PASS':
@@ -631,7 +590,6 @@ def main():
     reuse_parser.add_argument('--repo', type=Path, default=Path.cwd())
     reuse_parser.add_argument('--gh', default=os.environ.get('GH_BIN', 'gh'))
     reuse_parser.add_argument('--out', type=Path)
-    reuse_parser.add_argument('--adoption-out', type=Path)
     reuse_parser.add_argument('--github-output', type=Path, required=True)
     for name in ('observe', 'check'):
         read = sub.add_parser(name)

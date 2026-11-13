@@ -210,16 +210,15 @@ only with a version bump and is rebuilt and checked in the queue compile step.
 Any product change, moved main, partial/legacy proof or uncertainty runs the full
 graph. A release-plumbing continuation can reuse the source's earlier receipt.
 
-A plumbing-only push to the train uses the same consumer before scheduling tests.
-The existing dedupe job publishes a `train-full-gate` artifact with scope
-`full-set-adoption`: the adopting head/tree, main baseline, and original native
-source head, run and attempt. It becomes usable only after that workflow and its
-full-set fan-in succeed. Cut retries and later queue entries revalidate the
-original full-set artifact, complete logs, plumbing delta and both run identities;
-they retain the native producer's tree and executable identity. A missing or
-mismatched reference runs the full graph. This keeps prepared pushes and queue
-entries from repeating a successful source suite while compile, launch, asset
-rebuild and Release Prebuild checks continue on the release tree.
+A prepared release push to the train runs only a small identity check. It
+recognizes the version-only release commit with `prepared()` and checks the
+completed green full-set receipt at its immediate parent, named by
+`Train-CI-Head`. With both checks passing, the shared graph and its rollup do not
+run on this push. Missing proof, invalid trailers or a source change select the
+normal full train graph. No adoption artifact is produced for the release head.
+Release retries resolve the trailer directly to the original source receipt.
+This is scoped to the train push: pull-request admission, canonical queue checks
+and Release Prebuild keep their existing events.
 
 On reuse, preflight first restores `preflight-cli` from the validated full-gate
 run only when its receipt tree exactly matches the queue tree. A matching

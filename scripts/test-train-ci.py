@@ -20,7 +20,7 @@ data=json.loads((root/'forge.json').read_text())
 if args[:2]==['repo','view']: print('fixture/repo')
 elif args[:2]==['run','download']:
  name=args[args.index('--name')+1]
- source=data.get('run_downloads',{}).get(args[2],data.get('job_downloads',{}).get(name,data.get('artifact','')))
+ source=data.get('job_downloads',{}).get(name,data.get('artifact',''))
  if source is None: sys.exit(1)
  shutil.copytree(root/source,pathlib.Path(args[args.index('--dir')+1]),dirs_exist_ok=True)
 elif args[0]=='api':
@@ -28,8 +28,9 @@ elif args[0]=='api':
  if '/actions/artifacts?' in endpoint: print(json.dumps({'artifacts':data.get('job_artifacts',[])}))
  elif endpoint.endswith('/artifacts'): print(json.dumps({'artifacts':data.get('job_outputs',[])}))
  elif '/actions/runs/' in endpoint and endpoint.rsplit('/',1)[-1].isdigit(): print(json.dumps(data['job_run']))
+ elif endpoint.split('?')[0].endswith('/pulls'): print('[]')
  elif '/pulls/' in endpoint: print(json.dumps(data['pr']))
- elif '/statuses?' in endpoint: print(json.dumps(data.get('statuses_by_head',{}).get(endpoint.split('/commits/')[1].split('/')[0],data['statuses'])))
+ elif '/statuses?' in endpoint: print(json.dumps(data['statuses']))
  elif endpoint.endswith('/logs'): sys.stdout.buffer.write((root/'logs.zip').read_bytes())
  elif endpoint.split('?')[0].endswith('/jobs'): print(json.dumps({'jobs':data.get('job_jobs',[{'name':'Shared train and queue graph / Full-set gate','conclusion':data.get('fanin','success')}])}))
  else: print(json.dumps({'workflow_runs':data['runs']}))
@@ -380,49 +381,6 @@ class TrainReceipts(unittest.TestCase):
         self.git('commit', '-qm', 'release plumbing continuation')
         # Queue-only documentation may differ from the PR tree.
         self.assertTrue(attempt())
-        # The prepared train push must also adopt, and its completed run must
-        # retain a durable reference instead of claiming to have run the suite.
-        docs_head = self.git('rev-parse', 'HEAD')
-        self.env.update(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
-                        GITHUB_SHA=docs_head, GITHUB_RUN_ID='102')
-        self.assertTrue(attempt())
-        jobs = yaml.safe_load((SCRIPT.parent.parent/'.github/workflows/ci.yml').read_text())['jobs']
-        publication = next(step for step in jobs['fast-validation-main-push-dedupe']['steps']
-                           if step.get('with', {}).get('name') == 'train-full-gate')
-        adoption = self.repo/publication['with']['path']/'receipt.json'
-        record = json.loads(adoption.read_text())
-        self.assertEqual((record['scope'], record['head'], record['source_head'], record['source_run_id']),
-                         ('full-set-adoption', docs_head, source, '101'))
-        shutil.copytree(adoption.parent, self.root/'adopted')
-        data['run_downloads'] = {'101':'full', '102':'adopted'}
-        data['runs'].insert(0, {**data['runs'][0], 'id':102, 'head_sha':docs_head})
-        data['statuses_by_head'] = {docs_head:[{'context':'cas/full-gate','state':'success',
-            'description':'PASS tree='+self.git('rev-parse', docs_head+'^{tree}')}]}
-        data_path.write_text(json.dumps(data))
-        def check_adoption(expected=0):
-            shutil.rmtree(self.root/'adoption-check', ignore_errors=True)
-            return self.run_cli('check', '--repo', self.repo, '--head', docs_head,
-                '--out', self.root/'adoption-check', '--gh', self.gh, expected=expected)
-        adopted = check_adoption()
-        self.assertEqual((adopted['head'], adopted['release_head'], adopted['run_id']), (source, docs_head, '101'))
-        # A reference to some other successful run cannot replace X's proof.
-        (self.root/'adopted/receipt.json').write_text(json.dumps({**record, 'source_run_id':'999'}))
-        check_adoption(expected=1)
-        (self.root/'adopted/receipt.json').write_text(json.dumps(record))
-        data['runs'][0]['conclusion'] = 'failure'
-        data_path.write_text(json.dumps(data))
-        check_adoption(expected=1)
-        data['runs'][0]['conclusion'] = 'success'
-        data_path.write_text(json.dumps(data))
-        self.env.update(GITHUB_EVENT_NAME='merge_group',
-                        GITHUB_REF='refs/heads/gh-readonly-queue/main/pr-1-'+'a'*40)
-        self.assertTrue(attempt())
-        # An adoption also retains the native producer's tree-bound status.
-        data['statuses'] = []
-        data_path.write_text(json.dumps(data))
-        self.assertFalse(attempt())
-        data['statuses'] = saved_statuses
-        data_path.write_text(json.dumps(data))
         self.env['QUEUE_BASE_SHA'] = 'f'*40
         self.assertFalse(attempt())
         self.env['QUEUE_BASE_SHA'] = main
@@ -446,7 +404,6 @@ class TrainReceipts(unittest.TestCase):
         self.env.update(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/'+self.env['GITHUB_REF_NAME'],
                         GITHUB_SHA=self.git('rev-parse', 'HEAD'), GITHUB_RUN_ID='103')
         self.assertFalse(attempt())
-        self.assertFalse(adoption.exists())
 
 
     def test_queue_wall_clock_requires_the_completed_matching_tree(self):
@@ -476,28 +433,55 @@ class TrainReceipts(unittest.TestCase):
         manifest = self.repo/'cas-cli/Cargo.toml'
         manifest.parent.mkdir()
         manifest.write_text('[package]\nname="cas"\nversion="1.0.0"\n')
+        (self.repo/'scripts').mkdir()
+        shutil.copyfile(SCRIPT, self.repo/'scripts/train-ci.py')
         self.git('add', '.')
         self.git('commit', '-qm', 'manifest baseline')
         source = self.git('rev-parse', 'HEAD')
+        self.env['GITHUB_SHA'] = source
+        self.evidence('full')
+        self.forge('full')
+        jobs = yaml.safe_load((SCRIPT.parent.parent/'.github/workflows/full-validation.yml').read_text())['jobs']
+        gate = jobs['train-push']['steps'][-1]['run']
+        output = self.root/'push-output'
 
-        def preparation():
-            result = subprocess.run([sys.executable, str(SCRIPT), 'prepared', '--repo', str(self.repo)],
-                                    capture_output=True, text=True)
-            return result.returncode, result.stdout.strip()
+        def skip_push():
+            output.write_text('')
+            result = subprocess.run(['bash', '-e', '-c', gate], cwd=self.repo,
+                env={**self.env, 'GH_BIN':str(self.gh), 'GITHUB_OUTPUT':str(output)},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            return dict(line.split('=',1) for line in output.read_text().splitlines())['prepared'] == 'true'
 
+        self.assertFalse(skip_push())  # An ordinary train push still runs CI.
         trailers = f'release: v1.1.0\n\nRelease-Version: 1.1.0\nTrain-CI-Head: {source}'
-        # Copied release trailers on a docs commit cannot suppress the suite.
         self.git('commit', '--allow-empty', '-qm', trailers)
-        self.assertEqual(preparation()[0], 1)
+        self.assertFalse(skip_push())  # Copied trailers cannot suppress CI.
         self.git('reset', '--hard', source)
         manifest.write_text('[package]\nname="cas"\nversion="1.1.0"\n')
         self.git('add', '.')
         self.git('commit', '-qm', trailers)
-        self.assertEqual(preparation(), (0, source))
-        # A genuine version bump cannot launder an older ancestor's receipt.
+        self.git('checkout', '--detach', '-q')  # Actions checks out the event head.
+        self.assertTrue(skip_push())
+        # Y has no run: the existing check entry point resolves X directly.
+        state = self.run_cli('check', '--repo', self.repo, '--branch', self.env['GITHUB_REF_NAME'],
+                             '--head', self.git('rev-parse', 'HEAD'), '--gh', self.gh)
+        self.assertEqual((state['head'], state['release_head'], state['run_id']),
+                         (source, self.git('rev-parse', 'HEAD'), '101'))
+        for status, conclusion in [('completed', 'failure'), ('in_progress', None)]:
+            self.forge('full', status=status, conclusion=conclusion)
+            self.assertFalse(skip_push())  # Red or incomplete proof cannot skip CI.
+        self.forge('full')
+        (self.repo/'product.rs').write_text('pub fn changed() {}\n')
+        self.git('add', '.')
+        self.git('commit', '--amend', '--no-edit', '-q')
+        self.assertFalse(skip_push())  # Source changes require the full graph.
+        self.git('reset', '--hard', 'HEAD^')
+        manifest.write_text('[package]\nname="cas"\nversion="1.1.0"\n')
+        self.git('add', '.')
         stale = self.git('rev-parse', f'{source}^')
-        self.git('commit', '--amend', '-qm', trailers.replace(source, stale))
-        self.assertEqual(preparation()[0], 1)
+        self.git('commit', '-qm', trailers.replace(source, stale))
+        self.assertFalse(skip_push())  # A stale trailer cannot borrow proof.
 
 
 if __name__ == '__main__':

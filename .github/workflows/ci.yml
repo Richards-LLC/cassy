@@ -323,19 +323,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          MAIN_BASELINE: ${{ needs.ci-diff.outputs.main-baseline }}
         run: scripts/check-ci-merge-queue-validation.sh
-      - name: Publish adopted train full-set identity
-        if: >-
-          github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
-          && steps.tree-dedupe.outputs.reuse-source == 'full-gate'
-        uses: actions/upload-artifact@v4
-        with:
-          name: train-full-gate
-          path: target/full-gate-adoption/
-          overwrite: true
-          if-no-files-found: error
-          retention-days: 90
 
   # Factory pushes and PRs that do not target the protected default branch get
   # one cheap target-scoped lane. Main PRs use the full required lanes below;
@@ -2115,10 +2103,9 @@ jobs:
           echo "::notice title=Fast Validation deduplicated::Skipped the main-push suite because merge-queue run $VALIDATING_RUN_ID already validated this exact tree: $PRIOR_RUN_URL"
           echo "Fast Validation reused successful merge-queue run [$VALIDATING_RUN_ID]($PRIOR_RUN_URL)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Report the adopted train full-set receipt
+      - name: Report the reused train full-set receipt
         if: >-
-          (github.event_name == 'merge_group'
-          || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
+          github.event_name == 'merge_group'
           && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
           && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
         env:

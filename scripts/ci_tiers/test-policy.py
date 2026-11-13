@@ -107,22 +107,21 @@ class PolicyTests(unittest.TestCase):
             'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'full-gate',
             'needs.fast-validation-main-push-dedupe.outputs.journeys-reuse': 'true'})
         adopted = selected('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1')
-        self.assertEqual(selected('push', 'refs/heads/epic/release-train-fixture'), adopted)
         self.assertTrue({'fast-validation-suite-build', 'fast-validation-suite-shards',
                          'fast-validation-suite', 'fast-validation-ci-tiers',
                          'fast-validation-web', 'fast-validation-docs'}.isdisjoint(adopted))
         self.assertTrue({'fast-validation-preflight', 'fast-validation'}.issubset(adopted))
-        publication = next(step for step in jobs['fast-validation-main-push-dedupe']['steps']
-                           if step.get('with', {}).get('name') == 'train-full-gate')
-        for event, ref, proof, expected in [
-            ('push', 'refs/heads/epic/release-train-fixture', 'full-gate', True),
-            ('push', 'refs/heads/epic/release-train-fixture', '', False),
-            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'full-gate', False),
-            ('push', 'refs/heads/main', 'full-gate', False),
-        ]:
-            self.assertEqual(self.gh_expr(publication['if'], {
-                'github.event_name':event, 'github.ref':ref,
-                'steps.tree-dedupe.outputs.reuse-source':proof}), expected)
+        # Prepared pushes skip the shared graph, but the PR admission context
+        # and canonical queue checks must remain schedulable.
+        self.assertEqual(caller['jobs']['validation']['needs'], 'train-push')
+        for event, prepared, expected in [('push', 'true', False), ('push', 'false', True),
+                                          ('push', '', True), ('merge_group', '', True)]:
+            context = {'github.event_name':event, 'needs.train-push.outputs.prepared':prepared}
+            self.assertEqual(self.gh_expr(caller['jobs']['train-push']['if'], context), event == 'push')
+            self.assertEqual(self.gh_expr(caller['jobs']['validation']['if'], context), expected)
+        for result, expected in [('skipped', False), ('success', True), ('failure', True)]:
+            self.assertEqual(self.gh_expr(caller['jobs']['fast-validation']['if'], {
+                'needs.validation.result':result}), expected)
 
 
     def test_parser_dependency_absence_is_a_hard_failure(self):

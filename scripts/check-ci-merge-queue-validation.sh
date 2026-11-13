@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Main pushes may reuse a successful queue's exact-tree artifact. Queue entries
-# and prepared train pushes may reuse a completed full-set artifact when main
-# is unchanged and the remaining delta is release plumbing. The consumer also
+# may reuse a completed full-set artifact when main is unchanged and the
+# remaining delta is release plumbing. The consumer also
 # checks the tree-bound cas/full-gate status; status-only or partial proof never
 # skips the full graph.
 set -euo pipefail
@@ -16,11 +16,10 @@ printf 'run-fast-validation=true\njourneys-reuse=false\n' >>"$output"
 full_gate_reuse() {
     # Failure or unavailable evidence always leaves the full graph selected.
     python3 scripts/train-ci.py reuse --repo . --github-output "$output" \
-        --adoption-out target/full-gate-adoption \
         || echo "::warning::Full-set proof unavailable; running the complete shared gate."
 }
 
-if [[ "$event" == "merge_group" || ( "$event" == push && "$ref" == refs/heads/epic/release-train-* ) ]]; then
+if [[ "$event" == "merge_group" ]]; then
     full_gate_reuse
     exit 0
 fi

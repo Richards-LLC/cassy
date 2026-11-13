@@ -15,8 +15,30 @@ permissions:
   actions: read
 
 jobs:
+  train-push:
+    name: Recognize prepared release push
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      prepared: ${{ steps.release.outputs.prepared }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if source="$(python3 scripts/train-ci.py prepared)" \
+            && python3 scripts/train-ci.py check --branch "$GITHUB_REF_NAME" --head "$source" >/dev/null; then
+            echo 'prepared=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prepared=false' >> "$GITHUB_OUTPUT"
+          fi
   validation:
     name: Shared train and queue graph
+    needs: train-push
+    if: always() && (github.event_name != 'push' || needs.train-push.outputs.prepared != 'true')
     uses: ./.github/workflows/ci.yml
     with:
       full-set: true
@@ -28,7 +50,7 @@ jobs:
       pull-requests: read
   fast-validation:
     name: Fast Validation
-    if: always()
+    if: always() && needs.validation.result != 'skipped'
     needs: validation
     runs-on: ubuntu-latest
     steps:

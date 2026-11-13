@@ -949,7 +949,7 @@ mod tests {
         std::fs::write(temp.path().join("runs.json"), runs("in_progress").to_string()).unwrap();
         let gh = temp.path().join("gh");
         crate::test_paths::warm_stub(&gh, &format!(
-            "#!/bin/sh\ncase \"$1 $2 $3\" in\n'repo view org/repo') printf '%s' '{{\"nameWithOwner\":\"org/repo\"}}' ;;\n'api -X GET') case \"$4\" in\nrepos/org/repo/actions/workflows) cat '{dir}/workflows.json' ;;\nrepos/org/repo/actions/runs) cat '{dir}/runs.json' ;;\n*) exit 97 ;;\nesac ;;\n*) exit 98 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1 $2 $3\" in\n'repo view org/repo') printf '%s' '{{\"nameWithOwner\":\"org/repo\"}}' ;;\n'api -X GET') case \"$4\" in\nrepos/org/repo/actions/workflows) cat '{dir}/workflows.json' ;;\nrepos/org/repo/actions/runs) cat '{dir}/runs.json' ;;\nrepos/org/repo/commits/*/check-runs) printf '%s' '{{\"check_runs\":[]}}' ;;\n*) exit 97 ;;\nesac ;;\n*) exit 98 ;;\nesac\n",
             dir = temp.path().display(),
         ));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);

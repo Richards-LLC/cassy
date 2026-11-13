@@ -1,0 +1,3 @@
+title: Disposable Rust fixture read-to-write mutations remain admissible while source comparisons and extra source-value consumers are refused
+tasks: [cas-81b7]
+journeys: [FACTORY-CLOSE]

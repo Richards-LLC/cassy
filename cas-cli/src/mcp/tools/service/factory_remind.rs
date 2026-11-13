@@ -562,7 +562,8 @@ impl CasService {
             }
             if event_type == EXTERNAL_CI_COMPLETED_EVENT
                 && let Some(filter) = filter.as_mut()
-                && let Some(selector) = external_filter_string(filter, &["workflow"])
+                && let Some(selector) = filter.get("workflow").and_then(serde_json::Value::as_str)
+                    .map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
             {
                 let project = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root).to_path_buf();
                 let lookup = selector.clone();
@@ -931,7 +932,9 @@ mod tests {
         }
         let workflows = serde_json::json!([{"workflows": [
             {"id": 17, "name": "Pull request CI", "path": ".github/workflows/ci.yml"},
-            {"id": 18, "name": "Other", "path": ".github/workflows/other.yml"}
+            {"id": 18, "name": "Other", "path": ".github/workflows/other.yml"},
+            {"id": 19, "name": "CI", "path": ".github/workflows/lane.yml"},
+            {"id": 20, "name": "CI", "path": ".github/workflows/full-validation.yml"}
         ]}]);
         std::fs::write(temp.path().join("workflows.json"), workflows.to_string()).unwrap();
         let sha = "a".repeat(40);
@@ -966,10 +969,12 @@ mod tests {
             "remind_filter": serde_json::json!({"sha": sha, "workflow": selector}).to_string(),
         })).unwrap();
         let reminders = crate::store::open_reminder_store(&cas_root).unwrap();
-        let error = service.factory_remind(request("CI")).await.unwrap_err();
-        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-        assert_eq!(error.data.unwrap()["error_code"], "workflow_selector_invalid");
-        assert!(reminders.list_pending_for_target(&agent.id).unwrap().is_empty());
+        for selector in ["CI", "missing.yml"] {
+            let error = service.factory_remind(request(selector)).await.unwrap_err();
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(error.data.unwrap()["error_code"], "workflow_selector_invalid");
+            assert!(reminders.list_pending_for_target(&agent.id).unwrap().is_empty());
+        }
         for selector in ["Pull request CI", "ci.yml", "17"] {
             service.factory_remind(request(selector)).await.unwrap();
         }

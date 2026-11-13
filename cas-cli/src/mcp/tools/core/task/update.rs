@@ -1282,7 +1282,11 @@ impl CasCore {
                 });
             }
 
-            let artifact_scope_audit = if target_repo.is_some_and(|repo| repo.trim().is_empty()) {
+            // A missing lane with no recorded delivery needs only the target
+            // clear; it has no source boundary to resolve or retire.
+            let artifact_scope_audit = if target_repo.is_some_and(|repo| repo.trim().is_empty())
+                && super::lifecycle::close_ops::has_recorded_code_delivery(&task)
+            {
                 let context = task.deliverables.work_target.as_ref()
                     .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| &start.work_target))
                     .ok_or_else(|| McpError {

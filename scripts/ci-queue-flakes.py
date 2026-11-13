@@ -228,7 +228,7 @@ def next_working_day(today):
 
 
 def reconcile(args):
-    if not (os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or (os.environ.get('GITHUB_EVENT_NAME') == 'push' and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))):
+    if not (os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))):
         raise ValueError('flake publication requires a train or merge-queue run')
     receipts = sorted(args.receipts.rglob('receipt.json'))
     if not receipts:

@@ -115,7 +115,7 @@ fn red_evidence(root: &Path, train: &Task, freeze: &Freeze) -> Option<String> {
     let mut command = Command::new(crate::github_repo::gh_binary());
     command
         .args(["run", "list", "--workflow", "full-validation.yml", "--branch", lane])
-        .args(["--commit", &freeze.tip, "--event", "push", "--limit", "1"])
+        .args(["--commit", &freeze.tip, "--event", "workflow_dispatch", "--limit", "1"])
         .args(["--json", "databaseId,conclusion"])
         .current_dir(&repo);
     let timeout = Duration::from_secs(15);

@@ -81,6 +81,14 @@ pub(crate) fn changed_tests(
         } else {
             String::new()
         };
+        let all = parsed_tests(path, &source, &[(1, usize::MAX)], false)?;
+        let test_file =
+            path.contains(".test.") || path.contains(".spec.") || path.contains("__tests__/");
+        if test_file && all.is_empty() && !source.trim().is_empty() && !diff.is_empty() {
+            bail!(
+                "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
+            );
+        }
         let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)?
             .into_iter()
             .collect();
@@ -230,7 +238,7 @@ fn parsed_tests(
     let mut aliases = BTreeMap::new();
     imported_aliases(tree.root_node(), source, &mut aliases);
     if strict {
-        reject_retry_configuration(tree.root_node(), source, path, &aliases)?;
+        reject_retry_configuration(tree.root_node(), source, path, &aliases, false)?;
     }
     let mut tests = Vec::new();
     walk(
@@ -270,6 +278,7 @@ fn reject_retry_configuration(
     source: &str,
     path: &str,
     aliases: &BTreeMap<String, String>,
+    test_options: bool,
 ) -> Result<()> {
     if node.kind() == "pair"
         && let Some(key) = node.child_by_field_name("key")
@@ -280,7 +289,7 @@ fn reject_retry_configuration(
             call = call.and_then(|parent| parent.parent());
         }
         let runner_option = call.is_some_and(|call| {
-            declaration(call, source, aliases).is_some()
+            (test_options && declaration(call, source, aliases).is_some())
                 || call
                     .child_by_field_name("function")
                     .is_some_and(|function| text(function, source) == "test.describe.configure")
@@ -310,7 +319,7 @@ fn reject_retry_configuration(
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        reject_retry_configuration(child, source, path, aliases)?;
+        reject_retry_configuration(child, source, path, aliases, test_options)?;
     }
     Ok(())
 }
@@ -336,15 +345,27 @@ fn walk(
             .context("test arguments")?;
         let name = args.named_child(0).and_then(|name| title(name, source));
         let unresolved = unresolved || !supported || name.is_none();
+        let mut cursor = args.walk();
+        let callback = args
+            .named_children(&mut cursor)
+            .find(|arg| matches!(arg.kind(), "arrow_function" | "function_expression"));
+        let mut cursor = args.walk();
+        let external_callback = callback.is_none()
+            && args
+                .named_children(&mut cursor)
+                .skip(1)
+                .any(|arg| arg.kind() == "identifier");
+        if strict && (external_callback || (suite && supported && callback.is_none())) {
+            bail!(
+                "cannot resolve changed test scope at {path}:{}: out-of-line callbacks require explicit source-to-runtime identities",
+                node.start_position().row + 1
+            );
+        }
         if suite {
             let mut nested = suites.to_vec();
             if let Some(name) = name {
                 nested.push(name);
             }
-            let mut cursor = args.walk();
-            let callback = args
-                .named_children(&mut cursor)
-                .find(|arg| matches!(arg.kind(), "arrow_function" | "function_expression"));
             let header_changed = lines.iter().any(|(start, end)| {
                 *end >= node.start_position().row + 1
                     && *start
@@ -368,6 +389,9 @@ fn walk(
             }
         } else {
             if force || overlaps(node, lines) {
+                if strict {
+                    reject_retry_configuration(node, source, path, aliases, true)?;
+                }
                 if unresolved {
                     if !strict {
                         return Ok(());
@@ -538,7 +562,13 @@ fn execute_tests(
                 }
                 "jest" => {
                     command
-                        .args(["--runInBand", "--maxConcurrency=1", "--bail=1", "--json", "--outputFile"])
+                        .args([
+                            "--runInBand",
+                            "--maxConcurrency=1",
+                            "--bail=1",
+                            "--json",
+                            "--outputFile",
+                        ])
                         .arg(&report)
                         .arg("--testNamePattern")
                         .arg(&pattern)
@@ -870,6 +900,8 @@ mod tests {
             "test(title, () => {});",
             "describe(title, () => { test('child', () => {}); });",
             "test.each([1, 2])('row %i', () => {});",
+            "test('case_id', callback);",
+            "describe('suite_id', declareTests);",
         ] {
             assert!(
                 source_tests("a.test.ts", source, &[(1, 1)]).is_err(),
@@ -893,6 +925,12 @@ mod tests {
         ] {
             assert!(source_tests("a.test.ts", source, &[(1, 1)]).is_err());
         }
+        let scoped_retry =
+            "test('selected', () => {});\ntest('unchanged', { retry: 2 }, () => {});";
+        assert_eq!(
+            source_tests("a.test.ts", scoped_retry, &[(1, 1)]).unwrap(),
+            [id("a.test.ts", "selected")]
+        );
 
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -932,6 +970,18 @@ mod tests {
         assert_eq!(
             changed_tests(repo.path(), &base, &head, &["a.test.ts".into()]).unwrap(),
             [id("a.test.ts", "case_2")]
+        );
+        std::fs::write(repo.path().join("a.test.ts"), "declareTests();").unwrap();
+        git(&["add", "a.test.ts"]);
+        git(&["commit", "--quiet", "-m", "factory"]);
+        assert!(
+            changed_tests(
+                repo.path(),
+                &head,
+                &git(&["rev-parse", "HEAD"]),
+                &["a.test.ts".into()]
+            )
+            .is_err()
         );
     }
 

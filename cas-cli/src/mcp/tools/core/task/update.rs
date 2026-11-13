@@ -821,6 +821,13 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        // An older target clear reopened the task but left its source bound.
+        // Only that reviewed no-code state may repeat the clear to repair it.
+        let artifact_scope_repair = target_repo.is_some_and(|repo| repo.trim().is_empty())
+            && task.execution_note.as_deref() == Some("no-code")
+            && task.deliverables.work_target.is_none()
+            && task.deliverables.work_target_cleared
+            && super::lifecycle::close_ops::has_recorded_code_delivery(&task);
         let binding_override = proof_scope_fix && task.status == TaskStatus::AwaitingMerge
             && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some());
         // Check before any ordinary fields or side effects: a rejected batch
@@ -1141,7 +1148,9 @@ impl CasCore {
                     data: None,
                 });
             }
-            if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked) {
+            if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked)
+                && !(artifact_scope_repair && task.status == TaskStatus::Open)
+            {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
@@ -1259,6 +1268,7 @@ impl CasCore {
             };
             if !proof_targets_fix && !risk_fix && !methodology_fix
                 && task.deliverables.work_target.as_ref() == corrected_target.as_ref()
+                && !artifact_scope_repair
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
@@ -1272,6 +1282,26 @@ impl CasCore {
                 });
             }
 
+            // A missing lane with no recorded delivery needs only the target
+            // clear; it has no source boundary to resolve or retire.
+            let artifact_scope_audit = if target_repo.is_some_and(|repo| repo.trim().is_empty())
+                && super::lifecycle::close_ops::has_recorded_code_delivery(&task)
+            {
+                let context = task.deliverables.work_target.as_ref()
+                    .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| &start.work_target))
+                    .ok_or_else(|| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from("PROOF-SCOPE FIX REJECTED: no recorded work target to reconcile"), data: None,
+                    })
+                    .and_then(|target| super::repo_context::resolve_repo_context(&self.cas_root, target)
+                        .map_err(|message| McpError { code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None }))?;
+                Some(super::lifecycle::close_ops::retire_no_code_delivery_scope(
+                    &context.repo_root, &mut task, &context.target_branch,
+                ).map_err(|error| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: retained delivery conflicts with artifact-only scope: {error}")), data: None,
+                })?)
+            } else { None };
             task.deliverables.work_target = corrected_target.clone();
             refresh_epic_lane_binding(&mut task);
             if !proof_targets_fix && !risk_fix && !methodology_fix {
@@ -1326,7 +1356,7 @@ impl CasCore {
                             target.repo_selector, target.target_branch
                         )
                     })
-                    .unwrap_or_else(|| "The stale code work target was cleared for this no-code task.".to_string())
+                    .unwrap_or_else(|| format!("The stale code work target was cleared for this no-code task. {}", artifact_scope_audit.as_deref().unwrap_or_default()))
             };
             let note = audit::proof_scope_fix_note(
                 task.updated_at, &supervisor, reason, &target_description,

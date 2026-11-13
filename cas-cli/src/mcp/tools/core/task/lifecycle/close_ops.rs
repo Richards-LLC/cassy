@@ -2717,7 +2717,7 @@ fn close_delivered_tip(
 }
 
 /// Durable code evidence survives a deleted lane or a branchless parent.
-fn has_recorded_code_delivery(task: &Task) -> bool {
+pub(crate) fn has_recorded_code_delivery(task: &Task) -> bool {
     let delivery = &task.deliverables;
     !delivery.files_changed.is_empty()
         || delivery.commit_hash.is_some()
@@ -2725,6 +2725,62 @@ fn has_recorded_code_delivery(task: &Task) -> bool {
         || delivery.delivery_pr_merge_commit.is_some()
         || delivery.factory_branch_anchor.is_some()
         || !delivery.historical_factory_branch_anchors.is_empty()
+}
+
+/// A supervisor's artifact-only scope correction retires measured evidence,
+/// never an unmeasured code delivery. The caller persists this atomically with
+/// invalidating the prior proof cycle; no Git ref is moved.
+pub(crate) fn retire_no_code_delivery_scope(
+    repo: &std::path::Path,
+    task: &mut Task,
+    target: &str,
+) -> Result<String, String> {
+    if task.deliverables.integration_batch.is_some() {
+        return Err("retained integration batch must be settled before artifact-only correction".into());
+    }
+    let mut tips: Vec<String> = task.deliverables.factory_branch_anchor.iter()
+        .chain(&task.deliverables.historical_factory_branch_anchors)
+        .chain(task.deliverables.commit_hash.iter())
+        .chain(task.deliverables.merge_commit.iter())
+        .chain(task.deliverables.delivery_pr_merge_commit.iter()).cloned().collect();
+    tips.sort();
+    tips.dedup();
+    if !no_code_task_without_own_commits_judged(repo, task, target, None, true) {
+        no_code_close_proof(&task.id, task.execution_note.as_deref(), task.external_ref.as_deref(), false)?;
+        let start = task.deliverables.factory_branch_start.as_ref()
+            .ok_or("retained delivery has no recorded start; reconcile its source before artifact-only correction")?;
+        if tips.is_empty() {
+            tips.push(resolve_branch_sha(repo, &start.branch)
+                .ok_or("cannot resolve the retained delivery source")?);
+        }
+        for tip in &tips {
+            if !git_commit_is_ancestor(repo, &start.base_sha, tip) {
+                return Err(format!("retained delivery {tip} is not descended from recorded start {}", start.base_sha));
+            }
+            evidence_only::measure_paths(repo, &[(start.base_sha.clone(), tip.clone())], false)?;
+        }
+    }
+    let audit = format!("Retired source records after no-code evidence checks: tips {tips:?}, start {:?}; no Git refs changed.", task.deliverables.factory_branch_start);
+    let delivery = &mut task.deliverables;
+    delivery.factory_branch_anchor = None;
+    delivery.historical_factory_branch_anchors.clear();
+    delivery.declined_factory_branch_anchors = Some(Vec::new());
+    delivery.factory_branch_start = None;
+    delivery.parked_branch = None;
+    delivery.handoff_branches.clear();
+    delivery.authorized_merge_sources.clear();
+    delivery.files_changed.clear();
+    delivery.commit_hash = None;
+    delivery.merge_commit = None;
+    delivery.delivery_pr_number = None;
+    delivery.delivery_pr_merge_commit = None;
+    delivery.delivery_pr_merged_at = None;
+    delivery.green_merge_commit = None;
+    delivery.merge_ci_admission = None;
+    delivery.merge_conflicted = false;
+    delivery.parked_close_reason = None;
+    delivery.no_delivery_close_intent = None;
+    Ok(audit)
 }
 
 /// Releasing a lease retires its assignee, not its recorded delivery.

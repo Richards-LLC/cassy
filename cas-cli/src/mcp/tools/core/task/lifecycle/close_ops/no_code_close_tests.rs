@@ -1259,8 +1259,74 @@ async fn cleared_target_no_code_spike_closes_without_branch_or_merge_tree_gh1167
     );
 }
 
-/// GH #1167 (4): the same lane still gates a code task and a worker's own
-/// no-code close: an unnamed lane commit may be this task's work (cas-2387).
+/// GH #1901: a completed documentation delivery is not the current artifact.
+#[tokio::test]
+async fn artifact_scope_fix_retires_parked_docs_and_refuses_code_cas_3ff6() {
+    for (code, already_cleared) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let id = "cas-8156";
+        let (checkout, lane) = issue_delivery(&f, id, "main");
+        let path = if code { "product.rs" } else { "docs/design/proposal.brief.md" };
+        std::fs::create_dir_all(checkout.join("docs/design")).unwrap();
+        std::fs::write(checkout.join(path), "previous delivery\n").unwrap();
+        git(&checkout, &["add", path]);
+        git(&checkout, &["commit", "-qm", "docs(cas-8156): previous design"]);
+        let old_tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", &lane]);
+        git(f.dir.path(), &["merge", "-q", "--ff-only", &lane]);
+        git(f.dir.path(), &["push", "-q", "origin", "main"]);
+        // Persist the previous park, then resume with a new portable artifact.
+        let mut task = f.task(id);
+        task.status = TaskStatus::AwaitingMerge;
+        task.task_type = TaskType::Spike;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("artifact:art-current-design".into());
+        task.deliverables.factory_branch_anchor = Some(old_tip.clone());
+        task.deliverables.historical_factory_branch_anchors.push(old_tip.clone());
+        task.deliverables.parked_branch = Some(lane.clone());
+        task.deliverables.files_changed = vec![path.into()];
+        if already_cleared {
+            task.status = TaskStatus::Open;
+            task.deliverables.work_target = None;
+            task.deliverables.work_target_cleared = true;
+        }
+        let prior_target = task.deliverables.work_target.clone();
+        f.put(&task);
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.set("qa.mode", "batch").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        let corrected = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"update", "id":id, "proof_scope_fix":true,
+            "target_repo":"", "reason":"Published design replaces the old documentation delivery",
+        })).unwrap())).await;
+        if code {
+            assert!(corrected.is_err(), "{corrected:?}");
+            assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(), Some(old_tip.as_str()));
+            assert_eq!(f.task(id).deliverables.work_target, prior_target);
+            continue;
+        }
+        assert!(corrected.is_ok(), "{corrected:?}");
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":id, "reason":"Current design artifact delivered",
+        })).await;
+        assert!(!response.contains("[G-67]"), "{response}");
+        let current = f.task(id);
+        assert!(current.deliverables.factory_branch_anchor.is_none(), "{response}");
+        assert!(current.deliverables.historical_factory_branch_anchors.is_empty());
+        assert!(current.deliverables.factory_branch_start.is_none());
+        assert!(current.deliverables.parked_branch.is_none());
+        assert!(current.deliverables.files_changed.is_empty());
+        assert_eq!(current.external_ref.as_deref(), Some("artifact:art-current-design"));
+        if current.status != TaskStatus::Closed {
+            let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
+            assert!(dispatch.repository.is_none_or(|repository| repository.anchor_commits.is_empty()));
+        }
+    }
+}
+
+/// GH #1167 (4): unnamed lane work still keeps ordinary delivery gates.
 #[tokio::test]
 async fn unnamed_lane_commit_still_gates_code_and_worker_no_code_closes_gh1167() {
     for (id, no_code) in [("cas-c206", false), ("cas-c207", true)] {

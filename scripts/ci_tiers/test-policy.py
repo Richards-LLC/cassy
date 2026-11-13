@@ -4,6 +4,7 @@ import copy
 import itertools
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -558,15 +559,17 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         hub = self.root / 'hub-web'
         bin_dir = self.root / 'bin'; bin_dir.mkdir()
         for name, body in {'npx': ':', 'node': 'echo /fixture/chrome', 'ldd': 'echo libfixture.so',
-                           'npm': '[[ "$1" == run ]] || exit 0\necho "$*" > "$CALLS"\nmkdir -p e2e/.results\n'
+                           'npm': '[[ "$1" == run ]] || exit 0\nprintf "%s\\n" "$@" > "$CALLS"\nmkdir -p e2e/.results\n'
                                   '[[ -z "$REPORT" ]] || printf %s "$REPORT" > e2e/.results/report.json\nexit "$STATUS"'}.items():
             (bin_dir / name).write_text('#!/bin/bash\n' + body + '\n'); (bin_dir / name).chmod(0o755)
         spec = lambda line, status: {'title': f'HUB-J12 part {line}', 'file': 'network-switch.journey.ts',
                                      'line': line, 'tests': [{'status': status}]}
+        # Each failure is a GitHub ::error annotation: journey IDs in its title,
+        # spec location first in its message. A run without a report is red too.
         for status, specs, red, named in [
-            (1, [spec(19, 'expected'), spec(593, 'unexpected')], True, 'Commander journey HUB-J12 failed::network-switch.journey.ts:593'),
-            (0, [spec(19, 'expected')], False, None),
-            (1, None, True, 'title=Commander journeys::run exited 1')]:
+            (1, [spec(19, 'expected'), spec(593, 'unexpected')], True, [(['HUB-J12'], 'network-switch.journey.ts:593')]),
+            (0, [spec(19, 'expected')], False, []),
+            (1, None, True, [([], None)])]:
             with self.subTest(status=status, specs=specs):
                 shutil.rmtree(hub / 'e2e/.results', ignore_errors=True)
                 report = json.dumps({'suites': [{'title': 'journeys', 'specs': [], 'suites': [{'specs': specs}]}]}) if specs else ''
@@ -575,9 +578,12 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                                              'GREP': shards[0]['grep'], 'REPORT': report, 'STATUS': str(status)},
                                         text=True, capture_output=True)
                 self.assertEqual(result.returncode != 0, red, result.stdout + result.stderr)
-                self.assertIn(f'--grep {shards[0]["grep"]}', calls.read_text())
-                if named:
-                    self.assertIn(named, result.stdout)
+                argv = calls.read_text().splitlines()
+                self.assertEqual(argv[argv.index('--grep') + 1], shards[0]['grep'])
+                errors = [line[len('::error title='):].split('::', 1) for line in result.stdout.splitlines()
+                          if line.startswith('::error ')]
+                ids = [re.findall(r'\b[A-Z]+-J\d+\b', title) for title, _ in errors]
+                self.assertEqual([(i, message.split()[0] if i else None) for i, (_, message) in zip(ids, errors)], named)
 
     def test_suite_fanin_reuses_classification_without_source_checkout(self):
         job = self.ci()['jobs']['fast-validation-suite']

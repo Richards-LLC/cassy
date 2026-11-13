@@ -2768,23 +2768,16 @@ mod session_learn_tests {
     }
 
     #[test]
-    fn session_learn_prompt_is_the_dedicated_classifier_prompt() {
+    fn session_learn_prompt_preserves_transcript_and_duplicate_candidates() {
         let existing = vec![(
             "cas-e0a1".to_string(),
             "Epics branch\nfrom main.".to_string(),
         )];
-        let prompt = build_session_learn_prompt("transcript excerpt", "", &existing);
-        assert!(prompt.starts_with(SESSION_LEARN_CLASSIFIER_PROMPT));
-        assert!(
-            prompt.contains("transcript excerpt"),
-            "{prompt}"
-        );
-        // Duplicate candidates are passed in: the call cannot search.
-        assert!(
-            prompt.contains("cas-e0a1") && prompt.contains("Epics branch from main."),
-            "{prompt}"
-        );
-
+        let transcript = "transcript excerpt";
+        let prompt = build_session_learn_prompt(transcript, "", &existing);
+        assert!(prompt.contains(transcript));
+        assert!(prompt.contains(&existing[0].0));
+        assert!(prompt.contains(&existing[0].1.replace('\n', " ")));
     }
 
     /// Audit M09: one partial draft (a `dedup_hits`-only object, as the old

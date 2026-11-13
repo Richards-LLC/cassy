@@ -22143,13 +22143,6 @@ mod gh_1153_idle_pty_delivery_tests {
             .expect("wrap pty in pane")
     }
 
-    async fn drain_for(daemon: &mut crate::ui::factory::daemon::FactoryDaemon, span: Duration) {
-        let deadline = Instant::now() + span;
-        while Instant::now() < deadline {
-            let _ = daemon.app.mux.poll_batch();
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
 
     struct Fixture {
         _tmp: tempfile::TempDir,
@@ -22182,7 +22175,8 @@ mod gh_1153_idle_pty_delivery_tests {
         while daemon.app.mux.pane_bytes_received(WORKER).unwrap_or(0) == 0
             && Instant::now() < banner
         {
-            drain_for(&mut daemon, Duration::from_millis(50)).await;
+            let _ = daemon.app.mux.poll_batch();
+            tokio::task::yield_now().await;
         }
 
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
@@ -22197,8 +22191,17 @@ mod gh_1153_idle_pty_delivery_tests {
         let outcome = daemon.app.mux.inject(WORKER, prompt).await.unwrap();
         assert_eq!(outcome, InjectOutcome::Delivered);
         queue.mark_transport_delivered(row).unwrap();
-        // Past the Codex 500ms submit CR, draining like the daemon loop.
-        drain_for(&mut daemon, Duration::from_millis(800)).await;
+        // Observe the actual submit completion and fixture echo before opening the probe.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = daemon.app.mux.poll_batch();
+            if !daemon.app.mux.pane_submit_pending(WORKER)
+                && daemon.app.mux.pane_bytes_received(WORKER).unwrap() >= bytes_at_delivery + prompt.len() as u64 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "fixture submit and echo never completed");
+            tokio::task::yield_now().await;
+        }
         let bytes_now = daemon.app.mux.pane_bytes_received(WORKER).unwrap();
         assert!(
             bytes_now >= bytes_at_delivery + prompt.len() as u64,
@@ -22546,6 +22549,7 @@ mod gh_1153_idle_pty_delivery_tests {
             ..
         } = deliver_to_idle_worker().await;
 
+        let echo_before_nudge = daemon.app.mux.pane_bytes_received(WORKER).unwrap();
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
         let report = queue.message_delivery_report(row).unwrap().unwrap();
         assert_eq!(
@@ -22564,8 +22568,17 @@ mod gh_1153_idle_pty_delivery_tests {
 
         assert_eq!(probe.nudges, 1);
 
-        // cas-badb: every nudge lands only as echo until they run out.
-        drain_for(&mut daemon, Duration::from_millis(800)).await;
+        // cas-badb: observe this nudge's completed submit and real echo.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = daemon.app.mux.poll_batch();
+            if !daemon.app.mux.pane_submit_pending(WORKER)
+                && daemon.app.mux.pane_bytes_received(WORKER).unwrap() > echo_before_nudge {
+                break;
+            }
+            assert!(Instant::now() < deadline, "watchdog nudge never submitted and echoed");
+            tokio::task::yield_now().await;
+        }
         let probe = daemon.normal_delivery_probes.get_mut(&row).unwrap();
         probe.nudges = super::NORMAL_DELIVERY_MAX_NUDGES;
         probe.next_check_at = Instant::now().checked_sub(Duration::from_secs(1));

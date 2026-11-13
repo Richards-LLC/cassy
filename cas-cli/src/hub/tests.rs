@@ -2034,7 +2034,11 @@ async fn h1_real_daemon_connector_transforms_welcome_preserves_output_and_one_up
     let daemon_connections = connections.clone();
     let daemon_release = release_output.clone();
     let daemon_welcome = welcome_bytes.clone();
+    let barrier_bytes = serde_json::to_vec(&DaemonMessage::Output {
+        pane_id: "worker-1".into(), data: b"h1-frame-barrier".to_vec(),
+    }).unwrap();
     let daemon_output = output_bytes.clone();
+    let daemon_barrier = barrier_bytes.clone();
     let daemon = tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
@@ -2042,11 +2046,13 @@ async fn h1_real_daemon_connector_transforms_welcome_preserves_output_and_one_up
             let release = daemon_release.clone();
             let welcome = daemon_welcome.clone();
             let output = daemon_output.clone();
+            let barrier = daemon_barrier.clone();
             tokio::spawn(async move {
                 let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
                 ws.send(WsMessage::Binary(welcome)).await.unwrap();
                 release.notified().await;
                 ws.send(WsMessage::Binary(output)).await.unwrap();
+                ws.send(WsMessage::Binary(barrier)).await.unwrap();
                 futures_util::future::pending::<()>().await;
             });
         }
@@ -2077,13 +2083,8 @@ async fn h1_real_daemon_connector_transforms_welcome_preserves_output_and_one_up
     release_output.notify_waiters();
     assert_eq!(first.recv().await.unwrap().bytes, output_bytes);
     assert_eq!(second.recv().await.unwrap().bytes, output_bytes);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), first.recv())
-            .await
-            .is_err(),
-        "PTY output must be delivered exactly once"
-    );
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(first.recv().await.unwrap().bytes, barrier_bytes, "no duplicate before the next real daemon frame");
+    assert_eq!(second.recv().await.unwrap().bytes, barrier_bytes);
     assert_eq!(connections.load(Ordering::SeqCst), 1);
     assert_eq!(connector.upstream_connection_count("factory-a").await, 1);
     daemon.abort();

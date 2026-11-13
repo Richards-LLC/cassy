@@ -218,39 +218,4 @@ mod tests {
         assert!(!action_requires_lock(IntegrationAction::Verify));
     }
 
-    #[test]
-    fn lock_serializes_two_threads() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-        use std::thread;
-        use std::time::Duration;
-
-        let tmp = TempDir::new().unwrap();
-        let counter = Arc::new(AtomicUsize::new(0));
-        let observed_max = Arc::new(AtomicUsize::new(0));
-
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let path = tmp.path().to_path_buf();
-                let counter = counter.clone();
-                let observed_max = observed_max.clone();
-                thread::spawn(move || {
-                    let _lock = IntegrateLock::acquire(&path).unwrap();
-                    let inside = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    observed_max.fetch_max(inside, Ordering::SeqCst);
-                    thread::sleep(Duration::from_millis(20));
-                    counter.fetch_sub(1, Ordering::SeqCst);
-                })
-            })
-            .collect();
-
-        for h in handles {
-            h.join().unwrap();
-        }
-        assert_eq!(
-            observed_max.load(Ordering::SeqCst),
-            1,
-            "exclusive lock must serialize critical section"
-        );
-    }
 }

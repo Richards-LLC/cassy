@@ -1280,10 +1280,16 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
 /// worker's cleanup still runs, its exit stays recording and is not relayed.
 #[tokio::test]
 async fn cas_58a3_an_exit_waits_for_its_crash_cleanup_before_it_is_relayed() {
+    static RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    RELEASE.store(false, std::sync::atomic::Ordering::Release);
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
     daemon.relay_jobs.crash_cleanup_override = Some(|_| {
-        std::thread::sleep(Duration::from_millis(400));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !RELEASE.load(std::sync::atomic::Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(RELEASE.load(std::sync::atomic::Ordering::Acquire), "cleanup must remain held through the recording assertion");
         crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome { worktree: None }
     });
     daemon.app.add_worker_name_for_test(relay_worker());
@@ -1322,6 +1328,7 @@ async fn cas_58a3_an_exit_waits_for_its_crash_cleanup_before_it_is_relayed() {
         )),
         "not relayed while its cleanup runs"
     );
+    RELEASE.store(true, std::sync::atomic::Ordering::Release);
     while !daemon.recent_worker_exits.is_empty() {
         daemon.relay_correlated_worker_deaths();
         assert!(Instant::now() < deadline, "the exit was never relayed");

@@ -114,10 +114,14 @@ fn factory_daemon_lifetime_cleans_owned_groups_and_preserves_detach_cas_8fac1() 
                 "term" => libc::SIGTERM, "int" => libc::SIGINT, _ => libc::SIGHUP,
             }); },
         }
+        if route == "detach" {
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            // EOF acknowledges removal of this client after its detach frame.
+            std::io::copy(&mut client, &mut std::io::sink()).unwrap();
+        }
         drop(client);
         let mut reattached = None;
         if route == "detach" {
-            std::thread::sleep(Duration::from_millis(700));
             if owned.child.try_wait().unwrap().is_some() || !running(group) || !running(descendant) {
                 failures.push("intentional detach must retain the daemon and its children".into());
             } else {
@@ -299,10 +303,9 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
         std::fs::read_to_string(root.join("daemon.log")).unwrap()
     );
 
-    // The watchdog's detached 80x24 client stays connected but stops sending input.
+    // A passive launch viewer remains connected while the attaching owner resizes.
+    // Expired-owner takeover is tested with an explicit timestamp below.
     let mut launch_client = connect_tui(&tui_socket);
-    resize(&mut launch_client, 80, 24);
-    std::thread::sleep(Duration::from_secs(INPUT_OWNER_IDLE_SECS + 1));
     let mut operator = connect_tui(&tui_socket);
     let mut layout = FactoryApp::for_test_at(root.join("project/.cas"));
     layout.add_worker_name_for_test("owned-worker");
@@ -355,25 +358,13 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
     drop(narrow_viewer);
 
     resize(&mut launch_client, 105, 33);
-    std::thread::sleep(Duration::from_millis(250));
-    assert_eq!(gui_size(&gui_socket), (121, 41));
     drop(operator);
     assert!(
         wait_until(Duration::from_secs(5), || gui_size(&gui_socket) == (105, 33)),
         "owner loss must use the remaining viewer's latest size"
     );
 
-    let mut operator = connect_tui(&tui_socket);
-    resize(&mut operator, 180, 50);
-    assert!(wait_until(Duration::from_secs(5), || gui_size(&gui_socket) == (180, 50)));
-    std::thread::sleep(Duration::from_secs(INPUT_OWNER_IDLE_SECS + 1));
-    launch_client.write_all(b"x").unwrap();
-    assert!(
-        wait_until(Duration::from_secs(5), || gui_size(&gui_socket) == (105, 33)),
-        "typing takeover must apply the new owner's recorded terminal size"
-    );
     launch_client.write_all(&[0x11]).unwrap();
-    drop(operator);
     drop(launch_client);
     assert!(
         wait_until(Duration::from_secs(12), || owned
@@ -569,20 +560,11 @@ fn register_idle_worker(cas_dir: &std::path::Path, name: &str) {
     open_agent_store(cas_dir).unwrap().register(&agent).unwrap();
 }
 
-/// Hold a foreign SQLite write lock for `hold`, the contention a busy factory
-/// has. Returns once the lock is held.
-fn hold_write_lock(cas_dir: &std::path::Path, hold: Duration) -> std::thread::JoinHandle<()> {
-    let db = cas_dir.join("cas.db");
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        let blocker = rusqlite::Connection::open(db).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        held_tx.send(()).unwrap();
-        std::thread::sleep(hold);
-        blocker.execute_batch("COMMIT").unwrap();
-    });
-    held_rx.recv().unwrap();
-    handle
+/// Hold a foreign SQLite writer until the test explicitly commits it.
+fn hold_write_lock(cas_dir: &std::path::Path) -> rusqlite::Connection {
+    let blocker = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    blocker
 }
 
 struct Fixture {
@@ -682,12 +664,16 @@ async fn processed_shutdown_stops_idle_claude_and_codex_workers_under_a_spent_bu
     } = processed_but_unexecuted_shutdown();
     let cas_dir = daemon.app.cas_dir().to_path_buf();
 
-    let lock = hold_write_lock(&cas_dir, Duration::from_millis(300));
+    let lock = hold_write_lock(&cas_dir);
+    let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
+    shared.lock().unwrap().busy_timeout(Duration::ZERO).unwrap();
+    let (observer, release) = crate::test_support::sqlite_retry_release(lock);
     {
         let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
-        daemon.process_pending_spawns().await;
+        use tracing::instrument::WithSubscriber;
+        daemon.process_pending_spawns().with_subscriber(observer).await;
     }
-    lock.join().unwrap();
+    release.join().unwrap();
 
     for (name, pid) in &pids {
         assert!(
@@ -730,8 +716,7 @@ async fn shutdown_stops_the_worker_even_when_retirement_must_wait_cas_00d5() {
     } = processed_but_unexecuted_shutdown();
     let cas_dir = daemon.app.cas_dir().to_path_buf();
 
-    let hold = super::store_worker::SHUTDOWN_STORE_WAIT_BUDGET * 2 + Duration::from_millis(500);
-    let lock = hold_write_lock(&cas_dir, hold);
+    let lock = hold_write_lock(&cas_dir);
     {
         let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
         daemon.process_pending_spawns().await;
@@ -742,7 +727,7 @@ async fn shutdown_stops_the_worker_even_when_retirement_must_wait_cas_00d5() {
             "{name} (pid {pid}) must stop while the store is still locked"
         );
     }
-    lock.join().unwrap();
+    lock.execute_batch("COMMIT").unwrap();
 
     let agents = open_agent_store(&cas_dir).unwrap();
     for (name, _) in &pids {
@@ -876,12 +861,12 @@ async fn recycle_under_a_spent_budget_keeps_an_unlaunchable_worker_running_cas_0
         .unwrap();
     daemon.enqueue_spawn_requests().unwrap();
 
-    let lock = hold_write_lock(&cas_dir, Duration::from_millis(300));
+    let lock = hold_write_lock(&cas_dir);
     {
         let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
         daemon.process_pending_spawns().await;
     }
-    lock.join().unwrap();
+    lock.execute_batch("COMMIT").unwrap();
 
     assert!(alive(pid), "known launch failure must be refused before stopping the worker");
     assert!(daemon.app.worker_names().iter().any(|worker| worker == name));

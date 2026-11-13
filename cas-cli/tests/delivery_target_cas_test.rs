@@ -1145,10 +1145,10 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
         let notice_count = |key: &str| notice_db.query_row(
             "SELECT COUNT(*) FROM prompt_queue WHERE target = ?1 AND dedupe_key = ?2",
             rusqlite::params![worker, key],
-            |row| row.get::<_, usize>(0),
+            |row| row.get::<_, i64>(0),
         ).unwrap();
-        assert_eq!(notice_count(&format!("cassy-merge-closed:{}:worker:{worker}", task.id)), usize::from(closes));
-        assert_eq!(notice_count(&format!("cassy-merged-lane-parked:{}:{merge_sha}:worker:{worker}", task.id)), usize::from(row == "unparked"));
+        assert_eq!(notice_count(&format!("cassy-merge-closed:{}:worker:{worker}", task.id)), i64::from(closes));
+        assert_eq!(notice_count(&format!("cassy-merged-lane-parked:{}:{merge_sha}:worker:{worker}", task.id)), i64::from(row == "unparked"));
     }
 }
 

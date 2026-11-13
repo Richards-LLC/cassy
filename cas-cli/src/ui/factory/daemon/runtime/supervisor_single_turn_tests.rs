@@ -875,7 +875,7 @@ async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
     assert_eq!(receipt(), Some(SurfacingSource::HookSurfaced));
     assert!(queue.poll_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20).unwrap().is_empty());
     daemon.process_prompt_queue().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle_injected_writes(&mut daemon).await;
     assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed, "no second turn");
     assert_eq!(receipt(), Some(SurfacingSource::HookSurfaced));
 }

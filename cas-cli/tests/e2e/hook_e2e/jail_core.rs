@@ -89,7 +89,7 @@ fn test_pending_verification_does_not_change_unrelated_tool_permission() {
 
     // Unrelated tools remain available while the exact close waits.
     let (_, stdout1) = env.run_pre_tool_use_read("test.txt");
-    let was_blocked = stdout1.contains("deny");
+    let was_blocked = hook_denies(&stdout1);
     println!("First attempt blocked: {}", was_blocked);
     assert!(
         !was_blocked,
@@ -103,7 +103,7 @@ fn test_pending_verification_does_not_change_unrelated_tool_permission() {
 
     // Tools should work now
     let (_, stdout2) = env.run_pre_tool_use_read("test.txt");
-    let still_blocked = stdout2.contains("deny");
+    let still_blocked = hook_denies(&stdout2);
     println!("After jail release: blocked={}", still_blocked);
     assert!(
         !still_blocked,
@@ -207,7 +207,7 @@ fn test_worktree_merge_jail_release() {
 
     // Verify blocked
     let (_, stdout1) = env.run_pre_tool_use_read("test.txt");
-    let was_blocked = stdout1.contains("deny");
+    let was_blocked = hook_denies(&stdout1);
     println!("Before release: blocked={}", was_blocked);
     assert!(
         was_blocked,
@@ -221,7 +221,7 @@ fn test_worktree_merge_jail_release() {
 
     // Tools should work now
     let (_, stdout2) = env.run_pre_tool_use_read("test.txt");
-    let still_blocked = stdout2.contains("deny");
+    let still_blocked = hook_denies(&stdout2);
     println!("After worktree jail release: blocked={}", still_blocked);
     assert!(
         !still_blocked,
@@ -292,7 +292,7 @@ fn test_both_jails_block_tools() {
     // Clear verification jail only - should still be blocked by worktree jail
     env.set_pending_verification(&task1, false);
     let (_, stdout2) = env.run_pre_tool_use_read("test.txt");
-    let still_blocked = stdout2.contains("deny");
+    let still_blocked = hook_denies(&stdout2);
     println!(
         "After clearing verification jail: blocked={}",
         still_blocked
@@ -306,7 +306,7 @@ fn test_both_jails_block_tools() {
     // Clear worktree jail too - should work now
     env.set_pending_worktree_merge(&task2, false);
     let (_, stdout3) = env.run_pre_tool_use_read("test.txt");
-    let final_blocked = stdout3.contains("deny");
+    let final_blocked = hook_denies(&stdout3);
     println!("After clearing both jails: blocked={}", final_blocked);
     assert!(
         !final_blocked,

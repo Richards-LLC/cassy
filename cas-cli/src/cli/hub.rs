@@ -731,7 +731,7 @@ fn wait_for_stop_or_satisfying_hub(
     #[cfg(debug_assertions)]
     mark_restart_stop_waiter_for_test()?;
 
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
     loop {
         ensure_stop_budget(stop_deadline)?;
         let holder = paths
@@ -770,7 +770,7 @@ fn wait_for_stop_or_satisfying_hub(
         {
             return Ok(StopWait::AlreadySatisfied(Box::new(record)));
         }
-        if Instant::now() >= deadline {
+        if stop_wait_elapsed(started)? >= timeout {
             if let Some(holder) = holder.as_ref()
                 && (force || !holder.is_stopping())
             {
@@ -2108,6 +2108,10 @@ fn serve_foreground_logged(
     // hub.lock: a stale auth writer must never leave a launchd hub process
     // holding the machine lock while it waits indefinitely.
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
+    #[cfg(debug_assertions)]
+    if let Some(marker) = std::env::var_os("CAS_TEST_HUB_AUTH_OPEN_MARKER") {
+        std::fs::write(marker, b"entered\n")?;
+    }
     let auth = AuthStore::open(paths.root(), machine.id.clone())?;
     // Commander hub is machine-scoped, so its one AI-enrichment opt-in comes
     // from the host config rather than whichever project launched the daemon.
@@ -2569,6 +2573,29 @@ fn hold_instance_lock_after_record_removal_for_test() -> Result<()> {
         "test hub lock-release barrier timed out"
     );
     Ok(())
+}
+
+/// A debug fixture can advance the stop wait's elapsed clock while the old
+/// generation still owns its real machine lock. The marker is written only
+/// after the loop has observed that quiescence has not yet been reached.
+fn stop_wait_elapsed(started: Instant) -> Result<Duration> {
+    #[cfg(debug_assertions)]
+    if let Some(root) = std::env::var_os("CAS_TEST_HUB_LOCK_RELEASE_BARRIER") {
+        let root = std::path::PathBuf::from(root);
+        match std::fs::read_to_string(root.join("stop-wait-elapsed-ms")) {
+            Ok(value) => {
+                let elapsed = Duration::from_millis(value.trim().parse()?);
+                std::fs::write(
+                    root.join(format!("restart-stop-elapsed-{}", std::process::id())),
+                    format!("{}\n", elapsed.as_millis()),
+                )?;
+                return Ok(elapsed);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(started.elapsed())
 }
 
 #[cfg(debug_assertions)]

@@ -44,7 +44,7 @@ fn test_partial_jail_clear_still_blocks() {
     let (_, stdout2) = env.run_pre_tool_use_read("partial_test.txt");
     println!("After full clear hook output: {}", stdout2);
 
-    let still_blocked = stdout2.contains("deny");
+    let still_blocked = hook_denies(&stdout2);
     assert!(
         !still_blocked,
         "Should not be blocked after clearing all jails: {}",
@@ -164,7 +164,7 @@ fn test_jail_blocks_all_tool_types() {
         "Bash",
         serde_json::json!({"command": "echo test"}),
     );
-    let bash_blocked = bash_stdout.contains("deny");
+    let bash_blocked = hook_denies(&bash_stdout);
     println!("Bash blocked: {}", bash_blocked);
 
     // Test 2: Write should be blocked
@@ -172,7 +172,7 @@ fn test_jail_blocks_all_tool_types() {
         "Write",
         serde_json::json!({"file_path": "newfile.txt", "content": "test"}),
     );
-    let write_blocked = write_stdout.contains("deny");
+    let write_blocked = hook_denies(&write_stdout);
     println!("Write blocked: {}", write_blocked);
 
     // Test 3: Glob should be blocked
@@ -180,7 +180,7 @@ fn test_jail_blocks_all_tool_types() {
         "Glob",
         serde_json::json!({"pattern": "*.txt"}),
     );
-    let glob_blocked = glob_stdout.contains("deny");
+    let glob_blocked = hook_denies(&glob_stdout);
     println!("Glob blocked: {}", glob_blocked);
 
     // All tool types should be blocked by jail
@@ -351,7 +351,7 @@ fn test_concurrent_environments_isolation() {
     let (_, env2_stdout) = env2.run_pre_tool_use_read("test.txt");
     println!("Env2 (not jailed) hook output: {}", env2_stdout);
 
-    let env2_blocked = env2_stdout.contains("deny");
+    let env2_blocked = hook_denies(&env2_stdout);
     assert!(
         !env2_blocked,
         "Env2 should succeed (no jailed tasks): {}",
@@ -362,54 +362,11 @@ fn test_concurrent_environments_isolation() {
     let (_, env1_stdout) = env1.run_pre_tool_use_read("test.txt");
     println!("Env1 (jailed) hook output: {}", env1_stdout);
 
-    let env1_blocked = env1_stdout.contains("deny");
+    let env1_blocked = hook_denies(&env1_stdout);
     assert!(
         env1_blocked,
         "Env1 should be blocked due to jailed task: {}",
         env1_stdout
-    );
-}
-
-/// BUG TEST: Worktree jail should have different message than verification jail
-#[test]
-#[ignore]
-fn test_different_jail_messages() {
-    let env = HookTestEnv::new();
-
-    // Test verification jail message
-    let task1 = env.create_task("Verification jail message test");
-    env.set_pending_verification(&task1, true);
-
-    let (_, verify_output) = env.run_pre_tool_use_read("test.txt");
-    println!("Verification jail output: {}", verify_output);
-
-    env.set_pending_verification(&task1, false);
-
-    // Test worktree merge jail message
-    env.enable_worktrees();
-    let task2 = env.create_task("Worktree jail message test");
-    env.set_pending_worktree_merge(&task2, true);
-    let (_, pending_worktree) = env.get_task_jail_state(&task2);
-    assert!(pending_worktree, "pending_worktree_merge should be set");
-
-    let (_, worktree_output) = env.run_pre_tool_use_read("test.txt");
-    println!("Worktree jail output: {}", worktree_output);
-
-    // Messages should be different
-    assert_ne!(
-        verify_output,
-        worktree_output,
-        "Verification and worktree jail messages should be different"
-    );
-
-    // Check specific content
-    assert!(
-        verify_output.to_lowercase().contains("verification"),
-        "Verification jail should mention 'verification'"
-    );
-    assert!(
-        worktree_output.to_lowercase().contains("worktree"),
-        "Worktree jail should mention 'worktree'"
     );
 }
 

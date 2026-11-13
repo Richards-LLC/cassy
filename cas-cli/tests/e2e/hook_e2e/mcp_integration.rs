@@ -67,30 +67,7 @@ fn test_mcp_stop_hook_blocks_incomplete_epic() {
         "Subtask 2 should still be open (not closed)"
     );
 
-    // Verify Stop hook output indicates blocking
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_stdout) {
-        let decision = json.get("decision").and_then(|d| d.as_str());
-        println!("Decision: {:?}", decision);
-        assert_eq!(
-            decision,
-            Some("block"),
-            "Stop hook should block when epic has incomplete subtasks. Output: {}",
-            stop_stdout
-        );
-    } else {
-        // Non-JSON output - check for textual blocking indicators
-        let lower = stop_stdout.to_lowercase();
-        let is_blocked = lower.contains("block")
-            || lower.contains("subtask")
-            || lower.contains("epic")
-            || lower.contains("incomplete")
-            || lower.contains("remain");
-        assert!(
-            is_blocked,
-            "Stop hook should indicate incomplete epic subtasks. Got: '{}'",
-            stop_stdout
-        );
-    }
+    assert!(stop_hook_blocks(&stop_stdout), "{stop_stdout}");
 }
 
 /// Helper to extract CAS task ID from text (cas-XXXX format)
@@ -99,71 +76,6 @@ fn extract_cas_id(text: &str) -> Option<String> {
     re.captures(text)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
-}
-
-/// Test that verification jail allows task-verifier agent to work
-///
-/// This tests the fix for the bug where verification jail was blocking task-verifier itself.
-#[tokio::test]
-#[ignore]
-async fn test_mcp_verification_jail_allows_task_verifier() {
-    let env = HookTestEnv::new();
-
-    println!("Test environment created at: {:?}", env.dir());
-
-    // Create a task and set it to pending_verification using direct SQLite
-    let task_id = env.cas.create_task_with_options("Task for verification test", None, None, true);
-    println!("Created task: {}", task_id);
-
-    // Set pending_verification = true (simulating task close triggering verification)
-    env.set_pending_verification(&task_id, true);
-    println!("Set pending_verification=true for {}", task_id);
-
-    // Run a Claude session simulating task-verifier behavior
-    let result = session(
-        QueryOptions::new()
-            .model("haiku")
-            .cwd(env.dir())
-                        .mcp_config(env.mcp_config_path())
-            .max_turns(5)
-            .allow_tool("Read")
-            .allow_tool("mcp__cas__task"),
-        |mut sess| async move {
-            // Simulate task-verifier trying to read files for verification
-            // This should work even though there's a verification jail
-            // because task-verifier has special permissions
-            sess.send(
-                "Read the file test.txt and tell me what it contains. \
-                This simulates task-verifier checking code.",
-            )
-            .await?;
-
-            loop {
-                let msg = sess.await_response(None).await?;
-                if let Message::Assistant(ref a) = msg {
-                    println!("Assistant: {}", a.text());
-                }
-                if let Message::Result(ref r) = msg {
-                    return Ok(r.clone());
-                }
-            }
-        },
-    )
-    .await;
-
-    match result {
-        Ok(r) => {
-            let text = r.result.as_deref().unwrap_or("");
-            println!("Result: {}", text);
-
-            // The result should contain the file content, not be blocked
-            // Note: Normal sessions would be blocked, but task-verifier has special permissions
-            // This test documents the expected behavior
-        }
-        Err(e) => {
-            println!("Session error: {:?}", e);
-        }
-    }
 }
 
 /// Test basic MCP tool usage in a real Claude session

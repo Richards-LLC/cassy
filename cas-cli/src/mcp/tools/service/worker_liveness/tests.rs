@@ -876,8 +876,25 @@ fn stall_probe_sees_capped_build_under_cas_serve_frontend_cas_8ea3() {
         let probe = |at| run_worker_health_probe(Some(&root), &WorkerHealthRequest {
             worker: name.clone(), task: task.id.clone(), threshold_secs: 300, delay_secs: 5, requested_at: at,
         }).confirmed;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let _ready = loop {
+            let samples = crate::cli::factory::wedged::worker_child_samples(harness.id()).unwrap();
+            if !samples.is_empty() { break samples; }
+            assert!(std::time::Instant::now() < deadline, "owned build never entered the process tree");
+            std::thread::yield_now();
+        };
         probe(now); // Cold sample: no delta yet.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let before = crate::cli::factory::wedged::worker_child_samples(harness.id()).unwrap();
+        if busy {
+            loop {
+                let after = crate::cli::factory::wedged::worker_child_samples(harness.id()).unwrap();
+                if after.iter().any(|(pid, start, cpu, _)| before.iter().any(|(old_pid, old_start, old_cpu, _)| {
+                    pid == old_pid && start == old_start && cpu > old_cpu
+                })) { break; }
+                assert!(std::time::Instant::now() < deadline, "owned busy build never consumed CPU");
+                std::thread::yield_now();
+            }
+        }
         let confirmed = probe(now + chrono::Duration::seconds(1));
         // SAFETY: signals only the process group this test created.
         unsafe { libc::killpg(harness.id() as libc::pid_t, libc::SIGKILL) };

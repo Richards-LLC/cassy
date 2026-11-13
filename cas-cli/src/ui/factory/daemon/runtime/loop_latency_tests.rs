@@ -713,11 +713,12 @@ async fn commander_send_queues_under_a_spent_pass_budget_and_brief_write_content
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
-    let write_lock = hold_sqlite_write_lock(&cas_dir);
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        write_lock.release();
-    });
+    let write_lock = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    write_lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
+    shared.lock().unwrap().busy_timeout(Duration::ZERO).unwrap();
+    let (observer, release) = crate::test_support::sqlite_retry_release(write_lock);
+    use tracing::instrument::WithSubscriber;
 
     let reply = {
         let _spent = wait_budget::bound_waits_until(Instant::now());
@@ -739,7 +740,7 @@ async fn commander_send_queues_under_a_spent_pass_budget_and_brief_write_content
                     scopes: vec!["message:send".to_string()],
                     operator_verified: true,
                 },
-            })
+            }).with_subscriber(observer)
             .await
     };
     release.join().unwrap();

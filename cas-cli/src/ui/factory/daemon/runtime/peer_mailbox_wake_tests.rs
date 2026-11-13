@@ -340,11 +340,16 @@ async fn declined_peer_ask_wakes_after_the_turn_ends_on_a_repainting_pane_cas_73
     rusqlite::Connection::open(cas.join("cas.db")).unwrap()
         .execute("UPDATE prompt_queue SET next_attempt_at=? WHERE id=?",
             rusqlite::params![Utc::now().to_rfc3339(), id]).unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    for _ in 0..3 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         daemon.pane_silent_since.insert(name.clone(), Instant::now());
         daemon.process_prompt_queue().await.unwrap();
         super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        if queue.message_delivery_report(id).unwrap().unwrap().wake_attempt == cas_store::WakeAttempt::Fired {
+            break;
+        }
+        assert!(Instant::now() < deadline, "idle transcript was never admitted to wake");
+        tokio::task::yield_now().await;
     }
     let woke = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(woke.wake_attempt, cas_store::WakeAttempt::Fired, "{woke:?}");

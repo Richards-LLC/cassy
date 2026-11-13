@@ -2607,15 +2607,16 @@ mod tests {
     struct SequenceViolet {
         calls: AtomicUsize,
         results: Mutex<Vec<Result<Value, RemoteError>>>,
-        delay: Duration,
+        completed_at: Mutex<Vec<Instant>>,
     }
 
     impl VioletThreadResolver for SequenceViolet {
         fn resolve(&self, _external_ref: &str, _timeout: Duration) -> Result<Value, RemoteError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(self.delay);
             let mut results = self.results.lock().unwrap();
-            if results.len() > 1 { results.remove(0) } else { results[0].clone() }
+            let result = if results.len() > 1 { results.remove(0) } else { results[0].clone() };
+            self.completed_at.lock().unwrap().push(Instant::now());
+            result
         }
     }
 
@@ -2635,7 +2636,7 @@ mod tests {
         ] {
             let journal = journal();
             let cloud = Arc::new(FakeCloud::new(journal.clone()));
-            let violet = Arc::new(SequenceViolet { calls: AtomicUsize::new(0), results: Mutex::new(results), delay: Duration::ZERO });
+            let violet = Arc::new(SequenceViolet { calls: AtomicUsize::new(0), results: Mutex::new(results), completed_at: Mutex::new(Vec::new()) });
             let mut service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal);
             service.violet = violet.clone();
             service.violet_reconnect_window = Duration::from_millis(120);
@@ -2691,21 +2692,30 @@ mod tests {
         let link = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
         let identity = FakeViolet::ok().result.into_inner().unwrap();
         let dropped = || Err(RemoteError::reconnecting("Transport closed"));
-        let budget = Duration::from_millis(600);
-        let delay = Duration::from_millis(250);
+        let budget = Duration::from_secs(60);
         for (results, fresh) in [(vec![identity.clone()], false), (vec![dropped(), identity.clone()], true)] {
             let journal = journal();
             let cloud = Arc::new(FakeCloud::new(journal.clone()));
-            let mut service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal);
-            service.violet = Arc::new(SequenceViolet { calls: AtomicUsize::new(0), results: Mutex::new(results), delay });
+            let violet = Arc::new(SequenceViolet {
+                calls: AtomicUsize::new(0), results: Mutex::new(results), completed_at: Mutex::new(Vec::new()),
+            });
+            let mut service = service(cloud, Arc::new(FakeViolet::ok()), journal);
+            service.violet = violet.clone();
             service.total_budget = budget;
-            service.violet_reconnect_window = Duration::from_millis(400);
-            assert_eq!(service.execute(claim(REQUEST_ID, link)).unwrap()["code"], "acquired");
-            let given = cloud.post_timeouts.lock().unwrap()[0];
+            // This is the real reconnect timer under test, not a guessed fixture delay.
+            service.violet_reconnect_window = Duration::from_secs(10);
+            let original_deadline = Instant::now() + Duration::from_secs(300);
+            let (resolved, cloud_deadline) = service.resolve_violet(link, original_deadline);
+            let returned_at = Instant::now();
+            assert!(resolved.is_ok());
             if fresh {
-                assert!(given > budget - Duration::from_millis(100), "after a reconnect wait Cloud gets a fresh budget: {given:?}");
+                let completed_at = *violet.completed_at.lock().unwrap().last().unwrap();
+                // The fresh deadline is created after the resolver returns and
+                // before this caller resumes. No host-speed margin is needed.
+                assert!(cloud_deadline >= completed_at + budget);
+                assert!(cloud_deadline <= returned_at + budget);
             } else {
-                assert!(given <= budget - delay, "a first-try read spends the shared budget: {given:?}");
+                assert_eq!(cloud_deadline, original_deadline);
             }
         }
     }

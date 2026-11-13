@@ -1354,12 +1354,13 @@ mod ephemeral_guard_root_tests {
             pinned.ephemeral_project_refusal().is_none(),
             "a pinned root is durable wherever it lives"
         );
-        let unpinned = syncer_for(&base.path().join("scratch").join(".cas"), false);
+        let unpinned_root = base.path().join("scratch").join(".cas");
+        let unpinned = syncer_for(&unpinned_root, false);
         let refusal = unpinned.ephemeral_project_refusal();
         assert!(
             refusal
                 .as_deref()
-                .is_some_and(|r| r.contains("scratch")),
+                .is_some_and(|r| r.contains(unpinned_root.parent().unwrap().to_str().unwrap())),
             "an unpinned /tmp root must be refused by its own path, got {refusal:?}"
         );
     }

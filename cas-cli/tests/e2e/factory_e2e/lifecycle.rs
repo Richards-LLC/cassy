@@ -416,69 +416,6 @@ async fn test_full_message_round_trip() {
 }
 
 // =============================================================================
-// Test 5: Worker status reflects registered agents
-// =============================================================================
-
-#[tokio::test]
-#[ignore]
-async fn test_worker_status_reflects_registered_agents() {
-    let env = HookTestEnv::new();
-
-    // Pre-register supervisor and 2 workers
-    env.register_agent_with_role("sup-id-3", "boss-fox", "supervisor");
-    env.register_agent_with_role("wrk-id-3a", "alpha", "worker");
-    env.register_agent_with_role("wrk-id-3b", "beta", "worker");
-
-    println!("Test environment: {:?}", env.dir());
-
-    let result = session(
-        QueryOptions::new()
-            .model("haiku")
-            .cwd(env.dir())
-            .mcp_config(env.mcp_config_path())
-            .max_turns(3)
-            .allow_tool("mcp__cas__factory"),
-        |mut sess| async move {
-            sess.send(
-                "Use mcp__cas__factory with action='worker_status'. \
-                Report exactly how many workers are listed and their names.",
-            )
-            .await?;
-
-            loop {
-                let msg = sess.await_response(None).await?;
-                if let Message::Assistant(ref a) = msg {
-                    println!("Assistant: {}", a.text());
-                }
-                if let Message::Result(ref r) = msg {
-                    return Ok(r.clone());
-                }
-            }
-        },
-    )
-    .await;
-
-    match result {
-        Ok(r) => {
-            let text = r.result.as_deref().unwrap_or("");
-            println!("\nFinal result: {}", text);
-            let lower = text.to_lowercase();
-            assert!(
-                lower.contains("alpha"),
-                "Should mention worker alpha. Got: {}",
-                text
-            );
-            assert!(
-                lower.contains("beta"),
-                "Should mention worker beta. Got: {}",
-                text
-            );
-        }
-        Err(e) => panic!("Session failed: {:?}", e),
-    }
-}
-
-// =============================================================================
 // Test 6: Supervisor shuts down workers
 // =============================================================================
 

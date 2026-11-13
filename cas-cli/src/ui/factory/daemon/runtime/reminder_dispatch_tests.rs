@@ -347,13 +347,21 @@ async fn reminder_held_without_turn_end(lines: &[String]) {
     write_supervisor_transcript(&root, &daemon, lines);
     let (id, _) = dispatch(&mut daemon, false, false);
     let name = daemon.app.supervisor_name().to_string();
-    for _ in 0..2 {
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let queue = open_prompt_queue_store(&cas).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         daemon.pane_silent_since.insert(name.clone(), Instant::now());
         daemon.process_prompt_queue().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        daemon.queue_jobs.flush_for_reexec(&cas, Duration::from_secs(5)).await.unwrap();
+        super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
+        if queue.message_delivery_report(id).unwrap().unwrap().stage == cas_store::DeliveryStage::Gated {
+            break;
+        }
+        assert!(Instant::now() < deadline, "working supervisor's gate was never recorded");
+        tokio::task::yield_now().await;
     }
-    daemon.process_prompt_queue().await.unwrap();
-    let report = open_prompt_queue_store(daemon.app.cas_dir()).unwrap().message_delivery_report(id).unwrap().unwrap();
+    let report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(report.stage, cas_store::DeliveryStage::Gated, "{report:?}");
     assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "nothing typed into a working supervisor");
     assert!(teams_messages(&daemon).is_empty());

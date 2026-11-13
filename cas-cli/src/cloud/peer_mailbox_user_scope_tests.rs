@@ -468,7 +468,8 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     let sender_clone = Receiver::new();
     let root = sender_clone.dir.path();
     std::fs::create_dir_all(root.join("docs")).unwrap();
-    std::fs::write(root.join("docs/how.md"), "We retry with jitter.\n").unwrap();
+    let contents = "We retry with jitter.\n";
+    std::fs::write(root.join("docs/how.md"), contents).unwrap();
     let file = resolve_attachment(&sender_clone.cas, "docs/how.md@0123456789abcdef").unwrap();
     let PeerAttachment::File { path, relative, commit, .. } = &file else {
         panic!("a file pointer: {file:?}");
@@ -485,15 +486,16 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
         sha256: Some("ab".repeat(32)),
         url: Some("https://cloud.example/a/art-1".into()),
     };
+    let message = "Here's how we did it.";
     let body = attach_message_intent(
-        &attach_pointers("Here's how we did it.", &[file.clone(), artifact.clone()]),
+        &attach_pointers(message, &[file.clone(), artifact.clone()]),
         Some("ask"),
         false,
     ).unwrap();
     let (_, rest) = split_message_intent(&body);
     let (pointers, text) = split_attachments(rest);
     assert_eq!(pointers, [file.clone(), artifact], "both pointers round-trip");
-    assert_eq!(text, "Here's how we did it.");
+    assert_eq!(text, message);
     let (legacy, _) = split_attachments(
         "<cas-peer-attachment v=\"1\" kind=\"artifact\" id=\"art-old\"/>\nlegacy proof",
     );
@@ -516,11 +518,11 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     let shown = path.to_string();
     assert!(prompt.contains(&shown), "{prompt}");
     // pin: the attachment pointer and the body survive delivery verbatim.
-    assert_eq!(std::fs::read_to_string(path).unwrap(), "We retry with jitter.\n");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
     // pin: the recipient executes the advertised MCP command verbatim.
     assert!(prompt.contains("artifact action=fetch task_id=cas-proof id=art-1"), "{prompt}");
     // pin: delivered wording the recipient supervisor acts on.
-    assert!(prompt.ends_with("Here's how we did it."), "{prompt}");
+    assert!(prompt.ends_with(message), "{prompt}");
 }
 
 #[test]

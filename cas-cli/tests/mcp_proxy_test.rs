@@ -1115,7 +1115,17 @@ exec env \
             .unwrap()
             .success()
     );
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let state = std::process::Command::new("ps")
+            .args(["-p", pid.trim(), "-o", "stat="]).output().unwrap();
+        let state_text = String::from_utf8_lossy(&state.stdout);
+        if !state.status.success() || state_text.trim().is_empty() || state_text.trim_start().starts_with('Z') {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "owned upstream did not terminate");
+        tokio::task::yield_now().await;
+    }
 
     let caller = test_proxy_caller();
     let failed = tokio::time::timeout(std::time::Duration::from_secs(3), async {

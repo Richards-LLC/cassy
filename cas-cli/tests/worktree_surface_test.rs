@@ -6050,6 +6050,7 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     repo.add_worktree(&expected_root, "factory/erin");
     // A contained source is a no-op receipt (cas-4221); give erin work to merge.
     std::fs::write(expected_root.join("erin.txt"), "erin work").unwrap();
+    let expected_payload = std::fs::read_to_string(expected_root.join("erin.txt")).unwrap();
     run_git(&["add", "erin.txt"], &expected_root);
     run_git(&["commit", "-m", "erin work"], &expected_root);
 
@@ -6069,7 +6070,7 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
         .await
         .expect("factory call should succeed");
     let text = get_text(&result);
-    assert_eq!(git_stdout(&repo.root, &["show", "main:erin.txt"]), "erin work");
+    assert_eq!(git_stdout(&repo.root, &["show", "main:erin.txt"]), expected_payload);
 }
 
 // =============================================================================
@@ -6096,6 +6097,7 @@ async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
     let wt_path = cas_root.join("worktrees").join("alice");
     repo.add_worktree(&wt_path, "factory/alice");
     std::fs::write(wt_path.join("match.txt"), "ok").unwrap();
+    let expected_payload = std::fs::read_to_string(wt_path.join("match.txt")).unwrap();
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "match work"], &wt_path);
 
@@ -6110,7 +6112,7 @@ async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
         .await
         .expect("matching worker/task must merge");
     let text = get_text(&result);
-    assert_eq!(git_stdout(&repo.root, &["show", "epic/match:match.txt"]), "ok");
+    assert_eq!(git_stdout(&repo.root, &["show", "epic/match:match.txt"]), expected_payload);
 }
 
 /// AC2: Worker A + task assigned to worker B rejects — no foreign epic redirect.
@@ -6282,6 +6284,7 @@ async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
     let wt_path = cas_root.join("worktrees").join("alice");
     repo.add_worktree(&wt_path, "factory/alice");
     std::fs::write(wt_path.join("lease-work.txt"), "via lease").unwrap();
+    let expected_payload = std::fs::read_to_string(wt_path.join("lease-work.txt")).unwrap();
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "lease work"], &wt_path);
 
@@ -6296,7 +6299,7 @@ async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
         .await
         .expect("matching lease must authorize task_id");
     let text = get_text(&result);
-    assert_eq!(git_stdout(&repo.root, &["show", "epic/lease-ok:lease-work.txt"]), "via lease");
+    assert_eq!(git_stdout(&repo.root, &["show", "epic/lease-ok:lease-work.txt"]), expected_payload);
 }
 
 fn register_delivery_agent(

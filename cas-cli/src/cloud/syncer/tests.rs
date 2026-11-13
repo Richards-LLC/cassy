@@ -401,14 +401,6 @@ fn new_keeps_two_queue_root_identities_separate() {
 }
 
 #[test]
-fn test_conflict_action_variants() {
-    // Test all ConflictAction variants exist
-    let _use_remote = ConflictAction::UseRemote;
-    let _use_local = ConflictAction::UseLocal;
-    let _skip = ConflictAction::Skip;
-}
-
-#[test]
 fn test_sync_conflict_creation() {
     use chrono::Utc;
     let conflict = SyncConflict {

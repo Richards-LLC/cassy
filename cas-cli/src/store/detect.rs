@@ -1419,7 +1419,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Uses global state (CWD, env vars) - run with: cargo test -- --ignored
     fn test_has_project_cas() {
         let mut env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
 
@@ -1675,7 +1674,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Uses global state (CAS_ROOT env var) - run with: cargo test -- --ignored
     fn test_cas_root_env_var() {
         let temp = TempDir::new().unwrap();
         let cas_dir = temp.path().join(".cas");
@@ -1689,7 +1687,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Uses global state (CAS_ROOT env var, CWD) - run with: cargo test -- --ignored
     fn test_cas_root_env_var_invalid_path() {
         let temp = TempDir::new().unwrap();
         // Canonicalize to handle macOS /var -> /private/var symlinks

@@ -1947,7 +1947,20 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .expect("git is installed");
-        std::thread::sleep(Duration::from_millis(1_200));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = Command::new("ps").args(["-A", "-o", "pid=,ppid=,etime=,comm="]).output().unwrap();
+            let listing = String::from_utf8_lossy(&output.stdout);
+            if hung_helpers(&listing, std::process::id(), 1).iter().any(|(pid, _, _)| *pid == child.id() as i32) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("owned helper never reached the selected age");
+            }
+            std::thread::yield_now();
+        }
         let killed = kill_hung_helpers(std::process::id(), 1);
         assert!(
             killed

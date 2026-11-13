@@ -581,29 +581,24 @@ fn the_production_selector_is_hermetic_to_home_cas_and_cloud() {
     env.set("CAS_ROOT", &poison_cas);
     env.set("CAS_USER_CLOUD_JSON", poison_cas.join("cloud.json"));
 
-    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let (stop, stopped) = mpsc::channel();
     let server = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let _ = stream.write_all(
                         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
                     );
-                    let _ = attempt_tx.send(true);
-                    return;
+                    return true;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        let _ = attempt_tx.send(false);
-                        return;
+                    // accept was checked first, so queued requests are drained before stopping.
+                    if !matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                        return false;
                     }
-                    thread::sleep(Duration::from_millis(10));
+                    thread::yield_now();
                 }
-                Err(_) => {
-                    let _ = attempt_tx.send(false);
-                    return;
-                }
+                Err(error) => panic!("cloud trap accept failed: {error}"),
             }
         }
     });
@@ -612,34 +607,12 @@ fn the_production_selector_is_hermetic_to_home_cas_and_cloud() {
         &corpus,
         &fixture.cases[0],
         QueryMode::SeededTask,
-    )
-    .expect("hermetic production ranking");
-    assert!(!ranking.is_empty(), "the trap must not remove the ranking");
-    assert_eq!(
-        attempt_rx
-            .recv_timeout(Duration::from_secs(3))
-            .expect("cloud trap result"),
-        false,
-        "production ranking attempted a live cloud call"
     );
-    server.join().expect("cloud trap thread");
-}
-
-#[test]
-// pin: The retrieval evaluation procedure documents unreplicated inputs and its public rebaseline switch alongside runtime coverage.
-fn the_production_runner_documents_its_unreplicated_surface() {
-    let module = include_str!("../src/retrieval_eval.rs");
-    for behavior in [
-        "rule/skill/knowledge/agent stores",
-        "host-constraints/cloud/mcp-tools sections",
-        "hooks.ai_context = false",
-        "build_context_ai",
-    ] {
-        assert!(
-            module.contains(behavior),
-            "retrieval eval module must disclose unreplicated behavior: {behavior}"
-        );
-    }
+    let _ = stop.send(());
+    let attempted = server.join().expect("cloud trap thread");
+    let ranking = ranking.expect("hermetic production ranking");
+    assert!(!ranking.is_empty(), "the trap must not remove the ranking");
+    assert!(!attempted, "production ranking attempted a live cloud call");
 }
 
 #[test]

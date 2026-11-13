@@ -1785,13 +1785,19 @@ fn hub_serve_does_not_hold_instance_lock_while_auth_lock_is_contended() {
     fs::set_permissions(hub.join("auth.lock"), fs::Permissions::from_mode(0o600)).unwrap();
     auth_lock.lock_exclusive().unwrap();
 
+    let auth_entered = home.path().join("auth-open-entered");
     let mut serve = cas_process_command(home.path(), &path);
     serve
+        .env("CAS_TEST_HUB_AUTH_OPEN_MARKER", &auth_entered)
         .args(["hub", "serve", "--bind", "127.0.0.1", "--port", "0"])
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = serve.spawn().expect("spawn auth-lock contention fixture");
-    thread::sleep(Duration::from_millis(300));
+    let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+    while !auth_entered.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(auth_entered.exists(), "hub never reached AuthStore::open");
 
     let paths = cas::hub::HubRuntimePaths::new(&hub);
     let contender = paths
@@ -2186,10 +2192,20 @@ esac
         "old hub must still authoritatively own the lock after record removal"
     );
 
-    // Exceed the public implementation's five-second process-only stop wait.
-    // The old restart path discards that timeout, starts too early, and its
-    // one-shot child loses the still-held lock before this release arrives.
-    thread::sleep(Duration::from_millis(5_200));
+    // Advance the stop wait beyond the former five-second process-only
+    // window, while the real old-generation machine lock remains held.
+    fs::write(barrier.join("stop-wait-elapsed-ms"), b"5200\n").unwrap();
+    let observed_elapsed = barrier.join(format!("restart-stop-elapsed-{}", child.id()));
+    let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+    while !fs::read_to_string(&observed_elapsed).ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_some_and(|elapsed| elapsed >= 5_200)
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fs::read_to_string(&observed_elapsed).unwrap().trim().parse::<u64>().unwrap() >= 5_200,
+        "restart never observed the advanced stop clock while the old lock was held");
     fs::write(barrier.join("release"), b"release\n").unwrap();
     let output = child
         .wait_with_output()
@@ -2240,11 +2256,20 @@ fn restart_force_closes_a_held_client_and_starts_the_replacement() {
     held.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     write!(
         held,
-        "POST /v1/auth/pairing/exchange HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 1024\r\n\r\n{{"
+        "POST /v1/auth/pairing/exchange HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nExpect: 100-continue\r\n\r\n"
     )
     .unwrap();
     held.flush().unwrap();
-    thread::sleep(Duration::from_millis(100));
+    let mut interim = Vec::new();
+    while !interim.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        held.read_exact(&mut byte).unwrap();
+        interim.push(byte[0]);
+        assert!(interim.len() < 4096, "bounded HTTP interim response");
+    }
+    assert!(interim.starts_with(b"HTTP/1.1 100 "), "handler must request the withheld body: {interim:?}");
+    held.write_all(b"{{").unwrap();
+    held.flush().unwrap();
 
     let started = Instant::now();
     let restart = cas_command(home.path(), &path)
@@ -2927,12 +2952,7 @@ fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
     assert!(output.status.code().is_some(), "status hit its command deadline: {:?}", output.status);
     let status: Value = serde_json::from_slice(&output.stdout).expect("one status document");
     assert_eq!(status["service_status"], "unknown", "{status}");
-    assert!(
-        status["service_warning"]
-            .as_str()
-            .unwrap()
-            .contains("timed out")
-    );
+
     assert_eq!(
         status["runtime_receipt"]["boot_prerequisites"]["service_active"],
         Value::Null

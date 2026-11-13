@@ -116,15 +116,19 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
 async fn stall(daemon: &mut FactoryDaemon, timeout: Duration) -> Arc<ProvisioningCancellation> {
     let entered = daemon.app.cas_dir().join("entered");
     let late_write = daemon.app.cas_dir().join("late-write");
+    let late_pid = daemon.app.cas_dir().join("late-writer.pid");
+    let late_gate = daemon.app.cas_dir().join("late-writer.gate");
     let mut command = Command::new("sh");
     command
         .args([
             "-c",
-            "touch \"$1\"; (sleep 1; touch \"$2\") & sleep 30 & wait",
+            "mkfifo \"$4\"; (read gate < \"$4\"; touch \"$2\") & echo $! > \"$3\"; touch \"$1\"; sleep 30 & wait",
             "fixture",
         ])
         .arg(&entered)
-        .arg(&late_write);
+        .arg(&late_write)
+        .arg(&late_pid)
+        .arg(&late_gate);
     let queue = crate::store::open_spawn_queue_store(daemon.app.cas_dir()).unwrap();
     let request_id = queue
         .enqueue_spawn(
@@ -159,6 +163,20 @@ async fn stall(daemon: &mut FactoryDaemon, timeout: Duration) -> Arc<Provisionin
         "fixture must enter provisioning before the action"
     );
     stop
+}
+
+async fn late_writer_is_dead(daemon: &FactoryDaemon) {
+    let pid = std::fs::read_to_string(daemon.app.cas_dir().join("late-writer.pid")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = Command::new("ps").args(["-p", pid.trim(), "-o", "stat="]).output().unwrap();
+        let text = String::from_utf8_lossy(&state.stdout);
+        if !state.status.success() || text.trim().is_empty() || text.trim_start().starts_with('Z') {
+            break;
+        }
+        assert!(Instant::now() < deadline, "owned late-writer descendant survived cancellation");
+        tokio::task::yield_now().await;
+    }
 }
 
 fn setup() -> (tempfile::TempDir, FactoryDaemon) {
@@ -262,7 +280,7 @@ async fn restart_spawn_queue_cancels_stalled_provisioner_and_recovers() {
     assert_eq!(daemon.spawn_task.as_ref().unwrap().1, Some(next_request));
     assert_eq!(daemon.spawn_task.as_ref().unwrap().0, "next-worker");
     daemon.cancel_provisioning();
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    late_writer_is_dead(&daemon).await;
     assert!(
         !daemon.app.cas_dir().join("late-write").exists(),
         "reset must kill descendant writers"
@@ -303,7 +321,7 @@ async fn targeted_shutdown_kills_stalled_provisioner_without_retiring_other_name
     daemon.process_pending_spawns().await;
     assert!(started.elapsed() < Duration::from_millis(500));
     drain_failure(&mut daemon).await;
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    late_writer_is_dead(&daemon).await;
     assert!(
         !daemon.app.cas_dir().join("late-write").exists(),
         "shutdown must kill descendant writers"
@@ -389,16 +407,8 @@ fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741(
                   'factory/clever-panther-60-cas-9db0b'";
     // The daemon reports inside a loop pass whose store budget is often
     // spent while another writer holds the database (GH #1165).
-    let db = cas_dir.join("cas.db");
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let blocker = std::thread::spawn(move || {
-        let conn = rusqlite::Connection::open(db).unwrap();
-        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-        held_tx.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        conn.execute_batch("COMMIT").unwrap();
-    });
-    held_rx.recv().unwrap();
+    let blocker = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     {
         let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
         super::queue_and_events::report_provision_failure(
@@ -410,7 +420,7 @@ fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741(
             reason,
         );
     }
-    blocker.join().unwrap();
+    blocker.execute_batch("COMMIT").unwrap();
 
     let row_state = || {
         rusqlite::Connection::open(cas_dir.join("cas.db"))

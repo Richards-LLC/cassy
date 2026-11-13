@@ -355,11 +355,15 @@ fn reconcile_reused_factory_branch(
     // GH #1843: before its first commit, an accepted same-task start is
     // the provenance for dirty work. Identity validation already checked the
     // task's assignee, target and graph; also require this exact source branch.
-    // Keep its original boundary even if the target advanced during review.
+    // Keep its original boundary while edits remain, even if the target advanced.
+    // A clean lane still refreshes to the target before recording a new boundary.
     // The base remains a boundary, never an owned delivery commit.
     if recorded_start_branch == Some(expected_branch)
         && task_identity.and_then(|identity| identity.start_base.as_deref())
             == Some(factory_tip.as_str())
+        && git.has_uncommitted_changes(worktree_path).map_err(|error| {
+            format!("Cannot inspect reused factory branch {expected_branch}: {error}")
+        })?
     {
         return Ok(ReusedFactoryBranchStart::Unchanged);
     }

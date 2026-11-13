@@ -492,6 +492,47 @@ mod tests {
         check_staffing(&root, "cas-feat").unwrap();
     }
 
+    /// GH #1919: G-100 says to retarget parked work to the next train. That
+    /// one proof_scope_fix update now moves the parent too, so the re-park
+    /// start is not refused G-06 by the frozen train.
+    #[tokio::test]
+    async fn retarget_to_next_train_moves_parent_so_start_is_not_refused_gh_1919() {
+        let _env = TestEnvGuard::temp_home();
+        let (temp, root) = fixture();
+        let next = "epic/release-train-vnext-cas-tr2";
+        git(temp.path(), &["branch", next]);
+        let store = crate::store::open_task_store(&root).unwrap();
+        let mut train = store.get("cas-tr").unwrap();
+        train.id = "cas-tr2".into();
+        train.branch = Some(next.into());
+        train.labels = vec!["release-train".into()];
+        store.add(&train).unwrap();
+        let mut parked = store.get("cas-feat").unwrap();
+        parked.status = crate::types::TaskStatus::AwaitingMerge;
+        parked.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:freeze-test".into(),
+            target_branch: "epic/release-train-vnext-cas-tr".into(),
+        });
+        store.update(&parked).unwrap();
+        freeze(&root, "cas-tr", "operator", None).unwrap();
+
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role(
+            "retarget-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let req = serde_json::from_value(serde_json::json!({"id": "cas-feat"})).unwrap();
+        core.cas_task_update_with_delivery_mode(
+            req, None, Some(next), true, Some("cas-tr froze; next train"), None, None, None, false,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+
+        assert_eq!(store.get_parent_epic("cas-feat").unwrap().map(|epic| epic.id).as_deref(), Some("cas-tr2"));
+        check_staffing(&root, "cas-feat").unwrap();
+    }
+
     /// The operator lift clears the gate; a supervisor has no lift action.
     #[test]
     fn operator_lift_reopens_the_train() {

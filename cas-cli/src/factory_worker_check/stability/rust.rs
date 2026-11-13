@@ -47,7 +47,9 @@ impl Inventory<'_> {
         }
         let Some(source) = self.sources.get(path).copied() else { return Ok(()); };
         let tree = self.parser.parse(source, None).context("STABILITY_RUST_PARSE")?;
-        if tree.root_node().has_error() { bail!("STABILITY_RUST_PARSE: {path}"); }
+        // Recovery inside valid Rust bodies (for example a local `&raw`
+        // borrow) must not reject unrelated tests. Discover function/module
+        // structure here; the capped Cargo run checks Rust validity.
         self.items(tree.root_node(), source, path, prefix, directory, package, harness)
     }
 

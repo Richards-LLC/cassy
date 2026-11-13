@@ -1466,7 +1466,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     receipt("in_progress", None);
     let pending = cassy.close_green_merged_delivery(ID).await.receipt(ID);
     if !eligible {
-        assert!(pending.contains("[G-70]"), "an ineligible delivery cannot close without its pre-merge approval: {pending}");
+        assert!(pending.contains("[G-34]"), "an ineligible delivery cannot close without its pending pre-merge approval: {pending}");
         assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
         assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap().id, dispatch.id,
             "close must not replace the missing pre-merge approval with a post-merge dispatch");

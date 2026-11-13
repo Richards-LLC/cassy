@@ -13,7 +13,7 @@ name: CI
 #
 # COMPILER CACHE CONTRACT (cas-67a2). Every job here that compiles Rust must:
 #   1. configure the GitHub cache-v2 sccache backend — the workflow-level env
-#      below does that for all of them, and only `build-benchmark` opts out; and
+#      below does that except local factory lanes and `build-benchmark`; and
 #   2. end with a `Report sccache stats` step calling
 #      scripts/ci-sccache-summary.sh, so each job's hit rate is visible in its
 #      job summary instead of buried in a log nobody greps.
@@ -66,10 +66,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  RUSTC_WRAPPER: sccache
+  # Local factory listeners share a host; leave both wrappers empty there.
+  RUSTC_WRAPPER: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')) && 'sccache' || '' }}
+  RUSTC_WORKSPACE_WRAPPER: ""
   # The action supplies GitHub cache-v2 credentials. Keep one explicit CAS
   # namespace so every CI job can reuse identical compiler objects.
-  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_GHA_ENABLED: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && 'false' || 'true' }}
   SCCACHE_GHA_VERSION: "cas-v2"
 
 permissions:

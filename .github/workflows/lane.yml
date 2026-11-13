@@ -32,6 +32,13 @@ concurrency:
   group: lane-${{ github.ref }}
   cancel-in-progress: true
 
+# The local listeners share a host. Reuse their target directories without
+# compiler-cache daemons competing for the default server port (cas-3126).
+env:
+  RUSTC_WRAPPER: ""
+  RUSTC_WORKSPACE_WRAPPER: ""
+  SCCACHE_GHA_ENABLED: "false"
+
 permissions:
   contents: read
   actions: read
@@ -328,9 +335,6 @@ jobs:
     env: &lane-impact-env
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: "cas-v2"
       # The train archive profile, so the main-primed dependency cache applies.
       ZIG: ${{ github.workspace }}/.context/zig/zig
       CARGO_PROFILE_DEV_DEBUG: "0"

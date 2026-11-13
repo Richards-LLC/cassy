@@ -500,6 +500,10 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         for name, job in {**slim_jobs, **impact}.items():
             with self.subTest(job=name):
                 self.assertEqual(job['runs-on'], local)
+                environment = {**lane.get('env', {}), **job.get('env', {})}
+                self.assertEqual(environment.get('RUSTC_WRAPPER'), '')
+                self.assertEqual(environment.get('RUSTC_WORKSPACE_WRAPPER'), '')
+                self.assertEqual(environment.get('SCCACHE_GHA_ENABLED'), 'false')
         # The non-slim lane calls ci.yml. Evaluate its selected jobs too so
         # rollback cannot silently put factory work back on hosted runners.
         for event, ref in [('push', 'refs/heads/factory/worker'),
@@ -531,8 +535,25 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                             runner = self.gh_value(runner, context)
                         if event == 'push' and ref.startswith('refs/heads/factory/'):
                             self.assertEqual(runner, local)
+                            environment = {**ci['env'], **job.get('env', {})}
+                            for key, expected in [('RUSTC_WRAPPER', ''),
+                                                  ('RUSTC_WORKSPACE_WRAPPER', ''),
+                                                  ('SCCACHE_GHA_ENABLED', 'false')]:
+                                value = environment[key]
+                                if value.startswith('${{'):
+                                    value = self.gh_value(value, context)
+                                self.assertEqual(value, expected)
                         else:
                             self.assertNotEqual(runner, local)
+                            self.assertEqual(self.gh_value(ci['env']['RUSTC_WRAPPER'], context), 'sccache')
+                            backend = ci['env']['SCCACHE_GHA_ENABLED']
+                            if backend.startswith('${{'):
+                                backend = self.gh_value(backend, context)
+                            self.assertEqual(backend, 'true')
+        setup = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        for step in setup['runs']['steps']:
+            if step.get('id') == 'setup-sccache' or step.get('name') == 'Probe sccache backend':
+                self.assertFalse(self.gh_expr(step['if'], {'env.RUSTC_WRAPPER': ''}))
         for name, job in ci['jobs'].items():
             if name != 'fast-validation-runner-route':
                 self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)

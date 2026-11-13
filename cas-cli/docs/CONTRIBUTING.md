@@ -3239,6 +3239,10 @@ including Rust impact own tests and ring shards. A busy or offline local pool
 queues lane work there; it never spills onto GitHub-hosted runners.
 `CASSY_LANE_SELF_HOSTED` no longer controls routing. Unsetting `CAS_LANE_SLIM`
 restores the legacy checks while keeping factory work on the local pool.
+Both compiler wrappers are empty and the sccache backend is disabled on these
+shared-host lanes, including own/ring and legacy checks. The shared Rust setup
+skips its sccache installation/probe, and cache reporting never starts a server.
+Hosted validation retains its normal sccache backend.
 
 The six existing `cas-lane-light` listeners reserve GitHub-hosted width for
 release PR checks, frozen-train validation, merge-group validation and Release

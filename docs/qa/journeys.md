@@ -912,7 +912,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 #### Expected experience
 
-- Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer.
+- Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer. Autocomplete choices consume the typed prefix, close the palette and use the same compact receipt as the header menu. A Finish outcome that exceeds the short confirmation window remains unconfirmed while bounded read-only status checks continue; its own late native completion resolves the receipt without resending (cas-5b8a).
 - Only an exact supported first token reserves a command. Paths such as `/home/pippenz/notes.md`, unknown slash text and `//usage` send as ordinary messages; prefix suggestions still require an explicit choice (cas-62ea). A leading space also sends a supported command as ordinary text.
 - Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
 - Finish queues during a native turn and keeps its receipt pending beyond the outcome window until submission. An empty prompt after native completion accepts Finish despite background shell footer repaint; its actual reply appears in the conversation (cas-88ca).

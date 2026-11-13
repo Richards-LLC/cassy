@@ -46,6 +46,11 @@ const CAPTURES: &[Capture] = &[
         raw: include_str!("fixtures/cas-f3e3-message-display.json"),
         bindings: &[("delta", "message"), ("final", "message_is_final")],
     },
+    Capture {
+        name: "Claude 2.1.224 Stop (cas-f3e3)",
+        raw: include_str!("fixtures/cas-f3e3-stop.json"),
+        bindings: &[("last_assistant_message", "message")],
+    },
 ];
 
 /// Extract only HookInput field-level serde metadata. Fail closed if declaration

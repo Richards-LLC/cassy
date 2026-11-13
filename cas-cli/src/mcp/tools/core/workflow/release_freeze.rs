@@ -31,8 +31,8 @@ pub(crate) struct Freeze {
 }
 
 /// The freeze recorded on an open release train, published or not. `freeze`
-/// writes exactly one label; task updates only append labels, so the first
-/// one is authoritative and a later appended label cannot move its tip.
+/// writes exactly one label. The first valid label is authoritative if legacy
+/// stored data contains multiple freeze labels.
 pub(crate) fn freeze_of(train: &Task) -> Option<Freeze> {
     if !is_release_train(train) || train.is_terminal() {
         return None;

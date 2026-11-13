@@ -875,9 +875,8 @@ async fn finding_label_corrections_replace_axes_without_priority_override_cas_71
         }
         if labels.is_empty() {
             assert!(!task.labels.iter().any(|label| label == "incident" || label == "corrected" || label.starts_with("journey:")));
-        } else {
-            assert!(task.labels.contains(&"corrected".into()));
         }
+        assert_eq!(task.labels.contains(&"corrected".into()), labels.split(',').any(|label| label == "corrected"));
     }
     // Even unchanged and ordinary updates report their resulting priority.
     for (update, expected) in [

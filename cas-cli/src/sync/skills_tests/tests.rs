@@ -608,3 +608,19 @@ fn valid_yaml_without_the_key_does_not_fall_back_to_scanning() {
         "a missing key must read as absent, not as a prefix match"
     );
 }
+
+/// GH #1777: a legacy database skill named like a builtin must not write the
+/// builtin's directory, or `cas update` and `cas doctor` judge it differently.
+#[test]
+fn a_database_skill_never_writes_a_builtin_directory_gh_1777() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join(".claude/skills");
+    let syncer = SkillSyncer::new(target.clone());
+    let legacy = create_test_skill("playwright-debug", true);
+
+    let report = syncer.sync_all(&[legacy]).unwrap();
+
+    assert_eq!(report.synced, 0);
+    assert_eq!(report.shadowed_names, vec!["playwright-debug".to_string()]);
+    assert!(!target.join("cas-playwright-debug").exists());
+}

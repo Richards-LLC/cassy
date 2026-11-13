@@ -1236,7 +1236,12 @@ async fn dead_recycle_refuses_unregistered_live_replacement_cas_35f6() {
     const TEST: &str = "dead_recycle_refuses_unregistered_live_replacement_cas_35f6";
     if run_hermetic_recycle_child(TEST) { return; }
     use crate::mcp::{CasCore, tools::CasService};
-    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", SESSION);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let account = env.home().join(".codex");
+    std::fs::create_dir(&account).unwrap();
+    std::fs::write(account.join("auth.json"), "{}").unwrap();
     let dir = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(dir.path()).unwrap();
     let name = "replacement-before-register";
@@ -1261,8 +1266,8 @@ async fn dead_recycle_refuses_unregistered_live_replacement_cas_35f6() {
     let service = CasService::new(core, None);
     #[cfg(not(feature = "mcp-proxy"))]
     let service = CasService::new(core);
-    service.factory_recycle_worker_in(&crate::ops::fleet::FleetContext::operator(SESSION),
-        serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":name})).unwrap())
+    service.factory_request(rmcp::handler::server::wrapper::Parameters(
+        serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":name})).unwrap()))
         .await.unwrap();
     let request = open_spawn_queue_store(&cas).unwrap().peek(10).unwrap().remove(0).id;
     // The successor is running before the queued dead-path recycle is applied.
@@ -1299,6 +1304,11 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
     use crate::mcp::{CasCore, tools::CasService};
     use crate::worktree::{WorktreeConfig, WorktreeManager};
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", SESSION);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let account = env.home().join(".codex");
+    std::fs::create_dir(&account).unwrap();
+    std::fs::write(account.join("auth.json"), "{}").unwrap();
     let repo = env.home().join("project");
     std::fs::create_dir(&repo).unwrap();
     env.set_current_dir(&repo);
@@ -1383,7 +1393,7 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
         #[cfg(not(feature = "mcp-proxy"))]
         let service = CasService::new(core);
         let req = serde_json::from_value(serde_json::json!({"action":"recycle_worker", "target":name})).unwrap();
-        service.factory_recycle_worker_in(&crate::ops::fleet::FleetContext::operator(SESSION), req)
+        service.factory_request(rmcp::handler::server::wrapper::Parameters(req))
             .await.expect("supervisor can recycle a dead worker with unpublished work");
         daemon.enqueue_spawn_requests().unwrap();
         daemon.process_pending_spawns().await;
@@ -1430,9 +1440,10 @@ fn run_hermetic_recycle_child(test_name: &str) -> bool {
         (
             "codex",
             format!(
-                "#!/bin/sh\npwd > \"$HOME/replacement-cwd\"\nprintf '\\033[32m{REPLACEMENT_STARTUP}\\033[0m\\n'\nexec /bin/sleep 300\n"
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.0.0-test\\n'; exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\npwd > \"$HOME/replacement-cwd\"\nprintf '\\033[32m{REPLACEMENT_STARTUP}\\033[0m\\n'\nexec /bin/sleep 300\n"
             ),
         ),
+        ("codex-code-mode-host", "#!/bin/sh\nexit 0\n".into()),
         ("claude", format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.316 (Claude Code)'; exit 0; fi\nif [ \"$1\" = --help ]; then echo '--mcp-config --strict-mcp-config --effort'; exit 0; fi\nprintf '%s\\n' \"$CAS_ROOT\" > \"$CAS_ROOT/replacement-root\"\nprintf '{REPLACEMENT_STARTUP}\\n'\nexec /bin/sleep 300\n")),
         ("cas", "#!/bin/sh\nexit 0\n".into()),
     ] {

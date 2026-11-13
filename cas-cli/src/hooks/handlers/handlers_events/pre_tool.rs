@@ -501,6 +501,10 @@ fn handle_pre_tool_use_checked(
         None => return Ok(HookOutput::empty()),
     };
 
+    if let Some(reason) = crate::hooks::handlers::operator_evidence::outgoing_denial(input) {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-47", reason)));
+    }
+
     // Run before factory auto-approval and the missing-root early return.
     // Slack transport is an operator policy for every session.
     // gate[H-06 pre-tool]: Slack transport (Violet only)
@@ -2959,18 +2963,22 @@ fn collect_git_write_targets(
         bindings.insert("CAS_CLONE_PATH".to_string(), value);
     }
 
-    // Strip only literal heredoc data for this allowance. Expanding bodies
-    // can run $(git ...); retain the raw subprocess scopes in that case.
-    let expanding_heredoc = shell_command_without_heredoc_bodies(command).lines().any(|line| {
-        heredoc_delimiters(line).iter().any(|delimiter| !delimiter.literal_body)
-    });
-    let statements = if expanding_heredoc {
-        super::attribution::split_shell_statements(command)
-    } else {
-        shell_statement_words(command)
-    };
-    let mut pending_statements = std::collections::VecDeque::from(statements);
-    while let Some(words) = pending_statements.pop_front() {
+    // Heredoc bodies are data; only substitutions (including those in
+    // expanding bodies) execute. They share the shell_invocations scanner.
+    let substitutions = shell_substitutions(command);
+    if substitutions.unresolved() {
+        let mut target = default_target.clone();
+        target.uncertain_scope = true;
+        targets.push(target);
+    }
+    // A substitution runs before its statement, in that statement's cwd.
+    let mut visited_cwds = Vec::new();
+    let mut pending_statements = std::collections::VecDeque::from(shell_statement_words(command));
+    loop {
+        if !visited_cwds.contains(shell_cwd) {
+            visited_cwds.push(shell_cwd.clone());
+        }
+        let Some(words) = pending_statements.pop_front() else { break };
         let standalone_assignments = !words.is_empty() && words.iter().all(|word| {
             word.split_once('=').is_some_and(|(name, _)| is_shell_variable_name(name))
         });
@@ -3179,6 +3187,12 @@ fn collect_git_write_targets(
             index += 1;
         }
         targets.push(target);
+    }
+    for body in &substitutions.bodies {
+        for cwd in &visited_cwds {
+            // A subshell inherits cwd but cannot change its parent's cwd.
+            collect_git_write_targets(default_target, &mut cwd.clone(), body, depth + 1, targets);
+        }
     }
 }
 
@@ -3782,7 +3796,8 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
                      literal: &mut bool,
                      word_quoted: &mut bool,
                      ends: &mut Vec<usize>, end: usize| {
-        if !word.is_empty() {
+        // Argument consumers must preserve quoted empty values (e.g. --shuffle '').
+        if !word.is_empty() || (arguments_only && *word_quoted) {
             tokens.push(ShellToken::Word(std::mem::take(word)));
             literals.push(*literal);
             ends.push(end);
@@ -6247,15 +6262,12 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     if depth > 3 {
         return;
     }
-    let mut bodies = shell_heredoc_bodies(command).into_iter();
-    for delimiter in shell_command_without_heredoc_bodies(command).lines().flat_map(heredoc_delimiters) {
-        if let Some(body) = bodies.next()
-            && !delimiter.literal_body
-        {
-            collect_heredoc_substitutions(&body, depth, found);
-        }
+    let substitutions = shell_substitutions(command);
+    found.unresolved_heredoc |= substitutions.unresolved_heredoc;
+    found.unresolved_ansi_c |= substitutions.unresolved_ansi_c;
+    for body in &substitutions.bodies {
+        collect_shell_invocations(body, depth + 1, found);
     }
-    collect_shell_substitutions(&shell_command_without_heredoc_bodies(command), depth, found);
     for words in shell_statement_words(command) {
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
@@ -6297,14 +6309,43 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     }
 }
 
+/// Command text one shell line runs through substitution, for every guard
+/// that inspects executed commands. Expanding heredoc bodies contribute only
+/// their substitutions; literal bodies are data. Each flag marks text that
+/// could not be bounded, which callers must refuse rather than skip. An
+/// unterminated `$(` is a syntax error; the workspace contract names it.
+#[derive(Default)]
+pub(super) struct ShellSubstitutions {
+    pub(super) bodies: Vec<String>,
+    pub(super) unresolved_heredoc: bool,
+    pub(super) unresolved_ansi_c: bool,
+}
+
+impl ShellSubstitutions {
+    pub(super) fn unresolved(&self) -> bool {
+        self.unresolved_heredoc || self.unresolved_ansi_c
+    }
+}
+
+pub(super) fn shell_substitutions(command: &str) -> ShellSubstitutions {
+    let mut found = ShellSubstitutions::default();
+    let projected = shell_command_without_heredoc_bodies(command);
+    let mut bodies = shell_heredoc_bodies(command).into_iter();
+    for delimiter in projected.lines().flat_map(heredoc_delimiters) {
+        if let Some(body) = bodies.next()
+            && !delimiter.literal_body
+        {
+            collect_heredoc_substitutions(&body, &mut found);
+        }
+    }
+    collect_shell_substitutions(&projected, &mut found);
+    found
+}
+
 /// Inspect substitutions before word projection removes quote provenance.
 /// Parameter/arithmetic word parts can contain executable substitutions even
 /// when the outer word is unquoted; their source must remain inspectable.
-fn collect_shell_substitutions(
-    command: &str,
-    depth: usize,
-    found: &mut ShellInvocationScan,
-) {
+fn collect_shell_substitutions(command: &str, found: &mut ShellSubstitutions) {
     let bytes = command.as_bytes();
     let mut index = 0;
     let mut quote = None;
@@ -6368,12 +6409,11 @@ fn collect_shell_substitutions(
             continue;
         };
         let Some(end) = end else { break };
-        if ch == b'`' {
-            let body = shell_effects::backquote_body(&command[start..end]);
-            collect_shell_invocations(&body, depth + 1, found);
+        found.bodies.push(if ch == b'`' {
+            shell_effects::backquote_body(&command[start..end])
         } else {
-            collect_shell_invocations(&command[start..end], depth + 1, found);
-        }
+            command[start..end].to_string()
+        });
         word_start = false;
         index = end + 1;
     }
@@ -6381,7 +6421,7 @@ fn collect_shell_substitutions(
 
 /// Expanding heredoc text is data except for substitutions. Quotes in its
 /// body do not suppress expansion; escaped markers and quoted delimiters do.
-fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvocationScan) {
+fn collect_heredoc_substitutions(body: &str, found: &mut ShellSubstitutions) {
     // The shell removes unescaped backslash-newline pairs before expanding
     // the body. Preserve escaped backslashes so marker escaping stays exact.
     let mut logical = String::new();
@@ -6423,12 +6463,11 @@ fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvo
             found.unresolved_heredoc = true;
             break;
         };
-        if bytes[index] == b'`' {
-            let body = shell_effects::backquote_body(&logical[start..end]);
-            collect_shell_invocations(&body, depth + 1, found);
+        found.bodies.push(if bytes[index] == b'`' {
+            shell_effects::backquote_body(&logical[start..end])
         } else {
-            collect_shell_invocations(&logical[start..end], depth + 1, found);
-        }
+            logical[start..end].to_string()
+        });
         index = end + 1;
     }
 }
@@ -13028,6 +13067,12 @@ mod worker_commit_guard_tests {
             (format!("bash -c 'W=\"{linked_path}\"; cd \"$W\"; git commit -m work'"), false),
             ("bash -c 'cd \"$TASK_WORKTREE_UNSET\"; git commit -m work'".into(), true),
             ("eval 'cd \"$TASK_WORKTREE_UNSET\"'; git commit -m work".into(), true),
+            // cas-17a5 and GH #1814: literal heredoc bodies are data even
+            // when another heredoc in the command expands.
+            ("python3 - <<'PY'\nCommand::new(\"nohup\")\n.arg(\"bash\")\nPY\ncat <<EOF\nok\nEOF".into(), false),
+            ("python3 - <<'PY'\nprint(1)\nPY\ncat > notes.md <<MD\nwhile read -r l; do sudo bash -lc \"$l\"; done\nMD".into(), false),
+            // A substitution runs its command; its scope is still checked.
+            (format!("echo \"$(cd '{repo_path}' && git commit -m probe)\""), true),
         ] {
             let input = hook_git_write_input(&linked_path, &command);
             let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");

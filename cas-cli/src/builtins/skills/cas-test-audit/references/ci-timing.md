@@ -36,4 +36,4 @@ Build a timeline from the jobs API: start and end of each job and step. The crit
 
 ## Not measurable
 
-If the project keeps no CI artifacts or logs, write `not measurable` for timing and flake data. Do not estimate. Flake rate comes from retry data (failed then passed on retry) and the rerun cost recorded for it; a hard-failed run is not a flake.
+Without CI artifacts or logs, write `not measurable`; do not estimate. Retry outcomes and rerun cost are observations; neither a retry pass nor a hard failure classifies a flake. Use [cas-playwright-debug's measured procedure](../../cas-playwright-debug/SKILL.md#measure-a-flake), retaining failures/executions, seed, workers and failure signature.

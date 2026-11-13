@@ -458,7 +458,7 @@ fn published_train_closes_members_independently_cas_734b() {
     // or recorder participates in code acceptance.
     let complete = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,
         crate::release_reconcile::ReconcileTrigger::Backfill)).unwrap();
-    assert!(complete.complete);
+    assert!(complete.complete, "{complete:?}");
     assert!(complete.residuals.is_empty());
     assert!(!complete.exceptions.is_empty());
 }

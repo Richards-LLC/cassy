@@ -390,9 +390,8 @@ jobs:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
-        # The delivery's recorded start base binds the selection when its
-        # record ref exists and is an ancestor of HEAD; otherwise the inferred
-        # comparison base is used. The step log names which one ran.
+        # Selection uses the classifier's merge-base with the live target.
+        # The recorded start base is retained only for failure attribution.
         run: |
           record="refs/cas/delivery-base/$GITHUB_REF_NAME"
           git fetch --no-tags --quiet origin "+$record:$record" 2>/dev/null || true
@@ -403,6 +402,16 @@ jobs:
       - id: own
         name: Build the selection and run own tests
         run: python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json --github-output "$GITHUB_OUTPUT"
+
+      # Publish the named failures before archiving or rebuilding the base.
+      # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
+      - name: Publish own failure receipt before attribution
+        if: always() && steps.own.outputs.failed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-impact-${{ github.run_id }}-own-failures
+          path: target/ci-impact/
+          if-no-files-found: error
 
       - name: Archive the selection for the ring shards
         if: steps.own.outputs.ring-shards != '' && steps.own.outputs.ring-shards != '[]'
@@ -433,6 +442,8 @@ jobs:
       # archive because the base build replaces target/debug/cas.
       - name: Attribute own failures at the base
         if: steps.own.outputs.failed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-test-impact.py lane --phase attribute --receipt own --out target/ci-impact/lane.json
 
       # Not named ci-test-impact-*: a delivery's own red must not widen every
@@ -490,6 +501,15 @@ jobs:
           python3 scripts/ci-test-impact.py lane --phase ring --shard "$SHARD" \
             --archive lane-impact.tar.zst --out lane-impact/lane.json --github-output "$GITHUB_OUTPUT"
 
+      # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
+      - name: Publish ring failure receipt before attribution
+        if: always() && steps.ring.outputs.failed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-impact-${{ github.run_id }}-ring-${{ matrix.shard }}-failures
+          path: lane-impact/
+          if-no-files-found: error
+
       - uses: ./.github/actions/setup-rust-linux
         if: steps.ring.outputs.failed == 'true'
         with:
@@ -499,6 +519,8 @@ jobs:
 
       - name: Attribute ring failures at the base
         if: steps.ring.outputs.failed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-test-impact.py lane --phase attribute --receipt ring --out lane-impact/lane.json
 
       - name: Publish lane impact evidence

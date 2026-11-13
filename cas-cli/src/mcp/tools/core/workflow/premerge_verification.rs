@@ -1209,9 +1209,8 @@ impl CasCore {
                 .is_some();
         if !recorded
             && !fast_lane
-            && (review_tier::tier_for_delivery(task, repo)
+            && review_tier::tier_for_delivery(task, repo)
                 .is_some_and(|tier| tier.tier == review_tier::VerificationTier::Mechanical)
-                || review_tier::release_verdict_owns(&self.cas_root, task, repo))
         {
             return Ok(None);
         }
@@ -1279,6 +1278,24 @@ impl CasCore {
                     && let Some(verdict) =
                         verdict.filter(|verdict| verdict.status == VerificationStatus::Approved)
                 {
+                    let target_sha = review_target(repo, target).map_err(fail)?;
+                    if target_sha != candidate.target_sha {
+                        let base = git(repo, &["merge-base", &candidate.target_sha, &candidate.source_sha])
+                            .map_err(fail)?;
+                        if repository_proof::delivery_paths_changed(repo, &base,
+                            &candidate.source_sha, &candidate.target_sha, &target_sha)
+                            .map_err(fail)?.is_empty()
+                        {
+                            let receipt = format!(
+                                "approval carried: disjoint train delta; dispatch={} verdict={} target={} -> {}.",
+                                dispatch.id, verdict.id, candidate.target_sha, target_sha,
+                            );
+                            let store = self.open_task_store()?;
+                            if !store.get(&task.id).map_err(fail)?.notes.lines().any(|line| line == receipt) {
+                                store.append_note(&task.id, &receipt).map_err(fail)?;
+                            }
+                        }
+                    }
                     return Ok(Some(Approval {
                         candidate,
                         dispatch_id: dispatch.id.clone(),
@@ -1445,10 +1462,15 @@ impl CasCore {
         // cas-d4b7 requires a proven patch match. A conflicting/unbuildable
         // candidate must fall through so the caller invalidates the old approval
         // before the fresh-review path reports the candidate error.
-        let Ok(candidate) =
+        let candidate = match
             self.build_verification_candidate(task, repo, source, target, digest.to_string(), None)
-        else {
-            return Ok(None);
+        {
+            Ok(candidate) => candidate,
+            // A bounded response is not drift. Keep the exact approval until
+            // the immutable build completes and this same rebind can retry.
+            Err(error) if error.data.as_ref().is_some_and(|data|
+                data["reason"] == "candidate_preparation_pending") => return Err(error),
+            Err(_) => return Ok(None),
         };
         if candidate.validate(&self.cas_root, task).is_err() {
             return Ok(None);
@@ -1552,9 +1574,13 @@ impl CasCore {
                 &notice_source, &notice_key, result),
         ) {
             CandidatePreparation::Ready(result) => result,
-            CandidatePreparation::Pending(_) => Err(fail(format!(
-                "task {}: candidate preparation continues in the background; merge held. A supervisor notice reports completion. Retry factory action=worktree_merge id={source} task_id={}; the immutable cache is reused and exact review is still required before publication",
-                task.id, task.id))),
+            CandidatePreparation::Pending(_) => {
+                let mut error = fail(format!(
+                    "task {}: candidate preparation continues in the background; merge held. A supervisor notice reports completion. Retry factory action=worktree_merge id={source} task_id={}; the immutable cache is reused and exact review is still required before publication",
+                    task.id, task.id));
+                error.data = Some(serde_json::json!({"reason": "candidate_preparation_pending"}));
+                Err(error)
+            },
         }
     }
 
@@ -2134,6 +2160,7 @@ mod tests {
         let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
         run(repo, &["checkout", "-q", "main"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='fixture'\n[qa]\nmode='batch'\n[verification]\nenabled=true\n").unwrap();
         env.set("CAS_ROOT", &root);
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("candidate-owner".into());
@@ -2141,8 +2168,13 @@ mod tests {
             "candidate-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
         )).unwrap();
         let mut task = Task::new("cas-352b".into(), "Slow immutable candidate".into());
+        task.origin_project = Some("fixture".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(source.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() },
+            branch: "factory/w".into(), assignee: "worker".into(), base_sha: target.clone(),
+        });
         core.open_task_store().unwrap().add(&task).unwrap();
         let digest = context_digest(&root, &task).unwrap();
         let key = bound_candidate_key(&task.id, &repo.canonicalize().unwrap(),
@@ -2198,6 +2230,11 @@ mod tests {
             row.summary.as_deref() == Some("premerge_candidate_ready")).collect();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].target, "supervisor");
+        // Standard code in batch mode must get its review before publication.
+        assert_eq!(review_tier::tier_for_delivery(&task, repo).unwrap().tier,
+            review_tier::VerificationTier::Standard);
+        assert!(core.prepare_premerge_verification(&task, repo, "factory/w", "main").is_err());
+        assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

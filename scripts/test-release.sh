@@ -72,8 +72,8 @@ case "$1 $2" in
   "release preview")
     jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" \
       --argjson missing "${FAKE_REVIEW_MISSING:-$(printf '%s' '["cas-dead"]')}" \
-      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" \
-      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)),would_close:$n,would_hold:($missing|length),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),ALREADY_CLOSED:$closed},review_missing:$missing}' ;;
+      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" --argjson ci "${FAKE_CI_MISSING:-[]}" \
+      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)+($ci|length)),would_close:$n,would_hold:(($missing|length)+($ci|length)),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),LANE_CI_MISSING:($ci|length),ALREADY_CLOSED:$closed},review_missing:$missing,lane_ci_missing:$ci}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
@@ -679,6 +679,10 @@ cut_own_review_missing() {
     write_valid_draft "$tmp/own-review-notes.md"
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
+    FAKE_REVIEW_MISSING='[]' FAKE_CI_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
+        run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review-ci.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'LANE_CI_MISSING.*cas-000a, cas-000b' "$tmp/own-review-ci.log" || return 1
+    status=0
     FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
     # REVIEW_MISSING is the machine refusal identifier; a trailing gate frame

@@ -1444,8 +1444,8 @@ Close measures the delivered diff from the task's recorded start to its anchor a
 | Tier | Paths | Verification | QA |
 | --- | --- | --- | --- |
 | 0 | `docs/**` except `docs/design`, `docs/review` and the QA catalog, Markdown outside `src/` that does not instruct agents, `CHANGELOG.md`, `hub-web/e2e/**`, `**/tests/**` | No independent verifier; CI and mechanical close gates still run | No journeys and no ledger row |
-| 1 | Everything else, including skills, agents and an unmeasurable diff | In `qa.mode=batch`, one release verdict naming every delivery; an unmeasurable diff, `force-verifier` or `qa.mode=per_task` gets its own verifier | The impacted journeys |
-| 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | Its own verifier plus an adversarial probe, even when a release verdict names it | An `Adversarial probe:` row in the task ledger, in batch mode too |
+| 1 | Everything else, including skills, agents and an unmeasurable diff | One pre-merge verifier, including in `qa.mode=batch` | The impacted journeys |
+| 2 | Hooks and guards, `.github/workflows/**`, `scripts/release*`, merge-queue and close-gate code | Its own pre-merge verifier plus an adversarial probe | An `Adversarial probe:` row in the task ledger, in batch mode too |
 
 A missing assignment, expired heartbeat or retired worker never waives required
 verification, including a no-code task carrying external proof. Close reports a
@@ -1503,7 +1503,7 @@ availability failures remain unacknowledged for retry.
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one. Every covered hold also queues an owner-addressed supervisor action with the complete gate and an ordinary close retry command, even after the implementer retires. Replaying the same receipt does not duplicate its task outcome; repeated evidence for the same anchor and gate does not repeat the supervisor action.
+The release verdict is computed from each code delivery's existing approved merge verdict, local or peer, and the green full-set receipt for the frozen train tip. The cut names members missing an approval and stops before push or enqueue. There is no separate release review, published review ledger or recorder identity for code deliveries. Batch QA remains separate evidence; its ledger cannot approve code. The merge queue remains the final gate to `main`. Deliberate depth=light, rapid-response sampling and Tier 0 exemptions use green lane CI plus the green frozen-train run. Pending or rejected reviews retain their authority. Missing lane CI is named separately from a missing required review.
 
 Verifier improvements stay in the verdict; verifiers never file or request tasks. A supervisor staffs a follow-up for a reproduced defect affecting someone today, carrying `repro` and `affected` plus severity, reach and journey. Code-read findings remain theoretical P4 backlog, except theoretical money/data loss on a declared main journey is P2. Visible main-journey failures rank ahead of those hypotheses. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
@@ -3174,23 +3174,37 @@ non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
 Slim lanes omit broad Rust tests for factory pushes, but run the train's
-impact selection (`scripts/ci-test-impact.py`, unchanged) for the delivery's
-range on the self-hosted lane pool (cas-2e1b, cas-3126). The range starts at the delivery's
-recorded start base when `refs/cas/delivery-base/<branch>` exists and is an
-ancestor of the pushed head (task start pushes that ref, best effort, each
-time it records a new start base); otherwise it uses the classifier's inferred
-comparison base. The plan step logs which one it used. `Scoped Validation — impact own tests`
-builds the selection and runs the changed modules' unit tests, edited
-integration suites and directly changed crates first; up to three `impact ring`
-shards then run the rest of the selection from its archive, only after the own
-tests pass. A workspace plan (build/test policy, `scripts/`, `.github/` or an
-unmappable path) runs the whole workspace, still own tests first, exactly as
-the selector decided. A failed test fails the lane only when it passes (or
-does not exist) at the delivery's base: the same job checks out that base and
-reruns just the failed tests. Tests that fail there too are named in the job
-summary as inherited from the base and do not fail the delivery. Lane receipts are published as `lane-impact-*`, outside the
-selector's failure history. Merges into a release train start no train
-suite; lane CI already proved each delivery. The daemon's train CI scan
+impact selection (`scripts/ci-test-impact.py`) for the delivery's range on the
+self-hosted lane pool (cas-2e1b, cas-3126). Selection compares the pushed head with its merge-base with
+the live target, as resolved by the classifier. Content merged in from the
+train is excluded. The recorded start base in `refs/cas/delivery-base/<branch>`
+is used only for failure attribution, falling back to the inferred base when
+missing or not an ancestor. The plan logs both bases separately.
+`Scoped Validation — impact own tests` builds the selection and runs the changed
+modules' unit tests, edited integration suites, directly changed crates and
+explicit file-reading contracts first; up to three `impact ring` shards run the
+rest from its archive after own tests pass. Agent/config roots `.claude/`,
+`.codex/`, `.grok/`, `docs/` and `changelog.d/` select no Rust tests. Script and
+workflow inputs use their existing script/CI contract tier plus Rust test
+functions with matching file literals, including local helper/constant reads.
+Cargo manifests/lockfiles, nextest configuration, `.cargo/`, `vendor/` and
+unmapped code retain conservative workspace/crate selection. No Rust match
+produces an explicit empty selection and invokes no Cargo. A failed test fails the lane only when it passes (or
+does not exist) at the delivery's base. The same job first looks for explicit
+failure receipts from existing CI runs at that exact SHA, matching package,
+binary, test, compiler, nextest, runner image and profile/configuration. A prior
+lane's explicit base replay can supply this proof even when its own head differs.
+It reuses matching failures without preparing or compiling the base, then checks
+out the base and reruns only identities without proof. Missing, expired,
+configuration-mismatched or legacy receipts are misses. Tests that fail at the
+base are named in the job summary as inherited and do not fail the delivery.
+Named failure receipts are uploaded before attribution. Attribution records
+lookup, worktree, build and test times, with a twenty-minute total replay budget
+inside the unchanged forty-five-minute job. Interrupted or failed preparation
+leaves explicit unresolved identities and keeps the lane red. Lane receipts are
+published as `lane-impact-*`, outside the selector's failure history.
+Merges into a release train start no train suite; lane CI already proved each
+delivery. The daemon's train CI scan
 dispatches `full-validation.yml` once per frozen train tip (cas-0fc56), and a
 frozen train accepts no merge that could supersede it. That dispatched run and
 merge-group events call the same reusable `ci.yml` through

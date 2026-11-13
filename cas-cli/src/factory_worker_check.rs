@@ -2417,13 +2417,22 @@ import sys
 p = Path('target/attempts')
 n = int(p.read_text()) + 1 if p.exists() else 1
 p.write_text(str(n))
-names = ['owned_new'] + (['untouched'] if 'untouched' in sys.argv[-1] else [])
+selection = sys.argv[sys.argv.index('-E') + 1]
+retries = sys.argv[sys.argv.index('--retries') + 1] if '--retries' in sys.argv else None
+with Path('target/retries').open('a') as output:
+    output.write(str(retries) + '\n')
+names = ['owned_new'] + (['untouched'] if 'untouched' in selection else [])
 with Path('target/executed').open('a') as output:
     output.write(','.join(names) + '\n')
 if {seeded_failure} and n % 3 == 0:
-    print('        FAIL [ 0.01s] (1/1) fixture owned_new')
-    print('     Summary [ 0.01s] 1 test run: 0 passed, 1 failed')
-    raise SystemExit(1)
+    if retries == '0':
+        print('        FAIL [ 0.01s] (1/1) fixture owned_new')
+        print('     Summary [ 0.01s] 1 test run: 0 passed, 1 failed')
+        raise SystemExit(1)
+    # Emulate a project profile that retries and hides a failed invocation.
+    n += 1
+    p.write_text(str(n))
+    print('   FLAKY 2/2 [ 0.01s] (1/1) fixture owned_new')
 for name in names:
     print(f'        PASS [ 0.01s] (1/{{len(names)}}) fixture {{name}}')
 print(f'     Summary [ 0.01s] {{len(names)}} tests run: {{len(names)}} passed, 0 skipped')
@@ -2442,6 +2451,7 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
                 assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 5);
                 assert_eq!(receipt["test"]["stability"]["tests"][0]["name"], "owned_new");
                 assert_eq!(receipt["test"]["count"], 2);
+                assert_eq!(std::fs::read_to_string(repo.join("target/retries")).unwrap().lines().collect::<Vec<_>>(), vec!["0"; 5]);
                 let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
                 assert_eq!(executed.lines().filter(|line| line.split(',').any(|name| name == "untouched")).count(), 1);
                 let script = std::fs::read_to_string(&cargo).unwrap().replace("if False and", "if True and");

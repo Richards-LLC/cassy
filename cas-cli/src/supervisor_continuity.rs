@@ -61,7 +61,6 @@ fn integrated_recovery(root: &Path) -> anyhow::Result<String> {
         let review = match review_tier::tier_for_delivery(&task, &repo).map(|decision| decision.tier) {
             Some(review_tier::VerificationTier::Mechanical) => "mechanical close gates",
             Some(review_tier::VerificationTier::Adversarial) => "dedicated verifier and adversarial probe",
-            _ if review_tier::release_verdict_owns(root, &task, &repo) => "release verdict or receipt",
             _ => "dedicated verifier",
         };
         let hold = match dispatch.as_ref().map(|dispatch| dispatch.state) {

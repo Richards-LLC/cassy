@@ -66,6 +66,8 @@ pub(super) struct ReleasePreview {
     not_eligible: usize,
     by_reason: BTreeMap<String, usize>,
     review_missing: Vec<String>,
+    #[serde(default)]
+    lane_ci_missing: Vec<String>,
     members_by_id: BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
     #[serde(default)]
     candidate_build_seconds: u64,
@@ -77,7 +79,7 @@ impl ReleasePreview {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut value = Self { scope, members: members_by_id.len(), would_close: 0,
             would_hold: 0, already_closed: 0, not_eligible: 0, by_reason: BTreeMap::new(),
-            review_missing: vec![], members_by_id, candidate_build_seconds: 0 };
+            review_missing: vec![], lane_ci_missing: vec![], members_by_id, candidate_build_seconds: 0 };
         for (id, outcome) in &value.members_by_id {
             let reason = match outcome {
                 CassyMergeClose::Closed { .. } => { value.would_close += 1; "WOULD_CLOSE" }
@@ -87,12 +89,26 @@ impl ReleasePreview {
                     value.would_hold += 1;
                     let code = reason.split(':').next().unwrap_or(reason).trim();
                     if code == "REVIEW_MISSING" { value.review_missing.push(id.clone()); }
+                    if code == "LANE_CI_MISSING" { value.lane_ci_missing.push(id.clone()); }
                     if code == "RELEASE_MEMBER_HELD" { reason.as_str() } else { code }
                 }
             };
             *value.by_reason.entry(reason.to_string()).or_default() += 1;
         }
         value
+    }
+
+    fn allow_cut(&self) -> Result<()> {
+        let missing: Vec<_> = self.review_missing.iter().filter(|id|
+            self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.contains(id)).collect();
+        ensure!(missing.is_empty(), "REVIEW_MISSING: {}", missing.into_iter().cloned().collect::<Vec<_>>().join(", "));
+        let missing: Vec<_> = self.lane_ci_missing.iter().filter(|id|
+            self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.contains(id)).collect();
+        ensure!(missing.is_empty(), "LANE_CI_MISSING: {}", missing.into_iter().cloned().collect::<Vec<_>>().join(", "));
+        ensure!(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0),
+            "release cut refused: {} members, zero would-close; by_reason {:?}; review_missing {:?}",
+            self.members, self.by_reason, self.review_missing);
+        Ok(())
     }
 }
 
@@ -403,7 +419,7 @@ fn track_on_train(
         crate::gates::tag("G-121", "cut report proof differs from the recorded member reference"));
     let mut rebuilt = ReleasePreview::from_members(scope.clone(), preview.members_by_id.clone());
     rebuilt.candidate_build_seconds = preview.candidate_build_seconds;
-    // The preview records closure debt; publication and its verdict resolve it.
+    rebuilt.allow_cut()?;
     crate::release_reconcile::record_preview(root, repo, scope, serde_json::to_value(&rebuilt)?)
         .map_err(anyhow::Error::msg)?;
     // This is the cut boundary, before push/enqueue and independent of
@@ -933,14 +949,34 @@ pub(super) mod tests {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let (temp, root, train, _, args) = fixture();
         let scope = serde_json::to_value(cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap()).unwrap();
-        let preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
+        assert!(ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::new()).allow_cut().is_ok());
+        // cas-a6c8: review/QA can close every member before the cut.
+        for (outcome, allowed) in [
+            (CassyMergeClose::AlreadyClosed, true),
+            (CassyMergeClose::Held("RELEASE_MEMBER_HELD: missing proof".into()), false),
+        ] {
+            let members = (0..13).map(|n| (format!("cas-{n:04x}"), outcome.clone())).collect();
+            let preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), members);
+            assert_eq!(preview.allow_cut().is_ok(), allowed);
+        }
+        let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
             ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
             ("cas-0002".into(), CassyMergeClose::AlreadyClosed),
             ("cas-0003".into(), CassyMergeClose::NotEligible),
         ]));
-        assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (3, 0, 1, 1, 1));
+        assert!(preview.allow_cut().is_err());
+        preview.members_by_id.insert("cas-0004".into(), CassyMergeClose::Closed { notice: String::new() });
+        preview = ReleasePreview::from_members(preview.scope, preview.members_by_id);
+        preview.scope.included_task_ids = vec!["cas-0001".into(), "cas-0004".into()];
+        assert!(preview.allow_cut().is_err());
+        // Residuals outside this cut remain nonblocking.
+        preview.scope.included_task_ids = vec!["cas-0004".into()];
+        assert!(preview.allow_cut().is_ok());
+        preview.lane_ci_missing = vec!["cas-0004".into()];
+        assert!(preview.allow_cut().is_err());
+        preview.lane_ci_missing.clear();
+        assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (4, 1, 1, 1, 1));
         assert_eq!(preview.by_reason["REVIEW_MISSING"], 1);
-        // Closure review is recorded here and resolved after publication.
         super::track_on_train(&args, &root, temp.path(), &train, preview.clone()).unwrap();
         let tree = crate::release_reconcile::final_tree(temp.path(), &args.commit).unwrap();
         let key = cas_store::release_reconcile_store::ReleaseOperationKey {
@@ -1005,7 +1041,7 @@ pub(super) mod tests {
         };
         let inputs = root.join("input-audit.json");
         fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
-            "checked_sha": args.commit, "included_task_ids": ["cas-e3041", "cas-closed"],
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
         })).unwrap()).unwrap();
         args.inputs = Some(inputs.clone());
         let train = tasks.get("cas-a001").unwrap();
@@ -1035,7 +1071,7 @@ pub(super) mod tests {
         member.external_ref = Some(artifact.id.clone());
         tasks.update(&member).unwrap();
         fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
-            "checked_sha": args.commit, "included_task_ids": ["cas-e3041", "cas-closed"],
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
         })).unwrap()).unwrap();
         let mut foreign = tasks.get("cas-e3041").unwrap();
         foreign.origin_project = Some("other-project".into());
@@ -1046,14 +1082,18 @@ pub(super) mod tests {
             &tasks.get(&train.id).unwrap()));
         foreign.origin_project = Some("release-fixture".into());
         tasks.update(&foreign).unwrap();
-        // Tracking records review debt; report bytes do not close the delivery.
-        track_on_train(&args, &root, repo, &train).unwrap();
-        assert_eq!(tasks.get("cas-e3041").unwrap().status, TaskStatus::AwaitingMerge);
+        // A historical completed report's request link is not rebound as a
+        // new artifact. This does not exempt current members from approvals.
+        fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041", "cas-closed"],
+        })).unwrap()).unwrap();
         let pending = cut_scope(&root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref()).unwrap();
         assert!(!pending.no_code_members.contains_key("cas-closed"));
-        let preview = preview_scope(&root, repo, pending).unwrap();
-        assert_eq!(preview.review_missing, vec!["cas-e3041"]);
-        assert!(matches!(preview.members_by_id.get("cas-closed"), Some(CassyMergeClose::AlreadyClosed)));
+        fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
+        })).unwrap()).unwrap();
+        // Portable report bytes alone do not approve its delivery.
+        assert!(track_on_train(&args, &root, repo, &train).is_err());
         let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
             peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
             head_commit: args.commit.clone(), state_digest: String::new(), target_branch: None,

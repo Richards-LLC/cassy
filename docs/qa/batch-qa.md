@@ -18,7 +18,7 @@ waiver ends that per-task obligation; deferred batch evidence is still owed.
 Once per release, at the frozen tip after the fix-diff re-review, the supervisor
 builds a candidate, walks the combined batch matrix and records the reviewed
 revision.
-In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing. A deferred delivery reports its remaining QA or release-review gate. Recording QA retries ordinary close and reports any release verdict still owed. Covered QA anchors are not offered again. The supervisor gets one
+In qa.mode=batch, recording QA retries close using each delivery's existing merge approval. A QA receipt cannot replace that approval. A deferred delivery reports its remaining QA or verification gate. Covered QA anchors are not offered again. The supervisor gets one
 offer per distinct uncovered delivery set. Advancing main alone stays quiet; a
 changed set receives an offer naming the current published tip in its receipt call.
 
@@ -67,27 +67,17 @@ there, and still byte-checks a ledger that is published locally. The
 independent-author check runs against the closing machine's own record of who
 implemented each task.
 
-A release verdict uses the same action with `verification_type=release`: one
-review of the assembled tip, whose published report names every delivery. Scaffold
-that report with `cas qa ledger init --task <id> --release-scope scope.json` so it
-publishes the release's transformation and epic blocks. It rides
-task sync on a reserved `RELEASE_VERDICT_PROOF:` line. For Tier 1 deliveries
-owned by release review, its exact-anchor coverage also satisfies deferred
-batch debt. It does not replace Tier 2 probes or a dedicated review. A verdict recorded after an expired dispatch supersedes
-that old wait; live or newer dispatches and rejected verdicts retain authority.
+Code review happens before each delivery merges, including Tier 1 in batch
+mode. The release cut computes its verdict from those existing approvals
+(local or peer) and the green frozen-train full-set receipt. A missing
+approval is reported by task ID before push or enqueue. No release review
+ledger or recorder identity participates in code acceptance; a QA receipt
+cannot replace a missing merge approval. The merge queue still proves the
+final release tree before `main`.
 
-The release cut records the close preview, including missing release reviews,
-without waiting for that verdict. An all-held preview can still be tracked and
-admitted to the merge queue. Publication does not manufacture an approval:
-review gaps continue to hold delivery closure until the verdict covers them.
-
-For a release verdict, omit `task_ids` and `staging_sha`: Cassy derives them
-from the published ledger's `covers:` and `build:` headers. Scaffolding with
-`--release-scope` fills those headers from the release inventory and reviewed
-commit. Existing callers may still supply the fields. Every delivery anchor
-must be an ancestor of the reviewed commit. Receipts retain that commit and
-the resolved member anchors; they do not require the commit on each member's
-historical target branch.
+Historical release ledgers remain readable. New release-review ledgers are
+refused before recorder identity is resolved; deliveries use their existing
+approvals.
 
 Name who walked the ledger in `ledger_author` (agent id or name). For every
 listed tier 1 or tier 2 task, that author must be outside the same
@@ -105,28 +95,6 @@ lives in `.cas/operator/qa-author-overrides.toml`, which agents may not write.
 A task note never overrides, because the delivering worker can write notes on
 its own task. The receipt keeps the operator's words and the task gets an audit
 note.
-
-For a delivery containing only QA records, a supervisor has a narrower release
-closeout route (GH #1655). The recorded start-to-anchor Git diff must contain
-only `docs/qa/**/LEDGER.md` or Markdown files directly under
-`docs/qa/batch-evaluations/`. Product code, journey catalogs, agent instructions,
-unreadable diffs and a `no-code` declaration alone do not qualify.
-
-Record `verification action=qa_waive task_id=<id> head_sha=<pushed-delivery-tip>
-summary="<reason citing the independent walk>"`, then publish the release report
-and record `verification action=batch_receipt verification_type=release
-task_ids=["<id>"] staging_sha=<assembled-target-tip> ledger_artifact_id=<artifact>
-ledger_path=<published-report-path> ledger_author=<walker>`. The report must name
-the delivery, and its anchor must be integrated on its configured target.
-
-For this route only, the release report's walker may be the QA record's author.
-The supervisor recording the receipt must still be outside its implementation
-lineage. The latest QA round must be a reasoned supervisor waiver bound to the
-exact delivery anchor; missing, stale or superseded waivers do not qualify.
-The receipt's task note cites the waiver, and close rechecks it and the measured
-diff. Recording the release verdict retries ordinary close. This exception
-creates no operator author override and does not admit a self-authored batch
-QA receipt (`verification_type=task`) or waive review of product implementation.
 
 Use the verification MCP tool:
 
@@ -234,3 +202,5 @@ reviews retain their own verdicts, and Tier 2 still needs an adversarial probe.
 CI overrides remain subject to independent QA. Close rechecks these gates; appearing in recovery never approves or closes a delivery.
 Unreadable verification metadata skips and reports that row while preserving
 the other recovery actions and the inherited supervisor handoff.
+
+Deliberate depth=light, rapid-response sampling and Tier 0 exemptions use green lane CI plus the green frozen-train run. Pending or rejected reviews retain their authority. Missing lane CI is named separately from a missing required review.

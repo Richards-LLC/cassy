@@ -776,7 +776,7 @@ pub(crate) fn author_is_independent(
 
 pub(crate) fn author_refusal(task: &str, author: &str) -> String {
     format!(
-        "ledger author {author} is in {task}'s implementation lineage; the ledger must be walked by a QA reviewer, verifier or a worker that did not deliver it. Self-run checks remain the worker's own proof, not independent QA. A QA-ledger-only release verdict can use a supervisor's exact-head qa_waive (docs/qa/batch-qa.md). Otherwise only the operator can override, from their own terminal: `cas qa author-override {task} --note \"<why>\"`"
+        "ledger author {author} is in {task}'s implementation lineage; the ledger must be walked by a QA reviewer, verifier or a worker that did not deliver it. Self-run checks remain the worker's own proof, not independent QA. Only the operator can override, from their own terminal: `cas qa author-override {task} --note \"<why>\"`"
     )
 }
 
@@ -1058,89 +1058,11 @@ pub(crate) fn satisfying_release_verdict(
     covering_receipt(root, task, repo, target, head, cas_store::release_verdicts_for_task)
 }
 
-/// A later release review can retire an expired Tier 1 dispatch, but cannot
-/// replace a live cycle, a rejected review, or immutable delivery authority.
-/// Keep the old dispatch as audit history; every integration gate still runs.
-pub(crate) fn release_supersedes_stale_dispatch(
-    root: &Path,
-    task: &Task,
-) -> Result<Option<QaBatchReceipt>, String> {
-    use cas_types::VerificationDispatchState::{Claimed, Pending, TimedOut};
-    let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, &task.id)
-        .map_err(|e| e.to_string())? else { return Ok(None) };
-    if !matches!(dispatch.state, TimedOut | Pending | Claimed)
-        || (dispatch.state != TimedOut && dispatch.deadline_at > chrono::Utc::now())
-        || matches!(dispatch.receipt()?, cas_types::VerificationReceipt::TransactionReceipt { .. })
-        || task.deliverables.factory_branch_start.is_none()
-        || task.deliverables.factory_branch_anchor.is_none()
-    {
-        return Ok(None);
-    }
-    let latest = crate::store::open_verification_store(root)
-        .map_err(|e| e.to_string())?
-        .get_latest_for_task(&task.id).map_err(|e| e.to_string())?;
-    if latest.is_some_and(|verdict| !matches!(
-        verdict.status, cas_types::VerificationStatus::Pending | cas_types::VerificationStatus::Approved
-    )) {
-        return Ok(None);
-    }
-    let (repo, target) = task_context(root, task)?;
-    if !crate::mcp::tools::core::task::lifecycle::review_tier::release_verdict_owns(root, task, &repo) {
-        return Ok(None);
-    }
-    let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else { return Ok(None) };
-    Ok(satisfying_release_verdict(root, task, &repo, &target, anchor)?
-        .filter(|receipt| chrono::DateTime::parse_from_rfc3339(&receipt.recorded_at)
-            .is_ok_and(|recorded| recorded > dispatch.requested_at)))
-}
-
-/// Deferred Tier 1 batch debt follows its release verdict's exact anchor,
-/// project, independent author and published bytes. This does not turn a code
-/// review into general QA evidence or waive Tier 2 / dedicated review paths.
+/// Batch QA remains independent of the merge-time code approval.
 pub(crate) fn satisfying_deferred_receipt(
-    root: &Path,
-    task: &Task,
-    repo: &Path,
-    target: &str,
-    head: &str,
+    root: &Path, task: &Task, repo: &Path, target: &str, head: &str,
 ) -> Result<Option<QaBatchReceipt>, String> {
-    if let Some(receipt) = satisfying_receipt(root, task, repo, target, head)? {
-        return Ok(Some(receipt));
-    }
-    if crate::mcp::tools::core::task::lifecycle::review_tier::release_verdict_owns(root, task, repo) {
-        return satisfying_release_verdict(root, task, repo, target, head);
-    }
-    Ok(None)
-}
-
-/// cas-f497: whether the close gate would answer WAITING FOR RELEASE VERDICT for
-/// this delivery. Anything unreadable is `false`, so the delivery keeps its usual
-/// stall prompt rather than going quiet. Runs Git; call it off the factory loop.
-pub(crate) fn awaits_release_verdict(root: &Path, task: &Task) -> bool {
-    use crate::mcp::tools::core::task::lifecycle::review_tier::release_verdict_owns;
-    use cas_types::VerificationDispatchState::{Invalidated, Resolved};
-    let (Some(_), Some(anchor)) = (
-        task.deliverables.factory_branch_start.as_ref(),
-        task.deliverables.factory_branch_anchor.as_deref(),
-    ) else {
-        return false;
-    };
-    if task.depth == cas_types::TaskDepth::Light
-        || !crate::config::Config::load(root).is_ok_and(|config| config.verification_enabled())
-    {
-        return false;
-    }
-    let Ok((repo, target)) = task_context(root, task) else {
-        return false;
-    };
-    let no_verifier_on_record = matches!(
-        cas_store::get_latest_verification_dispatch(root, &task.id),
-        Ok(None) | Ok(Some(cas_types::VerificationDispatch { state: Resolved | Invalidated, .. }))
-    ) && crate::store::open_verification_store(root)
-        .is_ok_and(|store| store.get_latest_for_task(&task.id).is_ok_and(|latest| latest.is_none()));
-    no_verifier_on_record
-        && release_verdict_owns(root, task, &repo)
-        && matches!(satisfying_release_verdict(root, task, &repo, &target, anchor), Ok(None))
+    satisfying_receipt(root, task, repo, target, head)
 }
 
 /// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.

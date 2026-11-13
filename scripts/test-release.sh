@@ -74,8 +74,8 @@ case "$1 $2" in
   "release preview")
     jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" \
       --argjson missing "${FAKE_REVIEW_MISSING:-$(printf '%s' '["cas-dead"]')}" \
-      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" \
-      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)),would_close:$n,would_hold:($missing|length),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),ALREADY_CLOSED:$closed},review_missing:$missing}' ;;
+      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" --argjson ci "${FAKE_CI_MISSING:-[]}" \
+      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)+($ci|length)),would_close:$n,would_hold:(($missing|length)+($ci|length)),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),LANE_CI_MISSING:($ci|length),ALREADY_CLOSED:$closed},review_missing:$missing,lane_ci_missing:$ci}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
@@ -697,7 +697,7 @@ one_item_hotfix_train() {
 check 'one_item_hotfix_train' 'cas-d725: one-item hotfix train cuts, queues once and publishes through the normal release path'
 
 cut_own_review_missing() {
-    local fixture="$tmp/own-review" status=0
+    local fixture="$tmp/own-review" status=0 refusal
     clone_epic "$fixture" epic/own-review own-review
     mkdir -p "$fixture/changelog.d"
     printf '### Fixed — Review fixture\n\n- **First** — First delivery.\n' >"$fixture/changelog.d/cas-000a.md"
@@ -707,15 +707,24 @@ cut_own_review_missing() {
     write_valid_draft "$tmp/own-review-notes.md"
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
-    mkdir -p "$tmp/own-review-state"
-    FAKE_GH_STATE="$tmp/own-review-state" FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
+    FAKE_REVIEW_MISSING='[]' FAKE_CI_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
+        run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review-ci.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'LANE_CI_MISSING.*cas-000a, cas-000b' "$tmp/own-review-ci.log" || return 1
+    status=0
+    FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
-    [[ "$status" == 0 ]] &&
-        [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/own-review)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
-        grep -q '^release track ' "$FAKE_CAS_LOG" &&
-        grep -q '^pr merge ' "$FAKE_GH_LOG"
+    # REVIEW_MISSING is the machine refusal identifier; a trailing gate frame
+    # must not hide its task IDs or turn the unrelated preview member into one.
+    refusal="$(grep -F 'REVIEW_MISSING' "$tmp/own-review.log" | tail -1)"
+    [[ "$status" == 1 ]] &&
+        grep -q 'cas-000a' <<<"$refusal" &&
+        grep -q 'cas-000b' <<<"$refusal" &&
+        ! grep -q 'cas-dead' <<<"$refusal" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/own-review &&
+        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
+        ! grep -Eq '^pr (create|merge) ' "$FAKE_GH_LOG"
 }
-check 'cut_own_review_missing' 'included deliveries missing release review still reach queue admission'
+check 'cut_own_review_missing' 'own included deliveries missing review refuse with their ids even when another member would close'
 
 cut_preview_gate() {
     local fixture="$tmp/preview-cut" status=0
@@ -724,9 +733,13 @@ cut_preview_gate() {
     write_valid_draft "$tmp/preview-notes.md"
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
-    mkdir -p "$tmp/preview-state"
-    FAKE_GH_STATE="$tmp/preview-state" FAKE_WOULD_CLOSE=0 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
-    [[ "$status" == 0 ]] && grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
+    FAKE_WOULD_CLOSE=0 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 ]] &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
+        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
+        ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
+    : >"$FAKE_CAS_LOG"
+    FAKE_WOULD_CLOSE=1 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
     # cas-a6c8: receipts may already have closed all thirteen members.
     local closed_fixture="$tmp/already-closed-cut"
     clone_epic "$closed_fixture" epic/already-closed-cut already-closed-cut
@@ -738,7 +751,7 @@ cut_preview_gate() {
         grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
         grep -q '^release track .* --first-child ' "$FAKE_CAS_LOG"
 }
-check 'cut_preview_gate' 'cut admits all-held and all-already-closed members and preserves the close preview'
+check 'cut_preview_gate' 'cut refuses all-held members, permits all-already-closed members and keeps older-release residuals nonblocking'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

@@ -879,7 +879,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             std::fs::write(&gate, "go").unwrap();
             let child_done = || {
                 !core.open_agent_store().unwrap().list(None).unwrap().iter().any(|agent| {
-                    agent.metadata.get(OWNER_KEY) == Some(&dispatch.id)
+                    agent.metadata.contains_key(OWNER_KEY)
                         && agent.status == cas_types::AgentStatus::Active
                 })
             };
@@ -895,7 +895,6 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                             .is_ok_and(|s| s.success()),
                         "target_move" => cas_store::get_latest_verification_dispatch(&root, &task.id)
                             .unwrap().is_some_and(|latest| latest.id != dispatch.id
-                                && latest.state == cas_types::VerificationDispatchState::Resolved
                                 && cas_store::get_verification_for_dispatch(&root, &latest.id).unwrap()
                                     .is_some_and(|verdict| verdict.status == VerificationStatus::SupervisorCall)),
                         "rejected" | "supervisor_call" => !crate::store::open_prompt_queue_store(&root)

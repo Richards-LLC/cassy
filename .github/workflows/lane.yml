@@ -401,7 +401,23 @@ jobs:
 
       - id: own
         name: Build the selection and run own tests
-        run: python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json --github-output "$GITHUB_OUTPUT"
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, sys
+          command = [sys.executable, "scripts/ci-test-impact.py", "lane", "--phase", "own", "--out", "target/ci-impact/lane.json", "--github-output", os.environ["GITHUB_OUTPUT"]]
+          with subprocess.Popen(command) as child:
+              while True:
+                  print("lane-temp-sample", flush=True)
+                  subprocess.run(["du", "-sb", "--", "/tmp", os.environ["TMPDIR"], os.environ["CARGO_TARGET_TMPDIR"]], check=False)
+                  try:
+                      status = child.wait(timeout=10)
+                      break
+                  except subprocess.TimeoutExpired:
+                      pass
+              print("lane-temp-final", flush=True)
+              subprocess.run(["du", "-sb", "--", "/tmp", os.environ["TMPDIR"], os.environ["CARGO_TARGET_TMPDIR"]], check=False)
+          sys.exit(status if status >= 0 else 128 - status)
+          PY
 
       # Publish the named failures before archiving or rebuilding the base.
       # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
@@ -498,8 +514,22 @@ jobs:
             tar -xzf lane-impact-runner.tar.gz
           fi
           mkdir -p lane-impact && cp target/ci-impact/lane.json lane-impact/
-          python3 scripts/ci-test-impact.py lane --phase ring --shard "$SHARD" \
-            --archive lane-impact.tar.zst --out lane-impact/lane.json --github-output "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os, subprocess, sys
+          command = [sys.executable, "scripts/ci-test-impact.py", "lane", "--phase", "ring", "--shard", os.environ["SHARD"], "--archive", "lane-impact.tar.zst", "--out", "lane-impact/lane.json", "--github-output", os.environ["GITHUB_OUTPUT"]]
+          with subprocess.Popen(command) as child:
+              while True:
+                  print("lane-temp-sample", flush=True)
+                  subprocess.run(["du", "-sb", "--", "/tmp", os.environ["TMPDIR"], os.environ["CARGO_TARGET_TMPDIR"]], check=False)
+                  try:
+                      status = child.wait(timeout=10)
+                      break
+                  except subprocess.TimeoutExpired:
+                      pass
+              print("lane-temp-final", flush=True)
+              subprocess.run(["du", "-sb", "--", "/tmp", os.environ["TMPDIR"], os.environ["CARGO_TARGET_TMPDIR"]], check=False)
+          sys.exit(status if status >= 0 else 128 - status)
+          PY
 
       # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
       - name: Publish ring failure receipt before attribution

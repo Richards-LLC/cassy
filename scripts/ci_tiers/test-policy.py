@@ -908,6 +908,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         for mode in ['installed', 'missing', 'broken', 'download-failure', 'nextest-missing', 'install-failure']:
             with self.subTest(mode=mode):
                 fixture = self.root / mode; fixture.mkdir()
+                workspace = fixture / 'workspace'; workspace.mkdir()
                 commands = fixture / 'bin'; commands.mkdir()
                 cargo_home = fixture / 'cargo'; (cargo_home / 'bin').mkdir(parents=True)
                 rustup_home = fixture / 'rustup'
@@ -940,11 +941,18 @@ esac
                 result = self.run_body(prepare['run'], {
                     'PATH': str(commands)+':/usr/bin:/bin', 'CARGO_HOME': str(cargo_home),
                     'RUSTUP_HOME': str(rustup_home), 'RUNNER_TEMP': str(fixture),
+                    'GITHUB_WORKSPACE': str(workspace),
                     'GITHUB_PATH': str(github_path), 'GITHUB_ENV': str(github_env),
                     'CALLS': str(calls), 'READY': str(ready), 'NEXTEST_READY': str(nextest_ready), 'MODE': mode,
                     'INITIALIZER': str(initializer), 'CARGO_TEMPLATE': str(cargo),
                     'RUSTUP_TEMPLATE': str(rustup)})
                 self.assertEqual(github_path.read_text().splitlines(), [str(cargo_home / 'bin')])
+                published = dict(line.split('=', 1) for line in github_env.read_text().splitlines())
+                disk_temp = workspace / '.context/lane-temp'
+                self.assertEqual(published['TMPDIR'], str(disk_temp / 'tmp'))
+                self.assertEqual(published['CARGO_TARGET_TMPDIR'], str(disk_temp / 'cargo'))
+                self.assertTrue((disk_temp / 'tmp').is_dir())
+                self.assertTrue((disk_temp / 'cargo').is_dir())
                 observed = calls.read_text().splitlines()
                 install = 'rustup toolchain install fixture-pinned --profile minimal --component clippy --component rustfmt'
                 if mode == 'download-failure':
@@ -959,8 +967,40 @@ esac
                     self.assertTrue(nextest_ready.exists())
                     self.assertEqual(install in observed, mode in ['missing', 'broken'])
                     self.assertEqual('curl' in observed, mode == 'missing')
-                    nextest_install = f'cargo install cargo-nextest --locked --version fixture-nextest --target-dir {fixture}/nextest-build'
+                    nextest_install = f'cargo install cargo-nextest --locked --version fixture-nextest --target-dir {disk_temp}/tmp/nextest-build'
                     self.assertEqual(nextest_install in observed, mode != 'installed')
+
+    def test_lane_temp_sampling_preserves_phase_status_and_arguments(self):
+        jobs = policy.load(self.root / '.github/workflows/lane.yml')['jobs']
+        script = self.root / 'scripts/ci-test-impact.py'
+        script.parent.mkdir(exist_ok=True)
+        script.write_text('import os,json,sys\nopen(os.environ["CALLS"],"w").write(json.dumps(sys.argv[1:]))\nsys.exit(int(os.environ["STATUS"]))\n')
+        plan = self.root / 'target/ci-impact/lane.json'
+        plan.parent.mkdir(parents=True); plan.write_text('{}')
+        commands = self.root / 'bin'; commands.mkdir()
+        probe = commands / 'du'
+        probe.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DU_CALLS"\nprintf "42\\t/tmp\\n"\n')
+        probe.chmod(0o755)
+        calls = self.root / 'calls'; measurements = self.root / 'measurements'
+        output = self.root / 'github-output'
+        for phase, status in itertools.product(['own', 'ring'], [0, 17]):
+            with self.subTest(phase=phase, status=status):
+                job = jobs['lane-impact' if phase == 'own' else 'lane-impact-ring']
+                step = next(s for s in job['steps'] if s.get('id') == phase)
+                measurements.write_text('')
+                result = self.run_body(step['run'], {
+                    'PATH': str(commands)+':/usr/bin:/bin', 'CALLS': str(calls),
+                    'DU_CALLS': str(measurements), 'STATUS': str(status), 'SHARD': '2/3',
+                    'GITHUB_OUTPUT': str(output), 'TMPDIR': '/disk-fixture/tmp',
+                    'CARGO_TARGET_TMPDIR': '/disk-fixture/cargo'})
+                self.assertEqual(result.returncode, status, result.stderr)
+                expected = ['lane', '--phase', phase]
+                if phase == 'ring': expected += ['--shard', '2/3', '--archive', 'lane-impact.tar.zst']
+                expected += ['--out', 'target/ci-impact/lane.json' if phase == 'own' else 'lane-impact/lane.json', '--github-output', str(output)]
+                self.assertEqual(json.loads(calls.read_text()), expected)
+                self.assertTrue(measurements.read_text().splitlines())
+                self.assertEqual(set(measurements.read_text().splitlines()),
+                                 {'-sb -- /tmp /disk-fixture/tmp /disk-fixture/cargo'})
 
     def test_installed_linkers_skip_unavailable_ubuntu_mirrors(self):
         values = self.dependency_fixture()

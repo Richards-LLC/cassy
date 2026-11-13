@@ -3266,6 +3266,12 @@ The same lock guards nextest preparation: reuse the installed executable, or
 install the version recommended in `.config/nextest.toml` if it is missing.
 Local jobs avoid the prebuilt installer's shared `HOME/.install-action/tmp`,
 which can corrupt simultaneous ring downloads. Hosted jobs keep that installer.
+Local setup also exports `TMPDIR` and `CARGO_TARGET_TMPDIR` under the runner
+workspace's `.context/lane-temp/` disk directory before any Cargo or test work.
+Rustup installer and nextest build temporaries use that disk root rather than
+RAM-backed service `PrivateTmp`. Own/ring phases sample private `/tmp` and the
+disk temp directories while running, preserving the test command's exit status.
+Hosted temp placement and systemd units are unchanged.
 
 The six existing `cas-lane-light` listeners reserve GitHub-hosted width for
 release PR checks, frozen-train validation, merge-group validation and Release

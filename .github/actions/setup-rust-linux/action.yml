@@ -47,6 +47,12 @@ runs:
       if: runner.environment == 'self-hosted'
       shell: bash
       run: |
+        # PrivateTmp is RAM-backed on the local listeners. Keep compiler,
+        # test and installer temporaries on the runner's workspace disk.
+        export TMPDIR="$GITHUB_WORKSPACE/.context/lane-temp/tmp"
+        export CARGO_TARGET_TMPDIR="$GITHUB_WORKSPACE/.context/lane-temp/cargo"
+        mkdir -p "$TMPDIR" "$CARGO_TARGET_TMPDIR"
+        printf 'TMPDIR=%s\nCARGO_TARGET_TMPDIR=%s\n' "$TMPDIR" "$CARGO_TARGET_TMPDIR" >> "$GITHUB_ENV"
         export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
         export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
         export PATH="$CARGO_HOME/bin:$PATH"
@@ -59,7 +65,7 @@ runs:
         flock -x 9
         if ! "$CARGO_HOME/bin/cargo" --version; then
           if [[ ! -x "$CARGO_HOME/bin/rustup" ]]; then
-            installer="$(mktemp "$RUNNER_TEMP/rustup-init.XXXXXX")"
+            installer="$(mktemp "$TMPDIR/rustup-init.XXXXXX")"
             trap 'rm -f "$installer"' EXIT
             curl --fail --location --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$installer"
             sh "$installer" -y --profile minimal --default-toolchain none --no-modify-path
@@ -72,7 +78,7 @@ runs:
         # local listeners. Prepare nextest once under this same setup lock.
         if ! cargo nextest --version; then
           version="$(python3 -c 'import tomllib; print(tomllib.load(open(".config/nextest.toml", "rb"))["nextest-version"]["recommended"])')"
-          cargo install cargo-nextest --locked --version "$version" --target-dir "$RUNNER_TEMP/nextest-build"
+          cargo install cargo-nextest --locked --version "$version" --target-dir "$TMPDIR/nextest-build"
           cargo nextest --version
         fi
 

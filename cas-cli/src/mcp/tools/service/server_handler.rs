@@ -1968,6 +1968,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
 
+        service.tool_work.wait_idle().await;
         assert!(notes.contains("disk full"), "{notes}");
     }
 

@@ -1,0 +1,4 @@
+title: History recovery keeps fixed chronological timestamps and settles scroll before viewport checks
+tasks: [cas-4452f]
+invariants: [HUB-J23-HISTORY-FAILURE]
+journeys: [HUB-J23]

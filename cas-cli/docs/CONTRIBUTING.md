@@ -5060,3 +5060,21 @@ excluded. These rows describe attested work, never an inferred automatic event.
 Commit-to-main unwraps release-train main landings into their individual
 integrations. The observed delivery log identifies the train; Git retains
 individual integrations even when their local observations are absent.
+
+### Supervisor operator evidence
+
+The `H-47` hook checks supervisor `coordination action=message|interrupt`
+messages to `operator` and `commander:<label>`, including their preview summary.
+Each paragraph containing numeric literals, durations or completion claims
+needs `[evidence:<tool-use-id>]` from a successful tool result in the current
+user turn, or a leading `[unverified]` marker. Numeric literals must occur in
+the cited result; use a tool to calculate derived durations or local times.
+Clipboard claims require a cited `wl-paste` or `pbpaste` read after the most
+recent clipboard write. A missing transcript or turn boundary refuses evidence.
+This validates provenance and numeric support, not the semantics of all prose.
+
+The same policy labels unsupported MessageDisplay replies and refuses the
+first unsupported Stop. Reentrant Stop emits an uncertainty notice instead of
+blocking repeatedly. Stop cannot retract text already streamed to the pane.
+The Claude, factory-role and Codex hook projections include coordination calls;
+no new event or optional configuration flag is needed.

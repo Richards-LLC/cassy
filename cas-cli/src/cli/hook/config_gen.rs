@@ -1139,10 +1139,11 @@ fn configure_codex_tool_hooks(codex_dir: &Path, layer: CodexHookLayer) -> anyhow
 fn codex_hook_matcher(event: &str, layer: CodexHookLayer) -> String {
     match (event, layer) {
         ("PreToolUse", CodexHookLayer::User) => format!(
-            "^(Bash|apply_patch)$|{}",
-            crate::config::hooks::SLACK_POLICY_MATCHER
+            "^(Bash|apply_patch)$|{}|{}",
+            crate::config::hooks::SLACK_POLICY_MATCHER,
+            crate::config::hooks::OPERATOR_EVIDENCE_MATCHER
         ),
-        ("PreToolUse", CodexHookLayer::Project) => "^(Bash|apply_patch)$".to_string(),
+        ("PreToolUse", CodexHookLayer::Project) => format!("^(Bash|apply_patch)$|{}", crate::config::hooks::OPERATOR_EVIDENCE_MATCHER),
         _ => "^Bash$".to_string(),
     }
 }
@@ -1154,10 +1155,10 @@ mod codex_provision_tests {
 
     #[test]
     fn codex_pre_tool_hook_also_guards_apply_patch_cas_49c0() {
-        assert_eq!(
-            codex_hook_matcher("PreToolUse", CodexHookLayer::Project),
-            "^(Bash|apply_patch)$"
-        );
+        let project = regex::Regex::new(&codex_hook_matcher("PreToolUse", CodexHookLayer::Project)).unwrap();
+        for tool in ["Bash", "apply_patch", "mcp__cs__coordination"] {
+            assert!(project.is_match(tool));
+        }
         assert_eq!(
             codex_hook_matcher("PostToolUse", CodexHookLayer::User),
             "^Bash$"
@@ -1171,6 +1172,7 @@ mod codex_provision_tests {
             "apply_patch",
             "mcp__violet__violet_post",
             "mcp__cs__artifact",
+            "mcp__cs__coordination",
         ] {
             assert!(
                 re.is_match(tool),

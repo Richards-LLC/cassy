@@ -254,9 +254,13 @@ fn default_pre_tool_use_timeout() -> u32 {
 pub(crate) const SLACK_POLICY_MATCHER: &str =
     ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute|.*violet_post|.*_artifact";
 
+/// Operator messages must reach the same-turn evidence guard on every harness.
+pub(crate) const OPERATOR_EVIDENCE_MATCHER: &str = ".*_coordination$";
+
 pub(crate) fn default_pre_tool_use_matcher() -> Vec<String> {
     vec![
         SLACK_POLICY_MATCHER.into(),
+        OPERATOR_EVIDENCE_MATCHER.into(),
         "Read".into(),
         "Glob".into(),
         "Grep".into(),
@@ -285,7 +289,7 @@ impl PreToolUseHookConfig {
         let added_later = |entry: &&String| {
             matches!(
                 entry.as_str(),
-                "AskUserQuestion" | "Agent" | SLACK_POLICY_MATCHER
+                "AskUserQuestion" | "Agent" | SLACK_POLICY_MATCHER | OPERATOR_EVIDENCE_MATCHER
             )
         };
         let legacy: Vec<_> = canonical
@@ -310,6 +314,9 @@ impl PreToolUseHookConfig {
         };
         if !matchers.iter().any(|entry| entry == SLACK_POLICY_MATCHER) {
             matchers.push(SLACK_POLICY_MATCHER.into());
+        }
+        if !matchers.iter().any(|entry| entry == OPERATOR_EVIDENCE_MATCHER) {
+            matchers.push(OPERATOR_EVIDENCE_MATCHER.into());
         }
         matchers.join("|")
     }
@@ -769,6 +776,7 @@ mod tests {
             vec![SLACK_POLICY_MATCHER, "Agent"],
             vec![SLACK_POLICY_MATCHER, "Agent"],
             vec!["Agent"],
+            vec![OPERATOR_EVIDENCE_MATCHER],
             Vec::new(),
         ] {
             let mut config = PreToolUseHookConfig::default();
@@ -777,6 +785,10 @@ mod tests {
                 .retain(|entry| !omitted.contains(&entry.as_str()));
             config.matcher.reverse();
             assert_eq!(config.claude_matcher(), canonical.join("|"));
+        }
+        for configured in [vec!["Read".into()], Vec::new()] {
+            let config = PreToolUseHookConfig { matcher: configured, ..Default::default() };
+            assert!(regex::Regex::new(&config.claude_matcher()).unwrap().is_match("mcp__cas__coordination"));
         }
         let mut post = PostToolUseHookConfig::default();
         post.matcher = vec!["Bash".into(), "Write".into(), "Edit".into()];

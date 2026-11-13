@@ -501,6 +501,10 @@ fn handle_pre_tool_use_checked(
         None => return Ok(HookOutput::empty()),
     };
 
+    if let Some(reason) = crate::hooks::handlers::operator_evidence::outgoing_denial(input) {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+
     // Run before factory auto-approval and the missing-root early return.
     // Slack transport is an operator policy for every session.
     // gate[H-06 pre-tool]: Slack transport (Violet only)

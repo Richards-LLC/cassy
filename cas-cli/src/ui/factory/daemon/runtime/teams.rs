@@ -1006,6 +1006,7 @@ impl TeamsManager {
             "SendMessage",
             "Agent",
             crate::config::hooks::SLACK_POLICY_MATCHER,
+            crate::config::hooks::OPERATOR_EVIDENCE_MATCHER,
         ]
     }
 
@@ -3421,6 +3422,8 @@ mod tests {
                 matcher.contains(crate::config::hooks::SLACK_POLICY_MATCHER),
                 "{role} factory hook must reach Slack tools and CAS proxy dispatches"
             );
+
+            assert!(regex::Regex::new(matcher).unwrap().is_match("mcp__cas__coordination"));
 
             let perm = hooks
                 .get("PermissionRequest")

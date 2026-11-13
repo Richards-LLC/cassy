@@ -687,6 +687,10 @@ fi
 if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ] || [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ] || [ "$CAS_TEST_VERIFIER_STATUS" = malformed ] || [ "$CAS_TEST_VERIFIER_STATUS" = target_move ] || [ "$CAS_TEST_VERIFIER_STATUS" = no_code ]; then
     while [ ! -f "$CAS_TEST_VERIFIER_GATE" ]; do sleep 0.05; done
 fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = target_move ] && ! mkdir "$CAS_TEST_VERIFIER_GATE-reviewed" 2>/dev/null; then
+    echo '{"status":"supervisor_call","summary":"Review the new target before publication","confidence":0.95,"files_reviewed":"README.md","issues":"[]"}'
+    exit 0
+fi
 if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ]; then
     echo 'Task is already Closed' >&2
     exit 1
@@ -889,7 +893,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                             .args(["merge-base", "--is-ancestor", &source, "epic/train"])
                             .status()
                             .is_ok_and(|s| s.success()),
-                        "rejected" | "supervisor_call" | "target_move" => !crate::store::open_prompt_queue_store(&root)
+                        "target_move" => cas_store::get_latest_verification_dispatch(&root, &task.id)
+                            .unwrap().is_some_and(|latest| latest.id != dispatch.id
+                                && latest.state == cas_types::VerificationDispatchState::Resolved
+                                && cas_store::get_verification_for_dispatch(&root, &latest.id).unwrap()
+                                    .is_some_and(|verdict| verdict.status == VerificationStatus::SupervisorCall)),
+                        "rejected" | "supervisor_call" => !crate::store::open_prompt_queue_store(&root)
                             .unwrap()
                             .peek_all(10)
                             .unwrap()
@@ -912,13 +921,16 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             );
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             if status == "target_move" {
-                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Pending);
-                assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
+                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Invalidated);
+                let latest = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+                assert_ne!(latest.id, dispatch.id);
+                assert_ne!(latest.verifier_agent_id, claimed.verifier_agent_id);
+                let verdict = cas_store::get_verification_for_dispatch(&root, &latest.id).unwrap().unwrap();
+                assert_eq!(verdict.status, VerificationStatus::SupervisorCall);
+                assert_eq!(verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
                 assert!(!Command::new("git").current_dir(repo)
                     .args(["merge-base", "--is-ancestor", &source, "epic/train"])
                     .status().unwrap().success());
-                assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id,
-                    dispatch.id);
                 continue;
             }
             if matches!(status, "harness_failed" | "malformed") {

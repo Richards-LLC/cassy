@@ -58,7 +58,7 @@ runs:
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
         FULL_VALIDATION: ${{ startsWith(github.ref, 'refs/heads/precheck/') }}
-        TRAIN_RUST: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') }}
+        TRAIN_RUST: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-') }}
         BASE_SHA: ${{ inputs.base-sha }}
         ZERO_BASE_REF: ${{ inputs.zero-base-ref }}
       run: |

@@ -3198,7 +3198,11 @@ Named failure receipts are uploaded before attribution. Attribution records
 lookup, worktree, build and test times, with a twenty-minute total replay budget
 inside the unchanged forty-five-minute job. Interrupted or failed preparation
 leaves explicit unresolved identities and keeps the lane red. Lane receipts are
-published as `lane-impact-*`, outside the selector's failure history. Release-train pushes and
+published as `lane-impact-*`, outside the selector's failure history.
+Merges into a release train start no train suite; lane CI already proved each
+delivery. The daemon's train CI scan
+dispatches `full-validation.yml` once per frozen train tip (cas-0fc56), and a
+frozen train accepts no merge that could supersede it. That dispatched run and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.

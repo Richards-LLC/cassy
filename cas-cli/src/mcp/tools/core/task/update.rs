@@ -36,6 +36,28 @@ fn branch_update_work_target(
     }
 }
 
+/// GH #1919: G-100 asks the supervisor to retarget unfinished work to the
+/// next train. When the corrected target is another open train's lane and the
+/// task's parent is a different train, the parent moves with the target, so
+/// the re-park start is not refused G-06 by the frozen train it left.
+/// Returns (old parent, new train).
+fn train_parent_move(
+    cas_root: &std::path::Path,
+    store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    target: &cas_types::WorkTarget,
+) -> Option<(String, String)> {
+    use super::release_train::is_release_train;
+    let parent = store.get_parent_epic(task_id).ok().flatten().filter(is_release_train)?;
+    let lane = target.target_branch.as_str();
+    store.list(None).ok()?.into_iter()
+        .filter(|train| is_release_train(train) && !train.is_terminal() && train.id != parent.id)
+        .find(|train| train.effective_epic_branch().is_some_and(|branch| {
+            branch == lane || super::repo_context::effective_epic_ref(cas_root, branch) == lane
+        }))
+        .map(|train| (parent.id, train.id))
+}
+
 fn refresh_epic_lane_binding(task: &mut Task) {
     if task.task_type == TaskType::Epic
         && task
@@ -1335,6 +1357,12 @@ impl CasCore {
             task.pending_verification = false;
             task.pending_worktree_merge = false;
         task.updated_at = chrono::Utc::now();
+            let train_move = corrected_target.as_ref()
+                .filter(|_| req.epic.is_none() && !proof_targets_fix && !risk_fix && !methodology_fix)
+                .and_then(|target| train_parent_move(&self.cas_root, task_store.as_ref(), &task.id, target));
+            let parent_moved = train_move.as_ref()
+                .map(|(old, new)| format!(" Parent moved from train {old} to train {new}."))
+                .unwrap_or_default();
             let target_description = if methodology_fix {
                 format!("Execution methodology corrected to {}.", task.execution_note.as_deref().unwrap_or("<cleared>"))
             } else if risk_fix {
@@ -1352,7 +1380,7 @@ impl CasCore {
                     .as_ref()
                     .map(|target| {
                         format!(
-                            "Work target is now {} @ {}.",
+                            "Work target is now {} @ {}.{parent_moved}",
                             target.repo_selector, target.target_branch
                         )
                     })
@@ -1420,6 +1448,17 @@ impl CasCore {
                 message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
                 data: None,
             })?;
+            if let Some((old_parent, new_parent)) = train_move.as_ref() {
+                task_store.remove_dependency(&task.id, old_parent)
+                    .and_then(|()| task_store.add_dependency(&Dependency::new(
+                        task.id.clone(), new_parent.clone(), DependencyType::ParentChild,
+                    )))
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to move parent to train {new_parent}: {error}")),
+                        data: None,
+                    })?;
+            }
             let _ = crate::store::publish_direct_task_write(&self.cas_root, &task.id);
             let result_target = if methodology_fix {
                 format!("Execution methodology corrected to {}. Ordinary delivery and close proofs still apply.", task.execution_note.as_deref().unwrap_or("<cleared>"))
@@ -1438,7 +1477,7 @@ impl CasCore {
                     .as_ref()
                     .map(|target| {
                         format!(
-                            "New work target: {} @ {}.",
+                            "New work target: {} @ {}.{parent_moved}",
                             target.repo_selector, target.target_branch
                         )
                     })

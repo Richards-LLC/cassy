@@ -2120,14 +2120,22 @@ async fn docs_and_test_only_deliveries_are_never_gated_even_with_a_demo() {
     task.demo_statement = "Read the journey catalog".to_string();
     tasks.add(&task).unwrap();
 
-    let parked = close_text(&core, "cas-doc01").await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(!parked.contains("INDEPENDENT QA"), "{parked}");
+    // Independent QA stays exempt; the newly added test still owes stability.
+    let refused = close_text(&core, "cas-doc01").await;
+    assert_eq!(cas::gates::codes_in(&refused), ["G-61"], "{refused}");
+    assert_eq!(tasks.get("cas-doc01").unwrap().status, TaskStatus::InProgress);
     assert!(cas_store::list_qa_passes(&cas_dir, "cas-doc01").unwrap().is_empty());
     assert!(
         cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/docs-agent")
             .is_none()
     );
+
+    // Without the new test, the docs/CI delivery can park without a QA round.
+    git(&repo, &["rm", "-q", "web/e2e/reply.journey.spec.ts"]);
+    git(&repo, &["commit", "-q", "-m", "docs-only delivery"]);
+    let parked = close_text(&core, "cas-doc01").await;
+    assert_eq!(tasks.get("cas-doc01").unwrap().status, TaskStatus::AwaitingMerge, "{parked}");
+    assert!(cas_store::list_qa_passes(&cas_dir, "cas-doc01").unwrap().is_empty());
 }
 
 #[tokio::test]

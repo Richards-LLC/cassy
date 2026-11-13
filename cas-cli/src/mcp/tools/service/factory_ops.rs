@@ -8280,6 +8280,13 @@ impl CasService {
                 {
                     continue;
                 }
+                // Retention needs durable owner evidence on the next tick,
+                // including after a preview or a refused unpushed checkout.
+                // Discard the registry row only once its checkout is gone.
+                if self.inner.cas_root.join("worktrees").join(&agent.name).exists()
+                    || agent.metadata.get("clone_path").is_some_and(|path| Path::new(path).exists()) {
+                    continue;
+                }
                 if agent_store.unregister(&agent.id).is_ok() {
                     dead_agent_records_purged += 1;
                 }

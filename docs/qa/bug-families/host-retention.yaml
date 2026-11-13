@@ -1,4 +1,4 @@
 title: Host retention reclaims expired data while preserving live work and published evidence
 tasks: [cas-d740]
-invariants: [FACTORY-HOST-RETENTION]
-journeys: [FACTORY-ARTIFACT-METADATA]
+invariants: []
+journeys: [FACTORY-QA-RECEIPT]

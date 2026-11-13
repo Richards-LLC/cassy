@@ -3310,12 +3310,11 @@ impl CasCore {
                 }
                 Acquire::PeerHolds(hold) => {
                     peer_notes.push_str(&format!(
-                        "\n\n⚠️  PEER CLAIM OVERRIDE — {} holds the claim on {} until {}; started anyway (force=true). Tell them, so you don't both work it: {}coordination action=message target={} summary=\"took over {}\" message=\"...\"",
+                        "\n\n⚠️  PEER CLAIM OVERRIDE — {} holds the claim on {} until {}; started anyway (force=true). Tell your supervisor to coordinate the handoff: {}coordination action=message target=supervisor summary=\"took over {}\" message=\"...\"",
                         hold.describe(),
                         req.id,
                         hold.until(),
                         crate::mcp::tools::core::guidance::caller_prefix(),
-                        hold.name(),
                         req.id,
                     ));
                 }
@@ -6399,6 +6398,90 @@ mod preassigned_start_message_order_tests {
         };
         agent.factory_session = Some(factory_session.to_string());
         store.register(&agent).expect("register agent");
+    }
+
+    /// GH #1889: replay the cas-0e54 handoff after the peer supervisor exits.
+    /// Follow the emitted coordination target through the real message router.
+    #[tokio::test]
+    async fn forced_peer_takeover_notice_routes_to_own_supervisor_cas_c2b0() {
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use rmcp::model::{ErrorCode, RawContent};
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"cas-src\"\n").unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        register_agent(agents.as_ref(), "replacement", "smooth-shark-58", AgentRole::Worker, "soundwave");
+        register_agent(agents.as_ref(), "owner", "local-supervisor", AgentRole::Supervisor, "soundwave");
+        core.set_agent_id_for_testing("replacement".into());
+        let tasks = core.open_task_store().unwrap();
+        let mut task = Task::new("cas-0e54".into(), "Authorized takeover".into());
+        task.assignee = Some("smooth-shark-58".into());
+        tasks.add(&task).unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("fixture-token".into()), ..Default::default()
+        }.save_to_cas_dir(root).unwrap();
+        let key = crate::cloud::peer_claims::claim_key("cas-src", &task.id);
+        Mock::given(method("POST")).and(path(format!("/api/agents/tasks/{key}/claim")))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "error":"already_claimed", "owner_agent_id":"former-worker",
+                "expires_at":chrono::Utc::now() + chrono::Duration::minutes(10),
+            }))).mount(&server).await;
+        // The peer worker's registration/claim survives its supervisor's exit;
+        // its missing owner means it is no longer a routable worker peer.
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agents":[
+                {"id":"former-worker", "name":"rapid-bear-57", "agent_type":"worker",
+                 "user_id":"account", "status":"active", "last_heartbeat":chrono::Utc::now(),
+                 "active_tasks":1, "machine_id":"prowl",
+                 "metadata":{"role":"worker", "factory_session":"ended-peer", "canonical_id":"cas-src", "hostname":"prowl"}},
+                {"id":"replacement", "name":"smooth-shark-58", "agent_type":"worker",
+                 "user_id":"account", "status":"active", "last_heartbeat":chrono::Utc::now(),
+                 "active_tasks":0, "machine_id":"soundwave",
+                 "metadata":{"role":"worker", "factory_session":"soundwave", "canonical_id":"cas-src", "hostname":"soundwave"}}
+            ]}))).mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/agents/locks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"success", "locks":[]})))
+            .mount(&server).await;
+
+        let refusal = core.cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: task.id.clone(), brief: Some(true), force: None,
+        })).await.unwrap_err();
+        assert_eq!(refusal.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
+        assert!(agents.get_lease(&task.id).unwrap().is_none());
+
+        let result = core.cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: task.id.clone(), brief: Some(true), force: Some(true),
+        })).await.unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, "replacement");
+        let output = result.content.into_iter().filter_map(|item| match item.raw {
+            RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // target= is a machine tool argument; execute it instead of pinning prose.
+        let target = output.split_whitespace().find_map(|word| word.strip_prefix("target="))
+            .expect("takeover supplies a coordination target");
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        service.coordination(Parameters(serde_json::from_value(json!({
+            "action":"message", "target":target, "summary":"takeover", "message":"cas-0e54 takeover completed",
+        })).unwrap())).await.expect("the takeover's suggested route must accept the replacement");
+        let rows = crate::store::open_prompt_queue_store(root).unwrap().poll_all(10).unwrap();
+        let notices = rows.iter().filter(|row| row.summary.as_deref() == Some("takeover"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].target, "local-supervisor");
+        assert_eq!(notices[0].factory_session.as_deref(), Some("soundwave"));
     }
 
     #[tokio::test]

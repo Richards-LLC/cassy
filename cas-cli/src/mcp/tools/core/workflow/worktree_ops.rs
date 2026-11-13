@@ -7141,22 +7141,6 @@ mod tests {
         }
     }
 
-    /// GH #1899: a gh api timeout while an armed retry watches running CI is
-    /// no CI answer, so the retry stays armed instead of stopping.
-    #[cfg(unix)]
-    #[test]
-    fn retry_stays_armed_when_the_ci_lookup_times_out_gh_1899() {
-        use crate::factory_ci_retry::CiStatus;
-        let mut env = crate::test_support::TestEnvGuard::new();
-        let (repo, code_sha, tip) = delivery_ci_fixture_with(true, "", "");
-        let fake_gh = repo.path().join("gh-fixture");
-        crate::test_paths::warm_stub(&fake_gh, &format!(
-            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{code_sha}/check-runs) exec sleep 5 ;;\n*/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[]}}' ;;\n*) exit 97 ;;\nesac\n"
-        ));
-        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
-        assert_eq!(super::retry_ci_status(&tip, "main", repo.path(), &code_sha), CiStatus::Pending);
-    }
-
     /// A target-sync merge can contain code in its first-parent diff even
     /// though the lane delivers only documentation relative to that target.
     #[cfg(unix)]

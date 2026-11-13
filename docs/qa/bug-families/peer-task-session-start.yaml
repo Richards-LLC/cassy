@@ -1,0 +1,4 @@
+title: Session startup preserves peer task ownership while recovering abandoned local work
+tasks: [cas-0ff3]
+invariants: [PEER-TASK-OWNERSHIP]
+journeys: [FACTORY-SPAWN]

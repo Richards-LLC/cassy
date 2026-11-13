@@ -1,44 +1,20 @@
 name: CI
 
+# cas-0fc56: a merge into a release train starts no train suite; lane CI
+# already proved that delivery. Cassy dispatches this workflow once per frozen
+# train tip (train_ci::observe), and a frozen train accepts no merges that could
+# supersede the run, so there is no cancellation group.
 on:
-  push:
-    branches: ["epic/release-train-**"]
+  workflow_dispatch:
   merge_group:
-
-concurrency:
-  group: full-gate-${{ github.event_name == 'push' && github.ref || github.run_id }}
-  # cas-43ab: finish the running train suite; GitHub replaces only pending runs.
-  cancel-in-progress: false
 
 permissions:
   contents: read
   actions: read
 
 jobs:
-  train-push:
-    name: Recognize prepared release push
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    outputs:
-      prepared: ${{ steps.release.outputs.prepared }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if source="$(python3 scripts/train-ci.py prepared)" \
-            && python3 scripts/train-ci.py check --branch "$GITHUB_REF_NAME" --head "$source" >/dev/null; then
-            echo 'prepared=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'prepared=false' >> "$GITHUB_OUTPUT"
-          fi
   validation:
     name: Shared train and queue graph
-    needs: train-push
-    if: always() && (github.event_name != 'push' || needs.train-push.outputs.prepared != 'true')
     uses: ./.github/workflows/ci.yml
     with:
       full-set: true
@@ -50,7 +26,7 @@ jobs:
       pull-requests: read
   fast-validation:
     name: Fast Validation
-    if: always() && needs.validation.result != 'skipped'
+    if: always()
     needs: validation
     runs-on: ubuntu-latest
     steps:

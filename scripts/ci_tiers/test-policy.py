@@ -73,8 +73,8 @@ class PolicyTests(unittest.TestCase):
 
     def test_train_and_queue_call_one_full_graph(self):
         caller = policy.load(self.root/'.github/workflows/full-validation.yml')
-        self.assertIn('merge_group', caller['on'])
-        self.assertEqual(caller['on']['push']['branches'], ['epic/release-train-**'])
+        # cas-0fc56: merges into a train start no run; Cassy dispatches one at freeze.
+        self.assertEqual(set(caller['on']), {'workflow_dispatch', 'merge_group'})
         self.assertEqual(caller['jobs']['validation']['uses'], './.github/workflows/ci.yml')
         self.assertIs(caller['jobs']['validation']['with']['full-set'], True)
         jobs = self.ci()['jobs']
@@ -91,7 +91,7 @@ class PolicyTests(unittest.TestCase):
         def selected(event, ref):
             context = {**common, 'github.event_name': event, 'github.ref': ref}
             return {name for name, job in jobs.items() if self.gh_expr(job.get('if', 'true'), context)}
-        train = selected('push', 'refs/heads/epic/release-train-fixture')
+        train = selected('workflow_dispatch', 'refs/heads/epic/release-train-fixture')
         queue = selected('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1')
         self.assertEqual(train, queue)
         self.assertTrue({'fast-validation-preflight', 'fast-validation-ci-tiers',
@@ -107,21 +107,27 @@ class PolicyTests(unittest.TestCase):
             'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'full-gate',
             'needs.fast-validation-main-push-dedupe.outputs.journeys-reuse': 'true'})
         adopted = selected('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1')
+        self.assertEqual(selected('workflow_dispatch', 'refs/heads/epic/release-train-fixture'), adopted)
         self.assertTrue({'fast-validation-suite-build', 'fast-validation-suite-shards',
                          'fast-validation-suite', 'fast-validation-ci-tiers',
                          'fast-validation-web', 'fast-validation-docs'}.isdisjoint(adopted))
         self.assertTrue({'fast-validation-preflight', 'fast-validation'}.issubset(adopted))
-        # Prepared pushes skip the shared graph, but the PR admission context
-        # and canonical queue checks must remain schedulable.
-        self.assertEqual(caller['jobs']['validation']['needs'], 'train-push')
-        for event, prepared, expected in [('push', 'true', False), ('push', 'false', True),
-                                          ('push', '', True), ('merge_group', '', True)]:
-            context = {'github.event_name':event, 'needs.train-push.outputs.prepared':prepared}
-            self.assertEqual(self.gh_expr(caller['jobs']['train-push']['if'], context), event == 'push')
-            self.assertEqual(self.gh_expr(caller['jobs']['validation']['if'], context), expected)
-        for result, expected in [('skipped', False), ('success', True), ('failure', True)]:
-            self.assertEqual(self.gh_expr(caller['jobs']['fast-validation']['if'], {
-                'needs.validation.result':result}), expected)
+        publication = next(step for step in jobs['fast-validation-main-push-dedupe']['steps']
+                           if step.get('with', {}).get('name') == 'train-full-gate')
+        for event, ref, proof, expected in [
+            ('workflow_dispatch', 'refs/heads/epic/release-train-fixture', 'full-gate', True),
+            ('workflow_dispatch', 'refs/heads/epic/release-train-fixture', '', False),
+            ('push', 'refs/heads/epic/release-train-fixture', 'full-gate', False),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'full-gate', False),
+            ('push', 'refs/heads/main', 'full-gate', False),
+        ]:
+            self.assertEqual(self.gh_expr(publication['if'], {
+                'github.event_name':event, 'github.ref':ref,
+                'steps.tree-dedupe.outputs.reuse-source':proof}), expected)
+        # Train reuse requires the cas/full-gate status the dispatched run posts.
+        status = next(step for job in jobs.values() for step in job.get('steps', [])
+                      if 'context=cas/full-gate' in step.get('run', ''))
+        self.assertTrue(self.gh_expr(status['if'], {'inputs.full-set': True, 'github.event_name': 'workflow_dispatch'}))
 
 
     def test_parser_dependency_absence_is_a_hard_failure(self):
@@ -319,9 +325,9 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 if proof == 'full-gate':
                     self.assertTrue(self.gh_expr(smoke['if'], route))
 
-    def test_train_runs_finish_while_factory_runs_cancel_cas_43ab(self):
+    def test_train_runs_once_at_freeze_while_factory_runs_cancel_cas_0fc56(self):
         cases = [('push', 'refs/heads/factory/fixture', True, True),
-                 ('push', 'refs/heads/epic/release-train-fixture', False, True),
+                 ('workflow_dispatch', 'refs/heads/epic/release-train-fixture', False, False),
                  ('push', 'refs/heads/epic/ordinary', False, False),
                  ('push', 'refs/heads/main', False, False),
                  ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', False, False)]
@@ -337,12 +343,8 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 if any(self.gh_expr(concurrency.get('cancel-in-progress', 'false'), v) != cancels for v in values):
                     return False
                 groups = [group(v) for v in values]
-                if (groups[0] == groups[1]) != grouped:
+                if (bool(groups[0]) and groups[0] == groups[1]) != grouped:
                     return False
-            train_groups = [group({'github.event_name': 'push', 'github.ref': ref, 'github.run_id': '1'})
-                            for ref in ['refs/heads/epic/release-train-a', 'refs/heads/epic/release-train-b']]
-            if train_groups[0] == train_groups[1]:
-                return False
             return True
         workflow = self.ci()
         self.assertTrue(valid(workflow, cases))
@@ -356,13 +358,10 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             mutate(changed)
             self.assertFalse(valid(changed, cases))
 
-        caller = copy.deepcopy(policy.load(self.root / '.github/workflows/full-validation.yml'))
-        routes = [cases[1], cases[-1]]
-        self.assertTrue(valid(caller, routes))
-        for field, value in [('cancel-in-progress', True), ('group', '${{ github.run_id }}')]:
-            changed = copy.deepcopy(caller)
-            changed['concurrency'][field] = value
-            self.assertFalse(valid(changed, routes))
+        # The train caller has no cancellation group: nothing supersedes a frozen tip's run.
+        caller = policy.load(self.root / '.github/workflows/full-validation.yml')
+        self.assertNotIn('concurrency', caller)
+        self.assertTrue(valid(caller, [cases[1], cases[-1]]))
 
     @staticmethod
     def gh_value(expression, context):
@@ -404,7 +403,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                         continue
                     context={'inputs.full-set':True,'steps.job-receipt.outputs.reused':'true',
                         'steps.cli-restore.outputs.restored':'true',
-                        'github.event_name':'push','github.ref':'refs/heads/epic/release-train-fixture'}
+                        'github.event_name':'workflow_dispatch','github.ref':'refs/heads/epic/release-train-fixture'}
                     runs=self.gh_expr(step.get('if','true'),context)
                     # Republish the native train reports restored by job-check
                     # and the shared job receipt. Everything expensive skips.

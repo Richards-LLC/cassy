@@ -180,7 +180,7 @@ class Selection(unittest.TestCase):
                 "attempt = pathlib.Path('scripts/probe-ran')\nfailed = not attempt.exists()\n"
                 "with attempt.open('a') as out: out.write('attempt\\n')\n"
                 "sys.exit(int(failed))\n")
-            env = dict(os.environ, GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/epic/release-train-x',
+            env = dict(os.environ, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/epic/release-train-x',
                        FULL_SET='true', BASE_SHA='abc')
             result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all',
                                      '--only', 'scripts/test-probe.py'],

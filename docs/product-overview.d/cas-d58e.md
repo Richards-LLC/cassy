@@ -1,3 +1,3 @@
 ## Core Concepts
 
-Prepared release pushes check their version-only identity and original green train receipt, then skip the shared validation graph. Cut retries resolve `Train-CI-Head` directly; source changes or unavailable proof run normal train validation. Pull-request admission, queue reuse and Release Prebuild retain their existing behavior.
+Train CI runs once when Cassy dispatches the frozen tip; prepared release pushes start no train workflow. Cut retries resolve `Train-CI-Head` directly to the original green source receipt, without a release-head run or adoption artifact. Pull-request admission, queue reuse and Release Prebuild retain their existing behavior.

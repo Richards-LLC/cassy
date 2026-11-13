@@ -1118,12 +1118,36 @@ impl CasCore {
         let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id).map_err(fail)?;
         let findings = verdict.as_ref().map(|verdict| format!("\n{}\nFindings: {}", verdict.summary,
             serde_json::to_string(&verdict.issues).unwrap_or_default())).unwrap_or_default();
-        let action = if status == VerificationStatus::Approved {
-            "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed."
-        } else {
-            "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue."
+        let rejection = if status == VerificationStatus::Rejected {
+            use cas_types::{FindingSeverity, IssueSeverity};
+            let rounds = self.open_verification_store()?.get_for_task(&dispatch.task_id).map_err(fail)?
+                .iter()
+                .filter(|row| row.status == VerificationStatus::Rejected)
+                .filter_map(|row| row.dispatch_id.clone())
+                .collect::<std::collections::HashSet<_>>().len();
+            let eligible = verdict.as_ref().is_some_and(|row| {
+                row.issues.iter().any(|issue| issue.severity == IssueSeverity::Blocking)
+                    && row.issues.iter().all(|issue| {
+                        matches!(issue.triage.severity, FindingSeverity::Awkward | FindingSeverity::Cosmetic)
+                            && (issue.severity != IssueSeverity::Blocking
+                                || matches!(issue.category.as_str(), "documentation" | "evidence" | "receipt"
+                                    | "incomplete_close_reason" | "unnecessary_complexity"))
+                    })
+            });
+            Some((match rounds {
+                1 => "repair",
+                2 if eligible => "extra_round",
+                _ => "hold_escalate",
+            }, rounds))
+        } else { None };
+        let action = match rejection.map(|(action, _)| action) {
+            Some("repair") => "This delivery remains unpublished. Return only this delivery to its implementer for repair; unrelated deliveries may continue.",
+            Some("extra_round") => "This second rejection has only non-behavioural blockers. Return this delivery to the same implementer for one automatic extra repair round without an operator hold. The corrected candidate still requires independent approval. A third rejection holds and escalates; unrelated deliveries may continue.",
+            Some("hold_escalate") => "Hold this unpublished delivery and escalate to the operator before another repair round. The automatic extra round is unavailable: findings are behavioural or incomplete, or the repair budget is exhausted. Unrelated deliveries may continue.",
+            _ if status == VerificationStatus::Approved => "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed.",
+            _ => "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue.",
         };
-        crate::supervisor_notices::enqueue(
+        crate::supervisor_notices::enqueue_with_context(
             &self.cas_root,
             &recipient,
             "premerge_verification",
@@ -1132,6 +1156,10 @@ impl CasCore {
                 dispatch.task_id, dispatch.id
             ),
             &format!("{}:{status}", dispatch.id),
+            rejection.map(|(action, rounds)| serde_json::json!({
+                "task_id": dispatch.task_id, "dispatch_id": dispatch.id,
+                "rejection_action": action, "rejected_rounds": rounds,
+            })),
         )
         .map_err(fail)?;
         Ok(format!("\n{action}"))

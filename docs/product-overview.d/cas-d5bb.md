@@ -1,0 +1,1 @@
+Supervisor answers recorded with `verification action=add status=supervisor_call` resume the independent review on the same dispatch. The answer supplies context, while a fresh sealed reviewer retains responsibility for the final verdict.

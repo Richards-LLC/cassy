@@ -563,6 +563,7 @@ impl CasCore {
         // next task-only repository cycle. Preserve exact capability and
         // child-handoff authority, but let a direct supervisor verdict follow
         // an unchanged proof boundary to the current pending dispatch.
+        let mut answered_question = None;
         if supervisor_direct {
             requested_dispatch_id = cas_store::resolve_verification_dispatch_for_add(
                 &self.cas_root,
@@ -804,7 +805,12 @@ impl CasCore {
                     // The verdict may have committed while the best-effort
                     // post-commit wake failed. An identical supervisor retry
                     // repairs that wake without recording a second verdict.
-                    let retry_note = if super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
+                    let retry_note = if existing.status == VerificationStatus::SupervisorCall
+                        && proof_dispatch.state == cas_types::VerificationDispatchState::Pending
+                    {
+                        self.emit_premerge_review_handoff(&task, &proof_dispatch)?;
+                        "; answer recorded; verifier continuation scheduled on the same dispatch".into()
+                    } else if super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_some()
                     {
                         self.continue_premerge_after_verdict(&proof_dispatch, existing.status).await.unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
@@ -850,12 +856,20 @@ impl CasCore {
                         data: None,
                     });
                 }
+                if status == VerificationStatus::SupervisorCall
+                    && existing.provenance == cas_types::VerificationProvenance::TaskVerifier
+                    && existing.agent_id.is_some()
+                    && existing.agent_id == proof_dispatch.verifier_agent_id
+                {
+                    answered_question = Some(existing.id);
+                }
             }
         }
 
         // Atomically persist the review record and authority. A terminal
         // verdict also resolves the exact dispatch and pending task transition.
         // If any step fails, all authority and lifecycle writes roll back.
+        let mut resume_verifier = false;
         let task_row_changed = {
             let db_path = self.cas_root.join("cas.db");
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| McpError {
@@ -1028,6 +1042,29 @@ impl CasCore {
                 data: None,
             })?;
 
+            if let Some(question) = answered_question.as_deref() {
+                // cas-d5bb: the question spent the child's authority. Release
+                // only that exact claim, atomically with its supervisor answer;
+                // the existing launcher supplies a fresh sealed child handoff.
+                let now = chrono::Utc::now();
+                let deadline = (now + chrono::Duration::minutes(10))
+                    .min(dispatch.requested_at + chrono::Duration::minutes(60));
+                let changed = tx.execute(
+                    "UPDATE verification_dispatches
+                     SET state='pending', verifier_agent_id=NULL, capability_id=NULL, deadline_at=?5
+                     WHERE id=?1 AND state='claimed' AND verifier_agent_id=?2 AND deadline_at>?6 AND ?5>?6
+                       AND id=(SELECT id FROM verification_dispatches WHERE task_id=?7 ORDER BY requested_at DESC, id DESC LIMIT 1)
+                       AND ?3=(SELECT id FROM verifications WHERE dispatch_id=?1 AND id<>?4 ORDER BY created_at DESC, id DESC LIMIT 1)",
+                    rusqlite::params![dispatch.id, dispatch.verifier_agent_id, question,
+                        verification.id, deadline.to_rfc3339(), now.to_rfc3339(), task.id],
+                ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if changed != 1 {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        "Supervisor answer rejected: the question's exact verifier claim changed or expired; inspect the current dispatch."));
+                }
+                resume_verifier = true;
+            }
+
             // A question transfers the decision to the supervisor. The child
             // authority is spent, but the dispatch, delivery and pending task
             // remain unchanged until the supervisor records the answer/verdict.
@@ -1154,7 +1191,12 @@ impl CasCore {
                 != cas_types::MergeCiAdmission::Override;
         let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-        let close_retry = if candidate.is_some() {
+        let close_retry = if resume_verifier {
+            let current = cas_store::get_verification_dispatch(&self.cas_root, &requested_dispatch_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            self.emit_premerge_review_handoff(&task, &current)?;
+            "\nSupervisor answer recorded; verifier continuation scheduled on the same dispatch.".to_string()
+        } else if candidate.is_some() {
             let _phase = crate::mcp::tools::service::mutation_receipt::phase(
                 "verification_continuation",
             );

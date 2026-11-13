@@ -7768,7 +7768,7 @@ impl CasCore {
         result
     }
 
-    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-67,G-68,G-71,G-74,G-61,G-76,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
+    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-68,G-71,G-74,G-61,G-76,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
     // gate-audit[stranded_branch_override]: bypass G-125 A live supervisor accepts measured stranded children; malformed waiver authority still refuses.
     // gate-audit[skip_verification]: selector Derived waiver outcome; the external supervisor_override acceptor supplies G-68 exactly once.
     // gate-audit[bypass_close_gates]: selector A measured non-delivery disposition selects applicable checks; it does not waive a delivered-code check.

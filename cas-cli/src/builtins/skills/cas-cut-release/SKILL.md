@@ -27,7 +27,7 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    Write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
-   Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`. The cut checks each member's existing merge approval alongside the green frozen-train receipt; missing approvals are named before push. No separate release-review ledger or recorder is needed for code deliveries.
+   Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`. The cut checks each member's existing merge approval alongside the green frozen-train receipt; missing approvals are named before push. No separate release-review ledger or recorder is needed for code deliveries. Deliberate light, sampled and Tier 0 exemptions use green lane CI plus the green train run; a missing lane receipt is named separately.
    Commit the regenerated `.claude/CODEMAP.md` (`/codemap`) and the previous
    release's report there too; no docs PR follows. The command refuses while a
    file added or removed since the map's last commit is unmapped. Deliveries never edit

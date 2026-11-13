@@ -202,3 +202,5 @@ reviews retain their own verdicts, and Tier 2 still needs an adversarial probe.
 CI overrides remain subject to independent QA. Close rechecks these gates; appearing in recovery never approves or closes a delivery.
 Unreadable verification metadata skips and reports that row while preserving
 the other recovery actions and the inherited supervisor handoff.
+
+Deliberate depth=light, rapid-response sampling and Tier 0 exemptions use green lane CI plus the green frozen-train run. Pending or rejected reviews retain their authority. Missing lane CI is named separately from a missing required review.

@@ -2,6 +2,97 @@ use super::*;
 use cas_types::{FactoryBranchStart, TaskStatus, WorkTarget};
 
 #[test]
+fn deliberate_review_exemptions_require_green_lane_ci_cas_5a22() {
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    use cas_types::{MergeCiAdmission, TaskDepth};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let repo = env.home().join("release");
+    std::fs::create_dir_all(&repo).unwrap();
+    let root = crate::store::init_cas_dir(&repo).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &repo);
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='exempt'\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    git(&["remote", "add", "origin", "https://github.com/example/exempt.git"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    git(&["add", ".gitignore"]);
+    git(&["commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("app.rs"), "fn shipped() {}\n").unwrap();
+    git(&["add", "app.rs"]);
+    git(&["commit", "-qm", "code"]);
+    let code = git(&["rev-parse", "HEAD"]);
+    std::fs::create_dir(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs/guide.md"), "Guide\n").unwrap();
+    git(&["add", "docs/guide.md"]);
+    git(&["commit", "-qm", "docs"]);
+    let published = git(&["rev-parse", "HEAD"]);
+    let tasks = crate::store::open_task_store(&root).unwrap();
+    let mut train = Task::new("cas-exempt-train".into(), "train".into());
+    train.task_type = cas_types::TaskType::Epic;
+    tasks.add(&train).unwrap();
+    let now = chrono::Utc::now();
+    let window = crate::rapid_response::enable(&root, tasks.as_ref(), &train.id,
+        chrono::Duration::hours(1), "incident", "revert", now).unwrap();
+    let mut expected = BTreeMap::new();
+    for (kind, admission, gate) in [
+        ("mechanical", Some(MergeCiAdmission::Green), None),
+        ("light", Some(MergeCiAdmission::Green), None),
+        ("rapid", Some(MergeCiAdmission::Green), None),
+        ("mechanical", None, Some("LANE_CI_MISSING")),
+        ("light", Some(MergeCiAdmission::Advisory), Some("LANE_CI_MISSING")),
+        ("rapid", Some(MergeCiAdmission::Override), Some("LANE_CI_MISSING")),
+        ("required", Some(MergeCiAdmission::Green), Some("REVIEW_MISSING")),
+        ("forced", Some(MergeCiAdmission::Green), Some("REVIEW_MISSING")),
+        ("light-pending", Some(MergeCiAdmission::Green), Some("REVIEW_MISSING")),
+    ] {
+        let id = (0..).map(|n| format!("cas-{kind}-{n}"))
+            .find(|id| !expected.contains_key(id) && (kind != "rapid" || !crate::rapid_response::verification_sampled(id))).unwrap();
+        let mut task = Task::new(id.clone(), id.clone());
+        task.origin_project = Some("exempt".into());
+        task.status = TaskStatus::AwaitingMerge;
+        if kind.starts_with("light") { task.depth = TaskDepth::Light; }
+        if kind == "forced" { task.labels.push("force-verifier".into()); }
+        task.deliverables.factory_branch_anchor = Some(if kind == "mechanical" || kind == "forced" { published.clone() } else { code.clone() });
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget { repo_selector: "project:exempt".into(), target_branch: "main".into() },
+            branch: format!("factory/{id}"), assignee: "worker".into(),
+            base_sha: if kind == "mechanical" || kind == "forced" { code.clone() } else { base.clone() },
+        });
+        tasks.add(&task).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        if let Some(admission) = admission { tasks.record_merge_admission(&id, &published, admission).unwrap(); }
+        if kind == "rapid" { assert!(crate::rapid_response::record_skip(&root, &window, &id, "verification", "not sampled")); }
+        if kind == "light-pending" {
+            cas_store::create_verification_dispatch(&root, &id, "worker", "supervisor", now + chrono::Duration::hours(1)).unwrap();
+        }
+        expected.insert(id, gate);
+    }
+    crate::rapid_response::disable(&root, tasks.as_ref(), &train.id, now + chrono::Duration::minutes(1)).unwrap();
+    let scope = ReleaseScope {
+        project_id: "exempt".into(), repository: "example/exempt".into(), release_id: "v9.99.0".into(),
+        reviewed_sha: code, final_release_sha: published, promotion_pr: None, release_tag: None,
+        constituent_epic_ids: vec![], included_task_ids: expected.keys().cloned().collect(),
+        no_code_members: BTreeMap::new(), proof_refs: vec![],
+    };
+    let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    let outcomes = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    for (id, gate) in expected {
+        match gate {
+            None => assert!(matches!(outcomes.get(&id), Some(CassyMergeClose::Closed { .. })), "{id}: {:?}", outcomes.get(&id)),
+            Some(code) => assert!(matches!(outcomes.get(&id), Some(CassyMergeClose::Held(reason)) if reason == code), "{id}: {:?}", outcomes.get(&id)),
+        }
+    }
+}
+
+#[test]
 fn unregistered_reconcile_queues_parent_review_cas_d47d() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     for key in ["CAS_SESSION_ID", "CAS_AGENT_NAME", "CAS_AGENT_ID"] {
@@ -41,6 +132,7 @@ fn unregistered_reconcile_queues_parent_review_cas_d47d() {
     child.origin_project = parent.origin_project.clone();
     child.status = TaskStatus::Closed;
     child.deliverables.factory_branch_anchor = Some(published.clone());
+    child.deliverables.green_merge_commit = Some(published.clone());
     child.deliverables.factory_branch_start = Some(FactoryBranchStart {
         work_target: WorkTarget { repo_selector: "project:parent-fixture".into(), target_branch: "main".into() },
         branch: "factory/worker".into(), assignee: "worker".into(), base_sha: published.clone(),
@@ -137,6 +229,7 @@ fn published_train_closes_members_independently_cas_734b() {
             });
         }
         if id == "cas-closed" { task.deliverables.factory_branch_start = None; }
+        if id == "cas-equal" { task.deliverables.green_merge_commit = Some(published.clone()); }
         tasks.add(&task).unwrap();
         tasks.add_dependency(&cas_types::Dependency::new(id.into(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
     }
@@ -331,7 +424,7 @@ fn published_train_closes_members_independently_cas_734b() {
     for id in ["cas-unshipped", "cas-other-source"] {
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
     }
-    assert_eq!(result.residuals.len(), 4);
+    assert_eq!(result.residuals.len(), 3);
     for id in &scope.included_task_ids {
         let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
         assert_eq!(revision(id) - revisions[id], i64::from(closed_now));

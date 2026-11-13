@@ -126,7 +126,7 @@ PY
     fi
     web_receipt="$receipts/$local_sha.web.pass"
     web_proved=false
-    if head -n1 "$web_receipt" 2>/dev/null | grep -q "^hub-web-dist-drift: PASS $local_sha base=$base "; then
+    if head -n1 "$web_receipt" 2>/dev/null | grep -q "^hub-web-dist-drift: PASS $local_sha base=$base$"; then
         web_proved=true
     fi
     # Row selection depends on the push range: a receipt over a narrower range

@@ -736,7 +736,7 @@ esac
         self.write("hub-web/package.json", '{"name":"fixture","private":true}\n')
         self.write("hub-web/package-lock.json", '{}\n')
         self.write("hub-web/dist/app.js", "signup\n")
-        self.write("npm-fixture", '#!/bin/sh\ncase "$1" in\n'
+        self.write("npm-fixture", '#!/bin/sh\nprintf "%s\\n" "$*" >> ../.git/npm-calls\ncase "$1" in\n'
                    'ci) exit 0;;\nrun) cp src/signup.ts dist/app.js;;\n*) exit 1;;\nesac\n')
         (self.repo / "npm-fixture").chmod(0o755)
         self.commit()
@@ -782,6 +782,27 @@ esac
         self.assertIn("FAIL hub-web-dist-drift", refused.stderr)  # machine row identifier
         self.assertEqual(command(self.repo, "git", "ls-remote", "origin", branch).stdout.split()[0], integration)
         self.assertFalse((self.repo / "cargo-called").exists())
+        # The refused build produced fresh dist. Commit it, then replay the
+        # same pre-push payload twice, as after a transport failure.
+        self.commit()
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        validator = self.repo / ".git/receipt-validator"
+        validator.write_text('#!/bin/sh\ncase "$*" in\n'
+                             "'qa journeys --help') echo --base;;\n"
+                             "'qa journeys --check'*) exit 0;;\n*) exit 1;;\nesac\n")
+        validator.chmod(0o755)
+        env = dict(env, CAS_BIN=str(validator))
+        update = f"refs/heads/target {head} {branch} {integration}\n"
+        hook = ("bash", "scripts/fast-rows-pre-push.sh", "origin", str(remote))
+        first = command(self.repo, *hook, input=update, env=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        npm_calls = (self.repo / ".git/npm-calls").read_bytes()
+        receipts = [self.repo / f".git/cas/fast-rows/{head}{suffix}" for suffix in (".pass", ".web.pass")]
+        modified = [path.stat().st_mtime_ns for path in receipts]
+        retry = command(self.repo, *hook, input=update, env=env)
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertEqual((self.repo / ".git/npm-calls").read_bytes(), npm_calls)
+        self.assertEqual([path.stat().st_mtime_ns for path in receipts], modified)
 
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"

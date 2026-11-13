@@ -1674,6 +1674,10 @@ bug_families:
     title: Supervisor answers continue independent verification on the same dispatch
     tasks: [cas-d5bb]
     journeys: [FACTORY-MERGE]
+  release-plumbing-suite-adoption:
+    title: Prepared train pushes and queue entries adopt full-suite proof only across verified release plumbing
+    tasks: [cas-976f]
+    journeys: [FACTORY-MERGE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

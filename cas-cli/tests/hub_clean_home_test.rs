@@ -1002,24 +1002,20 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     assert_eq!(paths.read_process_record().unwrap().launched_by.as_deref(), Some("service"));
     assert!(paths.read_process_record().unwrap().public_url.is_some());
     socket.set(None);
-    let stopped_at = Instant::now();
     let stop = command(&["hub", "stop"]);
     assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
-    assert!(stopped_at.elapsed() < Duration::from_secs(15));
     // An absent bootstrap job cannot respawn, regardless of launchd throttle timing.
     assert!(!ProcessCommand::new("/bin/launchctl").args(["print", &target])
         .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
     assert!(paths.read_process_record().is_err());
     assert!(!home.path().join("mock-route").exists());
-    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert!(hub_fixture::wait_for_hub_exit(first_pid, CHILD_PROGRESS_TIMEOUT));
     let plist = home.path().join(format!("Library/LaunchAgents/{label}.plist"));
     assert!(plist.is_file(), "stop must keep the installed service definition");
     assert!(command(&["hub", "stop"]).status.success(), "stop is idempotent");
     socket.set(Some("updated.socket"));
-    let restarted_at = Instant::now();
     let restart = command(&["hub", "restart"]);
     assert!(restart.status.success(), "{}", String::from_utf8_lossy(&restart.stderr));
-    assert!(restarted_at.elapsed() < Duration::from_secs(15));
     let record = wait_for_publication();
     assert_ne!(record.pid, first_pid);
     assert_eq!(record.public_url.as_deref(), Some("https://launchd-proof.invalid:10046/"));

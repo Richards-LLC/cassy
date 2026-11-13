@@ -576,10 +576,14 @@ fn supervisor_phase_keeps_turn_open_after_tool_completion() {
                 json!({"type":"response_item","timestamp":at(2),"payload":{"type":"function_call_output","call_id":"c","output":"done"}}),
             ]
         };
-        write_lines(&path, &rows[..2]);
+        write_lines(&path, &rows[..1]);
         let scope = scope(cli);
         let mut index = WorkEventIndex::default();
         let resolve = |_: &SupervisorSource| Some(path.clone());
+        let starting = serde_json::to_value(index.supervisor_phase(&scope, &resolve).unwrap()).unwrap();
+        assert_eq!(starting["turn"]["stage"], "start");
+        assert!(starting["step"].is_null());
+        write_lines(&path, &rows[1..2]);
         let running = serde_json::to_value(index.supervisor_phase(&scope, &resolve).unwrap()).unwrap();
         assert_eq!(running["turn"]["stage"], "start");
         assert_eq!(running["turn"]["id"], "turn");

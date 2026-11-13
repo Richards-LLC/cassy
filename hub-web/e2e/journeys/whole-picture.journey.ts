@@ -337,8 +337,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(line.locator(".phase-clock")).not.toHaveText(before);
         expect(hub.frames.filter(frame => ["WorkEventsRequest", "WorkEventDetailRequest", "ScrollbackRequest"].includes(frame.kind))).toEqual([]);
       });
-      await journey.stage("A two-minute command remains busy across tool boundaries", async () => {
-        const started = journeyStamp();
+      const started = journeyStamp();
+      await journey.stage("A command shows busy, its step and a ticking turn clock", async () => {
         world.supervisor_phase = { event_id: "command", kind: "tool", lifecycle: { id: "command", stage: "start", started_at: started },
           turn: { id: "long-turn", stage: "start", started_at: started }, step: "exec_command", last_activity_at: started, observed_at: started, stale: false };
         await refresh();
@@ -348,6 +348,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         const before = await line.locator(".phase-clock").innerText();
         await page.clock.runFor(1000);
         await expect(line.locator(".phase-clock")).not.toHaveText(before);
+      });
+      await journey.stage("A two-minute command ends before its enclosing turn becomes idle", async () => {
         // Protocol fixture: report the native command's two-minute completion.
         // A real harness command and daemon kill belong to release batch QA.
         const ended = new Date(Date.parse(started) + 120_000).toISOString();
@@ -362,11 +364,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await refresh();
         await expect(line).toHaveAttribute("data-state", "idle", { timeout: 5_000 });
         await expect(line.locator(".phase-clock")).toHaveText("2:00");
-        world.supervisor_phase = { event_id: "phase-1", kind: "notice", lifecycle: { id: "turn-1", stage: "phase", phase: "setting_up", started_at: journeyStamp(-42_000) }, observed_at: journeyStamp(), stale: false };
-        await refresh();
       });
       await journey.stage("Compacting changes live; waiting has no moving dots", async () => {
-        world.supervisor_phase!.lifecycle.phase = "compacting";
+        world.supervisor_phase = { event_id: "phase-1", kind: "notice", lifecycle: { id: "turn-1", stage: "phase", phase: "compacting", started_at: journeyStamp(-42_000) }, observed_at: journeyStamp(), stale: false };
         // Native lifecycle changes need no unrelated fleet event, and Show
         // work is still off. The existing machine heartbeat owns refresh.
         await page.clock.runFor(5_000);

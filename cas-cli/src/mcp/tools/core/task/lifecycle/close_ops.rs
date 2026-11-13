@@ -9753,6 +9753,13 @@ impl CasCore {
                             ).as_deref(),
                         ));
                     }
+                    // cas-e571: a build routed from another machine ships
+                    // its evidence to that machine's reviewer before parking.
+                    if gate_refusals.is_empty()
+                        && let Err(refusal) = crate::artifacts::proof::publish_routed_evidence(&self.cas_root, &task)
+                    {
+                        gate_refusals.push(refusal);
+                    }
                     if !gate_refusals.is_empty() {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
@@ -9788,9 +9795,12 @@ impl CasCore {
                         // first park. Re-anchor before the retry returns its
                         // merge-required refusal so the queued request and
                         // supervisor status describe the current tip.
+                        // cas-e571: evidence publication only appended notes.
+                        let current = task_store.get(&task.id).ok()
+                            .filter(|current| same_except_close_audit(&task, current));
                         if let Err(error) = self.advance_awaiting_merge_anchor(
                             task_store.as_ref(),
-                            &task,
+                            current.as_ref().unwrap_or(&task),
                             &close_project_root,
                             &resolved_parent_branch,
                             anchor.as_deref(),
@@ -29145,6 +29155,74 @@ mod merge_state_gate_tests {
             "{}",
             stored.notes
         );
+    }
+
+    /// cas-e571 (the cas-0fc56 incident): a build routed here from another
+    /// machine parks, and that machine's pre-merge review finds the ledger
+    /// byte-identical where its verifier reads. Before the bytes can be
+    /// fetched, the review refuses loudly, naming both evidence directories.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn routed_park_evidence_reaches_the_peer_reviewer_cas_e571() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let mut fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
+        git(fixture.dir.path(), &["push", "-q", "origin", &fixture.branch]);
+        let root = fixture.dir.path().join(".cas");
+        std::fs::write(root.join("cloud.json"),
+            serde_json::json!({"endpoint": server.uri(), "token": "test-token"}).to_string()).unwrap();
+        let mut task = fixture.store.get(&fixture.task_id).unwrap();
+        task.notes = format!(
+            "BUILD_ROUTE: {}",
+            serde_json::json!({"key": "build-route:p:cas-anchor", "source_machine_id": "routing-peer",
+                "sender_agent_id": "s", "recipient_agent_id": "r", "recipient": "w@here",
+                "free_slots": 1, "load_per_cpu": null}),
+        );
+        fixture.store.update(&task).unwrap();
+        let worker_evidence =
+            crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&root, &task).unwrap();
+        std::fs::create_dir_all(&worker_evidence).unwrap();
+        let ledger = b"# QA ledger\n\n| Row | Status |\n| --- | --- |\n| probe | PASS |\n".to_vec();
+        std::fs::write(worker_evidence.join("LEDGER.md"), &ledger).unwrap();
+        let blob = format!("{}/blob", server.uri());
+        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-routed", "upload_url": blob, "required_headers": {}})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("PUT")).and(path("/blob"))
+            .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/artifacts/cloud-routed/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+            .expect(1).mount(&server).await;
+
+        let (is_error, text) = close_text(&fixture).await;
+        assert_eq!(is_error, Some(true), "{text}");
+        assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
+        let parked = fixture.store.get(&fixture.task_id).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{}", parked.notes);
+
+        // The routing machine holds only the synced task row.
+        let reviewer = crate::artifacts::proof::PeerReviewer::new(&server.uri(), parked);
+        let reviewer_evidence = reviewer.evidence_dir();
+        fixture._env.set("CAS_ROOT", &reviewer.root);
+        fixture._env.set("CAS_AGENT_ROLE", "supervisor");
+        let reviewer = std::sync::Arc::new(reviewer);
+        let attempt = |reviewer: std::sync::Arc<crate::artifacts::proof::PeerReviewer>| {
+            tokio::task::spawn_blocking(move || reviewer.attempt())
+        };
+        let refusal = attempt(reviewer.clone()).await.unwrap().unwrap_err();
+        assert!(refusal.contains(&worker_evidence.display().to_string())
+            && refusal.contains(&reviewer_evidence.display().to_string()), "{refusal}");
+
+        Mock::given(method("GET")).and(path("/api/artifacts/cloud-routed/url"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-routed", "url": blob, "size_bytes": ledger.len()})))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/blob"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(ledger.clone()))
+            .mount(&server).await;
+        attempt(reviewer.clone()).await.unwrap().expect("review dispatches once the bytes arrive");
+        assert_eq!(std::fs::read(reviewer_evidence.join("LEDGER.md")).unwrap(), ledger);
     }
 
     /// cas-b0a5: an amended commit hook anchor is now unreachable, while the

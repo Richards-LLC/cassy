@@ -429,12 +429,156 @@ pub fn fetch_task(
     Ok((artifact, path))
 }
 
+const EVIDENCE_SYNC: &str = "EVIDENCE_SYNC: ";
+
+/// What a routed build's park published: its evidence directory and the
+/// exact bytes the reviewing machine must hold before review (cas-e571).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EvidenceSync {
+    machine_id: String,
+    root: String,
+    files: Vec<SyncedFile>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SyncedFile {
+    name: String,
+    sha256: String,
+    artifact_id: String,
+}
+
+fn evidence_dir(cas_root: &Path, task: &cas_types::Task) -> anyhow::Result<PathBuf> {
+    crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(cas_root, task)
+        .map_err(anyhow::Error::msg)
+}
+
+/// cas-e571: a build routed from another machine publishes every file in its
+/// task evidence directory through the artifact path at park, then records a
+/// sha256 manifest, so the routing machine's reviewer can materialize it.
+pub(crate) fn publish_routed_evidence(cas_root: &Path, task: &cas_types::Task) -> Result<(), String> {
+    let Some(source) = crate::factory_build_routing::routed_from(task) else { return Ok(()) };
+    let machine_id = cas_types::Agent::get_or_generate_machine_id();
+    if source == machine_id {
+        return Ok(());
+    }
+    let dir = evidence_dir(cas_root, task).map_err(|error| error.to_string())?;
+    let fail = |detail: String| format!(
+        "EVIDENCE SYNC FAILED: {detail}. This build was routed from {source}, whose reviewer reads \
+         the task evidence directory under {source}'s artifacts root; this machine's is {}. \
+         Re-run close once Cloud accepts the upload.", dir.display());
+    let mut paths = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(fail(format!("cannot read {}: {error}", dir.display()))),
+    };
+    paths.sort();
+    let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
+    let config = crate::config::Config::load(cas_root).unwrap_or_default();
+    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let context = super::PublishContext {
+        store: &store,
+        roots: PublishRoots::new(cas_root, &base, &task.id),
+        task_id: task.id.clone(),
+        cloud: super::cloud_client(cas_root),
+    };
+    let published = store.list_for_task(&task.id).map_err(|error| fail(error.to_string()))?;
+    let mut files = Vec::new();
+    for path in paths {
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+        let (sha256, size) = digest_file(&path).map_err(|error| fail(error.to_string()))?;
+        if size == 0 {
+            continue;
+        }
+        let reused = published.iter().find(|record| {
+            record.name == name && record.sha256 == sha256 && validate(record, &task.id).is_ok()
+        });
+        let artifact_id = match reused {
+            Some(record) => record.id.clone(),
+            None => {
+                let outcome = super::publish(&context, &path)
+                    .map_err(|error| fail(format!("{name}: {error}")))?;
+                if outcome.disposition.storage_disposition() != super::StorageDisposition::Committed {
+                    return Err(fail(format!("{name}: {}", outcome.disposition.summary())));
+                }
+                outcome.artifact.id
+            }
+        };
+        files.push(SyncedFile { name, sha256, artifact_id });
+    }
+    let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files };
+    let note = format!(
+        "[{}] Evidence synced for review on {source}\n{EVIDENCE_SYNC}{}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        serde_json::to_string(&manifest).map_err(|error| fail(error.to_string()))?,
+    );
+    let tasks = crate::store::open_task_store(cas_root).map_err(|error| fail(error.to_string()))?;
+    tasks.append_note(&task.id, &note).map_err(|error| fail(error.to_string()))?;
+    Ok(())
+}
+
+/// The newest routed-park manifest restored byte-identical where the verifier
+/// reads, or a refusal naming both machines' evidence directories (cas-e571).
+fn materialize_manifest(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    sync: &EvidenceSync,
+) -> Result<(), String> {
+    let dir = evidence_dir(cas_root, task).map_err(|error| error.to_string())?;
+    let mut missing = Vec::new();
+    let store = SqliteArtifactStore::open(cas_root).map_err(|error| error.to_string())?;
+    let config = crate::config::Config::load(cas_root).unwrap_or_default();
+    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let roots = PublishRoots::new(cas_root, &base, &task.id);
+    let cloud = super::cloud_client(cas_root);
+    let identical = |file: &SyncedFile| {
+        digest_file(&dir.join(&file.name)).is_ok_and(|(sha256, _)| sha256 == file.sha256)
+    };
+    for file in &sync.files {
+        if identical(file) {
+            continue;
+        }
+        let fetched = (|| -> anyhow::Result<()> {
+            anyhow::ensure!(Path::new(&file.name).file_name() == Some(file.name.as_ref()), "unsafe name");
+            let artifact = from_notes(&task.notes, &file.artifact_id, &task.id)?
+                .ok_or_else(|| anyhow::anyhow!("no synced artifact record {}", file.artifact_id))?;
+            anyhow::ensure!(artifact.sha256 == file.sha256, "artifact {} has other bytes", file.artifact_id);
+            fetch(&store, cloud.as_ref(), &roots, artifact, &file.name)?;
+            Ok(())
+        })();
+        match fetched {
+            Ok(()) if identical(file) => {}
+            Ok(()) => missing.push(format!("{} (fetched outside {})", file.name, dir.display())),
+            Err(error) => missing.push(format!("{} ({error})", file.name)),
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "EVIDENCE NOT SYNCED: {} was built on {} with evidence in {}, but this machine's evidence \
+         directory {} lacks byte-identical {}. The pre-merge verifier was not dispatched; restore \
+         the files there or have the worker re-run close, then retry the merge.",
+        task.id, sync.machine_id, sync.root, dir.display(), missing.join(", "),
+    ))
+}
+
 /// Before a pre-merge review, save each committed artifact another machine
 /// published for this task (absent from this ledger) under its published name
 /// in this machine's task evidence directory, which the verifier reads
 /// (cas-5601). Local files win. A failure leaves the verifier's own
-/// missing-evidence path; it never blocks the dispatch.
-pub(crate) fn materialize_peer_evidence(cas_root: &Path, task: &cas_types::Task) {
+/// missing-evidence path; it never blocks the dispatch. A routed park's
+/// manifest is the exception: it must arrive byte-identical (cas-e571).
+pub(crate) fn materialize_peer_evidence(cas_root: &Path, task: &cas_types::Task) -> Result<(), String> {
+    let manifest = task.notes.lines().rev().find_map(|line| {
+        serde_json::from_str::<EvidenceSync>(line.strip_prefix(EVIDENCE_SYNC)?).ok()
+    });
+    if let Some(sync) = manifest {
+        return materialize_manifest(cas_root, task, &sync);
+    }
     let result = (|| -> anyhow::Result<()> {
         let store = SqliteArtifactStore::open(cas_root)?;
         let mut ids: Vec<String> = task.notes.lines()
@@ -465,20 +609,23 @@ pub(crate) fn materialize_peer_evidence(cas_root: &Path, task: &cas_types::Task)
     if let Err(error) = result {
         tracing::warn!(task_id = %task.id, %error, "peer evidence not materialized");
     }
+    Ok(())
+}
+
+/// A supervisor machine reviewing a peer's parked delivery: its own repo with
+/// a one-commit delivery, its own `.cas`, and Cloud at `endpoint`. Tests set
+/// `CAS_ROOT` to `root` and the supervisor role before an attempt.
+#[cfg(test)]
+pub(crate) struct PeerReviewer {
+    _dir: tempfile::TempDir,
+    repo: PathBuf,
+    pub(crate) root: PathBuf,
+    task: cas_types::Task,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
-
-    /// cas-5601: a LEDGER.md published on a peer machine and missing here is
-    /// restored by the real pre-merge preparation before its context digest,
-    /// so the first attempt reaches dispatch, and a retry fetches nothing.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn peer_evidence_lands_in_the_verifier_evidence_dir_cas_5601() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let server = MockServer::start().await;
+impl PeerReviewer {
+    pub(crate) fn new(endpoint: &str, mut task: cas_types::Task) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().to_path_buf();
         let git = |args: &[&str]| {
@@ -499,15 +646,48 @@ mod tests {
         let source = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-q", "main"]);
         let root = crate::store::init_cas_dir(&repo).unwrap();
-        env.set("CAS_ROOT", &root);
-        env.set("CAS_AGENT_ROLE", "supervisor");
         std::fs::write(root.join("config.toml"), "[verification]\nenabled = true\n").unwrap();
         std::fs::write(root.join("cloud.json"),
-            serde_json::json!({"endpoint": server.uri(), "token": "test-token"}).to_string()).unwrap();
-        let mut task = cas_types::Task::new("cas-peer".into(), "peer delivery".into());
+            serde_json::json!({"endpoint": endpoint, "token": "test-token"}).to_string()).unwrap();
         task.status = cas_types::TaskStatus::AwaitingMerge;
-        task.deliverables.factory_branch_anchor = Some(source.clone());
-        let bytes = crate::qa_ledger::scaffold(&task, &[], &source).into_bytes();
+        task.deliverables.factory_branch_anchor = Some(source);
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        Self { _dir: dir, repo, root, task }
+    }
+
+    /// One merge attempt: the verification dispatch it held on, or its refusal.
+    pub(crate) fn attempt(&self) -> Result<String, String> {
+        let core = crate::mcp::CasCore::with_daemon(self.root.clone(), None, None);
+        core.set_agent_id_for_testing("owner".into());
+        core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor)).unwrap();
+        let held = core.prepare_premerge_verification(&self.task, &self.repo, "factory/w", "main");
+        assert!(held.is_err(), "an unreviewed delivery cannot merge");
+        match cas_store::get_latest_verification_dispatch(&self.root, &self.task.id).unwrap() {
+            Some(dispatch) => Ok(dispatch.id),
+            None => Err(format!("{:?}", held.err())),
+        }
+    }
+
+    pub(crate) fn evidence_dir(&self) -> PathBuf {
+        evidence_dir(&self.root, &self.task).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+
+    /// cas-5601: a LEDGER.md published on a peer machine and missing here is
+    /// restored by the real pre-merge preparation before its context digest,
+    /// so the first attempt reaches dispatch, and a retry fetches nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_evidence_lands_in_the_verifier_evidence_dir_cas_5601() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let server = MockServer::start().await;
+        let mut task = cas_types::Task::new("cas-peer".into(), "peer delivery".into());
+        let bytes = crate::qa_ledger::scaffold(&task, &[], "0000000").into_bytes();
         let record = PublishedArtifact {
             id: "art-peer1".into(), task_id: "cas-peer".into(), name: "LEDGER.md".into(),
             mime: "text/markdown".into(), size_bytes: bytes.len() as u64,
@@ -518,7 +698,6 @@ mod tests {
         };
         task.notes = format!("[2026-11-12 03:00] Published artifact art-peer1\n{MARKER}{}",
             serde_json::to_string(&record).unwrap());
-        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
         Mock::given(method("GET")).and(path("/api/artifacts/cloud-peer1/url"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "artifact_id": "cloud-peer1", "url": format!("{}/blob", server.uri()),
@@ -527,23 +706,15 @@ mod tests {
         Mock::given(method("GET")).and(path("/blob"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
             .expect(1).mount(&server).await;
-        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-        core.set_agent_id_for_testing("owner".into());
-        core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
-            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor)).unwrap();
+        let reviewer = PeerReviewer::new(&server.uri(), task);
+        env.set("CAS_ROOT", &reviewer.root);
+        env.set("CAS_AGENT_ROLE", "supervisor");
 
-        let (cas_root, merge_task) = (root.clone(), task.clone());
-        let (first, second) = tokio::task::spawn_blocking(move || {
-            let attempt = || {
-                let held = core.prepare_premerge_verification(&merge_task, &repo, "factory/w", "main");
-                assert!(held.is_err(), "an unreviewed delivery cannot merge");
-                cas_store::get_latest_verification_dispatch(&cas_root, &merge_task.id).unwrap()
-                    .unwrap_or_else(|| panic!("first attempt never reached dispatch: {held:?}")).id
-            };
-            (attempt(), attempt())
+        let (first, second, evidence) = tokio::task::spawn_blocking(move || {
+            (reviewer.attempt(), reviewer.attempt(), reviewer.evidence_dir())
         }).await.unwrap();
-        assert_eq!(first, second, "the retry holds on the same dispatch");
-        let evidence = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&root, &task).unwrap();
+        let first = first.expect("first attempt reaches dispatch");
+        assert_eq!(Ok(first), second, "the retry holds on the same dispatch");
         assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
     }
 }

@@ -5766,7 +5766,10 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
         for (id, _, delivery, _) in verdict_cases {
             let mut task = row(id, TaskStatus::InProgress);
             task.pending_verification = true;
-            if !delivery {
+            if delivery {
+                // The real park path records this anchor and mints its delivery cycle.
+                task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+            } else {
                 task.task_type = cas_types::TaskType::Epic;
             }
             tasks.add(&task).unwrap();

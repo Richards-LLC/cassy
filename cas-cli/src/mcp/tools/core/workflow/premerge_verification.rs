@@ -2046,6 +2046,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn premerge_rejection_round_policy_replays_cas_ed08() {
+        use cas_types::{FindingSeverity, IssueSeverity, VerificationIssue};
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // Replay the structured findings from ver-ca026909ea7b (cas-2f46)
+        // and ver-22c4d2451b27 (cas-d740), independent of their summary prose.
+        let simplicity: VerificationIssue = serde_json::from_value(serde_json::json!({
+            "file": "scripts/ci-queue-flakes.py", "line": 320,
+            "severity": "blocking", "category": "unnecessary_complexity",
+            "problem": "unused --expect", "triage": {"severity": "awkward"}
+        })).unwrap();
+        let data_loss: VerificationIssue = serde_json::from_value(serde_json::json!({
+            "file": "cas-cli/src/factory_review_scratch.rs", "line": 1221,
+            "severity": "blocking", "category": "missing_validation",
+            "problem": "citation protection bypass", "triage": {"severity": "data_loss"}
+        })).unwrap();
+        let mut cases = vec![
+            ("cas-2f46", 2, vec![simplicity.clone()], "extra_round"),
+            ("cas-d740", 2, vec![data_loss], "hold_escalate"),
+            ("first", 1, vec![simplicity.clone()], "repair"),
+            ("exhausted", 3, vec![simplicity.clone()], "hold_escalate"),
+            ("empty", 2, vec![], "hold_escalate"),
+        ];
+        for category in ["documentation", "evidence", "receipt", "incomplete_close_reason"] {
+            let mut issue = simplicity.clone();
+            issue.category = category.into();
+            cases.push((category, 2, vec![simplicity.clone(), issue], "extra_round"));
+        }
+        let mut unknown = simplicity.clone();
+        unknown.category = "correctness".into();
+        cases.push(("mixed", 2, vec![simplicity.clone(), unknown], "hold_escalate"));
+        let mut warning = simplicity.clone();
+        warning.severity = IssueSeverity::Warning;
+        cases.push(("warnings_only", 2, vec![warning.clone()], "hold_escalate"));
+        for (name, severity) in [("broken", FindingSeverity::Broken), ("data_loss", FindingSeverity::DataLoss), ("money", FindingSeverity::Money)] {
+            warning.triage.severity = severity;
+            cases.push((name, 2, vec![simplicity.clone(), warning.clone()], "hold_escalate"));
+        }
+        let missing_triage: VerificationIssue = serde_json::from_value(serde_json::json!({
+            "file": "proof", "category": "evidence", "problem": "missing receipt"
+        })).unwrap();
+        cases.push(("missing_triage", 2, vec![missing_triage], "hold_escalate"));
+
+        for (name, rounds, issues, action) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(dir.path()).unwrap();
+            env.set("CAS_ROOT", &root);
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+            core.open_agent_store().unwrap().register(&owner).unwrap();
+            let task = Task::new(name.into(), "Review".into());
+            core.open_task_store().unwrap().add(&task).unwrap();
+            for round in 1..=rounds {
+                let dispatch = cas_store::create_verification_dispatch(&root, &task.id, "worker", &owner.id,
+                    chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
+                let mut verdict = Verification::new(format!("ver-{round}"), task.id.clone());
+                verdict.status = VerificationStatus::Rejected;
+                verdict.provenance = VerificationProvenance::System;
+                verdict.dispatch_id = Some(dispatch.id.clone());
+                verdict.issues = issues.clone();
+                cas_store::add_system_verification(&root, &verdict).unwrap();
+                let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+                cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, &owner.id, None, true).unwrap();
+                if round == rounds {
+                    // Replaying the same verdict must not consume another round
+                    // or enqueue a second repair/escalation notice.
+                    for _ in 0..2 {
+                        core.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
+                    }
+                }
+            }
+            let notices = crate::store::open_supervisor_queue_store(&root).unwrap()
+                .list_pending_prompt_outbox(&owner.id, "supervisor_notice", 10).unwrap();
+            assert_eq!(notices.len(), 1, "{name}");
+            let payload: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
+            assert_eq!(payload["context"]["rejection_action"], action, "{name}");
+            assert_eq!(payload["context"]["rejected_rounds"], rounds, "{name}");
+            assert_eq!(core.open_task_store().unwrap().get(&task.id).unwrap().status, task.status);
+        }
+    }
+
+    #[tokio::test]
     async fn premerge_rejection_notice_carries_findings_cas_381f() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();

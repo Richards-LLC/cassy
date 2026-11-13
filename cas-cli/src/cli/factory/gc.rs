@@ -165,7 +165,7 @@ mod tests {
             assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
         };
         let mut source_kept = Vec::new();
-        for name in ["dead", "unpushed", "live", "cited"] {
+        for name in ["dead", "unpushed", "live", "cited", "unknown", "active"] {
             let path = roots[0].join("worktrees").join(name);
             std::fs::create_dir_all(&path).unwrap();
             git(&path, &["init", "-b", &format!("factory/{name}")]);
@@ -179,10 +179,19 @@ mod tests {
                 git(&path, &["add", "."]);
                 git(&path, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "unpushed"]);
             }
+            if name != "unknown" {
+                let mut owner = cas_types::Agent::new(format!("owner-{name}"), name.into());
+                owner.role = cas_types::AgentRole::Worker;
+                owner.status = if name == "active" { cas_types::AgentStatus::Active } else { cas_types::AgentStatus::Shutdown };
+                cas_store::AgentStore::register(&cas_store::SqliteAgentStore::open(&roots[0]).unwrap(), &owner).unwrap();
+            }
             let target = crate::factory_scratch::worker_target_dir(&path);
             std::fs::create_dir_all(&target).unwrap();
             std::fs::write(target.join("object"), "disposable").unwrap();
-            if matches!(name, "live" | "cited") {
+            if matches!(name, "unknown" | "active") {
+                source_kept.push(path);
+                kept.push(target);
+            } else if matches!(name, "live" | "cited") {
                 let mut task = cas_types::Task::new(format!("cas-protect-{name}"), "Fixture protection".into());
                 task.notes = format!("factory/{name}");
                 crate::store::open_task_store_local(&roots[1]).unwrap().add(&task).unwrap();
@@ -256,10 +265,22 @@ mod tests {
             assert!(report.rows.iter().any(|row| row.category == category && row.reclaimed_bytes > 0), "{category}: {report:?}");
         }
         assert!(source_kept.iter().all(|path| path.join("source").exists()));
-        let reclaimed = expired.iter().filter(|path| !path.exists()).count() * 13;
-        eprintln!("fixture: reclaimed_bytes={reclaimed}");
+        eprintln!("fixture: reclaimed_bytes={}", report.reclaimed_bytes());
         assert!(expired.iter().all(|path| !path.exists()));
         assert!(kept.iter().all(|path| path.exists()), "{kept:?}");
+        // The idle daemon entry point runs the very same host policy, without
+        // opt-in flags; its scheduler is tested separately at the 80% boundary.
+        let automatic_path = &expired[0];
+        std::fs::create_dir_all(automatic_path).unwrap();
+        std::fs::write(automatic_path.join("proof.txt"), "automatic fixture").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(30 * 86400);
+        for path in [automatic_path.join("proof.txt"), automatic_path.clone()] {
+            std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+        }
+        std::fs::remove_file(env.home().join(".cas/retention/last-sweep.json")).unwrap();
+        crate::artifacts::retention::host::automatic(&roots[0], true);
+        assert!(!automatic_path.exists());
+        assert!(crate::artifacts::retention::host::last_report().unwrap().reclaimed_bytes() > 0);
     }
 
     #[test]

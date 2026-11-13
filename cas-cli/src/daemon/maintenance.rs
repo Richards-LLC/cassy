@@ -174,6 +174,9 @@ fn heartbeat_stale_agent_should_be_kept(agent: &crate::types::Agent) -> bool {
 pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasError> {
     use crate::store::{open_agent_store, open_event_store, open_store};
 
+    // Maintenance unit fixtures need not opt into a host deletion. The
+    // retention CLI fixture exercises this same function with an isolated HOME.
+    #[cfg(not(test))]
     crate::artifacts::retention::host::automatic(&config.cas_root, true);
     let started_at = Utc::now();
     let mut errors = Vec::new();

@@ -103,9 +103,6 @@ pub(crate) fn automatic_due(last: Option<&SweepReport>, percent: u8, idle: bool,
 /// Called on the daemon's heartbeat as well as idle maintenance. The host lock
 /// serializes different projects; the persisted timestamp prevents scan storms.
 pub(crate) fn automatic(cas: &Path, idle: bool) {
-    // Unit tests invoke maintenance with arbitrary roots; only explicit isolated
-    // sweep fixtures may delete data in the test process.
-    if cfg!(test) { return; }
     let percent = disk_percent(cas).unwrap_or(0).max(disk_percent(&crate::store::known_repos::host_cas_dir()).unwrap_or(0));
     if automatic_due(last_report().as_ref(), percent, idle, Utc::now().timestamp()) {
         let _ = sweep(cas, true);
@@ -140,7 +137,10 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
         let tasks = cas_store::SqliteTaskStore::open(&root)?.list(None)?;
         for task in tasks.iter().filter(|task| !task.is_terminal()) { refs.add(task)?; }
         // Publication events and their task records carry portable references.
-        for release in cas_store::quality_release_events(&root)?.into_iter().take(3) {
+        let mut releases = BTreeSet::new();
+        for release in cas_store::quality_release_events(&root)? {
+            if !releases.insert(release.release_version.clone().unwrap_or_else(|| release.id.clone())) { continue; }
+            if releases.len() > 3 { break; }
             refs.add((&release.task_id, &release.release_version, &release.local_note, &release.title, &release.link))?;
             if let Some(id) = &release.task_id
                 && let Some(task) = tasks.iter().find(|task| &task.id == id) { refs.add(task)?; }
@@ -291,8 +291,9 @@ fn candidates(project: &Project, _refs: &References, now: DateTime<Utc>, deadlin
         let branch = git(&path, &["branch", "--show-current"], deadline)?;
         let owners: Vec<_> = project.agents.iter().filter(|agent| agent.name == worker
             || agent.metadata.get("clone_path").is_some_and(|value| Path::new(value) == path)).collect();
-        // Missing old registry rows are retired only for an actual factory branch.
-        let preserve = ((owners.is_empty() && !branch.starts_with("factory/")) || owners.iter().any(|agent|
+        // Missing registry evidence is unknown ownership, even on a factory
+        // branch; an unregistered harness may be about to open its target.
+        let preserve = (owners.is_empty() || owners.iter().any(|agent|
             crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent).is_live()))
             .then(|| "owner is live or cannot be established as retired".to_string());
         let keys = vec![worker.to_string(), branch];
@@ -510,6 +511,10 @@ mod tests {
         // allocating the reported 73 GiB of ignored checkout scratch.
         let worktree = roots[0].join("worktrees/retired");
         fs::create_dir_all(&worktree).unwrap();
+        let mut owner = cas_types::Agent::new("retired-fixture".into(), "retired".into());
+        owner.status = cas_types::AgentStatus::Shutdown;
+        owner.role = cas_types::AgentRole::Worker;
+        cas_store::SqliteAgentStore::open(&roots[0]).unwrap().register(&owner).unwrap();
         let deadline = Instant::now() + BUDGET;
         git(&worktree, &["init", "-b", "factory/retired"], deadline).unwrap();
         git(&worktree, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "fixture"], deadline).unwrap();

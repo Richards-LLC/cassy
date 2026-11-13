@@ -97,7 +97,6 @@ pub(crate) struct GitEvidence {
     ci_pending: bool,
     /// The anchor is already on its target (merged, close blocked).
     merged_close_blocked: Option<MergedCloseBlockedTask>,
-    /// cas-f497: on its target and correctly waiting for the release verdict.
 }
 
 /// Git evidence by task id.

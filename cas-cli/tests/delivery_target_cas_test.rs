@@ -1922,7 +1922,7 @@ fn cas_git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
 /// Drive real admission, persistence and daemon retry with a Git/SQLite fixture.
 #[tokio::test]
 async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
-    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held", "cancelled", "gh-failure", "green-bad-neighbor", "missing-supervisor", "unknown", "unvalidated", "missing-commit"] {
+    for outcome in ["green", "red", "moved", "no-checks", "expired", "green-held", "cancelled", "green-after-gh-failure", "green-bad-neighbor", "missing-supervisor", "unknown", "unvalidated", "missing-commit"] {
         let home = TempDir::new().unwrap();
         let fake_bin = TempDir::new().unwrap();
         let gh = fake_bin.path().join("gh");
@@ -1932,6 +1932,7 @@ async fn pending_ci_merge_retry_is_bound_to_parked_sha() {
 if [ "$1 $2" = 'repo view' ]; then printf '{"nameWithOwner":"%s"}\n' "$3"; exit 0; fi
 if [ "$1 $2" = 'api graphql' ]; then printf '%s\n' '{"data":{"repository":{"mergeQueue":null}}}'; exit 0; fi
 if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = gh-failure ]; then exit 1; fi
+if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = gh-timeout ]; then exec sleep 5; fi
 if [ "$(cat "$CAS_CI_RETRY_TEST_RESPONSE")" = missing-commit ]; then echo 'HTTP 422: no commit found' >&2; exit 1; fi
 cat "$CAS_CI_RETRY_TEST_RESPONSE"
 "#);
@@ -1986,7 +1987,20 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
             std::fs::write(&response, r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"}]}"#).unwrap();
         }
         if outcome == "missing-commit" { std::fs::write(&response, "missing-commit").unwrap(); }
-        if outcome == "gh-failure" { std::fs::write(&response, "gh-failure").unwrap(); }
+        if outcome == "green-after-gh-failure" {
+            // GH #1899: a gh api error or timeout is no CI answer. The armed
+            // intent survives without a notice and lands on the later green.
+            let green = std::fs::read(&response).unwrap();
+            for failure in ["gh-timeout", "gh-failure"] {
+                std::fs::write(&response, failure).unwrap();
+                cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+                assert!(request.exists(), "{failure}: armed retry must survive a gh lookup failure");
+            }
+            let queue = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap();
+            assert!(!queue.peek_all(100).unwrap().iter().any(|p| p.source.starts_with("lifecycle-wake:merge-ci-retry:")),
+                "a gh lookup failure must not stop the retry or page the supervisor");
+            std::fs::write(&response, green).unwrap();
+        }
         if outcome == "cancelled" {
             std::fs::write(&response, r#"{"check_runs":[{"name":"Fast Validation","status":"completed","conclusion":"cancelled"}]}"#).unwrap();
         }

@@ -961,6 +961,21 @@ async fn live_catalog_search_cache_and_restart_never_expose_unsafe_server_name()
 }
 
 #[cfg(unix)]
+async fn wait_for_owned_upstream_exit(pid: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let state = std::process::Command::new("ps")
+            .args(["-p", pid.trim(), "-o", "stat="]).output().unwrap();
+        let state_text = String::from_utf8_lossy(&state.stdout);
+        if !state.status.success() || state_text.trim().is_empty() || state_text.trim_start().starts_with('Z') {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "owned upstream did not terminate: {pid}");
+        tokio::task::yield_now().await;
+    }
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connected_upstream_tool_error_then_transport_failure_recovers_once() {
     let sandbox = CasSandbox::new();
@@ -1107,7 +1122,16 @@ exec env \
         "tool-level isError must not degrade connection health"
     );
 
+    // The stdio front owns a private backend which inherits the capture pipe.
+    // Read its machine state while the front is live, then await both processes.
+    let backend_for = |front: &str| {
+        let state: Value = serde_json::from_slice(&std::fs::read(sandbox.cas_root()
+            .join("mcp-fronts").join(format!("{}.json", front.trim()))).unwrap()).unwrap();
+        assert_eq!(state["front_pid"].as_u64(), Some(front.trim().parse().unwrap()));
+        state["backend_pid"].as_u64().unwrap().to_string()
+    };
     let pid = std::fs::read_to_string(&pid_file).unwrap();
+    let backend_pid = backend_for(&pid);
     assert!(
         std::process::Command::new("kill")
             .args(["-TERM", pid.trim()])
@@ -1115,17 +1139,8 @@ exec env \
             .unwrap()
             .success()
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let state = std::process::Command::new("ps")
-            .args(["-p", pid.trim(), "-o", "stat="]).output().unwrap();
-        let state_text = String::from_utf8_lossy(&state.stdout);
-        if !state.status.success() || state_text.trim().is_empty() || state_text.trim_start().starts_with('Z') {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "owned upstream did not terminate");
-        tokio::task::yield_now().await;
-    }
+    wait_for_owned_upstream_exit(&pid).await;
+    wait_for_owned_upstream_exit(&backend_pid).await;
 
     let caller = test_proxy_caller();
     let failed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -1161,18 +1176,10 @@ exec env \
     assert_eq!(recovered.next_retry_at_ms, None);
     assert!(recovered.tool_count > 0);
     let recovered_pid = std::fs::read_to_string(&pid_file).unwrap();
+    let recovered_backend = backend_for(&recovered_pid);
     engine.shutdown().await;
-    // The fixture owns this recovered child. Finish cleanup before nextest closes its pipes.
+    // The fixture owns this recovered generation, including its backend.
     let _ = std::process::Command::new("kill").args(["-TERM", recovered_pid.trim()]).status();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let state = std::process::Command::new("ps")
-            .args(["-p", recovered_pid.trim(), "-o", "stat="]).output().unwrap();
-        let state_text = String::from_utf8_lossy(&state.stdout);
-        if !state.status.success() || state_text.trim().is_empty() || state_text.trim_start().starts_with('Z') {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "owned recovered upstream did not terminate");
-        tokio::task::yield_now().await;
-    }
+    wait_for_owned_upstream_exit(&recovered_pid).await;
+    wait_for_owned_upstream_exit(&recovered_backend).await;
 }

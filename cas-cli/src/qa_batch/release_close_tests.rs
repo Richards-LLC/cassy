@@ -49,12 +49,13 @@ fn deliberate_review_exemptions_require_green_lane_ci_cas_5a22() {
         ("mechanical", None, Some("LANE_CI_MISSING")),
         ("light", Some(MergeCiAdmission::Advisory), Some("LANE_CI_MISSING")),
         ("rapid", Some(MergeCiAdmission::Override), Some("LANE_CI_MISSING")),
+        ("rapid-reopened", Some(MergeCiAdmission::Green), Some("REVIEW_MISSING")),
         ("required", Some(MergeCiAdmission::Green), Some("REVIEW_MISSING")),
         ("forced", Some(MergeCiAdmission::Green), Some("REVIEW_MISSING")),
         ("light-pending", Some(MergeCiAdmission::Green), Some("REVIEW_MISSING")),
     ] {
         let id = (0..).map(|n| format!("cas-{kind}-{n}"))
-            .find(|id| !expected.contains_key(id) && (kind != "rapid" || !crate::rapid_response::verification_sampled(id))).unwrap();
+            .find(|id| !expected.contains_key(id) && (!kind.starts_with("rapid") || !crate::rapid_response::verification_sampled(id))).unwrap();
         let mut task = Task::new(id.clone(), id.clone());
         task.origin_project = Some("exempt".into());
         task.status = TaskStatus::AwaitingMerge;
@@ -69,7 +70,16 @@ fn deliberate_review_exemptions_require_green_lane_ci_cas_5a22() {
         tasks.add(&task).unwrap();
         tasks.add_dependency(&cas_types::Dependency::new(id.clone(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
         if let Some(admission) = admission { tasks.record_merge_admission(&id, &published, admission).unwrap(); }
-        if kind == "rapid" { assert!(crate::rapid_response::record_skip(&root, &window, &id, "verification", "not sampled")); }
+        if kind.starts_with("rapid") { assert!(crate::rapid_response::record_skip(&root, &window, &id, "verification", "not sampled")); }
+        if kind == "rapid-reopened" {
+            for status in [TaskStatus::Closed, TaskStatus::Open, TaskStatus::AwaitingMerge] {
+                let mut current = tasks.get(&id).unwrap();
+                current.status = status;
+                current.deliverables.factory_branch_anchor = task.deliverables.factory_branch_anchor.clone();
+                tasks.update(&current).unwrap();
+            }
+            tasks.record_merge_admission(&id, &published, MergeCiAdmission::Green).unwrap();
+        }
         if kind == "light-pending" {
             cas_store::create_verification_dispatch(&root, &id, "worker", "supervisor", now + chrono::Duration::hours(1)).unwrap();
         }

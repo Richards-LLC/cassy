@@ -2189,6 +2189,109 @@ fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&s
 }
 
 #[tokio::test]
+async fn cut_frozen_train_admits_only_its_red_repair_cas_82e4() {
+    use cas::types::{Dependency, DependencyType};
+
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let lane = "epic/sane-delivery-identity-cleanup-train-pr-0-7-ledger-cas-cf795";
+    run_git(&["checkout", "-b", lane], &repo.root);
+    std::fs::write(repo.root.join("release.txt"), "cut release\n").unwrap();
+    run_git(&["add", "release.txt"], &repo.root);
+    run_git(&["commit", "-m", "cut release"], &repo.root);
+    let frozen_tip = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+    run_git(&["checkout", "main"], &repo.root);
+    let remote = TempDir::new().unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+    let origin = "https://github.com/org/cut-repair-fixture.git";
+    run_git(&["remote", "add", "origin", origin], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()), origin], &repo.root);
+    run_git(&["push", "origin", "main", lane], &repo.root);
+
+    let root = init_cas_dir(&repo.root, &mut env).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[project]\ncanonical_id='cut-repair-fixture'\n[worktrees]\nenabled=false\n[verification]\nenabled=false\n").unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+    let tasks = open_task_store(&root).unwrap();
+    let mut train = Task::new("cas-cf795".into(), "Cut release awaiting its CI repair".into());
+    train.task_type = TaskType::Epic;
+    train.branch = Some(lane.into());
+    train.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cut-repair-fixture".into(), target_branch: "main".into(),
+    });
+    tasks.add(&train).unwrap();
+    let mut other = Task::new("cas-other".into(), "Another train".into());
+    other.task_type = TaskType::Epic;
+    tasks.add(&other).unwrap();
+    let mut repair = Task::new("cas-4dab".into(), "Repair the ejected verification test".into());
+    repair.status = TaskStatus::AwaitingMerge;
+    repair.depth = TaskDepth::Light;
+    repair.assignee = Some("alice".into());
+    repair.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cut-repair-fixture".into(), target_branch: lane.into(),
+    });
+    tasks.add(&repair).unwrap();
+    let worker = root.join("worktrees/alice");
+    repo.add_worktree(&worker, "factory/alice");
+    run_git(&["merge", "--ff-only", lane], &worker);
+    std::fs::write(worker.join("repair.txt"), "verification test uses its stable gate code\n").unwrap();
+    run_git(&["add", "repair.txt"], &worker);
+    run_git(&["commit", "-m", "fix(cas-4dab): repair the ejected verification test"], &worker);
+    let repair_tip = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    run_git(&["push", "origin", "factory/alice"], &worker);
+    register_delivery_agent(&root, "release-supervisor", "supervisor", AgentRole::Supervisor, "release-repair");
+    let service = delivery_service(&root, "release-supervisor");
+    env.set_current_dir(&repo.root);
+    let factory = cas::config::Config::load(&root).unwrap().factory();
+    let artifacts = cas::config::resolved_factory_artifacts_root(factory.artifacts_root.as_deref());
+    let receipts = cas::config::factory_task_artifact_dirs(&root, &artifacts, &train.id)[0]
+        .join("train-ci");
+    std::fs::create_dir_all(&receipts).unwrap();
+    let freeze = format!("release-train-frozen:1730000000:{frozen_tip}");
+
+    for scenario in ["no-red", "unlabelled", "foreign-parent", "closed", "unfrozen", "repair"] {
+        train.status = if scenario == "closed" { TaskStatus::Closed } else { TaskStatus::Open };
+        train.labels = vec!["release-train".into(), "release-train-cut".into()];
+        if scenario != "unfrozen" { train.labels.push(freeze.clone()); }
+        tasks.update(&train).unwrap();
+        repair.labels = if scenario == "unlabelled" { vec![] } else { vec!["release-repair".into()] };
+        tasks.update(&repair).unwrap();
+        for parent in [&train.id, &other.id] { tasks.remove_dependency(&repair.id, parent).unwrap(); }
+        let parent = if scenario == "foreign-parent" { &other.id } else { &train.id };
+        tasks.add_dependency(&Dependency::new(repair.id.clone(), parent.clone(), DependencyType::ParentChild)).unwrap();
+        let state = receipts.join("state.json");
+        if scenario == "no-red" {
+            if state.exists() { std::fs::remove_file(&state).unwrap(); }
+        } else {
+            std::fs::write(state, serde_json::json!({
+                "branch":lane, "red_since":"2026-11-12T21:47:00Z", "red_head":frozen_tip, "run_id":"43310659062",
+            }).to_string()).unwrap();
+        }
+        let mut request = coord_req("worktree_merge");
+        request.id = Some("factory/alice".into());
+        request.task_id = Some(repair.id.clone());
+        request.cleanup = Some(false);
+        let result = service.factory(Parameters(request)).await;
+        if scenario == "repair" {
+            let response = result.expect("the named child repair of the red cut must merge without lifting");
+            assert_ne!(response.is_error, Some(true), "{response:?}");
+            run_git(&["cat-file", "-e", &format!("{lane}:repair.txt")], &repo.root);
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", lane]),
+                git_stdout(remote.path(), &["rev-parse", lane]));
+            run_git(&["merge-base", "--is-ancestor", &repair_tip, lane], &repo.root);
+        } else {
+            assert!(result.is_err(), "{scenario}: {result:?}");
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", lane]), frozen_tip, "{scenario}");
+            assert_eq!(git_stdout(remote.path(), &["rev-parse", lane]), frozen_tip, "{scenario}");
+        }
+        assert_eq!(tasks.get(&train.id).unwrap().labels, train.labels, "{scenario}");
+        assert!(worker.join("repair.txt").is_file());
+    }
+    let train = tasks.get(&train.id).unwrap();
+    assert_eq!(train.notes.lines().filter(|line| line.contains("cas-4dab")).count(), 1);
+}
+
+#[tokio::test]
 async fn test_worktree_merge_keeps_cut_trains_frozen_after_landing_cas_2b8d() {
     let repo = GitRepo::new();
     let mut env = test_env();

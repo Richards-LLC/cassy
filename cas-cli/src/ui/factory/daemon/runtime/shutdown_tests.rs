@@ -1403,10 +1403,16 @@ async fn recover_dead_worker(recycle: bool, status: cas_types::AgentStatus) {
             .expect("same-name spawn reaps the exited pane");
     }
     assert_ne!(daemon.app.mux.pane_process_group_id(name), Some(pid));
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !env.home().join("replacement-cwd").exists() { tokio::task::yield_now().await; }
-    }).await.expect("replacement starts in its worktree");
-    let cwd = std::fs::read_to_string(env.home().join("replacement-cwd")).unwrap();
+    let cwd = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(cwd) = std::fs::read_to_string(env.home().join("replacement-cwd"))
+                && cwd.ends_with('\n')
+            {
+                break cwd;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("replacement publishes its complete working directory");
     assert_eq!(std::fs::canonicalize(cwd.trim()).unwrap(), std::fs::canonicalize(&worker).unwrap());
     assert_eq!(git(&worker, &["branch", "--show-current"]), branch);
     assert_eq!(git(&worker, &["rev-parse", "HEAD"]), tip);

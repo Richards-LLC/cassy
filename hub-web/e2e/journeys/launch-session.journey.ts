@@ -600,7 +600,10 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
     await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme });
     await journey.stage(`Quality at ${width} ${colorScheme}`, async () => {
       const palette = page.locator("#command-palette");
-      await page.locator("#command-palette-toggle").click();
+      // Focus the list search when present so one shortcut always opens the
+      // palette; on a phone the hidden/absent search cannot take focus.
+      await page.evaluate(() => document.querySelector<HTMLInputElement>("#conversation-search")?.focus());
+      await page.keyboard.press("ControlOrMeta+k");
       await expect(palette).toBeVisible();
       await palette.getByRole("button", { name: /^Quality/ }).click();
       const dialog = page.getByRole("dialog", { name: "Quality" });

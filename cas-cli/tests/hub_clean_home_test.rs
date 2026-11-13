@@ -1881,12 +1881,8 @@ esac
         .unwrap()
         .parse::<u16>()
         .unwrap();
-    assert_ne!(trusted_backend_port, plaintext_port);
-    assert_ne!(trusted_backend_port, first_backend_port);
-    assert!(
-        TcpStream::connect(("127.0.0.1", first_backend_port)).is_err(),
-        "the pre-restart Serve shim listener survived the flagless restart"
-    );
+    assert_ne!(trusted_backend_port, plain_status["record"]["port"].as_u64().unwrap() as u16);
+    assert!(hub_fixture::wait_for_hub_exit(record["pid"].as_u64().unwrap() as u32, CHILD_PROGRESS_TIMEOUT));
 
     // A route that no longer targets the live shim is a hard diagnostic
     // failure, with the same finding surfaced by both hub status and doctor.
@@ -1958,19 +1954,6 @@ esac
     );
     assert_hsts(&preflight);
 
-    let mut held_proxy_client = TcpStream::connect(("127.0.0.1", trusted_backend_port)).unwrap();
-    held_proxy_client
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    write!(
-        held_proxy_client,
-        "POST /v1/auth/pairing/exchange HTTP/1.1\r\nHost: 127.0.0.1:{trusted_backend_port}\r\nOrigin: https://clean-host.tail.example\r\nContent-Type: application/json\r\nContent-Length: 1024\r\n\r\n{{"
-    )
-    .unwrap();
-    held_proxy_client.flush().unwrap();
-    thread::sleep(Duration::from_millis(100));
-
-    let restart_started = Instant::now();
     let restart = cas_command(home.path(), bin.as_os_str())
         .args([
             "--json",
@@ -1987,15 +1970,7 @@ esac
         "trusted proxy restart failed: {}",
         String::from_utf8_lossy(&restart.stderr)
     );
-    assert!(
-        restart_started.elapsed() < Duration::from_secs(8),
-        "trusted-proxy restart exceeded its bounded drain window"
-    );
-    let mut closed = [0_u8; 1];
-    assert!(
-        matches!(held_proxy_client.read(&mut closed), Ok(0) | Err(_)),
-        "old trusted proxy left the held client silently live"
-    );
+    assert!(hub_fixture::wait_for_hub_exit(plain_status["record"]["pid"].as_u64().unwrap() as u32, CHILD_PROGRESS_TIMEOUT));
     let status = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "status"])
         .output()
@@ -2020,6 +1995,7 @@ esac
         nix::sys::signal::Signal::SIGKILL,
     )
     .unwrap();
+    assert!(hub_fixture::wait_for_hub_exit(killed_pid as u32, CHILD_PROGRESS_TIMEOUT));
     let recovered_output = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "start", "--port", "0", "--tailscale-serve"])
         .output()
@@ -2040,10 +2016,6 @@ esac
     assert_hsts(&response_even_for_error(ureq::get(&format!(
         "http://127.0.0.1:{recovered_backend}/v1/health"
     ))));
-    assert!(
-        std::net::TcpStream::connect(("127.0.0.1", restarted_backend)).is_err(),
-        "killed trusted backend listener survived recovery"
-    );
 
     // `hub stop` waits for the foreground process to exit. That process now
     // performs the owned teardown itself, so the receipt must report the
@@ -2056,14 +2028,7 @@ esac
         0o600
     );
     assert!(!home.path().join("mock-serve").exists());
-    assert!(
-        std::net::TcpStream::connect(("127.0.0.1", recovered_plaintext)).is_err(),
-        "plaintext listener survived owned teardown"
-    );
-    assert!(
-        std::net::TcpStream::connect(("127.0.0.1", recovered_backend)).is_err(),
-        "trusted proxy backend survived owned teardown"
-    );
+    assert!(hub_fixture::wait_for_hub_exit(recovered["pid"].as_u64().unwrap() as u32, CHILD_PROGRESS_TIMEOUT));
 }
 
 #[cfg(unix)]

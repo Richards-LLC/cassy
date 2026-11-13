@@ -117,5 +117,7 @@ async fn handoff_lines_become_feature_verdicts() {
     assert_eq!(events[0].local_note.as_deref(), Some("283 injected, none used"));
     // A valid public identity can contain the same digits as the private note.
     events[0].id = "00000283-0000-4000-8000-000000000001".into();
-    assert!(!serde_json::to_string(&events[0].to_wire()).unwrap().contains("283"));
+    let wire = serde_json::to_value(events[0].to_wire()).unwrap();
+    assert_eq!(wire["id"], events[0].id);
+    assert!(wire.get("local_note").is_none());
 }

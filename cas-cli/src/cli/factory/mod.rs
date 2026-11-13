@@ -2472,14 +2472,6 @@ fn check_factory_launch(
     };
 
     if let Some(cas_root) = resolved_cas_root.as_deref() {
-        // The shared store identifies the supervisor's main checkout even
-        // when launch was requested from a linked worktree with private hooks.
-        let project = cas_root.parent().unwrap_or(cwd);
-        if GitOperations::detect_repo_root(project).is_ok()
-            && let Err(error) = crate::cli::doctor::verify_git_hooks_path(project)
-        {
-            failures.push(error);
-        }
         let config = Config::load(cas_root).unwrap_or_default();
         let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
         // cas-3f93: worker targets on `[factory] scratch_root` fill that

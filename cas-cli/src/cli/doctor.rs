@@ -30,7 +30,6 @@ mod idle_sync;
 mod slack_transport;
 mod communication;
 mod git_hooks;
-pub(crate) use git_hooks::verify_git_hooks_path;
 mod journeys;
 #[cfg(feature = "mcp-proxy")]
 mod retired_tools;

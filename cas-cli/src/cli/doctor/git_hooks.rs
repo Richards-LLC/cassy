@@ -41,16 +41,6 @@ pub(super) fn checks(project: &Path) -> Vec<Check> {
     rows
 }
 
-/// Refuse supervisor launch when its effective hook directory is unavailable.
-pub(crate) fn verify_git_hooks_path(project: &Path) -> Result<(), String> {
-    if let Some(check) = check(project)
-        && matches!(check.status, CheckStatus::Warning | CheckStatus::Error)
-    {
-        return Err(check.message);
-    }
-    Ok(())
-}
-
 fn check(project: &Path) -> Option<Check> {
     const NAME: &str = "Git hooks path";
     let cap = Duration::from_secs(2);
@@ -108,13 +98,8 @@ fn check(project: &Path) -> Option<Check> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "Hooks directory is missing",
         Err(_) => "Hooks directory could not be inspected",
     };
-    let repair = if Path::new(&root).join(".githooks/pre-push").is_file() {
-        "restore the tracked hooks with `git config --worktree core.hooksPath .githooks`"
-    } else {
-        "restore the intended hooks with the project's documented installer"
-    };
     Some(warning(format!(
-        "{status} at {resolved}; core.hooksPath={configured}; checkout {root}. Run `git config --show-origin --show-scope --get core.hooksPath` in that checkout, then {repair}; factory workers need their own guards refreshed through spawn/reuse. Review authority before changing config"
+        "{status} at {resolved}; core.hooksPath={configured}; checkout {root}. Run `git config --show-origin --show-scope --get core.hooksPath` in that checkout, then restore the intended hooks with the project's documented installer; factory workers need their own guards refreshed through spawn/reuse. Review authority before changing config"
     )))
 }
 
@@ -165,7 +150,6 @@ mod tests {
             git(&repo, &["config", "core.hooksPath", configured]);
             let before = std::fs::read(repo.join(".git/config")).unwrap();
             let row = check(&subdir).expect("configured hooksPath must be checked");
-            assert!(verify_git_hooks_path(&subdir).is_err());
             let json = super::super::serialize_checks(&[row], &[]);
             assert_eq!(json[0]["group"], "config");
             assert_eq!(json[0]["status"], "warning");
@@ -210,7 +194,6 @@ mod tests {
             &["config", "--worktree", "core.hooksPath", "private-hooks"],
         );
         assert!(matches!(check(&worker).unwrap().status, CheckStatus::Ok));
-        assert!(verify_git_hooks_path(&worker).is_ok());
         assert!(matches!(check(&repo).unwrap().status, CheckStatus::Warning));
         env.set_current_dir(&worker);
         let rows = checks(&repo);

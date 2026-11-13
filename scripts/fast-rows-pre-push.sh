@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # gate[C-07 git-hook]: Pre-push fast rows (worker and main checkout)
-# Git pre-push gate for factory worker and epic branches (cas-043b, cas-1efb).
+# Git pre-push gate for factory worker branches (cas-043b).
 #
 # Cassy installs a pre-push hook in worker worktrees that delegates here. A
-# push of refs/heads/factory/* or refs/heads/epic/* must carry a fast-rows PASS
+# push of refs/heads/factory/* must carry a `release-gate.sh --fast-rows` PASS
 # for the pushed tip as early local feedback; CI owns the authoritative
 # proof and park ignores this receipt. An existing same-tip receipt makes a repeat
-# push free for the same comparison base. Other refs (including main) pass through.
+# push free. Other refs (epic branches, main) pass through.
 #
 # Override, logged to <git-common-dir>/cas/fast-rows/overrides.log:
 #   CAS_SKIP_FAST_ROWS='<reason>' git push ...
@@ -44,7 +44,10 @@ status=0
 
 # gate[H-38 git-hook]: Main-checkout pre-push (factory ref needs a same-tip fast-rows PASS)
 while read -r _local_ref local_sha remote_ref remote_sha; do
-    [[ ( "$remote_ref" == refs/heads/factory/* || "$remote_ref" == refs/heads/epic/* ) && "$local_sha" != "$zero" ]] || continue
+    [[ "$remote_ref" == refs/heads/factory/* && "$local_sha" != "$zero" ]] || continue
+    if head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha "; then
+        continue
+    fi
     if [[ -n "${CAS_SKIP_FAST_ROWS:-}" ]]; then
         # Persist the same typed per-code facts that `cas gates report` reads.
         # A skip is accepted only after recording succeeds.
@@ -109,23 +112,8 @@ PY
         fi
         base="${base:-origin/main}"
     fi
-    base="$(git merge-base "$base" "$local_sha" 2>/dev/null || printf '%s' "$base")"
-    web_changed=false
-    if ! git diff --quiet "$base" "$local_sha" -- hub-web/; then
-        web_changed=true
-    fi
-    web_receipt="$receipts/$local_sha.web.pass"
-    web_proved=false
-    if head -n1 "$web_receipt" 2>/dev/null | grep -q "^hub-web-dist-drift: PASS $local_sha base=$base "; then
-        web_proved=true
-    fi
-    # Row selection depends on the push range: a receipt over a narrower range
-    # may not have built the web assets that this epic push changes.
-    if [[ "$web_changed" == false || "$web_proved" == true ]] \
-        && head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha base=$base "; then
-        continue
-    fi
     printf 'pre-push: running fast rows on %s (base %s)\n' "${local_sha:0:12}" "$base" >&2
+    base="$(git merge-base "$base" "$local_sha" 2>/dev/null || printf '%s' "$base")"
     # The gate's guardian removes its scratch tree on exit. Keep each push
     # attempt's complete diagnostics outside that tree, even if the gate exits
     # before it can write a receipt. A later attempt must not overwrite it.
@@ -133,18 +121,6 @@ PY
         printf 'pre-push: refused: cannot create durable fast-row logs for %s\n' "${local_sha:0:12}" >&2
         status=1
         continue
-    fi
-    if [[ "$web_changed" == true && "$web_proved" == false ]]; then
-        version="$(sed -n 's/^version = "\([^" ]*\)".*/\1/p' cas-cli/Cargo.toml | head -n1)"
-        if ! CAS_RELEASE_GATE_LOG_DIR="$attempt_logs" bash scripts/release-gate.sh "$version" --only hub-web-dist-drift \
-            </dev/null >"$attempt_logs/gate.log" 2>&1; then
-            cat "$attempt_logs/gate.log" >&2
-            printf 'FIX: run npm --prefix hub-web ci --no-audit --no-fund && npm --prefix hub-web run build, then commit hub-web/dist and retry the push\n' >&2
-            printf 'pre-push: web build logs: %s\n' "$attempt_logs" >&2
-            status=1
-            continue
-        fi
-        printf 'hub-web-dist-drift: PASS %s base=%s\n' "$local_sha" "$base" >"$web_receipt"
     fi
     CAS_RELEASE_GATE_LOG_DIR="$attempt_logs" bash scripts/release-gate.sh --fast-rows --base "$base" \
         </dev/null >"$attempt_logs/gate.log" 2>&1

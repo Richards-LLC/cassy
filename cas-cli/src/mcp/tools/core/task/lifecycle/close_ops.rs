@@ -2717,7 +2717,7 @@ fn close_delivered_tip(
 }
 
 /// Durable code evidence survives a deleted lane or a branchless parent.
-fn has_recorded_code_delivery(task: &Task) -> bool {
+pub(crate) fn has_recorded_code_delivery(task: &Task) -> bool {
     let delivery = &task.deliverables;
     !delivery.files_changed.is_empty()
         || delivery.commit_hash.is_some()

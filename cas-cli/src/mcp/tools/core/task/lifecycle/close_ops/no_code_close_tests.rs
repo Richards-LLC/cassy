@@ -1287,6 +1287,7 @@ async fn artifact_scope_fix_retires_parked_docs_and_refuses_code_cas_3ff6() {
         task.deliverables.parked_branch = Some(lane.clone());
         task.deliverables.files_changed = vec![path.into()];
         if already_cleared {
+            task.status = TaskStatus::Open;
             task.deliverables.work_target = None;
             task.deliverables.work_target_cleared = true;
         }

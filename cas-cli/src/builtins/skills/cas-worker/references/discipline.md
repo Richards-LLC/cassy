@@ -77,6 +77,8 @@ selection automatically. For Vitest, Jest or Playwright, use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`.
 The receipt includes the repeated source identities; park reads it without
 running tests. A failure stops the run: fix or delete the test before a new run.
+Docs, test, fixture and CI only deliveries keep their existing park exemption;
+mixed product deliveries still owe stability for their changed tests.
 
 Before rewording user-facing text, grep the tests for the old wording. Measure
 a size or count claim on a real tree as well as a fixture. List each module run

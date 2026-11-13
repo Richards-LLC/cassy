@@ -139,9 +139,21 @@ pub(super) fn park_refusals(
         ));
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    // Same G-61 receipt gate for every harness. Non-Git scope-classification
-    // callers have no delivered tests; ordinary park already binds a Git tip.
-    if proof_repo.join(".git").exists() {
+    // Keep the existing docs/test/CI-only park contract, including a rejected
+    // QA round's test-only correction after its product work reached the target.
+    // Mixed product deliveries still owe exact-tip stability for their tests.
+    // Attribution can retain earlier product commits already on a new target;
+    // only product paths still contributed there make this a mixed delivery.
+    let (live_target, _) = super::preferred_live_target_ref_for_delivery(
+        proof_repo, target, task.delivery_mode,
+    );
+    let remaining_paths = super::git_stdout_lines(proof_repo, &[
+        "diff", "--name-only", "--no-ext-diff", &format!("{live_target}...{head}"), "--",
+    ]).ok();
+    if proof_repo.join(".git").exists()
+        && changed_paths.iter().any(|path| !crate::qa_pass::is_non_surface_path(path)
+            && remaining_paths.as_ref().is_none_or(|paths| paths.contains(path)))
+    {
         use crate::factory_worker_check::stability;
         match stability::required(proof_repo, head, target, changed_paths, delivery_ranges)
             .and_then(|tests| stability::missing(cas_root, proof_repo, head, &tests))
@@ -956,10 +968,11 @@ mod tests {
             stability::record(root.path(), repo.path(), &base, Proof { runner: runner.into(),
                 tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
             std::fs::write(repo.path().join(path), format!("{old}{added}")).unwrap();
+            std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
             let head = commit_changelog_fixture(repo.path(), "add owned test");
             let mut task = Task::new("cas-9e02e".into(), "stability fixture".into());
             task.notes = "[2026-11-13 10:00] ✅ DECISION no changelog: test-only stability fixture".into();
-            let paths = vec![identity.path.clone()];
+            let paths = vec![identity.path.clone(), "hub-web/src/app.ts".into()];
             if rust { crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(child)"); }
             let started = std::time::Instant::now();
             let held = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None).unwrap();

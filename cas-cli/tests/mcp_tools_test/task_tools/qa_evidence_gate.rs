@@ -1375,16 +1375,15 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
     assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
     assert_eq!(fx.status(), TaskStatus::InProgress);
 
-    // A stated reason clears the marker gate, but cannot replace passing tests.
+    // A stated reason clears the marker gate; this test-only delivery can park.
     let allowed_reason = "fixture:clipboard-unavailable";
     commit_file(
         &fx.repo,
         "hub-web/e2e/generated/fleet.spec.ts",
         &format!("import {{ test }} from \"@playwright/test\";\ntest(\"fleet\", async () => {{\n  // cas-allow-skip: {allowed_reason}\n  test.fixme(true, \"clipboard\");\n}});\n"),
     );
-    let stability_required = close_text(&fx.core, TASK).await;
-    assert_eq!(cas::gates::codes_in(&stability_required), ["G-61"], "{stability_required}");
-    assert_eq!(fx.status(), TaskStatus::InProgress);
+    let parked = close_text(&fx.core, TASK).await;
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
     // The exact caller-supplied waiver reason remains in the decision audit.
     assert!(fx.notes().contains(allowed_reason), "{}", fx.notes());
 }

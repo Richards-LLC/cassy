@@ -590,6 +590,8 @@ PY
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     after="$(git -C "$fixture" rev-parse HEAD)"
     [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
+    # There is deliberately no Y run/artifact: retry must fetch X again.
+    rm -rf "$fixture/.git/cas/train-ci"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]]
 }

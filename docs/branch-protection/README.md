@@ -196,7 +196,9 @@ a successful completed GitHub workflow and its `Full-set gate` job; a status
 alone, legacy Rust-only artifact or missing job cannot authorize a cut or reuse.
 `scripts/release.sh` checks this receipt for a train’s starting tree before preparing
 release metadata. An explicit non-train hotfix keeps its emergency path, discloses
-that it has no train receipt, and receives the complete queue graph without reuse. An unchanged prepared retry retains the original starting tip.
+that it has no train receipt, and receives the complete queue graph without reuse. A prepared release push starts no train workflow. An unchanged prepared retry
+resolves `Train-CI-Head` directly to the original starting tip and its green
+receipt, without requiring a run or adoption artifact at the release head.
 
 ### Queue reuse
 
@@ -218,8 +220,8 @@ source head, run and attempt. It becomes usable only after that workflow and its
 full-set fan-in succeed. Cut retries and later queue entries revalidate the
 original full-set artifact, complete logs, plumbing delta and both run identities;
 they retain the native producer's tree and executable identity. A missing or
-mismatched reference runs the full graph. This keeps prepared pushes and queue
-entries from repeating a successful source suite while compile, launch, asset
+mismatched reference runs the full graph. This keeps dispatched plumbing-only
+freezes and queue entries from repeating a successful source suite while compile, launch, asset
 rebuild and Release Prebuild checks continue on the release tree.
 
 On reuse, preflight first restores `preflight-cli` from the validated full-gate

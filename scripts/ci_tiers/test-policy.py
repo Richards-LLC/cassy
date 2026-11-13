@@ -100,6 +100,29 @@ class PolicyTests(unittest.TestCase):
                          'fast-validation-suite', 'fast-validation-docs',
                          'queue-flake-publication', 'fast-validation'}.issubset(train))
         self.assertNotIn('scoped-validation-fast', train)
+        # The existing full-set consumer's adoption outputs must reach every
+        # suite producer while keeping exact-tree compile/launch preflight.
+        common.update({
+            'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false',
+            'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'full-gate',
+            'needs.fast-validation-main-push-dedupe.outputs.journeys-reuse': 'true'})
+        adopted = selected('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1')
+        self.assertEqual(selected('push', 'refs/heads/epic/release-train-fixture'), adopted)
+        self.assertTrue({'fast-validation-suite-build', 'fast-validation-suite-shards',
+                         'fast-validation-suite', 'fast-validation-ci-tiers',
+                         'fast-validation-web', 'fast-validation-docs'}.isdisjoint(adopted))
+        self.assertTrue({'fast-validation-preflight', 'fast-validation'}.issubset(adopted))
+        publication = next(step for step in jobs['fast-validation-main-push-dedupe']['steps']
+                           if step.get('with', {}).get('name') == 'train-full-gate')
+        for event, ref, proof, expected in [
+            ('push', 'refs/heads/epic/release-train-fixture', 'full-gate', True),
+            ('push', 'refs/heads/epic/release-train-fixture', '', False),
+            ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', 'full-gate', False),
+            ('push', 'refs/heads/main', 'full-gate', False),
+        ]:
+            self.assertEqual(self.gh_expr(publication['if'], {
+                'github.event_name':event, 'github.ref':ref,
+                'steps.tree-dedupe.outputs.reuse-source':proof}), expected)
 
 
     def test_parser_dependency_absence_is_a_hard_failure(self):

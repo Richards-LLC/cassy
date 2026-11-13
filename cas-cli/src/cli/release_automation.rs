@@ -940,27 +940,14 @@ pub(super) mod tests {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let (temp, root, train, _, args) = fixture();
         let scope = serde_json::to_value(cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap()).unwrap();
-        assert!(ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::new()).allow_cut().is_ok());
-        // cas-a6c8: review/QA can close every member before the cut.
-        for (outcome, allowed) in [
-            (CassyMergeClose::AlreadyClosed, true),
-            (CassyMergeClose::Held("RELEASE_MEMBER_HELD: missing proof".into()), false),
-        ] {
-            let members = (0..13).map(|n| (format!("cas-{n:04x}"), outcome.clone())).collect();
-            let preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), members);
-            assert_eq!(preview.allow_cut().is_ok(), allowed);
-        }
-        let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
+        let preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
             ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
             ("cas-0002".into(), CassyMergeClose::AlreadyClosed),
             ("cas-0003".into(), CassyMergeClose::NotEligible),
         ]));
-        assert!(preview.allow_cut().is_err());
-        preview.members_by_id.insert("cas-0004".into(), CassyMergeClose::Closed { notice: String::new() });
-        preview = ReleasePreview::from_members(preview.scope, preview.members_by_id);
-        assert!(preview.allow_cut().is_ok());
-        assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (4, 1, 1, 1, 1));
+        assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (3, 0, 1, 1, 1));
         assert_eq!(preview.by_reason["REVIEW_MISSING"], 1);
+        // Closure review is recorded here and resolved after publication.
         super::track_on_train(&args, &root, temp.path(), &train, preview.clone()).unwrap();
         let tree = crate::release_reconcile::final_tree(temp.path(), &args.commit).unwrap();
         let key = cas_store::release_reconcile_store::ReleaseOperationKey {

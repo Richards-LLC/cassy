@@ -59,16 +59,20 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     commit(repo, "work.txt");
     run(repo, &["checkout", "-q", "main"]);
     let root = crate::store::init_cas_dir(repo).unwrap();
-    let mut supervisor = Agent::new_with_role("sup-id".into(), "supervisor".into(), AgentRole::Supervisor);
+    // The synced train still names its former supervisor on prowl. This
+    // machine's live successor must handle it through the existing resolver.
+    let mut supervisor = Agent::new_with_role("successor-id".into(), "supervisor".into(), AgentRole::Supervisor);
     supervisor.factory_session = Some("session".into());
     open_agent_store(&root).unwrap().register(&supervisor).unwrap();
     let store = open_task_store(&root).unwrap();
-    store.add(&train_task("cas-tr", &[])).unwrap();
     let now = Utc::now();
+    let mut train = train_task("cas-tr", &[]);
+    train.created_at = now - Duration::hours(12);
+    store.add(&train).unwrap();
     let none = BTreeSet::new();
     let poll = |queued: &BTreeSet<String>| notify_train_cuts(&root, queued, now).unwrap();
     let frozen = || release_freeze::freeze_of(&open_task_store(&root).unwrap().get("cas-tr").unwrap()).is_some();
-    let wakes = || open_supervisor_queue_store(&root).unwrap().peek("sup-id", 10).unwrap();
+    let wakes = || open_supervisor_queue_store(&root).unwrap().peek("successor-id", 10).unwrap();
 
     receipt(repo, &root, "PASS");
     poll(&none);
@@ -104,6 +108,14 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     config.set("release.auto_cut_max_per_day", "4").unwrap();
     config.save(&root).unwrap();
 
+    // A stale heartbeat is not a live successor, even if still registered.
+    supervisor.last_heartbeat = now - Duration::hours(1);
+    open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    poll(&none);
+    assert!(!frozen());
+    supervisor.last_heartbeat = now;
+    open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+
     poll(&none);
     poll(&none);
     assert!(frozen(), "green tip with fragments freezes for its cut");
@@ -127,4 +139,35 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     let notes = open_task_store(&root).unwrap().get("cas-tr").unwrap().notes;
     assert_eq!(notes.matches("AUTO-CUT: started").count(), 1, "one cut per tip");
     assert_eq!(wakes().len(), 1);
+}
+
+#[test]
+fn green_train_waits_until_its_release_repair_finishes() {
+    let _env = TestEnvGuard::temp_home();
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = temp.path();
+    run(repo, &["init", "-q", "-b", "main"]);
+    commit(repo, "scripts/release.sh");
+    commit(repo, "changelog.d/fix.md");
+    run(repo, &["branch", LANE]);
+    let root = crate::store::init_cas_dir(repo).unwrap();
+    let supervisor = Agent::new_with_role("sup-id".into(), "supervisor".into(), AgentRole::Supervisor);
+    open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    let store = open_task_store(&root).unwrap();
+    store.add(&train_task("cas-tr", &[])).unwrap();
+    let mut repair = Task::new("cas-repair".into(), "Repair the train".into());
+    repair.labels.push(release_freeze::REPAIR_LABEL.into());
+    store.add(&repair).unwrap();
+    store.add_dependency(&cas_types::Dependency::new(repair.id.clone(), "cas-tr".into(), cas_types::DependencyType::ParentChild)).unwrap();
+    receipt(repo, &root, "PASS");
+    for status in [TaskStatus::Open, TaskStatus::InProgress, TaskStatus::AwaitingMerge] {
+        repair.status = status;
+        store.update(&repair).unwrap();
+        notify_train_cuts(&root, &BTreeSet::new(), Utc::now()).unwrap();
+        assert!(release_freeze::freeze_of(&store.get("cas-tr").unwrap()).is_none(), "{status:?}");
+    }
+    repair.status = TaskStatus::Closed;
+    store.update(&repair).unwrap();
+    notify_train_cuts(&root, &BTreeSet::new(), Utc::now()).unwrap();
+    assert!(release_freeze::freeze_of(&store.get("cas-tr").unwrap()).is_some());
 }

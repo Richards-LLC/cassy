@@ -27,6 +27,36 @@ fn changes(paths: &[&str]) -> Vec<Change> {
 }
 
 #[test]
+fn approved_pulse_card_profile_admits_pr613_and_rejects_outside_scope() {
+    let config: crate::config::Config = toml::from_str(include_str!("../../docs/qa/pulse-card-fast-lane.toml")).unwrap();
+    let lane = config.fast_lane.unwrap();
+    let bug = task(TaskType::Bug, &[]);
+    let fixture: Vec<Change> = [
+        ("apps/frontend/app/src/components/creators/creator-detail/CreatorDetailView.test.ts", 32),
+        ("apps/frontend/app/src/components/creators/creator-detail/CreatorDetailView.vue", 42),
+        ("apps/frontend/app/src/components/metrics/ScoreBasisCaption.vue", 107),
+        ("apps/frontend/locales/en.json", 5),
+        ("apps/frontend/locales/es.json", 5),
+    ].into_iter().map(|(path, lines)| Change { path: path.into(), lines }).collect();
+    assert!(lane.enabled);
+    assert_eq!(evaluate(&lane, &bug, &fixture), Eligibility::Eligible { files: 5, lines: 191 });
+    assert_eq!(lane.merge_checks, ["Frontend unit tests"]);
+    assert_eq!(lane.receipt_checks, ["Hermetic end-to-end tests"]);
+    assert_eq!(lane.receipt_statuses, ["Vercel"]);
+    assert_eq!((lane.max_files, lane.max_lines, lane.receipt_window_mins), (10, 300, 30));
+    for path in ["apps/frontend/server/api/creators.ts", "apps/frontend/app/src/pages/new.vue",
+        "apps/frontend/app/src/components/metrics/Other.vue", "apps/frontend/package.json", ".github/workflows/frontend.yml"] {
+        let mut outside = fixture.clone();
+        outside.push(Change { path: path.into(), lines: 1 });
+        assert!(matches!(evaluate(&lane, &bug, &outside), Eligibility::Refused(_)), "{path}");
+    }
+    let mut large = fixture.clone();
+    large[0].lines += 110;
+    assert!(matches!(evaluate(&lane, &bug, &large), Eligibility::Refused(_)));
+    assert!(matches!(evaluate(&lane, &task(TaskType::Feature, &[]), &fixture), Eligibility::Refused(_)));
+}
+
+#[test]
 fn eligibility_admits_a_small_frontend_hotfix_and_names_each_refusal() {
     let lane = pulse_card();
     let page = "apps/frontend/app/src/pages/admin/creator.vue";

@@ -38,10 +38,8 @@ Check and status names match exactly and are case-sensitive:
 - `receipt_statuses` are commit-status contexts on the merge commit, such as
   `Vercel` for the production build.
 - Workflow names are not read.
-- One summary job that succeeds only when its jobs succeed (pulse-card's
-  `Post-merge receipt` over `build / Frontend fresh build` and
-  `e2e / Hermetic end-to-end tests`) is enough: rerun and revert act on its
-  Actions run.
+- A summary job is usable only if it exists in the repository; a stale
+  Actions catalog entry does not establish the actual job name.
 - Path globs are case-sensitive, so list both spellings where they differ, such as `*auth*` and `*Auth*`.
 
 ## Eligibility
@@ -61,6 +59,34 @@ The result is a decision note on the task, either
 `FAST LANE ELIGIBLE head=<sha> files=N lines=M` or
 `FAST LANE REFUSED head=<sha>: <reason>`. A refused delivery takes the normal
 path.
+
+## Pulse-card pilot
+
+The approved three-hotfix pilot uses [this exact project profile](pulse-card-fast-lane.toml),
+based on design artifact `art-c7fa7432`. It allows only the creator-detail view,
+score-basis caption, their named tests and English/Spanish locales, with ten
+files and 300 added-plus-deleted lines. PR #613 is the replay fixture: five
+files and 191 changed lines. Apply the profile's keys using `cas config set`,
+setting `enabled` last. It enables the existing lane; it adds no lane engine.
+
+The actual merge job is `Frontend unit tests` (unit tests plus baseline
+typecheck). The receipt requires `Hermetic end-to-end tests` and the `Vercel`
+commit status on the merge SHA within thirty minutes. The sample names above
+are generic examples, not pulse-card's current check names.
+
+Review must establish a reproducible bug or operator hotfix, check phase
+ancestry and plan-fit, and reject API/contract, authorization or shared-domain
+changes even inside an allowed Vue file. The path classifier cannot prove
+those semantic restrictions. Binary, generated, route or executable changes
+use the normal lane. Renames are diffed as both source and destination paths.
+Keep the delivery's independent review and protected-branch authority. An unresolved
+receipt stops further pilot hotfixes; the supervisor owns reconciliation and
+the three-delivery timing report. This is a pilot operating limit.
+
+Request-to-preview under ten minutes remains an unmeasured target. Creating a
+revert PR does not roll back production; the supervisor merges and verifies
+recovery. Config enablement alone does not change pulse-card workflows or
+Vercel preview settings.
 
 ## What changes for an eligible delivery
 
@@ -137,6 +163,6 @@ On failure:
   is the operator's step.
 - **Backend CI path filters (pulse-card repository).** Add path filters so
   frontend-only PRs skip the backend boot, typecheck, unit, fresh-database and
-  PostgreSQL-contract jobs. Expose a single always-reporting `PR gate` job on
-  PRs and a `Post-merge receipt` workflow on push to `main`. That change is made
-  in the pulse-card repository, coordinated through the supervisor.
+  PostgreSQL-contract jobs. The approved design reuses existing unit and main-push
+  e2e jobs instead of adding summary jobs. Workflow routing changes remain in
+  the pulse-card repository, coordinated through the supervisor.

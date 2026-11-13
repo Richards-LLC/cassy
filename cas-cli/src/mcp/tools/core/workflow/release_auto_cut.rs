@@ -18,7 +18,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use super::release_freeze;
 use crate::mcp::tools::core::task::release_train::is_release_train;
-use crate::supervisor_notices::{ReleaseNoticePhase, release_action};
+use crate::supervisor_notices::{self, ReleaseNoticePhase, release_action};
 use crate::types::Task;
 
 /// The operator's Commander pause; a synced label, like the freeze.
@@ -124,7 +124,7 @@ fn cadence(root: &Path, train: &Task, now: DateTime<Utc>) -> Result<Option<Strin
 /// while any merge-queue run is in flight.
 // gate-audit[queue_busy]: input Measured merge-queue state prevents release; never an override.
 pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_busy: bool, now: DateTime<Utc>) -> Result<Outcome> {
-    // gate[G-122 release-verdict]: Auto-cut preconditions (setup, owner, fragments, queue, cadence, notes draft)
+    // gate[G-122 release-verdict]: Auto-cut preconditions (setup, live supervisor, repairs, fragments, queue, cadence, notes draft)
     if let Some(reason) = declined_setup(root, train) {
         return Ok(Outcome::Declined(reason));
     }
@@ -134,9 +134,14 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
         return Ok(Outcome::Handled);
     }
     let agents = crate::store::open_agent_store(root)?.list(None)?;
-    let owner = train.epic_verification_owner.as_deref();
-    if !owner.is_some_and(|owner| agents.iter().any(|agent| agent.id == owner || agent.name == owner)) {
-        return Ok(Outcome::Declined("the train's supervisor is not on this machine".into()));
+    let supervisor = supervisor_notices::resolve(&agents, train.epic_verification_owner.as_deref(), None);
+    if supervisor.id == "operator" {
+        return Ok(Outcome::Declined("no live registered supervisor on this machine".into()));
+    }
+    if crate::store::open_task_store(root)?.get_subtasks(&train.id)?.iter().any(|child| {
+        !child.is_terminal() && child.labels.iter().any(|label| label == release_freeze::REPAIR_LABEL)
+    }) {
+        return Ok(Outcome::Declined("a release-repair child is unfinished".into()));
     }
     let repo = crate::train_guardrails::train_repo_root(root, train)?;
     let count = fragments(&repo, tip);

@@ -5004,10 +5004,15 @@ poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip
 has a green train-suite receipt, it acts when the tip holds `changelog.d/`
 fragments, no merge-queue run is in flight, the operator has not paused it
 (Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
-label), the train's supervisor is registered on this machine and the cadence
+label), a live supervisor is registered on this machine and the cadence
 allows it: fewer than `release.auto_cut_max_per_day` (default 4) other trains
 frozen in 24 hours, the last at least `release.auto_cut_min_interval_hours`
-(default 2) ago. It freezes the train, then waits for the supervisor's
+(default 2) ago. The existing notice resolver prefers the live owner, then a
+same-name successor, then another live project-local supervisor; a stale owner
+on another machine cannot block a live local successor. No cut executes on a
+remote supervisor's behalf: that machine's daemon handles its own supervisor.
+An unfinished `release-repair` child holds auto-cut, including when the current
+tip is already green. It freezes the train, then waits for the supervisor's
 `release-notes.md` in the train's artifact directory, waking the supervisor
 once per tip with a deadline. With the draft present it runs the
 repository's `scripts/release.sh --notes <draft>` once per tip in a dedicated

@@ -5,7 +5,10 @@ and when disk usage exceeds 80%. Artifacts stay for at least 14 days, and live t
 citations, unmerged deliveries and the latest three releases preserve their evidence.
 Retired worker checkouts require clean, fully pushed Git state and no live task;
 their target directories are disposable. Scratch and review scratch expire after
-24 hours unless referenced by live work. Unknown ownership, native process use,
+24 hours unless referenced by live work. Managed proof reviews retain their separate
+lease, dispatch, source and two-hour audit guards; resolved reviews release disposable
+targets promptly. Explicit recording/candidate regeneration keeps its existing gates
+and preserves proof ledgers, logs and checksum records. Unknown ownership, native process use,
 symlinks and unavailable reference evidence preserve files.
 
 `cas factory gc report` previews the host policy, `cas factory gc cleanup` applies

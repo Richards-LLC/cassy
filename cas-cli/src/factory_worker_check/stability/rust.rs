@@ -93,6 +93,21 @@ impl Inventory<'_> {
                         self.file(&child, &child_prefix, &child_directory, package, harness)?;
                     }
                 }
+                "macro_invocation" => {
+                    let mut children = node.walk();
+                    let body = node.named_children(&mut children).find(|child| child.kind() == "token_tree");
+                    if let Some(body) = body {
+                        let body = text(body, source);
+                        if body.len() > 2 {
+                            let inner = &body[1..body.len() - 1];
+                            // Property-test macros retain static fn names even
+                            // when their parameter grammar is not ordinary Rust.
+                            let parsed = self.parser.parse(inner, None).context("STABILITY_MACRO_PARSE")?;
+                            self.items(parsed.root_node(), inner, path, prefix, directory, package, harness)?;
+                        }
+                    }
+                }
+                "ERROR" => self.items(node, source, path, prefix, directory, package, harness)?,
                 _ => {},
             }
         }
@@ -147,7 +162,34 @@ fn inventory(repo: &Path, head: &str, paths: &[String]) -> Result<Vec<Test>> {
 pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> Result<Vec<Test>> {
     let prior = inventory(repo, base, paths)?.into_iter()
         .map(|test| ((test.identity, test.package, test.harness), test.source)).collect::<BTreeMap<_, _>>();
-    Ok(inventory(repo, head, paths)?.into_iter().filter(|test| paths.contains(&test.identity.path)
+    let current = inventory(repo, head, paths)?;
+    // A new test in an unreferenced source file must not silently disappear
+    // from the gate. It either resolves through a Cargo root or needs repair.
+    let tree = delivered_tree(repo, head).context("STABILITY_DELIVERY_TREE")?;
+    let sources = tree.rust_sources(repo).context("STABILITY_SOURCE_READ")?;
+    for path in paths.iter().filter(|path| path.ends_with(".rs")) {
+        if tree.manifest_dir_for_source(path).is_none() { continue; }
+        let Some((_, source)) = sources.iter().find(|(source, _)| source == path) else { continue; };
+        let mut parser = Parser::new();
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;
+        let parsed = parser.parse(source, None).context("STABILITY_RUST_PARSE")?;
+        let mut standalone = Inventory { parser, sources: BTreeMap::new(), tests: Vec::new(), visited: BTreeSet::new() };
+        standalone.items(parsed.root_node(), source, path, "", "", "", None)?;
+        let source_tests = std::mem::take(&mut standalone.tests);
+        let old = git(repo, &["show", &format!("{base}:{path}")]).unwrap_or_default();
+        let parsed = standalone.parser.parse(&old, None).context("STABILITY_RUST_PARSE")?;
+        standalone.items(parsed.root_node(), &old, path, "", "", "", None)?;
+        let previous = standalone.tests.into_iter().map(|test| (test.identity.name, test.source)).collect::<BTreeMap<_, _>>();
+        for test in source_tests {
+            if previous.get(&test.identity.name) != Some(&test.source) && !current.iter().any(|resolved| resolved.identity.path == *path
+                && (resolved.identity.name == test.identity.name
+                    || resolved.identity.name.ends_with(&format!("::{}", test.identity.name))))
+            {
+                bail!("STABILITY_TEST_NOT_DISCOVERABLE: {}::{}; wire the test into a Cargo target before park", path, test.identity.name);
+            }
+        }
+    }
+    Ok(current.into_iter().filter(|test| paths.contains(&test.identity.path)
         && prior.get(&(test.identity.clone(), test.package.clone(), test.harness.clone())) != Some(&test.source)).collect())
 }
 

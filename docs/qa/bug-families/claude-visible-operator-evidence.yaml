@@ -1,4 +1,0 @@
-title: Claude Code supervisor replies use visible same-turn evidence without hidden tool-use IDs
-statement: Matching numbers and SHAs pass; unsupported literals, failed or stale results, and clipboard claims without a fresh read remain refused.
-tasks: [cas-1f5f]
-journeys: [HUB-J5]

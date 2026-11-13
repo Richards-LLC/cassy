@@ -7,6 +7,35 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.24.0] - 2026-11-13
+
+### Changed — Release validation
+
+- **Train suite runs once per release, at the freeze** — Merges into a release train no longer start the full train suite or cancel the one in progress; lane CI already proves each delivery. Freezing the train starts exactly one run at the frozen tip, its green receipt is what the cut consumes, and a red still raises the train-red notice. Auto-cut now freezes a ready train first and cuts on that run's green.
+
+### Fixed — Supervisor replies
+
+- **Accept verified Claude Code replies** — The operator evidence guard now matches numbers and SHAs against successful results from the current turn without requiring hidden tool-use IDs. Exact commands can be named in backticks. Unsupported facts and clipboard claims without a fresh read remain refused.
+
+### Fixed — Release trains
+
+- **Retargeting to the next train moves the parent too** — Was: retargeting a
+  parked task from a frozen train to the next train's branch left it under the
+  frozen train, so its next start was refused until a separate epic update.
+  Now: the same update moves the parent to the next train.
+
+### Fixed — Commander
+
+- **Slash commands sent during a supervisor turn wait instead of failing** — A command such as `/mcp`, `/model` or `/usage` sent from Commander while the supervisor's turn is still open is now queued and typed once when that turn ends. Its card shows Queued until then. Before, Commander showed "Not sent" and the operator had to watch for the turn to end and resend. Drafts in the native prompt and open native dialogs still refuse the command.
+
+### Added — Test audit
+
+- **One test value and flake audit** — The shipped audit now scans Rust and JS/Playwright tests for timing guesses, instant teardown checks, shared resources, order dependence and unseeded randomness alongside dead/duplicate, style/wording and slow candidates. The same report includes bounded thirty-day CI and issue history, with native evidence and explicit uncertainty instead of guessing flake rates.
+
+### Fixed — Release delivery
+
+- **Skip prepared release push validation** — Prepared release pushes start no train workflow under freeze-only dispatch. Cut retries use the green source receipt named by `Train-CI-Head` without requiring a run or adoption artifact at the release head. PR admission, merge queue validation and Release Prebuild continue normally.
+
 ## [4.23.0] - 2026-11-13
 
 ### Fixed — Release validation

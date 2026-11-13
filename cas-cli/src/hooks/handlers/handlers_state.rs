@@ -852,6 +852,42 @@ mod cas_85d9_lease_renewal_tests {
         CasDir { _tmp: tmp, root }
     }
 
+    /// A pulled InProgress task has no lease on this machine. SessionStart
+    /// must not turn that replica into a new Open write (GH #1896).
+    #[test]
+    fn session_start_preserves_peer_tasks_without_local_ownership_cas_0ff3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for case in ["no_local_lease", "reassigned_to_peer", "foreign_holder"] {
+            let cas = setup_cas();
+            let agents = open_agent_store(&cas.root).unwrap();
+            let tasks = open_task_store(&cas.root).unwrap();
+            let mut task = Task::new("cas-peer-task".into(), "peer work".into());
+            task.status = TaskStatus::InProgress;
+            task.assignee = Some("peer-worker".into());
+            tasks.add(&task).unwrap();
+            if case != "no_local_lease" {
+                let mut holder = Agent::new("old-holder".into(), "peer-worker".into());
+                holder.machine_id = Some(if case == "foreign_holder" {
+                    format!("peer-{}", Agent::get_or_generate_machine_id())
+                } else {
+                    Agent::get_or_generate_machine_id()
+                });
+                if case == "reassigned_to_peer" {
+                    holder.name = "previous-local-worker".into();
+                }
+                agents.register(&holder).unwrap();
+                agents.try_claim(&task.id, &holder.id, 60, None).unwrap();
+                agents.release_lease(&task.id, &holder.id).unwrap();
+            }
+            let before = tasks.get(&task.id).unwrap();
+            assert_eq!(cleanup_orphaned_tasks(&cas.root), 0, "{case}");
+            let after = tasks.get(&task.id).unwrap();
+            assert_eq!(after.status, TaskStatus::InProgress, "{case}");
+            assert_eq!(after.assignee, before.assignee, "{case}");
+            assert_eq!(after.updated_at, before.updated_at, "{case}");
+        }
+    }
+
     /// cas-85d9 AC3: a task held by a live, heartbeating worker past the
     /// lease duration must still be observable as in-progress — proven at
     /// the level that actually bit us (docs/requests wave-2 report):

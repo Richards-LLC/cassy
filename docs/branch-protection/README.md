@@ -200,14 +200,26 @@ that it has no train receipt, and receives the complete queue graph without reus
 ### Queue reuse
 
 `scripts/check-ci-merge-queue-validation.sh` delegates to the same receipt
-consumer in `scripts/train-ci.py`. The PR head must have the queue tree. A
-completed green source must be its ancestor, and its main baseline must equal
-the queue event's base SHA. The entire remaining diff may contain only version
-fields, matching lock versions, CHANGELOG/fragments, CODEMAP, builtin reference
-history and release notes. A version-generated `hub-web/dist` delta is allowed
+consumer in `scripts/train-ci.py`. The actual queue history must contain the PR
+head and queue base. A completed green source must be its ancestor, and its main
+baseline must equal the queue event's base SHA. The entire source-to-queue diff
+may contain only version fields, matching lock versions, CHANGELOG/fragments,
+CODEMAP, builtin reference history, release notes/reports, compiled overview and
+journey docs, and their input fragments. A version-generated `hub-web/dist` delta is allowed
 only with a version bump and is rebuilt and checked in the queue compile step.
 Any product change, moved main, partial/legacy proof or uncertainty runs the full
 graph. A release-plumbing continuation can reuse the source's earlier receipt.
+
+A plumbing-only push to the train uses the same consumer before scheduling tests.
+The existing dedupe job publishes a `train-full-gate` artifact with scope
+`full-set-adoption`: the adopting head/tree, main baseline, and original native
+source head, run and attempt. It becomes usable only after that workflow and its
+full-set fan-in succeed. Cut retries and later queue entries revalidate the
+original full-set artifact, complete logs, plumbing delta and both run identities;
+they retain the native producer's tree and executable identity. A missing or
+mismatched reference runs the full graph. This keeps prepared pushes and queue
+entries from repeating a successful source suite while compile, launch, asset
+rebuild and Release Prebuild checks continue on the release tree.
 
 On reuse, preflight first restores `preflight-cli` from the validated full-gate
 run only when its receipt tree exactly matches the queue tree. A matching

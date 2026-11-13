@@ -193,6 +193,69 @@ The factory gate audit detects refusals controlled by caller identity independen
 
 Factory-check cleanup retires duplicated test-shape validation at park and CI prose pins, merges proof-scope and independent-QA code identities. Train dispatch holds remain where candidate-review exemptions would otherwise skip a pending verdict. Publication hooks remain until every post route has an equivalent server-side enforcer. Messaging to recorded native child IDs preserves factory-peer coordination policy. The mechanical task audit records removed rows, retained checks without equivalent enforcement, and the measured registry reduction; generated shared docs refresh at the release cut.
 
+- **Release report sources** — Reports accept both text-fenced drafts and exact JSON publication payloads, including replies. JSON message text takes precedence over duplicate blocks. CHANGELOG fallbacks preserve supplied Was/Now pairs and separate shipped changes from supporting notes without repeating them across audiences.
+
+Peer replies with an exact Cloud `in_reply_to` resolve the sender's outgoing ask
+before wake-kind filtering. This includes quiet answers to automatic build-route
+asks. Messages without an explicit link keep the existing correlation rules;
+quiet, status and receipt messages do not implicitly answer questions. Structured
+`CAS_MERGE_HOLD` task and PR scopes continue to govern which asks hold merges.
+
+**Cross-machine task ownership at session startup.**
+
+A peer task can be InProgress without a lease on the observing machine. Session startup preserves that status and assignment instead of publishing an Open reset. Recovery of abandoned local work requires matching local lease history and applies only if the task snapshot remains current. Unknown ownership is preserved for supervisor review.
+
+Task label updates replace ordinary labels with the supplied, trimmed and
+deduplicated set. Omitting labels preserves them; an empty value clears ordinary
+labels. Finding provenance remains protected, and nonempty updates preserve omitted
+triage axes. Supervisors can remove a release train's cut label through task update.
+
+- **Proof after checkpoint rebases** — A fresh park on an owned task branch uses the pushed delivery tip for focused proof after a legitimate rebase and ancestry-preserving merge. It reports an unattributable restored checkpoint instead of directing the worker to test an older commit. Ordinary first-parent checkpoints and shared lanes keep their accepted delivery boundaries, proof scope and generated-output safeguards; a body-only mention cannot claim another task's commit.
+
+### First-failure CI repair
+
+The release queue executes native shards once and preserves every nonzero exit.
+It no longer excludes tests through issue labels. A hosted publisher files one
+P0 repair issue per failed native test, including identity, run and failure output.
+Issue intake owns staffing ahead of feature work. Its owner must fix or delete
+by the next working day and record covered behaviour when deleting; CI never
+rewrites source. Repeated observations keep the original deadline.
+
+The factory browser test guard reads Playwright 1.65 required, optional and variadic option values before checking for a named spec or canonical journey ID. Named-spec shuffle runs accept numeric, string and negative seeds. A spec-looking option value cannot authorize an unfiltered run, and unsupported option tokens are named in the refusal.
+
+**Artifact-only scope corrections.** A supervisor can replace a previously recorded documentation delivery with portable no-code evidence. The correction checks the retained Git boundaries with the existing docs/artifacts path and file-mode rules, retires their source metadata with the old proof cycle, and refuses retained code or unreadable delivery boundaries. Ordinary code delivery gates remain required.
+
+- **CI completion reminders** — An optional workflow selector accepts an exact display name, workflow file path or numeric GitHub workflow ID. Registration resolves it against the origin repository before saving the reminder and refuses unknown or ambiguous selectors. Omit the selector to wait for all applicable runs on the commit.
+
+- **Filename discovery** — Workers can use standalone `rg --files` and
+  name-only `find` commands under credential-store parent directories, including
+  output redirected to a file. Pipelines and substitutions retain ordinary
+  credential inspection; explicit credential-store operands remain protected.
+
+**Complete simplicity findings.** A pre-merge verifier that finds unnecessary code inspects the same file for every instance of that class and reports the locations and smaller changes together in one verdict.
+
+- **Local-only recovery inventory** — Without a Git remote, retained-work inventory compares commits with the task's local target, falling back to the configured base or primary checkout branch. It still shows dirty or ahead worker checkouts. Push instructions use a configured remote and are omitted for local-only repositories; inspection remains read-only.
+
+- **Runtime fixture mutation** — Test-shape lint accepts an immediate same-path formatted Rust fixture rewrite when the read value has no other consumer. Assertions and comparisons of source text still require behavioral coverage instead, so real Git/MCP regressions can change disposable compiled inputs without a pin or bypass.
+
+**Reworked peer deliveries.** When a peer re-parks a delivery, merge preparation follows its new recorded anchor if the local factory ref is an ancestor of the matching origin tip. Local divergence still requires explicit reconciliation. The update uses the existing checked-out-worktree safeguards and expected-old-SHA comparison.
+
+- **QA source citations** — A ledger expectation can cite a repository source path and positive line number, including extensionless scripts and files such as README. URLs and clock times do not count as source citations.
+
+Supervisor operator messages use `[evidence:<tool-use-id>]` beside factual paragraphs or begin uncertain paragraphs with `[unverified]`. The hook accepts only paired, successful tool results after the current user-turn boundary, and numeric literals must appear in the cited result. Perform time conversions and calculations with a tool before citing them. Clipboard claims need a `wl-paste` or `pbpaste` result after the latest clipboard write. Missing transcripts or a turn start outside the bounded transcript tail cannot establish evidence.
+
+This is a structural provenance check, not semantic fact verification: a citation identifies the result the operator can inspect. Claude MessageDisplay labels unsupported replies; Stop refuses unsupported final replies on the first attempt and emits an uncertainty notice on reentrant attempts to avoid a continuation loop. Streaming content may already be visible before Stop runs. Direct transports outside the configured hooks are outside this guard.
+
+Expired unparked task-only verification can be requested again through close, including a corrected portable no-code proof reference. Renewal creates a pending review and retains the expired dispatch for audit. Shipped PR/queue deliveries, active reviews, receipt-bound deliveries and epics keep their existing recovery boundaries.
+
+Supervisor answers recorded with `verification action=add status=supervisor_call` resume the independent review on the same dispatch. The answer supplies context, while a fresh sealed reviewer retains responsibility for the final verdict.
+
+- **Worker checkpoint pushes** — A pushed checkpoint on an owned InProgress task is not a parked delivery, including when commit-time branch and anchor capture exists. After a supervisor-directed target sync, the worker may rebase and publish using an explicit force-with-lease for the observed remote tip. H-40 verifies ownership, recorded start ancestry and authoritative delivery/review state; unknown state, deletion, parked work and rewritten reviewed anchors refuse. Parked or reviewed branches merge their target instead.
+
+**Merge response receipts.** A slow delivery merge returns a preparing receipt after a short wait while its existing safety checks continue in the background. The receipt path records the complete final result, and a supervisor notice reports completion. A published merge reports COMMITTED even when its close follow-up is still running. Callers use the receipt and notice before deciding whether another merge request is needed.
+
+Prepared release pushes and merge-queue entries reuse an ancestor's successful full-set proof when only release plumbing changed and main is unchanged. A durable adoption artifact records the release head/tree and original native producer head/run/attempt. Consumers verify both completed workflows, complete logs, source proof and the actual queue delta before suppressing suite jobs. Compile, launch, generated assets and Release Prebuild remain checked against the release tree. Any source edit or invalid proof keeps the full suite selected.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -296,6 +359,8 @@ an independent reviewer. A native child returns identity evidence without
 submitting even an error verdict.
 
 Factory turn costs are recorded locally for Claude, Codex and Grok supervisors and workers, independently of Commander mirroring. `cas ledger report --release vX.Y.Z --offline` reads release-window ledger rows to show wakes, no-op wakes, input/output tokens and minutes by channel, with counts for missing measurements. Wake channels come from authenticated queue provenance, including a session-less daemon row addressed to that exact agent. Without a row, a Claude background-task notification counts as the agent's own role, CAS's fixed worker startup and delivery-watchdog texts count as daemon, and any other input counts as terminal (unauthenticated pane input). A no-op means no successful supported action was observed. Prose counts as an answer only for an authenticated operator wake or a question verified against its authenticated queue row; Teams wrappers and pointer wakes use the original row provenance, and launch-context messages do not take the wake slot. For other wakes, only typed tool actions count: task, coordination and edit writes, factory and verification writes such as merges and spawns, and subagent launches. Reads, waits, receipt-only replies and status restatements do not count. Shell actions are conservatively recognized only for explicit commit, push and check commands, including the patches and commands inside a Codex code-mode `exec` script. OpenCode turns are not recorded yet. Unsupported Cloud Turn events remain queued locally behind their own push cursor and six-hour kind cooldown; other ledger kinds keep pushing, and every sync round attempts pull even if push fails.
+
+Merged delivery close reads test receipts from the assigned worker's registered checkout even after recovery changes its path or branch. Receipts remain bound to the delivered commit and declared repository; the original proof target declaration stays unchanged.
 
 ## Authoritative Sources
 

@@ -76,6 +76,30 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("opaque_test", command["stems"])
         self.assertNotIn("gamma_test", command["stems"])
 
+    def test_binary_source_selects_subprocess_helpers_beyond_linked_imports(self):
+        # cas-778c: the CLI can change even when the suite imports only an
+        # unrelated library module. Follow helpers, not a list of suite names.
+        self.put("cas-cli/tests/gamma_test.rs", '''use cas::gamma::other;
+#[path = "support/runner.rs"] mod runner;
+#[test] fn cli_contract() { runner::run(); }
+''')
+        self.put("cas-cli/tests/support/runner.rs", '''mod nested;
+pub fn run() { nested::launch(); }
+''')
+        self.put("cas-cli/tests/support/nested.rs", 'pub fn launch() { assert_cmd::cargo::cargo_bin("cas"); }\n')
+        self.put("cas-cli/tests/beta_test.rs", 'use cas::gamma::other; fn cli_contract() { command().assert(); }\n')
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        plan = self.select()
+        command = plan["commands"][0]
+        self.assertTrue({"beta_test", "gamma_test"} <= set(command["stems"]))
+        self.assertTrue({"beta_test", "gamma_test", "opaque_test"} <= set(plan["subprocess_stems"]))
+        self.assertNotIn("alpha_test", plan["subprocess_stems"])
+        # The expansion belongs only to binary-source changes.
+        self.base = self.git("rev-parse", "HEAD")
+        command = self.select("cas-cli/tests/alpha_test.rs")["commands"][0]
+        self.assertEqual(command["stems"], ["alpha_test", "builtin_archive_portability_test"])
+
     def test_merge_commit_selects_source_already_present_in_first_parent(self):
         self.put("cas-cli/src/lib.rs", 'pub mod alpha; pub mod beta; pub mod gamma; pub mod cli;\n')
         self.put("cas-cli/src/cli/mod.rs", "pub mod update;\n")

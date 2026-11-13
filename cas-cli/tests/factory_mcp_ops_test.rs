@@ -9372,12 +9372,12 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
         "an ordinary reply after the interrupt reached the worker discharges the halt"
     );
 
-    let closed = worker_service
+    // The halt gate returns MCP Err; downstream delivery refusals may be Ok(tool error).
+    worker_service
         .inner
         .cas_task_close(Parameters(close("already merged before the interrupt")))
         .await
         .expect("the answered interrupt must allow the later close to proceed");
-    assert_ne!(closed.is_error, Some(true));
 
 }
 

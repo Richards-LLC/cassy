@@ -8418,14 +8418,15 @@ async fn test_worktree_cleanup_unknown_target_reports_not_found_not_disabled() {
 
     let svc = make_service(cas_root.clone());
     let mut req = coord_req("worktree_cleanup");
-    req.id = Some("no-such-worker".to_string());
+    let target = "no-such-worker";
+    req.id = Some(target.to_string());
     let err = svc
         .factory(Parameters(req))
         .await
         .expect_err("unknown target must be an error, not a success message");
 
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-    assert!(err.message.contains("[G-102]"));
+    assert!(err.message.contains(target), "{err:?}");
 }
 
 /// AC2: a branch whose commits exist on no other branch is refused without

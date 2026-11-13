@@ -1151,18 +1151,8 @@ exec env \
         Some("connection_failed")
     );
     let due = degraded.next_retry_at_ms.unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    // The first failure backs off by the production 5 s base; reach that
-    // deadline on the engine's clock instead of sleeping until it.
-    // Due in the future and no later than the 5 s base. No lower bound:
-    // real time passes between the failure and this read.
-    assert!(
-        due > now && due - now <= 5_000,
-        "first retry is due within 5 s: due={due} now={now}"
-    );
+    // Both values come from the same failure event; scheduler delays cannot change the contract.
+    assert_eq!(due, degraded.last_attempt_at_ms.unwrap().saturating_add(5_000));
 
     assert_eq!(engine.retry_unhealthy_at_for_tests(due).await, 1);
     let recovered = engine.health_snapshot().await.servers.remove(0);
@@ -1170,5 +1160,19 @@ exec env \
     assert_eq!(recovered.consecutive_failures, 0);
     assert_eq!(recovered.next_retry_at_ms, None);
     assert!(recovered.tool_count > 0);
+    let recovered_pid = std::fs::read_to_string(&pid_file).unwrap();
     engine.shutdown().await;
+    // The fixture owns this recovered child. Finish cleanup before nextest closes its pipes.
+    let _ = std::process::Command::new("kill").args(["-TERM", recovered_pid.trim()]).status();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let state = std::process::Command::new("ps")
+            .args(["-p", recovered_pid.trim(), "-o", "stat="]).output().unwrap();
+        let state_text = String::from_utf8_lossy(&state.stdout);
+        if !state.status.success() || state_text.trim().is_empty() || state_text.trim_start().starts_with('Z') {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "owned recovered upstream did not terminate");
+        tokio::task::yield_now().await;
+    }
 }

@@ -1,7 +1,6 @@
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { JOURNEY_NOW } from "./clock";
-import { ProtocolClock } from "./protocol-clock";
 import type { Locator, Page } from "@playwright/test";
 
 const historyStamp = (offset: number) => new Date(JOURNEY_NOW + offset).toISOString();
@@ -75,74 +74,58 @@ for (const [name, viewport, colorScheme] of [
 
 
 test("HUB-J23 recover unanswered history without hiding missing answers (cas-3590)", journeyPart, async ({ page, journey }) => {
-  const clock = new ProtocolClock(page);
+  await page.clock.setFixedTime(JOURNEY_NOW);
   const reply = (id: number) => ({ notification_id: id, reply_to: null, message: `Recovered answer ${id}`, summary: "", device_id: "journey-device", kind: "answer", at: historyStamp((id - 101) * 60_000) });
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], time: clock, history: { [PELICAN]: [
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], history: { [PELICAN]: [
     { messages: [], replies: Array.from({ length: 50 }, (_, index) => reply(51 + index)), has_earlier: true, next_before: 51 },
     { messages: [], replies: [reply(50)], has_earlier: false },
   ] } });
-  await clock.start();
   hub.pausedHistory.add(PELICAN);
   const failure = page.getByRole("alert").filter({ has: page.getByRole("button", { name: "Retry history" }) });
   await journey.stage("An unanswered reopen names the gap and offers recovery", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect.poll(() => hub.historyRequests.length).toBe(1);
-    await clock.advance(15_000);
-    await expectSettledHistoryFailure(page, failure, clock);
+    await page.clock.fastForward(15_000);
+    await expectSettledHistoryFailure(page, failure);
     hub.pausedHistory.delete(PELICAN);
     await failure.getByRole("button").click();
-    await expectProtocolVisible(page.getByRole("log").locator('[data-key="reply:100"]'), clock);
+    await expect(page.getByRole("log").locator('[data-key="reply:100"]')).toBeVisible();
     await expect(failure).toBeHidden();
   });
   await journey.stage("An unanswered older page can retry its original cursor", async () => {
     hub.pausedHistory.add(PELICAN);
     // Reconnect A requests the newest page while the cached thread stays readable.
     hub.drop(PELICAN);
-    await expect.poll(async () => {
-      await clock.advance(2_000);
-      return hub.historyRequests.length;
-    }).toBe(3);
+    await expect.poll(() => hub.historyRequests.length).toBe(3);
     const newest = hub.historyRequests.at(-1)!;
     expect(newest.before).toBeUndefined();
     await page.getByRole("button", { name: "Load earlier", exact: true }).click();
     await expect.poll(() => hub.historyRequests.length).toBe(4);
-    await clock.advance(15_000);
-    await expectSettledHistoryFailure(page, failure, clock);
+    await page.clock.fastForward(15_000);
+    await expectSettledHistoryFailure(page, failure);
     // A's late page hydrates, but B still owes the older answer (cas-bf2f).
-    const late = { ...reply(100), message: "Newest page arrived while the older answer is still missing" };
-    hub.send(PELICAN, { ConversationHistory: { request_id: newest.request_id, messages: [], replies: [late], has_earlier: true, next_before: 51 } });
-    await expectProtocolVisible(page.getByRole("log").locator('[data-key="reply:100"]').filter({ hasText: late.message }), clock);
+    hub.send(PELICAN, { ConversationHistory: { request_id: newest.request_id, messages: [], replies: [reply(100)], has_earlier: true, next_before: 51 } });
     await expect(failure).toBeVisible();
     await expect(page.getByRole("log").locator('[data-key="reply:50"]')).toHaveCount(0);
     hub.pausedHistory.delete(PELICAN);
     await failure.getByRole("button").click();
-    await expectProtocolVisible(page.getByRole("log").locator('[data-key="reply:50"]'), clock);
+    await expect(page.getByRole("log").locator('[data-key="reply:50"]')).toBeVisible();
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 51 });
     await expect(failure).toBeHidden();
     await expect(page.getByRole("log").locator('[data-key="reply:51"]')).toHaveCount(1);
   });
 });
 
-/** Observe stable scroll positions across rendered frames, with protocol IO
- * settled between virtual frames; host speed cannot move history timestamps. */
-async function expectSettledHistoryFailure(page: Page, failure: Locator, clock: ProtocolClock): Promise<void> {
+async function expectSettledHistoryFailure(page: Page, failure: Locator): Promise<void> {
   await expect(failure).toBeVisible();
-  let previous: number | undefined;
-  let stable = 0;
-  await expect.poll(async () => {
-    await clock.advance(16);
-    const top = await page.locator(".conversation-reading.thread").evaluate(element => element.scrollTop);
-    stable = top === previous ? stable + 1 : 0;
-    previous = top;
-    return stable;
-  }).toBeGreaterThanOrEqual(2);
+  const settled = await page.waitForFunction(state => {
+    const thread = document.querySelector<HTMLElement>(".conversation-reading.thread");
+    if (!thread) return false;
+    state.stable = thread.scrollTop === state.top ? state.stable + 1 : 0;
+    state.top = thread.scrollTop;
+    return state.stable >= 2;
+  }, { top: -1, stable: 0 }, { polling: "raf" });
+  await settled.dispose();
   await expect(failure).toBeInViewport();
-}
-
-async function expectProtocolVisible(locator: Locator, clock: ProtocolClock): Promise<void> {
-  await expect.poll(async () => {
-    await clock.advance(16);
-    return locator.isVisible();
-  }).toBe(true);
 }

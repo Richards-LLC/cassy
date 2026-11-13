@@ -2118,7 +2118,7 @@ mod tests {
                 }
             }
             let notices = crate::store::open_supervisor_queue_store(&root).unwrap()
-                .list_pending_prompt_outbox(&owner.id, "supervisor_notice", 10).unwrap();
+                .peek(&owner.id, 10).unwrap();
             assert_eq!(notices.len(), 1, "{name}");
             let payload: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
             assert_eq!(payload["context"]["rejection_action"], action, "{name}");

@@ -2290,6 +2290,18 @@ while lacking the fast-row delegate; inspect them rather than assuming absence.
 Do not copy those guards into the main checkout. A hook-install warning during
 spawn/reuse means enforcement is not proven.
 
+H-40 distinguishes a live checkpoint from a parked delivery. A supervisor-directed
+rebase of an owned InProgress task may publish with an explicit
+`--force-with-lease=refs/heads/<branch>:<observed-checkpoint-sha>`; Git refuses a
+changed remote tip. The push hook's `WorkerCheckpointPush` handler checks the
+recorded start ancestry of both tips, source/destination ownership and current
+task/delivery/review state. Commit-time `factory_branch_anchor` or `parked_branch`
+capture alone is not a park. AwaitingMerge, pending verification and active
+review envelopes refuse rewrites; persisted completion receipts and bound QA
+review tips must remain reachable. Unknown state and deletion refuse. Merge
+the target into parked/reviewed branches. Normal fast-forward pushes retain
+the existing ancestry, ownership, fast-row and local-gate checks.
+
 At park, `receipt_scope::park_refusal` reads passing capped test receipts for
 every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
 Park executes neither checks nor tests. Local fast-row receipts are not park

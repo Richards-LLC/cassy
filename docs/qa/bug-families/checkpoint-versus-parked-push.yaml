@@ -1,0 +1,4 @@
+title: Checkpoint rebases preserve delivery review and Git ownership boundaries
+tasks: [cas-ddde]
+invariants: [FACTORY-CHECKPOINT-PUSH-STATE]
+journeys: [FACTORY-SPAWN]

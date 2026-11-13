@@ -2014,16 +2014,21 @@ while read local_ref local_sha remote_ref remote_sha; do
     echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' on '$branch' may push only to 'refs/heads/$branch', not '$remote_ref' — this is not your branch. [H-40]\" >&2
     exit 1
   fi
-  # A pushed factory tip is the delivery boundary recorded when work is
-  # parked. Preserve its ancestry so a later target sync is merged in rather
-  # than rebasing reviewed work out of the branch history.
+  # A checkpoint push is not a park. The CLI rechecks authoritative task,
+  # delivery and review state before permitting this one non-FF exception.
   if [ \"$remote_sha\" != \"$zero_sha\" ] && {
     [ \"$local_sha\" = \"$zero_sha\" ] || ! git merge-base --is-ancestor \"$remote_sha\" \"$local_sha\";
   }; then
-    record_push_rejection \"$remote_ref\"
-    echo \"Cassy PUSH GUARD: non-fast-forward would rewrite the parked delivery.\" >&2
-    echo \"Merge the target in, don't rebase. [H-40]\" >&2
-    exit 1
+    if [ \"$local_sha\" != \"$zero_sha\" ] &&
+      CAS_PUSH_GUARD_BRANCH=\"$branch\" CAS_PUSH_GUARD_REMOTE_REF=\"$remote_ref\" \\
+      CAS_PUSH_GUARD_LOCAL_SHA=\"$local_sha\" CAS_PUSH_GUARD_REMOTE_SHA=\"$remote_sha\" \\
+      cas hook WorkerCheckpointPush; then
+      :
+    else
+      record_push_rejection \"$remote_ref\"
+      echo \"Cassy PUSH GUARD: rewrite refused; only a verified InProgress checkpoint may be rebased. Merge the target into parked or reviewed deliveries. [H-40]\" >&2
+      exit 1
+    fi
   fi
   refs=\"$refs$local_ref $local_sha $remote_ref $remote_sha
 \"
@@ -5123,12 +5128,15 @@ mod tests {
         }
         let _home = crate::test_support::TestEnvGuard::temp_home();
         for (case, status, reviewed, foreign_owner, bound, stale_lease, allow) in [
-            ("ef33 checkpoint", cas_types::TaskStatus::InProgress, false, false, true, false, true),
-            ("parked", cas_types::TaskStatus::AwaitingMerge, false, false, true, false, false),
-            ("reviewed in progress", cas_types::TaskStatus::InProgress, true, false, true, false, false),
-            ("foreign task owner", cas_types::TaskStatus::InProgress, false, true, true, false, false),
-            ("missing start binding", cas_types::TaskStatus::InProgress, false, false, false, false, false),
-            ("stale lease", cas_types::TaskStatus::InProgress, false, false, true, true, false),
+            ("ef33 checkpoint", cas_types::TaskStatus::InProgress, 0, false, true, false, true),
+            ("parked", cas_types::TaskStatus::AwaitingMerge, 0, false, true, false, false),
+            ("reviewed in progress", cas_types::TaskStatus::InProgress, 1, false, true, false, false),
+            ("submitted receipt", cas_types::TaskStatus::InProgress, 2, false, true, false, false),
+            ("bound QA review", cas_types::TaskStatus::InProgress, 3, false, true, false, false),
+            ("unrelated start", cas_types::TaskStatus::InProgress, 4, false, true, false, false),
+            ("foreign task owner", cas_types::TaskStatus::InProgress, 0, true, true, false, false),
+            ("missing start binding", cas_types::TaskStatus::InProgress, 0, false, false, false, false),
+            ("stale lease", cas_types::TaskStatus::InProgress, 0, false, true, true, false),
         ] {
             let (_repo_tmp, worker_tmp, remote_tmp, cas_root) = make_parked_delivery_push_fixture();
             let repo = worker_tmp.path().join("worker");
@@ -5152,12 +5160,27 @@ mod tests {
             task.deliverables.factory_branch_anchor = Some(checkpoint.clone());
             if bound {
                 task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-                    assignee: task.assignee.clone().unwrap(), branch: branch.into(), base_sha: base.clone(),
+                    assignee: task.assignee.clone().unwrap(), branch: branch.into(), base_sha: if reviewed == 4 { git(&repo, &["rev-parse", "origin/main"]) } else { base.clone() },
                     work_target: cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() },
                 });
             }
-            if reviewed { task.deliverables.review_envelope = Some("reviewed".into()); }
+            if reviewed == 1 { task.deliverables.review_envelope = Some("reviewed".into()); }
             store.add(&task).unwrap();
+            if reviewed == 2 {
+                let receipt = cas_store::build_worker_completion_receipt(&cas_types::WorkerCompletionReceiptInput {
+                    task_id: task.id.clone(), worker_agent_id: "w".into(), repo_selector: "project:fixture".into(),
+                    source_branch: branch.into(), commit_sha: checkpoint.clone(), merge_base_sha: base.clone(),
+                    target_branch: "main".into(), target_sha: git(&repo, &["rev-parse", "origin/main"]),
+                    proof_reference: "fixture".into(), scope_summary: "ef33 checkpoint".into(), artifact_path: None,
+                }, "w", chrono::Utc::now());
+                cas_store::create_worker_delivery(cas_root.path(), &receipt, cas_types::WorkerDeliveryState::AwaitingVerification, "w").unwrap();
+            }
+            if reviewed == 3 {
+                cas_store::open_qa_pass(cas_root.path(), &cas_store::NewQaPass {
+                    task_id: &task.id, implementer_agent_id: "w", branch, bound_head: &checkpoint,
+                    deadline_at: chrono::Utc::now() + chrono::Duration::hours(1), max_rounds: 3,
+                }, chrono::Utc::now()).unwrap();
+            }
             // Publish a per-task checkpoint, then bring in tonight's main sync.
             let bin = worker_tmp.path().join("bin");
             std::fs::create_dir(&bin).unwrap();

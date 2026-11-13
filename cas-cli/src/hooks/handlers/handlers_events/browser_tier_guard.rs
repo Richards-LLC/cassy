@@ -2,11 +2,13 @@
 //! Runs before filesystem auto-approval, including without a Cassy root.
 use cas_core::hooks::types::HookInput;
 
-/// Playwright test options whose next argument is their value.
+// Playwright 1.65.0 testOptions and bundled Commander parseOptions:
+// https://github.com/microsoft/playwright/blob/a1f35e1955976e84411f9c10358228a80b763ebe/packages/playwright/src/program.ts
+// Shipped definitions and parser replay: art-94788b19 and art-ecbe4183.
+/// Required-value options; --project is handled separately because it is variadic.
 const VALUE_OPTIONS: &[&str] = &[
     "--config",
     "-c",
-    "--project",
     "--output",
     "--reporter",
     "--workers",
@@ -14,6 +16,7 @@ const VALUE_OPTIONS: &[&str] = &[
     "--grep",
     "-g",
     "--grep-invert",
+    "-G",
     "--shard",
     "--retries",
     "-j",
@@ -23,6 +26,14 @@ const VALUE_OPTIONS: &[&str] = &[
     "--browser",
     "--global-timeout",
     "--tsconfig",
+    "--add-reporter",
+    "--last-failed-file",
+    "--run-agents",
+    "--test-list",
+    "--test-list-invert",
+    "--ui-host",
+    "--ui-port",
+    "--update-source-method",
 ];
 
 /// Boolean options compatible with collection-only runs. Interactive --ui is
@@ -40,17 +51,63 @@ const BOOLEAN_OPTIONS: &[&str] = &[
     "-x",
 ];
 
-/// Playwright options whose value is optional (`--shuffle[=seed]`). A numeric
-/// next word is the value, never a file filter (GH #1876); anything else is
-/// left for spec selection, so `--shuffle tests/a.spec.ts` still names a spec.
-const OPTIONAL_VALUE_OPTIONS: &[&str] = &["--shuffle"];
+/// Optional values consume any non-option token, including spec-looking strings.
+const OPTIONAL_VALUE_OPTIONS: &[&str] = &[
+    "--debug",
+    "--only-changed",
+    "--shuffle",
+    "--update-snapshots",
+    "-u",
+];
 
-fn optional_value_width(arg: &str, next: Option<&String>) -> Option<usize> {
-    OPTIONAL_VALUE_OPTIONS.contains(&arg).then(|| {
-        1 + usize::from(
-            next.is_some_and(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit())),
-        )
-    })
+fn optional_value(value: &str) -> bool {
+    static NEGATIVE_NUMBER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^-([0-9]+|[0-9]*\.[0-9]+)(e[+-]?[0-9]+)?$").unwrap()
+    });
+    value.len() <= 1 || !value.starts_with('-') || NEGATIVE_NUMBER.is_match(value)
+}
+
+/// Return consumed token count, option spelling and its first value.
+/// Unknown short groups are refused rather than guessing what they consume.
+fn option(args: &[String]) -> Option<(usize, &str, Option<&str>)> {
+    let arg = args.first()?.as_str();
+    let (name, attached) = if arg.starts_with("--") {
+        arg.split_once('=')
+            .map_or((arg, None), |(n, v)| (n, Some(v)))
+    } else if arg.starts_with('-') && arg.len() > 2 {
+        (arg.get(..2)?, Some(arg.get(2..)?))
+    } else {
+        (arg, None)
+    };
+    if VALUE_OPTIONS.contains(&name) || name == "--project" {
+        let value = attached.or_else(|| args.get(1).map(String::as_str))?;
+        let mut width = if attached.is_some() { 1 } else { 2 };
+        // Commander activates variadic consumption only for the split spelling,
+        // not for --project=name (utilsBundle.js parseOptions).
+        if name == "--project" && attached.is_none() {
+            while args.get(width).is_some_and(|v| optional_value(v)) {
+                width += 1;
+            }
+        }
+        Some((width, name, Some(value)))
+    } else if OPTIONAL_VALUE_OPTIONS.contains(&name) {
+        let value = attached.or_else(|| {
+            args.get(1)
+                .map(String::as_str)
+                .filter(|v| optional_value(v))
+        });
+        Some((
+            1 + usize::from(attached.is_none() && value.is_some()),
+            name,
+            value,
+        ))
+    } else if attached.is_none()
+        && (BOOLEAN_OPTIONS.contains(&name) || matches!(name, "--list" | "--ui"))
+    {
+        Some((1, name, None))
+    } else {
+        None
+    }
 }
 
 /// `test --list` only collects: no browser, server or test runs (GH #1852).
@@ -58,25 +115,33 @@ fn optional_value_width(arg: &str, next: Option<&String>) -> Option<usize> {
 /// `--list` (`--grep-invert --list` runs the suite) and `--` turns later
 /// words into file filters. Positional words only narrow the listing.
 fn collection_only(args: &[String]) -> bool {
+    if args
+        .iter()
+        .any(|arg| arg == "--full" || arg.starts_with("--full="))
+    {
+        return false;
+    }
+    let args = &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())];
     let mut list = false;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
-        if arg == "--list" {
-            list = true;
-        } else if BOOLEAN_OPTIONS.contains(&arg) {
-            // No value to consume; the next token may still be --list.
-        } else if VALUE_OPTIONS.contains(&arg) {
-            i += 1;
-        } else if let Some(width) = optional_value_width(arg, args.get(i + 1)) {
-            i += width - 1;
-        } else if arg.starts_with('-')
-            && !arg.split_once('=').is_some_and(|(name, _)| {
-                name.starts_with("--")
-                    && (VALUE_OPTIONS.contains(&name) || OPTIONAL_VALUE_OPTIONS.contains(&name))
-            })
-        {
-            return false;
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            let Some((width, name, _)) = option(&args[i..]) else {
+                return false;
+            };
+            if matches!(name, "--ui" | "--ui-host" | "--ui-port") {
+                return false;
+            }
+            list |= name == "--list";
+            i += width;
+            continue;
         }
         i += 1;
     }
@@ -90,35 +155,39 @@ fn selected(args: &[String], culprit: &mut Option<String>) -> bool {
     {
         return false;
     }
+    // The separator also matters when it was consumed as a required value:
+    // Playwright's action strips the suffix using the original process.argv.
+    let args = &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())];
     let mut i = 0;
     let mut targeted = false;
     while i < args.len() {
         let arg = &args[i];
-        let grep = arg.strip_prefix("--grep=").or_else(|| {
-            (arg == "--grep" || arg == "-g")
-                .then(|| args.get(i + 1).map(String::as_str))
-                .flatten()
-        });
-        if let Some(grep) = grep {
-            targeted |= !grep.is_empty()
-                && grep.split('|').all(|id| {
-                    let id = id.trim_matches(|c| c == '(' || c == ')' || c == '^' || c == '$');
-                    let Some((surface, number)) = id.split_once("-J") else {
-                        return false;
-                    };
-                    !surface.is_empty()
-                        && surface.chars().all(|c| c.is_ascii_uppercase())
-                        && !number.is_empty()
-                        && number.chars().all(|c| c.is_ascii_digit())
-                });
-            i += if arg == "--grep" || arg == "-g" { 2 } else { 1 };
-            continue;
+        // Playwright removes everything after -- from its test filters.
+        if arg == "--" {
+            break;
         }
-        if VALUE_OPTIONS.contains(&arg.as_str()) {
-            i += 2;
-            continue;
-        }
-        if let Some(width) = optional_value_width(arg, args.get(i + 1)) {
+        if arg.starts_with('-') {
+            let Some((width, name, value)) = option(&args[i..]) else {
+                *culprit = Some(arg.clone());
+                return false;
+            };
+            if matches!(name, "--grep" | "-g") {
+                let grep = value.unwrap_or("");
+                targeted |= !grep.is_empty()
+                    && grep.split('|').all(|id| {
+                        let id = id.trim_matches(|c| c == '(' || c == ')' || c == '^' || c == '$');
+                        let Some((surface, number)) = id.split_once("-J") else {
+                            return false;
+                        };
+                        !surface.is_empty()
+                            && surface.chars().all(|c| c.is_ascii_uppercase())
+                            && !number.is_empty()
+                            && number.chars().all(|c| c.is_ascii_digit())
+                    });
+            }
             i += width;
             continue;
         }
@@ -271,8 +340,13 @@ fn unfiltered(command: &str, depth: usize, culprit: &mut Option<String>) -> bool
                 "journeys" | "test:journeys" | "journeys:real-hub"
             )
         }) {
+            let mut args = &words[i + 1..];
+            // npm consumes its forwarding separator before Playwright sees it.
+            if args.first().is_some_and(|arg| arg == "--") {
+                args = &args[1..];
+            }
             if words[..i].iter().any(|w| w == "run" || w == "run-script")
-                && !selected(&words[i + 1..], culprit)
+                && !selected(args, culprit)
             {
                 return true;
             }

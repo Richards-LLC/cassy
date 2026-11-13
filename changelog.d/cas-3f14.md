@@ -1,3 +1,3 @@
 ### Fixed — Factory guards
 
-- **Playwright's `--shuffle <seed>` no longer trips the browser test tier** — Was: a named single-spec run with `--shuffle 42` was refused because `42` was read as a file filter. Now: the optional seed is consumed with its flag, unfiltered runs and `--full` are still refused, and a refusal names the token it could not read.
+- **Playwright optional values preserve the browser test tier** — Named-spec runs accept `--shuffle 42`, string or negative seeds, and Playwright 1.65’s other optional-value flags. Values consumed by options never count as named specs; unfiltered runs and `--full` stay refused, and unsupported tokens are named in the refusal.

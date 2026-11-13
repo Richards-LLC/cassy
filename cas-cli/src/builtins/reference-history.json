@@ -3276,6 +3276,8 @@
     ],
     "skills/cas-test-audit/SKILL.md": [
       "0dce056bb5ccedc1f50e210d065040187ec0d49b013351f860ecbb86531b1ea2",
+      "2ea9e4aac7ebd5c8cb85ca23b9a9b57bc6049d720ec2c622a5bbb31118eb9210",
+      "6872aa02a587c4ea8256e7e440c940c91b0cd235a2aef74206eec02f611d07ed",
       "7edd386c3a97eb7cd143c6f477499eb1e0c4e3db3960814ec80d94555338682e",
       "89c5ad2d475e3c36140ed38d77517c8cb920030a24ccc095de0edf4098fee12e",
       "8cb32876246b6be2c6474aff954577b48fd1cbdcc3ff27ea0a6c51ac16c556a8"
@@ -3289,11 +3291,21 @@
       "43b1f66f234eba5ab7e5b33fc0471c5dd33026815761d7c7ec6a8a5b36a681e2",
       "6c30c3b7afda2d9cdd2a93a8e6953efa98a1014c7ad8310db0a4c49b7c6a05f1",
       "73b99038d5277184e1d0d987cb0ffa36bb69736e652eefe3d08de05d067abb38",
-      "daab3035b5a7e9ec1b4f70361169fd990f32027da58ee9c944b8cd702471de1b"
+      "a7ba1371238c2367c614d70eec454fb2325916e0d1060f63c96542b537173082",
+      "daab3035b5a7e9ec1b4f70361169fd990f32027da58ee9c944b8cd702471de1b",
+      "fb9a6469c85d5e801a990fc757584442059242ae6894bdea7d0370932a3a5212"
     ],
     "skills/cas-test-audit/references/ledger.md": [
+      "35a8575ee0627f9a235190deda0202b7e5833bf4a06807502e86bf0e1540cbc9",
+      "3fdaaa242812aaede24b93bc83ef821a8aad1a1e0054f8760a48b4d4a8743c12",
       "4e63d3eea21fd1b794e81a7ea22ad43e4d4458a8649e498a3efe675f0dd7574b",
       "a6d46c0fb6e5aa22c86b58dab715d0b5dc3d763ae8eea234a3569737bc30dabf"
+    ],
+    "skills/cas-test-audit/scripts/audit.py": [
+      "61e58f6da9037c2ea7b814cf46ace9746c4fd4d8b24809ad0e4ed52fddaed019"
+    ],
+    "skills/cas-test-audit/scripts/history.py": [
+      "d7628fa5e4e7798bb7cb96bb6ee978fbfe046d88eadf714427d938837ec516b9"
     ],
     "skills/cas-to-questionnaire/SKILL.md": [
       "1232c0f5c1629f9e8f362dc1fbec6b62f3e7bdc66e6f47c37e2a6340edb39449",

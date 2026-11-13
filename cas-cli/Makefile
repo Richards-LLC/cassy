@@ -213,6 +213,7 @@ test-scoped-selftest:
 # exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
 	cd .. && python3 scripts/test-model-boundary.py
+	cd .. && python3 scripts/test-test-audit.py
 	cd .. && node --test scripts/test-walk-kit.mjs
 	cd .. && bash scripts/test-cas-image-generate.sh
 	cd .. && bash scripts/test-check-changelog-lint.sh

@@ -1,14 +1,12 @@
 name: CI
 
+# cas-0fc56: a merge into a release train starts no train suite; lane CI
+# already proved that delivery. Cassy dispatches this workflow once per frozen
+# train tip (train_ci::observe), and a frozen train accepts no merges that could
+# supersede the run, so there is no cancellation group.
 on:
-  push:
-    branches: ["epic/release-train-**"]
+  workflow_dispatch:
   merge_group:
-
-concurrency:
-  group: full-gate-${{ github.event_name == 'push' && github.ref || github.run_id }}
-  # cas-43ab: finish the running train suite; GitHub replaces only pending runs.
-  cancel-in-progress: false
 
 permissions:
   contents: read

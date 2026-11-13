@@ -661,13 +661,16 @@ describe("Commander live connection lifecycle", () => {
     const catalogReads = () => hub.requests.filter(row => row.path === "/v1/sessions").length;
     const before = catalogReads();
     let readsAtEnd: number | undefined;
-    stream.addEventListener("abort", () => { readsAtEnd = catalogReads(); }, { once: true });
+    const ended = new Promise<void>(resolve => {
+      stream.addEventListener("abort", () => { readsAtEnd = catalogReads(); resolve(); }, { once: true });
+    });
     hub.event({ kind: "fleet_changed", session: "session-a" });
     await waitFor(() => expect(events).toHaveLength(1));
     hub.refusePairing(true);
     release();
 
-    await waitFor(() => expect(stream.aborted).toBe(true));
+    await ended;
+    expect(stream.aborted).toBe(true);
     expect(readsAtEnd! - before).toBe(1);
   });
   it.each([false, true])("coalesces 100 events in 1s with fresh final catalog (multiplex=%s, cas-b55b)", async (multiplex) => {

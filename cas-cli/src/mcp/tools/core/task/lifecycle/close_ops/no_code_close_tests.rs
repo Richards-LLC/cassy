@@ -1259,8 +1259,7 @@ async fn cleared_target_no_code_spike_closes_without_branch_or_merge_tree_gh1167
     );
 }
 
-/// GH #1167 (4): the same lane still gates a code task and a worker's own
-/// no-code close: an unnamed lane commit may be this task's work (cas-2387).
+/// GH #1901: a completed documentation delivery is not the current artifact.
 #[tokio::test]
 async fn artifact_scope_fix_retires_parked_docs_and_refuses_code_cas_3ff6() {
     for code in [false, true] {
@@ -1275,6 +1274,8 @@ async fn artifact_scope_fix_retires_parked_docs_and_refuses_code_cas_3ff6() {
         git(&checkout, &["commit", "-qm", "docs(cas-8156): previous design"]);
         let old_tip = git(&checkout, &["rev-parse", "HEAD"]);
         git(&checkout, &["push", "-q", "origin", &lane]);
+        git(f.dir.path(), &["merge", "-q", "--ff-only", &lane]);
+        git(f.dir.path(), &["push", "-q", "origin", "main"]);
         // Persist the previous park, then resume with a new portable artifact.
         let mut task = f.task(id);
         task.status = TaskStatus::AwaitingMerge;
@@ -1319,6 +1320,7 @@ async fn artifact_scope_fix_retires_parked_docs_and_refuses_code_cas_3ff6() {
     }
 }
 
+/// GH #1167 (4): unnamed lane work still keeps ordinary delivery gates.
 #[tokio::test]
 async fn unnamed_lane_commit_still_gates_code_and_worker_no_code_closes_gh1167() {
     for (id, no_code) in [("cas-c206", false), ("cas-c207", true)] {

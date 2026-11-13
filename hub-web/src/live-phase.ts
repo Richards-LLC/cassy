@@ -24,13 +24,13 @@ function instant(value: unknown): number | undefined {
 export function livePhase(value: unknown, context: PhaseContext): PhaseLine | undefined {
   const snapshot = record(value), lifecycle = record(snapshot?.lifecycle);
   const reported = typeof lifecycle?.id === "string" && typeof lifecycle.stage === "string";
-  if (!reported && !context.waiting) return undefined;
+  if (!reported && !context.waiting && !context.working) return undefined;
   const phase = reported ? lifecycle.phase : undefined;
   const ended = lifecycle?.stage === "end" || typeof lifecycle?.outcome === "string" || phase === "compacted";
   const sourceRunning = reported && !ended && ["start", "phase"].includes(lifecycle.stage as string);
   // An old unanswered ask must not override a newer executing lifecycle.
   const waiting = (context.waiting && !sourceRunning) || ["waiting", "waiting_on_you", "waiting_for_input", "awaiting_approval"].includes(String(phase));
-  let label: string | undefined;
+  let label = "Phase not reported";
   let running = false;
   if (waiting) label = "Waiting on you";
   else if (phase === "compacting" || phase === "compacted") { label = ended ? "Compacted" : "Compacting"; running = !ended; }
@@ -40,7 +40,6 @@ export function livePhase(value: unknown, context: PhaseContext): PhaseLine | un
       : ended ? lifecycle.outcome === "error" ? "Turn failed" : "Turn completed" : "Working";
     running = !ended && (lifecycle.stage === "start" || lifecycle.stage === "phase");
   }
-  if (label === undefined) return undefined;
   const unavailable = !context.connected || context.stale === true || snapshot?.stale === true;
   const active = running && !waiting && !unavailable;
   const start = reported ? instant(lifecycle.started_at) : undefined;

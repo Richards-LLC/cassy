@@ -47,14 +47,7 @@ describe("ConversationView (Pebble thread)", () => {
     snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, ended_at: "2026-10-28T12:00:46Z" } };
     view.update();
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:46");
-    const measured = snapshot;
-    for (const missing of [null, { ...snapshot, lifecycle: { id: "future", stage: "phase", phase: "unknown" } }]) {
-      snapshot = missing as typeof snapshot;
-      view.refreshWorking();
-      expect(livePhase(snapshot, { ...state, now, working: true })).toBeUndefined();
-      expect(view.element.querySelector(".working-turn")).toBeNull();
-    }
-    snapshot = measured;
+    expect(livePhase(null, { ...state, now, working: true })).toMatchObject({ active: false, unavailable: false });
     expect(livePhase({ ...snapshot, lifecycle: { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" } }, { ...state, now })?.active).toBe(false);
   });
   it("keeps a short fenced status as a code frame with exact Copy and retained Wrap", async () => {

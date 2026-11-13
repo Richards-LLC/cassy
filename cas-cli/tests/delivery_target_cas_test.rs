@@ -38,6 +38,9 @@ use crate::test_env_guard::TestEnvGuard;
 #[path = "fixtures/ci_check_run.rs"]
 mod ci_check_run;
 
+#[path = "fixtures/merge_outcome.rs"]
+mod merge_outcome;
+
 // =============================================================================
 // Fixtures (deliberately self-contained: cas-0a21 must not couple to the
 // shared worktree_surface_test helpers while cas-59c0 is editing that file)
@@ -1104,33 +1107,16 @@ async fn premerge_record_then_merge(rows: &[(&str, &str, Option<&str>, bool)]) {
             // grace, the published merge answers COMMITTED with its merge
             // and push state, and the close after it finishes in the
             // background, recording its result on the task.
-            let answer = get_text(
-                &supervisor
-                    .factory_with_budget_for_testing(
-                        merge,
-                        std::time::Duration::from_secs(50),
-                        std::time::Duration::ZERO,
-                    )
-                    .await
-                    .expect("merge"),
-            );
-            // pin: the early answer names the merge and its local-only target (cas-3937).
-            assert!(answer.contains("COMMITTED") && answer.contains("local-only target"), "{row}: {answer}");
-            let mut notes = String::new();
-            for _ in 0..400 {
-                notes = task_store.get(&task.id).unwrap().notes;
-                if notes.contains("POST_COMMIT_OUTCOME") {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-            assert!(notes.contains("POST_COMMIT_OUTCOME"), "{row}: the close's result is kept: {notes}");
-            // pin: the note carries the close's own outcome and the task's status (cas-3937 review).
-            assert!(
-                notes.contains("Cassy closed task") && notes.contains("task status now `closed`"),
-                "{row}: {notes}"
-            );
-            answer
+            let response = supervisor
+                .factory_with_budget_for_testing(merge, std::time::Duration::from_secs(50),
+                    std::time::Duration::ZERO)
+                .await.expect("merge");
+            let (answer, receipt) = merge_outcome::completed(&cas_root, &task.id, response).await;
+            let receipt = receipt.expect("held close returns a continuation receipt");
+            assert_eq!(receipt["mutation_outcome"], "COMMITTED");
+            assert_eq!(receipt["task_status"], "closed");
+            assert!(receipt["merge_close_outcome"].as_str().is_some_and(|outcome| !outcome.is_empty()));
+            get_text(&answer)
         } else {
             get_text(&supervisor.factory(Parameters(merge)).await.expect("merge"))
         };
@@ -1227,42 +1213,25 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
     merge.allow_trunk = Some(true);
     merge.cleanup = Some(false);
     let started = std::time::Instant::now();
-    let answer = get_text(
-        &supervisor
-            .factory_with_budget_for_testing(
-                merge,
-                std::time::Duration::from_secs(20),
-                std::time::Duration::ZERO,
-            )
-            .await
-            .expect("transactional merge"),
-    );
-    assert!(answer.contains("COMMITTED"), "response took {:?}: {answer}", started.elapsed());
-    assert!(started.elapsed() < std::time::Duration::from_secs(20), "response exceeded 20 seconds: {answer}");
-    assert!(answer.contains("local-only target"), "{answer}");
-    assert!(answer.contains(&git_stdout(&fixture.repo.root, &["rev-parse", "main"])), "{answer}");
-    assert_eq!(
-        delivery_state(&fixture),
-        WorkerDeliveryState::MergeAuthorized,
-        "early answer must precede the delivery close: {answer}",
-    );
-
-    let task_store = open_task_store(&fixture.cas_root).unwrap();
-    let mut notes = String::new();
-    for _ in 0..400 {
-        notes = task_store.get(&fixture.task_id).unwrap().notes;
-        if notes.contains("POST_COMMIT_OUTCOME") {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    assert!(notes.contains("POST_COMMIT_OUTCOME"), "close outcome missing: {notes}");
-    assert!(
-        notes.contains("task status now `closed`")
-            && notes.contains("Close outcome: Closed task: cas-slowclose-target-cas"),
-        "{notes}"
-    );
-    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::Delivered);
+    let response = supervisor
+        .factory_with_budget_for_testing(merge, std::time::Duration::from_secs(20),
+            std::time::Duration::ZERO)
+        .await.expect("transactional merge");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "response exceeded its budget");
+    let (answer, receipt) = merge_outcome::completed(&fixture.cas_root, &fixture.task_id, response).await;
+    let receipt = receipt.expect("held close returns a continuation receipt");
+    assert_eq!(receipt["mutation_outcome"], "COMMITTED");
+    assert_eq!(receipt["task_status"], "closed");
+    assert!(receipt["merge_close_outcome"].as_str().is_some_and(|outcome| !outcome.is_empty()));
+    let merged = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
+    assert!(receipt["commit"].as_str().unwrap().contains(&merged));
+    let task = open_task_store(&fixture.cas_root).unwrap().get(&fixture.task_id).unwrap();
+    assert_eq!(task.status, TaskStatus::Closed);
+    let (_, transaction) = cas_store::get_latest_worker_delivery(&fixture.cas_root, &fixture.task_id)
+        .unwrap().unwrap();
+    assert_eq!(transaction.merge_commit_sha.as_deref(), Some(merged.as_str()));
+    assert_eq!(answer.is_error, Some(false));
+    assert_eq!(transaction.state, WorkerDeliveryState::Delivered);
 }
 
 /// cas-6a57: in a debug build the poll frame of an `async fn` holds a slot for

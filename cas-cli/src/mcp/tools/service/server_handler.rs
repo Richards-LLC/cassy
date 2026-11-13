@@ -583,7 +583,7 @@ impl CasService {
         match won {
             Won::Handler(joined) => {
                 if let Some(durable) = &merge_receipt {
-                    durable.finish(&joined, &receipt).map_err(|error| rmcp::ErrorData {
+                    durable.finish(&joined, &receipt, None).map_err(|error| rmcp::ErrorData {
                         code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                         message: format!("Merge finished but its receipt could not be updated: {error}").into(),
                         data: None,

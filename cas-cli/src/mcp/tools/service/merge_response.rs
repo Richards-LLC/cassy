@@ -43,13 +43,13 @@ impl MergeReceipt {
         Ok(())
     }
 
-    pub(super) fn finish(&self, joined: &Joined, receipt: &Receipt) -> std::io::Result<()> {
+    pub(super) fn finish(&self, joined: &Joined, receipt: &Receipt, task_status: Option<&str>) -> std::io::Result<()> {
         let result = match joined {
             Ok(Ok(result)) => json!({"ok":result}),
             Ok(Err(error)) => json!({"error":error}),
             Err(error) => json!({"handler_error":error.to_string()}),
         };
-        self.save(json!({"state":"completed", "result":result,
+        self.save(json!({"state":"completed", "result":result, "task_status":task_status,
             "mutation_outcome":if receipt.commit.get().is_some() { "COMMITTED" } else { "NOT_COMMITTED" },
             "commit":receipt.commit.get().map(|commit| &commit.description),
             "merge_close_outcome":receipt.followup.lock().ok().and_then(|followup| followup.clone())}))
@@ -75,9 +75,20 @@ impl MergeReceipt {
             let joined = handle.await;
             let summary = super::server_handler::late_close_summary(&joined);
             let recorded = tokio::task::spawn_blocking(move || -> Result<(), String> {
-                self.finish(&joined, &receipt).map_err(|error| error.to_string())?;
-                let detail = format!("Merge outcome for {} (receipt {}): {summary}. Full result: {}",
-                    self.source.as_deref().unwrap_or("<unknown>"), self.id, self.path.display());
+                let status = self.task.as_deref().and_then(|task| {
+                    service.inner.open_task_store().ok()?.get(task).ok()
+                }).map(|task| task.status.to_string());
+                self.finish(&joined, &receipt, status.as_deref()).map_err(|error| error.to_string())?;
+                let close = receipt.followup.lock().ok().and_then(|followup| followup.clone());
+                let failed = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true));
+                let outcome = match close {
+                    Some(close) if failed => format!("{close}. Merge failure: {summary}"),
+                    Some(close) => close,
+                    None => summary,
+                };
+                let detail = format!("Merge outcome for {} (receipt {}); task status now `{}`. Close outcome: {outcome}. Full result: {}",
+                    self.source.as_deref().unwrap_or("<unknown>"), self.id,
+                    status.as_deref().unwrap_or("unknown"), self.path.display());
                 if let Some(task) = &self.task {
                     let noted = (|| -> Result<(), String> {
                         let store = service.inner.open_task_store().map_err(|error| error.to_string())?;
@@ -94,7 +105,8 @@ impl MergeReceipt {
                 let owner = service.inner.get_registered_agent_id_read_only().ok();
                 let recipient = crate::supervisor_notices::resolve(&agents, owner.as_deref(), None);
                 crate::supervisor_notices::enqueue_with_context(&service.inner.cas_root, &recipient,
-                    "merge_outcome", &detail, &self.id, Some(json!({"receipt_id":self.id, "receipt_path":self.path})))
+                    "merge_outcome", &detail, &self.id, Some(json!({"receipt_id":self.id, "receipt_path":self.path,
+                        "task_status":status, "merge_close_outcome":receipt.followup.lock().ok().and_then(|followup| followup.clone())})))
                     .map_err(|error| error.to_string())
             }).await;
             if !matches!(&recorded, Ok(Ok(()))) {

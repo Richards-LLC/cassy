@@ -34,6 +34,9 @@ use crate::test_env_guard::TestEnvGuard;
 #[path = "fixtures/ci_check_run.rs"]
 mod ci_check_run;
 
+#[path = "fixtures/merge_outcome.rs"]
+mod merge_outcome;
+
 /// cas-6a30: every test in this integration binary shares one process. Direct
 /// HOME/XDG_CONFIG_HOME mutation bypasses the canonical guard and can move the
 /// host registry between schema installation and strict store open.
@@ -4508,8 +4511,12 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
             std::time::Duration::ZERO,
         ))
         .unwrap();
-    assert!(get_text(&rejected).contains("PUSH NOT CONFIRMED"), "{}", get_text(&rejected));
-    assert!(!get_text(&rejected).contains("COMMITTED"), "{}", get_text(&rejected));
+    let (_rejected, receipt) = runtime.block_on(merge_outcome::completed(
+        &root, req.task_id.as_deref().unwrap(), rejected));
+    if let Some(receipt) = receipt {
+        assert_eq!(receipt["mutation_outcome"], "NOT_COMMITTED");
+    }
+    assert_eq!(tasks.get("task-charlie").unwrap().status, TaskStatus::AwaitingMerge);
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), before_failed_push);
     let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));

@@ -965,7 +965,13 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     expect(view.element.scrollTop).toBe(1200);
     const failure = view.element.querySelector<HTMLElement>('[role="alert"]')!;
     // jsdom has no layout: model the browser revealing the error beside Load earlier.
-    failure.scrollIntoView = () => { view.element.scrollTop = 0; };
+    failure.scrollIntoView = () => { view.element.scrollTop = error?.before === undefined ? 1200 : 0; };
+    // Concurrent newest-page A fails first at the tail; older-page B then
+    // moves that same visible alert beside Load earlier (HUB-J23/cas-3590).
+    error = { detail: "fixture:newest-timeout" };
+    view.update();
+    expect(failure.hidden).toBe(false);
+    expect(view.element.scrollTop).toBe(1200);
     error = { detail: "fixture:history-timeout", before: 42 };
     view.update();
     expect(failure.hidden).toBe(false);

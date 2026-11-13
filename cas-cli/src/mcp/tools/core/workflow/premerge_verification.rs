@@ -2147,6 +2147,10 @@ mod tests {
         let mut task = Task::new("cas-352b".into(), "Slow immutable candidate".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(source.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() },
+            branch: "factory/w".into(), assignee: "worker".into(), base_sha: target.clone(),
+        });
         core.open_task_store().unwrap().add(&task).unwrap();
         let digest = context_digest(&root, &task).unwrap();
         let key = bound_candidate_key(&task.id, &repo.canonicalize().unwrap(),
@@ -2202,6 +2206,11 @@ mod tests {
             row.summary.as_deref() == Some("premerge_candidate_ready")).collect();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].target, "supervisor");
+        // Standard code in batch mode must get its review before publication.
+        assert_eq!(review_tier::tier_for_delivery(&task, repo).unwrap().tier,
+            review_tier::VerificationTier::Standard);
+        assert!(core.prepare_premerge_verification(&task, repo, "factory/w", "main").is_err());
+        assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_some());
     }
 
     #[test]

@@ -336,13 +336,23 @@ fn published_train_closes_members_independently_cas_734b() {
         let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
         assert_eq!(revision(id) - revisions[id], i64::from(closed_now));
     }
-    // Adding only the missing exact-head approval completes the same operation;
-    // an already-closed member's historical exception cannot hold the train.
+    // A batch ledger cannot replace the missing code delivery approvals.
     let mut later = receipt;
     later.id = "qab-later".into();
     later.task_heads = ["cas-unreviewed", "cas-unshipped", "cas-other-source"].map(|id| (id.into(), anchor.clone())).into();
     cas_store::import_qa_batch_receipt(&root, &later).unwrap();
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    let held = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    for id in later.task_heads.keys() {
+        assert!(matches!(held.get(id), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
+        let dispatch = cas_store::create_verification_dispatch_bound(&root, id, "worker", "supervisor",
+            &boundary, chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+        conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
+        conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES (?1,?2,'reviewer','task','approved','pass','[]',?3,?4)",
+            rusqlite::params![format!("ver-repaired-{id}"), id, chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+    }
+    // Existing merge approvals alone complete the operation; no ledger author
+    // or recorder participates in code acceptance.
     let complete = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,
         crate::release_reconcile::ReconcileTrigger::Backfill)).unwrap();
     assert!(complete.complete);

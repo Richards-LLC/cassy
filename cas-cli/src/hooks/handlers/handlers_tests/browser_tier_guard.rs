@@ -38,7 +38,25 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             "npx playwright test -- --list",
             "npx playwright test --list --full",
             "npx playwright test --reporter --help",
+            // GH #1876: the seed is consumed by --shuffle, so nothing names a spec.
+            "npx playwright test --shuffle 42",
+            "npx playwright test --shuffle=42",
+            "npx playwright test qa/a.spec.ts --shuffle=42 --full",
+            // Optional values consume spec-looking strings too (GH #1876 review).
+            "pnpm exec playwright test --shuffle tests/qa-coverage/a.spec.ts --workers=1",
+            "npx playwright test --debug qa/a.spec.ts",
+            "npx playwright test --only-changed qa/a.spec.ts",
+            "npx playwright test --update-snapshots qa/a.spec.ts",
+            "npx playwright test -u qa/a.spec.ts",
+            "npx playwright test --project chromium qa/a.spec.ts",
+            "npx playwright test -G qa/a.spec.ts",
+            "npx playwright test --test-list qa/a.spec.ts",
+            "npx playwright test qa/a.spec.ts --unknown-option value",
+            "npx playwright test -xu qa/a.spec.ts",
+            "npx playwright test -- qa/a.spec.ts",
             "npx playwright test -- --help",
+            "npx playwright test --grep-invert -- qa/a.spec.ts",
+            "npx playwright test --list -- --full",
             "npx playwright test --help --full",
             "npx playwright test --help; npx playwright test",
             "node scripts/run-verified-tests.mjs playwright --help",
@@ -85,7 +103,7 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             "cat > README.md <<\"EOF\"\nexample\nEOF\nnpx playwright test",
         ] {
             let reason = denial(command, role).expect(command);
-            assert!(reason.contains("scripts/journey-eval.sh"), "{reason}");
+            assert!(reason.contains("[H-08]"), "{command}: {reason}");
         }
     }
 }
@@ -113,6 +131,22 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "PLAYWRIGHT_HTML_OPEN=never npx playwright test tests/x.spec.ts:42 --debug=cli > pw-debug.log 2>&1 &",
         "npx playwright test qa/real-walk.spec.mjs --retries 0 -j 1 --trace on --repeat-each 2 --max-failures 1 --browser chromium --global-timeout 30000 --tsconfig tsconfig.json",
         "npx playwright test qa/real-walk.spec.js --workers=1",
+        // GH #1876: --shuffle takes an optional seed that is not a file filter.
+        "pnpm exec playwright test tests/qa-coverage/am-hubspot-integrations.spec.ts -c tests/qa-coverage/playwright.hubspot-integrations.config.ts --trace on --workers=1 --shuffle 42 --reporter=json",
+        "pnpm exec playwright test tests/qa-coverage/a.spec.ts --shuffle arbitrary-seed --workers=1",
+        "pnpm exec playwright test qa/a.spec.ts --debug cli --only-changed main --shuffle arbitrary-seed --update-snapshots changed -u missing --workers=1",
+        "pnpm exec playwright test --shuffle -1e-3 qa/a.spec.ts --workers=1",
+        "pnpm exec playwright test --shuffle --workers=1 qa/a.spec.ts",
+        "pnpm exec playwright test --project chromium --workers=1 qa/a.spec.ts",
+        "pnpm exec playwright test --project=chromium qa/a.spec.ts",
+        "pnpm exec playwright test --shuffle=-seed qa/a.spec.ts",
+        "pnpm exec playwright test --shuffle '' qa/a.spec.ts",
+        "pnpm exec playwright test --shuffle - qa/a.spec.ts",
+        "pnpm exec playwright test --shuffle -.25e+2 qa/a.spec.ts",
+        "pnpm exec playwright test -uall qa/a.spec.ts -j1 -Gignore",
+        "pnpm exec playwright test qa/a.spec.ts --test-list selected.txt --test-list-invert ignored.txt --add-reporter json --last-failed-file last.json --run-agents none --update-source-method patch",
+        "pnpm exec playwright test qa/a.spec.ts -- ignored.spec.ts",
+        "npm run journeys -- qa/a.spec.ts --shuffle text",
         "npx playwright test tests/e2e/explorer-login.spec.cjs --workers=1",
         "NODE_PATH=/cached/node_modules npx --prefix /cached playwright test scripts/tests/decision-workbook.spec.js --config scripts/tests/decision-workbook.playwright.config.cjs",
         "npx --prefix=/cached playwright test scripts/tests/decision-workbook.spec.cjs --config=scripts/tests/decision-workbook.playwright.config.cjs",
@@ -127,6 +161,8 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "npx playwright test --help 2>&1 | head -40",
         // GH #1852: collection only; nothing launches.
         "pnpm exec playwright test --list > target/collection.log 2>&1",
+        "pnpm exec playwright test --list --forbid-only --shuffle=42",
+        "pnpm exec playwright test --list --quiet --shuffle 42",
         "npx vitest run",
         "npx tsc --noEmit",
         "cat > README.md <<'EOF'\nnpx playwright test\nEOF",

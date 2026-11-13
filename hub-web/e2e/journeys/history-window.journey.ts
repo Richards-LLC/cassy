@@ -1,6 +1,10 @@
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
-import { journeyStamp } from "./clock";
+import { JOURNEY_NOW } from "./clock";
+import { ProtocolClock } from "./protocol-clock";
+import type { Locator, Page } from "@playwright/test";
+
+const historyStamp = (offset: number) => new Date(JOURNEY_NOW + offset).toISOString();
 
 for (const [name, viewport, colorScheme] of [
   ["desktop", { width: 1280, height: 800 }, "light"],
@@ -10,7 +14,7 @@ for (const [name, viewport, colorScheme] of [
     await page.setViewportSize(viewport); await page.emulateMedia({ colorScheme });
     const turns = (first: number, last: number) => Array.from({ length: last - first + 1 }, (_, index) => {
       const id = first + index;
-      return { notification_id: id, reply_to: null, message: `Turn ${id}: release evidence stays in conversation order.`, summary: "", device_id: "journey-device", kind: "answer", at: journeyStamp((id - 150) * 6 * 60_000) };
+      return { notification_id: id, reply_to: null, message: `Turn ${id}: release evidence stays in conversation order.`, summary: "", device_id: "journey-device", kind: "answer", at: historyStamp((id - 150) * 6 * 60_000) };
     });
     const deepAsk = { ...turns(1, 1)[0]!, kind: "ask", message: "Approve the release plan from earlier history?", options: ["Approve"] };
     const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], history: { [PELICAN]: [
@@ -71,19 +75,21 @@ for (const [name, viewport, colorScheme] of [
 
 
 test("HUB-J23 recover unanswered history without hiding missing answers (cas-3590)", journeyPart, async ({ page, journey }) => {
-  const reply = (id: number) => ({ notification_id: id, reply_to: null, message: `Recovered answer ${id}`, summary: "", device_id: "journey-device", kind: "answer", at: journeyStamp(-60_000) });
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], history: { [PELICAN]: [
+  const clock = new ProtocolClock(page);
+  const reply = (id: number) => ({ notification_id: id, reply_to: null, message: `Recovered answer ${id}`, summary: "", device_id: "journey-device", kind: "answer", at: historyStamp((id - 101) * 60_000) });
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], time: clock, history: { [PELICAN]: [
     { messages: [], replies: Array.from({ length: 50 }, (_, index) => reply(51 + index)), has_earlier: true, next_before: 51 },
     { messages: [], replies: [reply(50)], has_earlier: false },
   ] } });
+  await clock.start();
   hub.pausedHistory.add(PELICAN);
   const failure = page.getByRole("alert").filter({ has: page.getByRole("button", { name: "Retry history" }) });
   await journey.stage("An unanswered reopen names the gap and offers recovery", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect.poll(() => hub.historyRequests.length).toBe(1);
-    await page.clock.fastForward(15_000);
-    await expect(failure).toBeInViewport();
+    await clock.advance(15_000);
+    await expectSettledHistoryFailure(page, failure, clock);
     hub.pausedHistory.delete(PELICAN);
     await failure.getByRole("button").click();
     await expect(page.getByRole("log").locator('[data-key="reply:100"]')).toBeVisible();
@@ -93,13 +99,16 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     hub.pausedHistory.add(PELICAN);
     // Reconnect A requests the newest page while the cached thread stays readable.
     hub.drop(PELICAN);
-    await expect.poll(() => hub.historyRequests.length).toBe(3);
+    await expect.poll(async () => {
+      await clock.advance(100);
+      return hub.historyRequests.length;
+    }).toBe(3);
     const newest = hub.historyRequests.at(-1)!;
     expect(newest.before).toBeUndefined();
     await page.getByRole("button", { name: "Load earlier", exact: true }).click();
     await expect.poll(() => hub.historyRequests.length).toBe(4);
-    await page.clock.fastForward(15_000);
-    await expect(failure).toBeInViewport();
+    await clock.advance(15_000);
+    await expectSettledHistoryFailure(page, failure, clock);
     // A's late page hydrates, but B still owes the older answer (cas-bf2f).
     hub.send(PELICAN, { ConversationHistory: { request_id: newest.request_id, messages: [], replies: [reply(100)], has_earlier: true, next_before: 51 } });
     await expect(failure).toBeVisible();
@@ -112,3 +121,19 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     await expect(page.getByRole("log").locator('[data-key="reply:51"]')).toHaveCount(1);
   });
 });
+
+/** Observe stable scroll positions across rendered frames, with protocol IO
+ * settled between virtual frames; host speed cannot move history timestamps. */
+async function expectSettledHistoryFailure(page: Page, failure: Locator, clock: ProtocolClock): Promise<void> {
+  await expect(failure).toBeVisible();
+  let previous: number | undefined;
+  let stable = 0;
+  await expect.poll(async () => {
+    await clock.advance(16);
+    const top = await page.locator(".conversation-reading.thread").evaluate(element => element.scrollTop);
+    stable = top === previous ? stable + 1 : 0;
+    previous = top;
+    return stable;
+  }).toBeGreaterThanOrEqual(2);
+  await expect(failure).toBeInViewport();
+}

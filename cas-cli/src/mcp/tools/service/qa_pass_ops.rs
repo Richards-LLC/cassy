@@ -780,10 +780,13 @@ impl CasService {
                 reviewer,
                 &reason,
             ) {
-                Ok(_) => format!(
-                    "{} is back to Open with its assignee kept; request_changes recorded the ledger.",
-                    pass.task_id
-                ),
+                Ok(_) => {
+                    let _ = crate::store::publish_direct_task_write(&self.inner.cas_root, &pass.task_id);
+                    format!(
+                        "{} is back to Open with its assignee kept; request_changes recorded the ledger.",
+                        pass.task_id
+                    )
+                }
                 Err(error) => format!(
                     "request_changes could not reopen {}: {error}. The supervisor must decline it manually.",
                     pass.task_id

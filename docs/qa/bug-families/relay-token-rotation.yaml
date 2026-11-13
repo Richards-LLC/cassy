@@ -1,0 +1,3 @@
+title: Daemon adoption rejects stale relay credentials and the hub refreshes once without losing verified operator delivery or image previews
+tasks: [cas-ef33]
+journeys: [HUB-J11, HUB-J24, HUB-J27]

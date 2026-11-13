@@ -103,6 +103,13 @@ paired device controls the terminal. Raw terminal input still requires both
 `pane:input` and that device's active session lease. Message permission never
 grants terminal input authority.
 
+An authenticated hub relay presents the session daemon's private token during
+its WebSocket handshake. If daemon adoption rotates that token while the hub
+connects, a stale credential is refused with HTTP 401. The hub rereads the
+private token and retries once only if it changed, retaining its queued controls.
+Tokenless local viewers remain unverified; browser pairing grants no direct
+relay trust. A hub-only restart preserves pairings and running factory panes.
+
 ## Selected-session stores and live phase freshness
 
 Bridge and hub session routes resolve the selected session's `project_dir`
@@ -2289,6 +2296,18 @@ a disposable remote. Existing 3.62 private guards may still enforce ownership
 while lacking the fast-row delegate; inspect them rather than assuming absence.
 Do not copy those guards into the main checkout. A hook-install warning during
 spawn/reuse means enforcement is not proven.
+
+H-40 distinguishes a live checkpoint from a parked delivery. A supervisor-directed
+rebase of an owned InProgress task may publish with an explicit
+`--force-with-lease=refs/heads/<branch>:<observed-checkpoint-sha>`; Git refuses a
+changed remote tip. The push hook's `WorkerCheckpointPush` handler checks the
+recorded start ancestry of both tips, source/destination ownership and current
+task/delivery/review state. Commit-time `factory_branch_anchor` or `parked_branch`
+capture alone is not a park. AwaitingMerge, pending verification and active
+review envelopes refuse rewrites; persisted completion receipts and bound QA
+review tips must remain reachable. Unknown state and deletion refuse. Merge
+the target into parked/reviewed branches. Normal fast-forward pushes retain
+the existing ancestry, ownership, fast-row and local-gate checks.
 
 At park, `receipt_scope::park_refusal` reads passing capped test receipts for
 every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.

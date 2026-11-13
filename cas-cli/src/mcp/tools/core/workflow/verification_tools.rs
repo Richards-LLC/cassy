@@ -716,6 +716,7 @@ impl CasCore {
                         )),
                         data: None,
                     })?;
+                    let _ = crate::store::publish_direct_task_write(&self.cas_root, &req.task_id);
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(format!(
@@ -855,7 +856,7 @@ impl CasCore {
         // Atomically persist the review record and authority. A terminal
         // verdict also resolves the exact dispatch and pending task transition.
         // If any step fails, all authority and lifecycle writes roll back.
-        {
+        let task_row_changed = {
             let db_path = self.cas_root.join("cas.db");
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -890,6 +891,7 @@ impl CasCore {
 
             let mut review_bound_at = None;
             let mut review_consumed_at = None;
+            let mut task_row_changed = false;
             let dispatch = if let Some(capability_token) = req.verifier_capability.as_deref() {
                 let capability = cas_store::consume_verifier_capability_with_conn(
                     &tx,
@@ -1073,7 +1075,7 @@ impl CasCore {
                 };
 
                 if delivery_transitioned {
-                    tx.execute(
+                    task_row_changed = tx.execute(
                         "UPDATE tasks
                          SET status = ?2, pending_verification = 0, updated_at = ?3
                          WHERE id = ?1 AND status IN ('in_progress', 'awaiting_merge')",
@@ -1093,7 +1095,7 @@ impl CasCore {
                             "Failed to project delivery verification state: {e}"
                         )),
                         data: None,
-                    })?;
+                    })? > 0;
                 }
 
                 if task.pending_verification {
@@ -1106,6 +1108,7 @@ impl CasCore {
                             data: None,
                         },
                     )?;
+                    task_row_changed = true;
                 }
             }
 
@@ -1124,6 +1127,12 @@ impl CasCore {
                 &req.task_id,
                 &verification.id,
             );
+            task_row_changed
+        };
+        // The verdict transaction bypasses SyncingTaskStore. Publish before
+        // any later close/notice can mask its pending flag or delivery state.
+        if task_row_changed {
+            let _ = crate::store::publish_direct_task_write(&self.cas_root, &req.task_id);
         }
 
         if verification.status != VerificationStatus::SupervisorCall {

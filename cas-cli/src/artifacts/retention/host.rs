@@ -114,11 +114,20 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
     let registry = crate::store::known_repos::open_host_known_repo_store()?;
     let mut roots: BTreeSet<_> = registry.list()?.into_iter().map(|repo| repo.path.join(".cas")).collect();
     roots.insert(cas.to_path_buf());
-    if let Some(global) = dirs::home_dir().map(|home| home.join(".cas"))
-        && global.join("cas.db").is_file() { roots.insert(global); }
     ensure!(roots.len() <= 256, "registered-project inventory exceeds 256 stores");
     let mut projects = Vec::new();
     let mut refs = References::default();
+    // The host registry DB usually has no project task/agent schema. Read its
+    // task citations when present, without treating it as a registered project.
+    let global = crate::store::known_repos::host_cas_dir();
+    let global_tasks = {
+        let db = cas_store::shared_db::shared_connection(&global.join("cas.db"))?;
+        let conn = db.try_lock().map_err(|_| anyhow::anyhow!("host reference inventory busy"))?;
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')", [], |row| row.get(0))?;
+        drop(conn);
+        if exists { cas_store::SqliteTaskStore::open(&global)?.list(None)? } else { Vec::new() }
+    };
+    for task in global_tasks.iter().filter(|task| !task.is_terminal()) { refs.add(task)?; }
     let mut seen = BTreeSet::new();
     for root in roots {
         ensure!(Instant::now() < deadline, "reference inventory budget exhausted; nothing deleted");
@@ -153,7 +162,7 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
     }
     // Close citations transitively: live task -> old task -> published alias ->
     // another task. A terminal intermediary must not sever evidence protection.
-    let mut evidence = Vec::new();
+    let mut evidence: Vec<_> = global_tasks.iter().map(|task| (vec![task.id.clone()], task)).collect();
     for project in &projects {
         let store = cas_store::SqliteArtifactStore::open(&project.root)?;
         for task in &project.tasks {

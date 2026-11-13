@@ -908,7 +908,13 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         for mode in ['installed', 'missing', 'broken', 'download-failure', 'nextest-missing', 'install-failure']:
             with self.subTest(mode=mode):
                 fixture = self.root / mode; fixture.mkdir()
-                workspace = fixture / 'workspace'; workspace.mkdir()
+                runner = fixture / 'runner'
+                workspace = runner / '_work/repo/repo'; workspace.mkdir(parents=True)
+                runner_temp = runner / '_work/_temp'; runner_temp.mkdir()
+                git_env = os.environ.copy()
+                for key in subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).splitlines():
+                    git_env.pop(key, None)
+                subprocess.run(['git', '-C', str(workspace), 'init', '-q'], env=git_env, check=True)
                 commands = fixture / 'bin'; commands.mkdir()
                 cargo_home = fixture / 'cargo'; (cargo_home / 'bin').mkdir(parents=True)
                 rustup_home = fixture / 'rustup'
@@ -940,7 +946,7 @@ esac
                 github_path = fixture / 'github-path'; github_env = fixture / 'github-env'
                 result = self.run_body(prepare['run'], {
                     'PATH': str(commands)+':/usr/bin:/bin', 'CARGO_HOME': str(cargo_home),
-                    'RUSTUP_HOME': str(rustup_home), 'RUNNER_TEMP': str(fixture),
+                    'RUSTUP_HOME': str(rustup_home), 'RUNNER_TEMP': str(runner_temp),
                     'GITHUB_WORKSPACE': str(workspace),
                     'GITHUB_PATH': str(github_path), 'GITHUB_ENV': str(github_env),
                     'CALLS': str(calls), 'READY': str(ready), 'NEXTEST_READY': str(nextest_ready), 'MODE': mode,
@@ -948,11 +954,15 @@ esac
                     'RUSTUP_TEMPLATE': str(rustup)})
                 self.assertEqual(github_path.read_text().splitlines(), [str(cargo_home / 'bin')])
                 published = dict(line.split('=', 1) for line in github_env.read_text().splitlines())
-                disk_temp = workspace / '.context/lane-temp'
-                self.assertEqual(published['TMPDIR'], str(disk_temp / 'tmp'))
-                self.assertEqual(published['CARGO_TARGET_TMPDIR'], str(disk_temp / 'cargo'))
-                self.assertTrue((disk_temp / 'tmp').is_dir())
-                self.assertTrue((disk_temp / 'cargo').is_dir())
+                disk_temp = runner / 't'
+                self.assertEqual(published['TMPDIR'], str(disk_temp))
+                self.assertEqual(published['CARGO_TARGET_TMPDIR'], str(runner / 'ct'))
+                self.assertTrue(disk_temp.is_dir())
+                self.assertTrue((runner / 'ct').is_dir())
+                self.assertFalse(disk_temp.is_relative_to(workspace))
+                discovery = subprocess.run(['git', 'rev-parse', '--show-toplevel'],
+                    cwd=disk_temp, env=git_env, text=True, capture_output=True)
+                self.assertNotEqual(discovery.returncode, 0, 'empty temp fixtures must not inherit the checkout')
                 observed = calls.read_text().splitlines()
                 install = 'rustup toolchain install fixture-pinned --profile minimal --component clippy --component rustfmt'
                 if mode == 'download-failure':
@@ -967,7 +977,7 @@ esac
                     self.assertTrue(nextest_ready.exists())
                     self.assertEqual(install in observed, mode in ['missing', 'broken'])
                     self.assertEqual('curl' in observed, mode == 'missing')
-                    nextest_install = f'cargo install cargo-nextest --locked --version fixture-nextest --target-dir {disk_temp}/tmp/nextest-build'
+                    nextest_install = f'cargo install cargo-nextest --locked --version fixture-nextest --target-dir {disk_temp}/nextest-build'
                     self.assertEqual(nextest_install in observed, mode != 'installed')
 
     def test_lane_temp_sampling_preserves_phase_status_and_arguments(self):

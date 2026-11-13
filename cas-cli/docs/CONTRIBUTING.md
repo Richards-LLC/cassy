@@ -3266,8 +3266,11 @@ The same lock guards nextest preparation: reuse the installed executable, or
 install the version recommended in `.config/nextest.toml` if it is missing.
 Local jobs avoid the prebuilt installer's shared `HOME/.install-action/tmp`,
 which can corrupt simultaneous ring downloads. Hosted jobs keep that installer.
-Local setup also exports `TMPDIR` and `CARGO_TARGET_TMPDIR` under the runner
-workspace's `.context/lane-temp/` disk directory before any Cargo or test work.
+Local setup also exports `TMPDIR` and `CARGO_TARGET_TMPDIR` to short `t` and `ct`
+disk directories directly under each runner root, resolved from
+`RUNNER_TEMP/../..`, before any Cargo or test work. These paths stay outside the
+checkout so disposable fixtures cannot inherit its Git/CAS state, and leave
+room for Unix-domain socket names.
 Rustup installer and nextest build temporaries use that disk root rather than
 RAM-backed service `PrivateTmp`. Own/ring phases sample private `/tmp` and the
 disk temp directories while running, preserving the test command's exit status.

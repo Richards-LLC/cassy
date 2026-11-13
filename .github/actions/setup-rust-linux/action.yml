@@ -48,9 +48,12 @@ runs:
       shell: bash
       run: |
         # PrivateTmp is RAM-backed on the local listeners. Keep compiler,
-        # test and installer temporaries on the runner's workspace disk.
-        export TMPDIR="$GITHUB_WORKSPACE/.context/lane-temp/tmp"
-        export CARGO_TARGET_TMPDIR="$GITHUB_WORKSPACE/.context/lane-temp/cargo"
+        # test and installer temporaries on disk, outside the checkout so
+        # disposable test roots cannot discover its Git/CAS state. A short
+        # path also leaves room for fixture Unix-domain socket names.
+        runner_root="$(cd "$RUNNER_TEMP/../.." && pwd)"
+        export TMPDIR="$runner_root/t"
+        export CARGO_TARGET_TMPDIR="$runner_root/ct"
         mkdir -p "$TMPDIR" "$CARGO_TARGET_TMPDIR"
         printf 'TMPDIR=%s\nCARGO_TARGET_TMPDIR=%s\n' "$TMPDIR" "$CARGO_TARGET_TMPDIR" >> "$GITHUB_ENV"
         export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"

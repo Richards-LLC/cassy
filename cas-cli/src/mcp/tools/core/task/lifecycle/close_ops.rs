@@ -11368,7 +11368,14 @@ impl CasCore {
             // worktree. Read them there, so both closes judge one evidence set.
             let merged_receipt_repo = (worker_worktree_path.is_none()
                 && (supervisor_closing_merged_anchor || supervisor_closing_merged_receipt))
-                .then(|| self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()).ok().flatten())
+                .then(|| {
+                    crate::factory_worker_check::assigned_worker_checkout(&self.cas_root, &task)
+                        .ok()
+                        .filter(|path| declared_repo_context.as_ref().is_some_and(|context| {
+                            validate_pre_close_worktree(path, context, None).is_ok()
+                        }))
+                        .or_else(|| self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()).ok().flatten())
+                })
                 .flatten();
             let receipt_repo = merged_receipt_repo.as_deref().unwrap_or(proof_repo);
             let mut epic_has_recorded_delivery = !task_commit_identity.known_commits.is_empty();

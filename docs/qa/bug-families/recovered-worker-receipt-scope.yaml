@@ -1,0 +1,4 @@
+title: Recovered merged deliveries count supervisor-recorded module receipts from the assigned worker checkout
+tasks: [cas-231c]
+invariants: [FACTORY-SELECTED-TEST-LOG]
+journeys: [FACTORY-CLOSE]

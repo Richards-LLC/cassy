@@ -361,6 +361,30 @@ fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)
     bail!("Worker test refused: package {package} not found in workspace")
 }
 
+/// Receipt keys follow the registered worker's actual checkout, including
+/// recovered clones. Reading proof does not require its current branch to
+/// remain the delivered branch; callers validate the task's repository.
+pub(crate) fn assigned_worker_checkout(cas_root: &Path, task: &cas_types::Task) -> Result<PathBuf> {
+    let agents = crate::store::open_agent_store(cas_root)?;
+    let worker = task
+        .assignee
+        .as_deref()
+        .and_then(|assignee| {
+            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
+        })
+        .filter(|agent| agent.role == cas_types::AgentRole::Worker)
+        .context("task must be assigned to a registered worker")?;
+    // Same metadata/convention precedence as the factory worker roster.
+    worker
+        .metadata
+        .get("clone_path")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| cas_root.join("worktrees").join(&worker.name))
+        .canonicalize()
+        .context("assigned worker checkout is unavailable")
+}
+
 /// Record an existing supervisor-run selection under the assigned worker's
 /// normal receipt key. The authority, task binding and provenance are checked
 /// here so MCP and CLI use exactly the same path.
@@ -392,24 +416,7 @@ pub(crate) fn record_supervisor_test(
     if task.status == cas_types::TaskStatus::Closed {
         bail!("cannot record new test evidence for a closed task");
     }
-    let agents = crate::store::open_agent_store(&root)?;
-    let worker = task
-        .assignee
-        .as_deref()
-        .and_then(|assignee| {
-            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
-        })
-        .filter(|agent| agent.role == cas_types::AgentRole::Worker)
-        .context("task must be assigned to a registered worker")?;
-    // Same metadata/convention precedence as the factory worker roster.
-    let repo = worker
-        .metadata
-        .get("clone_path")
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-        .unwrap_or_else(|| root.join("worktrees").join(&worker.name))
-        .canonicalize()
-        .context("assigned worker checkout is unavailable")?;
+    let repo = assigned_worker_checkout(&root, &task)?;
     let tested_repo = evidence
         .repo
         .canonicalize()

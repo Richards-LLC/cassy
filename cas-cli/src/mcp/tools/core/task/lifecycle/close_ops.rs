@@ -105,11 +105,22 @@ fn request_close_verification_dispatch(
     boundary: &cas_types::VerificationProofBoundary,
     supervisor_recovery: bool,
     no_delivery_intent: Option<(&str, Option<&str>)>,
+    renewal: Option<(&str, &Task, &Task)>,
 ) -> Result<CloseVerificationDispatch, McpError> {
     let persist = || -> cas_store::Result<CloseVerificationDispatch> {
         let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
         cas_store::shared_db::install_busy_handler(&conn)?;
         let tx = cas_store::shared_db::begin_immediate_with_retry(&conn)?;
+        if let Some((expired_id, _, _)) = renewal {
+            let current = cas_store::get_latest_verification_dispatch_with_conn(&tx, task_id)?
+                .ok_or_else(|| cas_store::StoreError::Other("Expired verification changed; retry close".into()))?;
+            if current.id != expired_id || current.state != cas_types::VerificationDispatchState::TimedOut {
+                if matches!(current.state, cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed) {
+                    return Ok(CloseVerificationDispatch::AlreadyActive(current));
+                }
+                return Err(cas_store::StoreError::Other("Expired verification changed; retry close".into()));
+            }
+        }
         let (dispatch, already_active) = match cas_store::create_verification_dispatch_bound_with_conn(
             &tx, task_id, requester_id, owner_id, boundary,
             chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
@@ -124,6 +135,22 @@ fn request_close_verification_dispatch(
         let matching_proof = dispatch.owner_agent_id == owner_id
             && dispatch.receipt().map_err(cas_store::StoreError::Parse)? == boundary.receipt().map_err(cas_store::StoreError::Parse)?
             && dispatch.repository == boundary.repository;
+        // cas-afd2: the corrected report and its fresh review become visible
+        // together. Never rewrite an active cycle or a concurrently changed proof.
+        if let Some((_, before, closing)) = renewal.filter(|_| matching_proof)
+            && closing.execution_note.as_deref() == Some("no-code")
+            && (before.external_ref != closing.external_ref || before.execution_note != closing.execution_note)
+        {
+            let changed = tx.execute(
+                "UPDATE tasks SET execution_note=?1, external_ref=?2, updated_at=?3
+                 WHERE id=?4 AND execution_note IS ?5 AND external_ref IS ?6",
+                rusqlite::params![closing.execution_note, closing.external_ref,
+                    chrono::Utc::now().to_rfc3339(), task_id, before.execution_note, before.external_ref],
+            )?;
+            if changed != 1 {
+                return Err(cas_store::StoreError::Other("No-code proof changed before verification renewal; retry close".into()));
+            }
+        }
         if let Some((reason, expected_assignee)) = no_delivery_intent.filter(|_| matching_proof) {
             let (encoded, assignee): (String, Option<String>) = tx.query_row(
                 "SELECT deliverables, assignee FROM tasks WHERE id = ?1",
@@ -216,6 +243,7 @@ mod verification_dispatch_tests {
                     requested,
                     false,
                     Some(("Measured no source delivery", Some("worker"))),
+                    None,
                 )
                 .expect("active dispatch is verification-pending, never INTERNAL_ERROR");
                 match outcome {
@@ -8158,6 +8186,10 @@ impl CasCore {
             ));
         }
 
+        // An expired task-only review can be requested again, never waived.
+        // Shipped, receipt-bound and epic recovery retain their exact boundary.
+        let mut renew_expired_task_dispatch = None;
+
         // An explicitly persisted proof cycle is stronger than configuration,
         // depth, orphan, and review convenience paths. Once one exists, no
         // close projection may proceed until that exact dispatch resolves.
@@ -8174,6 +8206,25 @@ impl CasCore {
                         "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable exact dispatch state: {}. Cassy refuses to infer close authority.",
                         req.id, error
                     )))));
+                }
+                Ok(Some(dispatch))
+                    if task.task_type != TaskType::Epic
+                        && task.status != TaskStatus::AwaitingMerge
+                        && task.deliverables.delivery_pr_merged_at.is_none()
+                        && task.deliverables.delivery_pr_merge_commit.is_none()
+                        && task.deliverables.green_merge_commit.is_none()
+                        && dispatch.receipt_id.is_none()
+                        && dispatch.delivery_transaction_id.is_none()
+                        && (dispatch.state == cas_types::VerificationDispatchState::TimedOut
+                            || (matches!(dispatch.state, cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
+                                && dispatch.deadline_at <= chrono::Utc::now())) =>
+                {
+                    cas_store::timeout_verification_dispatch(&self.cas_root, &req.id, chrono::Utc::now())
+                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to persist verification timeout: {error}")))?;
+                    persist_close_flags(task_store.as_ref(), &task, |task| task.pending_verification = false)
+                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                    task.pending_verification = false;
+                    renew_expired_task_dispatch = Some(dispatch.id);
                 }
                 Ok(Some(dispatch))
                     if matches!(
@@ -9412,6 +9463,9 @@ impl CasCore {
 
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
+            // Renew the explicit review before handing this delivery to merge.
+            // QA and content gates above still run before requesting it.
+            && renew_expired_task_dispatch.is_none()
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
             && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
@@ -10025,13 +10079,15 @@ impl CasCore {
             }
         }
         // gate[G-68 park as-of]: Verification jail (VERIFICATION REQUIRED / FAILED / timed out)
-        if verification_enabled
-            && !skip_verification
-            && !depth_light
-            && !rapid_unsampled
-            && !tier_skips_verifier
-            && !release_verdict_covers
-            && shipped_timeout_waiver.is_none()
+        if renew_expired_task_dispatch.is_some()
+            || (verification_enabled
+                && !skip_verification
+                && !depth_light
+                && !rapid_unsampled
+                && !tier_skips_verifier
+                && !release_verdict_covers
+                && shipped_timeout_waiver.is_none())
+
         {
             // cas-5597: every factory worker's close parks; the merge verdict closes.
             let is_worker_without_subagents = crate::harness_policy::is_worker_from_env();
@@ -10695,6 +10751,7 @@ impl CasCore {
                             &proof_boundary,
                             supervisor_direct_recovery,
                             req.no_delivery.filter(|value| *value).map(|_| (req.reason.as_deref().unwrap_or_default(), close_assignee.as_deref())),
+                            renew_expired_task_dispatch.as_deref().map(|id| (id, &close_snapshot, &task)),
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {
@@ -31545,12 +31602,16 @@ esac
         // Another task's commit on origin/main is not this task's shipped receipt.
         let foreign = accepted.clone();
         let (refused, text) = close(named.clone(), &foreign).await;
-        assert!(refused && text.contains("VERIFICATION TIMED OUT"), "{text}");
+        assert!(refused, "{text}");
+        let latest = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id).unwrap().unwrap();
+        assert_eq!(latest.id, dispatch.id);
+        assert_eq!(latest.state, cas_types::VerificationDispatchState::TimedOut);
 
         let (refused, text) = close("shipped by PR 1513".into(), &receipt).await;
         assert!(refused, "{text}");
-        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &dispatch.id).unwrap().state,
-            cas_types::VerificationDispatchState::TimedOut);
+        let latest = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id).unwrap().unwrap();
+        assert_eq!(latest.id, dispatch.id);
+        assert_eq!(latest.state, cas_types::VerificationDispatchState::TimedOut);
         assert!(!text.contains("blocking dependencies"), "shipped blocker must not hold: {text}");
         assert_ne!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
 

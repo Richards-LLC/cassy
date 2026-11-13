@@ -9940,19 +9940,17 @@ async fn test_task_close_succeeds_after_verifier_clearance() {
     );
 }
 
-/// cas-c29a/cas-08ca: exact-task verification-dispatch timeout recovery.
+/// cas-c29a/cas-08ca/cas-afd2: exact-task verification-dispatch timeout recovery.
 ///
-/// A task enters `pending_verification` on the first close attempt and the
-/// If the task-verifier crashes, a retry after the durable deadline marks only
-/// the named dispatch timed_out and releases only that task. A different task's
-/// pending transition remains untouched.
+/// If the task-verifier crashes, a close retry after the durable deadline
+/// preserves the expired task-only dispatch and requests a fresh review.
+/// A different task's pending review remains untouched.
 #[tokio::test]
 async fn test_close_auto_escalates_stale_verification_dispatch() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
-    let verification_store = open_verification_store(&cas_dir).unwrap();
     let task_store = open_task_store(&cas_dir).unwrap();
 
     // Create + start task.
@@ -10010,13 +10008,12 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         "first close must set pending_verification"
     );
 
-    let legacy_dispatch = verification_store
-        .get_latest_for_task(&id)
+    let original_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &id)
         .expect("get dispatch row")
         .expect("dispatch row exists");
     assert_eq!(
-        legacy_dispatch.status,
-        cas::types::VerificationStatus::Pending
+        original_dispatch.state,
+        cas::types::VerificationDispatchState::Pending
     );
 
     let mut other = cas::types::Task::new(
@@ -10026,7 +10023,7 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
     other.status = TaskStatus::InProgress;
     other.pending_verification = true;
     task_store.add(&other).expect("add B");
-    cas_store::create_verification_dispatch(
+    let other_dispatch = cas_store::create_verification_dispatch(
         &cas_dir,
         &other.id,
         "worker-b",
@@ -10045,7 +10042,7 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
     )
     .expect("expire exact A dispatch");
 
-    // Second close — should auto-escalate instead of looping.
+    // cas-afd2 replaces task-only timeout escalation with a fresh Pending cycle.
     let result = service
         .cas_task_close(Parameters(TaskCloseRequest {
             no_delivery: None,
@@ -10058,27 +10055,22 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         }))
         .await
         .expect("second close returns a result");
+    assert_eq!(result.is_error, Some(true), "review must still block close");
     let text = extract_text(result);
-    assert!(
-        text.contains("VERIFICATION TIMED OUT"),
-        "retry after timeout must report escalation, got: {text}"
-    );
-    assert!(
-        !text.contains("VERIFICATION REQUIRED"),
-        "escalation must not fall back to the standard jail message"
-    );
 
-    // pending_verification is cleared only for A.
-    let task_after_escalation = task_store.get(&id).expect("task exists");
-    assert!(
-        !task_after_escalation.pending_verification,
-        "auto-escalation must clear pending_verification"
-    );
+    let task_after_renewal = task_store.get(&id).expect("task exists");
+    assert!(task_after_renewal.pending_verification, "{text}");
+    assert_eq!(task_after_renewal.status, TaskStatus::InProgress, "{text}");
 
+    let renewed = cas_store::get_latest_verification_dispatch(&cas_dir, &id)
+        .expect("A dispatch lookup")
+        .expect("A dispatch");
+    assert_ne!(renewed.id, original_dispatch.id, "{text}");
+    assert_eq!(renewed.state, cas::types::VerificationDispatchState::Pending);
+    assert!(renewed.deadline_at > chrono::Utc::now());
     assert_eq!(
-        cas_store::get_latest_verification_dispatch(&cas_dir, &id)
-            .expect("A dispatch lookup")
-            .expect("A dispatch")
+        cas_store::get_verification_dispatch(&cas_dir, &original_dispatch.id)
+            .expect("expired A dispatch")
             .state,
         cas::types::VerificationDispatchState::TimedOut
     );
@@ -10089,9 +10081,8 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
     assert_eq!(
         cas_store::get_latest_verification_dispatch(&cas_dir, &other.id)
             .expect("B dispatch lookup")
-            .expect("B dispatch")
-            .state,
-        cas::types::VerificationDispatchState::Pending,
+            .expect("B dispatch"),
+        other_dispatch,
         "timing out A must not mutate B's dispatch"
     );
 }
@@ -11265,10 +11256,10 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
         .await
         .expect("first close returns a result");
 
-    // Expire the authoritative typed deadline so the retry auto-escalates.
+    // Bind receipt recovery and expire its typed deadline; task-only expiry renews.
     let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
     conn.execute(
-        "UPDATE verification_dispatches SET deadline_at = ?2 WHERE task_id = ?1",
+        "UPDATE verification_dispatches SET deadline_at = ?2, receipt_id = 'dc-timeout-alias' WHERE task_id = ?1",
         rusqlite::params![
             id,
             (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()

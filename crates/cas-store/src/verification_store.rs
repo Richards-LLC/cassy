@@ -1209,6 +1209,11 @@ fn create_verification_dispatch_bound_in_transaction(
     if let Some(existing) = get_latest_verification_dispatch_with_conn(&conn, task_id)?
         && existing.state == VerificationDispatchState::TimedOut
         && !supervisor_recovery
+        // A task-only retry requests a new review; it grants no approval and
+        // leaves the expired row available for audit. Delivery receipt recovery
+        // still requires supervisor authority, including partial boundaries.
+        && (existing.receipt_id.is_some() || existing.delivery_transaction_id.is_some()
+            || boundary.receipt_id.is_some() || boundary.delivery_transaction_id.is_some())
     {
         return Err(StoreError::Parse(format!(
             "verification dispatch {} timed out; registered-supervisor recovery must name it",
@@ -1263,8 +1268,8 @@ fn create_verification_dispatch_bound_in_transaction(
 
 /// Backward-compatible task-only dispatch creation.
 ///
-/// This cannot recover a timed-out cycle; registered-supervisor recovery must
-/// use the explicit bound API and server-derived authority.
+/// A timed-out task-only cycle may request a fresh pending review. Receipt-bound
+/// delivery recovery requires the explicit bound API and supervisor authority.
 pub fn create_verification_dispatch(
     cas_dir: &Path,
     task_id: &str,
@@ -5371,13 +5376,38 @@ mod tests {
                 .state,
             VerificationDispatchState::Pending
         );
-        create_verification_dispatch_bound(
+        // Task-only expiry must never become a route around receipt-bound
+        // recovery, including an inconsistent partial boundary on either side.
+        for (receipt, transaction) in [(true, false), (false, true), (true, true)] {
+            let boundary = VerificationProofBoundary {
+                receipt_id: receipt.then(|| "receipt-bound".into()),
+                delivery_transaction_id: transaction.then(|| "transaction-bound".into()),
+                repository: None,
+            };
+            assert!(create_verification_dispatch_bound(
+                dir.path(), "cas-timeout-a", "worker-a", "supervisor-a",
+                &boundary, future, false,
+            ).is_err());
+            let id = format!("cas-bound-{receipt}-{transaction}");
+            create_verification_dispatch_bound(
+                dir.path(), &id, "worker-a", "supervisor-a", &boundary, past, false,
+            ).unwrap();
+            timeout_verification_dispatch(dir.path(), &id, Utc::now()).unwrap().unwrap();
+            assert!(create_verification_dispatch_bound(
+                dir.path(), &id, "worker-a", "supervisor-a",
+                &VerificationProofBoundary::task(), future, false,
+            ).is_err());
+        }
+        let renewed = create_verification_dispatch_bound(
             dir.path(), "cas-timeout-a", "worker-a", "supervisor-a",
-            &VerificationProofBoundary::default(), future, true,
-        ).expect("supervisor recovery starts a fresh cycle");
+            &VerificationProofBoundary::default(), future, false,
+        ).expect("a task-only timeout starts a fresh pending cycle without approval");
+        assert_ne!(renewed.id, timed_out.id);
+        assert_eq!(renewed.state, VerificationDispatchState::Pending);
         assert!(expired_verification_dispatches(
             dir.path(), past - Duration::seconds(1), Utc::now(), 10,
-        ).unwrap().is_empty(), "a superseded timeout must not page for the new cycle");
+        ).unwrap().iter().all(|dispatch| dispatch.task_id != "cas-timeout-a"),
+            "a superseded timeout must not page for the new cycle");
     }
 
     #[test]

@@ -130,7 +130,7 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
         for task in tasks.iter().filter(|task| !task.is_terminal()) { refs.add(task)?; }
         // Publication events and their task records carry portable references.
         for release in cas_store::quality_release_events(&root)?.into_iter().take(3) {
-            refs.add(&release)?;
+            refs.add((&release.task_id, &release.release_version, &release.local_note, &release.title, &release.link))?;
             if let Some(id) = &release.task_id
                 && let Some(task) = tasks.iter().find(|task| &task.id == id) { refs.add(task)?; }
         }
@@ -438,4 +438,63 @@ fn persist(report: &SweepReport) -> Result<()> {
         file.persist(state.join("last-sweep.json"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_retention_replays_inventory_cas_d740() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let gib = 1024_u64.pow(3);
+        let old = SystemTime::now() - Duration::from_secs(30 * 86400);
+        let sparse = |path: &Path, bytes| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let file = File::create(path).unwrap();
+            file.set_len(bytes).unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+            File::open(path.parent().unwrap()).unwrap().set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+        };
+        let mut roots = Vec::new();
+        for (name, size) in [("cassy", 40), ("gabber", 42)] {
+            let project = env.home().join(name);
+            let root = crate::store::init_cas_dir(&project).unwrap();
+            fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {name:?}\n")).unwrap();
+            crate::store::known_repos::register_repo_strict(&project).unwrap();
+            let mut task = cas_types::Task::new(format!("cas-{name}-old"), "Inventory fixture".into());
+            task.status = cas_types::TaskStatus::Closed;
+            task.closed_at = Some(Utc::now() - chrono::Duration::days(30));
+            cas_store::SqliteTaskStore::open(&root).unwrap().add(&task).unwrap();
+            let artifacts = crate::config::project_factory_artifacts_root(&root, &crate::config::resolved_factory_artifacts_root(None));
+            sparse(&artifacts.join(&task.id).join("inventory"), size * gib);
+            roots.push(root);
+        }
+        sparse(&roots[0].join("scratch/old/inventory"), 6 * gib);
+        sparse(&roots[0].join("review-scratch/old/inventory"), 32 * gib);
+        // Source and target sizes are accounted separately, without hashing or
+        // allocating the reported 73 GiB of ignored checkout scratch.
+        let worktree = roots[0].join("worktrees/retired");
+        fs::create_dir_all(&worktree).unwrap();
+        let deadline = Instant::now() + BUDGET;
+        git(&worktree, &["init", "-b", "factory/retired"], deadline).unwrap();
+        git(&worktree, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "fixture"], deadline).unwrap();
+        git(&worktree, &["update-ref", "refs/remotes/origin/factory/retired", "HEAD"], deadline).unwrap();
+        fs::write(worktree.join(".git/info/exclude"), "inventory\ntarget/\n").unwrap();
+        sparse(&worktree.join("inventory"), 73 * gib);
+        sparse(&crate::factory_scratch::worker_target_dir(&worktree).join("inventory"), gib);
+        let started = Instant::now();
+        let report = sweep(&roots[0], false).unwrap();
+        assert!(!report.incomplete, "{report:?}");
+        assert!(started.elapsed() < BUDGET);
+        assert_eq!(report.reclaimed_bytes(), 0);
+        for (category, size) in [("artifacts", 82), ("scratch", 6), ("review-scratch", 32), ("worktrees", 73), ("targets", 1)] {
+            let bytes: u64 = report.rows.iter().filter(|row| row.category == category && row.disposition == "reclaimable").map(|row| row.bytes).sum();
+            assert_eq!(bytes, size * gib, "{category}: {report:?}");
+        }
+        assert_eq!(fs::metadata(worktree.join("inventory")).unwrap().len(), 73 * gib);
+        assert!(!state_dir().join("last-sweep.json").exists());
+        eprintln!("fixture inventory: cassy artifacts=40GiB gabber artifacts=42GiB worktrees=73GiB review-scratch=32GiB scratch=6GiB targets=1GiB; input disk=84%; preview reclaimed_bytes=0 elapsed_ms={}", started.elapsed().as_millis());
+    }
 }

@@ -1679,6 +1679,8 @@ mod tests {
     /// success once the post-commit grace runs out. Never UNKNOWN.
     #[tokio::test]
     async fn a_committed_merge_with_a_slow_close_reports_its_outcome_cas_3937() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

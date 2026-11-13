@@ -1,3 +1,5 @@
+## Core Concepts
+
 ### JavaScript stability checks
 
 The capped worker runner accepts `cas factory worker-check --cas-root "$CAS_ROOT" -- vitest path/to/file.test.ts`. Substitute `jest` or `playwright` for the runner and select that runner's test files. Paths are relative to the repository root. It resolves each file's package and uses its locally installed runner in an isolated worker or managed review checkout.

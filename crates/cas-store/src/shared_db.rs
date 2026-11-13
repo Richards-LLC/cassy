@@ -1035,7 +1035,7 @@ fn cheap_random_u64() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::panic;
     use std::sync::Barrier;
@@ -1594,22 +1594,69 @@ mod tests {
         (db_path, conn)
     }
 
-    /// Hold a write lock on `db_path` for `hold`, signalling once it is held.
+    /// Hold a real SQLite write lock until the test explicitly releases it.
     fn hold_write_lock(
         db_path: std::path::PathBuf,
-        hold: Duration,
-    ) -> (std::sync::mpsc::Receiver<()>, std::thread::JoinHandle<()>) {
-        let (tx, rx) = std::sync::mpsc::channel();
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             let other = Connection::open(&db_path).unwrap();
             other.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
             other.execute_batch("BEGIN IMMEDIATE").unwrap();
             other.execute("INSERT INTO t VALUES (99, 'foreign')", []).unwrap();
-            tx.send(()).unwrap();
-            std::thread::sleep(hold);
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv();
             other.execute_batch("COMMIT").unwrap();
         });
-        (rx, handle)
+        ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        (release_tx, handle)
+    }
+
+    // Observe a real retry after SQLITE_BUSY. Pausing at this event lets the
+    // caller check mutex ownership at the retry boundary, without racing a sleep.
+    struct RetryObserver {
+        first: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    }
+
+    impl tracing::Subscriber for RetryObserver {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == module_path!().trim_end_matches("::tests")
+                && metadata.fields().field("delay_ms").is_some()
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {
+            if let Some((ready, release)) = self.first.lock().unwrap().take() {
+                ready.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        }
+    }
+
+    fn retry_observer() -> (RetryObserver, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        (RetryObserver { first: Mutex::new(Some((ready_tx, release_rx))) }, ready_rx, release_tx)
+    }
+
+    /// Release a fixture's foreign writer only after the real operation has
+    /// observed SQLITE_BUSY and reached its application retry boundary.
+    pub(crate) fn retry_after_release<T>(blocker: Connection, body: impl FnOnce() -> T) -> T {
+        let (observer, retrying, resume) = retry_observer();
+        let holder = std::thread::spawn(move || {
+            retrying.recv_timeout(Duration::from_secs(10)).unwrap();
+            blocker.execute_batch("COMMIT").unwrap();
+            resume.send(()).unwrap();
+        });
+        let result = tracing::subscriber::with_default(observer, body);
+        holder.join().unwrap();
+        result
     }
 
     /// cas-759f / the GH-reported "database is locked": a DEFERRED transaction
@@ -1619,64 +1666,52 @@ mod tests {
     /// fails in milliseconds. This test pins the mechanism, because the fix
     /// only makes sense against it.
     #[test]
-    fn a_deferred_read_then_write_fails_instantly_despite_the_busy_timeout() {
+    fn a_stale_deferred_snapshot_refuses_upgrade_without_calling_the_busy_handler() {
         let temp = TempDir::new().unwrap();
         let (db_path, conn) = contended_db(&temp);
-
         conn.execute_batch("BEGIN").unwrap();
-        // Take the read snapshot first, exactly as the verification handler did.
-        let _: i64 = conn
-            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
-            .unwrap();
-
-        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(50));
-        ready.recv().unwrap();
+        let _: i64 = conn.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+        let (release, holder) = hold_write_lock(db_path);
+        release.send(()).unwrap();
         holder.join().unwrap();
 
-        let started = Instant::now();
+        thread_local! { static BUSY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+        conn.busy_handler(Some(|_| {
+            BUSY_CALLS.with(|calls| calls.set(calls.get() + 1));
+            false
+        })).unwrap();
         let result = conn.execute("INSERT INTO t VALUES (2, 'ours')", []);
-        let waited = started.elapsed();
-        let _ = conn.execute_batch("ROLLBACK");
-
-        let error = result.expect_err("the upgrade must be refused");
+        conn.execute_batch("ROLLBACK").unwrap();
+        let error = result.expect_err("the stale snapshot cannot upgrade to a writer");
         assert!(is_busy_error(&error), "unexpected error: {error}");
-        assert!(
-            waited < Duration::from_millis(500),
-            "the busy handler was expected to be skipped entirely, but it waited {waited:?}"
-        );
+        assert_eq!(BUSY_CALLS.with(std::cell::Cell::get), 0);
     }
 
     /// The fix: take the write lock up front, where the busy handler DOES
     /// apply, and the same caller waits through a foreign lock instead of
     /// failing.
     #[test]
-    fn immediate_write_txn_waits_through_a_one_second_foreign_lock() {
+    fn immediate_write_txn_retries_after_foreign_lock_is_released() {
         let temp = TempDir::new().unwrap();
         let (db_path, conn) = contended_db(&temp);
-
-        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_000));
-        ready.recv().unwrap();
-
-        let started = Instant::now();
-        let rows: i64 = with_immediate_write_txn(&conn, |tx| {
-            // Reads inside the write transaction are safe: the lock is ours.
-            let count: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
-            tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
-            Ok(count)
-        })
-        .expect("must wait through the foreign lock, not fail");
-        let waited = started.elapsed();
-
+        conn.busy_timeout(Duration::ZERO).unwrap();
+        let (release, holder) = hold_write_lock(db_path);
+        let (observer, retrying, resume) = retry_observer();
+        let writer = std::thread::spawn(move || tracing::subscriber::with_default(observer, || {
+            with_immediate_write_txn(&conn, |tx| {
+                let count: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
+                tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
+                Ok(count)
+            })
+        }));
+        retrying.recv_timeout(Duration::from_secs(10)).unwrap();
+        release.send(()).unwrap();
         holder.join().unwrap();
-        assert!(
-            waited >= Duration::from_millis(900),
-            "expected to wait for the holder, waited only {waited:?}"
-        );
-        assert!(rows >= 1);
-        let total: i64 = conn
-            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(total, 3, "seed + foreign + ours");
+        resume.send(()).unwrap();
+        assert_eq!(writer.join().unwrap().unwrap(), 2);
+        let total: i64 = Connection::open(temp.path().join("contended.db")).unwrap()
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+        assert_eq!(total, 3);
     }
 
     /// Eight long-lived connections is the real fleet shape on this host (six
@@ -1719,32 +1754,22 @@ mod tests {
         assert_eq!(written, 40, "8 writers x 5 rounds must all land");
     }
 
-    /// When the wait genuinely runs out, the caller is told what was attempted.
-    /// "database is locked" alone told the supervisor nothing about whether
-    /// anything had waited at all — which is why the original report needed a
-    /// manual `BEGIN IMMEDIATE` probe to establish that the lock was a burst.
+    /// Exhausting the retry schedule never executes the transaction body.
     #[test]
-    fn giving_up_names_the_wait_that_was_attempted() {
+    fn bounded_write_txn_exhaustion_does_not_run_the_body() {
         let temp = TempDir::new().unwrap();
         let (db_path, conn) = contended_db(&temp);
-        // A tiny budget keeps the test fast; the shape of the message is what
-        // is being asserted, not the specific duration.
-        conn.busy_timeout(Duration::from_millis(20)).unwrap();
-
-        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(3_000));
-        ready.recv().unwrap();
-
-        let result: crate::Result<()> = with_immediate_write_txn_bounded(
-            &conn,
-            &[10, 10],
-            |tx| {
-                tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
-                Ok(())
-            },
-        );
-        let message = result.expect_err("the holder outlasts the budget").to_string();
+        conn.busy_timeout(Duration::ZERO).unwrap();
+        let (release, holder) = hold_write_lock(db_path);
+        let called = std::cell::Cell::new(false);
+        let result: crate::Result<()> = with_immediate_write_txn_bounded(&conn, &[0, 0], |_| {
+            called.set(true);
+            Ok(())
+        });
+        release.send(()).unwrap();
         holder.join().unwrap();
-
+        assert!(matches!(result, Err(StoreError::Other(_))));
+        assert!(!called.get(), "a refused write cannot run the transaction body");
     }
 
     /// A store connection must cap the WAL file so a long-lived writer fleet
@@ -2306,26 +2331,32 @@ mod tests {
             )
             .unwrap();
 
-        let (stalled_done_tx, stalled_done) = std::sync::mpsc::channel();
+        // Keep a direct reference to this slot before the opener starts. Its
+        // state mutex is held throughout the real SQLite open/PRAGMA operation.
+        let slot = {
+            let mut pool = lock_pool();
+            Arc::clone(pool.get_or_insert_with(Pool::default).slots
+                .entry(canonical_db_path(&stalled_path)).or_default())
+        };
         let stalled = {
             let path = stalled_path.clone();
             std::thread::spawn(move || {
-                let outcome = shared_connection(&path).map(|_| ());
-                let _ = stalled_done_tx.send(());
-                outcome
+                shared_connection(&path).map(|_| ())
             })
         };
-        // Give the pooled open time to reach SQLite and start waiting.
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            stalled_done.try_recv().is_err(),
-            "test precondition: the open of the locked database must be waiting"
-        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if matches!(slot.state.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+                break;
+            }
+            assert!(!stalled.is_finished(), "the contended open must still own its slot");
+            assert!(Instant::now() < deadline, "the opener never acquired its slot");
+            std::thread::yield_now();
+        }
 
         let (other_tx, other_rx) = std::sync::mpsc::channel();
         let other = std::thread::spawn(move || {
-            let started = Instant::now();
-            let outcome = shared_connection(&other_path).map(|_| started.elapsed());
+            let outcome = shared_connection(&other_path).map(|_| ());
             let _ = other_tx.send(outcome.is_ok());
             outcome
         });
@@ -2485,70 +2516,6 @@ mod tests {
             .unwrap()
     }
 
-    /// The cas-0e57 inversion: an in-process thread holds the SQLite write
-    /// lock on its own connection and needs the pooled connection's mutex to
-    /// finish, while a pooled writer waits for that write lock. Holding the
-    /// mutex through the wait (the unpooled retry used through a guard) left
-    /// both stuck for the full ~31.6s budget, then failed the pooled writer.
-    #[test]
-    fn cas_3f65e_pooled_writer_lets_an_in_process_lock_holder_finish() {
-        let temp = TempDir::new().unwrap();
-        let (db_path, conn) = contended_db(&temp);
-        let shared = Arc::new(Mutex::new(conn));
-
-        let (held_tx, held_rx) = std::sync::mpsc::channel();
-        let holder = {
-            let shared = Arc::clone(&shared);
-            let db_path = db_path.clone();
-            std::thread::spawn(move || {
-                let own = Connection::open(&db_path).unwrap();
-                own.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
-                own.execute_batch("BEGIN IMMEDIATE").unwrap();
-                own.execute("INSERT INTO t VALUES (99, 'holder')", []).unwrap();
-                held_tx.send(()).unwrap();
-                // Let the pooled writer start waiting on the write lock.
-                std::thread::sleep(Duration::from_millis(150));
-                let started = Instant::now();
-                let rows: i64 = shared
-                    .lock()
-                    .unwrap()
-                    .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
-                    .unwrap();
-                let mutex_wait = started.elapsed();
-                own.execute_batch("COMMIT").unwrap();
-                (rows, mutex_wait)
-            })
-        };
-        held_rx.recv().unwrap();
-
-        let started = Instant::now();
-        let tx = begin_immediate_pooled(&shared).expect("the pooled writer must get the lock");
-        tx.execute("INSERT INTO t VALUES (2, 'pooled')", []).unwrap();
-        tx.commit().unwrap();
-        let writer_wait = started.elapsed();
-
-        let (rows_seen, mutex_wait) = holder.join().unwrap();
-        assert_eq!(rows_seen, 1, "the holder read through the pooled connection");
-        assert!(
-            mutex_wait < Duration::from_millis(1_000),
-            "the holder waited {mutex_wait:?} for the pooled mutex"
-        );
-        assert!(
-            writer_wait < Duration::from_secs(3),
-            "the pooled writer waited {writer_wait:?}"
-        );
-        let total: i64 = shared
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(total, 3, "seed + holder + pooled");
-        // The pool's budget-aware busy handler is back (GH #1165); SQLite
-        // reports a custom handler as busy_timeout 0, never the short
-        // per-attempt timeout.
-        assert_eq!(busy_timeout_ms(&shared.lock().unwrap()), 0);
-    }
-
     /// While a pooled writer waits, other callers keep getting the mutex
     /// between its attempts.
     #[test]
@@ -2556,35 +2523,29 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (db_path, conn) = contended_db(&temp);
         let shared = Arc::new(Mutex::new(conn));
-
-        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_200));
-        ready.recv().unwrap();
-
+        let (release, holder) = hold_write_lock(db_path);
+        let (observer, retrying, resume) = retry_observer();
         let writer = {
             let shared = Arc::clone(&shared);
-            std::thread::spawn(move || {
+            std::thread::spawn(move || tracing::subscriber::with_default(observer, || {
                 let tx = begin_immediate_pooled(&shared)?;
                 tx.execute("INSERT INTO t VALUES (2, 'pooled')", [])?;
                 tx.commit()?;
                 crate::Result::Ok(())
-            })
+            }))
         };
-        std::thread::sleep(Duration::from_millis(100));
-
-        let mut slowest = Duration::ZERO;
-        for _ in 0..6 {
-            let started = Instant::now();
-            drop(shared.lock().unwrap());
-            slowest = slowest.max(started.elapsed());
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        retrying.recv_timeout(Duration::from_secs(10)).unwrap();
+        let released = shared.try_lock().map(|conn| {
+            assert_eq!(busy_timeout_ms(&conn), 0);
+            conn.query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap()
+        });
+        // Release both barriers before asserting the observed mutex outcome.
+        release.send(()).unwrap();
         holder.join().unwrap();
-        writer.join().unwrap().expect("the writer commits once the holder does");
-
-        assert!(
-            slowest < Duration::from_millis(500),
-            "the pooled mutex was held for {slowest:?} while the writer waited"
-        );
+        resume.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        assert_eq!(released.unwrap(), 1);
+        assert_eq!(shared.lock().unwrap().query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap(), 3);
     }
 
     /// Fifteen workers' processes writing at once is the fleet-boot shape.
@@ -2602,37 +2563,26 @@ mod tests {
                 let conn = Connection::open(&path).unwrap();
                 conn.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
                 let shared = Mutex::new(conn);
-                let mut slowest = Duration::ZERO;
                 for round in 0..5 {
-                    let started = Instant::now();
                     with_immediate_write_txn_pooled(&shared, |tx| {
                         let _: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
                         tx.execute(
                             "INSERT INTO t (v) VALUES (?1)",
                             rusqlite::params![format!("w{worker}-r{round}")],
                         )?;
-                        // A short body, so the lock is genuinely contended.
-                        std::thread::sleep(Duration::from_millis(5));
                         Ok(())
                     })
                     .unwrap_or_else(|e| panic!("worker {worker} round {round} failed: {e}"));
-                    slowest = slowest.max(started.elapsed());
                 }
-                slowest
             }));
         }
-        let slowest = handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .max()
-            .unwrap();
+        for handle in handles { handle.join().unwrap(); }
 
         let conn = Connection::open(&db_path).unwrap();
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 1 + 15 * 5);
-        assert!(slowest < Duration::from_secs(10), "slowest writer waited {slowest:?}");
     }
 
     /// GH #1165: a thread with a store wait budget gives up at its deadline
@@ -2642,10 +2592,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (db_path, conn) = contended_db(&temp);
         let shared = Mutex::new(conn);
-        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_000));
-        ready.recv().unwrap();
+        let (release, holder) = hold_write_lock(db_path);
 
-        let started = Instant::now();
         let error = {
             let _budget = crate::wait_budget::bound_waits_for(Duration::from_millis(40));
             match begin_immediate_pooled(&shared) {
@@ -2653,9 +2601,8 @@ mod tests {
                 Err(error) => error,
             }
         };
-        let waited = started.elapsed();
+        release.send(()).unwrap();
         holder.join().unwrap();
-        assert!(waited < Duration::from_millis(500), "waited {waited:?}");
         assert!(
             matches!(&error, StoreError::Database(e) if is_busy_error(e)),
             "{error}"
@@ -2664,15 +2611,13 @@ mod tests {
     }
 
     #[test]
-    fn cas_3f65e_pooled_budget_exhaustion_fails_with_the_wait_stated() {
+    fn cas_3f65e_pooled_budget_exhaustion_restores_handler_and_releases_mutex() {
         let temp = TempDir::new().unwrap();
         let (db_path, conn) = contended_db(&temp);
         let shared = Mutex::new(conn);
 
-        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_000));
-        ready.recv().unwrap();
+        let (release, holder) = hold_write_lock(db_path);
 
-        let started = Instant::now();
         let error = match begin_immediate_pooled_bounded(
             &shared,
             Duration::from_millis(20),
@@ -2681,12 +2626,11 @@ mod tests {
             Ok(_) => panic!("the foreign lock outlives the budget"),
             Err(error) => error,
         };
-        let waited = started.elapsed();
+        release.send(()).unwrap();
         holder.join().unwrap();
 
-        let message = error.to_string();
+        assert!(matches!(error, StoreError::Other(_)));
 
-        assert!(waited < Duration::from_millis(800), "waited {waited:?}");
         let conn = shared.try_lock().expect("the mutex is released on failure");
         assert!(conn.is_autocommit(), "no transaction is left open");
         assert_eq!(

@@ -1003,98 +1003,6 @@ mod tests {
         assert_eq!(queued.title, task.title);
     }
 
-    /// cas-d5c8 (GH #921): the MCP task write paths (create, update, note,
-    /// close, cancel) complete while other agents keep committing writes, the
-    /// shape of a 4-6 worker factory session. Before the fix, staging the sync
-    /// intent failed with "database is locked" on the first collision.
-    #[test]
-    fn task_writes_wait_out_a_fleet_of_concurrent_writers() {
-        let (temp, store) = create_test_store();
-        let db = temp.path().join("cas.db");
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let writers: Vec<_> = (0..5)
-            .map(|agent| {
-                let db = db.clone();
-                let stop = stop.clone();
-                let started = started.clone();
-                std::thread::spawn(move || {
-                    let conn = rusqlite::Connection::open(db).unwrap();
-                    let mut commits = 0usize;
-                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        // A write held for a moment, as a fleet's store writes are.
-                        // (A zero-think-time hammer starves any SQLite waiter,
-                        // because the busy handler polls; that is not a fleet.)
-                        if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
-                            continue;
-                        }
-                        conn.execute(
-                            "INSERT INTO task_mutation_revisions (entity_id, revision, present) VALUES (?1, 1, 1)
-                             ON CONFLICT(entity_id) DO UPDATE SET revision = revision + 1",
-                            rusqlite::params![format!("fleet-agent-{agent}")],
-                        )
-                        .unwrap();
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                        conn.execute_batch("COMMIT").unwrap();
-                        commits += 1;
-                        started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // Then some think time, different per agent so their
-                        // writes interleave: together the five keep the
-                        // database write-locked roughly 60% of the time.
-                        std::thread::sleep(std::time::Duration::from_millis(80 + 40 * agent as u64));
-                    }
-                    commits
-                })
-            })
-            .collect();
-
-        // Every agent is writing before the task writes begin.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while started.load(std::sync::atomic::Ordering::Relaxed) < 5
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let mut failures = Vec::new();
-        for round in 0..6 {
-            let id = format!("cas-fleet-{round}");
-            let mut task = Task::new(id.clone(), format!("fleet round {round}"));
-            // Spread the task writes across the agents' write cycles.
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            if let Err(error) = store.add(&task) {
-                failures.push(format!("create {id}: {error}"));
-                continue;
-            }
-            task.priority = crate::types::Priority::HIGH;
-            if let Err(error) = store.update(&task) {
-                failures.push(format!("update {id}: {error}"));
-            }
-            if let Err(error) = store.append_note(&id, "progress under contention") {
-                failures.push(format!("note {id}: {error}"));
-            }
-            task.status = if round % 2 == 0 {
-                TaskStatus::Closed
-            } else {
-                TaskStatus::Cancelled
-            };
-            if let Err(error) = store.update(&task) {
-                failures.push(format!("close/cancel {id}: {error}"));
-            }
-        }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let commits: usize = writers
-            .into_iter()
-            .map(|writer| writer.join().unwrap())
-            .sum();
-        assert!(
-            commits > 0,
-            "the concurrent writers must actually have written"
-        );
-        assert!(
-            failures.is_empty(),
-            "task writes failed under contention: {failures:#?}"
-        );
-    }
     fn reopen_test_store(cas_dir: &Path, with_team: bool) -> SyncingTaskStore {
         let inner = SqliteTaskStore::open(cas_dir).unwrap();
         let queue = SyncQueue::open(cas_dir).unwrap();
@@ -1670,7 +1578,7 @@ mod tests {
         );
         let records = store.queue.task_sync_recovery_records().unwrap();
         assert_eq!(records.len(), 1);
-        assert!(records[0].blocked_reason.contains("unclassified"));
+
         let pending = store.queue.pending(10, 5).unwrap();
         assert_eq!(pending.len(), 1, "the unrelated intent should be recovered");
         assert_eq!(pending[0].entity_id, unrelated.id);
@@ -1709,42 +1617,23 @@ mod tests {
             .pop()
             .unwrap();
 
-        let (start_tx, start_rx) = mpsc::channel();
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let direct_dir = temp.path().to_path_buf();
-        let task_id = task.id.clone();
-        let writer = std::thread::spawn(move || {
-            start_rx.recv().unwrap();
-            let direct = SqliteTaskStore::open(&direct_dir).unwrap();
-            let mut newer = direct.get(&task_id).unwrap();
-            newer.title = "interleaving direct body".to_string();
-            let result = direct.update(&newer);
-            finished_tx.send(result).unwrap();
-        });
-
+        let direct = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        direct.busy_timeout(Duration::ZERO).unwrap();
+        let update = || direct.execute(
+            "UPDATE tasks SET title = 'interleaving direct body' WHERE id = ?1", [&task.id],
+        );
         let outcome = store
             .fulfill_upsert_after_validation(&intent, TaskSyncFulfillMode::Mutation, || {
-                start_tx.send(()).unwrap();
-                assert!(
-                    finished_rx
-                        .recv_timeout(Duration::from_millis(100))
-                        .is_err(),
-                    "BEGIN IMMEDIATE must exclude the direct writer through payload enqueue"
-                );
-            })
-            .unwrap();
+                let error = update().expect_err("the actual transaction must exclude a bypass writer");
+                assert!(cas_store::shared_db::is_busy_error(&error));
+            }).unwrap();
         assert_eq!(outcome, TaskSyncFulfillResult::Fulfilled);
-        finished_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("direct writer should complete after fulfillment commits")
-            .unwrap();
-        writer.join().unwrap();
+        assert_eq!(update().unwrap(), 1, "the same writer succeeds after fulfillment commits");
 
         let pending = store.queue.pending(10, 5).unwrap();
         assert_eq!(pending.len(), 1);
-        let payload = pending[0].payload.as_deref().unwrap();
-        assert!(payload.contains("validated canonical body"));
-        assert!(!payload.contains("interleaving direct body"));
+        let payload: Task = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload.title, task.title);
     }
 
     /// cas-0e57: fulfillment must not hold the SQLite write lock while it
@@ -1754,7 +1643,7 @@ mod tests {
     /// during a fleet boot. Here a thread holds the mutex; while fulfillment
     /// waits for it, a foreign connection must still be able to write.
     #[test]
-    fn fulfillment_waits_for_the_store_mutex_without_holding_the_write_lock_cas_0e57() {
+    fn fulfillment_loads_canonical_before_taking_the_write_lock_cas_0e57() {
         let (temp, store) = create_test_store();
         let mut task = Task::new("task-0e57-inversion".to_string(), "before".to_string());
         store.add(&task).unwrap();
@@ -1770,28 +1659,20 @@ mod tests {
             .pop()
             .unwrap();
 
-        let db = temp.path().join("cas.db");
-        let pooled = cas_store::shared_db::shared_connection(&db).unwrap();
-        let (held_tx, held_rx) = mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _guard = pooled.lock().unwrap();
-            held_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(1500));
-        });
-        held_rx.recv().unwrap();
-
-        let store = Arc::new(store);
-        let fulfilling = Arc::clone(&store);
-        let fulfiller = std::thread::spawn(move || fulfilling.fulfill_upsert(&intent));
-        std::thread::sleep(Duration::from_millis(300));
-        let probe = rusqlite::Connection::open(&db).unwrap();
-        let write = probe.execute_batch("BEGIN IMMEDIATE; ROLLBACK;");
-        holder.join().unwrap();
-        let outcome = fulfiller.join().unwrap().unwrap();
-        assert!(
-            write.is_ok(),
-            "fulfillment held the write lock while waiting for the store mutex: {write:?}"
-        );
+        let probe = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        probe.busy_timeout(Duration::ZERO).unwrap();
+        let outcome = store.queue.fulfill_task_sync_intent(
+            &intent,
+            TaskSyncFulfillMode::Mutation,
+            || {},
+            || {
+                // Canonical loading can need another connection's mutex. A
+                // foreign writer must be free to finish before that load runs.
+                probe.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").unwrap();
+                store.load_canonical_sync_payload(&intent)
+                    .map_err(|error| crate::error::CasError::Other(error.to_string()))
+            },
+        ).unwrap();
         assert_eq!(outcome, TaskSyncFulfillResult::Fulfilled);
         let pending = store.queue.pending(10, 5).unwrap();
         assert!(

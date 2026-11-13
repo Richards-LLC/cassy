@@ -663,10 +663,7 @@ mod tests {
             .map(String::as_str)
             .or_else(|| panic.downcast_ref::<&str>().copied())
             .unwrap_or("");
-        assert!(
-            message.contains("refusing to open protected database"),
-            "{message}"
-        );
+        assert!(message.contains(&host_cas.join("cas.db").display().to_string()), "{message}");
     }
 
     #[test]

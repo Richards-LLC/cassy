@@ -301,15 +301,20 @@ mod process_runner {
     fn cancelling_kills_the_child_and_records_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let repo = linked_repo(dir.path(), "alpha");
-        let binary = script(dir.path(), "sleep 30");
+        let binary = script(dir.path(), ": > \"$0.started\"; exec sleep 30");
         let state = dir.path().join(STATE_FILE);
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancel);
+        let entered = PathBuf::from(format!("{}.started", binary.display()));
         let stopper = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !entered.exists() && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            let started = entered.exists();
             flag.store(true, Ordering::SeqCst);
+            started
         });
-        let started = Instant::now();
 
         let report = run_sweep(
             &IdleSyncConfig::default(),
@@ -321,9 +326,8 @@ mod process_runner {
         )
         .unwrap();
 
-        stopper.join().unwrap();
+        assert!(stopper.join().unwrap(), "child must start before cancellation");
         assert!(report.cancelled);
-        assert!(started.elapsed() < Duration::from_secs(10));
         assert!(IdleSyncState::load(&state).unwrap().record(&repo).is_none());
     }
 }

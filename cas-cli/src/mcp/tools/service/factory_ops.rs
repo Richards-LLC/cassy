@@ -15863,15 +15863,13 @@ mod tests {
 
         let locker = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         locker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(750));
-            locker.execute_batch("COMMIT").unwrap();
-        });
+        let (observer, release) = crate::test_support::sqlite_retry_release(locker);
         let request = serde_json::from_value(serde_json::json!({
             "action": "shutdown_workers", "worker_names": "locked-worker", "force": true
         }))
         .unwrap();
-        let result = service.factory_shutdown_workers(request).await;
+        use tracing::instrument::WithSubscriber;
+        let result = service.factory_shutdown_workers(request).with_subscriber(observer).await;
         release.join().unwrap();
         let text = response_text(result.expect("force shutdown waits out a brief write lock"));
         assert!(text.contains("Queued shutdown request"), "{text}");

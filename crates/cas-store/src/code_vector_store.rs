@@ -1034,7 +1034,6 @@ mod tests {
     /// parallel doctor run into 36 file failures).
     #[test]
     fn queue_writes_wait_out_a_foreign_write_lock() {
-        use std::sync::mpsc;
         use std::time::Duration;
 
         let root = tempfile::tempdir().unwrap();
@@ -1046,31 +1045,12 @@ mod tests {
         seed_symbols(root.path(), &symbols);
         store.sync_file_symbols(&symbols, &[]).unwrap();
 
-        let db_path = root.path().join("cas.db");
-        let (holding, held) = mpsc::channel();
-        let blocker = std::thread::spawn(move || {
-            // A separate `Connection::open` deliberately bypasses the
-            // process-wide shared connection: an in-process mutex would
-            // serialize instead of reproducing SQLITE_BUSY.
-            let conn = Connection::open(&db_path).unwrap();
-            conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT).unwrap();
-            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO code_vector_queue
-                     (symbol_id, content_hash, status, last_error, updated_at)
-                 VALUES ('foreign', 'h', 'pending', NULL, '2026-01-01T00:00:00Z')",
-                [],
-            )
-            .unwrap();
-            holding.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(400));
-            conn.execute_batch("COMMIT").unwrap();
-        });
-
-        held.recv().unwrap();
-        store
-            .retire(&["sym-2".to_string()])
-            .expect("retire waited out the foreign write lock");
+        let blocker = Connection::open(root.path().join("cas.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        store.conn.lock().unwrap().busy_timeout(Duration::ZERO).unwrap();
+        crate::shared_db::tests::retry_after_release(blocker, || {
+            store.retire(&["sym-2".to_string()])
+        }).expect("retire retries the contended write");
         assert!(
             store
                 .list_pending(10)
@@ -1082,11 +1062,11 @@ mod tests {
 
         // The symbol is still live, so the next reconcile is expected to queue
         // it again — that it does so proves the reconcile write landed too.
-        let outcome = store
-            .reconcile(false)
-            .expect("reconcile waited out the foreign write lock");
+        let blocker = Connection::open(root.path().join("cas.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let outcome = crate::shared_db::tests::retry_after_release(blocker, || store.reconcile(false))
+            .expect("reconcile retries the contended write");
         assert_eq!(outcome.requeued, 1);
-        blocker.join().unwrap();
         assert!(
             store
                 .list_pending(10)

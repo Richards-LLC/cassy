@@ -4100,29 +4100,12 @@ mod tests {
             .commit_batch("/repo", &[commit(&a)], &[], &a, false)
             .unwrap();
 
-        let db_path = temp.path().join("cas.db");
-        let (holding, held) = std::sync::mpsc::channel();
-        let blocker = std::thread::spawn(move || {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT).unwrap();
-            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-            conn.execute(
-                "INSERT INTO history_index_state (repository, source, last_attempt_at)
-                 VALUES ('/other', 'git', '2026-08-05T00:00:00Z')",
-                [],
-            )
-            .unwrap();
-            holding.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            conn.execute_batch("COMMIT").unwrap();
-        });
-        held.recv().unwrap();
-
+        let blocker = Connection::open(temp.path().join("cas.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         let b = "b".repeat(40);
-        store
-            .commit_batch("/repo", &[commit(&a), commit(&b)], &[], &b, true)
-            .expect("commit_batch waited out the foreign write lock");
-        blocker.join().unwrap();
+        crate::shared_db::tests::retry_after_release(blocker, || {
+            store.commit_batch("/repo", &[commit(&a), commit(&b)], &[], &b, true)
+        }).expect("commit_batch retries the contended write");
         assert_eq!(store.counts("/repo").unwrap().0, 2);
     }
 

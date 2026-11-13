@@ -1667,30 +1667,18 @@ fn retiring_a_deleted_file_waits_out_a_foreign_writer_instead_of_failing() {
         .busy_timeout(Duration::from_millis(50))
         .expect("shorten busy timeout");
 
-    let holder_path = db_path.clone();
-    let (holding, held) = mpsc::channel();
-    let blocker = std::thread::spawn(move || {
-        let conn = rusqlite::Connection::open(&holder_path).expect("foreign connection");
-        conn.busy_timeout(Duration::from_millis(50))
-            .expect("timeout");
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .expect("take the write lock");
-        conn.execute(
-            "INSERT OR REPLACE INTO code_vector_queue
-                 (symbol_id, content_hash, status, last_error, updated_at)
-             VALUES ('foreign-row', 'h', 'pending', NULL, '2026-01-01T00:00:00Z')",
-            [],
-        )
-        .expect("foreign write");
-        holding.send(()).expect("signal");
-        std::thread::sleep(Duration::from_millis(300));
-        conn.execute_batch("COMMIT")
-            .expect("release the write lock");
-    });
-
-    held.recv().expect("foreign writer holding");
-    let result = reconcile_code_tree(&[], std::slice::from_ref(&repo), &cas_root, false)
-        .expect("reconcile under contention");
+    let conn = rusqlite::Connection::open(&db_path).expect("foreign connection");
+    conn.execute_batch("BEGIN IMMEDIATE").expect("take the write lock");
+    conn.execute(
+        "INSERT OR REPLACE INTO code_vector_queue
+             (symbol_id, content_hash, status, last_error, updated_at)
+         VALUES ('foreign-row', 'h', 'pending', NULL, '2026-01-01T00:00:00Z')",
+        [],
+    ).expect("foreign write");
+    let (observer, blocker) = crate::test_support::sqlite_retry_release(conn);
+    let result = tracing::dispatcher::with_default(&observer, ||
+        reconcile_code_tree(&[], std::slice::from_ref(&repo), &cas_root, false))
+        .expect("reconcile under observed contention");
     blocker.join().expect("blocker thread");
 
     assert_eq!(result.files_deleted, 1, "the deleted file was not retired");

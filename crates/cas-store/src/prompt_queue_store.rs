@@ -20091,7 +20091,6 @@ mod tests {
             let tx = ImmediateTx::new(&conn).unwrap();
             // Hold the write lock before B starts.
             barrier_a.wait();
-            thread::sleep(Duration::from_millis(80));
             SqlitePromptQueueStore::atomic_stage_stamp_in_tx(
                 &tx,
                 id,

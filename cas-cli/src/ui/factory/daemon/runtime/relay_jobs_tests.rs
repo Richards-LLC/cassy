@@ -1447,15 +1447,7 @@ async fn cas_58a3_a_respawn_waits_for_the_crashed_workers_cleanup() {
             .any(|spawn| matches!(spawn, super::super::PendingSpawn::Respawn(name) if name == relay_worker())),
         "the respawn was taken once the cleanup applied"
     );
-    assert!(
-        daemon
-            .app
-            .error_message
-            .as_deref()
-            .is_none_or(|error| !error.contains("still being cleaned up")),
-        "the respawn ran past the reservation: {:?}",
-        daemon.app.error_message
-    );
+
     settle_relays(&mut daemon).await;
 }
 

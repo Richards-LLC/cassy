@@ -154,6 +154,7 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
     use std::os::unix::net::UnixStream;
     use std::process::Child;
 
+    const COMPACT_FIXTURE: &str = "cas-e074-compact-fixture";
     const NAME: &str = "ui::factory::daemon::runtime::shutdown_tests::detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631";
     if let Some(root) = std::env::var_os("CAS_9631_CHILD") {
         let root = std::path::PathBuf::from(root);
@@ -173,9 +174,10 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
                     command: "/bin/sh".into(),
                     args: vec![
                         "-c".into(),
-                        "while :; do stty size > \"$1\"; sleep 0.1; done".into(),
+                        "printf '%s\\n' \"$2\"; while :; do stty size > \"$1\"; sleep 0.1; done".into(),
                         "fixture".into(),
                         size_file.to_string_lossy().into_owned(),
+                        COMPACT_FIXTURE.into(),
                     ],
                     cwd: Some(root.clone()),
                     env: vec![],
@@ -344,9 +346,7 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
                 Err(error) => panic!("narrow viewer read: {error}"),
             }
-            screen.dump_viewport().unwrap().lines().next().is_some_and(|line| {
-                line.trim_start().starts_with("Cassy") && line.contains("no epic")
-            })
+            screen.dump_viewport().unwrap().contains(COMPACT_FIXTURE)
         }),
         "narrow non-owner must receive a rendered compact screen; got {:?}",
         screen.dump_viewport().unwrap()

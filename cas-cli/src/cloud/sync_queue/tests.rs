@@ -1986,22 +1986,14 @@ fn reopen_reads_only_and_writes_wait_for_a_foreign_lock_cas_0e57() {
 
     let locker = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
     locker.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let started = std::time::Instant::now();
+    // The foreign writer remains held through reopen/init, so no elapsed bound is needed.
     let queue = SyncQueue::open(temp.path()).unwrap();
     queue.init().unwrap();
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
-        "init waited {:?} on a foreign write lock",
-        started.elapsed()
-    );
-
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        locker.execute_batch("COMMIT").unwrap();
-    });
-    queue
-        .enqueue(EntityType::Task, "cas-0e57-b", SyncOperation::Upsert, Some("{}"))
-        .expect("a briefly held write lock is waited out");
+    queue.conn.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
+    let (observer, release) = crate::test_support::sqlite_retry_release(locker);
+    tracing::dispatcher::with_default(&observer, || queue
+        .enqueue(EntityType::Task, "cas-0e57-b", SyncOperation::Upsert, Some("{}")))
+        .expect("an observed foreign write lock is waited out");
     release.join().unwrap();
 }
 

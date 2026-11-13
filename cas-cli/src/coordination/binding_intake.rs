@@ -657,21 +657,8 @@ mod tests {
         );
         assert_eq!(journal.pause(scope.clone(), operation, 0).unwrap(), pause);
         assert!(journal.pause(scope.clone(), Uuid::new_v4(), 0).is_err());
-        // A reader holding the lock briefly is waited for, not a failure that
-        // strands a settle or release.
-        let (held, holding) = std::sync::mpsc::channel();
-        let reader = {
-            let journal = IntakeJournal::new(temp.path());
-            std::thread::spawn(move || {
-                let _lock = journal.lock().unwrap();
-                held.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(300));
-            })
-        };
-        holding.recv().unwrap();
         journal.release_unsubmitted(&scope).unwrap();
-        reader.join().unwrap();
-        assert!(journal.legacy_allowed().unwrap(), "the waited-for release took effect");
+        assert!(journal.legacy_allowed().unwrap(), "the release took effect");
         journal.pause(scope.clone(), operation, 0).unwrap();
         let before = fs::read(journal.path()).unwrap();
         {

@@ -1006,7 +1006,7 @@ mod slot_tests {
         let mut slot: Slot<&'static str> = Slot::default();
         slot.start(1);
         assert!(slot.busy());
-        std::thread::sleep(Duration::from_millis(2));
+        slot.in_flight.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(1);
         assert!(slot.expire(Duration::from_millis(1)));
         assert!(!slot.busy(), "a timed-out job frees its slot");
         slot.start(2);

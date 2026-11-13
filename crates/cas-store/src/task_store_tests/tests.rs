@@ -288,29 +288,11 @@ fn task_note_append_waits_through_a_foreign_write_lock() {
         .execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;")
         .unwrap();
 
-    let (started_tx, started_rx) = mpsc::channel();
-    let (finished_tx, finished_rx) = mpsc::channel();
-    let task_id = task.id.clone();
-    let worker = std::thread::spawn(move || {
-        started_tx.send(()).unwrap();
-        let result = store.append_note(&task_id, "note after contention");
-        finished_tx.send(result).unwrap();
-    });
-
-    started_rx.recv().unwrap();
-    assert!(
-        finished_rx
-            .recv_timeout(Duration::from_millis(100))
-            .is_err(),
-        "task note append must wait while a foreign writer holds the lock"
-    );
-    holder.execute_batch("COMMIT").unwrap();
-
-    finished_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("task note append should finish after lock release")
-        .expect("task note append should succeed after transient contention");
-    worker.join().unwrap();
+    let shared = crate::shared_db::shared_connection(&temp.path().join("cas.db")).unwrap();
+    shared.lock().unwrap().busy_timeout(Duration::ZERO).unwrap();
+    crate::shared_db::tests::retry_after_release(holder, || {
+        store.append_note(&task.id, "note after contention")
+    }).expect("task note append retries the contended write");
     assert_eq!(
         SqliteTaskStore::open(temp.path())
             .unwrap()

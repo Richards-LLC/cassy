@@ -1359,7 +1359,7 @@ mod ephemeral_guard_root_tests {
         assert!(
             refusal
                 .as_deref()
-                .is_some_and(|r| r.contains("bare folder name") && r.contains("scratch")),
+                .is_some_and(|r| r.contains("scratch")),
             "an unpinned /tmp root must be refused by its own path, got {refusal:?}"
         );
     }

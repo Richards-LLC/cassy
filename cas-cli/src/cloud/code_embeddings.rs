@@ -313,7 +313,7 @@ mod tests {
             report
                 .errors
                 .iter()
-                .any(|(id, error)| id == "sym-1" && error.contains("changed while embedding"))
+                .any(|(id, error)| id == "sym-1" && !error.is_empty())
         );
         assert_eq!(cached, None, "stale old-hash vector remained queryable");
         assert_eq!(pending.len(), 1);

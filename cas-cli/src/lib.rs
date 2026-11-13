@@ -168,6 +168,45 @@ pub(crate) mod test_support {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
+    /// Release a held foreign writer only after SQLITE_BUSY reaches the real retry path.
+    pub(crate) fn sqlite_retry_release(
+        blocker: rusqlite::Connection,
+    ) -> (tracing::Dispatch, std::thread::JoinHandle<()>) {
+        struct RetryObserver {
+            first: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        }
+        impl tracing::Subscriber for RetryObserver {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.target() == "cas_store::shared_db"
+                    && metadata.fields().field("delay_ms").is_some()
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+            fn event(&self, _: &tracing::Event<'_>) {
+                if let Some((ready, resume)) = self.first.lock().unwrap().take() {
+                    ready.send(()).unwrap();
+                    resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                }
+            }
+        }
+        let (ready, retrying) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let observer = tracing::Dispatch::new(RetryObserver {
+            first: Mutex::new(Some((ready, resumed))),
+        });
+        let holder = std::thread::spawn(move || {
+            retrying.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            blocker.execute_batch("COMMIT").unwrap();
+            resume.send(()).unwrap();
+        });
+        (observer, holder)
+    }
+
     /// Pin real styled bytes independently of crossterm's memoized NO_COLOR.
     /// Declare after `TestEnvGuard` and keep both alive through rendering, so
     /// color-policy changes are serialized and restored before the env lock.

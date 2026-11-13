@@ -1137,7 +1137,6 @@ mod tests {
         let mut terminal = BufReader::new(unsafe { std::fs::File::from_raw_fd(slave) });
         let mut type_keys = |keys: &[u8]| {
             keyboard.write_all(keys).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(50));
         };
         // Erase is the terminal's; each record is read once, in order.
         type_keys(b"nx\x7f\x7fy\rn\r");

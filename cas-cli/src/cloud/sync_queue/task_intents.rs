@@ -1257,32 +1257,20 @@ mod tests {
         let queue = SyncQueue::open(temp.path()).unwrap();
         queue.init().unwrap();
         let db = temp.path().join("cas.db");
+        queue.conn.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
         for round in 0..3 {
-            let (held_tx, held_rx) = std::sync::mpsc::channel();
-            let writer_db = db.clone();
-            let writer = std::thread::spawn(move || {
-                let conn = rusqlite::Connection::open(writer_db).unwrap();
-                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-                conn.execute(
-                    "INSERT INTO task_mutation_revisions (entity_id, revision, present) VALUES (?1, 1, 1)
-                     ON CONFLICT(entity_id) DO UPDATE SET revision = revision + 1",
-                    params![format!("other-task-{round}")],
-                )
-                .unwrap();
-                held_tx.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                conn.execute_batch("COMMIT").unwrap();
-            });
-            held_rx.recv().unwrap();
-            let staged = queue.stage_task_sync_intent(
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            conn.execute(
+                "INSERT INTO task_mutation_revisions (entity_id, revision, present) VALUES (?1, 1, 1)
+                 ON CONFLICT(entity_id) DO UPDATE SET revision = revision + 1",
+                params![format!("other-task-{round}")],
+            ).unwrap();
+            let (observer, writer) = crate::test_support::sqlite_retry_release(conn);
+            let staged = tracing::dispatcher::with_default(&observer, || queue.stage_task_sync_intent(
                 &format!("cas-contended-{round}"),
-                "update",
-                None,
-                None,
-                None,
-                None,
-                false,
-            );
+                "update", None, None, None, None, false,
+            ));
             writer.join().unwrap();
             let intent = staged.unwrap_or_else(|error| {
                 panic!("round {round}: staging must wait out the writer: {error}")

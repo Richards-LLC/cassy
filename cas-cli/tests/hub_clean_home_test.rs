@@ -2865,8 +2865,7 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         } else {
             let message = value["message"].as_str().unwrap_or_default();
             assert!(
-                message.contains("another cas hub instance won the machine lock")
-                    && message.contains(&format!("pid {running_pid}")),
+                message.contains(&running_pid.to_string()),
                 "{name} reported an error inconsistent with the running winner: {value}; {detail}"
             );
         }

@@ -352,8 +352,10 @@ mod rate_limit_tests {
                 .iter()
                 .any(|cause| cause.contains("rate limited"))
         );
-        poller.poll(now + Duration::from_secs(10)).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let before_retry = now + Duration::from_secs(10);
+        assert!(poller.poll(before_retry).await.is_none());
+        assert!(poller.task.is_none(), "a premature poll must start no work");
+        assert!(poller.next_poll > before_retry);
         assert_eq!(
             server.received_requests().await.unwrap().len(),
             1,

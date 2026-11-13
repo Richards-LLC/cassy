@@ -358,7 +358,6 @@ mod tests {
         let blocker = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         let worker = StoreWorker::start();
-        let started = Instant::now();
         let (ack, event) = {
             let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
             let ack_dir = cas_dir.clone();
@@ -386,13 +385,7 @@ mod tests {
         };
         assert_eq!(ack, Persisted::Deferred);
         assert_eq!(event, Persisted::Deferred);
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "the caller returned at once: {:?}",
-            started.elapsed()
-        );
-        // Still pending while the foreign writer holds the lock.
-        std::thread::sleep(Duration::from_millis(50));
+        // Deferred work cannot finish while this thread still owns the writer.
         assert!(worker.pending() > 0);
 
         blocker.execute_batch("ROLLBACK").unwrap();

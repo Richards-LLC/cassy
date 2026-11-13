@@ -28,7 +28,7 @@ fn test_partial_jail_clear_still_blocks() {
     let (_, stdout) = env.run_pre_tool_use_read("partial_test.txt");
     println!("Partial clear hook output: {}", stdout);
 
-    let is_blocked = stdout.contains("deny");
+    let is_blocked = hook_denies(&stdout);
     assert!(
         is_blocked,
         "BUG: Partial jail clear should NOT release jail! Still have {} jailed. Got: {}",
@@ -77,7 +77,7 @@ fn test_closed_task_with_jail_flag_ignored() {
     println!("Closed jailed task hook output: {}", stdout);
 
     // This test reveals whether closed tasks are excluded from jail check
-    let is_blocked = stdout.contains("deny");
+    let is_blocked = hook_denies(&stdout);
     if is_blocked {
         println!(
             "NOTE: Closed tasks with pending_verification still blocking - may be intended behavior"
@@ -117,7 +117,7 @@ fn test_rapid_jail_state_changes() {
     println!("After rapid changes hook output: {}", stdout);
 
     // Should not be blocked (empty output or no deny)
-    let is_blocked = stdout.contains("deny");
+    let is_blocked = hook_denies(&stdout);
     assert!(
         !is_blocked,
         "Should succeed after rapid state changes: {}",
@@ -141,7 +141,7 @@ fn test_empty_database_no_errors() {
     println!("Empty database hook output: {}", stdout);
 
     // Should not be blocked (empty output or passthrough)
-    let is_blocked = stdout.contains("deny");
+    let is_blocked = hook_denies(&stdout);
     assert!(
         !is_blocked,
         "Should not error with empty database: {}",
@@ -207,7 +207,7 @@ fn test_jail_persists_across_turns() {
     // Simulate multiple tool use attempts - all should be blocked
     for i in 0..3 {
         let (_, stdout) = env.run_pre_tool_use_read("test.txt");
-        let is_blocked = stdout.contains("deny");
+        let is_blocked = hook_denies(&stdout);
         println!("Turn {}: blocked={}", i + 1, is_blocked);
         assert!(
             is_blocked,
@@ -220,7 +220,7 @@ fn test_jail_persists_across_turns() {
     // Clear jail - next invocation should work
     env.set_pending_verification(&task_id, false);
     let (_, stdout) = env.run_pre_tool_use_read("test.txt");
-    let is_blocked = stdout.contains("deny");
+    let is_blocked = hook_denies(&stdout);
     println!("After clear: blocked={}", is_blocked);
     assert!(
         !is_blocked,
@@ -243,40 +243,12 @@ fn test_jail_error_message_content() {
     let (_, stdout) = env.run_pre_tool_use_read("test.txt");
     println!("Hook output: {}", stdout);
 
-    // Parse the JSON output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-        // Check for expected fields
-        let hook_specific = json.get("hookSpecificOutput");
-        assert!(hook_specific.is_some(), "Should have hookSpecificOutput");
-
-        if let Some(hso) = hook_specific {
-            let permission = hso.get("permissionDecision").and_then(|v| v.as_str());
-            assert_eq!(permission, Some("deny"), "Should deny permission");
-
-            let reason = hso.get("permissionDecisionReason").and_then(|v| v.as_str());
-            assert!(reason.is_some(), "Should have denial reason");
-
-            let reason_text = reason.unwrap();
-            println!("Denial reason: {}", reason_text);
-
-            // Check message contains the task ID
-            assert!(
-                reason_text.contains(&task_id),
-                "Denial message should contain task ID {}, got: {}",
-                task_id,
-                reason_text
-            );
-
-            // Check message mentions verification
-            assert!(
-                reason_text.to_lowercase().contains("verification"),
-                "Denial message should mention 'verification', got: {}",
-                reason_text
-            );
-        }
-    } else {
-        println!("Could not parse hook output as JSON: {}", stdout);
-    }
+    let output: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("hook must produce a valid JSON decision");
+    let hook_specific = output.get("hookSpecificOutput").expect("hook decision");
+    assert_eq!(hook_specific["permissionDecision"], "deny");
+    let reason = hook_specific["permissionDecisionReason"].as_str().expect("denial reason");
+    assert!(reason.contains(&task_id), "{reason}");
 }
 
 /// BUG TEST: Database corruption recovery - invalid jail state
@@ -333,7 +305,7 @@ fn test_long_task_title_handling() {
     println!("Long title hook output (success={}): {}", success, stdout);
 
     // Should block (task is jailed) and not crash on long title
-    let is_blocked = stdout.contains("deny");
+    let is_blocked = hook_denies(&stdout);
     assert!(
         is_blocked,
         "Should block on jailed task with long title: {}",
@@ -459,7 +431,7 @@ fn test_factory_worker_exempt_from_verification_jail() {
     // Standalone (no factory env): jail active, Read is blocked.
     let (_, stdout_jailed) = env.run_pre_tool_use_read("test.txt");
     assert!(
-        stdout_jailed.contains("deny"),
+        hook_denies(&stdout_jailed),
         "precondition: without factory env vars the worker should be jailed: {}",
         stdout_jailed
     );
@@ -471,7 +443,7 @@ fn test_factory_worker_exempt_from_verification_jail() {
         &[("CAS_AGENT_ROLE", "worker"), ("CAS_FACTORY_MODE", "1")],
     );
     assert!(
-        !stdout_worker.contains("deny"),
+        !hook_denies(&stdout_worker),
         "factory worker with CAS_AGENT_ROLE=worker + CAS_FACTORY_MODE=1 must be exempt from jail: {}",
         stdout_worker
     );
@@ -483,7 +455,7 @@ fn test_factory_worker_exempt_from_verification_jail() {
         &[("CAS_AGENT_ROLE", "worker")],
     );
     assert!(
-        stdout_role_only.contains("deny"),
+        hook_denies(&stdout_role_only),
         "CAS_AGENT_ROLE=worker alone should NOT exempt (CAS_FACTORY_MODE is also required): {}",
         stdout_role_only
     );
@@ -494,3 +466,13 @@ fn test_factory_worker_exempt_from_verification_jail() {
 // =============================================================================
 
 // Helper to extract task ID from CLI output.
+
+fn hook_denies(stdout: &str) -> bool {
+    if stdout.trim().is_empty() {
+        return false;
+    }
+    let output: serde_json::Value = serde_json::from_str(stdout)
+        .expect("nonempty hook output must be a valid JSON decision");
+    output.pointer("/hookSpecificOutput/permissionDecision")
+        .is_some_and(|decision| decision == "deny")
+}

@@ -231,6 +231,7 @@ struct McpTestClient {
     /// dedicated thread so the child can never wedge on a full stderr pipe
     /// mid-test (the same unbounded-blocking class as the stdout read).
     stderr_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    stderr_done: std::sync::mpsc::Receiver<()>,
     /// The last [`DIAGNOSTIC_TAIL_BYTES`] of stderr, kept for every child so
     /// a timeout can say what the server last printed (cas-5eb9).
     stderr_tail: std::sync::Arc<std::sync::Mutex<BoundedTail>>,
@@ -322,6 +323,7 @@ impl McpTestClient {
         )));
         let stderr_buf = capture_stderr
             .then(|| std::sync::Arc::new(std::sync::Mutex::new(String::new())));
+        let (stderr_done_tx, stderr_done) = std::sync::mpsc::channel();
         if let Some(mut pipe) = child.stderr.take() {
             let tail = std::sync::Arc::clone(&stderr_tail);
             let full = stderr_buf.clone();
@@ -343,6 +345,7 @@ impl McpTestClient {
                         }
                     }
                 }
+                let _ = stderr_done_tx.send(());
             });
         }
 
@@ -351,6 +354,7 @@ impl McpTestClient {
             stdin,
             stdout_lines,
             stderr_buf,
+            stderr_done,
             stderr_tail,
             server_log_dir,
             next_id: 1,
@@ -365,20 +369,9 @@ impl McpTestClient {
             .stderr_buf
             .as_ref()
             .expect("client was not spawned with stderr captured");
-        // The child is dead, so the drain thread is at (or racing toward)
-        // EOF. Poll briefly for it to finish flushing rather than joining,
-        // so a stuck reader can never wedge the test either.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut last = String::new();
-        while std::time::Instant::now() < deadline {
-            let snapshot = buf.lock().expect("stderr buffer poisoned").clone();
-            if !snapshot.is_empty() && snapshot == last {
-                break;
-            }
-            last = snapshot;
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        last
+        self.stderr_done.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("stderr reader must flush through the child's EOF");
+        buf.lock().expect("stderr buffer poisoned").clone()
     }
 
     /// Send a request and wait, with a bound, for its response.

@@ -472,22 +472,5 @@ mod tests {
         assert_ne!(id1, id2);
     }
 
-    #[test]
-    fn test_send_event_non_blocking() {
-        let config = TelemetryConfig {
-            enabled: true,
-            anonymous_id: Some("test-id".to_string()),
-            consent_given: Some(true),
-        };
 
-        let client = TelemetryClient::new(&config);
-
-        // This should return immediately without blocking
-        client.track_session_started();
-        client.track_command("test");
-        client.track_error("test_error", Some("test"), true);
-
-        // Give the background thread a moment to process
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }

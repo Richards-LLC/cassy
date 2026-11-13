@@ -553,8 +553,6 @@ fn test_rule_delete_then_restore_latest_lifecycle_state() {
 /// SQLite refuses with SQLITE_BUSY without consulting the busy handler.
 #[test]
 fn test_rule_writes_wait_out_a_concurrent_writer() {
-    use std::sync::mpsc;
-    use std::time::{Duration as StdDuration, Instant};
 
     let temp = TempDir::new().unwrap();
     let store = SqliteRuleStore::open(temp.path()).unwrap();
@@ -566,56 +564,27 @@ fn test_rule_writes_wait_out_a_concurrent_writer() {
         .unwrap();
     let db = temp.path().join("cas.db");
 
-    // Another agent: take the write lock, write, hold it, then commit.
-    let hold = |label: &'static str| {
-        let db = db.clone();
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let conn = rusqlite::Connection::open(db).unwrap();
-            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-            conn.execute(
-                "UPDATE rules SET surface_count = surface_count + 1 WHERE id = 'rule-other-01'",
-                [],
-            )
-            .unwrap();
-            ready_tx.send(()).unwrap();
-            std::thread::sleep(StdDuration::from_millis(300));
-            conn.execute_batch("COMMIT").unwrap();
-            label
-        });
-        ready_rx.recv().unwrap();
-        holder
+    let hold = || {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn.execute(
+            "UPDATE rules SET surface_count = surface_count + 1 WHERE id = 'rule-other-01'", [],
+        ).unwrap();
+        conn
     };
-
+    store.conn.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
     let mut updated = rule.clone();
     updated.content = "v2".to_string();
-    let holder = hold("update");
-    let started = Instant::now();
-    store
-        .update_with_metadata(&updated, Some("agent-a"), Some("revise"))
-        .expect("update waits out the writer");
-    let waited = started.elapsed();
-    holder.join().unwrap();
-    assert!(
-        waited >= StdDuration::from_millis(200),
-        "it waited for the lock: {waited:?}"
-    );
-    assert!(
-        waited < StdDuration::from_secs(10),
-        "the wait is bounded: {waited:?}"
-    );
+    crate::shared_db::tests::retry_after_release(hold(), || {
+        store.update_with_metadata(&updated, Some("agent-a"), Some("revise"))
+    }).expect("update retries the contended write");
 
     let mut promoted = updated.clone();
     promoted.status = cas_types::RuleStatus::Proven;
-    let holder = hold("promote");
-    store
-        .update(&promoted)
-        .expect("promote waits out the writer");
-    holder.join().unwrap();
-
-    let holder = hold("delete");
-    store.delete(&rule.id).expect("delete waits out the writer");
-    holder.join().unwrap();
+    crate::shared_db::tests::retry_after_release(hold(), || store.update(&promoted))
+        .expect("promote retries the contended write");
+    crate::shared_db::tests::retry_after_release(hold(), || store.delete(&rule.id))
+        .expect("delete retries the contended write");
 
     let final_rule = store.get(&rule.id).unwrap();
     assert_eq!(final_rule.content, "v2");

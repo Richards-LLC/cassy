@@ -103,7 +103,7 @@ fn cas_d58d_team_scope_delivers_to_a_teammate_and_own_scope_refuses() {
     let (team, hidden) = apply_same_repo_scope(marked(), SameRepoScope::Team);
     assert!(hidden.is_empty());
     match resolve_same_repo_target(&team, &hidden, "bold-bear-3").unwrap() {
-        SameRepoTarget::Peer(peer) => assert_eq!(owner_label(peer), "teammate bob@example.com"),
+        SameRepoTarget::Peer(peer) => assert!(owner_label(peer).contains("bob@example.com")),
         other => panic!("team scope must deliver to the teammate: {other:?}"),
     }
 

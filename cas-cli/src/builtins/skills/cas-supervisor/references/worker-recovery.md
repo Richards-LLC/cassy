@@ -56,9 +56,10 @@ Classify the failure before you retry. The same brief on the same cause fails th
 | Model tool errors | The worker keeps mis-calling or looping on a tool | Respawn the same brief on a different model. |
 | Wrong approach | Wrong problem solved, design rejected, brief misread | Rewrite the brief to name what was wrong; use a fresh worker. |
 | Environment or tooling | Missing binary, denied path, broken worktree, stale Cassy binary, CI infrastructure | Fix the environment first; no retry fixes it. |
-| Same failure twice | A retry fails the same way | Stop. Write down the premise you retried on and escalate, or file the CAS bug ([filing-cas-bugs.md](filing-cas-bugs.md)). |
+| Second pre-merge rejection | The delivery has two rejected review dispatches | Follow the structured findings: give one automatic extra repair round to the same worker only when there is at least one blocking finding, every blocking category is `documentation`, `evidence`, `receipt`, `incomplete_close_reason` or `unnecessary_complexity`, and every finding's `triage.severity` is `awkward` or `cosmetic`. Missing/empty findings, missing triage, behavioural findings and money/data-loss findings hold and escalate to the operator. Never infer eligibility from summary prose. A third rejection holds and escalates regardless of category. |
+| Same failure twice outside that review policy | A retry fails the same way | Stop. Write down the premise you retried on and escalate, or file the CAS bug ([filing-cas-bugs.md](filing-cas-bugs.md)). |
 
-Cap it at two retries per task, then escalate. Before reassigning a dead worker's task, write the report it never sent:
+Use the pre-merge rejection policy above for review repairs; cap other retries at two per task, then escalate. An extra repair round never approves or publishes the delivery: it still needs an independent PASS on its corrected candidate. Before reassigning a dead worker's task, write the report it never sent:
 `task action=notes id=<task-id> note_type=blocker notes="BLOCKED <tip sha or none>: worker died (<failure mode>); landed: <commits or nothing>"`.
 
 ## Worker Failure Recovery

@@ -226,6 +226,14 @@ mod tests {
             std::fs::create_dir_all(&external).unwrap();
             std::fs::write(external.join("proof.txt"), "must survive").unwrap();
             std::os::unix::fs::symlink(&external, roots[0].join("scratch/linked")).unwrap();
+            // A forged persisted trash owner cannot authorize deletion outside
+            // the registered category, even when the data itself is a symlink.
+            let trash = env.home().join(".cas/retention/trash/forged");
+            std::fs::create_dir_all(&trash).unwrap();
+            std::fs::write(trash.join("owner.json"), serde_json::to_vec(&serde_json::json!({
+                "project": roots[0], "category": "scratch", "path": external, "keys": []
+            })).unwrap()).unwrap();
+            std::os::unix::fs::symlink(&external, trash.join("data")).unwrap();
             kept.push(external);
         }
         env.set_current_dir(roots[0].parent().unwrap());

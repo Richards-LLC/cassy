@@ -24,6 +24,8 @@ pub(crate) struct SweepReport {
     pub incomplete: bool,
     pub rows: Vec<Row>,
     pub errors: Vec<String>,
+    #[serde(default)]
+    pub cursors: BTreeMap<PathBuf, PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,7 +261,7 @@ fn inspect_tree(path: &Path, deadline: Instant, exclude: Option<&Path>) -> Resul
     Ok(tree)
 }
 
-fn candidates(project: &Project, refs: &References, now: DateTime<Utc>, deadline: Instant) -> Result<Vec<(Candidate, Duration)>> {
+fn candidates(project: &Project, _refs: &References, now: DateTime<Utc>, deadline: Instant) -> Result<Vec<(Candidate, Duration)>> {
     let mut found = Vec::new();
     let artifacts = cas_store::SqliteArtifactStore::open(&project.root)?;
     for task in &project.tasks {
@@ -290,13 +292,13 @@ fn candidates(project: &Project, refs: &References, now: DateTime<Utc>, deadline
         let owners: Vec<_> = project.agents.iter().filter(|agent| agent.name == worker
             || agent.metadata.get("clone_path").is_some_and(|value| Path::new(value) == path)).collect();
         // Missing old registry rows are retired only for an actual factory branch.
-        if (owners.is_empty() && !branch.starts_with("factory/")) || owners.iter().any(|agent|
-            crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent).is_live()) { continue; }
+        let preserve = ((owners.is_empty() && !branch.starts_with("factory/")) || owners.iter().any(|agent|
+            crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent).is_live()))
+            .then(|| "owner is live or cannot be established as retired".to_string());
         let keys = vec![worker.to_string(), branch];
-        let source = Candidate { project: project.root.clone(), category: "worktrees".into(), path: path.clone(), keys: keys.clone(), preserve: None };
-        if cited(&source, refs) { continue; }
+        let source = Candidate { project: project.root.clone(), category: "worktrees".into(), path: path.clone(), keys: keys.clone(), preserve: preserve.clone() };
         // Build output is regenerable even when an unpushed source branch is kept.
-        found.push((Candidate { project: project.root.clone(), category: "targets".into(), path: crate::factory_scratch::worker_target_dir(&path), keys, preserve: None }, Duration::ZERO));
+        found.push((Candidate { project: project.root.clone(), category: "targets".into(), path: crate::factory_scratch::worker_target_dir(&path), keys, preserve }, Duration::ZERO));
         found.push((source, Duration::ZERO));
     }
     Ok(found)
@@ -307,7 +309,7 @@ fn drain(directory: &Path, candidate: &Candidate, refs: &References, lock: &File
     let data = directory.join("data");
     ensure!(!fs::symlink_metadata(&data)?.file_type().is_symlink(), "symlinked trash data");
     ensure!(!cited(candidate, refs), "cited by live work or retained releases");
-    ensure!(!crate::factory_target_cache::review_output_in_use(directory, lock), "live or unverifiable native process");
+    ensure!(!crate::factory_target_cache::review_output_in_use_until(directory, lock, deadline), "live or unverifiable native process");
     // Each successful unlink is accounted even if a later unlink fails.
     row.disposition = "reclaimed".into();
     for entry in walkdir::WalkDir::new(&data).follow_links(false).contents_first(true) {
@@ -360,11 +362,19 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
         lock.try_lock_exclusive().context("host retention already running")?;
         lock
     } else { tempfile::tempfile()? };
-    let mut report = SweepReport { at: Utc::now().timestamp(), applied: apply, used_percent: disk_percent(cas).unwrap_or(0).max(disk_percent(&crate::store::known_repos::host_cas_dir()).unwrap_or(0)), ..Default::default() };
-    let (projects, refs) = match load_projects(cas, deadline) {
+    let previous = last_report();
+    let mut report = SweepReport { cursors: previous.as_ref().map(|report| report.cursors.clone()).unwrap_or_default(), at: Utc::now().timestamp(), applied: apply, used_percent: disk_percent(cas).unwrap_or(0).max(disk_percent(&crate::store::known_repos::host_cas_dir()).unwrap_or(0)), ..Default::default() };
+    let (mut projects, refs) = match load_projects(cas, deadline) {
         Ok(snapshot) => snapshot,
         Err(error) => { report.errors.push(error.to_string()); report.incomplete = true; if apply { persist(&report)?; } return Ok(report); }
     };
+    // Resume after the previous project's final candidate, so a large or
+    // unreadable first project cannot starve every other registered root.
+    if let Some(index) = previous.as_ref().and_then(|report| report.rows.last())
+        .and_then(|row| projects.iter().position(|project| project.root == row.project)) {
+        let count = projects.len();
+        projects.rotate_left((index + 1) % count);
+    }
     let trash = state.join("trash");
     if apply {
         for directory in children(&trash)? {
@@ -387,30 +397,41 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
     }
     for project in &projects {
         if Instant::now() >= deadline { report.incomplete = true; break; }
-        let found = match candidates(project, &refs, Utc::now(), deadline) {
+        let mut found = match candidates(project, &refs, Utc::now(), deadline) {
             Ok(found) => found,
             Err(error) => { report.errors.push(format!("{}: {error}", project.root.display())); continue; }
         };
+        found.sort_by(|a, b| (a.0.category == "worktrees", &a.0.path).cmp(&(b.0.category == "worktrees", &b.0.path)));
+        if let Some(start) = report.cursors.get(&project.root)
+            .and_then(|cursor| found.iter().position(|(candidate, _)| candidate.path == *cursor)) {
+            let count = found.len();
+            found.rotate_left((start + 1) % count);
+        }
         for (candidate, age) in found {
-            if report.rows.len() >= 1024 || Instant::now() >= deadline { report.incomplete = true; break; }
+            if report.rows.len() >= 256 || Instant::now() >= deadline { report.incomplete = true; break; }
+            report.cursors.insert(project.root.clone(), candidate.path.clone());
             if !candidate.path.exists() { continue; }
             let mut row = Row { project: candidate.project.clone(), category: candidate.category.clone(), path: candidate.path.clone(), bytes: 0, reclaimed_bytes: 0, disposition: String::new() };
             let attempt = (|| -> Result<()> {
                 validate_candidate(&candidate, &projects)?;
                 let excluded = (candidate.category == "worktrees").then(|| crate::factory_scratch::worker_target_dir(&candidate.path));
-                let tree = inspect_tree(&candidate.path, deadline, excluded.as_deref())?;
+                let tree = inspect_tree(&candidate.path, deadline.min(Instant::now() + Duration::from_secs(2)), excluded.as_deref())?;
                 row.bytes = tree.bytes;
                 ensure!(!cited(&candidate, &refs), "cited by live work or retained releases");
                 ensure!(candidate.preserve.is_none(), "{}", candidate.preserve.as_deref().unwrap_or_default());
                 ensure!(SystemTime::now().duration_since(tree.newest).unwrap_or_default() >= age, "inside retention window");
-                ensure!(!crate::factory_target_cache::review_output_in_use(&candidate.path, &lock), "live or unverifiable native process");
+                ensure!(!crate::factory_target_cache::review_output_in_use_until(&candidate.path, &lock, deadline), "live or unverifiable native process");
                 if apply {
+                    if candidate.category == "worktrees" {
+                        ensure!(!crate::factory_scratch::worker_target_dir(&candidate.path).exists(), "worker output pending reclamation");
+                    }
                     let directory = trash.join(uuid::Uuid::new_v4().to_string());
                     no_symlink_ancestors(&directory)?;
                     fs::create_dir_all(&directory)?;
                     let mut marker = File::create(directory.join("owner.json"))?;
                     serde_json::to_writer(&mut marker, &candidate)?;
                     marker.sync_all()?;
+                    drop(marker);
                     fs::rename(&candidate.path, directory.join("data"))?;
                     for repo in tree.repositories {
                         // Only vanished exact registrations are force-removed; source
@@ -422,7 +443,10 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
                 } else { row.disposition = "reclaimable".into(); }
                 Ok(())
             })();
-            if let Err(error) = attempt { row.disposition = format!("retained: {error}"); }
+            if let Err(error) = attempt {
+                report.incomplete |= error.to_string().contains("budget exhausted");
+                row.disposition = format!("retained: {error}");
+            }
             report.rows.push(row);
         }
     }

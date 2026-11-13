@@ -1793,6 +1793,34 @@ pub(crate) fn review_output_in_use(path: &Path, lease: &fs::File) -> bool {
     }
 }
 
+/// A retention sweep shares one deadline across all native process probes.
+/// Unavailable or truncated evidence keeps the directory.
+pub(crate) fn review_output_in_use_until(path: &Path, lease: &fs::File, deadline: std::time::Instant) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() { return true; }
+        let deadline = crate::bounded_process::Deadline::after(remaining);
+        let cap = std::time::Duration::from_secs(2);
+        let Ok(output) = crate::bounded_process::run_command(
+            std::process::Command::new("/usr/sbin/lsof").args(["-nP", "-F0pfn"]), deadline, cap,
+        ) else { return true; };
+        if !output.status.success() || !output.stderr.is_empty()
+            || lsof_uses_many(&output.stdout, path, path, &[lease.as_raw_fd()]) { return true; }
+        let Ok(output) = crate::bounded_process::run_command(
+            std::process::Command::new("/bin/ps").args(["-axo", "pid=,command="]), deadline, cap,
+        ) else { return true; };
+        !output.status.success() || !output.stderr.is_empty()
+            || process_arguments_use(&output.stdout, path, path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if std::time::Instant::now() >= deadline { return true; }
+        review_output_in_use(path, lease)
+    }
+}
+
 fn live_process_uses(worktree: &Path, cache: &Path) -> bool {
     process_uses(worktree, cache, None)
 }

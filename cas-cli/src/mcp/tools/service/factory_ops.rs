@@ -8378,8 +8378,6 @@ impl CasService {
         );
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
         let artifact_authorized = target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
-        let trace_cleanup: Result<(usize, u64), String> = Ok((0, 0));
-        let candidate_cleanup: Result<(usize, u64), String> = Ok((0, 0));
         // Whole-directory retention is host-wide and reference-aware. Do not
         // inventory every artifact tree again through the legacy local sweep.
         let target_cache_result = cleanup_target_cache_report(
@@ -8398,12 +8396,6 @@ impl CasService {
         match host_retention {
             Ok(report) => output.push_str(&report.render()),
             Err(error) => output.push_str(&format!("Host retention refused: {error}\n")),
-        }
-        match candidate_cleanup {
-            Ok((files, bytes)) => output.push_str(&format!(
-                "\nCandidate binaries: removed_files={files} reclaimed_bytes={bytes} (closed >=48h; ledger hash and version recorded; artifacts=true force=true dry_run=false required)\n"
-            )),
-            Err(error) => output.push_str(&format!("\nCandidate binary cleanup incomplete: {error}\n")),
         }
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
@@ -8436,17 +8428,10 @@ impl CasService {
             output.push('\n');
             output.push_str(&text);
         }
-        match trace_cleanup {
-            Ok((files, bytes)) => output.push_str(&format!(
-                "\n\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
-            )),
-            Err(error) => output.push_str(&format!("\n\nJourney recording cleanup incomplete: {error}\n")),
-        }
-
         output.push('\n');
-        output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
         output.push('\n');
-        output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, false));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",
@@ -9156,271 +9141,6 @@ fn process_command_line(pid: u32) -> String {
     } else {
         command
     }
-}
-
-/// Inventory and reclaim the durable per-task artifact root from the factory
-/// workspace contract (GH #196). Directories are named for task IDs, so task
-/// lifecycle is the only authority that makes a receipt eligible for removal.
-#[derive(Default)]
-struct FactoryArtifactInventory {
-    root: std::path::PathBuf,
-    closed: Vec<std::path::PathBuf>,
-    stray: Vec<std::path::PathBuf>,
-    error: Option<String>,
-    removed: usize,
-    dry_run: bool,
-    review_roots: Vec<(std::path::PathBuf, crate::artifacts::retention::ArtifactRootUsage)>,
-}
-
-impl FactoryArtifactInventory {
-    /// Sibling project keys (including pre-rename keys), bare task IDs and
-    /// shared builds have no project-task deletion authority. Inventory only.
-    fn include_review_roots(&mut self) {
-        self.include_review_roots_until(None)
-    }
-
-    fn include_review_roots_until(&mut self, deadline: Option<std::time::Instant>) {
-        let Some(base) = self.root.parent() else {
-            return;
-        };
-        let entries = match std::fs::read_dir(base) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-            Err(error) => {
-                self.error = Some(format!("artifact root inventory unavailable: {error}"));
-                return;
-            }
-        };
-        self.review_roots = entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            .map(|entry| {
-                let path = entry.path();
-                let usage = crate::artifacts::retention::artifact_root_usage_until(&path, deadline);
-                (path, usage)
-            })
-            .collect();
-        self.review_roots.sort_by(|a, b| a.0.cmp(&b.0));
-    }
-
-    fn render(&self) -> String {
-        let mut out = format!(
-            "\nDurable task artifacts: root={} closed-task candidates={} stray inventory={} mode={}\n",
-            self.root.display(),
-            self.closed.len(),
-            self.stray.len(),
-            if self.dry_run {
-                "review-only"
-            } else {
-                "cleanup"
-            },
-        );
-        for path in &self.closed {
-            out.push_str(&format!("  - closed-task artifact: {}\n", path.display()));
-        }
-        for path in &self.stray {
-            out.push_str(&format!(
-                "  - review-only stray artifact: {}\n",
-                path.display()
-            ));
-        }
-        for (root, usage) in &self.review_roots {
-            out.push_str(&format!("  - artifact root inventory: {} bytes={} review-only; sibling/legacy roots are never deletion candidates\n", root.display(), usage.bytes));
-            for path in &usage.regenerable {
-                out.push_str(&format!("    regenerable build output stored as evidence: {} (manual review; preserved)\n", path.display()));
-            }
-            if let Some(error) = &usage.error {
-                out.push_str(&format!("    partial byte inventory: {error}\n"));
-            }
-        }
-        out.push_str("  Retention: at least 7 days since close; open tasks and tasks updated in the last 7 days preserve referenced evidence.\n");
-        if let Some(error) = &self.error {
-            out.push_str(&format!("  - artifact inventory unavailable: {error}\n"));
-        } else if self.dry_run && !self.closed.is_empty() {
-            out.push_str("  Durable artifact deletion is off by default; artifacts=true is a separate opt-in requiring force=true dry_run=false. Strays are never auto-deleted.\n");
-        } else if self.removed > 0 {
-            out.push_str(&format!(
-                "  Closed-task artifact directories removed: {}\n",
-                self.removed
-            ));
-        }
-        out
-    }
-}
-
-
-fn factory_artifact_inventory(
-    root: std::path::PathBuf,
-    closed_task_ids: &std::collections::BTreeSet<String>,
-) -> FactoryArtifactInventory {
-    let mut inventory = FactoryArtifactInventory {
-        root,
-        dry_run: true,
-        ..Default::default()
-    };
-    if std::fs::symlink_metadata(&inventory.root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        inventory.error = Some("project artifact namespace must not be a symlink".into());
-        return inventory;
-    }
-    let entries = match std::fs::read_dir(&inventory.root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return inventory,
-        Err(error) => {
-            inventory.error = Some(error.to_string());
-            return inventory;
-        }
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if closed_task_ids.contains(&name) {
-            inventory.closed.push(path);
-        } else {
-            inventory.stray.push(path);
-        }
-    }
-    inventory.closed.sort();
-    inventory.stray.sort();
-    inventory
-}
-
-/// Trace/video recordings are bulky scratch; receipts keep the separate
-/// seven-day, reference-aware artifact policy above. Unknown close dates fail closed.
-fn trace_retention_eligible(task: &cas_types::Task, now: chrono::DateTime<chrono::Utc>) -> bool {
-    task.status == cas_types::TaskStatus::Closed
-        && task
-            .closed_at
-            .is_some_and(|closed| closed <= now - chrono::Duration::hours(24))
-}
-
-fn factory_trace_cleanup(
-    root: &std::path::Path,
-    tasks: &[cas_types::Task],
-    authorized: bool,
-    now: chrono::DateTime<chrono::Utc>,
-) -> std::io::Result<(usize, u64)> {
-    let eligible = tasks
-        .iter()
-        .filter(|task| trace_retention_eligible(task, now))
-        .map(|task| task.id.clone())
-        .collect();
-    let inventory = factory_artifact_inventory(root.to_path_buf(), &eligible);
-    if let Some(error) = inventory.error {
-        return Err(std::io::Error::other(error));
-    }
-    let mut removed = (0, 0);
-    if authorized {
-        for path in inventory.closed {
-            for entry in walkdir::WalkDir::new(path).follow_links(false) {
-                let entry = entry?;
-                if entry.file_type().is_file()
-                    && (entry.file_name() == "trace.zip"
-                        || entry.path().extension().is_some_and(|ext| ext == "webm"))
-                {
-                    let bytes = entry.metadata()?.len();
-                    std::fs::remove_file(entry.path())?;
-                    removed.0 += 1;
-                    removed.1 += bytes;
-                }
-            }
-        }
-    }
-    Ok(removed)
-}
-
-/// Candidate executables are regenerable; their ledger and identity records
-/// retain the proof. This sweep is separate from whole-directory retention.
-fn factory_candidate_binary_cleanup(
-    root: &std::path::Path,
-    tasks: &[cas_types::Task],
-    authorized: bool,
-    now: chrono::DateTime<chrono::Utc>,
-) -> std::io::Result<(usize, u64)> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-
-    let mut removed = (0, 0);
-    if !authorized {
-        return Ok(removed);
-    }
-    let eligible = tasks.iter().filter(|task| {
-        task.status == cas_types::TaskStatus::Closed
-            && task.closed_at.is_some_and(|closed| closed <= now - chrono::Duration::hours(48))
-    }).map(|task| task.id.clone()).collect();
-    let inventory = factory_artifact_inventory(root.to_path_buf(), &eligible);
-    if let Some(error) = inventory.error {
-        return Err(std::io::Error::other(error));
-    }
-    let hash_pattern = regex::Regex::new(r"(?i)\b[0-9a-f]{64}\b").unwrap();
-    let version_pattern = regex::Regex::new(r"\bcas [0-9]+\.[0-9]+\.[0-9]+\b").unwrap();
-    for path in inventory.closed {
-        let mut hashes = std::collections::BTreeSet::new();
-        let mut binaries = Vec::new();
-        for entry in walkdir::WalkDir::new(path).follow_links(false) {
-            let entry = entry?;
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            if entry.file_name() == "LEDGER.md" {
-                let ledger = std::fs::read_to_string(entry.path())?;
-                if version_pattern.is_match(&ledger) {
-                    hashes.extend(hash_pattern.find_iter(&ledger).map(|hash| hash.as_str().to_ascii_lowercase()));
-                }
-            } else if entry.file_name() == "cas" {
-                binaries.push(entry.into_path());
-            }
-        }
-        if hashes.is_empty() {
-            continue;
-        }
-        for binary in binaries {
-            let mut file = std::fs::File::open(&binary)?;
-            let mut hash = Sha256::new();
-            let mut buffer = [0; 64 * 1024];
-            let mut bytes = 0;
-            loop {
-                let count = file.read(&mut buffer)?;
-                if count == 0 { break; }
-                hash.update(&buffer[..count]);
-                bytes += count as u64;
-            }
-            if hashes.contains(&format!("{:x}", hash.finalize())) {
-                std::fs::remove_file(&binary)?;
-                removed.0 += 1;
-                removed.1 += bytes;
-            }
-        }
-    }
-    Ok(removed)
-}
-
-fn factory_artifact_cleanup(
-    root: &std::path::Path,
-    closed_task_ids: &std::collections::BTreeSet<String>,
-    authorized: bool,
-    eligible: &std::collections::BTreeSet<String>,
-) -> FactoryArtifactInventory {
-    let mut inventory = factory_artifact_inventory(root.to_path_buf(), closed_task_ids);
-    inventory.include_review_roots();
-    inventory.dry_run = !authorized;
-    if authorized {
-        for path in &inventory.closed {
-            if !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|id| eligible.contains(id))
-            {
-                continue;
-            }
-            if std::fs::remove_dir_all(path).is_ok() {
-                inventory.removed += 1;
-            }
-        }
-    }
-    inventory
 }
 
 type LiveFactoryWorkers = std::collections::HashSet<(String, Option<String>)>;
@@ -22786,62 +22506,6 @@ mod sync_safety_tests {
 mod artifact_project_scope_tests {
     use super::*;
 
-    #[test]
-    fn trace_retention_preserves_open_recent_and_durable_evidence_cas_1a7a8() {
-        use cas_types::{Task, TaskStatus};
-        use chrono::{Duration, TimeZone, Utc};
-        let now = Utc.with_ymd_and_hms(2026, 10, 17, 12, 0, 0).unwrap();
-        for (status, age_hours, authorized, delete) in [
-            (TaskStatus::Open, Some(48), true, false),
-            (TaskStatus::InProgress, Some(48), true, false),
-            (TaskStatus::Closed, None, true, false),
-            (TaskStatus::Closed, Some(-1), true, false),
-            (TaskStatus::Closed, Some(23), true, false),
-            (TaskStatus::Closed, Some(24), false, false),
-            (TaskStatus::Closed, Some(24), true, true),
-            (TaskStatus::Closed, Some(48), true, true),
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let dir = temp.path().join("cas-abcd/nested");
-            std::fs::create_dir_all(&dir).unwrap();
-            for name in [
-                "trace.zip",
-                "video.webm",
-                "screenshot.png",
-                "LEDGER.md",
-                "receipt.json",
-                "other.zip",
-            ] {
-                std::fs::write(dir.join(name), b"proof").unwrap();
-            }
-            #[cfg(unix)]
-            {
-                let outside = temp.path().join("outside");
-                std::fs::create_dir_all(&outside).unwrap();
-                std::fs::write(outside.join("trace.zip"), b"keep").unwrap();
-                std::os::unix::fs::symlink(&outside, dir.join("linked-dir")).unwrap();
-                std::os::unix::fs::symlink(outside.join("trace.zip"), dir.join("linked.webm"))
-                    .unwrap();
-            }
-            let mut task = Task::new("cas-abcd".into(), "retention".into());
-            task.status = status;
-            task.closed_at = age_hours.map(|hours| now - Duration::hours(hours));
-            let report = factory_trace_cleanup(temp.path(), &[task], authorized, now).unwrap();
-            for name in ["trace.zip", "video.webm"] {
-                assert_eq!(
-                    dir.join(name).exists(),
-                    !delete,
-                    "{status:?} {age_hours:?} authorized={authorized}: {name}"
-                );
-            }
-            for name in ["screenshot.png", "LEDGER.md", "receipt.json", "other.zip"] {
-                assert!(dir.join(name).is_file(), "durable {name} must survive");
-            }
-            #[cfg(unix)]
-            assert!(temp.path().join("outside/trace.zip").is_file());
-            assert_eq!(report, if delete { (2, 10) } else { (0, 0) });
-        }
-    }
 
     #[test]
     fn reports_only_checkouts_with_missing_gitdir_cas_1a7a8() {
@@ -22935,58 +22599,5 @@ mod artifact_project_scope_tests {
         assert!(retired.join("artifact").is_file());
     }
 
-    #[test]
-    fn cleanup_never_claims_another_projects_same_task_or_legacy_evidence_cas_6ebf() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().join("artifacts");
-        let a = temp.path().join("one/project/.cas");
-        let b = temp.path().join("two/project/.cas");
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        let a_root = crate::config::project_factory_artifacts_root(&a, &base);
-        let b_root = crate::config::project_factory_artifacts_root(&b, &base);
-        for dir in [
-            a_root.join("cas-a4b1"),
-            b_root.join("cas-a4b1"),
-            base.join("cas-a4b1"),
-        ] {
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("proof.md"), "evidence").unwrap();
-        }
-        let renamed = base.join("cas-src-old-key/cas-a4b1/DerivedData");
-        let shared = base.join("shared-builds/target");
-        for dir in [&renamed, &shared] {
-            std::fs::create_dir_all(dir).unwrap();
-            std::fs::write(dir.join("build"), b"rebuild").unwrap();
-        }
-        let closed = ["cas-a4b1".to_string()].into_iter().collect();
-        let report = factory_artifact_cleanup(&a_root, &closed, true, &closed);
-        assert_eq!(report.removed, 1);
-        assert!(!a_root.join("cas-a4b1").exists());
-        assert!(b_root.join("cas-a4b1/proof.md").is_file());
-        assert!(base.join("cas-a4b1/proof.md").is_file());
-        let output = report.render();
-        for (path, bytes) in [
-            (&b_root, 8),
-            (&base.join("cas-a4b1"), 8),
-            (&base.join("cas-src-old-key"), 7),
-            (&base.join("shared-builds"), 7),
-        ] {
-            let row = output.lines().find(|line| line.contains(&path.display().to_string()))
-                .unwrap_or_else(|| panic!("unscoped roots must be visible: {output}"));
-            assert!(row.contains(&format!("bytes={bytes}")) && row.contains("review-only"), "{row}");
-        }
-        assert!(
-            output.contains(&renamed.display().to_string())
-                && output.contains(&shared.display().to_string()),
-            "regenerable outputs must be flagged: {output}"
-        );
-        assert!(renamed.join("build").is_file());
-        assert!(shared.join("build").is_file());
-        let mut bounded = factory_artifact_inventory(a_root.clone(), &closed);
-        bounded.include_review_roots_until(Some(std::time::Instant::now()));
-        assert!(!bounded.review_roots.is_empty());
-        assert!(bounded.review_roots.iter().all(|(_, usage)| usage.bytes == 0 && usage.error.is_some()));
-        assert!(b_root.join("cas-a4b1/proof.md").is_file());
-    }
+
 }

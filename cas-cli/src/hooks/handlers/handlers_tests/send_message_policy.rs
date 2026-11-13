@@ -264,3 +264,42 @@ fn operator_evidence_scope_and_missing_transcript_gh1887() {
         assert_eq!(deny_reason(&handle_pre_tool_use(&input, None).unwrap()).is_some(), denied);
     }
 }
+
+/// GH #1915: Claude Code exposes commands and results to the model, but not
+/// tool-use IDs. Replay that transcript shape through the operator's Stop hook.
+#[test]
+fn pane_stop_matches_visible_result_without_tool_id_gh1915() {
+    use crate::hooks::handlers::handle_stop;
+    let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some("supervisor"))]);
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp.path().join("claude.jsonl");
+    for (message, denied) in [
+        ("`git log -1 --oneline` and `git rev-list --count HEAD`: d39a718, 133 commits.", false),
+        ("`git rev-list --count HEAD`: 134 commits.", true),
+        // Same digit fragments as the real SHA must not prove a different SHA.
+        ("`git log -1 --oneline`: e39b718.", true),
+    ] {
+        let rows = [
+            serde_json::json!({"type":"user","sessionId":"claude-evidence","message":{"role":"user","content":[{"type":"text","text":"check the current commit and count"}]}}),
+            serde_json::json!({"type":"assistant","sessionId":"claude-evidence","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"toolu_hidden_log","name":"Bash","input":{"command":"git log -1 --oneline"}},
+                {"type":"tool_use","id":"toolu_hidden_count","name":"Bash","input":{"command":"git rev-list --count HEAD"}}
+            ]}}),
+            serde_json::json!({"type":"user","sessionId":"claude-evidence","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"toolu_hidden_log","content":"d39a718 release hotfix","is_error":false},
+                {"type":"tool_result","tool_use_id":"toolu_hidden_count","content":"133","is_error":false}
+            ]}}),
+            serde_json::json!({"type":"assistant","sessionId":"claude-evidence","message":{"role":"assistant","content":[{"type":"text","text":message}]}}),
+        ];
+        std::fs::write(&transcript, rows.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        let input: HookInput = serde_json::from_value(serde_json::json!({
+            "session_id":"claude-evidence", "hook_event_name":"Stop", "transcript_path":transcript,
+            "last_assistant_message":message
+        })).unwrap();
+        let out = handle_stop(&input, Some(tmp.path())).unwrap();
+        assert_eq!(out.decision.as_deref() == Some("block"), denied, "{message}");
+        if denied {
+            assert!(crate::gates::codes_in(out.reason.as_deref().unwrap()).contains(&"H-47"));
+        }
+    }
+}

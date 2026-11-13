@@ -1,1 +1,3 @@
+## Core Concepts
+
 Expired unparked task-only verification can be requested again through close, including a corrected portable no-code proof reference. Renewal creates a pending review and retains the expired dispatch for audit. Shipped PR/queue deliveries, active reviews, receipt-bound deliveries and epics keep their existing recovery boundaries.

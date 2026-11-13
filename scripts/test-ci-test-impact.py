@@ -417,6 +417,70 @@ path="tests/builtin_archive_portability_test.rs"
         split = json.loads(state.read_text())["split"]
         self.assertEqual((split["build"], split["ring"]), (["--workspace"], f"(all()) and not ({own})"), "a workspace plan runs whole, own first")
 
+    def test_lane_attribution_reuses_only_exact_base_configuration_and_test_proof(self):
+        failure = self.NEXTEST_FAILURE
+        config = {"platform": "linux-x86_64", "rustc": "1.99.0", "profile": "test"}
+        destination = self.root / "output/attribution.json"
+        for mismatch in [None, "replayed", "head", "configuration", "missing-config", "package", "binary", "test", "uncertain", "expired"]:
+            with self.subTest(mismatch=mismatch):
+                receipt = {"head": self.base, "configuration": config,
+                           "failures": [failure], "uncertain": False}
+                if mismatch == "head":
+                    receipt["head"] = "0" * 40
+                elif mismatch == "configuration":
+                    receipt["configuration"] = dict(config, rustc="other")
+                elif mismatch == "missing-config":
+                    del receipt["configuration"]
+                elif mismatch in {"package", "binary", "test"}:
+                    receipt["failures"] = [dict(failure, **{mismatch: "other"})]
+                elif mismatch == "uncertain":
+                    receipt["uncertain"] = True
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w") as zipped:
+                    zipped.writestr("base-receipt.json" if mismatch == "replayed" else "ring-receipt.json", json.dumps(receipt))
+                payloads = [json.dumps({"workflow_runs": [{"id": 11, "head_sha": self.base,
+                    "head_repository": {"full_name": "fixture/repo"}, "path": ".github/workflows/lane.yml"}]}).encode(),
+                    json.dumps({"artifacts": [{"id": 7, "name": "lane-impact-11-ring-1", "expired": mismatch == "expired"}]}).encode()]
+                recent = {"artifacts": []}
+                if mismatch == "replayed":
+                    payloads = [json.dumps({"workflow_runs": []}).encode()]
+                    recent = {"artifacts": [{"id": 7, "name": "lane-impact-12-ring-1", "expired": False,
+                        "workflow_run": {"id": 12, "repository_id": 1, "head_repository_id": 1}}]}
+                payloads.append(json.dumps(recent).encode())
+                if mismatch != "expired":
+                    payloads.append(archive.getvalue())
+                class Opener:
+                    def open(self, request, timeout):
+                        return io.BytesIO(payloads.pop(0))
+                with patch.dict(os.environ, {"GITHUB_REPOSITORY": "fixture/repo", "GH_TOKEN": "fixture-token"}), \
+                        patch.object(impact.urllib.request, "build_opener", lambda handler: Opener()):
+                    proof = impact.base_failure_proof(self.base, config, [failure])
+                self.assertEqual([row["failure"] for row in proof], [failure] if mismatch in (None, "replayed") else [])
+                if mismatch in (None, "replayed"):
+                    with patch.object(impact, "base_failure_proof", return_value=proof), \
+                            patch.object(impact.subprocess, "run", side_effect=AssertionError("base rebuilt")):
+                        self.assertEqual(impact.lane_attribute(self.root, self.base, [failure, failure], destination, config), 0)
+                    result = json.loads(destination.read_text())
+                    self.assertEqual((result["inherited"], result["caused"], result["unresolved"]), ([failure], [], []))
+                    self.assertEqual(result["reused"][0]["artifact_id"], 7)
+                    self.assertEqual(result["timings"]["build_seconds"], 0)
+                    carried = json.loads(destination.with_name("base-receipt.json").read_text())
+                    self.assertEqual((carried["head"], carried["failures"]), (self.base, [failure]))
+
+    def test_lane_attribution_timeout_keeps_early_receipt_and_fails_closed(self):
+        failure = self.NEXTEST_FAILURE
+        destination = self.root / "output/attribution.json"
+        def expired(*args, **kwargs):
+            self.assertEqual(json.loads(destination.read_text())["unresolved"], [failure])
+            raise subprocess.TimeoutExpired(args[0], 1)
+        with patch.object(impact, "base_failure_proof", return_value=[]), \
+                patch.object(impact.subprocess, "check_call", side_effect=expired), \
+                patch.object(impact.subprocess, "run"):
+            self.assertNotEqual(impact.lane_attribute(self.root, self.base, [failure], destination, {}), 0)
+        receipt = json.loads(destination.read_text())
+        self.assertEqual((receipt["inherited"], receipt["caused"], receipt["unresolved"]), ([], [], [failure]))
+        self.assertEqual(receipt["status"], "unresolved")
+
     def test_lane_binds_to_the_recorded_start_base_and_logs_a_fallback(self):
         self.select("cas-cli/src/alpha.rs")
         recorded = self.git("rev-parse", "HEAD")

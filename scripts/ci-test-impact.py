@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Conservative CI test selection, additive failure history, and run receipts.
 
-No Cargo is invoked by plan/history/record. Unknown inputs select the workspace;
+No builds are performed by plan/history/record. Unknown inputs select the workspace;
 module uncertainty selects the affected crate, never an empty successful run.
 """
 import argparse
 import io
 import json
 import os
+import platform
 from pathlib import Path
 import re
+import signal
 import subprocess
 import statistics
 import sys
@@ -313,6 +315,8 @@ def lane_run(root, selection, source, expression, extra, destination, role):
     failure without a parsed failed test fails the phase at once."""
     log = Path(destination).parent / f"{role}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
+    # Preserve archive compiler identity while binding the actual runtime.
+    selection = dict(selection, configuration=proof_configuration(root, selection.get("configuration")))
     started = time.monotonic()
     env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
     status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), "nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"], cwd=root, env=env).returncode
@@ -328,39 +332,222 @@ def lane_run(root, selection, source, expression, extra, destination, role):
     return status, bool(status and accounted)
 
 
-def lane_attribute(root, base, failures, destination):
-    """Rerun the failed tests at the delivery's base. Only tests that do not
-    fail there fail the lane; base failures are reported as inherited."""
+def proof_configuration(root, compiled=None):
+    """Bind reusable results to the actual runner, tools and test profile.
+
+    The receipt's exact head SHA binds repository inputs (including nextest
+    configuration); these fields bind inputs outside that tree. Missing tool
+    identity disables reuse rather than inventing a compatible baseline.
+    """
+    try:
+        def version(*command):
+            return subprocess.check_output(command, cwd=root, text=True, stderr=subprocess.DEVNULL, timeout=15).strip()
+        return {"version": 1, "platform": platform.system(), "arch": platform.machine(),
+                "image": [os.environ.get(key, "") for key in ("ImageOS", "ImageVersion")],
+                "rustc": compiled["rustc"] if compiled else version("rustc", "-Vv"),
+                "nextest": version(os.environ.get("CARGO", "cargo"), "nextest", "--version"),
+                "profile": "default",
+                "repository_config": compiled["repository_config"] if compiled else git(root, "ls-tree", "-r", "HEAD", "--", ".cargo", ".config/nextest.toml", "rust-toolchain", "rust-toolchain.toml"),
+                "environment": {key: value for key, value in sorted(os.environ.items())
+                    if key.startswith(("CARGO_PROFILE_", "NEXTEST_")) or key in {
+                        "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS",
+                        "CARGO_BUILD_TARGET", "RUST_TEST_THREADS", "CI", "GITHUB_ACTIONS"}}}
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def github_fetcher():
+    repo, token = os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise ValueError("invalid repository")
+    class SafeRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, response, code, message, headers, url):
+            redirected = super().redirect_request(request, response, code, message, headers, url)
+            if redirected and urlparse(url).hostname != urlparse(request.full_url).hostname:
+                redirected.remove_header("Authorization")
+            return redirected
+    opener = urllib.request.build_opener(SafeRedirect())
+    def fetch(path):
+        request = urllib.request.Request("https://api.github.com/repos/" + repo + path,
+            headers={"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"})
+        with opener.open(request, timeout=15) as response:
+            data = response.read(5_000_001)
+            if len(data) > 5_000_000:
+                raise ValueError("proof response too large")
+            return data
+    return repo, fetch
+
+
+def failure_key(failure):
+    return failure["package"], failure["binary"], failure["test"]
+
+
+def base_failure_proof(base, configuration, failures):
+    """Only explicit failed identities at this exact SHA/config can be inherited.
+
+    Read existing CI artifacts, never inferred selection or additive history.
+    Old receipts without configuration and unavailable artifacts are misses.
+    Bounded lookup and downloads leave the existing job time for a replay.
+    """
+    proven = {}
+    if not configuration or not re.fullmatch(r"[0-9a-f]{40}", base):
+        return []
+    wanted = {failure_key(failure) for failure in failures}
+    try:
+        repo, fetch = github_fetcher()
+        runs = json.loads(fetch(f"/actions/runs?head_sha={base}&status=completed&per_page=5"))["workflow_runs"]
+        candidates = []
+        for run in runs[:5]:
+            if (run["head_sha"] != base or run["head_repository"]["full_name"] != repo
+                    or run["path"] not in {".github/workflows/lane.yml", ".github/workflows/ci.yml"}):
+                continue
+            artifacts = json.loads(fetch(f"/actions/runs/{int(run['id'])}/artifacts?per_page=100"))["artifacts"]
+            candidates.extend((artifact, run["id"], False) for artifact in artifacts)
+        # Earlier lanes can have replayed this same recorded train base. Their
+        # base-receipt is explicit proof at the base, even though the lane head
+        # differs. Consult recent same-repository artifacts without a new job.
+        recent = json.loads(fetch("/actions/artifacts?per_page=100"))["artifacts"]
+        for artifact in recent:
+            producer = artifact.get("workflow_run") or {}
+            if producer.get("repository_id") and producer.get("repository_id") == producer.get("head_repository_id"):
+                candidates.append((artifact, producer["id"], True))
+        seen = set()
+        for artifact, run_id, replay_only in candidates:
+            if artifact["expired"] or not artifact["name"].startswith(("lane-impact-", "ci-test-impact-")) or artifact["name"] == "lane-impact-archive":
+                continue
+            if artifact["id"] in seen:
+                continue
+            if len(seen) == 12:
+                break
+            seen.add(artifact["id"])
+            try:
+                archive = zipfile.ZipFile(io.BytesIO(fetch(f"/actions/artifacts/{int(artifact['id'])}/zip")))
+                for info in archive.infolist():
+                    if not info.filename.endswith("receipt.json") or info.file_size > 1_000_000:
+                        continue
+                    if replay_only and Path(info.filename).name != "base-receipt.json":
+                        continue
+                    receipt = json.loads(archive.read(info))
+                    if receipt.get("head") != base or receipt.get("configuration") != configuration or receipt.get("uncertain", True):
+                        continue
+                    for failure in receipt["failures"]:
+                        key = failure_key(failure)
+                        if key in wanted:
+                            proven[key] = {"failure": failure, "run_id": run_id, "artifact_id": artifact["id"], "receipt": info.filename}
+                if wanted <= proven.keys():
+                    return list(proven.values())
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError, zipfile.BadZipFile) as error:
+                print(f"Base proof artifact unavailable: {error}", file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+        print(f"Base proof unavailable; replay required: {error}", file=sys.stderr)
+    return list(proven.values())
+
+
+def lane_attribute(root, base, failures, destination, configuration=None):
+    """Reuse exact-base failures, replay misses, and fail closed on incomplete work."""
+    started = time.monotonic()
+    # Twenty minutes for lookup/preparation/build/test, within the existing
+    # 45-minute job. This is a bound, never permission to inherit a missing test.
+    deadline = started + 20 * 60
+    failures = list({failure_key(f): f for f in failures}.values())
+    result = {"base": base, "inherited": [], "caused": [], "unresolved": failures,
+              "reused": [], "status": "pending", "timings": {
+                  "lookup_seconds": 0, "worktree_seconds": 0, "build_seconds": 0, "test_seconds": 0}}
+    def save():
+        result["elapsed_seconds"] = time.monotonic() - started
+        write(destination, result)
+    save()  # Durable even if preparation is interrupted.
+    lookup = time.monotonic()
+    result["reused"] = base_failure_proof(base, configuration, failures)
+    result["timings"]["lookup_seconds"] = time.monotonic() - lookup
+    known = {failure_key(row["failure"]) for row in result["reused"]}
+    result["inherited"] = [f for f in failures if failure_key(f) in known]
+    pending = [f for f in failures if failure_key(f) not in known]
+    result["unresolved"] = pending
+    if result["inherited"]:
+        # Carry reusable proof forward so a busy train does not age its sole
+        # successful base replay out of the bounded recent-artifact window.
+        write(Path(destination).with_name("base-receipt.json"), {
+            "version": VERSION, "head": base, "configuration": configuration,
+            "failures": result["inherited"], "uncertain": False, "reused": result["reused"]})
+    save()
     work = Path(os.environ.get("RUNNER_TEMP") or root / "target") / "lane-impact-base"
-    subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True)
-    subprocess.check_call(["git", "worktree", "add", "--detach", str(work), base], cwd=root)
-    subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"], cwd=work)
-    failures = list({(f["package"], f["binary"], f["test"]): f for f in failures}.values())
-    packages = sorted({failure["package"] for failure in failures})
-    build = ["--workspace"] if len(packages) > 1 else ["-p", packages[0]]
-    if len(packages) == 1:
-        targets = sorted({failure["binary"] for failure in failures})
-        build += [arg for target in targets for arg in (["--lib"] if target == packages[0] else ["--test", target])]
-    identity = lambda failure: failure["package"] if failure["binary"] == failure["package"] else f"{failure['package']}::{failure['binary']}"
-    expression = " or ".join(f"(binary_id({identity(failure)}) and test(={failure['test']}))" for failure in failures)
-    env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
-    run = subprocess.run([os.environ.get("CARGO", "cargo"), "nextest", "run", *build, "-E", expression, "--no-fail-fast", "--no-tests=pass"], cwd=work, env=env, capture_output=True, text=True)
-    Path(destination).with_suffix(".log").write_text(run.stdout + run.stderr)
-    at_base = {(f["package"], f["binary"], f["test"]) for f in parse_failures(strip_ansi(run.stdout + run.stderr))}
-    if run.returncode and not at_base:
-        at_base = set()
-        print("Lane impact: the base run failed without a test result; no failure is attributed to the base", file=sys.stderr)
-    inherited = [f for f in failures if (f["package"], f["binary"], f["test"]) in at_base]
-    caused = [f for f in failures if f not in inherited]
-    write(destination, {"base": base, "inherited": inherited, "caused": caused})
-    lines = [f"Lane impact: inherited from base {base[:12]} (fails there too): {f['binary']} {f['test']}" for f in inherited]
-    lines += [f"Lane impact: caused by this delivery (passes or is absent at base): {f['binary']} {f['test']}" for f in caused]
+    def remaining():
+        return max(0.001, deadline - time.monotonic())
+    def timed_command(command, phase, log, env):
+        phase_start = time.monotonic()
+        try:
+            # Stream output to disk throughout compilation/test execution.
+            with open(log, "a") as handle:
+                process = subprocess.Popen(command, cwd=work, env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+                try:
+                    return process.wait(timeout=remaining())
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+                    raise
+        finally:
+            result["timings"][phase] = time.monotonic() - phase_start
+            save()
+    if pending:
+        try:
+            preparation = time.monotonic()
+            try:
+                subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True, timeout=remaining())
+                subprocess.check_call(["git", "worktree", "add", "--detach", str(work), base], cwd=root, timeout=remaining())
+                subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"], cwd=work, timeout=remaining())
+            finally:
+                result["timings"]["worktree_seconds"] = time.monotonic() - preparation
+                save()
+            packages = sorted({f["package"] for f in pending})
+            build = ["--workspace"] if len(packages) > 1 else ["-p", packages[0]]
+            if len(packages) == 1:
+                targets = sorted({f["binary"] for f in pending})
+                build += [arg for target in targets for arg in (["--lib"] if target == packages[0] else ["--test", target])]
+            identity = lambda f: f["package"] if f["binary"] == f["package"] else f"{f['package']}::{f['binary']}"
+            expression = " or ".join(f"(binary_id({identity(f)}) and test(={f['test']}))" for f in pending)
+            env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
+            cargo = os.environ.get("CARGO", "cargo")
+            log = Path(destination).with_suffix(".log")
+            log.with_suffix(".build.log").write_text("")
+            # List performs the build separately so a stalled compiler and a
+            # stalled test have distinct durations in the failure receipt.
+            status = timed_command([cargo, "nextest", "list", *build, "-E", expression, "--message-format", "json"], "build_seconds", log.with_suffix(".build.log"), env)
+            if status:
+                raise RuntimeError(f"base build failed: {status}")
+            log.write_text("")
+            status = timed_command([cargo, "nextest", "run", *build, "-E", expression, "--no-fail-fast", "--no-tests=pass"], "test_seconds", log, env)
+            text = strip_ansi(log.read_text())
+            at_base = {failure_key(f) for f in parse_failures(text)}
+            if status and not at_base:
+                raise RuntimeError(f"base run failed without a test result: {status}")
+            base_failures = [f for f in pending if failure_key(f) in at_base]
+            base_configuration = proof_configuration(work)
+            write(Path(destination).with_name("base-receipt.json"), {
+                "version": VERSION, "head": base, "configuration": base_configuration,
+                "failures": result["inherited"] + base_failures if base_configuration == configuration else base_failures,
+                "uncertain": False, "reused": result["reused"]})
+            result["inherited"] += base_failures
+            result["caused"] = [f for f in pending if failure_key(f) not in at_base]
+            result["unresolved"] = []
+        except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+            result["error"] = str(error)
+            print(f"Lane impact: unresolved base attribution: {error}", file=sys.stderr)
+        finally:
+            try:
+                subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True, timeout=15)
+            except (OSError, subprocess.SubprocessError) as error:
+                result["cleanup_error"] = str(error)
+    result["status"] = "unresolved" if result["unresolved"] else "caused" if result["caused"] else "inherited"
+    save()
+    lines = [f"Lane impact: inherited from base {base[:12]} (fails there too): {f['binary']} {f['test']}" for f in result["inherited"]]
+    lines += [f"Lane impact: caused by this delivery (passes or is absent at base): {f['binary']} {f['test']}" for f in result["caused"]]
+    lines += [f"Lane impact: unresolved at base: {f['binary']} {f['test']}" for f in result["unresolved"]]
     print("\n".join(lines))
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
             handle.write("\n" + "\n".join(f"- {line}" for line in lines) + "\n")
-    subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True)
-    return 1 if caused else 0
+    return 1 if result["caused"] or result["unresolved"] else 0
 
 
 def lane_base(root, recorded_ref, inferred):
@@ -390,6 +577,7 @@ def lane(root, args):
         print(f"Lane impact base: {base or args.zero_base_ref} ({source})")
         selection = plan(root, base, args.zero_base_ref, args.history)
         selection["base_source"] = source
+        selection["configuration"] = proof_configuration(root)
         split = lane_split(root, selection)
         write(out, {"plan": selection, "split": split})
         outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": source}
@@ -400,8 +588,8 @@ def lane(root, args):
         saved = json.loads(out.read_text())
         selection, split = saved["plan"], saved["split"]
         if args.phase == "attribute":
-            failures = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())["failures"]
-            return lane_attribute(root, selection["base"], failures, out.with_name(f"{args.receipt}-attribution.json"))
+            receipt = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())
+            return lane_attribute(root, selection["base"], receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"), receipt.get("configuration"))
         source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
         receipt = out.with_name(f"{args.phase}-receipt.json")
         status, failed = 0, False
@@ -429,30 +617,12 @@ def collect_history(destination):
     records = []
     uncertain = False
     try:
-        repo = os.environ["GITHUB_REPOSITORY"]
-        token = os.environ["GH_TOKEN"]
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
-            raise ValueError("invalid repository")
-        api = "https://api.github.com/repos/" + repo
-        class SafeRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, request, response, code, message, headers, url):
-                redirected = super().redirect_request(request, response, code, message, headers, url)
-                if redirected and urlparse(url).hostname != urlparse(request.full_url).hostname:
-                    redirected.remove_header("Authorization")
-                return redirected
-        opener = urllib.request.build_opener(SafeRedirect())
-        def fetch(url):
-            request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"})
-            with opener.open(request, timeout=15) as response:
-                data = response.read(5_000_001)
-                if len(data) > 5_000_000:
-                    raise ValueError("history response too large")
-                return data
-        artifacts = json.loads(fetch(api + "/actions/artifacts?per_page=100"))["artifacts"]
+        _, fetch = github_fetcher()
+        artifacts = json.loads(fetch("/actions/artifacts?per_page=100"))["artifacts"]
         selected = [a for a in artifacts if a["name"].startswith("ci-test-impact-") and not a["expired"]][:16]
         for artifact in selected:
             # Construct the endpoint from a numeric ID, not artifact-controlled URLs.
-            archive = zipfile.ZipFile(io.BytesIO(fetch(api + f"/actions/artifacts/{int(artifact['id'])}/zip")))
+            archive = zipfile.ZipFile(io.BytesIO(fetch(f"/actions/artifacts/{int(artifact['id'])}/zip")))
             logged = []
             receipt_uncertain = False
             for info in archive.infolist():
@@ -517,7 +687,7 @@ def record(plan, logs, status, elapsed, destination, role):
         count += sum(map(int, re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:", text)))
         failures.extend(parse_failures(text))
     misses = [failure for failure in failures if not selected_failure(plan, failure)] if role == "full" else []
-    receipt = {"version": VERSION, "head": plan["head"], "base": plan.get("base"), "role": role, "plan": plan, "selected_test_count": count, "elapsed_seconds": elapsed, "status": status, "failures": failures, "uncertain": status != 0 and not failures, "post_merge_missed": misses, "recall": (len(failures) - len(misses)) / len(failures) if failures and role == "full" else None}
+    receipt = {"version": VERSION, "head": plan["head"], "base": plan.get("base"), "role": role, "configuration": plan.get("configuration"), "plan": plan, "selected_test_count": count, "elapsed_seconds": elapsed, "status": status, "failures": failures, "uncertain": status != 0 and not failures, "post_merge_missed": misses, "recall": (len(failures) - len(misses)) / len(failures) if failures and role == "full" else None}
     write(destination, receipt)
     print(f"CI impact: {plan['mode']}, {count} tests, {elapsed:.2f}s, status={status}, misses={len(misses)}, recall={receipt['recall']}")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -565,8 +735,11 @@ def main():
         write(args.out, selection)
         return 0
     if args.mode == "record":
+        # An externally executed archive/profile needs its own producer identity;
+        # legacy recall-only receipts cannot safely stand in for base proof.
         record(selection, args.log, args.status, args.elapsed, args.out, "full")
         return 0
+    selection["configuration"] = proof_configuration(root)
     started = time.monotonic()
     logs = []
     status = 0

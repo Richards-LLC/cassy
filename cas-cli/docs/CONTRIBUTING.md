@@ -3186,10 +3186,19 @@ shards then run the rest of the selection from its archive, only after the own
 tests pass. A workspace plan (build/test policy, `scripts/`, `.github/` or an
 unmappable path) runs the whole workspace, still own tests first, exactly as
 the selector decided. A failed test fails the lane only when it passes (or
-does not exist) at the delivery's base: the same job checks out that base and
-reruns just the failed tests. Tests that fail there too are named in the job
-summary as inherited from the base and do not fail the delivery. Lane receipts are published as `lane-impact-*`, outside the
-selector's failure history. Release-train pushes and
+does not exist) at the delivery's base. The same job first looks for explicit
+failure receipts from existing CI runs at that exact SHA, matching package,
+binary, test, compiler, nextest, runner image and profile/configuration. A prior
+lane's explicit base replay can supply this proof even when its own head differs.
+It reuses matching failures without preparing or compiling the base, then checks
+out the base and reruns only identities without proof. Missing, expired,
+configuration-mismatched or legacy receipts are misses. Tests that fail at the
+base are named in the job summary as inherited and do not fail the delivery.
+Named failure receipts are uploaded before attribution. Attribution records
+lookup, worktree, build and test times, with a twenty-minute total replay budget
+inside the unchanged forty-five-minute job. Interrupted or failed preparation
+leaves explicit unresolved identities and keeps the lane red. Lane receipts are
+published as `lane-impact-*`, outside the selector's failure history. Release-train pushes and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.

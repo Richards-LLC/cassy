@@ -1272,6 +1272,21 @@ impl CasCore {
                 });
             }
 
+            let artifact_scope_audit = if target_repo.is_some_and(|repo| repo.trim().is_empty()) {
+                let context = task.deliverables.work_target.as_ref()
+                    .ok_or_else(|| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from("PROOF-SCOPE FIX REJECTED: no recorded work target to reconcile"), data: None,
+                    })
+                    .and_then(|target| super::repo_context::resolve_repo_context(&self.cas_root, target)
+                        .map_err(|message| McpError { code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None }))?;
+                Some(super::lifecycle::close_ops::retire_no_code_delivery_scope(
+                    &context.repo_root, &mut task, &context.target_branch,
+                ).map_err(|error| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: retained delivery conflicts with artifact-only scope: {error}")), data: None,
+                })?)
+            } else { None };
             task.deliverables.work_target = corrected_target.clone();
             refresh_epic_lane_binding(&mut task);
             if !proof_targets_fix && !risk_fix && !methodology_fix {
@@ -1326,7 +1341,7 @@ impl CasCore {
                             target.repo_selector, target.target_branch
                         )
                     })
-                    .unwrap_or_else(|| "The stale code work target was cleared for this no-code task.".to_string())
+                    .unwrap_or_else(|| format!("The stale code work target was cleared for this no-code task. {}", artifact_scope_audit.as_deref().unwrap_or_default()))
             };
             let note = audit::proof_scope_fix_note(
                 task.updated_at, &supervisor, reason, &target_description,

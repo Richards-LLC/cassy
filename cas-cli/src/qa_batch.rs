@@ -773,7 +773,7 @@ pub(crate) fn author_is_independent(
 
 pub(crate) fn author_refusal(task: &str, author: &str) -> String {
     format!(
-        "ledger author {author} is in {task}'s implementation lineage; the ledger must be walked by a QA reviewer, verifier or a worker that did not deliver it. Self-run checks remain the worker's own proof, not independent QA. A QA-ledger-only release verdict can use a supervisor's exact-head qa_waive (docs/qa/batch-qa.md). Otherwise only the operator can override, from their own terminal: `cas qa author-override {task} --note \"<why>\"`"
+        "ledger author {author} is in {task}'s implementation lineage; the ledger must be walked by a QA reviewer, verifier or a worker that did not deliver it. Self-run checks remain the worker's own proof, not independent QA. Only the operator can override, from their own terminal: `cas qa author-override {task} --note \"<why>\"`"
     )
 }
 

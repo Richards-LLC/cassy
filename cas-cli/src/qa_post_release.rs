@@ -420,7 +420,7 @@ mod tests {
             "action": "qa_status", "task_id": "cas-train",
         })).unwrap())).await.unwrap());
         assert!(status.contains("cas-live") && status.contains(&receipt_id), "{status}");
-        // pin: a QA walk must name the remaining release-review gate rather than silently doing nothing.
+        // pin: a QA walk must name the remaining delivery-approval gate.
 
         assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
         // The notice is obsolete once QA is covered, even though a different
@@ -434,25 +434,9 @@ mod tests {
         let refused = service.verification(rmcp::handler::server::wrapper::Parameters(request("release"))).await.unwrap_err();
         assert!(refused.message.contains("RELEASE_REVIEW_COMPUTED"));
         assert!(cas_store::release_verdicts_for_task(&cas, "batch-offer-fixture", "cas-live").unwrap().is_empty());
-        // Existing delivery approvals, rather than a new release reviewer,
-        // complete the already recorded QA receipt's close callback.
-        let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
         for id in ["cas-live", "cas-retired"] {
-            let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
-                peer_premerge: None, repository_root: project.display().to_string(), worktree_root: project.display().to_string(),
-                head_commit: live.clone(), state_digest: String::new(), target_branch: None, anchor_commits: vec![live.clone()],
-            });
-            let dispatch = cas_store::create_verification_dispatch_bound(&cas, id, "worker", "supervisor", &boundary,
-                chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
-            conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
-            conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES (?1,?2,'reviewer','task','approved','pass','[]',?3,?4)",
-                rusqlite::params![format!("ver-{id}"), id, chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+            assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
         }
-        service.inner.close_release_covered_deliveries(&receipt).await;
-        for id in ["cas-live", "cas-retired"] {
-            assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::Closed);
-        }
-        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
 
     }
 

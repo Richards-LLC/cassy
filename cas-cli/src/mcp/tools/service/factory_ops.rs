@@ -8385,6 +8385,18 @@ impl CasService {
         );
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
         let artifact_authorized = target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
+        // Regenerable recordings and recorded binaries retain their separate
+        // explicit gates. They never authorize whole-directory evidence removal.
+        let regeneration = (|| -> anyhow::Result<_> {
+            let protected = crate::artifacts::retention::host::protected_tasks(&self.inner.cas_root)?;
+            let tasks = crate::store::open_task_store_local(&self.inner.cas_root)?.list(None)?
+                .into_iter().filter(|task| !protected.contains(&task.id)).collect::<Vec<_>>();
+            let root = crate::config::project_factory_artifacts_root(&self.inner.cas_root,
+                &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()));
+            Ok((factory_trace_cleanup(&root, &tasks, target_cache_mutation_authorized, chrono::Utc::now())?,
+                factory_candidate_binary_cleanup(&root, &tasks, artifact_authorized, chrono::Utc::now())?))
+        });
+        let regeneration = if target_cache_mutation_authorized { regeneration() } else { Ok(((0, 0), (0, 0))) };
         // Whole-directory retention is host-wide and reference-aware. Do not
         // inventory every artifact tree again through the legacy local sweep.
         let target_cache_result = cleanup_target_cache_report(
@@ -8403,6 +8415,11 @@ impl CasService {
         match host_retention {
             Ok(report) => output.push_str(&report.render()),
             Err(error) => output.push_str(&format!("Host retention refused: {error}\n")),
+        }
+        match regeneration {
+            Ok(((traces, trace_bytes), (binaries, binary_bytes))) => output.push_str(&format!(
+                "\nJourney recordings: removed_files={traces} reclaimed_bytes={trace_bytes}\nCandidate binaries: removed_files={binaries} reclaimed_bytes={binary_bytes}\n")),
+            Err(error) => output.push_str(&format!("\nRegenerable artifacts preserved: {error}\n")),
         }
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
@@ -8438,7 +8455,8 @@ impl CasService {
         output.push('\n');
         output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
         output.push('\n');
-        output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, false));
+        // Managed review collection is included once in the host sweep report;
+        // its lease/dispatch/head/dirty-source guards remain authoritative.
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",
@@ -9149,6 +9167,111 @@ fn process_command_line(pid: u32) -> String {
         command
     }
 }
+
+fn trace_retention_eligible(task: &cas_types::Task, now: chrono::DateTime<chrono::Utc>) -> bool {
+    task.status == cas_types::TaskStatus::Closed
+        && task
+            .closed_at
+            .is_some_and(|closed| closed <= now - chrono::Duration::hours(24))
+}
+
+fn factory_trace_cleanup(
+    root: &std::path::Path,
+    tasks: &[cas_types::Task],
+    authorized: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<(usize, u64)> {
+    let eligible: std::collections::BTreeSet<String> = tasks
+        .iter()
+        .filter(|task| trace_retention_eligible(task, now))
+        .map(|task| task.id.clone())
+        .collect();
+    let paths = eligible.into_iter().map(|id: String| root.join(id));
+    let mut removed = (0, 0);
+    if authorized {
+        for path in paths {
+            if !path.is_dir() { continue; }
+            for entry in walkdir::WalkDir::new(path).follow_links(false) {
+                let entry = entry?;
+                if entry.file_type().is_file()
+                    && (entry.file_name() == "trace.zip"
+                        || entry.path().extension().is_some_and(|ext| ext == "webm"))
+                {
+                    let bytes = entry.metadata()?.len();
+                    std::fs::remove_file(entry.path())?;
+                    removed.0 += 1;
+                    removed.1 += bytes;
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Candidate executables are regenerable; their ledger and identity records
+/// retain the proof. This sweep is separate from whole-directory retention.
+fn factory_candidate_binary_cleanup(
+    root: &std::path::Path,
+    tasks: &[cas_types::Task],
+    authorized: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<(usize, u64)> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut removed = (0, 0);
+    if !authorized {
+        return Ok(removed);
+    }
+    let eligible: std::collections::BTreeSet<String> = tasks.iter().filter(|task| {
+        task.status == cas_types::TaskStatus::Closed
+            && task.closed_at.is_some_and(|closed| closed <= now - chrono::Duration::hours(48))
+    }).map(|task| task.id.clone()).collect();
+    let paths = eligible.into_iter().map(|id: String| root.join(id));
+    let hash_pattern = regex::Regex::new(r"(?i)\b[0-9a-f]{64}\b").unwrap();
+    let version_pattern = regex::Regex::new(r"\bcas [0-9]+\.[0-9]+\.[0-9]+\b").unwrap();
+    for path in paths {
+        if !path.is_dir() { continue; }
+        let mut hashes = std::collections::BTreeSet::new();
+        let mut binaries = Vec::new();
+        for entry in walkdir::WalkDir::new(path).follow_links(false) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if entry.file_name() == "LEDGER.md" {
+                let ledger = std::fs::read_to_string(entry.path())?;
+                if version_pattern.is_match(&ledger) {
+                    hashes.extend(hash_pattern.find_iter(&ledger).map(|hash| hash.as_str().to_ascii_lowercase()));
+                }
+            } else if entry.file_name() == "cas" {
+                binaries.push(entry.into_path());
+            }
+        }
+        if hashes.is_empty() {
+            continue;
+        }
+        for binary in binaries {
+            let mut file = std::fs::File::open(&binary)?;
+            let mut hash = Sha256::new();
+            let mut buffer = [0; 64 * 1024];
+            let mut bytes = 0;
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 { break; }
+                hash.update(&buffer[..count]);
+                bytes += count as u64;
+            }
+            if hashes.contains(&format!("{:x}", hash.finalize())) {
+                std::fs::remove_file(&binary)?;
+                removed.0 += 1;
+                removed.1 += bytes;
+            }
+        }
+    }
+    Ok(removed)
+}
+
 
 type LiveFactoryWorkers = std::collections::HashSet<(String, Option<String>)>;
 

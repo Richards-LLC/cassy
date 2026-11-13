@@ -6757,7 +6757,7 @@ async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248()
     )
     .unwrap();
     let now = chrono::Utc::now();
-    let old = now - chrono::Duration::days(8);
+    let old = now - chrono::Duration::days(15);
     let store = env.task_store();
     for id in ["cas-a001", "cas-a002", "cas-a003", "cas-a004", "cas-a006"] {
         let mut task = Task::new(id.into(), "closed evidence owner".into());
@@ -6771,6 +6771,12 @@ async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248()
         store.add(&task).unwrap();
         std::fs::create_dir_all(root.join(id)).unwrap();
         std::fs::write(root.join(id).join("proof.txt"), "durable evidence").unwrap();
+        if id != "cas-a002" {
+            let modified = std::time::SystemTime::now() - std::time::Duration::from_secs(15 * 86400);
+            for path in [root.join(id).join("proof.txt"), root.join(id)] {
+                std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+            }
+        }
     }
     let mut open = Task::new("cas-a005".into(), "open review".into());
     open.notes = "Review artifact://art-7a82".into();
@@ -6799,7 +6805,7 @@ async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248()
         .unwrap();
     let output = get_text(&result);
     for (id, guard) in [
-        ("cas-a002", "7-day floor"),
+        ("cas-a002", "14-day floor"),
         ("cas-a003", "open artifact reference"),
         ("cas-a004", "recent note reference"),
     ] {
@@ -7470,9 +7476,9 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         "active review lease must prevent reclamation"
     );
     drop(lease_file);
-    // Force alone is still a preview for disposable checkout removal.
+    // Explicit dry-run previews the automatic host policy without removing source.
     let mut preview = cleanup.clone();
-    preview.dry_run = None;
+    preview.dry_run = Some(true);
     env.service
         .factory_request(Parameters(preview))
         .await

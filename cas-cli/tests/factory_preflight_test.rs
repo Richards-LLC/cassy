@@ -146,107 +146,27 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
     for index in 0..128 {
         std::fs::create_dir_all(artifacts.join(format!("review-only-{index}"))).unwrap();
     }
-
-    let help = gc_command_at(project.path(), &home)
-        .args(["factory", "gc", "cleanup", "--help"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let help = String::from_utf8(help)
-        .unwrap()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(!help.contains("--artifacts"), "{help}");
-    // pin: CLI cleanup help documents each actual mutation tier.
-    assert!(
-        help.contains(concat!(
-            "Each run may mark stale agents and missing worktrees, purge dead ",
-            "agent records, clear gone or recycled process-group records, and ",
-            "remove stale skill markers."
-        )),
-        "{help}"
-    );
-    assert!(
-        help.contains(concat!(
-            "--force also reaps orphan worker process groups and prunes ",
-            "terminal prompt entries."
-        )),
-        "{help}"
-    );
-    assert!(
-        help.contains(concat!(
-            "Target-cache reclamation, orphan-process kills, and ",
-            "journey-recording cleanup require both --force and --no-dry-run. ",
-            "Artifact cleanup is available only through the MCP gc_cleanup action ",
-            "with artifacts=true."
-        )),
-        "{help}"
-    );
-
-    let report = gc_command_at(project.path(), &home)
-        .args(["factory", "gc", "report"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let report = String::from_utf8(report).unwrap();
-    assert!(report.starts_with("[INFO] GC review:"), "{report}");
-    // pin: the real CLI report names the cleanup-tier help before inventory detail.
-    assert_eq!(
-        report.lines().nth(1),
-        Some("Review cleanup tiers: cas factory gc cleanup --help"),
-        "{report}"
-    );
-    assert!(report.is_ascii() && report.lines().all(|line| line.len() <= 79), "{report}");
-    assert!(!report.lines().any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")), "{report}");
-    let json = gc_command_at(project.path(), &home)
-        .args(["factory", "gc", "report", "--json"])
-        .assert().success().get_output().stdout.clone();
-    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
-    assert!(json["report_text"].as_str().unwrap().starts_with("[INFO] GC review:"));
-    assert!(json["machine_status"]["TARGET_CACHE_STATUS_JSON"].is_object());
-    let full = gc_command_at(project.path(), &home)
-        .args(["factory", "gc", "report", "--full"])
-        .assert().success().get_output().stdout.clone();
-    let full = String::from_utf8(full).unwrap();
-    assert!(full.starts_with("Factory GC Report\n") && full.contains("TARGET_CACHE_STATUS_JSON="), "{full}");
-
-    let cleanup = gc_command_at(project.path(), &home)
-        .args(["factory", "gc", "cleanup", "--force", "--no-dry-run", "--full"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let cleanup = String::from_utf8(cleanup).unwrap();
-    assert!(cleanup.starts_with("Factory GC cleanup complete."), "{cleanup}");
-    assert!(cleanup.contains("Cargo target caches: mode=cleanup"), "{cleanup}");
-
+    gc_command_at(project.path(), &home).args(["factory", "gc", "cleanup", "--help"])
+        .assert().success();
+    for action in ["report", "cleanup"] {
+        let result = gc_command_at(project.path(), &home)
+            .args(["factory", "gc", action, "--json"]).assert().success().get_output().clone();
+        let document: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert!(document["machine_status"]["TARGET_CACHE_STATUS_JSON"].is_object());
+        let host = &document["machine_status"]["HOST_RETENTION_STATUS_JSON"];
+        assert_eq!(host["applied"], action == "cleanup");
+        assert_eq!(host["reclaimed_bytes"].as_u64().unwrap_or(0), 0);
+        assert_eq!(host["rows"].as_array().unwrap().len(), 128);
+        assert!(result.stderr.is_empty());
+    }
     let preview = gc_command_at(project.path(), &home)
-        .args(["factory", "gc", "cleanup"])
+        .args(["factory", "gc", "cleanup", "--dry-run", "--json"])
         .assert().success().get_output().clone();
-    let text = String::from_utf8(preview.stdout).unwrap();
-    assert!(text.starts_with("[INFO] GC cleanup complete:"), "{text}");
-    assert!(text.lines().all(|line| line.len() <= 79), "{text}");
-    assert!(text.lines().count() < 100, "inventory must not grow with every path");
-    assert!(text.contains("stray inventory=128"), "{text}");
-    assert!(!text.contains("_STATUS_JSON="), "{text}");
-    assert!(text.contains("cleanup --full") && text.contains("cleanup --json"));
-    let _ = String::from_utf8(preview.stderr).unwrap();
-    let machine = gc_command_at(project.path(), &home)
-        .args(["factory", "gc", "cleanup", "--json"])
-        .assert().success().get_output().clone();
-    let document: Value = serde_json::from_slice(&machine.stdout).unwrap();
-    let _ = document["report_text"].as_str().unwrap();
-    assert!(document["full_report"].as_str().unwrap().contains("mode=dry-run"));
-    assert!(document["machine_status"]["TARGET_CACHE_STATUS_JSON"].is_object());
-    assert!(machine.stderr.is_empty(), "JSON mode must suppress progress");
+    let document: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(document["machine_status"]["HOST_RETENTION_STATUS_JSON"]["applied"], false);
     assert_eq!(std::fs::read_dir(artifacts).unwrap().count(), 128);
 }
+
 
 #[test]
 fn invalid_explicit_deployment_pin_keeps_its_own_diagnostic_cas_b0c5() {

@@ -26,6 +26,8 @@ pub(crate) struct SweepReport {
     pub errors: Vec<String>,
     #[serde(default)]
     pub cursors: BTreeMap<PathBuf, PathBuf>,
+    #[serde(default)]
+    pub managed_review_reports: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +57,7 @@ impl SweepReport {
         for ((project, category), (bytes, reclaimed)) in categories {
             out.push_str(&format!("  {} {category}: bytes={bytes} reclaimed_bytes={reclaimed}\n", project.display()));
         }
+        for report in &self.managed_review_reports { out.push_str(report); }
         for error in &self.errors { out.push_str(&format!("  Preserved: {error}\n")); }
         out.push_str(&format!("HOST_RETENTION_STATUS_JSON={}\n", serde_json::to_string(self).unwrap()));
         out
@@ -109,9 +112,16 @@ pub(crate) fn automatic(cas: &Path, idle: bool) {
     }
 }
 
-fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, References)> {
+fn load_projects(cas: &Path, deadline: Instant, include_recent: bool) -> Result<(Vec<Project>, References)> {
     let registry = crate::store::known_repos::open_host_known_repo_store()?;
-    let mut roots: BTreeSet<_> = registry.list()?.into_iter().map(|repo| repo.path.join(".cas")).collect();
+    let registered = {
+        let db = cas_store::shared_db::shared_connection(&crate::store::known_repos::host_cas_dir().join("cas.db"))?;
+        let conn = db.try_lock().map_err(|_| anyhow::anyhow!("host registry busy"))?;
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='known_repos')", [], |row| row.get(0))?;
+        drop(conn);
+        if exists { registry.list()? } else { Vec::new() }
+    };
+    let mut roots: BTreeSet<_> = registered.into_iter().map(|repo| repo.path.join(".cas")).collect();
     roots.insert(cas.to_path_buf());
     ensure!(roots.len() <= 256, "registered-project inventory exceeds 256 stores");
     let mut projects = Vec::new();
@@ -126,16 +136,16 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
         drop(conn);
         if exists { cas_store::SqliteTaskStore::open(&global)?.list(None)? } else { Vec::new() }
     };
-    for task in global_tasks.iter().filter(|task| !task.is_terminal()) { refs.add(task)?; }
+    for task in global_tasks.iter().filter(|task| !task.is_terminal() || (include_recent && task.updated_at >= Utc::now() - chrono::Duration::days(14))) { refs.add(task)?; }
     let mut seen = BTreeSet::new();
     for root in roots {
         ensure!(Instant::now() < deadline, "reference inventory budget exhausted; nothing deleted");
-        no_symlink_ancestors(&root)?;
         let root = root.canonicalize().with_context(|| format!("unreadable registered store {}", root.display()))?;
+        no_symlink_ancestors(&root)?;
         if !seen.insert(root.clone()) { continue; }
         ensure!(root.join("cas.db").is_file(), "registered store has no database: {}", root.display());
         let tasks = cas_store::SqliteTaskStore::open(&root)?.list(None)?;
-        for task in tasks.iter().filter(|task| !task.is_terminal()) { refs.add(task)?; }
+        for task in tasks.iter().filter(|task| !task.is_terminal() || (include_recent && task.updated_at >= Utc::now() - chrono::Duration::days(14))) { refs.add(task)?; }
         // Publication events and their task records carry portable references.
         let mut releases = BTreeSet::new();
         for release in cas_store::quality_release_events(&root)? {
@@ -159,6 +169,7 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
         let config = crate::config::Config::load(&root)?;
         let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
         let artifacts = crate::config::project_factory_artifacts_root(&root, &base);
+        let artifacts = artifacts.canonicalize().unwrap_or(artifacts);
         let agents = cas_store::SqliteAgentStore::open(&root)?.list(None)?;
         projects.push(Project { root, tasks, agents, artifacts });
     }
@@ -189,6 +200,22 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
         if before == protected.len() { break; }
     }
     Ok((projects, refs))
+}
+
+/// Explicit regenerable-file cleanup shares live/release reference protection,
+/// independently of the longer whole-directory and recent-note windows.
+pub(crate) fn protected_tasks(cas: &Path) -> Result<BTreeSet<String>> {
+    let (projects, refs) = load_projects(cas, Instant::now() + BUDGET, false)?;
+    let mut protected = BTreeSet::new();
+    for project in projects {
+        let store = cas_store::SqliteArtifactStore::open(&project.root)?;
+        for task in project.tasks {
+            if refs.cites(&task.id) || store.list_for_task(&task.id)?.iter().any(|artifact|
+                std::iter::once(Some(artifact.id.as_str())).chain([artifact.cloud_artifact_id.as_deref(), artifact.cloud_url.as_deref(), artifact.slack_permalink.as_deref()])
+                    .flatten().any(|key| refs.cites(key))) { protected.insert(task.id); }
+        }
+    }
+    Ok(protected)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -275,8 +302,19 @@ fn candidates(project: &Project, _refs: &References, now: DateTime<Utc>, deadlin
             preserve: (!(task.is_terminal() && task.closed_at.is_some_and(|closed| now.signed_duration_since(closed).num_days() >= ARTIFACT_DAYS)))
                 .then(|| "task is live, recently closed or has unknown close date".into()) }, Duration::from_secs(14 * 86400)));
     }
+    for path in children(&project.artifacts)? {
+        if !project.tasks.iter().any(|task| path.file_name().and_then(|name| name.to_str()) == Some(task.id.as_str())) {
+            found.push((Candidate { project: project.root.clone(), category: "artifacts".into(),
+                keys: vec![path.file_name().unwrap_or_default().to_string_lossy().into_owned()], path,
+                preserve: Some("unknown task owner".into()) }, Duration::ZERO));
+        }
+    }
     for category in ["scratch", "review-scratch"] {
         for path in children(&project.root.join(category))? {
+            // Managed proof trees require their own dispatch, lease and source
+            // checks; generic age-based deletion must never bypass them.
+            if category == "review-scratch" && (path.join("owner.json").exists()
+                || children(&path)?.iter().any(|child| child.join("owner.json").exists())) { continue; }
             let mut keys = Vec::new();
             if let Some(id) = path.file_name().and_then(|name| name.to_str()) {
                 keys.extend(project.tasks.iter().filter(|task| id.contains(&task.id)).map(|task| task.id.clone()));
@@ -365,7 +403,7 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
     } else { tempfile::tempfile()? };
     let previous = last_report();
     let mut report = SweepReport { cursors: previous.as_ref().map(|report| report.cursors.clone()).unwrap_or_default(), at: Utc::now().timestamp(), applied: apply, used_percent: disk_percent(cas).unwrap_or(0).max(disk_percent(&crate::store::known_repos::host_cas_dir()).unwrap_or(0)), ..Default::default() };
-    let (mut projects, refs) = match load_projects(cas, deadline) {
+    let (mut projects, refs) = match load_projects(cas, deadline, true) {
         Ok(snapshot) => snapshot,
         Err(error) => { report.errors.push(error.to_string()); report.incomplete = true; if apply { persist(&report)?; } return Ok(report); }
     };
@@ -398,6 +436,8 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
     }
     for project in &projects {
         if Instant::now() >= deadline { report.incomplete = true; break; }
+        report.managed_review_reports.push(crate::factory_review_scratch::render_until(
+            &project.root, apply, Some(deadline)));
         let mut found = match candidates(project, &refs, Utc::now(), deadline) {
             Ok(found) => found,
             Err(error) => { report.errors.push(format!("{}: {error}", project.root.display())); continue; }
@@ -500,6 +540,7 @@ mod tests {
             let mut task = cas_types::Task::new(format!("cas-{name}-old"), "Inventory fixture".into());
             task.status = cas_types::TaskStatus::Closed;
             task.closed_at = Some(Utc::now() - chrono::Duration::days(30));
+            task.updated_at = task.closed_at.unwrap();
             cas_store::SqliteTaskStore::open(&root).unwrap().add(&task).unwrap();
             let artifacts = crate::config::project_factory_artifacts_root(&root, &crate::config::resolved_factory_artifacts_root(None));
             sparse(&artifacts.join(&task.id).join("inventory"), size * gib);

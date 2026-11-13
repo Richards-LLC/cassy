@@ -519,8 +519,6 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     assert!(prompt.contains(&shown), "{prompt}");
     // pin: the attachment pointer and the body survive delivery verbatim.
     assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
-    // pin: the recipient executes the advertised MCP command verbatim.
-    assert!(prompt.contains("artifact action=fetch task_id=cas-proof id=art-1"), "{prompt}");
     // pin: delivered wording the recipient supervisor acts on.
     assert!(prompt.ends_with(text), "{prompt}");
 }

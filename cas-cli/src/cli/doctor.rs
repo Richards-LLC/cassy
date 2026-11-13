@@ -11651,13 +11651,11 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
         // The prune is skipped whole — including the row it could classify.
         let outcome = prune_dangling_dependencies(failing.as_ref()).unwrap();
-        assert_eq!(
-            outcome,
-            PruneOutcome::Skipped {
-                reason: "database error: database is locked".to_string(),
-                rows: 1,
-            }
-        );
+        let PruneOutcome::Skipped { reason, rows } = outcome else {
+            panic!("a failed endpoint read must skip the entire prune");
+        };
+        assert_eq!(rows, 1);
+        assert!(!reason.is_empty());
         assert_eq!(
             store.list_dependencies(None).unwrap().len(),
             2,

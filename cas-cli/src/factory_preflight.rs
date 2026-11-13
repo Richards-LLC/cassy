@@ -314,6 +314,8 @@ struct PreflightFacts {
     required_harnesses: HashSet<Harness>,
     capability_snapshot: cas_factory::CapabilitySnapshot,
     cloud_queue: CloudQueueFacts,
+    disk_percent: Option<u8>,
+    last_sweep: Option<crate::artifacts::retention::host::SweepReport>,
     runtime_elapsed_ms: u64,
 }
 
@@ -370,6 +372,9 @@ pub fn collect_factory_preflight(
         default_versions,
         required_harnesses: required_harnesses(project_root),
         cloud_queue: collect_cloud_queue_facts(cas_root),
+        disk_percent: crate::artifacts::retention::host::disk_percent(cas_root)
+            .into_iter().chain(crate::artifacts::retention::host::disk_percent(&crate::store::known_repos::host_cas_dir())).max(),
+        last_sweep: crate::artifacts::retention::host::last_report(),
         runtime_elapsed_ms: started.elapsed().as_millis() as u64,
     };
     build_report(facts)
@@ -402,6 +407,7 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
     let cas_mcp = classify_mcp(facts.mcp, &mut findings);
     let optional_upstreams = classify_proxy(facts.proxy, &mut findings);
     classify_cloud_queue(facts.cloud_queue, &mut findings);
+    classify_disk_pressure(facts.disk_percent, facts.last_sweep.as_ref(), &mut findings);
     let harnesses = classify_harnesses(
         facts.receipts,
         facts.default_versions,
@@ -440,6 +446,24 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
 
 /// Read persisted queue evidence without creating a database or reaching the
 /// cloud. Preflight remains a bounded, read-only local diagnostic.
+fn classify_disk_pressure(percent: Option<u8>, last: Option<&crate::artifacts::retention::host::SweepReport>, findings: &mut Vec<PreflightFinding>) {
+    if let Some(percent) = percent.filter(|percent| *percent > crate::artifacts::retention::host::PRESSURE_PERCENT) {
+        let evidence = last.map(|report| {
+            let preserved = report.rows.iter().filter(|row| row.disposition.starts_with("retained:") || row.disposition.starts_with("pending"))
+                .take(5).map(|row| format!("{}: {}", row.path.display(), row.disposition)).collect::<Vec<_>>().join("; ");
+            format!("last sweep at {} reclaimed_bytes={} incomplete={}; preserved: {}; errors: {}",
+                report.at, report.reclaimed_bytes(), report.incomplete, preserved, report.errors.join("; "))
+        }).unwrap_or_else(|| "No completed host sweep recorded".into());
+        findings.push(PreflightFinding {
+            code: "disk.pressure".into(), severity: PreflightSeverity::Warning,
+            component: "disk".into(),
+            message: format!("Disk usage {percent}% exceeds 80%; {evidence}"),
+            remediation: "Run cas factory gc cleanup; inspect retained paths before reclaiming additional space".into(),
+            last_evidence_at: last.and_then(|report| chrono::DateTime::from_timestamp(report.at, 0)).map(|at| at.to_rfc3339()),
+        });
+    }
+}
+
 fn collect_cloud_queue_facts(cas_root: &Path) -> CloudQueueFacts {
     let cloud = Config::load(cas_root)
         .unwrap_or_default()
@@ -1932,6 +1956,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn disk_pressure_threshold_and_last_sweep_cas_d740() {
+        for (percent, warning) in [(79, false), (80, false), (81, true), (84, true)] {
+            let mut facts = healthy_facts();
+            facts.disk_percent = Some(percent);
+            facts.last_sweep = Some(crate::artifacts::retention::host::SweepReport {
+                at: 1_000, applied: true, incomplete: true, ..Default::default()
+            });
+            let report = build_report(facts);
+            let finding = report.findings.iter().find(|finding| finding.code == "disk.pressure");
+            assert_eq!(finding.is_some(), warning);
+            if let Some(finding) = finding {
+                assert_eq!(finding.severity, PreflightSeverity::Warning);
+                assert!(finding.last_evidence_at.is_some());
+            }
+        }
+    }
+
     fn healthy_facts() -> PreflightFacts {
         let receipts = vec![
             receipt(Harness::ClaudeCode, "2.1.0"),
@@ -2007,6 +2049,8 @@ mod tests {
                 }
                 snapshot
             },
+            disk_percent: Some(40),
+            last_sweep: None,
             cloud_queue: CloudQueueFacts {
                 held_personal: 0,
                 team_only: false,

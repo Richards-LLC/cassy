@@ -101,7 +101,10 @@ pub(crate) fn automatic_due(last: Option<&SweepReport>, percent: u8, idle: bool,
 /// Called on the daemon's heartbeat as well as idle maintenance. The host lock
 /// serializes different projects; the persisted timestamp prevents scan storms.
 pub(crate) fn automatic(cas: &Path, idle: bool) {
-    let percent = disk_percent(cas).unwrap_or(0);
+    // Unit tests invoke maintenance with arbitrary roots; only explicit isolated
+    // sweep fixtures may delete data in the test process.
+    if cfg!(test) { return; }
+    let percent = disk_percent(cas).unwrap_or(0).max(disk_percent(&crate::store::known_repos::host_cas_dir()).unwrap_or(0));
     if automatic_due(last_report().as_ref(), percent, idle, Utc::now().timestamp()) {
         let _ = sweep(cas, true);
     }
@@ -111,12 +114,15 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
     let registry = crate::store::known_repos::open_host_known_repo_store()?;
     let mut roots: BTreeSet<_> = registry.list()?.into_iter().map(|repo| repo.path.join(".cas")).collect();
     roots.insert(cas.to_path_buf());
+    if let Some(global) = dirs::home_dir().map(|home| home.join(".cas"))
+        && global.join("cas.db").is_file() { roots.insert(global); }
     ensure!(roots.len() <= 256, "registered-project inventory exceeds 256 stores");
     let mut projects = Vec::new();
     let mut refs = References::default();
     let mut seen = BTreeSet::new();
     for root in roots {
         ensure!(Instant::now() < deadline, "reference inventory budget exhausted; nothing deleted");
+        no_symlink_ancestors(&root)?;
         let root = root.canonicalize().with_context(|| format!("unreadable registered store {}", root.display()))?;
         if !seen.insert(root.clone()) { continue; }
         ensure!(root.join("cas.db").is_file(), "registered store has no database: {}", root.display());
@@ -145,6 +151,32 @@ fn load_projects(cas: &Path, deadline: Instant) -> Result<(Vec<Project>, Referen
         let agents = cas_store::SqliteAgentStore::open(&root)?.list(None)?;
         projects.push(Project { root, tasks, agents, artifacts });
     }
+    // Close citations transitively: live task -> old task -> published alias ->
+    // another task. A terminal intermediary must not sever evidence protection.
+    let mut evidence = Vec::new();
+    for project in &projects {
+        let store = cas_store::SqliteArtifactStore::open(&project.root)?;
+        for task in &project.tasks {
+            let mut keys = vec![task.id.clone()];
+            for artifact in store.list_for_task(&task.id)? {
+                keys.push(artifact.id);
+                keys.extend([artifact.cloud_artifact_id, artifact.cloud_url, artifact.slack_permalink].into_iter().flatten());
+            }
+            evidence.push((keys, task));
+        }
+    }
+    let mut protected = BTreeSet::new();
+    loop {
+        ensure!(Instant::now() < deadline, "reference closure budget exhausted; nothing deleted");
+        let before = protected.len();
+        for (index, (keys, task)) in evidence.iter().enumerate() {
+            if !protected.contains(&index) && keys.iter().any(|key| refs.cites(key)) {
+                refs.add(task)?;
+                protected.insert(index);
+            }
+        }
+        if before == protected.len() { break; }
+    }
     Ok((projects, refs))
 }
 
@@ -158,6 +190,18 @@ struct Candidate {
 
 fn cited(candidate: &Candidate, refs: &References) -> bool {
     refs.cites(&candidate.path.to_string_lossy()) || candidate.keys.iter().any(|key| refs.cites(key))
+}
+
+fn no_symlink_ancestors(path: &Path) -> Result<()> {
+    ensure!(path.is_absolute() && !path.components().any(|part| matches!(part, std::path::Component::ParentDir)), "non-canonical retention path");
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => ensure!(!metadata.file_type().is_symlink(), "symlinked retention path: {}", ancestor.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn children(path: &Path) -> Result<Vec<PathBuf>> {
@@ -182,14 +226,14 @@ fn git(path: &Path, args: &[&str], deadline: Instant) -> Result<String> {
 
 struct Tree { bytes: u64, newest: SystemTime, repositories: Vec<PathBuf> }
 fn inspect_tree(path: &Path, deadline: Instant) -> Result<Tree> {
-    for ancestor in path.ancestors() {
-        ensure!(!fs::symlink_metadata(ancestor)?.file_type().is_symlink(), "symlinked retention path");
-    }
+    no_symlink_ancestors(path)?;
     let mut tree = Tree { bytes: 0, newest: SystemTime::UNIX_EPOCH, repositories: Vec::new() };
     let mut entries = walkdir::WalkDir::new(path).follow_links(false).into_iter();
     while let Some(entry) = entries.next() {
         ensure!(Instant::now() < deadline, "tree inventory budget exhausted");
         let entry = entry?;
+        // Nested links are retained rather than trusting an age from a target.
+        ensure!(!entry.file_type().is_symlink(), "symlink inside retention tree");
         let metadata = entry.metadata()?;
         tree.newest = tree.newest.max(metadata.modified()?);
         if entry.file_name() == ".git" {
@@ -206,14 +250,15 @@ fn inspect_tree(path: &Path, deadline: Instant) -> Result<Tree> {
 fn candidates(project: &Project, refs: &References, now: DateTime<Utc>, deadline: Instant) -> Result<Vec<(Candidate, Duration)>> {
     let mut found = Vec::new();
     let artifacts = cas_store::SqliteArtifactStore::open(&project.root)?;
-    for task in project.tasks.iter().filter(|task| task.status == cas_types::TaskStatus::Closed
+    for task in project.tasks.iter().filter(|task| task.is_terminal()
         && task.closed_at.is_some_and(|closed| now.signed_duration_since(closed).num_days() >= ARTIFACT_DAYS)) {
+        ensure!(Path::new(&task.id).components().count() == 1 && !task.id.starts_with('.'), "invalid task directory");
         let mut keys = vec![task.id.clone()];
         for artifact in artifacts.list_for_task(&task.id)? {
             keys.push(artifact.id);
             keys.extend([artifact.cloud_artifact_id, artifact.cloud_url, artifact.slack_permalink].into_iter().flatten());
         }
-        found.push((Candidate { project: project.root.clone(), category: "artifacts".into(), path: project.artifacts.join(&task.id), keys }, Duration::from_secs(14 * 86400)));
+        found.push((Candidate { project: project.root.clone(), category: "artifacts".into(), path: project.artifacts.join(&task.id), keys }, Duration::ZERO));
     }
     for category in ["scratch", "review-scratch"] {
         for path in children(&project.root.join(category))? {
@@ -244,12 +289,14 @@ fn candidates(project: &Project, refs: &References, now: DateTime<Utc>, deadline
     Ok(found)
 }
 
-fn drain(directory: &Path, candidate: &Candidate, refs: &References, lock: &File, deadline: Instant) -> Result<Row> {
+fn drain(directory: &Path, candidate: &Candidate, refs: &References, lock: &File, deadline: Instant, row: &mut Row) -> Result<()> {
+    no_symlink_ancestors(directory)?;
     let data = directory.join("data");
-    let mut row = Row { project: candidate.project.clone(), category: candidate.category.clone(), path: candidate.path.clone(), bytes: 0, reclaimed_bytes: 0, disposition: "reclaimed".into() };
+    ensure!(!fs::symlink_metadata(&data)?.file_type().is_symlink(), "symlinked trash data");
     ensure!(!cited(candidate, refs), "cited by live work or retained releases");
     ensure!(!crate::factory_target_cache::review_output_in_use(directory, lock), "live or unverifiable native process");
-    // Deletion itself is incremental: a large tree cannot monopolize the host.
+    // Each successful unlink is accounted even if a later unlink fails.
+    row.disposition = "reclaimed".into();
     for entry in walkdir::WalkDir::new(&data).follow_links(false).contents_first(true) {
         if Instant::now() >= deadline { row.disposition = "pending (budget exhausted)".into(); break; }
         let entry = entry?;
@@ -258,36 +305,71 @@ fn drain(directory: &Path, candidate: &Candidate, refs: &References, lock: &File
         else { fs::remove_file(entry.path())?; }
         row.reclaimed_bytes = row.reclaimed_bytes.saturating_add(bytes);
     }
-    row.bytes = row.reclaimed_bytes;
     if !data.exists() {
         fs::remove_file(directory.join("owner.json"))?;
         fs::remove_dir(directory)?;
     }
-    Ok(row)
+    Ok(())
+}
+
+fn validate_candidate(candidate: &Candidate, projects: &[Project]) -> Result<()> {
+    let project = projects.iter().find(|project| project.root == candidate.project).context("unregistered trash owner")?;
+    let valid = match candidate.category.as_str() {
+        "artifacts" => candidate.path.parent() == Some(project.artifacts.as_path()),
+        "scratch" | "review-scratch" | "worktrees" => candidate.path.parent() == Some(project.root.join(&candidate.category).as_path()),
+        "targets" => candidate.keys.first().is_some_and(|worker| {
+            Path::new(worker).components().count() == 1
+                && !worker.starts_with('.')
+                && crate::factory_scratch::worker_target_dir(&project.root.join("worktrees").join(worker)) == candidate.path
+        }),
+        _ => false,
+    };
+    ensure!(valid, "trash candidate escapes its category");
+    no_symlink_ancestors(&candidate.path)
 }
 
 pub(crate) fn sweep(cas: &Path, apply: bool) -> Result<SweepReport> {
-    let started = Instant::now();
-    let deadline = started + BUDGET;
+    sweep_until(cas, apply, Instant::now() + BUDGET)
+}
+
+pub(crate) fn preview(cas: &Path, deadline: Instant) -> Result<SweepReport> {
+    sweep_until(cas, false, deadline)
+}
+
+fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport> {
     let state = state_dir();
-    fs::create_dir_all(&state)?;
-    let lock = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(state.join("sweep.lock"))?;
-    lock.try_lock_exclusive().context("host retention already running")?;
+    no_symlink_ancestors(&state)?;
+    // Preview uses a temporary lease descriptor and never creates host state.
+    if apply { fs::create_dir_all(&state)?; }
+    no_symlink_ancestors(&state.join("sweep.lock"))?;
+    let lock = if apply {
+        let lock = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(state.join("sweep.lock"))?;
+        lock.try_lock_exclusive().context("host retention already running")?;
+        lock
+    } else { tempfile::tempfile()? };
     let mut report = SweepReport { at: Utc::now().timestamp(), applied: apply, used_percent: disk_percent(cas).unwrap_or(0), ..Default::default() };
     let (projects, refs) = match load_projects(cas, deadline) {
         Ok(snapshot) => snapshot,
-        Err(error) => { report.errors.push(error.to_string()); report.incomplete = true; persist(&report)?; return Ok(report); }
+        Err(error) => { report.errors.push(error.to_string()); report.incomplete = true; if apply { persist(&report)?; } return Ok(report); }
     };
     let trash = state.join("trash");
     if apply {
         for directory in children(&trash)? {
             if Instant::now() >= deadline { report.incomplete = true; break; }
-            let attempt = (|| -> Result<Row> {
-                let candidate: Candidate = serde_json::from_slice(&fs::read(directory.join("owner.json"))?)?;
-                ensure!(projects.iter().any(|project| project.root == candidate.project), "unregistered trash owner");
-                drain(&directory, &candidate, &refs, &lock, deadline)
+            let attempt = (|| -> Result<()> {
+                no_symlink_ancestors(&directory)?;
+                let marker = directory.join("owner.json");
+                no_symlink_ancestors(&marker)?;
+                ensure!(fs::metadata(&marker)?.len() <= 64 * 1024, "oversized trash marker");
+                let candidate: Candidate = serde_json::from_slice(&fs::read(marker)?)?;
+                validate_candidate(&candidate, &projects)?;
+                let mut row = Row { project: candidate.project.clone(), category: candidate.category.clone(), path: candidate.path.clone(), bytes: 0, reclaimed_bytes: 0, disposition: String::new() };
+                if let Err(error) = drain(&directory, &candidate, &refs, &lock, deadline, &mut row) { row.disposition = format!("retained: {error}"); }
+                row.bytes = row.reclaimed_bytes;
+                report.rows.push(row);
+                Ok(())
             })();
-            match attempt { Ok(row) => report.rows.push(row), Err(error) => report.errors.push(format!("{}: {error}", directory.display())) }
+            if let Err(error) = attempt { report.errors.push(format!("{}: {error}", directory.display())); }
         }
     }
     for project in &projects {
@@ -301,13 +383,15 @@ pub(crate) fn sweep(cas: &Path, apply: bool) -> Result<SweepReport> {
             if !candidate.path.exists() { continue; }
             let mut row = Row { project: candidate.project.clone(), category: candidate.category.clone(), path: candidate.path.clone(), bytes: 0, reclaimed_bytes: 0, disposition: String::new() };
             let attempt = (|| -> Result<()> {
+                validate_candidate(&candidate, &projects)?;
                 ensure!(!cited(&candidate, &refs), "cited by live work or retained releases");
-                let tree = inspect_tree(&candidate.path, deadline.min(Instant::now() + Duration::from_millis(500)))?;
+                let tree = inspect_tree(&candidate.path, deadline)?;
                 row.bytes = tree.bytes;
                 ensure!(SystemTime::now().duration_since(tree.newest).unwrap_or_default() >= age, "inside retention window");
                 ensure!(!crate::factory_target_cache::review_output_in_use(&candidate.path, &lock), "live or unverifiable native process");
                 if apply {
                     let directory = trash.join(uuid::Uuid::new_v4().to_string());
+                    no_symlink_ancestors(&directory)?;
                     fs::create_dir_all(&directory)?;
                     let mut marker = File::create(directory.join("owner.json"))?;
                     serde_json::to_writer(&mut marker, &candidate)?;
@@ -319,9 +403,7 @@ pub(crate) fn sweep(cas: &Path, apply: bool) -> Result<SweepReport> {
                         let _ = git(project.root.parent().context("project parent")?,
                             &["worktree", "remove", "--force", repo.to_str().context("non-UTF-8 checkout")?], deadline);
                     }
-                    let deleted = drain(&directory, &candidate, &refs, &lock, deadline)?;
-                    row.reclaimed_bytes = deleted.reclaimed_bytes;
-                    row.disposition = deleted.disposition;
+                    drain(&directory, &candidate, &refs, &lock, deadline, &mut row)?;
                 } else { row.disposition = "reclaimable".into(); }
                 Ok(())
             })();
@@ -330,13 +412,15 @@ pub(crate) fn sweep(cas: &Path, apply: bool) -> Result<SweepReport> {
         }
     }
     report.incomplete |= Instant::now() >= deadline;
-    persist(&report)?;
+    if apply { persist(&report)?; }
     Ok(report)
 }
 
 fn persist(report: &SweepReport) -> Result<()> {
     let state = state_dir();
     let bytes = serde_json::to_vec(report)?;
+    no_symlink_ancestors(&state.join("sweeps.jsonl"))?;
+    no_symlink_ancestors(&state.join("last-sweep.json"))?;
     let mut log = fs::OpenOptions::new().create(true).append(true).open(state.join("sweeps.jsonl"))?;
     log.write_all(&bytes)?;
     log.write_all(b"\n")?;

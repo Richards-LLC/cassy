@@ -1301,6 +1301,11 @@ impl EmbeddedDaemon {
                     // both-binaries data read as post-fix.
                     self.touch_binary_epoch();
                     self.send_agent_heartbeat().await;
+                    let root = self.config.cas_root.clone();
+                    let idle = self.activity.is_idle();
+                    tokio::task::spawn_blocking(move || {
+                        crate::artifacts::retention::host::automatic(&root, idle);
+                    });
                 }
 
                 // Code indexing - idle-PREFERRED, with a max-staleness override.

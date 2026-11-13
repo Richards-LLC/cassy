@@ -32,7 +32,7 @@ pub(super) fn execute(
             "force": force,
             // dry_run gates only the stricter cache/process/journey tiers;
             // earlier metadata cleanup and force-only tiers keep their gates.
-            "dry_run": *dry_run || !*no_dry_run,
+            "dry_run": if *dry_run { Some(true) } else if *no_dry_run { Some(false) } else { None },
         }),
     };
     let request =
@@ -152,6 +152,70 @@ mod tests {
         let mut live = cas_types::Task::new("cas-live".into(), "Keep published proof".into());
         live.notes = "art-one-cited art-two-cited".into();
         crate::store::open_task_store_local(&roots[1]).unwrap().add(&live).unwrap();
+        // Dead owner targets are disposable; unpushed source and live/cited
+        // worktrees remain protected through the actual Git/reference probes.
+        let git = |path: &Path, args: &[&str]| {
+            let result = std::process::Command::new("git").arg("-C").arg(path)
+                .args(args).env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE").output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        };
+        let mut source_kept = Vec::new();
+        for name in ["dead", "unpushed", "live", "cited"] {
+            let path = roots[0].join("worktrees").join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            git(&path, &["init", "-b", &format!("factory/{name}")]);
+            std::fs::write(path.join(".gitignore"), "target/\n").unwrap();
+            std::fs::write(path.join("source"), "committed").unwrap();
+            git(&path, &["add", "."]);
+            git(&path, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "fixture"]);
+            git(&path, &["update-ref", &format!("refs/remotes/origin/factory/{name}"), "HEAD"]);
+            if name == "unpushed" {
+                std::fs::write(path.join("source"), "local commit").unwrap();
+                git(&path, &["add", "."]);
+                git(&path, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "unpushed"]);
+            }
+            let target = crate::factory_scratch::worker_target_dir(&path);
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("object"), "disposable").unwrap();
+            if matches!(name, "live" | "cited") {
+                let mut task = cas_types::Task::new(format!("cas-protect-{name}"), "Fixture protection".into());
+                task.notes = format!("factory/{name}");
+                crate::store::open_task_store_local(&roots[1]).unwrap().add(&task).unwrap();
+                source_kept.push(path);
+                kept.push(target);
+            } else {
+                expired.push(target);
+                if name == "dead" { expired.push(path); } else { source_kept.push(path); }
+            }
+        }
+        // Cross-project live citation through a terminal task must be transitive.
+        let mut intermediate = cas_types::Task::new("cas-intermediary".into(), "Terminal reference".into());
+        intermediate.status = cas_types::TaskStatus::Closed;
+        intermediate.notes = "art-one-cited art-two-cited".into();
+        crate::store::open_task_store_local(&roots[0]).unwrap().add(&intermediate).unwrap();
+        let store = crate::store::open_task_store_local(&roots[1]).unwrap();
+        live.notes = "cas-intermediary".into();
+        store.update(&live).unwrap();
+        for category in ["scratch", "review-scratch"] {
+            for (name, old, cited) in [("expired", true, false), ("fresh", false, false), ("cited", true, true)] {
+                let path = roots[0].join(category).join(name);
+                std::fs::create_dir_all(&path).unwrap();
+                std::fs::write(path.join("proof.txt"), "fixture proof").unwrap();
+                if old {
+                    let time = std::time::SystemTime::now() - Duration::from_secs(2 * 86400);
+                    for item in [path.join("proof.txt"), path.clone()] {
+                        std::fs::File::open(item).unwrap().set_times(std::fs::FileTimes::new().set_modified(time)).unwrap();
+                    }
+                }
+                if cited {
+                    let mut task = cas_types::Task::new(format!("cas-{category}-ref"), "Scratch reference".into());
+                    task.notes = path.to_string_lossy().into_owned();
+                    store.add(&task).unwrap();
+                }
+                if old && !cited { expired.push(path); } else { kept.push(path); }
+            }
+        }
         env.set_current_dir(roots[0].parent().unwrap());
         env.set("CAS_ROOT", &roots[0]);
         let run = |extra: &[&str]| {
@@ -162,11 +226,20 @@ mod tests {
             let Some(super::super::FactoryCommands::Gc { command }) = &factory.command else { unreachable!() };
             execute(command, &cli, Some(&roots[0])).unwrap();
         };
+        run(&["--dry-run"]);
+        assert!(expired.iter().all(|path| path.exists()));
         run(&[]);
+        let report = crate::artifacts::retention::host::last_report().unwrap();
+        assert!(report.reclaimed_bytes() > 0);
+        assert!(!report.incomplete, "{:?}", report);
+        for category in ["artifacts", "worktrees", "targets", "scratch", "review-scratch"] {
+            assert!(report.rows.iter().any(|row| row.category == category && row.reclaimed_bytes > 0), "{category}: {report:?}");
+        }
+        assert!(source_kept.iter().all(|path| path.join("source").exists()));
         let reclaimed = expired.iter().filter(|path| !path.exists()).count() * 13;
         eprintln!("fixture: reclaimed_bytes={reclaimed}");
         assert!(expired.iter().all(|path| !path.exists()));
-        assert!(kept.iter().all(|path| path.join("proof.txt").exists()));
+        assert!(kept.iter().all(|path| path.exists()), "{kept:?}");
     }
 
     #[test]

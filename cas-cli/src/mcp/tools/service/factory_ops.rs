@@ -7548,21 +7548,6 @@ impl CasService {
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
         let trace_archive =
             cas_store::trace_archive_stats(&self.inner.cas_root).unwrap_or_default();
-        let closed_task_ids = crate::store::open_task_store(&self.inner.cas_root)
-            .ok()
-            .and_then(|store| store.list(Some(cas_types::TaskStatus::Closed)).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|task| task.id)
-            .collect();
-        let mut artifact_report = factory_artifact_inventory(
-            crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
-                config.factory().artifacts_root.as_deref(),
-            )),
-            &closed_task_ids,
-        );
-        artifact_report.include_review_roots_until(Some(report_deadline.min(
-            std::time::Instant::now() + std::time::Duration::from_millis(250))));
         let target_cache_report = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
             let live_roots = live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
@@ -7654,7 +7639,10 @@ impl CasService {
             &self.inner.cas_root, target_cache_report.as_ref().ok(), Some(report_deadline)));
         host.push_str(&crate::factory_review_scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
         host.push_str(&crate::factory_review_scratch::unmanaged_large_until(&self.inner.cas_root, Some(report_deadline)));
-        host.push_str(&artifact_report.render());
+        match crate::artifacts::retention::host::preview(&self.inner.cas_root, report_deadline) {
+            Ok(report) => host.push_str(&report.render()),
+            Err(error) => host.push_str(&format!("Host retention inventory unavailable: {error}\n")),
+        }
         let missing_gitdirs = missing_gitdir_checkouts(&self.inner.cas_root);
         if !missing_gitdirs.is_empty() {
             host.push_str("\nReclaimable checkouts with missing gitdir (review WIP before removal):\n");
@@ -8197,6 +8185,9 @@ impl CasService {
             return Ok(Self::success(render_gc_report_response(&output, view)));
         }
 
+        let host_retention = crate::artifacts::retention::host::sweep(
+            &self.inner.cas_root, req.dry_run != Some(true));
+
         let prompt_expiry_age = req.older_than_secs;
         let stale_after = prompt_expiry_age.unwrap_or(120);
         let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
@@ -8387,77 +8378,10 @@ impl CasService {
         );
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
         let artifact_authorized = target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
-        let tasks = crate::store::open_task_store(&self.inner.cas_root)
-            .map_err(|error| error.to_string())
-            .and_then(|store| {
-                store
-                    .list(if artifact_authorized {
-                        None
-                    } else {
-                        Some(cas_types::TaskStatus::Closed)
-                    })
-                    .map_err(|error| error.to_string())
-            });
-        let closed_task_ids = tasks
-            .as_ref()
-            .map(|tasks| {
-                tasks
-                    .iter()
-                    .filter(|task| task.status == cas_types::TaskStatus::Closed)
-                    .map(|task| task.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let artifact_root = crate::config::project_factory_artifacts_root(
-            &self.inner.cas_root,
-            &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
-        );
-        let trace_cleanup = tasks
-            .as_ref()
-            .map_err(|error| error.clone())
-            .and_then(|tasks| {
-                factory_trace_cleanup(
-                    &artifact_root,
-                    tasks,
-                    target_cache_mutation_authorized,
-                    chrono::Utc::now(),
-                )
-                .map_err(|error| error.to_string())
-            });
-        let candidate_cleanup = tasks
-            .as_ref()
-            .map_err(|error| error.clone())
-            .and_then(|tasks| factory_candidate_binary_cleanup(
-                &artifact_root, tasks, artifact_authorized, chrono::Utc::now(),
-            ).map_err(|error| error.to_string()));
-        // Artifact deletion is separate from process/cache cleanup. Unknown
-        // close dates or reference evidence must preserve durable receipts.
-        let eligible = if artifact_authorized {
-            tasks
-                .as_ref()
-                .map_err(|error| error.clone())
-                .and_then(|tasks| {
-                    crate::artifacts::retention::eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now(), crate::artifacts::retention::MIN_RETENTION_DAYS)
-                })
-        } else {
-            Ok(Default::default())
-        };
-        let artifact_cleanup = match eligible {
-            Ok(eligible) => factory_artifact_cleanup(
-                &artifact_root,
-                &closed_task_ids,
-                artifact_authorized,
-                &eligible,
-            ),
-            Err(error) => {
-                let mut inventory = factory_artifact_inventory(artifact_root, &closed_task_ids);
-                inventory.include_review_roots();
-                inventory.error = Some(format!(
-                    "retention/reference evidence unavailable; preserved all artifacts: {error}"
-                ));
-                inventory
-            }
-        };
+        let trace_cleanup: Result<(usize, u64), String> = Ok((0, 0));
+        let candidate_cleanup: Result<(usize, u64), String> = Ok((0, 0));
+        // Whole-directory retention is host-wide and reference-aware. Do not
+        // inventory every artifact tree again through the legacy local sweep.
         let target_cache_result = cleanup_target_cache_report(
             &self.inner.cas_root, &config, agent_store.as_ref(), worktree_store.as_ref(),
             &live_target_cache_roots, target_cache_mutation_authorized, None,
@@ -8471,7 +8395,10 @@ impl CasService {
             orphan_process_summary.skipped,
         );
         output.push('\n');
-        output.push_str(&artifact_cleanup.render());
+        match host_retention {
+            Ok(report) => output.push_str(&report.render()),
+            Err(error) => output.push_str(&format!("Host retention refused: {error}\n")),
+        }
         match candidate_cleanup {
             Ok((files, bytes)) => output.push_str(&format!(
                 "\nCandidate binaries: removed_files={files} reclaimed_bytes={bytes} (closed >=48h; ledger hash and version recorded; artifacts=true force=true dry_run=false required)\n"

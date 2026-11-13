@@ -1293,13 +1293,13 @@ pub enum FactoryGcCommands {
     /// Target-cache reclamation, orphan-process kills, and journey-recording
     /// cleanup require both --force and --no-dry-run.
     ///
-    /// Artifact cleanup is available only through the MCP gc_cleanup action
-    /// with artifacts=true.
+    /// Expired host-wide artifacts, retired checkouts and scratch are swept
+    /// automatically. --dry-run previews that retention without deleting files.
     Cleanup {
         /// Also reap orphan worker process groups and prune terminal prompts.
         #[arg(long, short = 'f')]
         force: bool,
-        /// Keep cache, orphan-process, and journey cleanup in preview mode.
+        /// Preview host retention, cache, orphan-process, and journey cleanup.
         #[arg(long, conflicts_with = "no_dry_run")]
         dry_run: bool,
         /// Authorize cache, orphan-process, and journey cleanup with --force.

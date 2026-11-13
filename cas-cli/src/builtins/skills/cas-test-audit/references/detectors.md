@@ -1,45 +1,26 @@
-# Detector recipes
+# Detector scope and evidence
 
-Each recipe is a starting grep or tool, not a verdict. Hand-check 10 flagged rows and record `held / flagged`. Reference-audit precision is shown where measured; re-measure on the new project before trusting it.
+Run `scripts/audit.py` once for all classes; it is a portable lexical inventory, not a compiler or a deletion verdict. `pattern` is the stable machine identifier. Every row carries file/line, test or helper scope, evidence, confidence and a proposed fix. Comments, strings and Rust raw strings are masked before code matching. Native test attributes, test modules, conventional test files and JS test callbacks define scope; production code outside them is excluded.
 
-## Contents
+| Pattern / class | Signal | Review and fix |
+| --- | --- | --- |
+| fixed-sleep / flake-prone, slow | Rust thread/Tokio sleep, JS setTimeout, Playwright waitForTimeout | Fixed readiness guesses wait on the event. Recognized fake timers and event-bounded predicate polling are excluded; aliases need review. Runtime saving is unmeasured until CI timing proves it. |
+| instant-port / flake-prone | One connection-must-fail assertion | Observe the server's shutdown/ready event; a refused attempt alone cannot establish lifecycle completion. |
+| instant-teardown / flake-prone | Kill/stop/close followed by a one-shot process/file assertion without a wait/join | Await the exact completion or cleanup event. Synchronous owned-file operations are not teardown races. |
+| tight-deadline / flake-prone | Small real-time upper bounds or event timeouts, including elapsed assertions | Review the awaited event's own budget. Test timing contracts with controlled clocks; runner timeouts are safety bounds, not event assertions. Lower bounds are not upper deadlines. |
+| shared-port, shared-path / flake-prone | Literal/global fixed listener ports; writes to shared temp paths | Use port zero with retained listener ownership or per-test temporary directories. A fixture string/pure path builder is not shared I/O. |
+| shared-state, order-dependence / flake-prone | Unguarded process environment, static mut, or mutation of a binding shared by test callbacks | Reset with a full-duration guard or allocate state per test. Helpers' local variables and existing reset hooks are not global state. |
+| unseeded-random / flake-prone | Unseeded rand/Math.random/random inputs | Inspect whether the expectation depends on the draw. Seed varying test data; random cryptographic challenge round-trips may be invariant and are not proven flakes. |
+| disabled-test / dead candidate | ignore/skip/todo | Check runner registration, subprocess helper callers and retirement history. Disabled does not mean dead. |
+| duplicate-body / duplicate candidate | Identical normalized bodies within one file | Quote both assertion paths and imports; check differing enclosing fixtures before merging. |
+| wording-assertion / wording-pinned | Human wording asserted on output/error channels | Check stable codes or behavior instead. Assertion diagnostic messages, exact caller payloads and protocol data are not wording preferences. |
+| style-assertion / style-pinned | CSS/source appearance assertions | Keep DOM/behavior checks; visual QA owns appearance. Source metadata or exact preserved files may be data contracts. |
+| no-assertion / restates-implementation candidate | Trivial test body with no assertion or observable call | Trace helper/exception assertions before deletion. Compiler/caller evidence still owns dead or superseded classifications. |
 
-- Rust
-- TypeScript and JavaScript
-- Any language
-- Screenshot and e2e
+The scanner does not expand macros, resolve aliases/imports, parse JS template interpolation or prove production reachability. Its signal is deliberately a **candidate**. Hand review owns semantic distinctions and records false negatives as well as false positives. Superseded tests need the actual retiring commit; an automated skip flag cannot supply it.
 
-## Rust
+## Historical pass
 
-| pattern | recipe | reference-audit precision |
-|---|---|---|
-| dead code (production never calls it) | capped `cargo check --lib` with `dead_code` warnings; then `git grep -w <item>` split into test and production hits | rustc "no production caller": 105/106. The grep split alone: 7/55 real dead-code tests (the rest were wrappers whose tests must stay) |
-| superseded | `git log -S<symbol>` on the item; cite the commit that removed the last production caller or marked it "kept for compatibility" | per-row, cite the commit |
-| restates implementation: logic copy | the test body contains the same `split`, `trim` or loop as the function and never calls it | 10/23 copied logic |
-| const equals literal, `default_*()`, round trip | `assert_eq!(CONST, literal)`, `assert_eq!(default_x(), literal)`, serialize then deserialize | 12/19, 14/15, 25/35 |
-| snapshot, enum table, source read | `insta`, tables of every variant, `include_str!` of a source file | 0/84, 2/73, 3/58: noisy |
-| real sleep | `thread::sleep`, `tokio::time::sleep` in tests; exclude sleeps inside a poll loop with a deadline | 231 tests flagged, 135 sleeps were inside poll loops |
-| per-test rebuilt setup | the same fixture built in every test of a module; look for a shared helper | find by timing: slowest 5% of tests |
-| assertion-free | a test whose only checks are `is_ok()`, `is_err()` or none | high when the body has no other assertion |
+The same invocation reads thirty-day GitHub run and issue metadata without rerunning jobs or changing issues. Grouping uses workflow/event and the identical SHA, or a locally measurable identical Git tree. Aggregate status flips remain low confidence until a named native failure and executed pass are inspected. Reruns, queue ejections and issue reports each retain their own evidence and uncertainty.
 
-## TypeScript and JavaScript
-
-| pattern | recipe | precision |
-|---|---|---|
-| unreferenced module | `npx fallow dead-code` (compare `--production` against default); confirm with a same-file reference check | 5/7 on hub-web |
-| CSS or source-text assertion | `expect(` on a variable read from a CSS, `main.ts` or HTML file; exclude `querySelector` and other DOM queries | 8/10 with the DOM exclusion, 5/16 without |
-| real timers | `setTimeout`, `sleep`, a `waitFor` with a large timeout and no fake-timer setup | measure by file time |
-| dynamic import in a test body | `await import(` inside `it(` or `test(` | check each: some are mock isolation |
-| unbounded lazy regex | `.*?` or `[\s\S]*?` with no length bound in an assertion over a large string | check each |
-| token-name contract | assertions that a CSS variable name exists | style pinning: same ruling |
-| subset claimed as full suite | a delivery note says "full suite" but the command had a path or `-t` filter, or the count differs from the runner's total | per-delivery check candidate |
-
-## Any language
-
-- **Duplicate:** map assertion to assertion within the same module, then across layers (integration tests against unit tests, end-to-end tests against component tests). Quote both sides. A file imported by another test is not deleted.
-- **Self-contained test:** a test file that imports nothing from the project and checks its own data (for example raw SQL on its own schema).
-- **Flaky:** a test that failed then passed on retry in the CI retry data.
-
-## Screenshot and e2e
-
-Flag an e2e test that takes screenshots or dumps the DOM and has no `expect` of its own (reference audit: 1/3). End-to-end tests that finish before the critical path ends do not shorten the run; say so in the ledger.
+Supplement the bounded metadata with native artifacts, current skip/exclusion configuration and Cassy incident notes using `--history-evidence`. Include source URLs/paths, SHA/tree, run attempt, native identity, outcome and confidence. A cap, absent credentials or missing logs is missing evidence, never zero historical flakes. Only original native evidence establishes a high-confidence historical flake; history-reported and repaired/deleted cases remain separately labelled.

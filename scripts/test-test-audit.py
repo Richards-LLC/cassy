@@ -40,10 +40,19 @@ class Audit(unittest.TestCase):
                     matches = [row for row in findings if row['pattern'] == pattern]
                     self.assertTrue(matches, findings)
                     self.assertTrue(all(row['line'] >= 1 and row['fix'] for row in matches))
+        for path, source in {
+            'tests/order.rs': 'static mut ORDER: u32 = 0; #[test] fn one() { unsafe { ORDER += 1; } assert!(true); }',
+            'order.test.ts': 'let order = 0; test("one", () => { order++; expect(run()).toBe(1); }); test("two", () => { order++; expect(run()).toBe(2); });',
+        }.items():
+            with self.subTest(pattern='order-dependence', path=path):
+                self.assertTrue(any(row['pattern'] == 'order-dependence' for row in self.scan({path: source})['findings']))
         clean = {
             'case.rs': '''fn production_delay() { thread::sleep(Duration::from_secs(1)); }
 #[test] fn waits_for_event() { let tmp = tempfile::tempdir().unwrap(); listener.bind(("127.0.0.1",0)); child.kill().unwrap(); child.wait().unwrap(); assert!(!path.exists()); assert_eq!(error.code(), "scope_denied"); }
+#[test] fn diagnostics() { assert!(reason.is_empty(), "This explains a failure"); assert_eq!(stdout, b"caller payload bytes"); }
 #[test] fn bounded_poll() { while !ready() && Instant::now() < deadline { thread::sleep(Duration::from_millis(10)); } assert!(ready()); }''',
+            'production.ts': 'export function production(value) { return /ready/.test(value); }',
+            'destructured.test.ts': 'test("one", async ({page}) => { await page.click("#one"); expect(run()).toBe(1); }); test("two", async ({page}) => { await page.click("#two"); expect(run()).toBe(2); });',
             'case.test.ts': '''test("virtual time", async () => { vi.useFakeTimers(); const note = "await page.waitForTimeout(100)"; setTimeout(done, 200); vi.advanceTimersByTime(200); expect(error.code).toBe("scope_denied"); });
 // page.waitForTimeout(99)
 ''',
@@ -63,8 +72,28 @@ test("slow", async () => { await page.waitForTimeout(2000); });''',
         self.assertTrue({'dead', 'duplicate', 'wording-pinned', 'style-pinned', 'slow', 'restates-implementation'} <= classes)
         self.assertEqual(sum(report['counts'].values()), len(report['findings']))
 
+    def test_history_distinguishes_same_source_from_other_shas_and_missing_proof(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('audit_history', SCRIPT.with_name('history.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        runs = [
+            {'head_sha': 'a'*40, 'workflow_id': 1, 'event': 'merge_group', 'conclusion': 'failure', 'run_attempt': 1, 'html_url': 'run/1'},
+            {'head_sha': 'a'*40, 'workflow_id': 1, 'event': 'merge_group', 'conclusion': 'success', 'run_attempt': 2, 'html_url': 'run/2'},
+            {'head_sha': 'b'*40, 'workflow_id': 1, 'event': 'push', 'conclusion': 'failure', 'html_url': 'run/3'},
+            {'head_sha': 'c'*40, 'workflow_id': 1, 'event': 'push', 'conclusion': 'success', 'html_url': 'run/4'},
+        ]
+        issue = {'number': 1, 'title': 'flaky native', 'url': 'issue/1', 'state': 'OPEN', 'body': '<!-- cas-queue-flake: {"test":{"name":"native"}} -->'}
+        rows = module.analyze(runs, [issue, issue])
+        self.assertEqual(sum(row['pattern']=='same-source-workflow-flip' for row in rows), 1)
+        self.assertEqual(sum(row['pattern']=='historical-issue' for row in rows), 1)
+        self.assertEqual(sum(row['pattern']=='historical-rerun' for row in rows), 1)
+        self.assertTrue(all(row['confidence'] != 'high' for row in rows))
+        same_tree = module.analyze(runs, [], lambda sha: 'same-tree' if sha in {'b'*40,'c'*40} else sha)
+        self.assertEqual(sum(row['pattern']=='same-source-workflow-flip' for row in same_tree), 2)
+
     def test_deleted_serve_teardown_incident_from_dc43f83d(self):
-        source = subprocess.check_output(['git', 'show', 'dc43f83d:cas-cli/tests/hub_clean_home_test.rs'], cwd=REPO, text=True)
+        source = (REPO / 'scripts/fixtures/test-audit/serve-teardown.rs.txt').read_text()
         report = self.scan({'tests/hub_clean_home_test.rs': source})
         incident = [row for row in report['findings'] if row['test'] == 'clean_home_tailscale_stop_reports_removal_after_serve_exit_teardown' and row['class'] == 'flake-prone']
         self.assertTrue(incident, report['counts'])

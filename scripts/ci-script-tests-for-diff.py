@@ -180,6 +180,9 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         )) or (test == "scripts/test-walk-kit.mjs" and (
             "cas-cli/src/builtins/skills/cas-qa-craft/scripts/walk-kit.mjs" in changed
         ))
+        boundary_related = boundary_related or (test == "scripts/test-test-audit.py" and any(
+            path.startswith(("cas-cli/src/builtins/skills/cas-test-audit/", "scripts/fixtures/test-audit/"))
+            for path in changed))
         provisioned_related = test in PROVISIONED_INPUTS and any(
             fnmatchcase(path, pattern) for path in changed
             for pattern in (*PROVISIONED_INPUTS[test], *COHORT_INPUTS))

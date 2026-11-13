@@ -931,6 +931,8 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
+    BuiltinFile { path: "skills/cas-test-audit/scripts/audit.py", content: include_str!("builtins/skills/cas-test-audit/scripts/audit.py") },
+    BuiltinFile { path: "skills/cas-test-audit/scripts/history.py", content: include_str!("builtins/skills/cas-test-audit/scripts/history.py") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -1672,6 +1674,8 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
+    BuiltinFile { path: "skills/cas-test-audit/scripts/audit.py", content: include_str!("builtins/skills/cas-test-audit/scripts/audit.py") },
+    BuiltinFile { path: "skills/cas-test-audit/scripts/history.py", content: include_str!("builtins/skills/cas-test-audit/scripts/history.py") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
@@ -2419,6 +2423,8 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-test-audit/references/detectors.md", content: include_str!("builtins/skills/cas-test-audit/references/detectors.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ci-timing.md", content: include_str!("builtins/skills/cas-test-audit/references/ci-timing.md") },
     BuiltinFile { path: "skills/cas-test-audit/references/ledger.md", content: include_str!("builtins/skills/cas-test-audit/references/ledger.md") },
+    BuiltinFile { path: "skills/cas-test-audit/scripts/audit.py", content: include_str!("builtins/skills/cas-test-audit/scripts/audit.py") },
+    BuiltinFile { path: "skills/cas-test-audit/scripts/history.py", content: include_str!("builtins/skills/cas-test-audit/scripts/history.py") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -6994,6 +7000,12 @@ This is the body content."#;
             ("codex", CODEX_BUILTIN_SKILLS),
             ("grok", GROK_BUILTIN_SKILLS),
         ] {
+            for (path, content) in [
+                ("skills/cas-test-audit/scripts/audit.py", include_str!("builtins/skills/cas-test-audit/scripts/audit.py")),
+                ("skills/cas-test-audit/scripts/history.py", include_str!("builtins/skills/cas-test-audit/scripts/history.py")),
+            ] {
+                assert_eq!(catalog.iter().find(|file| file.path == path).map(|file| file.content), Some(content), "{label}: {path}");
+            }
             for builtin in catalog {
                 let Some((_, child)) = skill_dir_child(builtin.path) else {
                     continue;

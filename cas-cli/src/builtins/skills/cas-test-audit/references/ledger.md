@@ -29,6 +29,12 @@ Measured and projected stay in separate columns. End with totals if every propos
 - `covering test` names the test that still protects the behaviour, or `none needed: dead` / `none needed: superseded`.
 - Low-confidence and `noisy, not proposed` rows are listed but carry no deletion.
 
+## Flake history and detector precision
+
+Keep every historical observation, including tests now repaired or deleted. List native test identity, SHA/tree, attempts, fail/pass execution, run/issue URL or Cassy note, current disposition and uncertainty. Separate a verified named same-source flip from an aggregate workflow flip, ejection, issue report or skip-list signal. State the thirty-day window, collection caps and unavailable sources.
+
+Record held/sample for up to ten rows per detector. Keep noisy and low-confidence inventory separate from approved fix/delete proposals. Publish both machine-readable findings and the hand review. Counts are finding rows, not unique flaky tests or measured failure rates. Report `unmeasured` when CI cost was not collected; never infer a saving from sleep literals.
+
 ## Side findings
 
 Anything real found along the way (tests that cannot fail, a possible network dependency, unimported files) that is not a cut.

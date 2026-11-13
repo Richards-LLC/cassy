@@ -115,6 +115,33 @@ fn cli_round_trip() {
             code = source.replace('ASSERTION', extra + '\n    ' + assertion)
             self.assertTrue(shape.message_assertions(code, 'src/cli.rs'))
 
+    def test_escaped_python_caller_payload_cas_8447(self):
+        source = r"""def test_entry(self):
+    name = 'Bank *operating* | R&D'
+    self.chart['accounts'][2]['Name'] = name
+    self.model['entries'][1]['lines'][1]['account'] = name
+    self.save('chart.json', self.chart)
+    markdown = self.run_cli(fmt='markdown')
+    self.assertIn(r'Bank \*operating\* \| R&amp;D', markdown.stdout)
+"""
+        cases = [(source, False),
+                 (source.replace('    self.assertIn(', "    label = 'é'; self.assertIn("), False),
+                 (source + "\ndef test_unrelated(self):\n" + source.splitlines()[-1] + '\n', True),
+                 (source.replace(r'Bank \*operating\* \| R&amp;D', 'Bank *operating* | R&amp;D'), False),
+                 (source.replace(r'Bank \*operating\* \| R&amp;D', r'Unrelated \*account\* \| R&amp;D'), True),
+                 (source.replace("    self.chart['accounts'][2]['Name'] = name\n", '').replace(
+                     "    self.model['entries'][1]['lines'][1]['account'] = name\n", ''), True),
+                 (source.replace('    markdown =', "    name = 'Changed account'\n    markdown ="), True),
+                 (source.replace('self.assertIn(', 'self.assertNotIn('), True),
+                 (source.replace('    self.assertIn(', "    # pin: escaped wording\n    self.assertIn(").replace(
+                     r'Bank \*operating\* \| R&amp;D', 'The entry must preserve all wording in this generated report.'), True)]
+        for code, rejected in cases:
+            line = max(i for i, text in enumerate(code.splitlines(), 1) if 'self.assert' in text)
+            for changed in [None, {line}]:
+                with self.subTest(code=code, changed=changed):
+                    self.assertEqual(bool(shape.message_assertions(code, 'tests/test_entry.py', changed)), rejected)
+                    self.assertEqual(bool(shape.lint_text_pins(code, 'tests/test_entry.py', changed_lines=changed)), rejected)
+
     def hits(self, code, path='src/lib.rs'):
         return shape.lint(code, path)
 
@@ -144,6 +171,42 @@ fn cli_round_trip() {
 
     def test_source_read_and_position_check(self):
         self.assertTrue(self.hits('#[test] fn t() { let p = root.join("lib.rs"); let s = fs::read_to_string(&p).unwrap(); assert!(s.find("a") < s.find("b")); }'))
+
+    def test_fixture_source_mutation_cas_81b7(self):
+        # cas-28c5 at 094294333a: editing compiled inputs of a disposable repo
+        # drives Git/MCP behavior; no assertion inspects the fixture's text.
+        source = r'''#[tokio::test]
+async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    let lib = repo.join("crates/widget/src/lib.rs");
+    let body = std::fs::read_to_string(&lib).unwrap();
+    std::fs::write(lib, format!("{body}pub const SYNCED: bool = true;\n")).unwrap();
+    git(repo, &["add", "crates/widget/src/lib.rs"]);
+    git(repo, &["commit", "-q", "-m", "target update"]);
+    let output = call(&f.worker, request).await;
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    assert_eq!(f.task().deliverables.factory_branch_anchor, Some(tip));
+}
+'''
+        write = 'std::fs::write(lib, format!("{body}pub const SYNCED: bool = true;\\n")).unwrap();'
+        cases = [
+            (source, False),
+            (source.replace('std::fs::', 'fs::'), False),
+            (source.replace('{body}pub const', '{}pub const').replace('true;\\n"))', 'true;\\n", body))'), False),
+            ('#[cfg(test)] mod tests {' + source + 'fn other() { let body = unrelated(); } }', False),
+            (source.replace(write, 'std::fs::write(lib, format!("{}", body == expected_source)).unwrap();'), True),
+            (source.replace('std::fs::write(lib,', 'std::fs::write(repo.join("expected.rs"),'), True),
+            (source.replace(write, 'assert!(body.contains("SYNCED")); ' + write), True),
+            (source.replace(write, write + ' assert!(body.contains("SYNCED"));'), True),
+            (source.replace(write, write + ' assert_eq!(body, expected_source);'), True),
+            (source.replace(write, write + ' let alias = body; assert_eq!(alias, expected_source);'), True),
+            (source.replace('std::fs::read_to_string(&lib).unwrap()', 'include_str!("lib.rs")'), True),
+        ]
+        for code, rejected in cases:
+            with self.subTest(code=code):
+                self.assertEqual(bool(self.hits(code)), rejected)
 
     def test_test_only_helper_and_integration_helper(self):
         code = 'fn helper() { let s = include_str!("lib.rs"); }'

@@ -210,10 +210,17 @@ fn explicit_headful_missing_claude_fails_cas_7e12() {
 
 #[test]
 fn headful_fixture_preserves_selected_claude_credentials_cas_7e12() {
-    let keys = ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-    let _ambient = keys.map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, "headful-fixture-value"));
-    let _unrelated = crate::test_env_guard::AmbientEnvRestore::set("VIKTOR_API_KEY", "unrelated-fixture");
+    let keys = [
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+    ];
+    let _ambient =
+        keys.map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, "headful-fixture-value"));
+    let _unrelated =
+        crate::test_env_guard::AmbientEnvRestore::set("NEON_API_KEY", "unrelated-fixture");
     {
         let _guard = EnvGuard::set(&[("TUI_TEST_HEADFUL", "1".into())]);
         let child = Command::new("/bin/sh").args(["-c",
@@ -222,7 +229,7 @@ fn headful_fixture_preserves_selected_claude_credentials_cas_7e12() {
              [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = headful-fixture-value ] && \
              [ \"$ANTHROPIC_API_KEY\" = headful-fixture-value ] && \
              [ \"$ANTHROPIC_AUTH_TOKEN\" = headful-fixture-value ] && \
-             [ \"$TUI_TEST_HEADFUL\" = 1 ] && [ -z \"${VIKTOR_API_KEY+x}\" ] && [ -z \"${CAS_ROOT+x}\" ]"])
+             [ \"$TUI_TEST_HEADFUL\" = 1 ] && [ -z \"${NEON_API_KEY+x}\" ] && [ -z \"${CAS_ROOT+x}\" ]"])
             .status().unwrap();
         assert!(child.success(), "live fixture must preserve Claude account selection and credentials in children");
     }

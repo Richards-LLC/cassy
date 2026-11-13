@@ -1922,6 +1922,13 @@ mod tests {
     /// Commander once, threaded under the verified question it answers.
     #[test]
     fn mcp_reconnect_after_clear_keeps_answers_mirrored_cas_bfe3() {
+        // GH #1829: the old MCP's end can delete the row before the new one registers.
+        for old_mcp_ended in [false, true] {
+            reconnect_after_clear_mirrors_the_answer(old_mcp_ended);
+        }
+    }
+
+    fn reconnect_after_clear_mirrors_the_answer(old_mcp_ended: bool) {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (temp, root, queue) = terminal_session(vec![]);
         let account = temp.path().join("account");
@@ -1937,6 +1944,13 @@ mod tests {
         let mut supervisor = agents.get("supervisor-id").unwrap();
         supervisor.cc_session_id = Some("after-clear".into());
         agents.update(&supervisor).unwrap();
+        if old_mcp_ended {
+            {
+                use cas_store::EventStore as _;
+                cas_store::SqliteEventStore::open(&root).unwrap().init().unwrap();
+            }
+            agents.unregister("supervisor-id").unwrap();
+        }
         crate::mcp::CasCore::with_daemon(root.clone(), None, None)
             .register_agent("supervisor-id".into(), "supervisor".into(), None)
             .unwrap();

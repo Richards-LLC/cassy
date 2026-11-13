@@ -125,6 +125,9 @@ const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str, &str)] = &[
         "codex/skills/cas-codex-supervisor-checklist.md",
         "The renamed no-hooks checklist; see ALLOWED_MISSING_TWIN.",
     ),
+    ("codex", "skills/cas-writing-tests/agents/openai.yaml", "codex/skills/cas-writing-tests/agents/openai.yaml", "Codex invocation policy metadata."),
+    ("codex", "skills/cas-playwright-tests/agents/openai.yaml", "codex/skills/cas-playwright-tests/agents/openai.yaml", "Codex invocation policy metadata."),
+    ("codex", "skills/cas-tdd/agents/openai.yaml", "codex/skills/cas-tdd/agents/openai.yaml", "Codex invocation policy metadata."),
     (
         "codex",
         "skills/cas-nuxt-playwright/agents/openai.yaml",

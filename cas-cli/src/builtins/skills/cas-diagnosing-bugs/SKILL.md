@@ -63,7 +63,7 @@ baseline, then bisect the regression with that measurement before changing code.
 ## Phase 5 — Fix and regression
 
 Turn the minimized repro into one failing regression per root cause
-([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)), only at a seam that exercises the
+([Fewest tests](../cas-writing-tests/SKILL.md#fewest-tests)), only at a seam that exercises the
 real call-site pattern. If no correct seam exists, record that architectural
 finding. Otherwise: make the regression fail, fix it, make it pass, then rerun
 the original loop.

@@ -91,7 +91,6 @@ pub mod store_choice;
 mod sync;
 mod update;
 pub mod update_transaction;
-pub(crate) mod viktor;
 mod violet_cmd;
 pub(crate) use violet_cmd::hub as violet_hub;
 pub(crate) use violet_cmd::channels::session_start_summary as session_start_channels;
@@ -125,7 +124,6 @@ pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
 pub use sync::SyncCommands;
 pub use update::{UpdateArgs, startup_config_notices};
-pub use viktor::ViktorArgs;
 
 /// Build version string including git hash and date
 fn build_version() -> String {
@@ -312,9 +310,6 @@ pub enum Commands {
 
     /// Run diagnostics
     Doctor(DoctorArgs),
-
-    /// Show credential-safe provisioning status for the managed Viktor gateway
-    Viktor(ViktorArgs),
 
     /// Inspect channel bindings, or read and post Slack through the Violet hub
     Violet(violet_cmd::VioletArgs),
@@ -522,7 +517,6 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Setup(_)
         | Commands::Open(_)
         | Commands::Doctor(_)
-        | Commands::Viktor(_)
         | Commands::Violet(_)
         | Commands::Update(_)
         | Commands::Changelog(_)
@@ -883,7 +877,6 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Hub(_) => "hub".to_string(),
         Commands::Serve(_) => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
-        Commands::Viktor(_) => "viktor".to_string(),
         Commands::Violet(_) => "violet".to_string(),
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
@@ -1027,7 +1020,6 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Hub(args) => hub::execute(args, cli),
         Commands::Serve(args) => serve_execute(args),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
-        Commands::Viktor(args) => viktor::execute(args, cli, cas_root),
         Commands::Violet(args) => violet_cmd::execute(args, cli, cas_root),
         Commands::Config(cmd) => {
             let root = guarded_write_root(config_store_guard(cmd), require_cas_root(cas_root)?)?;

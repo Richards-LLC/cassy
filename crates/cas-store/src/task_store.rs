@@ -1296,6 +1296,12 @@ impl TaskStore for SqliteTaskStore {
         self.update_with_mutation_receipt(task, "")
     }
 
+    fn record_mutation_receipt(&self, task_id: &str, receipt_id: &str) -> Result<()> {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            Self::record_mutation_receipt_with_conn(tx, receipt_id, task_id)
+        })
+    }
+
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
         self.update_checked(task, receipt_id, None, false)?
             .ok_or_else(|| StoreError::Other("unconditional task update was refused".to_string()))

@@ -1598,13 +1598,21 @@ impl CasCore {
                     triaged_labels.extend(["from-finding".into(), "reach:theoretical".into()]);
                 }
             } else {
-                let additions: Vec<_> = labels.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                let replacement: Vec<_> = labels.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                // Replace user labels without erasing finding provenance or
+                // omitted triage axes used to derive the finding's priority.
+                triaged_labels.retain(|label| label == "from-finding"
+                    || ["severity:", "reach:", "journey:"].iter().any(|axis| label.starts_with(axis)));
                 for axis in ["severity:", "reach:", "journey:"] {
-                    if additions.iter().any(|label| label.starts_with(axis)) {
+                    if replacement.iter().any(|label| label.starts_with(axis)) {
                         triaged_labels.retain(|label| !label.starts_with(axis));
                     }
                 }
-                triaged_labels.extend(additions.into_iter().map(str::to_owned));
+                for label in replacement {
+                    if !triaged_labels.iter().any(|existing| existing == label) {
+                        triaged_labels.push(label.to_owned());
+                    }
+                }
             }
         }
         if req.labels.is_some()
@@ -2973,6 +2981,39 @@ mod status_transition_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn update_labels_replaces_cut_train_set_gh1891() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        core.open_agent_store().unwrap().init().unwrap();
+        let mut train = Task::new("cas-cf795".into(), "Release train v4.21".into());
+        train.task_type = TaskType::Epic;
+        train.branch = Some("epic/release-train-v4.21".into());
+        train.labels = vec!["release-train".into(), "release-train-cut".into()];
+        tasks.add(&train).unwrap();
+        let target = super::super::repo_context::effective_epic_ref(
+            temp.path(), train.branch.as_deref().unwrap(),
+        );
+        assert!(super::super::release_train::check_cut_merge(temp.path(), &target, None).is_err());
+
+        for (labels, expected) in [
+            (Some("release-train"), vec!["release-train"]),
+            (Some(" release-train, release-train, ,incident,incident "), vec!["release-train", "incident"]),
+            (None, vec!["release-train", "incident"]),
+            (Some(""), vec![]),
+        ] {
+            let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+                "id": train.id, "labels": labels,
+            })).unwrap();
+            core.cas_task_update(Parameters(request)).await.unwrap();
+            assert_eq!(tasks.get(&train.id).unwrap().labels, expected);
+            assert!(super::super::release_train::check_cut_merge(temp.path(), &target, None).is_ok());
+        }
     }
 
     #[tokio::test]

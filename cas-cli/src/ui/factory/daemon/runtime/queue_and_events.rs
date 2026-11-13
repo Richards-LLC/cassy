@@ -7941,7 +7941,12 @@ impl FactoryDaemon {
         before: Option<i64>,
         requested_limit: u16,
     ) -> anyhow::Result<crate::ui::factory::DaemonMessage> {
-        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        // History is read-only: neither queue setup DDL nor the daemon's
+        // pooled writer mutex belongs on this user request. WAL readers can
+        // see committed turns even while a writer holds its transaction.
+        let queue: Arc<dyn cas_store::PromptQueueStore> = Arc::new(
+            cas_store::SqlitePromptQueueStore::open_read_only(self.app.cas_dir())?,
+        );
         let limit = usize::from(
             requested_limit.clamp(1, crate::ui::factory::protocol::COMMANDER_HISTORY_PAGE_SIZE),
         );

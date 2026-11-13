@@ -335,20 +335,9 @@ pub(crate) fn cleanup_agent_leases_for_end(
 
 /// Cleanup orphaned tasks on session start
 ///
-/// Finds in_progress tasks that have no active lease (from crashed/interrupted sessions)
-/// and resets them to Open status so they can be worked on again.
-///
-/// cas-85d9: this is the most consequential consumer of `list_active_leases`
-/// found while auditing the "task leases are never renewed" gap (cas-d165).
-/// Before task leases renewed on heartbeat, ANY task held past its ~30min
-/// claim duration would have "no active lease" here even though its worker
-/// was alive, heartbeating, and actively working — and this function would
-/// silently reopen it to `Open` on the very next `SessionStart` of ANY
-/// agent in the factory (not just the task's own worker), letting a second
-/// worker pick up and duplicate work the first was still doing. Task-lease
-/// heartbeat renewal (`agent_heartbeat` in
-/// `crates/cas-store/src/agent_store/ops_agent.rs`) is what keeps this
-/// function's "no active lease ⇒ orphaned" assumption true in practice now.
+/// Reopen abandoned local work only when its lease history proves ownership.
+/// Peer tasks have no local lease: absence alone cannot distinguish an orphan
+/// from an active task pulled from another machine (GH #1896).
 pub(crate) fn cleanup_orphaned_tasks(cas_root: &std::path::Path) -> usize {
     let task_store = match open_task_store(cas_root) {
         Ok(store) => store,
@@ -371,22 +360,39 @@ pub(crate) fn cleanup_orphaned_tasks(cas_root: &std::path::Path) -> usize {
     }
 
     // Get all active leases
-    let active_leases = agent_store.list_active_leases().unwrap_or_default();
+    let Ok(active_leases) = agent_store.list_active_leases() else {
+        return 0;
+    };
     let claimed_task_ids: std::collections::HashSet<_> =
         active_leases.iter().map(|l| l.task_id.as_str()).collect();
 
-    // Find orphaned tasks (in_progress but no active lease)
+    let local_machine = Agent::get_or_generate_machine_id();
     let mut reopened = 0;
-    for task in in_progress {
-        if !claimed_task_ids.contains(task.id.as_str()) {
-            // Reopen the task by setting status back to Open
-            if let Ok(mut t) = task_store.get(&task.id) {
-                t.status = TaskStatus::Open;
-                t.updated_at = chrono::Utc::now();
-                if task_store.update(&t).is_ok() {
-                    reopened += 1;
-                }
-            }
+    for mut task in in_progress {
+        if claimed_task_ids.contains(task.id.as_str()) {
+            continue;
+        }
+        let Ok(history) = agent_store.get_lease_history(&task.id, Some(1)) else {
+            continue;
+        };
+        let Some(previous) = history.first() else {
+            continue;
+        };
+        let Ok(holder) = agent_store.get(&previous.agent_id) else {
+            continue;
+        };
+        // A past local lease cannot authorize resetting a later peer binding.
+        // Legacy local registrations may lack machine_id; foreign ones may not.
+        if task.assignee.as_deref().is_none_or(|assignee| {
+            assignee != holder.id && assignee != holder.name
+        }) || holder.machine_id.as_deref().is_some_and(|machine| machine != local_machine)
+        {
+            continue;
+        }
+        let expected = task.clone();
+        task.status = TaskStatus::Open;
+        if task_store.update_if_current(&task, &expected).is_ok() {
+            reopened += 1;
         }
     }
 
@@ -850,6 +856,42 @@ mod cas_85d9_lease_renewal_tests {
         let tmp = tempfile::tempdir().expect("TempDir");
         let root = init_cas_dir(tmp.path()).expect("init_cas_dir");
         CasDir { _tmp: tmp, root }
+    }
+
+    /// A pulled InProgress task has no lease on this machine. SessionStart
+    /// must not turn that replica into a new Open write (GH #1896).
+    #[test]
+    fn session_start_preserves_peer_tasks_without_local_ownership_cas_0ff3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for case in ["no_local_lease", "reassigned_to_peer", "foreign_holder"] {
+            let cas = setup_cas();
+            let agents = open_agent_store(&cas.root).unwrap();
+            let tasks = open_task_store(&cas.root).unwrap();
+            let mut task = Task::new("cas-peer-task".into(), "peer work".into());
+            task.status = TaskStatus::InProgress;
+            task.assignee = Some("peer-worker".into());
+            tasks.add(&task).unwrap();
+            if case != "no_local_lease" {
+                let mut holder = Agent::new("old-holder".into(), "peer-worker".into());
+                holder.machine_id = Some(if case == "foreign_holder" {
+                    format!("peer-{}", Agent::get_or_generate_machine_id())
+                } else {
+                    Agent::get_or_generate_machine_id()
+                });
+                if case == "reassigned_to_peer" {
+                    holder.name = "previous-local-worker".into();
+                }
+                agents.register(&holder).unwrap();
+                agents.try_claim(&task.id, &holder.id, 60, None).unwrap();
+                agents.release_lease(&task.id, &holder.id).unwrap();
+            }
+            let before = tasks.get(&task.id).unwrap();
+            assert_eq!(cleanup_orphaned_tasks(&cas.root), 0, "{case}");
+            let after = tasks.get(&task.id).unwrap();
+            assert_eq!(after.status, TaskStatus::InProgress, "{case}");
+            assert_eq!(after.assignee, before.assignee, "{case}");
+            assert_eq!(after.updated_at, before.updated_at, "{case}");
+        }
     }
 
     /// cas-85d9 AC3: a task held by a live, heartbeating worker past the

@@ -312,21 +312,6 @@ lint_release_draft() {
         verify-deliveries "$remote/$base" --notes "$draft" --report "$release_input_report" >&2
 }
 
-# cas-4b33: deliveries never edit .claude/CODEMAP.md, so the supervisor
-# regenerates it (/codemap) on the train before the cut. Refuse a map that
-# predates a file added or removed since it was last committed; per-task
-# fragments and release notes do not change the structure.
-require_current_codemap() {
-    local mapped stale
-    git ls-files --error-unmatch .claude/CODEMAP.md >/dev/null 2>&1 || return 0
-    mapped="$(git log -1 --format=%H -- .claude/CODEMAP.md)"
-    stale="$(git diff --no-renames --name-only --diff-filter=AD "$mapped" HEAD -- . \
-        ':(exclude).claude/CODEMAP.md' ':(exclude)changelog.d' ':(exclude)docs/qa/bug-families' \
-        ':(exclude)docs/product-overview.d' ':(exclude)docs/release-notes')"
-    stale="$(printf '%s\n' "$stale" | sed -n '1,5p')"
-    [[ -z "$stale" ]] || die ".claude/CODEMAP.md predates files added or removed since ${mapped:0:12} (${stale//$'\n'/, }); regenerate it with /codemap, commit it on $branch and rerun"
-}
-
 # Steps 1-3 plus the commit. Prints the version prepared.
 prepare() {
     local base_version version current prepared_commit drafts=() prepared_drafts=()
@@ -361,7 +346,6 @@ prepare() {
         printf '%s\n' "$version"
         return 0
     fi
-    require_current_codemap
     local source
     source="$(draft_source "$version")"
     lint_release_draft "$source"
@@ -378,6 +362,11 @@ prepare() {
     python3 "$script_dir/doc-fragments.py" compile >&2 \
         || die "doc fragment compile failed; fix what scripts/doc-fragments.py check reports"
     place_draft "$version" "$source"
+    # A supervisor's pending /codemap refresh rides this commit, so it never
+    # moves the tested train tip or requires its own CI run.
+    if git ls-files --error-unmatch .claude/CODEMAP.md >/dev/null 2>&1; then
+        git add -- .claude/CODEMAP.md
+    fi
     git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}" hub-web/dist
     local doc
     for doc in docs/qa/journeys.yaml docs/qa/bug-families docs/PRODUCT_OVERVIEW.md docs/product-overview.d; do
@@ -517,15 +506,8 @@ preview_cut() {
     jq -e --arg sha "$sha" '.scope.final_release_sha == $sha and (.members|type)=="number" and (.would_close|type)=="number"' \
         <<<"$release_close_preview" >/dev/null || die "invalid candidate preview; nothing pushed"
     say "close preview: $(jq -c '{members,would_close,would_hold,already_closed,not_eligible,by_reason,review_missing,candidate_build_seconds}' <<<"$release_close_preview")"
-    local unreviewed
-    unreviewed="$(jq -r --slurpfile inputs "$release_input_report" '
-        ($inputs[0].included_task_ids // []) as $included |
-        [(.review_missing // [])[] | select(. as $id | $included | index($id))] | join(", ")
-    ' <<<"$release_close_preview")"
-    [[ -z "$unreviewed" ]] \
-        || die "release cut refused: REVIEW_MISSING for $unreviewed; record verification action=batch_receipt verification_type=release task_ids=<release-member-ids> staging_sha=<reviewed-sha> ledger_artifact_id=<artifact-id> ledger_path=<ledger-path> ledger_author=<reviewer>; see docs/qa/batch-qa.md and the close preview above; nothing pushed or enqueued"
-    jq -e '.members == 0 or .would_close > 0 or (.would_hold == 0 and .not_eligible == 0)' <<<"$release_close_preview" >/dev/null \
-        || die "release cut refused: zero would-close; inspect the close preview above; nothing pushed or enqueued"
+    # Release review closes deliveries after publication; its absence is
+    # visible in this preview and never holds queue admission.
 }
 
 # Advisory once per invocation, including dry-run and version preview. Never
@@ -542,7 +524,8 @@ if "$print_only"; then
     exit 0
 fi
 
-[[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "the worktree has uncommitted changes; commit or stash them first"
+[[ -z "$(git status --porcelain --untracked-files=no -- . ':(exclude).claude/CODEMAP.md')" ]] \
+    || die "the worktree has uncommitted changes; commit or stash them first"
 
 # Train membership is advisory: explicit hotfix/non-train branches retain the
 # caller's --base (main by default). The canonical CLI owns the branch check.

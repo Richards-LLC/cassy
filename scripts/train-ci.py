@@ -3,7 +3,7 @@
 """Whole-set CI receipts, release admission and checked queue reuse.
 
 This never launches tests. CI owns execution; the daemon and release command
-consume its exact-head artifact instead of running another local suite.
+consume its verified artifact instead of running another local suite.
 """
 import argparse
 from datetime import datetime, timezone
@@ -27,6 +27,13 @@ REQUIRED_JOBS = ('fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-
 PREFIX = 'epic/release-train-'
 MANIFESTS = {'cas-cli/Cargo.toml': 'cas', **{f'crates/{name}/Cargo.toml': name for name in
              ('cas-types', 'cas-search', 'cas-store', 'cas-core', 'cas-mcp')}}
+
+
+# Shared by release preparation, train admission and queue plumbing checks.
+def release_asset(path):
+    return path in ('CHANGELOG.md', '.claude/CODEMAP.md', 'cas-cli/src/builtins/reference-history.json') or path.startswith(
+        ('changelog.d/', 'docs/release-notes/', 'docs/release-reports/',
+         'docs/qa/bug-families/', 'docs/product-overview.d/', 'hub-web/dist/'))
 
 
 def command(args, cwd=None, output=None):
@@ -85,8 +92,7 @@ def prepared(repo, head):
                     package['version'] = version[1]
             if before != after:
                 return None
-        elif path not in ('CHANGELOG.md', '.claude/CODEMAP.md', 'cas-cli/src/builtins/reference-history.json') and not path.startswith(
-                ('changelog.d/', 'docs/release-notes/', 'hub-web/dist/')):
+        elif not release_asset(path):
             return None
     return source[1]
 
@@ -330,7 +336,7 @@ def plumbing_only(repo, source, head):
             # Only version-generated bundles can join release plumbing. The
             # reuse compile job rebuilds them and checks their committed bytes.
             continue
-        elif path not in ('CHANGELOG.md', '.claude/CODEMAP.md', 'cas-cli/src/builtins/reference-history.json') and not path.startswith(('changelog.d/', 'docs/release-notes/')):
+        elif not release_asset(path):
             return False
     return version_changed or not any(path.startswith('hub-web/dist/') for path in paths)
 
@@ -437,8 +443,26 @@ def observe(args):
         return json.loads(command([gh, 'api', '-X', 'GET', f'repos/{slug}/{endpoint}', *fields], args.repo))
 
     runs = api(f'actions/workflows/{WORKFLOW}/runs', '-f', f'branch={branch}', '-f', 'event=push', '-f', 'per_page=100')['workflow_runs']
-    candidates = [run for run in runs if run['head_sha'] == head and run['head_branch'] == branch and run['event'] == 'push']
-    run = max(candidates, key=lambda item: (item['id'], item.get('run_attempt', 1)), default=None)
+    candidates = [run for run in runs if run['head_branch'] == branch and run['event'] == 'push']
+    # Keep only each head's latest attempt; a failed rerun cannot lend old green proof.
+    latest = {}
+    for candidate in sorted(candidates, key=lambda item: (item['id'], item.get('run_attempt', 1))):
+        latest[candidate['head_sha']] = candidate
+    run = latest.get(head)
+    if getattr(args, 'command', None) == 'check' and (not run or run['status'] != 'completed'
+                                   or run['conclusion'] in ('cancelled', 'skipped')):
+        # Walk nearest first. Every intervening commit must be release assets,
+        # including edits later reverted; a net diff could hide source changes.
+        for ancestor in git(args.repo, 'rev-list', '--first-parent', head).splitlines()[1:]:
+            candidate = latest.get(ancestor)
+            if not candidate or candidate['status'] != 'completed' or candidate['conclusion'] != 'success':
+                continue
+            paths = git(args.repo, 'log', '--format=', '--name-only', '--no-renames',
+                        '--diff-merges=first-parent', f'{ancestor}..{head}').splitlines()
+            if not all(release_asset(path) for path in paths if path):
+                break
+            head, run = ancestor, candidate
+            break
     state = {**previous, 'branch': branch, 'head': head, 'outcome': 'PENDING'}
     if not run or run['status'] != 'completed' or run['conclusion'] in ('cancelled', 'skipped'):
         write(state_path, state)

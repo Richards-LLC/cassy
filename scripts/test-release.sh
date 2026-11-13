@@ -47,6 +47,8 @@ case "$1 $2" in
   "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
   "api -X")
     case "$4" in
+      */pulls?*) echo '[]' ;;
+      */artifacts?*) echo '{"artifacts":[]}' ;;
       */jobs) echo '{"jobs":[{"name":"Shared train and queue graph / Full-set gate","conclusion":"success"}]}' ;;
       *) cat "${FAKE_TRAIN_RUN:-/dev/null}" ;;
     esac ;;

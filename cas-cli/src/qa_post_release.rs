@@ -420,7 +420,7 @@ mod tests {
             "action": "qa_status", "task_id": "cas-train",
         })).unwrap())).await.unwrap());
         assert!(status.contains("cas-live") && status.contains(&receipt_id), "{status}");
-        // pin: a QA walk must name the remaining release-review gate rather than silently doing nothing.
+        // pin: a QA walk must name the remaining delivery-approval gate.
 
         assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
         // The notice is obsolete once QA is covered, even though a different
@@ -431,20 +431,12 @@ mod tests {
         let latest = rows.iter().filter(|row| row.payload.contains("batch_receipt_offer"))
             .max_by_key(|row| row.id).unwrap();
         assert!(!latest.payload.contains("cas-live"), "covered anchor cannot be re-offered: {latest:?}");
-        let reviewed = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("release"))).await.unwrap());
+        let refused = service.verification(rmcp::handler::server::wrapper::Parameters(request("release"))).await.unwrap_err();
+        assert!(refused.message.contains("RELEASE_REVIEW_COMPUTED"));
+        assert!(cas_store::release_verdicts_for_task(&cas, "batch-offer-fixture", "cas-live").unwrap().is_empty());
         for id in ["cas-live", "cas-retired"] {
-            assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::Closed, "{reviewed}");
+            assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
         }
-        let verdict = cas_store::release_verdicts_for_task(&cas, "batch-offer-fixture", "cas-live").unwrap().remove(0);
-        let notices = pending_holds();
-        assert_eq!(notices.len(), 3);
-        let payload: serde_json::Value = notices.iter().map(|row| serde_json::from_str::<serde_json::Value>(&row.payload).unwrap())
-            .find(|payload| payload["context"]["receipt_id"] == verdict.id).unwrap();
-        assert_eq!(payload["context"]["closed_count"], 2);
-        assert_eq!(payload["context"]["held_by_kind"]["RELEASE_MEMBER_HELD"].as_array().unwrap().len(), 2);
-        service.inner.close_release_covered_deliveries(&verdict).await;
-        assert_eq!(pending_holds().len(), 3);
-        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "closed delivery has no further QA offer");
 
     }
 

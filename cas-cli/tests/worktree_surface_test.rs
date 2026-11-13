@@ -2754,11 +2754,11 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
                 git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]),
                 before
             );
-            // These are the existing exemptions. Neither an unresolved nor a
-            // rejected delivery may hold a target lock across model review.
-            for (id, name, file) in [
-                ("cas-ef52", "bob", "notes.md"),
-                ("cas-ef53", "carol", "ordinary.rs"),
+            // A rejected delivery cannot hold the target lock across another
+            // delivery's exemption or independent pre-merge review.
+            for (id, name, file, review_required) in [
+                ("cas-ef52", "bob", "notes.md", false),
+                ("cas-ef53", "carol", "ordinary.rs", true),
             ] {
                 let branch = format!("factory/{name}-{id}");
                 let worker = fixture.cas_root.join("worktrees").join(name);
@@ -2778,21 +2778,37 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
                 exempt.deliverables.parked_branch = Some(branch.clone());
                 exempt.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
                     work_target: exempt.deliverables.work_target.clone().unwrap(),
-                    assignee: name.into(), branch: branch.clone(), base_sha: base,
+                    assignee: name.into(), branch: branch.clone(), base_sha: base.clone(),
                 });
                 tasks.add(&exempt).unwrap();
                 let mut independent = coord_req("worktree_merge");
                 independent.id = Some(branch);
                 independent.task_id = Some(id.into());
                 independent.cleanup = Some(false);
-                let response = fixture.service.factory(Parameters(independent)).await;
+                let response = fixture.service.factory(Parameters(independent.clone())).await;
+                let (response, independent_dispatch) = if review_required {
+                    let held = response.expect_err("Standard code needs its own pre-merge review");
+                    assert!(held.message.contains("[G-104]"), "{held}");
+                    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]), base);
+                    assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), base);
+                    let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, id).unwrap().unwrap();
+                    let approved = fixture.service.verification(Parameters(verification_req(serde_json::json!({
+                        "action": "add", "task_id": id, "dispatch_id": dispatch.id,
+                        "status": "approved", "summary": "Independent sibling candidate approved",
+                    })))).await.unwrap();
+                    assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
+                    (fixture.service.factory(Parameters(independent)).await, Some(dispatch.id))
+                } else {
+                    (response, None)
+                };
                 run_git(&["merge-base", "--is-ancestor", &tip, "epic/rebound"], &fixture.repo.root);
                 assert_eq!(
                     git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
                     git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]),
-                    "independent exempt delivery publishes while another is held: {response:?}"
+                    "independent delivery publishes with its own review policy while another is held: {response:?}"
                 );
-                assert!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, id).unwrap().is_none());
+                assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.cas_root, id).unwrap().map(|dispatch| dispatch.id),
+                    independent_dispatch, "publication consumes the sibling's review without a post-merge dispatch");
             }
         }
         assert_eq!(

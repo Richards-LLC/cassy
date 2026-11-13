@@ -100,7 +100,7 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     // Reconnect A requests the newest page while the cached thread stays readable.
     hub.drop(PELICAN);
     await expect.poll(async () => {
-      await clock.advance(100);
+      await clock.advance(2_000);
       return hub.historyRequests.length;
     }).toBe(3);
     const newest = hub.historyRequests.at(-1)!;

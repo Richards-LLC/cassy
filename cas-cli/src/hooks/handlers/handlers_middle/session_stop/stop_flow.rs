@@ -50,6 +50,17 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     // documented brake; it is not a fix for a measured incident.
     let stop_is_reentrant = input.stop_hook_is_reentrant();
 
+    // Stop is the pane fallback for harnesses without MessageDisplay. Never
+    // re-block a continuation; retain a visible uncertainty notice instead.
+    if let Some(reason) = crate::hooks::handlers::operator_evidence::pane_denial(input) {
+        return Ok(if stop_is_reentrant {
+            HookOutput::with_system_context(format!("[unverified] {}", crate::gates::tag("H-47", reason)))
+        } else {
+            HookOutput::block_stop(crate::gates::tag("H-47", reason))
+        });
+    }
+
+
     // Check for exit blockers (open tasks, active children) before allowing stop
     // Skip for factory agents (Worker, Supervisor, Director) - supervisor manages task reassignment
     let config = Config::load(cas_root).unwrap_or_default();

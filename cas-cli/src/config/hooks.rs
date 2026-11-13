@@ -250,9 +250,13 @@ fn default_pre_tool_use_timeout() -> u32 {
 /// Shared with the generated factory hook settings. Includes normalized
 /// Grok/OpenCode tool names, the CAS proxy dispatch tool, a direct Violet
 /// post, and `artifact` (whose `post` action uploads through Violet,
-/// cassy#1148), so the publication gate sees every Slack share.
+/// cassy#1148), and coordination operator messages. The historical constant
+/// name is retained; all mandatory MCP policy uses this one matcher.
 pub(crate) const SLACK_POLICY_MATCHER: &str =
-    ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute|.*violet_post|.*_artifact";
+    ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute|.*violet_post|.*_artifact|.*_coordination$";
+
+// Persisted defaults from before operator-claim evidence joined MCP policy.
+const LEGACY_SLACK_POLICY_MATCHER: &str = ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute|.*violet_post|.*_artifact";
 
 pub(crate) fn default_pre_tool_use_matcher() -> Vec<String> {
     vec![
@@ -285,7 +289,7 @@ impl PreToolUseHookConfig {
         let added_later = |entry: &&String| {
             matches!(
                 entry.as_str(),
-                "AskUserQuestion" | "Agent" | SLACK_POLICY_MATCHER
+                "AskUserQuestion" | "Agent" | SLACK_POLICY_MATCHER | LEGACY_SLACK_POLICY_MATCHER
             )
         };
         let legacy: Vec<_> = canonical
@@ -300,7 +304,7 @@ impl PreToolUseHookConfig {
             .cloned()
             .collect();
         let is_saved_default = same_matcher_set(&configured_legacy, &legacy)
-            && self.matcher.iter().all(|entry| canonical.contains(entry));
+            && self.matcher.iter().all(|entry| canonical.contains(entry) || entry == LEGACY_SLACK_POLICY_MATCHER);
         let mut matchers = if !self.enabled {
             Vec::new()
         } else if is_saved_default {
@@ -777,6 +781,13 @@ mod tests {
                 .retain(|entry| !omitted.contains(&entry.as_str()));
             config.matcher.reverse();
             assert_eq!(config.claude_matcher(), canonical.join("|"));
+        }
+        let mut prior_policy = PreToolUseHookConfig::default();
+        prior_policy.matcher[0] = LEGACY_SLACK_POLICY_MATCHER.into();
+        assert_eq!(prior_policy.claude_matcher(), canonical.join("|"));
+        for configured in [vec!["Read".into()], Vec::new()] {
+            let config = PreToolUseHookConfig { matcher: configured, ..Default::default() };
+            assert!(regex::Regex::new(&config.claude_matcher()).unwrap().is_match("mcp__cas__coordination"));
         }
         let mut post = PostToolUseHookConfig::default();
         post.matcher = vec!["Bash".into(), "Write".into(), "Edit".into()];

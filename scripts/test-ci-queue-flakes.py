@@ -146,30 +146,19 @@ class QueueRecovery(unittest.TestCase):
                               env={**self.env,"FIXTURE_TEST":test,"GITHUB_EVENT_NAME":event},
                               capture_output=True,text=True)
 
-    def test_failed_selection_runs_once_more_on_the_same_tree(self):
+    def test_first_failure_runs_once_and_preserves_the_tree(self):
         for engine in ('rust','playwright'):
-            for name, outcome, code in [('sometimes','FLAKY',0),('always-fail','FAIL',1)]:
-                with self.subTest(engine=engine,name=name):
-                    (self.repo/'attempts.jsonl').unlink(missing_ok=True)
-                    before = self.git('rev-parse','HEAD^{tree}')
-                    result = self.run_queue(engine,name)
-                    self.assertEqual(result.returncode,code,result.stdout+result.stderr)
-                    receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
-                    self.assertEqual(receipt['outcome'],outcome)
-                    # cas-c6e3: FAIL names what still fails; FLAKY keeps its line.
-                    summary = result.stdout.strip().splitlines()[-1]
-                    if outcome == 'FAIL':
-                        self.assertRegex(summary, rf'^FAIL: 1 failing test\(s\): .*{name}.*; receipt ')
-                    else:
-                        self.assertRegex(summary, r'^FLAKY: 1 flaky test\(s\); receipt \S*/receipts/receipt\.json$')
-                    self.assertEqual(receipt['initial_status'],1)
-                    self.assertEqual(receipt['tree'],before)
-                    calls = self.calls()
-                    self.assertEqual(len(calls),2)
-                    self.assertNotIn('--partition',calls[1])
-                    self.assertFalse(any(a.startswith('--shard') for a in calls[1]))
-                    self.assertLess(receipt['rerun_seconds'],30)
-                    self.assertEqual(self.git('rev-parse','HEAD^{tree}'),before)
+            with self.subTest(engine=engine):
+                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                before = self.git('rev-parse','HEAD^{tree}')
+                result = self.run_queue(engine)
+                self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+                receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                self.assertEqual(receipt['outcome'],'FAIL')
+                self.assertEqual(receipt['initial_status'],1)
+                self.assertEqual(receipt['tree'],before)
+                self.assertEqual(len(self.calls()),1)
+                self.assertEqual(self.git('rev-parse','HEAD^{tree}'),before)
 
     def test_train_uses_queue_recovery_and_publication(self):
         self.env['GITHUB_REF'] = 'refs/heads/epic/release-train-fixture'

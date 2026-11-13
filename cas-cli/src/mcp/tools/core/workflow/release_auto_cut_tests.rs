@@ -107,6 +107,7 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     let draft = notes_draft(&root, "cas-tr").unwrap();
     assert!(wakes()[0].payload.contains(&draft.display().to_string()), "{}", wakes()[0].payload);
 
+    std::fs::create_dir_all(draft.parent().unwrap()).unwrap();
     std::fs::write(&draft, "notes\n").unwrap();
     poll(&none);
     receipt(repo, &root, "FAIL");

@@ -514,9 +514,8 @@ p = argparse.ArgumentParser(); p.add_argument('cmd')\n\
 for flag in ('--repo', '--branch', '--head', '--out'): p.add_argument(flag)\n\
 a = p.parse_args()\n\
 state = {'branch': a.branch, 'head': a.head, 'outcome': 'PENDING'}\n\
-if pathlib.Path(os.environ['TRAIN_CI_VERDICT']).exists():\n\
-    state.update(outcome='FAIL', run_id='31', run_attempt=1, red_since=a.head, red_head=a.head,\n\
-                 merge_range=[], failures=['suite'])\n\
+red = dict(outcome='FAIL', run_id='31', run_attempt=1, red_since=a.head, red_head=a.head, merge_range=[], failures=['suite'])\n\
+state.update(red if pathlib.Path(os.environ['TRAIN_CI_VERDICT']).exists() else {})\n\
 pathlib.Path(a.out, 'state.json').write_text(json.dumps(state))\n\
 print(json.dumps(state))\n").unwrap();
         git(&["add", "."]);

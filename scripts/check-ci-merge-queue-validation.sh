@@ -20,7 +20,7 @@ full_gate_reuse() {
         || echo "::warning::Full-set proof unavailable; running the complete shared gate."
 }
 
-if [[ "$event" == "merge_group" || ( "$event" == push && "$ref" == refs/heads/epic/release-train-* ) ]]; then
+if [[ "$event" == "merge_group" || ( "$event" == workflow_dispatch && "$ref" == refs/heads/epic/release-train-* ) ]]; then
     full_gate_reuse
     exit 0
 fi

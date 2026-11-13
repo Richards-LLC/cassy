@@ -1,5 +1,7 @@
 # Commander draft under an artificial clock — cas-e265
 
+Historical evidence only; current authoring policy is `cas-playwright-tests`. Older version numbers below record the measured run and are not supported-version advice.
+
 The original empty-draft failure did not reproduce in **21 completed clock-trigger probes** against the same production bundle. This is a non-reproduction result, not a product fix or proof that the original failure was harmless. The historical cause remains unknown; the supervisor explicitly accepted that limit (#2125448).
 
 ## Build and experiment

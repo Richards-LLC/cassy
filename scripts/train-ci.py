@@ -25,6 +25,8 @@ WORKFLOW = 'full-validation.yml'
 REQUIRED_JOBS = ('fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-validation-web',
                  'fast-validation-suite', 'fast-validation-docs', 'queue-flake-publication')
 PREFIX = 'epic/release-train-'
+# cas-0fc56: Cassy dispatches the one train run at a release freeze; merges start none.
+TRAIN_EVENT = 'workflow_dispatch'
 MANIFESTS = {'cas-cli/Cargo.toml': 'cas', **{f'crates/{name}/Cargo.toml': name for name in
              ('cas-types', 'cas-search', 'cas-store', 'cas-core', 'cas-mcp')}}
 
@@ -184,13 +186,8 @@ def job_save(args):
     previous=args.out/'receipt.json'
     reused=json.loads(previous.read_text()) if previous.is_file() else {}
     if any(reused.get(key)!=value for key,value in expected.items()): reused={}
-    recovery=[]
-    for path in (args.repo/'target/queue-flakes').rglob('receipt.json'):
-        record=json.loads(path.read_text())
-        if record.get('schema')==1 and record.get('run_id')==os.environ['GITHUB_RUN_ID']:
-            recovery.append(record)
     result={**identity(),**expected,'outcome':'PASS' if args.status=='success' else 'FAIL',
-        'recovery':recovery,'producer_run':reused.get('producer_run',os.environ['GITHUB_RUN_ID'])}
+        'producer_run':reused.get('producer_run',os.environ['GITHUB_RUN_ID'])}
     if reused.get('reused_from'):
         result['reused_from']=reused['reused_from']
     # Keep the native train reports with their job, so a cache hit can feed
@@ -220,7 +217,7 @@ def job_check(args):
             run=api('actions/runs/'+run_id)
             if run.get('status')!='completed' or run.get('path') not in ('.github/workflows/'+WORKFLOW,WORKFLOW):
                 continue
-            if run.get('event') not in ('merge_group','push'):
+            if run.get('event') not in ('merge_group',TRAIN_EVENT):
                 continue
             with tempfile.TemporaryDirectory() as temporary:
                 command([args.gh,'run','download',run_id,'--name',expected['artifact'],'--dir',temporary],args.repo)
@@ -240,7 +237,8 @@ def job_check(args):
                 outputs=api('actions/runs/'+str(producer)+'/artifacts')['artifacts']
                 if not any(item['name']==args.requires_artifact and not item.get('expired') for item in outputs):
                     continue
-            if any(item.get('tree')!=expected['tree'] or item.get('outcome') not in ('PASS','FLAKY') for item in record.get('recovery',[])):
+            # Legacy recovered failures are not successful reusable proof.
+            if record.get('recovery'):
                 continue
             native=[json.loads(body) for name,body in reports.items() if name.endswith('shard.json')]
             if any(row.get('head')!=record['head'] or row.get('run_id')!=run_id or
@@ -254,13 +252,6 @@ def job_check(args):
                     write(target,{**row,**identity(),'reused_from':run_id})
                 else:
                     target.write_bytes(body)
-            # Rebind transport identity only. Keep the observation's original
-            # run so a cached flake never counts as a new independent failure.
-            for index,recovery in enumerate(record.get('recovery',[])):
-                rebound={**recovery,'head':os.environ['GITHUB_SHA'],'tree':expected['tree'],
-                    'run_id':os.environ['GITHUB_RUN_ID'],
-                    'observation_run_id':recovery.get('observation_run_id',recovery['run_id'])}
-                write(args.repo/'target/queue-flakes/reused'/str(index)/'receipt.json',rebound)
             result.update(reused=True,reused_from=run_id,producer_run=record.get('producer_run',run_id))
             write(args.out/'receipt.json',{**record,**identity(),'reused_from':run_id})
             break
@@ -268,28 +259,6 @@ def job_check(args):
         # Cache outage or malformed evidence means execution, never approval.
         print('Job receipt unavailable; executing: '+str(error),file=sys.stderr)
     return result
-
-
-def job_export(args):
-    """Feed this run's per-job observations into the existing flake fan-in."""
-    tree=git(args.repo,'rev-parse','HEAD^{tree}')
-    count=0
-    for path in args.evidence.rglob('receipt.json'):
-        record=json.loads(path.read_text())
-        if record.get('scope')!='job' or record.get('schema')!=2:
-            continue
-        if record.get('run_id')!=os.environ['GITHUB_RUN_ID'] or record.get('tree')!=tree:
-            raise ValueError('job receipt does not belong to the evaluated run/tree')
-        for recovery in record.get('recovery',[]):
-            if recovery.get('tree')!=tree or recovery.get('run_id')!=os.environ['GITHUB_RUN_ID'] or recovery.get('head')!=os.environ['GITHUB_SHA']:
-                raise ValueError('recovery observation does not belong to the evaluated run/tree')
-            # Two jobs may run the same script step (preflight's source-built
-            # terminal test and the CI tiers); each is its own reconcile slot.
-            if recovery.get('runner')=='step':
-                recovery={**recovery,'shard':record['job']+'/'+recovery['shard']}
-            write(args.out/str(count)/'receipt.json',recovery)
-            count+=1
-    return {'observations':count}
 
 
 def full_collect(args):
@@ -389,7 +358,7 @@ def reuse(args):
                        if row.get('context') == 'cas/full-gate'), {})
         return latest.get('state') == 'success' and latest.get('description') == 'PASS tree=' + tree
     head = git(args.repo, 'rev-parse', 'HEAD')
-    if event == 'push' and ref.startswith('refs/heads/' + PREFIX):
+    if event == TRAIN_EVENT and ref.startswith('refs/heads/' + PREFIX):
         branch = ref.removeprefix('refs/heads/')
         pr_head = head
         queue_main = os.environ.get('MAIN_BASELINE') or git(args.repo, 'rev-parse',
@@ -409,7 +378,7 @@ def reuse(args):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
             return
     if not branch.startswith(PREFIX): return
-    runs = api(f'actions/workflows/{WORKFLOW}/runs?branch={branch}&event=push&per_page=100')['workflow_runs']
+    runs = api(f'actions/workflows/{WORKFLOW}/runs?branch={branch}&event={TRAIN_EVENT}&per_page=100')['workflow_runs']
     candidates = sorted((run for run in runs if run['status'] == 'completed' and run['conclusion'] == 'success'),
                         key=lambda run: (run['id'], run.get('run_attempt', 1)), reverse=True)
     for candidate in candidates:
@@ -426,7 +395,7 @@ def reuse(args):
         source, source_tree = state['head'], state['tree']
         if source != original and not green_status(source, source_tree): continue
         if not plumbing_only(args.repo, source, head): continue
-        if event == 'push' and args.adoption_out:
+        if event == TRAIN_EVENT and args.adoption_out:
             write(args.adoption_out/'receipt.json', {**identity(), 'schema':2,
                 'scope':'full-set-adoption', 'head':head, 'branch':branch, 'tree':queue_tree,
                 'artifact':ARTIFACT, 'outcome':'PASS', 'main_baseline':queue_main,
@@ -504,8 +473,8 @@ def observe(args):
     def api(endpoint, *fields):
         return json.loads(command([gh, 'api', '-X', 'GET', f'repos/{slug}/{endpoint}', *fields], args.repo))
 
-    runs = api(f'actions/workflows/{WORKFLOW}/runs', '-f', f'branch={branch}', '-f', 'event=push', '-f', 'per_page=100')['workflow_runs']
-    candidates = [run for run in runs if run['head_sha'] == head and run['head_branch'] == branch and run['event'] == 'push']
+    runs = api(f'actions/workflows/{WORKFLOW}/runs', '-f', f'branch={branch}', '-f', f'event={TRAIN_EVENT}', '-f', 'per_page=100')['workflow_runs']
+    candidates = [run for run in runs if run['head_sha'] == head and run['head_branch'] == branch and run['event'] == TRAIN_EVENT]
     run = max(candidates, key=lambda item: (item['id'], item.get('run_attempt', 1)), default=None)
     state = {**previous, 'branch': branch, 'head': head, 'outcome': 'PENDING'}
     if not run or run['status'] != 'completed' or run['conclusion'] in ('cancelled', 'skipped'):
@@ -651,13 +620,9 @@ def main():
         job.add_argument('--gh',default=os.environ.get('GH_BIN','gh'))
         job.add_argument('--requires-artifact')
         if name=='job-save': job.add_argument('--status',required=True)
-    export=sub.add_parser('job-export')
-    export.add_argument('--repo',type=Path,default=Path.cwd())
-    export.add_argument('--evidence',type=Path,required=True)
-    export.add_argument('--out',type=Path,required=True)
     args = parser.parse_args()
-    if args.command in ('job-check','job-save','job-export'):
-        result={'job-check':job_check,'job-save':job_save,'job-export':job_export}[args.command](args)
+    if args.command in ('job-check','job-save'):
+        result={'job-check':job_check,'job-save':job_save}[args.command](args)
         if getattr(args,'github_output',None):
             with args.github_output.open('a') as stream:
                 for key in ('reused','artifact','producer_run'):

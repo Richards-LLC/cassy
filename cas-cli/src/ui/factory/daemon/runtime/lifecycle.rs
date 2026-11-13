@@ -266,7 +266,7 @@ pub(super) fn escalate_expired_verification_dispatches(
         .take(RELAYS_PER_SWEEP)
         .filter(|dispatch| {
             let detail = format!(
-                "Verification dispatch {} for {} passed its deadline {} with no verdict. Re-dispatch the verifier (or verify directly), then finish the close.",
+                "Verification dispatch {} for {} passed its deadline {} with no verdict. Retry the close or merge that opened it to start Cassy's daemon-owned verifier, or record the verdict directly on mechanical evidence, then finish the close.",
                 dispatch.id,
                 dispatch.task_id,
                 dispatch.deadline_at.to_rfc3339()
@@ -1036,9 +1036,13 @@ impl MergeQueueRepair {
                     "merge_queue_ejected: {detail}\nMerge-queue repair cycle 1 of 1 (rule-176(5)) {}: run every remaining queue check locally in the runner's environment and in parallel, fix all failures in one batch, then re-deliver. A second ejection pages the operator.",
                     Self::marker(*run, head),
                 );
-                cas_store::request_changes_for_parked_delivery(cas_dir, &task.id, actor, &reason)
+                let returned = cas_store::request_changes_for_parked_delivery(cas_dir, &task.id, actor, &reason)
                     .map_err(|error| tracing::warn!(task_id = %task.id, %error, "cas-25ce: ejected delivery not returned"))
-                    .is_ok()
+                    .is_ok();
+                if returned {
+                    let _ = crate::store::publish_direct_task_write(cas_dir, &task.id);
+                }
+                returned
             }
             // gate[N-28 notice]: Second merge-queue ejection operator page
             Self::PageOperator { run, head } => {

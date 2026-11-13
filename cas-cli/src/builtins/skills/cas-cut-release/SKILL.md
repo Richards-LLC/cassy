@@ -12,13 +12,7 @@ proves the exact tree that ships, and landing on `main` publishes it. There is
 no release PR, no tag push and no local build. Platforms: Linux runs the suite;
 macOS: compile-checked and launch-tested; suite runs on Linux.
 
-Release prep checklist: compare the locked `@playwright/test` version in
-`hub-web/package-lock.json` with `npm view @playwright/test version` (run from
-the checkout). Flag **more than one minor behind** in the prep notes; a major
-gap also needs review. Upgrade and refresh Playwright guidance before the cut,
-or record the supervisor's explicit deferral. After an upgrade, regenerate
-agents in scratch with `npx playwright init-agents --loop=<harness>` and review
-them against `cas-playwright-debug`'s healer guard before adopting any changes.
+Release prep checklist: compare the locked Playwright version with the latest stable and verify browser binaries plus the chosen Node runtime. Any gap needs an upgrade decision before authoring/cut; the Node 26 tracing incident is a compatibility warning, not a universal engine constraint. Generate `npx playwright init-agents --loop=<harness>` and `npx playwright init-skills --loop=<harness>` in scratch, then review the official diff against [cas-playwright-tests](../cas-playwright-tests/SKILL.md), including its healer guard.
 
 1. Start from the epic branch only after closeout is complete: one full review,
    one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` and the

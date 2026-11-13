@@ -1,6 +1,6 @@
 ---
 name: cas-test-audit
-description: Use when asked to audit a project's tests for dead, duplicate, style-pinning, slow or flaky tests, or to cut test cost; not for writing one new test (cas-tdd).
+description: Use when asked to audit a project's tests for dead, duplicate, style-pinning, slow or flaky tests, or to cut test cost; not for writing one new test (cas-writing-tests).
 metadata:
   managed_by: cas
 ---
@@ -25,9 +25,10 @@ Read this before promising speed. In cas-src (the reference audit, 10 green inte
 2. **Baseline cost.** Follow [ci-timing](references/ci-timing.md) for each runner. Done when a table lists tests, test-seconds, shard wall and thread use per layer, and the CI run ids used. If a project keeps no CI artifacts, write `not measurable`; never estimate.
 3. **Run the detectors** in [detectors](references/detectors.md) for the languages present. Each detector reports flagged and, after a 10-row hand check, held. Done when every detector row has `held / flagged`.
 4. **Apply the precision floor.** A detector under 50% on its sample goes in the ledger as `noisy, not proposed`. Its rows are never proposed for deletion. Low-confidence rows are listed, never proposed for deletion.
-5. **Classify** every proposal into one bucket from the table below, with a confidence (`high` tool-authoritative or both sides quoted, `medium`, `low`).
-6. **Write the ledger** in [ledger](references/ledger.md). Keep measured time removed and projected saving in separate columns; a saving is a projection until a before/after run proves it.
-7. **Stop.** Hand the ledger to the operator with the decisions list. Done when no test file differs from the audited revision.
+5. **Faith review.** Compare each spec title with its final assertions using [cas-playwright-tests](../cas-playwright-tests/SKILL.md): flag promises proved only by clicks/requests, missing independent outcomes or sabotage evidence, and silently skipped required coverage.
+6. **Classify** every proposal into one bucket from the table below, with a confidence (`high` tool-authoritative or both sides quoted, `medium`, `low`).
+7. **Write the ledger** in [ledger](references/ledger.md). Keep measured time removed and projected saving in separate columns; a saving is a projection until a before/after run proves it.
+8. **Stop.** Hand the ledger to the operator with the decisions list. Done when no test file differs from the audited revision.
 
 ## Buckets
 
@@ -39,12 +40,12 @@ Read this before promising speed. In cas-src (the reference audit, 10 green inte
 | duplicate | another test asserts the same behaviour; quote both assertions |
 | slow | a real sleep, per-test rebuilt setup or serial loop; fix the cause, delete only if another bucket also flags it |
 
-Style pinning (CSS or source-text assertions) is deleted, not updated: Visual QA and behavioural tests own appearance. Keep the DOM or behaviour assertions beside it.
+Remove implementation/style pins; preserve behavior assertions and named accessibility-property contracts from [cas-playwright-tests](../cas-playwright-tests/references/locators-and-accessibility.md). Computed style alone is not an accessibility outcome.
 
 ## Two lists, not one score
 
 - **Value list** (cut or merge): highest-confidence flag first.
-- **Cost list** (speed): `runtime x runs + flake_rate x rerun_cost`, divided by unique coverage; a test with no unique coverage ranks as pure cost. Flake rate and unique coverage are measured inputs: flake from CI retry data, unique coverage from assertion-to-assertion mapping in the same module. Line-coverage diffing only where the project already produces reports.
+- **Cost list** (speed): `runtime x runs + flake_rate x rerun_cost`, divided by unique coverage; no unique coverage ranks as pure cost. Measure flake rate with [cas-playwright-debug](../cas-playwright-debug/SKILL.md#measure-a-flake); CI retry outcomes are observations, not a diagnosis. Map unique coverage assertion-to-assertion in the same module; use existing line-coverage reports only.
 - **Runner levers:** measured thread use, worker count, shard imbalance. One A/B run proves a change.
 
 ## Hard limits

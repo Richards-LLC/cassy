@@ -36,6 +36,28 @@ fn branch_update_work_target(
     }
 }
 
+/// GH #1919: G-100 asks the supervisor to retarget unfinished work to the
+/// next train. When the corrected target is another open train's lane and the
+/// task's parent is a different train, the parent moves with the target, so
+/// the re-park start is not refused G-06 by the frozen train it left.
+/// Returns (old parent, new train).
+fn train_parent_move(
+    cas_root: &std::path::Path,
+    store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    target: &cas_types::WorkTarget,
+) -> Option<(String, String)> {
+    use super::release_train::is_release_train;
+    let parent = store.get_parent_epic(task_id).ok().flatten().filter(is_release_train)?;
+    let lane = target.target_branch.as_str();
+    store.list(None).ok()?.into_iter()
+        .filter(|train| is_release_train(train) && !train.is_terminal() && train.id != parent.id)
+        .find(|train| train.effective_epic_branch().is_some_and(|branch| {
+            branch == lane || super::repo_context::effective_epic_ref(cas_root, branch) == lane
+        }))
+        .map(|train| (parent.id, train.id))
+}
+
 fn refresh_epic_lane_binding(task: &mut Task) {
     if task.task_type == TaskType::Epic
         && task
@@ -821,6 +843,13 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        // An older target clear reopened the task but left its source bound.
+        // Only that reviewed no-code state may repeat the clear to repair it.
+        let artifact_scope_repair = target_repo.is_some_and(|repo| repo.trim().is_empty())
+            && task.execution_note.as_deref() == Some("no-code")
+            && task.deliverables.work_target.is_none()
+            && task.deliverables.work_target_cleared
+            && super::lifecycle::close_ops::has_recorded_code_delivery(&task);
         let binding_override = proof_scope_fix && task.status == TaskStatus::AwaitingMerge
             && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some());
         // Check before any ordinary fields or side effects: a rejected batch
@@ -1141,7 +1170,9 @@ impl CasCore {
                     data: None,
                 });
             }
-            if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked) {
+            if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked)
+                && !(artifact_scope_repair && task.status == TaskStatus::Open)
+            {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
@@ -1259,6 +1290,7 @@ impl CasCore {
             };
             if !proof_targets_fix && !risk_fix && !methodology_fix
                 && task.deliverables.work_target.as_ref() == corrected_target.as_ref()
+                && !artifact_scope_repair
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
@@ -1272,6 +1304,26 @@ impl CasCore {
                 });
             }
 
+            // A missing lane with no recorded delivery needs only the target
+            // clear; it has no source boundary to resolve or retire.
+            let artifact_scope_audit = if target_repo.is_some_and(|repo| repo.trim().is_empty())
+                && super::lifecycle::close_ops::has_recorded_code_delivery(&task)
+            {
+                let context = task.deliverables.work_target.as_ref()
+                    .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| &start.work_target))
+                    .ok_or_else(|| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from("PROOF-SCOPE FIX REJECTED: no recorded work target to reconcile"), data: None,
+                    })
+                    .and_then(|target| super::repo_context::resolve_repo_context(&self.cas_root, target)
+                        .map_err(|message| McpError { code: ErrorCode::INVALID_PARAMS, message: Cow::from(message), data: None }))?;
+                Some(super::lifecycle::close_ops::retire_no_code_delivery_scope(
+                    &context.repo_root, &mut task, &context.target_branch,
+                ).map_err(|error| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: retained delivery conflicts with artifact-only scope: {error}")), data: None,
+                })?)
+            } else { None };
             task.deliverables.work_target = corrected_target.clone();
             refresh_epic_lane_binding(&mut task);
             if !proof_targets_fix && !risk_fix && !methodology_fix {
@@ -1305,6 +1357,12 @@ impl CasCore {
             task.pending_verification = false;
             task.pending_worktree_merge = false;
         task.updated_at = chrono::Utc::now();
+            let train_move = corrected_target.as_ref()
+                .filter(|_| req.epic.is_none() && !proof_targets_fix && !risk_fix && !methodology_fix)
+                .and_then(|target| train_parent_move(&self.cas_root, task_store.as_ref(), &task.id, target));
+            let parent_moved = train_move.as_ref()
+                .map(|(old, new)| format!(" Parent moved from train {old} to train {new}."))
+                .unwrap_or_default();
             let target_description = if methodology_fix {
                 format!("Execution methodology corrected to {}.", task.execution_note.as_deref().unwrap_or("<cleared>"))
             } else if risk_fix {
@@ -1322,11 +1380,11 @@ impl CasCore {
                     .as_ref()
                     .map(|target| {
                         format!(
-                            "Work target is now {} @ {}.",
+                            "Work target is now {} @ {}.{parent_moved}",
                             target.repo_selector, target.target_branch
                         )
                     })
-                    .unwrap_or_else(|| "The stale code work target was cleared for this no-code task.".to_string())
+                    .unwrap_or_else(|| format!("The stale code work target was cleared for this no-code task. {}", artifact_scope_audit.as_deref().unwrap_or_default()))
             };
             let note = audit::proof_scope_fix_note(
                 task.updated_at, &supervisor, reason, &target_description,
@@ -1390,6 +1448,18 @@ impl CasCore {
                 message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
                 data: None,
             })?;
+            if let Some((old_parent, new_parent)) = train_move.as_ref() {
+                task_store.remove_dependency(&task.id, old_parent)
+                    .and_then(|()| task_store.add_dependency(&Dependency::new(
+                        task.id.clone(), new_parent.clone(), DependencyType::ParentChild,
+                    )))
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to move parent to train {new_parent}: {error}")),
+                        data: None,
+                    })?;
+            }
+            let _ = crate::store::publish_direct_task_write(&self.cas_root, &task.id);
             let result_target = if methodology_fix {
                 format!("Execution methodology corrected to {}. Ordinary delivery and close proofs still apply.", task.execution_note.as_deref().unwrap_or("<cleared>"))
             } else if risk_fix {
@@ -1407,7 +1477,7 @@ impl CasCore {
                     .as_ref()
                     .map(|target| {
                         format!(
-                            "New work target: {} @ {}.",
+                            "New work target: {} @ {}.{parent_moved}",
                             target.repo_selector, target.target_branch
                         )
                     })
@@ -1597,13 +1667,21 @@ impl CasCore {
                     triaged_labels.extend(["from-finding".into(), "reach:theoretical".into()]);
                 }
             } else {
-                let additions: Vec<_> = labels.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                let replacement: Vec<_> = labels.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                // Replace user labels without erasing finding provenance or
+                // omitted triage axes used to derive the finding's priority.
+                triaged_labels.retain(|label| label == "from-finding"
+                    || ["severity:", "reach:", "journey:"].iter().any(|axis| label.starts_with(axis)));
                 for axis in ["severity:", "reach:", "journey:"] {
-                    if additions.iter().any(|label| label.starts_with(axis)) {
+                    if replacement.iter().any(|label| label.starts_with(axis)) {
                         triaged_labels.retain(|label| !label.starts_with(axis));
                     }
                 }
-                triaged_labels.extend(additions.into_iter().map(str::to_owned));
+                for label in replacement {
+                    if !triaged_labels.iter().any(|existing| existing == label) {
+                        triaged_labels.push(label.to_owned());
+                    }
+                }
             }
         }
         if req.labels.is_some()
@@ -2829,6 +2907,8 @@ impl CasCore {
         }
 
         if task.assignee.is_some() && task.assignee != prior_assignee {
+            let publication = super::lifecycle::epic_lane::assignment_branch_note(&self.cas_root, task_store.as_ref(), &task);
+            if !publication.is_empty() { warnings.push(publication.trim().to_string()); }
             if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
                 warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
             }
@@ -2970,6 +3050,39 @@ mod status_transition_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn update_labels_replaces_cut_train_set_gh1891() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        core.open_agent_store().unwrap().init().unwrap();
+        let mut train = Task::new("cas-cf795".into(), "Release train v4.21".into());
+        train.task_type = TaskType::Epic;
+        train.branch = Some("epic/release-train-v4.21".into());
+        train.labels = vec!["release-train".into(), "release-train-cut".into()];
+        tasks.add(&train).unwrap();
+        let target = super::super::repo_context::effective_epic_ref(
+            temp.path(), train.branch.as_deref().unwrap(),
+        );
+        assert!(super::super::release_train::check_cut_merge(temp.path(), &target, None).is_err());
+
+        for (labels, expected) in [
+            (Some("release-train"), vec!["release-train"]),
+            (Some(" release-train, release-train, ,incident,incident "), vec!["release-train", "incident"]),
+            (None, vec!["release-train", "incident"]),
+            (Some(""), vec![]),
+        ] {
+            let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+                "id": train.id, "labels": labels,
+            })).unwrap();
+            core.cas_task_update(Parameters(request)).await.unwrap();
+            assert_eq!(tasks.get(&train.id).unwrap().labels, expected);
+            assert!(super::super::release_train::check_cut_merge(temp.path(), &target, None).is_ok());
+        }
     }
 
     #[tokio::test]

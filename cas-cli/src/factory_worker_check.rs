@@ -280,7 +280,7 @@ fn targeted_test(args: &[String]) -> Option<TargetedTest> {
 }
 
 pub(crate) fn allowed_args(args: &[String]) -> bool {
-    check_packages(args).is_some() || targeted_test(args).is_some()
+    check_packages(args).is_some() || targeted_test(args).is_some() || javascript::allowed_args(args)
 }
 
 /// Use the same explicit [[test]] name/path inventory as cas-test-targets.py;
@@ -2042,6 +2042,12 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 }
 
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
+    if javascript::allowed_args(args) {
+        if isolated_test_env.is_some() || !test_env.is_empty() {
+            bail!("JavaScript stability commands do not accept Rust child environment profiles");
+        }
+        return javascript::execute(cas_root, args, cwd);
+    }
     validate_test_environment(args, test_env)?;
     let test = targeted_test(args);
     if let Some(directory) = isolated_test_env {

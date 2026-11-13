@@ -71,6 +71,10 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     for (from, to) in ranges {
         required.extend(rust::changed(repo, from, to, paths)?.into_iter()
             .map(|test| test.identity).filter(|identity| live.contains(identity)));
+        let live_javascript = super::javascript::changed_tests(repo, from, head, paths)?
+            .into_iter().collect::<BTreeSet<_>>();
+        required.extend(super::javascript::changed_tests(repo, from, to, paths)?.into_iter()
+            .filter(|identity| live_javascript.contains(identity)));
     }
     Ok(required.into_iter().collect())
 }

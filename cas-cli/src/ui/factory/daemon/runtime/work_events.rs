@@ -215,6 +215,8 @@ struct TranscriptIndex {
     events: Vec<Indexed>,
     open_calls: HashMap<String, usize>,
     turn: Option<String>,
+    turn_lifecycle: Option<WorkLifecycle>,
+    last_activity_at: Option<String>,
     command_sessions: HashMap<String, usize>,
     poll_parents: HashMap<String, usize>,
     changed_files: HashMap<Option<String>, Vec<WorkChangedFile>>,
@@ -230,6 +232,8 @@ impl TranscriptIndex {
             events: Vec::new(),
             open_calls: HashMap::new(),
             turn: None,
+            turn_lifecycle: None,
+            last_activity_at: None,
             command_sessions: HashMap::new(),
             poll_parents: HashMap::new(),
             changed_files: HashMap::new(),
@@ -510,6 +514,15 @@ impl TranscriptIndex {
             started_at: (stage == "start").then(|| at.to_rfc3339()),
             ended_at: (stage == "end").then(|| at.to_rfc3339()),
         });
+        if phase.is_none() && matches!(stage, "start" | "end") {
+            let mut turn = indexed.event.lifecycle.clone().unwrap();
+            if stage == "end" {
+                turn.started_at = self.turn_lifecycle.as_ref()
+                    .filter(|prior| prior.id == turn.id)
+                    .and_then(|prior| prior.started_at.clone());
+            }
+            self.turn_lifecycle = Some(turn);
+        }
     }
 
     fn index_line(&mut self, offset: u64, bytes: &[u8]) {
@@ -535,6 +548,7 @@ impl TranscriptIndex {
             return;
         }
         let Some(at) = timestamp(&value) else { return };
+        self.last_activity_at = Some(at.to_rfc3339());
         let content = value.pointer("/message/content");
         match value.get("type").and_then(Value::as_str) {
             Some("user") => {
@@ -569,6 +583,12 @@ impl TranscriptIndex {
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                         .or(self.turn.take());
+                    // Native prompt boundaries are independent of paged work rows.
+                    self.turn_lifecycle = Some(WorkLifecycle {
+                        id: self.turn.clone().unwrap_or_else(|| format!("prompt:{offset}")),
+                        stage: "start".into(), phase: None, outcome: None,
+                        started_at: Some(at.to_rfc3339()), ended_at: None,
+                    });
                 }
             }
             Some("assistant") => {
@@ -625,6 +645,7 @@ impl TranscriptIndex {
             return;
         };
         let Some(at) = timestamp(&value) else { return };
+        self.last_activity_at = Some(at.to_rfc3339());
         let Some(payload) = value.get("payload") else {
             return;
         };
@@ -1283,6 +1304,14 @@ pub(crate) struct SupervisorPhase {
     pub(crate) event_id: String,
     pub(crate) kind: WorkEventKind,
     pub(crate) lifecycle: WorkLifecycle,
+    /// Native enclosing turn, independent of the latest tool lifecycle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn: Option<WorkLifecycle>,
+    /// Tool name only; never commands, arguments or output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_activity_at: Option<String>,
     pub(crate) observed_at: String,
     pub(crate) stale: bool,
 }
@@ -1363,6 +1392,7 @@ fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str, now: DateTime<Ut
                 outcome: completed.then(|| "success".into()), started_at,
                 ended_at: completed.then(|| at.to_rfc3339()),
             },
+            turn: None, step: None, last_activity_at: Some(at.to_rfc3339()),
             observed_at: Utc::now().to_rfc3339(), stale: false,
         });
     }
@@ -1456,24 +1486,40 @@ impl WorkEventIndex {
             .filter_map(|source| self.transcripts.get(&source.agent_id))
             .flat_map(|index| index.events.iter().map(|item| &item.event))
             .collect();
+        let time = |at: &str| DateTime::parse_from_rfc3339(at)
+            .map(|at| at.timestamp_millis()).unwrap_or(0);
+        let boundary = |life: &WorkLifecycle| life.ended_at.as_deref()
+            .or(life.started_at.as_deref()).map(&time).unwrap_or(0);
+        let turn = sources.iter().filter_map(|source| self.transcripts.get(&source.agent_id))
+            .filter_map(|index| index.turn_lifecycle.clone()).max_by_key(&boundary);
         let latest = events.iter().copied().filter(|event| event.lifecycle.is_some())
-            .max_by_key(|event| {
-                event.lifecycle.as_ref().and_then(|life| life.ended_at.as_deref())
-                    .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-                    .map(|at| at.timestamp_millis())
-                    .unwrap_or_else(|| DateTime::parse_from_rfc3339(&event.at).map(|at| at.timestamp_millis()).unwrap_or(0))
-            })?;
-        let mut lifecycle = latest.lifecycle.clone()?;
+            .max_by_key(|event| event.lifecycle.as_ref().and_then(|life| life.ended_at.as_deref())
+                .map(&time).unwrap_or_else(|| time(&event.at)))
+            // An old tool cannot replace a newer native turn start/end.
+            .filter(|event| turn.as_ref().is_none_or(|turn| {
+                event.lifecycle.as_ref().map(&boundary).unwrap_or(0) >= boundary(turn)
+            }));
+        let mut lifecycle = latest.and_then(|event| event.lifecycle.clone())
+            .or_else(|| turn.clone())?;
         // Only the matching operation's recorded start can complete an end.
-        // A compaction boundary has no in-progress interval to recover.
         if lifecycle.stage == "end" && lifecycle.started_at.is_none() {
             lifecycle.started_at = events.iter().filter_map(|event| event.lifecycle.as_ref())
                 .find(|prior| prior.id == lifecycle.id && prior.stage == "start")
                 .and_then(|prior| prior.started_at.clone());
         }
+        let step = events.iter().copied().filter(|event| {
+            event.kind == WorkEventKind::Tool
+                && event.lifecycle.as_ref().is_some_and(|life| life.stage != "end")
+                && turn.as_ref().is_none_or(|turn| turn.stage != "end" && event.turn.as_deref() == Some(&turn.id))
+        }).max_by_key(|event| time(&event.at))
+            .and_then(|event| event.tool.as_ref()).map(|tool| tool.name.clone());
+        let last_activity_at = sources.iter().filter_map(|source| self.transcripts.get(&source.agent_id))
+            .filter_map(|index| index.last_activity_at.clone()).max_by_key(|at| time(at));
         Some(SupervisorPhase {
-            event_id: latest.id.clone(), kind: latest.kind, lifecycle,
-            observed_at: self.phase_observed_at.clone().unwrap_or_else(|| latest.at.clone()),
+            event_id: latest.map(|event| event.id.clone()).unwrap_or_else(|| lifecycle.id.clone()),
+            kind: latest.map(|event| event.kind).unwrap_or(WorkEventKind::Notice),
+            lifecycle, turn, step, last_activity_at,
+            observed_at: self.phase_observed_at.clone().unwrap_or_else(|| Utc::now().to_rfc3339()),
             stale: !fresh,
         })
     }

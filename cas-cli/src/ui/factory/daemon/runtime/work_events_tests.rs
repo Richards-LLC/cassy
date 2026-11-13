@@ -559,6 +559,53 @@ fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
 }
 
 #[test]
+fn supervisor_phase_keeps_turn_open_after_tool_completion() {
+    for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("native.jsonl");
+        let rows = if cli == cas_mux::SupervisorCli::Claude {
+            vec![
+                json!({"type":"user","uuid":"turn","timestamp":at(0),"message":{"content":"work"}}),
+                json!({"type":"assistant","timestamp":at(1),"message":{"content":[{"type":"tool_use","id":"c","name":"Bash","input":{"command":"private input"}}]}}),
+                json!({"type":"user","timestamp":at(2),"message":{"content":[{"type":"tool_result","tool_use_id":"c","content":"done"}]}}),
+            ]
+        } else {
+            vec![
+                json!({"type":"event_msg","timestamp":at(0),"payload":{"type":"task_started","turn_id":"turn"}}),
+                json!({"type":"response_item","timestamp":at(1),"payload":{"type":"function_call","call_id":"c","name":"exec_command","arguments":"{\"cmd\":\"private input\"}"}}),
+                json!({"type":"response_item","timestamp":at(2),"payload":{"type":"function_call_output","call_id":"c","output":"done"}}),
+            ]
+        };
+        write_lines(&path, &rows[..1]);
+        let scope = scope(cli);
+        let mut index = WorkEventIndex::default();
+        let resolve = |_: &SupervisorSource| Some(path.clone());
+        let starting = serde_json::to_value(index.supervisor_phase(&scope, &resolve).unwrap()).unwrap();
+        assert_eq!(starting["turn"]["stage"], "start");
+        assert!(starting["step"].is_null());
+        write_lines(&path, &rows[1..2]);
+        let running = serde_json::to_value(index.supervisor_phase(&scope, &resolve).unwrap()).unwrap();
+        assert_eq!(running["turn"]["stage"], "start");
+        assert_eq!(running["turn"]["id"], "turn");
+        assert_eq!(running["step"], if cli == cas_mux::SupervisorCli::Claude { "Bash" } else { "exec_command" });
+        assert!(!running.to_string().contains("private input"));
+        write_lines(&path, &rows[2..]);
+        let between = serde_json::to_value(index.supervisor_phase(&scope, &resolve).unwrap()).unwrap();
+        assert_eq!(between["turn"]["stage"], "start");
+        assert!(between["step"].is_null());
+        assert_eq!(DateTime::parse_from_rfc3339(between["last_activity_at"].as_str().unwrap()).unwrap(), DateTime::parse_from_rfc3339(&at(2)).unwrap());
+        write_lines(&path, &[if cli == cas_mux::SupervisorCli::Claude {
+            json!({"type":"system","subtype":"turn_duration","timestamp":at(3)})
+        } else {
+            json!({"type":"event_msg","timestamp":at(3),"payload":{"type":"task_complete","turn_id":"turn"}})
+        }]);
+        let ended = serde_json::to_value(index.supervisor_phase(&scope, &resolve).unwrap()).unwrap();
+        assert_eq!(ended["turn"]["stage"], "end");
+        assert_eq!(ended["turn"]["started_at"], running["turn"]["started_at"]);
+    }
+}
+
+#[test]
 fn v2_reasoning_publishes_only_recorded_summary_and_detail() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("rollout.jsonl");

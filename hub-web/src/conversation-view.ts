@@ -877,7 +877,20 @@ export class ConversationView {
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
-    if (revealHistoryFailure) this.historyFailure.scrollIntoView?.({ block: "nearest" });
+    if (revealHistoryFailure) {
+      // An older-page error is now the reader's place. A queued activity pin
+      // or reconnect restoration must not take its Retry control back offscreen.
+      if (historyError?.before !== undefined) {
+        this.following = false;
+        this.pinDeferred = false;
+        this.placePending = false;
+        this.place = undefined;
+      }
+      this.historyFailure.scrollIntoView?.({ block: "nearest" });
+      this.scrolledTo = this.element.scrollTop;
+      this.notePlace();
+      this.jump.hidden = shouldFollowTail(this.element);
+    }
   }
 
   /** Explicit paging through rows already held in memory. */

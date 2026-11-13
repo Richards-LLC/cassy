@@ -794,7 +794,7 @@ export class ConversationView {
     this.renderLoadEarlier(loadingEarlier);
     const ended = this.options.sessionEnd?.();
     this.phase = ended ? undefined : this.options.phase?.();
-    const working = !ended && (this.phase !== undefined || this.options.working?.() === true);
+    const working = !ended && (this.phase !== undefined || (!this.options.phase && this.options.working?.() === true));
     if (!this.phase?.active && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
@@ -1408,7 +1408,7 @@ export class ConversationView {
     const newest = this.history.visibleEvents().at(-1);
     const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
     const phase = this.options.phase?.();
-    const working = !this.options.sessionEnd?.() && (phase !== undefined || this.options.working?.() === true) && !sending;
+    const working = !this.options.sessionEnd?.() && (phase !== undefined || (!this.options.phase && this.options.working?.() === true)) && !sending;
     const signature = (value?: PhaseLine): string => JSON.stringify([value?.label, value?.active, value?.unavailable, value?.elapsed !== undefined]);
     if (working !== this.nodes.has("working") || signature(phase) !== signature(this.phase)) this.update();
     else {

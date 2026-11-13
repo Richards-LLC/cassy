@@ -1278,6 +1278,24 @@ impl CasCore {
                     && let Some(verdict) =
                         verdict.filter(|verdict| verdict.status == VerificationStatus::Approved)
                 {
+                    let target_sha = review_target(repo, target).map_err(fail)?;
+                    if target_sha != candidate.target_sha {
+                        let base = git(repo, &["merge-base", &candidate.target_sha, &candidate.source_sha])
+                            .map_err(fail)?;
+                        if repository_proof::delivery_paths_changed(repo, &base,
+                            &candidate.source_sha, &candidate.target_sha, &target_sha)
+                            .map_err(fail)?.is_empty()
+                        {
+                            let receipt = format!(
+                                "approval carried: disjoint train delta; dispatch={} verdict={} target={} -> {}.",
+                                dispatch.id, verdict.id, candidate.target_sha, target_sha,
+                            );
+                            let store = self.open_task_store()?;
+                            if !store.get(&task.id).map_err(fail)?.notes.lines().any(|line| line == receipt) {
+                                store.append_note(&task.id, &receipt).map_err(fail)?;
+                            }
+                        }
+                    }
                     return Ok(Some(Approval {
                         candidate,
                         dispatch_id: dispatch.id.clone(),
@@ -1444,10 +1462,15 @@ impl CasCore {
         // cas-d4b7 requires a proven patch match. A conflicting/unbuildable
         // candidate must fall through so the caller invalidates the old approval
         // before the fresh-review path reports the candidate error.
-        let Ok(candidate) =
+        let candidate = match
             self.build_verification_candidate(task, repo, source, target, digest.to_string(), None)
-        else {
-            return Ok(None);
+        {
+            Ok(candidate) => candidate,
+            // A bounded response is not drift. Keep the exact approval until
+            // the immutable build completes and this same rebind can retry.
+            Err(error) if error.data.as_ref().is_some_and(|data|
+                data["reason"] == "candidate_preparation_pending") => return Err(error),
+            Err(_) => return Ok(None),
         };
         if candidate.validate(&self.cas_root, task).is_err() {
             return Ok(None);
@@ -1551,9 +1574,13 @@ impl CasCore {
                 &notice_source, &notice_key, result),
         ) {
             CandidatePreparation::Ready(result) => result,
-            CandidatePreparation::Pending(_) => Err(fail(format!(
-                "task {}: candidate preparation continues in the background; merge held. A supervisor notice reports completion. Retry factory action=worktree_merge id={source} task_id={}; the immutable cache is reused and exact review is still required before publication",
-                task.id, task.id))),
+            CandidatePreparation::Pending(_) => {
+                let mut error = fail(format!(
+                    "task {}: candidate preparation continues in the background; merge held. A supervisor notice reports completion. Retry factory action=worktree_merge id={source} task_id={}; the immutable cache is reused and exact review is still required before publication",
+                    task.id, task.id));
+                error.data = Some(serde_json::json!({"reason": "candidate_preparation_pending"}));
+                Err(error)
+            },
         }
     }
 

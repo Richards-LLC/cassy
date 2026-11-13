@@ -372,6 +372,7 @@ pub(crate) fn fallback_context_within(
     // "already shown". A Claude Teams copy is a pointer, and its teammate turn
     // fires no UserPromptSubmit; a pointer turn whose turn-start hook failed
     // or ran out of room is retried here until its rows resolve.
+    // gate[N-91 notice]: CAS-wake pointer rows
     if let Some((key, prompt, started_at)) = &turn {
         let first_boundary = !receipt.state.delivered.contains(key);
         let pending = names_wake_pointer(prompt) && !receipt.state.pointers_resolved.contains(key);

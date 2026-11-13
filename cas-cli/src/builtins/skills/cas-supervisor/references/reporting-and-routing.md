@@ -25,9 +25,9 @@ A downstream product release is not done at deploy, and its release notes wait f
 
 A failed check is an incident: file the bug, and the fix-forward release runs its own check. Only the operator can waive a pending or failed check, in their own words in an epic decision note starting `POST-RELEASE OVERRIDE:`.
 
-## Upkeep refusals and escapes
+## Shared docs
 
-Task park refuses a delivery that leaves the journey registry, CODEMAP or PRODUCT_OVERVIEW untrue for the paths it changed. The worker fixes it or records the gate's escape token as a decision note ([vocabulary](../../cas-qa-craft/references/journeys.md#escape-vocabulary)). At review, read each `UPKEEP ESCAPE` note against the diff and request changes when its reason does not hold. `supervisor_override=true` with a reason waives these gates: use it for a gate defect, never to skip upkeep.
+Deliveries add per-task fragments (`docs/qa/bug-families/<slug>.yaml`, `docs/product-overview.d/<task-id>.md`) and never edit CODEMAP or PRODUCT_OVERVIEW; park does not check them. Release prep folds the fragments in and regenerates both documents once. At review, request changes when a delivery edits a shared doc instead of adding its fragment.
 
 ## Cross-team routing
 

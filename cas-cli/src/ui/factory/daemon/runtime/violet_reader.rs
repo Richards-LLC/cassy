@@ -709,6 +709,7 @@ impl PromptQueueTyper<'_> {
         self.enqueue_at(session, delivery, kind, text, key, Utc::now())
     }
 
+    // gate[W-55 watchdog]: Violet v2 managed reader delivery
     fn enqueue_at(&self, session: &str, delivery: &ClaimedDelivery, kind: &str, text: &str, key: &str, now: DateTime<Utc>) -> Result<(), NamedRefusal> {
         let target = &delivery.target;
         let field = |value: &Value| value.as_str().filter(|text| !text.is_empty()).map(str::to_string);

@@ -287,6 +287,7 @@ pub fn run_query_set(ctx: &ParityContext, set: &QuerySet) -> Result<Vec<QueryRes
 /// set that misses an entry type or tier present in the store is an error,
 /// because a baseline with blind spots silently blesses whatever the migration
 /// does in them.
+// gate-audit[allow_uncovered]: selector Selects an explicitly partial measurement capture; no factory request is admitted.
 pub fn capture(
     ctx: &ParityContext,
     set: &QuerySet,

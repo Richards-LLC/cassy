@@ -181,6 +181,7 @@ impl CasCore {
 
 /// G8 reads the park-time report, never a new diff. Legacy catalog adoption
 /// remains advisory; enforcement arms when a YAML registry exists.
+// gate-audit[forward]: G-118 The qa_record decision tags this pure renderer output.
 pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option<String> {
     if impact["registry"]["present"] != true {
         return None;

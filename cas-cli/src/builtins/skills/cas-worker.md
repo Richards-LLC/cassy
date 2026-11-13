@@ -58,7 +58,7 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
 
 | Phase or trigger | Read before acting |
 | --- | --- |
-| Test design/review | [Fewest tests](../cas-tdd/SKILL.md#fewest-tests) |
+| Test design/review | [Fewest tests](../cas-writing-tests/SKILL.md#fewest-tests) |
 | Before checks/tests | [discipline.md](references/discipline.md) |
 | Browser changes/journeys | [Browser checks](references/discipline.md#browser-checks) |
 | Delivery | [close-gate.md](references/close-gate.md); [Batch QA](references/details.md#batch-qa) when `qa.mode=batch` |

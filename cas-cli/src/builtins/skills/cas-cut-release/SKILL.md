@@ -12,13 +12,7 @@ proves the exact tree that ships, and landing on `main` publishes it. There is
 no release PR, no tag push and no local build. Platforms: Linux runs the suite;
 macOS: compile-checked and launch-tested; suite runs on Linux.
 
-Release prep checklist: compare the locked `@playwright/test` version in
-`hub-web/package-lock.json` with `npm view @playwright/test version` (run from
-the checkout). Flag **more than one minor behind** in the prep notes; a major
-gap also needs review. Upgrade and refresh Playwright guidance before the cut,
-or record the supervisor's explicit deferral. After an upgrade, regenerate
-agents in scratch with `npx playwright init-agents --loop=<harness>` and review
-them against `cas-playwright-debug`'s healer guard before adopting any changes.
+Release prep checklist: compare the locked Playwright version with the latest stable and verify browser binaries plus the chosen Node runtime. Any gap needs an upgrade decision before authoring/cut; the Node 26 tracing incident is a compatibility warning, not a universal engine constraint. Generate `npx playwright init-agents --loop=<harness>` and `npx playwright init-skills --loop=<harness>` in scratch, then review the official diff against [cas-playwright-tests](../cas-playwright-tests/SKILL.md), including its healer guard.
 
 1. Start from the epic branch only after closeout is complete: one full review,
    one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` and the
@@ -28,12 +22,18 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
    Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`, and pass the audit's printed included task IDs to `batch_receipt`.
-   Commit the regenerated `.claude/CODEMAP.md` and the previous release's
-   report there too; no docs PR follows. Fixture versions use `9.99.x`.
+   Commit the regenerated `.claude/CODEMAP.md` (`/codemap`) and the previous
+   release's report there too; no docs PR follows. The command refuses while a
+   file added or removed since the map's last commit is unmapped. Deliveries never edit
+   CODEMAP or PRODUCT_OVERVIEW: the command folds the `docs/qa/bug-families/`
+   and `docs/product-overview.d/` fragments into the registry and overview
+   (`scripts/doc-fragments.py compile`); refresh the overview with
+   project-overview when its fragments call for it. Fixture versions use `9.99.x`.
    The train's ready-to-cut notice prompts this preparation after review.
    Auto-cut: when the exact train tip is green with changelog fragments,
    Cassy freezes the train and runs `scripts/release.sh --notes` itself with
-   the draft at the `release-notes.md` path its wake names. Write that draft;
+   the draft at the `release-notes.md` path its wake names. Write that draft
+   and commit a regenerated CODEMAP;
    Cassy never writes or posts notes. The operator pauses auto-cut in Commander.
 2. Read the train CI receipt and complete log artifact; fix every red first.
    The existing CI suite at the newest train tip replaces a local pre-cut full

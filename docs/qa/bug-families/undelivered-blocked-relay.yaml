@@ -1,4 +1,0 @@
-title: Stale blocked lifecycle relays escalate once before their obsolete payload retires
-tasks: [cas-f66d]
-invariants: [FACTORY-UNDELIVERED-RELAY-ACTION]
-journeys: [FACTORY-SUPERVISE]

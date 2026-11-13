@@ -260,9 +260,9 @@ fn consecutive_messages_all_surface_in_one_turn() {
 
 /// The supervisor's early return was the quieter half of the same bug: it made
 /// the supervisor the one factory role whose mail could never surface here.
-/// The reminder must now APPEND to the mail, not replace it.
+/// The supervisor must surface the same durable mail as a worker.
 #[test]
-fn the_supervisor_reminder_appends_instead_of_suppressing_mail() {
+fn supervisor_turn_surfaces_queued_mail() {
     let mut env = TestEnvGuard::new();
     supervisor_env(&mut env);
     let temp = TempDir::new().unwrap();
@@ -279,12 +279,8 @@ fn the_supervisor_reminder_appends_instead_of_suppressing_mail() {
     let context =
         context_of(&handle_user_prompt_submit(&input("supervisor"), Some(temp.path())).unwrap());
     assert!(
-        context.contains("[supervisor reminder]"),
-        "the cas-55ac reminder must survive: {context}"
-    );
-    assert!(
         context.contains("MERGE REQUIRED for cas-7a01"),
-        "supervisor-bound mail must surface alongside the reminder: {context}"
+        "{context}"
     );
 }
 
@@ -327,9 +323,9 @@ fn supervisor_turn_writes_receipts_for_every_inbox_alias() {
     assert_receipted_for_every_alias(&store, &aliases);
 }
 
-/// A supervisor with no mail must still get exactly the reminder it always got.
+/// An empty supervisor inbox adds no per-prompt context.
 #[test]
-fn the_supervisor_reminder_is_unchanged_when_there_is_no_mail() {
+fn supervisor_turn_without_mail_adds_no_context() {
     let mut env = TestEnvGuard::new();
     supervisor_env(&mut env);
     let temp = TempDir::new().unwrap();
@@ -337,11 +333,7 @@ fn the_supervisor_reminder_is_unchanged_when_there_is_no_mail() {
 
     let context =
         context_of(&handle_user_prompt_submit(&input("supervisor"), Some(temp.path())).unwrap());
-    assert!(context.contains("[supervisor reminder]"));
-    assert!(
-        !context.contains("[incoming messages]"),
-        "an empty inbox must not announce itself: {context}"
-    );
+    assert!(context.is_empty(), "{context}");
 }
 
 #[test]

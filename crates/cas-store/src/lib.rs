@@ -52,6 +52,7 @@ mod code_vector_store;
 mod commit_link_store;
 pub mod communication_slo;
 mod delegation_receipt_store;
+mod delivery_cycle;
 mod delivery_store;
 mod entity_store;
 mod epic_split_store;
@@ -146,8 +147,13 @@ pub use delegation_receipt_store::{
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
 };
+pub use delivery_cycle::{
+    DELIVERY_CYCLE_SCHEMA, DeliveryCycle, current_delivery_cycle, current_delivery_cycle_with_conn,
+    delivery_cycle_id, delivery_cycles, backfill_delivery_cycles,
+};
 pub use delivery_store::{
-    DELIVERY_SCHEMA, build_worker_completion_receipt, clear_pending_observed_delivery_merge,
+    DELIVERY_SCHEMA, build_worker_completion_receipt, build_worker_completion_receipt_in_cycle,
+    clear_pending_observed_delivery_merge,
     create_worker_delivery, create_worker_delivery_with_dispatch,
     create_worker_delivery_with_dispatch_for_lease, create_worker_delivery_with_dispatch_for_lease_at_repository, get_latest_worker_delivery,
     get_worker_delivery_by_receipt, has_pending_observed_delivery_merge,
@@ -188,8 +194,8 @@ pub use qa_pass_store::{
 pub use quality_event_store::{
     CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
     QUALITY_EVENT_BATCH_LIMIT, QUALITY_EVENT_SCHEMA_STATEMENTS, QualityEvent, QualityEventWire,
-    EstimateReference, QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
-    normalize_release_version, quality_events_after, quality_events_between,
+    EstimateReference, ReviewEvidence, QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
+    normalize_release_version, quality_event_by_id, quality_events_after, quality_events_between,
     quality_open_estimates, quality_check_samples, quality_events_for_task, quality_interventions_since, quality_release_events,
     record_quality_event, quality_event_recorded, sanitize_quality_link, sanitize_quality_title,
 };

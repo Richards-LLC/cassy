@@ -1419,6 +1419,7 @@ fn reference_history_additions_presence(
     }))
 }
 
+// gate-audit[allow_partial]: selector Selects line-presence matching for a measured integration receipt; it does not waive receipt authority.
 fn line_content_presence_uncached(
     repo: &Path,
     parent: &str,

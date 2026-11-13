@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-07 git-hook]: Pre-push fast rows (worker and main checkout)
 # Git pre-push gate for factory worker branches (cas-043b).
 #
 # Cassy installs a pre-push hook in worker worktrees that delegates here. A
@@ -14,6 +15,22 @@
 #   <local ref> <local sha> <remote ref> <remote sha>
 set -uo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then
+        printf '\n%s\n' "$@" >&2
+        # Reporting is best effort and must preserve the refusal's exit code.
+        local bin="${CAS_BIN:-cas}"
+        if command -v "$bin" >/dev/null 2>&1; then
+            "$bin" gates record-refusal --message "script exit $status $*" >/dev/null 2>&1 || :
+        fi
+    fi
+}
+trap 'gate_exit "$?" "[C-07]" "[H-38]"' EXIT
+
+
 zero='0000000000000000000000000000000000000000'
 common="$(git rev-parse --path-format=absolute --git-common-dir)" || exit 1
 # Git exports GIT_DIR, GIT_INDEX_FILE and friends to hooks. The gate runs
@@ -25,12 +42,21 @@ unset $(git rev-parse --local-env-vars)
 receipts="$common/cas/fast-rows"
 status=0
 
+# gate[H-38 git-hook]: Main-checkout pre-push (factory ref needs a same-tip fast-rows PASS)
 while read -r _local_ref local_sha remote_ref remote_sha; do
     [[ "$remote_ref" == refs/heads/factory/* && "$local_sha" != "$zero" ]] || continue
     if head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha "; then
         continue
     fi
     if [[ -n "${CAS_SKIP_FAST_ROWS:-}" ]]; then
+        # Persist the same typed per-code facts that `cas gates report` reads.
+        # A skip is accepted only after recording succeeds.
+        if ! "${CAS_BIN:-cas}" gates record-override C-07 H-38 \
+            --reason "$local_sha $CAS_SKIP_FAST_ROWS"; then
+            printf 'pre-push: refused: could not record the fast-row override\n' >&2
+            status=1
+            continue
+        fi
         mkdir -p "$receipts"
         printf '%s %s %s skipped fast rows: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$local_sha" \
             "${remote_ref#refs/heads/}" "$CAS_SKIP_FAST_ROWS" >>"$receipts/overrides.log"

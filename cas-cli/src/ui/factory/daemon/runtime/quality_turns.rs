@@ -23,6 +23,8 @@ use super::work_events::{
 
 #[derive(Default)]
 pub(super) struct Scanner {
+    history: bool,
+    since: Option<DateTime<Utc>>,
     cursors: HashMap<String, Cursor>,
     misses: HashMap<String, (SupervisorSource, Instant)>,
     ownership: RefCell<HashMap<PathBuf, RolloutOwnership>>,
@@ -31,6 +33,8 @@ pub(super) struct Scanner {
 }
 
 struct Cursor {
+    inserted: usize,
+    since: Option<DateTime<Utc>>,
     source: SupervisorSource,
     path: PathBuf,
     offset: u64,
@@ -52,6 +56,7 @@ struct Pending {
     id: String,
     started: Option<DateTime<Utc>>,
     wake: Option<WakeChannel>,
+    notice_kind: Option<String>,
     may_answer: bool,
     actions: BTreeSet<TurnAction>,
     calls: HashMap<String, (TurnAction, bool)>,
@@ -128,13 +133,14 @@ fn unqueued_wake(prompt: &str, origin: Option<&str>, agent: &Agent) -> WakeChann
 /// IDs inside a Teams envelope or a pointer select only authenticated queue
 /// facts addressed to this recipient. Sender prose never grants provenance.
 fn wake(
+    root: &Path,
     prompt: &str,
     origin: Option<&str>,
     agent: &Agent,
     session: &str,
     queue: &dyn PromptQueueStore,
     agents: &[Agent],
-) -> (WakeChannel, bool) {
+) -> (WakeChannel, bool, Option<String>) {
     use crate::hooks::handlers::handlers_middle::factory_inbox::{envelope_ids, wake_named_ids};
     let ids = envelope_ids(prompt)
         .into_iter()
@@ -152,7 +158,7 @@ fn wake(
                     && row.origin == Some(QueueOrigin::Daemon))
         })
     else {
-        return (unqueued_wake(prompt, origin, agent), false);
+        return (unqueued_wake(prompt, origin, agent), false, None);
     };
     let channel = match &row.origin {
         Some(QueueOrigin::PairedDevice { .. }) => WakeChannel::Operator,
@@ -174,7 +180,33 @@ fn wake(
     let may_answer = channel == WakeChannel::Operator
         || (channel != WakeChannel::Unknown
             && (row.kind.as_deref() == Some("ask") || row.prompt.contains('?')));
-    (channel, may_answer)
+    // Lifecycle kinds carry an episode key after the category (for example
+    // merge_ready:[supervisor,task,head]); only the category is a notice kind.
+    let notice = row.kind.as_deref().and_then(|kind| kind.split(':').next()).map(str::to_string)
+        .or_else(|| if row.origin == Some(QueueOrigin::Daemon) {
+        // Older lifecycle prompts only retain the durable notification id.
+        // Recover its type only for this exact authenticated recipient.
+        use cas_store::SupervisorQueueStore;
+        if let Some(id) = row.source.strip_prefix("lifecycle-wake:").and_then(|id| id.parse::<i64>().ok())
+            && let Ok(store) = cas_store::SqliteSupervisorQueueStore::open(root)
+            && let Ok(Some(event)) = store.get(id)
+            && event.supervisor_id == agent.id {
+            return Some(event.event_type);
+        }
+        match row.source.as_str() {
+            "worker-check" => Some("worker_check".into()),
+            "task-assignment" => Some("task_assignment".into()),
+            "delivery-watchdog" => Some("delivery_watchdog".into()),
+            "relay-watchdog" => Some("relay_watchdog".into()),
+            "director" => Some("director".into()),
+            source if source.starts_with("lifecycle-wake:") => source.split(':').nth(1)
+                .filter(|kind| kind.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())).map(str::to_string),
+            _ => None,
+        }
+    } else { None });
+    let notice = notice.filter(|kind| !kind.is_empty() && kind.len() <= 96
+        && kind.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/')));
+    (channel, may_answer, notice)
 }
 
 /// A candidate isn't an action until its result succeeds. Reads, waits, polls,
@@ -333,6 +365,7 @@ impl Pending {
             id: id.to_owned(),
             started: at,
             wake: None,
+            notice_kind: None,
             may_answer: false,
             actions: BTreeSet::new(),
             calls: HashMap::new(),
@@ -366,6 +399,7 @@ impl Pending {
 
     fn attribute(
         &mut self,
+        root: &Path,
         prompt: &str,
         origin: Option<&str>,
         agent: &Agent,
@@ -376,8 +410,9 @@ impl Pending {
         if self.wake.is_some() || launch_context(prompt) {
             return;
         }
-        let (channel, may_answer) = wake(prompt, origin, agent, session, queue, agents);
+        let (channel, may_answer, notice_kind) = wake(root, prompt, origin, agent, session, queue, agents);
         self.wake = Some(channel);
+        self.notice_kind = notice_kind;
         self.may_answer = may_answer;
     }
 
@@ -396,6 +431,8 @@ impl Pending {
 impl Cursor {
     fn new(source: SupervisorSource, path: PathBuf) -> Self {
         Self {
+            inserted: 0,
+            since: None,
             source,
             path,
             offset: 0,
@@ -418,6 +455,7 @@ impl Cursor {
         let Some(turn) = self.pending.take() else {
             return;
         };
+        if self.since.is_some_and(|since| at < since) { return }
         let usage = if turn.messages.is_empty() {
             turn.usage
         } else {
@@ -430,7 +468,7 @@ impl Cursor {
                 "turn|{}|{}|{}",
                 self.source.agent_id, self.source.harness_session, turn.id
             ),
-            QualityPayload::Turn {
+            QualityPayload::Turn { supersedes: None, notice_kind: turn.notice_kind,
                 woken_by: turn.wake.unwrap_or(WakeChannel::Unknown),
                 no_op: turn.actions.is_empty(),
                 actions: turn.actions.into_iter().collect(),
@@ -453,10 +491,11 @@ impl Cursor {
             return;
         }
         while let Some(event) = self.outbox.front() {
-            match crate::quality_ledger::emit_checked(root, event) {
-                Ok(inserted) => {
+            match crate::quality_ledger::emit_turn_checked(root, event) {
+                Ok((inserted, new_wake)) => {
+                    self.inserted += usize::from(inserted);
                     // A replayed turn is already in the ledger; only a new row is a wake.
-                    if inserted && let QualityPayload::Turn { input_tokens, .. } = &event.payload {
+                    if new_wake && let QualityPayload::Turn { input_tokens, .. } = &event.payload {
                         self.recorded.push((*input_tokens, event.occurred_at));
                     }
                     self.outbox.pop_front();
@@ -523,7 +562,7 @@ impl Cursor {
                     // Claude stamps harness-generated input, e.g. a
                     // background-task notification, with its origin kind.
                     let origin = value.pointer("/origin/kind").and_then(Value::as_str);
-                    turn.attribute(&prompt, origin, agent, session, queue, agents);
+                    turn.attribute(root, &prompt, origin, agent, session, queue, agents);
                 }
             } else if kind == "assistant" {
                 if let Some(turn) = &mut self.pending {
@@ -617,7 +656,7 @@ impl Cursor {
         {
             match entry {
                 "message" if payload["role"] == "user" && turn.wake.is_none() => {
-                    turn.attribute(&text(&payload["content"]), None, agent, session, queue, agents);
+                    turn.attribute(root, &text(&payload["content"]), None, agent, session, queue, agents);
                 }
                 "message"
                     if payload["role"] == "assistant" && payload["phase"] == "final_answer" =>
@@ -702,6 +741,7 @@ impl Cursor {
         match kind {
             "user_message_chunk" if turn.wake.is_none() => {
                 turn.attribute(
+                    root,
                     update["content"]["text"].as_str().unwrap_or(""),
                     None,
                     agent,
@@ -956,6 +996,7 @@ impl Scanner {
                     .insert(source.agent_id.clone(), Cursor::new(source.clone(), path));
             }
             if let Some(cursor) = self.cursors.get_mut(&source.agent_id) {
+                cursor.since = self.since;
                 #[cfg(test)]
                 {
                     cursor.before_read = self.before_read.take();
@@ -963,10 +1004,36 @@ impl Scanner {
                 if let Err(error) = cursor.refresh(root, agent, session, queue, agents) {
                     tracing::debug!(%error, "turn ledger transcript read deferred");
                 }
-                if agent.role == AgentRole::Supervisor {
+                if !self.history && agent.role == AgentRole::Supervisor {
                     auto_clear(root, session, queue, agent, cursor);
                 }
             }
         }
     }
+}
+
+/// Explicit historical replay uses the same readers, never auto-clear or a new
+/// observer. Only retained transcripts and authenticated queue rows can enrich a wake.
+pub(crate) fn backfill_quality_turns(root: &Path, since: DateTime<Utc>) -> anyhow::Result<usize> {
+    let actors: BTreeSet<_> = cas_store::quality_events_between(root, Some(since), None)?.into_iter()
+        .filter(|e| e.project_id.is_empty() && matches!(e.payload, QualityPayload::Turn { notice_kind: None, .. }))
+        .filter_map(|e| e.actor).collect();
+    let agents = crate::store::open_agent_store(root)?.list(None)?;
+    let agents: Vec<_> = agents.into_iter().filter(|agent| actors.contains(&agent.id)).collect();
+    let queue = crate::store::open_prompt_queue_store(root)?;
+    let sessions: BTreeSet<_> = agents.iter().filter_map(|a| a.factory_session.clone()).collect();
+    let mut inserted = 0;
+    for session in sessions {
+        let mut scanner = Scanner { history: true, since: Some(since), ..Scanner::default() };
+        loop {
+            let before: u64 = scanner.cursors.values().map(|c| c.offset).sum();
+            scanner.scan(root, root.parent().unwrap_or(root), &session, queue.as_ref(), &agents);
+            let after: u64 = scanner.cursors.values().map(|c| c.offset).sum();
+            if after == before { break }
+        }
+        anyhow::ensure!(scanner.cursors.values().all(|c| c.outbox.is_empty()),
+            "historical turn writes are pending; rerun ledger backfill after the store recovers");
+        inserted += scanner.cursors.values().map(|c| c.inserted).sum::<usize>();
+    }
+    Ok(inserted)
 }

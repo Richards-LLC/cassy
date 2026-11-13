@@ -242,6 +242,7 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
 /// `branch` lacks, and whether merging it in is clean or would conflict.
 /// Read-only: nothing is merged here, and a conflict is refused with the
 /// files it would touch. Empty when the successor already has every commit.
+// gate-audit[input]: Renders an advisory freshness note for the assigned branch; does not admit or refuse a request.
 pub(crate) fn stale_base_note(
     repo: &Path,
     branch: &str,
@@ -393,6 +394,27 @@ pub(crate) fn cited_commit_warning(
         "\n\n⚠️ CITED CODE NOT ON THIS EPIC [CITED_CODE_NOT_ON_EPIC] (cas-1630): {}. The task cannot start until that code reaches {branch}: merge the epic that has it into {branch}, or file the task under that epic.",
         lines.join("; ")
     )
+}
+
+/// First assignment/start must publish the parent's lane even when workers
+/// were spawned without a task. Explicit child targets remain authoritative.
+pub(crate) fn assignment_branch_note(
+    root: &Path,
+    store: &dyn cas_store::TaskStore,
+    subject: &cas_types::Task,
+) -> String {
+    let Some(epic) = store.get_parent_epic(&subject.id).ok().flatten() else {
+        return String::new();
+    };
+    if let Some(target) = super::super::repo_context::effective_task_work_target(subject, Some(&epic))
+        && (Some(target.target_branch.strip_prefix("origin/").unwrap_or(&target.target_branch))
+            != super::super::repo_context::effective_epic_branch(&epic)
+            || epic.deliverables.work_target.as_ref()
+                .is_some_and(|parent| parent.repo_selector != target.repo_selector))
+    {
+        return String::new();
+    }
+    crate::ops::fleet::epic_branch_readiness(root, &epic).unwrap_or_default()
 }
 
 /// Staffing is still admitted when an epic lacks published release history.

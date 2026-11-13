@@ -1,5 +1,5 @@
 //! cas-5ea7: the hotfix fast lane at close. At park an eligible delivery
-//! defers upkeep and QA evidence; after a lane merge the post-merge receipt
+//! defers QA evidence; after a lane merge the post-merge receipt
 //! (receipt checks, receipt statuses and the journey walk) replaces the QA
 //! evidence gate, and an attributable receipt failure opens a revert PR.
 use super::*;
@@ -13,12 +13,6 @@ pub(super) enum LaneClose {
     Park,
     /// Merged on the lane at `merge`, at `at`.
     Merged { lane: FastLaneConfig, merge: String, at: chrono::DateTime<chrono::Utc> },
-}
-
-impl LaneClose {
-    pub(super) fn on_lane(&self) -> bool {
-        !matches!(self, Self::Off)
-    }
 }
 
 /// A lane merge recorded for this delivery's merge, else park eligibility,
@@ -51,37 +45,6 @@ pub(super) fn classify(
         Eligibility::Eligible { .. } => LaneClose::Park,
         Eligibility::Refused(_) => LaneClose::Off,
     }
-}
-
-/// On the lane, upkeep refusals become notices plus one follow-up task. A
-/// bug-case refusal (G3) is owed by the receipt: it is deferred at park and
-/// takes the normal return path after the merge. Returns the refusals kept.
-pub(super) fn defer_upkeep(
-    notes: &mut CloseNoteTracker<'_>,
-    task: &mut Task,
-    stage: &LaneClose,
-    refusals: Vec<String>,
-    notices: &mut Vec<String>,
-) -> Vec<String> {
-    let (case, deferred): (Vec<_>, Vec<_>) = refusals
-        .into_iter()
-        .partition(|refusal| refusal.contains("BUG FIX WITHOUT A CASE"));
-    let kept = if matches!(stage, LaneClose::Merged { .. }) { case } else {
-        if !case.is_empty() {
-            notes.record(task, "FAST LANE: the bug-case upkeep refusal (G3) is deferred to the post-merge receipt.");
-            notices.push("FAST LANE: bug-case upkeep (G3) deferred to the post-merge receipt".into());
-        }
-        Vec::new()
-    };
-    if !deferred.is_empty() {
-        let filed = follow_up(notes, task, "upkeep", "Fast-lane hotfix upkeep: repair the registry and docs drift it deferred", &format!(
-            "Hotfix {} merged on the fast lane, which defers upkeep. Repair each finding below on the target branch.\n\n{}",
-            task.id,
-            deferred.join("\n\n")
-        ));
-        notices.push(format!("FAST LANE: upkeep deferred to a follow-up task ({filed})"));
-    }
-    kept
 }
 
 /// One follow-up task per `key`, recorded on the hotfix so retries reuse it.

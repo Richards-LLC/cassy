@@ -583,6 +583,9 @@ async fn public_verdicts_project_only_their_receipt_bound_delivery() {
         let mut task = task_store.get(&task_id).unwrap();
         task.status = TaskStatus::InProgress;
         task.pending_verification = true;
+        // Park records the delivered tip as the cycle anchor; transaction
+        // verdicts resolve through that one cycle (c8b54ca9fd).
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
         task_store.update(&task).unwrap();
 
         let receipt = cas_store::build_worker_completion_receipt(
@@ -3483,9 +3486,11 @@ async fn test_task_close_blocked_without_verification() {
         text.contains("VERIFICATION REQUIRED"),
         "Close should be blocked without verification: {text}"
     );
+    // GH #1867: a native Task/Agent verifier shares the caller and cannot
+    // record, so the warning never instructs one.
     assert!(
-        text.contains("Task(subagent_type=\"task-verifier\""),
-        "Close warning must include explicit Task() spawn syntax: {text}"
+        !text.contains("Task(subagent_type=\"task-verifier\""),
+        "Close warning must not instruct a native verifier spawn: {text}"
     );
 
     // A durable dispatch-request verification row must be persisted so the

@@ -193,12 +193,13 @@ pub fn claude_worker_contract(worker_name: &str) -> String {
 
 /// The skills a factory worker's native listing keeps. Every other skill stays
 /// available by name through the `skill` MCP tool, which the contract names.
-/// OpenCode's verbose rows set the budget: six fit under 2,500 characters.
+/// Keep the native listing under 2,500 characters, including both test authors.
 pub const WORKER_ROLE_SKILLS: &[&str] = &[
     "cas-diagnosing-bugs",
     "cas-resolving-merge-conflicts",
     "cas-search",
-    "cas-tdd",
+    "cas-writing-tests",
+    "cas-playwright-tests",
     "cas-worker",
     "verify-before-claim",
 ];
@@ -1423,10 +1424,14 @@ impl PtyConfig {
             // Factory agents cannot route AskUserQuestion to the human: under
             // native Agent Teams it becomes a self-directed permission prompt.
             // Remove it from Claude's model-visible tool surface up front.
-            // The PreToolUse denial remains wired as defense in depth for
-            // stale/replayed sessions or harnesses that bypass this argv path.
+            // Supervisors also use Cassy's durable transport for messaging;
+            // workers retain native messaging only to their own subagents.
             args.push("--disallowedTools".to_string());
-            args.push("AskUserQuestion".to_string());
+            args.push(if role == "supervisor" {
+                "AskUserQuestion,SendMessage".to_string()
+            } else {
+                "AskUserQuestion".to_string()
+            });
         }
 
         // cas-0bf4: optionally lower the worker's scheduling priority so
@@ -3052,6 +3057,7 @@ impl Pty {
     ///
     /// Falls back to `child.kill()` (SIGKILL on the direct child) when no PID
     /// is available (non-unix builds, already-reaped process, etc.).
+    // gate-audit[force]: selector Selects termination signal strength for an already-authorized process tree; it does not bypass process ownership.
     pub async fn kill_tree(&mut self, force: bool) {
         #[cfg(unix)]
         {
@@ -5912,7 +5918,7 @@ echo SMOKE_DONE
             config
                 .args
                 .windows(2)
-                .any(|pair| pair == ["--disallowedTools", "AskUserQuestion"]),
+                .any(|pair| pair == ["--disallowedTools", "AskUserQuestion,SendMessage"]),
             "factory supervisor spawn must remove AskUserQuestion from Claude's tool surface"
         );
     }
@@ -7398,6 +7404,13 @@ echo SMOKE_DONE
     /// one renderer. After normalizing the tool prefix, the bodies differ only
     /// by the identity line, Grok's namespace note and Codex's Plan-mode
     /// hazard.
+
+    #[test]
+    fn worker_role_skills_include_test_authors() {
+        for skill in ["cas-writing-tests", "cas-playwright-tests"] {
+            assert!(WORKER_ROLE_SKILLS.contains(&skill));
+        }
+    }
 
     #[test]
     fn test_launch_shapes_use_harness_correct_tool_prefix() {

@@ -471,6 +471,7 @@ impl CasService {
         self.inner.cas_task_show(Parameters(inner_req)).await
     }
 
+    // gate-audit[input]: Dispatch input validation and delegation to coded task policies; malformed update shapes are not policy bypasses.
     pub(super) async fn task_update(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         if let Some(ids) = req.task_ids.as_ref() {
             let fields = serde_json::to_value(&req).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;

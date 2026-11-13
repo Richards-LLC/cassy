@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate[C-35 release-script]: Train full-set receipt precondition (train-ci.py check)
 """Whole-set CI receipts, release admission and checked queue reuse.
 
 This never launches tests. CI owns execution; the daemon and release command
@@ -631,7 +632,12 @@ def main():
 
 if __name__ == '__main__':
     try:
-        sys.exit(main() or 0)
-    except (ValueError, OSError, KeyError, subprocess.SubprocessError, ET.ParseError, zipfile.BadZipFile) as error:
-        print(f'train CI: {error}', file=sys.stderr)
-        sys.exit(1)
+        try:
+            sys.exit(main() or 0)
+        except (ValueError, OSError, KeyError, subprocess.SubprocessError, ET.ParseError, zipfile.BadZipFile) as error:
+            print(f'train CI: {error}', file=sys.stderr)
+            sys.exit(1)
+    except BaseException as error:
+        if not isinstance(error, SystemExit) or error.code:
+            print("[C-35]", file=sys.stderr)
+        raise

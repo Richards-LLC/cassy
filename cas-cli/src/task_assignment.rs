@@ -3,17 +3,17 @@
 use cas_types::{AgentRole, Task, TaskStatus, TaskType};
 use std::path::Path;
 
-/// The one-line form of cas-tdd's "Fewest tests" principle, carried once by
+/// The one-line form of cas-writing-tests's "Fewest tests" principle, carried once by
 /// every task start (cas-5a52).
 pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the fewest tests that fail without the change, one per behaviour, \
      through the real path, replaying the real incident; extend an existing test before adding one, and fix or delete a flaky test \
-     instead of retrying it (cas-tdd, Fewest tests).";
+     instead of retrying it (cas-writing-tests, Fewest tests).";
 
 /// Carried by every assignment and spawn brief. It points at the principle
 /// rather than repeating it, since the task start the worker runs next
 /// carries it (cas-d9db).
 pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
-    "Fewest tests: cas-tdd (task start states the principle). Assignment authorizes and requires those ",
+    "Fewest tests: cas-writing-tests (task start states the principle). Assignment authorizes and requires those ",
     "tests covering the lines touched, which you run yourself per cas-worker ",
     "references/discipline.md. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. ",
     "Docs-only and no-code tasks prove their acceptance check instead (e.g. ",

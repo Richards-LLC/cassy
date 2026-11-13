@@ -11,8 +11,8 @@ Run the tests that cover the code you touched; name each file or filter you ran.
 <!-- cas-src:else -->
 The project's CLAUDE.md or AGENTS.md names the scoped commands.
 <!-- cas-src:end -->
-Use [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests) and
-[Test hygiene](../../cas-tdd/SKILL.md#test-hygiene) for test design and failing-first cases; scope determines existing tests to run, not new
+Use [Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests) and
+[Test hygiene](../../cas-writing-tests/SKILL.md#test-hygiene) for test design and failing-first cases; scope determines existing tests to run, not new
 tests to add. Docs-only and no-code tasks prove their acceptance check instead
 (e.g. markdownlint, `cas codemap status`, a published artifact); don't add code
 tests to them. Record non-Rust exit status and actual test count; zero tests
@@ -77,7 +77,7 @@ in the close reason.
 
 Read the diff and trace callers, struct literals and match arms across
 consumers. Before the push, cut the tests you added to the
-[fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests).
+[fewest that fail without the change](../../cas-writing-tests/SKILL.md#fewest-tests).
 Never run cargo test, clippy, rustc or scoped-test scripts. Rust: never record a
 scoped `--proof`, `SCOPED_PROOF:` or `loaded_proof` receipt. Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
 

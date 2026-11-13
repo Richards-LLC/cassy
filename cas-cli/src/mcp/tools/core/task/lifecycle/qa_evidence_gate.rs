@@ -1,3 +1,4 @@
+//! Marker syntax is independent of cas-playwright-tests coverage/optional-lane policy.
 //! QA evidence close gate (cas-0cd5).
 //!
 //! Runs on every delivery close, immediately before the factory merge gate.
@@ -210,13 +211,15 @@ pub(crate) fn task_evidence_dir(cas_root: &Path, task: &Task) -> Result<PathBuf,
 
 /// Format preflight before either verification-dispatch path mutates state.
 /// Existing ledgers are checked even for no-code tasks, whose runtime gate skips.
+// gate[G-52 park as-of]: QA ledger rejected and Tier 2 adversarial probe
+// gate-audit[require_missing]: selector Selects the appropriate preflight phase; missing mandatory ledger remains checked at final park.
 pub(crate) fn ledger_preflight(
     cas_root: &Path,
     task: &Task,
     require_missing: bool,
 ) -> Result<(), String> {
-    let config =
-        crate::config::Config::load(cas_root).map_err(|e| format!("QA LEDGER REJECTED: {e}"))?;
+    let config = crate::config::Config::load(cas_root)
+        .map_err(|e| crate::gates::tag("G-52", format!("QA LEDGER REJECTED: {e}")))?;
     let paths = crate::config::resolved_factory_artifact_paths(
         cas_root,
         config.factory().artifacts_root.as_deref(),
@@ -237,9 +240,10 @@ pub(crate) fn ledger_preflight(
     if dir.exists()
         && crate::config::canonical_factory_task_artifact_dir(&paths.base, &dir).is_none()
     {
-        return Err(
-            "QA LEDGER REJECTED: task artifact directory escapes its project namespace".into(),
-        );
+        return Err(crate::gates::tag(
+            "G-52",
+            "QA LEDGER REJECTED: task artifact directory escapes its project namespace",
+        ));
     }
     // A no-code audit report may be named LEDGER.md (cas-test-audit). Only a
     // file that declares the canonical QA matrix is held to it (GH #1766, #1817).
@@ -279,12 +283,12 @@ pub(crate) fn ledger_preflight(
     if report.ok {
         Ok(())
     } else {
-        Err(format!(
+        Err(crate::gates::tag("G-52", format!(
             "QA LEDGER REJECTED before verification dispatch:\n{}\nRun cas qa ledger check {} --task {}",
             report.refusal(),
             ledger.display(),
             task.id
-        ))
+        )))
     }
 }
 
@@ -305,10 +309,10 @@ fn adversarial_probe_refusal(task_id: &str, ledger: &Path, paths: &[String]) -> 
     {
         return None;
     }
-    Some(format!(
+    Some(crate::gates::tag("G-52", format!(
         "QA EVIDENCE REJECTED: Tier 2 delivery has no adversarial probe. {reason} Run `cas qa ledger init --task {task_id}` if {} is missing, add a row whose cell starts `Adversarial probe:` with what you tried to get past and what happened, then retry the close.",
         ledger.display()
-    ))
+    )))
 }
 
 /// A missing flat citation can outlive the namespace migration in a running

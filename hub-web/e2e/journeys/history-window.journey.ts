@@ -92,7 +92,7 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     await expectSettledHistoryFailure(page, failure, clock);
     hub.pausedHistory.delete(PELICAN);
     await failure.getByRole("button").click();
-    await expect(page.getByRole("log").locator('[data-key="reply:100"]')).toBeVisible();
+    await expectProtocolVisible(page.getByRole("log").locator('[data-key="reply:100"]'), clock);
     await expect(failure).toBeHidden();
   });
   await journey.stage("An unanswered older page can retry its original cursor", async () => {
@@ -110,12 +110,14 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     await clock.advance(15_000);
     await expectSettledHistoryFailure(page, failure, clock);
     // A's late page hydrates, but B still owes the older answer (cas-bf2f).
-    hub.send(PELICAN, { ConversationHistory: { request_id: newest.request_id, messages: [], replies: [reply(100)], has_earlier: true, next_before: 51 } });
+    const late = { ...reply(100), message: "Newest page arrived while the older answer is still missing" };
+    hub.send(PELICAN, { ConversationHistory: { request_id: newest.request_id, messages: [], replies: [late], has_earlier: true, next_before: 51 } });
+    await expectProtocolVisible(page.getByRole("log").locator('[data-key="reply:100"]').filter({ hasText: late.message }), clock);
     await expect(failure).toBeVisible();
     await expect(page.getByRole("log").locator('[data-key="reply:50"]')).toHaveCount(0);
     hub.pausedHistory.delete(PELICAN);
     await failure.getByRole("button").click();
-    await expect(page.getByRole("log").locator('[data-key="reply:50"]')).toBeVisible();
+    await expectProtocolVisible(page.getByRole("log").locator('[data-key="reply:50"]'), clock);
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 51 });
     await expect(failure).toBeHidden();
     await expect(page.getByRole("log").locator('[data-key="reply:51"]')).toHaveCount(1);
@@ -136,4 +138,11 @@ async function expectSettledHistoryFailure(page: Page, failure: Locator, clock: 
     return stable;
   }).toBeGreaterThanOrEqual(2);
   await expect(failure).toBeInViewport();
+}
+
+async function expectProtocolVisible(locator: Locator, clock: ProtocolClock): Promise<void> {
+  await expect.poll(async () => {
+    await clock.advance(16);
+    return locator.isVisible();
+  }).toBe(true);
 }

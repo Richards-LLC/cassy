@@ -877,6 +877,58 @@ async fn widening_covered_by_worker_receipts_keeps_the_parked_delivery_cas_d6eb(
     assert_eq!(f.task().proof_targets, ["unrelated", "widget::gear"]);
 }
 
+/// GH #1890: recovered deliveries keep receipts at the assigned worker's
+/// actual checkout even when its path and branch no longer follow conventions.
+#[tokio::test]
+async fn recovered_close_counts_supervisor_module_receipts_cas_231c() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let recovered = f.cas_dir().join("worktrees/recovered-proof");
+    git(f.dir.path(), &["worktree", "move", f.worker_path.to_str().unwrap(), recovered.to_str().unwrap()]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut worker = agents.get("br-worker-session").unwrap();
+    worker.metadata.insert("clone_path".into(), recovered.to_string_lossy().into_owned());
+    agents.update(&worker).unwrap();
+    let branch = "factory/retired-implementer";
+    git(&recovered, &["checkout", "-qb", branch]);
+    for module in ["registry", "receipts", "workflow", "lifecycle", "teams"] {
+        std::fs::write(recovered.join(format!("crates/widget/src/{module}.rs")), "pub fn changed() {}\n").unwrap();
+    }
+    git(&recovered, &["add", "."]);
+    git(&recovered, &["commit", "-qm", "fix(cas-br01): recover six changed modules"]);
+    git(&recovered, &["push", "-q", "origin", branch]);
+    let tip = git(&recovered, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    let mut task = f.task();
+    task.branch = Some(branch.into());
+    task.deliverables.parked_branch = Some(branch.into());
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    tasks.update(&task).unwrap();
+    git(f.dir.path(), &["merge", "-q", "--ff-only", branch]);
+    git(f.dir.path(), &["push", "-q", "origin", "main"]);
+    let close = serde_json::json!({"action":"close", "id":ID, "reason":"recovered gear", "commit_receipt":tip});
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let missing = call(&f.supervisor, close.clone()).await;
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{missing}");
+    let logs = tempfile::tempdir().unwrap();
+    for module in ["gear", "registry", "receipts", "workflow", "lifecycle", "teams"] {
+        let log = logs.path().join(format!("{module}.log"));
+        std::fs::write(&log, "Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+        let proof = serde_json::json!({
+            "head":tip, "repo":recovered,
+            "cargo_args":["nextest", "run", "-p", "widget", "--lib", "-E", format!("test({module})")],
+            "log_path":log, "exit_code":0,
+        });
+        f.supervisor.factory(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"record_test_receipt", "task_id":ID, "payload":proof.to_string(),
+        })).unwrap())).await.unwrap();
+    }
+    assert_eq!(crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &recovered, &tip).len(), 6);
+    let closed = call(&f.supervisor, close).await;
+    assert_eq!(f.task().status, TaskStatus::Closed, "{closed}");
+    assert_eq!(f.task().proof_targets, ["unrelated"], "receipts must not rewrite the declaration");
+}
+
 /// cas-e9d6: the 14:01 divergence. Cassy's post-merge close of a parked
 /// blast-radius delivery judges the worker's receipts at the delivered tip,
 /// exactly as the worker's own close does. A gate that truly fails on the
@@ -1229,6 +1281,88 @@ async fn peer_premerge_case(case: PeerReceiptCase) {
     assert_eq!(report.rejected, 1, "a replay must not restore the reopened task's old authority");
     assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap().state, cas_types::VerificationDispatchState::Invalidated);
 
+}
+
+/// cas-28c5 / GH #1895: ef33 preserved its pushed checkpoint as a side
+/// parent after rebasing onto synced main. Proof belongs to the live merge tip.
+#[tokio::test]
+async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
+    let mut env = TestEnvGuard::temp_home();
+    for (case, explicit, foreign, live_proof) in [
+        ("measured tip", false, false, true),
+        ("explicit receipt", true, false, true),
+        ("foreign continuation", true, true, true),
+        ("old proof only", false, false, false),
+    ] {
+        let f = fixture(&mut env);
+        let repo = f.dir.path();
+        let branch = format!("{LANE}-{ID}");
+        let base = git(repo, &["rev-parse", "main"]);
+        git(&f.worker_path, &["branch", "-m", &branch]);
+        std::fs::create_dir_all(f.worker_path.join("changelog.d")).unwrap();
+        std::fs::write(f.worker_path.join(format!("changelog.d/{ID}.md")),
+            "### Fixed — Widget\n\n- **Gear turns** — Repair the gear.\n").unwrap();
+        git(&f.worker_path, &["add", "changelog.d"]);
+        git(&f.worker_path, &["commit", "-q", "--amend", "--no-edit"]);
+        let checkpoint = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(&f.worker_path, &["push", "-q", "origin", &branch]);
+        let tasks = open_task_store(&f.cas_dir()).unwrap();
+        let mut task = f.task();
+        task.deliverables.factory_branch_anchor = Some(checkpoint.clone());
+        task.deliverables.parked_branch = Some(branch.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            assignee: WORKER.into(), branch: branch.clone(), base_sha: base,
+            work_target: task.deliverables.work_target.clone().unwrap(),
+        });
+        tasks.update(&task).unwrap();
+        if !live_proof {
+            crate::factory_worker_check::record_passing_test_for_tests(
+                &f.cas_dir(), &f.worker_path, &checkpoint, "widget", "test(gear)",
+            );
+        }
+        // The synced target changes compiled crate inputs: an old receipt
+        // cannot be reused through the documentation-only proof shortcut.
+        std::fs::write(repo.join("crates/widget/src/embedded.md"), "synced compiled input\n").unwrap();
+        git(repo, &["add", "crates/widget/src/embedded.md"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-a0b1): target update"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(&f.worker_path, &["rebase", "origin/main"]);
+        let rebased = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        assert_ne!(rebased, checkpoint);
+        git(&f.worker_path, &["merge", "-q", "--no-ff", &checkpoint, "-m", "Merge preserved checkpoint"]);
+        assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD^{tree}"]), git(&f.worker_path, &["rev-parse", &format!("{rebased}^{{tree}}")]), "restoring ancestry must preserve the rebased tree");
+        if foreign {
+            std::fs::write(f.worker_path.join("foreign.txt"), "sibling work\n").unwrap();
+            git(&f.worker_path, &["add", "foreign.txt"]);
+            git(&f.worker_path, &["commit", "-q", "-m", "fix(cas-abcd): sibling delivery"]);
+        }
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(&f.worker_path, &["push", "-q", "origin", &branch]);
+        if live_proof {
+            crate::factory_worker_check::record_passing_test_for_tests(
+                &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+            );
+        }
+        let mut request = serde_json::json!({"action":"close", "id":ID, "reason":"Gear repair complete"});
+        if explicit { request["commit_receipt"] = tip.clone().into(); }
+        let output = call(&f.worker, request).await;
+        let codes = crate::gates::codes_in(&output);
+        let parked = f.task();
+        if foreign {
+            assert_eq!(parked.status, TaskStatus::InProgress, "{case}: {output}");
+            assert!(!codes.contains(&"G-61"), "attribution must refuse before stale proof advice: {output}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
+        } else if !live_proof {
+            assert!(codes.contains(&"G-61"), "{case}: {output}");
+            assert!(output.contains(&tip[..12]), "proof must name the measured commit: {output}");
+            assert_eq!(parked.status, TaskStatus::InProgress);
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(checkpoint.as_str()));
+        } else {
+            assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{case}: {output}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+            assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(branch.as_str()));
+        }
+    }
 }
 
 /// cas-3d70, through the real close: the commit-time anchor names a commit on

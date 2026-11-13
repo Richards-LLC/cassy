@@ -19,9 +19,12 @@ the assignment brief prints the exact path. Leave historical flat
 ## Requested sync
 
 Checkpoint dirty work as a commit (all worktrees share the stash stack), then
-`git rebase <branch>` onto the exact branch the supervisor named; resolve
-conflicts or escalate the affected files. A frozen parked delivery stays on its
-original branch; a new assignment uses its own per-task branch from the target tip.
+`git rebase <branch>` onto the exact branch the supervisor named only while
+its task is InProgress and has no parked completion receipt or active review.
+A commit-captured anchor or a checkpoint push alone is not a park. Publish the
+rebase with an explicit `--force-with-lease=refs/heads/<branch>:<observed-tip>`;
+a changed remote tip refuses. Merge the target into parked/reviewed work instead.
+A frozen parked delivery stays on its original branch; a new assignment uses its own per-task branch from the target tip.
 
 ## Task fields
 

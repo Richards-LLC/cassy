@@ -622,6 +622,27 @@ impl TaskStore for SyncingTaskStore {
         self.inner.update_from_sync(task, expected)
     }
 
+    /// cas-a836: request_changes, reopen and proof-scope corrections commit
+    /// through cas-store directly, so no intent was staged and the peer
+    /// never saw the change. Stage one now and bind it to the committed
+    /// revision; a crash before the receipt leaves a provably pre-commit
+    /// intent rather than an ambiguous one.
+    fn publish_current_row(&self, task_id: &str) -> Result<()> {
+        let _sync_guard = self
+            .queue
+            .lock_task_sync_mutations(&[task_id])
+            .map_err(queue_error_before_local_commit)?;
+        let current = self.inner.get(task_id)?;
+        let updated_at = current.updated_at.to_rfc3339();
+        let intent = self.stage_upsert(&current, "publish", Some(&updated_at), Some(&current))?;
+        if let Err(error) = self.inner.record_mutation_receipt(task_id, &intent.mutation_id) {
+            self.cancel_staged_after_local_failure(&intent);
+            return Err(error);
+        }
+        self.fulfill_upsert(&intent)?;
+        Ok(())
+    }
+
     /// cas-eda0: `green_merge_commit` is local merge coordination consumed by
     /// this machine's verdict path; it rides the next ordinary upsert.
     fn record_merge_admission(

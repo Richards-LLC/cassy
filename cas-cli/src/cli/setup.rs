@@ -106,7 +106,6 @@ pub fn execute(args: &SetupArgs, cli: &Cli) -> Result<()> {
     steps.push(cloud_step(args, cli));
     steps.push(pairing_step(args, cli));
     steps.push(hub_step(args));
-    steps.push(viktor_step(args));
     steps.push(project_step(args));
 
     let final_status = if steps
@@ -125,7 +124,7 @@ pub fn execute(args: &SetupArgs, cli: &Cli) -> Result<()> {
         "Follow the action-needed instructions above, then rerun `cas setup`."
     };
     steps.push(SetupStep::new(
-        7,
+        6,
         "Final status",
         final_status,
         "cas setup",
@@ -572,72 +571,6 @@ fn service_is_ready(output: &Output) -> bool {
         .unwrap_or(false)
 }
 
-fn viktor_step(args: &SetupArgs) -> SetupStep {
-    let configured = std::env::var_os("VIKTOR_API_KEY").is_some()
-        || super::viktor::load_machine_credential()
-            .ok()
-            .flatten()
-            .is_some();
-    if configured {
-        return SetupStep::new(
-            5,
-            "Viktor key",
-            StepStatus::Ok,
-            "cas viktor key",
-            "Viktor credentials are already configured for this machine.",
-        );
-    }
-    if args.dry_run || args.yes {
-        return SetupStep::new(
-            5,
-            "Viktor key",
-            StepStatus::Skipped,
-            "cas viktor key",
-            "Optional; run the command later with an operator-issued key if Viktor is needed.",
-        );
-    }
-
-    match interactive::confirm("Configure the optional Viktor gateway now", false) {
-        Ok(false) => SetupStep::new(
-            5,
-            "Viktor key",
-            StepStatus::Skipped,
-            "cas viktor key",
-            "Skipped; run `cas viktor key` later with an operator-issued key.",
-        ),
-        Err(error) => SetupStep::new(
-            5,
-            "Viktor key",
-            StepStatus::ActionNeeded,
-            "cas viktor key",
-            format!("Could not ask about the optional key: {error}"),
-        ),
-        Ok(true) => match run_cas_inherited(&["viktor", "key"], None) {
-            Ok(status) if status.success() => SetupStep::new(
-                5,
-                "Viktor key",
-                StepStatus::Ok,
-                "cas viktor key",
-                "Viktor key was saved for this machine.",
-            ),
-            Ok(status) => SetupStep::new(
-                5,
-                "Viktor key",
-                StepStatus::ActionNeeded,
-                "cas viktor key",
-                format!("Viktor key command exited with {status}."),
-            ),
-            Err(error) => SetupStep::new(
-                5,
-                "Viktor key",
-                StepStatus::ActionNeeded,
-                "cas viktor key",
-                format!("Could not run Viktor key setup: {error}"),
-            ),
-        },
-    }
-}
-
 fn project_step(args: &SetupArgs) -> SetupStep {
     let mut step = initialize_project_step(args);
     if !args.dry_run && let Some(project) = args.project.as_deref() {
@@ -661,7 +594,7 @@ fn project_step(args: &SetupArgs) -> SetupStep {
 fn initialize_project_step(args: &SetupArgs) -> SetupStep {
     let Some(project) = args.project.as_deref() else {
         return SetupStep::new(
-            6,
+            5,
             "First project",
             StepStatus::Skipped,
             "cas setup --project <DIR>",
@@ -671,7 +604,7 @@ fn initialize_project_step(args: &SetupArgs) -> SetupStep {
     let command = format!("cas setup --project {}", project.display());
     if !project.is_dir() {
         return SetupStep::new(
-            6,
+            5,
             "First project",
             StepStatus::ActionNeeded,
             command,
@@ -683,7 +616,7 @@ fn initialize_project_step(args: &SetupArgs) -> SetupStep {
     }
     if args.dry_run {
         return SetupStep::new(
-            6,
+            5,
             "First project",
             StepStatus::Skipped,
             format!(
@@ -698,7 +631,7 @@ fn initialize_project_step(args: &SetupArgs) -> SetupStep {
         Ok(output) => output,
         Err(error) => {
             return SetupStep::new(
-                6,
+                5,
                 "First project",
                 StepStatus::ActionNeeded,
                 command,
@@ -708,7 +641,7 @@ fn initialize_project_step(args: &SetupArgs) -> SetupStep {
     };
     if !init.status.success() || !project.join(".cas").is_dir() {
         return SetupStep::new(
-            6,
+            5,
             "First project",
             StepStatus::ActionNeeded,
             "cas init --yes",
@@ -718,7 +651,7 @@ fn initialize_project_step(args: &SetupArgs) -> SetupStep {
 
     if !CloudConfig::load_effective().is_logged_in() {
         return SetupStep::new(
-            6,
+            5,
             "First project",
             StepStatus::Skipped,
             "cas cloud sync",
@@ -727,7 +660,7 @@ fn initialize_project_step(args: &SetupArgs) -> SetupStep {
     }
     match run_cas_capture(&["cloud", "sync"], Some(project)) {
         Ok(output) if output.status.success() => SetupStep::new(
-            6,
+            5,
             "First project",
             StepStatus::Ok,
             "cas init --yes && cas cloud sync",
@@ -737,7 +670,7 @@ fn initialize_project_step(args: &SetupArgs) -> SetupStep {
             ),
         ),
         Ok(output) => SetupStep::new(
-            6,
+            5,
             "First project",
             StepStatus::ActionNeeded,
             "cas cloud sync",
@@ -747,7 +680,7 @@ fn initialize_project_step(args: &SetupArgs) -> SetupStep {
             ),
         ),
         Err(error) => SetupStep::new(
-            6,
+            5,
             "First project",
             StepStatus::ActionNeeded,
             "cas cloud sync",

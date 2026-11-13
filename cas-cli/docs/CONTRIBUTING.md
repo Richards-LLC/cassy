@@ -81,8 +81,8 @@ to the existing agent's `cc_session_id`. The durable agent ID and factory
 ownership stay the same. A different name, process or role keeps its own
 registration semantics.
 
-Use the daemon-owned candidate verifier or a separately registered reviewer
-with a sealed handoff for the exact dispatch. A native child that observes its
+Use the daemon-owned verifier, which reviews close and candidate dispatches;
+retrying the close or merge that opened a dispatch starts one replacement. A native child that observes its
 parent's identity returns that evidence without recording a verdict, including
 `status=error`. A registered supervisor may record a verdict directly, with
 `supervisor_direct` provenance, only on mechanical evidence (counts, receipts,
@@ -103,6 +103,13 @@ paired device controls the terminal. Raw terminal input still requires both
 `pane:input` and that device's active session lease. Message permission never
 grants terminal input authority.
 
+An authenticated hub relay presents the session daemon's private token during
+its WebSocket handshake. If daemon adoption rotates that token while the hub
+connects, a stale credential is refused with HTTP 401. The hub rereads the
+private token and retries once only if it changed, retaining its queued controls.
+Tokenless local viewers remain unverified; browser pairing grants no direct
+relay trust. A hub-only restart preserves pairings and running factory panes.
+
 ## Selected-session stores and live phase freshness
 
 Bridge and hub session routes resolve the selected session's `project_dir`
@@ -122,6 +129,15 @@ whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
 
+## First child assignment publishes its epic lane
+
+Task create with an assignee, task update assigning a child and a successful
+worker task start all check the parent epic's branch readiness. This includes
+workers spawned without `task_id` and assigned afterwards. The check reuses
+focus/spawn publication guards: recorded originating host, expected-absent push,
+existing remote preservation and explicit child repository/branch targets.
+Publication failures are visible in the successful task receipt for recovery.
+
 ## Staffing behind a published release
 
 Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when
@@ -131,6 +147,33 @@ to sync the integration branch into the epic first. It does not refuse work or
 move Git refs. Publication comes from the target repository's Release ledger;
 a tag alone is not publication evidence. Missing receipts or unavailable refs
 produce no warning. An origin-only epic tip is usable; when both refs exist, a fresher descendant origin tip is considered before warning.
+
+## Explicit peer merge holds
+
+A peer question is advisory unless the sender deliberately gives it merge-hold scope.
+For `coordination action=message target=<peer> kind=ask`, put this structured line first in
+`message`, followed by the review request:
+
+```text
+CAS_MERGE_HOLD {"task_id":"cas-example","pr":4249}
+Please review the delivery before it merges.
+```
+
+Either `task_id` or a positive integer `pr` is sufficient; both may be present. Task IDs and
+PR numbers match exactly. The first content line is the only hold declaration: ordinary body
+mentions, quoted examples, work orders and statements such as “Not yours: cas-example” never
+create a hold. Legacy prose-only review asks also remain advisory. Invalid JSON, unknown keys
+or an empty scope grant no hold authority. `task_id` on an unrelated coordination operation
+is not a declaration on the peer ask; use the explicit message header above.
+
+The hold applies to the sender's `worktree_merge`, protected PR arming and raw `gh pr merge`.
+If a raw PR merge cannot resolve its PR number, a valid explicit hold still fails closed;
+an unscoped question does not block it. Existing linked or unambiguous typed peer answers
+clear scoped asks. An incoming peer message with an exact Cloud `in_reply_to`
+resolves its outgoing ask before wake-kind filtering, including quiet build-route
+answers. Quiet, status and receipt messages without that link still cannot answer
+an ask implicitly. Ambiguous answers remain visible with their reply ID for linking; a
+`PEER ASK OVERRIDE <ask-id>: <reason>` task note permits an audited override as before.
 
 ## Worker contracts across machines
 
@@ -1409,8 +1452,14 @@ verification, including a no-code task carrying external proof. Close reports a
 named assignee absent from the registry as no longer registered. A live supervisor
 may explicitly request `supervisor_override=true` with a close reason when no
 current proof cycle or unresolved legacy verdict prevents it; the waiver records
-a durable `Skipped` row. Pending, timed-out and resolved dispatches retain their
-exact verdict authority, including an error requiring recovery. Measured Tier 0,
+a durable `Skipped` row. Active and resolved dispatches retain their exact
+verdict authority, including an error requiring recovery. For a non-epic task
+not yet parked, an expired task-only dispatch requests a fresh pending review
+on the next close, even if ordinary verification configuration changed. It
+never grants approval. A no-code report can supply a corrected portable
+`external_ref` inline on that close; its reference and fresh dispatch are saved
+together. Active cycles remain immutable, and receipt-bound delivery or epic
+timeout recovery still requires the existing supervisor path. Measured Tier 0,
 light-depth and other existing policy exemptions remain explicit in close output;
 identity availability is reported separately from the exemption actually applied.
 
@@ -2257,8 +2306,33 @@ while lacking the fast-row delegate; inspect them rather than assuming absence.
 Do not copy those guards into the main checkout. A hook-install warning during
 spawn/reuse means enforcement is not proven.
 
+H-40 distinguishes a live checkpoint from a parked delivery. A supervisor-directed
+rebase of an owned InProgress task may publish with an explicit
+`--force-with-lease=refs/heads/<branch>:<observed-checkpoint-sha>`; Git refuses a
+changed remote tip. The push hook's `WorkerCheckpointPush` handler checks the
+recorded start ancestry of both tips, source/destination ownership and current
+task/delivery/review state. Commit-time `factory_branch_anchor` or `parked_branch`
+capture alone is not a park. AwaitingMerge, pending verification and active
+review envelopes refuse rewrites; persisted completion receipts and bound QA
+review tips must remain reachable. Unknown state and deletion refuse. Merge
+the target into parked/reviewed branches. Normal fast-forward pushes retain
+the existing ancestry, ownership, fast-row and local-gate checks.
+
 At park, `receipt_scope::park_refusal` reads passing capped test receipts for
 every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
+A fresh park evaluates focused proof at the accepted delivery boundary. A
+rebase that restores the checkpoint through
+an identical-tree merge uses the same patch, ownership and sibling checks as
+a parked retry, advancing that boundary to the measured pushed tip. A retained
+checkpoint reachable only through a side parent reports an attribution refusal
+before proof advice; it never asks for tests at the older checkpoint. An
+ordinary first-parent checkpoint can remain the parked boundary when a later
+continuation is rejected; proof stays bound to that checkpoint, and merge
+independently refuses the untrusted continuation. A shared
+lane that intentionally retains task A's boundary while task B is stacked above
+it still parks and scopes proof to A. Ordinary shared-lane corrections retain
+their subject-ownership checks; a foreign task named in the subject cannot be
+adopted by mentioning this task in the commit body.
 Park executes neither checks nor tests. Local fast-row receipts are not park
 proof because workers can write them, and park reads no fast-row exception
 file. CI runs the fast rows before merge admission; the pre-push hook provides
@@ -2608,6 +2682,13 @@ clears the intent. Foreground service launches and crash recovery do not clear i
 A hub that crashes without an explicit stop remains eligible for update recovery.
 
 ## Build, assembly and CI policy
+
+`task action=update labels=...` replaces ordinary labels with trimmed, unique
+values. Omit `labels` to preserve them, or pass an empty value to clear them.
+Finding provenance is retained; nonempty corrections preserve omitted triage
+axes, while an empty correction resets findings to broken/theoretical. This
+same handler serves MCP and CLI task updates, including removal of a release
+train's `release-train-cut` label.
 
 While a release train is open in the target repository, `worktree_merge` refuses
 direct main/trunk merges, including `allow_trunk=true`. Merge fixes into the
@@ -2995,11 +3076,11 @@ The hook also accepts this complete fixed profile before a named nextest command
 (use an existing, literal absolute path without shell expansion):
 
 ```bash
-env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
+env -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
 ```
 
 The hook carries this as runner metadata, including detached execution. The
-runner removes those six credentials and sets XDG only on the final Cargo/test
+runner removes those four credentials and sets XDG only on the final Cargo/test
 child, after Cassy credential bootstrap and normal builder admission. Parent
 identity, private targets, memory limits and clean-tip receipts remain in force.
 Other environment wrappers, partial profiles, identity/build overrides and shell
@@ -3120,7 +3201,8 @@ selector's failure history. Release-train pushes and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.
-Both share quarantine plus one rerun. The schema-2 `train-full-gate` artifact
+Both preserve the first failure, publish P0 repair issues and run without retries
+or test exclusions. The schema-2 `train-full-gate` artifact
 binds every required job to the source tree and main baseline; train cuts refuse
 legacy or partial receipts. The queue can reuse this complete proof after only
 release-plumbing changes with main unchanged, then runs compile/source-built
@@ -3917,44 +3999,29 @@ Standing operator policy: factory/* pushes and epic-targeted PRs run
 import/dependency-selected tests in Scoped Validation. Protected-default PRs run
 the required Fast Validation admission lane and an advisory macOS notice. The release
 merge queue runs the complete workspace suite on its synthetic tree once. Only
-at this queue stage, `scripts/ci-queue-flakes.py run` reruns the exact failed Rust
-tests or failed journey specs once in the same job on the same tracked tree.
-The Rust recovery attempt has a 29-second execution deadline and bounded child
-cleanup, keeping its added time below 30 seconds; passing suites add no rerun.
-A second failure still ejects the queue entry. Fail-then-pass is **FLAKY**, and
-both attempts' reports, output and journey traces remain in the queue artifacts.
-The required Fast Validation fan-in refuses green until `reconcile` has durably
-filed or updated a `priority:p1`, `flaky` issue in the configured Cassy issue
-route (`Richards-LLC/cassy` here), with its test identity, run link and original
-failure. Impact recall still records the original failing status and log.
+at this queue stage, `scripts/ci-queue-flakes.py run` executes each native shard
+once with retries disabled. Every nonzero exit fails the shard, including cleanup
+errors after a passing test summary. The queue never excludes tests based on
+issue labels. Native reports and original output remain in the shard artifacts.
 
-Open issues labeled `flaky-quarantine` are the quarantine source of truth. Each
-has one `<!-- cas-queue-flake: JSON -->` test identity/observation line. Shards
-read them with an issues-read `GITHUB_TOKEN`, exclude only those identities and
-print the issue links in the job summary. State/label-filtered GitHub lists can
-lag acknowledged updates, so discovery enumerates unfiltered issue history and
-reads each flake candidate directly before deciding its open state and labels.
-Reconciliation adds that label to native test identities after
-two distinct GitHub run IDs; duplicate shards, cached observations and run attempts count once.
-Individual script and web test commands retry once through the same publication
-fan-in. A recovered command receives the label immediately, but remains covered
-on later trees: quarantining a command never excludes its whole suite.
-Only recognized cleanup diagnostics after a positive all-pass summary become
-warnings; mixed pass/fail summaries and later assertions retain failure.
-The fix PR uses `Fixes #N`: closing the issue removes the exclusion from the next
-queue run. No bot PR, new credential or evaluated-tree edit is needed.
+The hosted `queue-flake-publication` fan-in reads those artifacts and creates or
+updates one `priority:p0`, `flaky` repair issue per failed native test identity in
+the configured route (`Richards-LLC/cassy` here). The issue names the test, links
+the run and failure output, and carries a fix-or-delete deadline on the next
+working day (Monday through Friday, UTC date). Later observations preserve the
+original deadline. Normal issue intake creates and staffs the repair task ahead
+of feature work. If its owner deletes the test, the task must record the behaviour
+it covered. CI never deletes source or changes the evaluated tree.
 
-The hosted publication fan-in alone has issues-write and contents-write. An
-atomic `heads/cas-queue-flake-publication-lock` ref serializes issue creation
-and updates across runs without changing the evaluated tree. Concurrent writers
-fail closed and retain their receipts. If a cancelled publisher leaves this ref,
-confirm the owning run (named in its commit) has finished before deleting the
-ref and reconciling the retained receipts. Transport, malformed quarantine and
-missing-shard evidence failures also refuse green. Workers, lane CI, schedules,
-main/tag pushes and ordinary manual checks keep zero retries and ignore queue
-quarantine. The explicit `test-ci-queue-flakes.py --live-acceptance <dir>` mode is
-only a throwaway-branch workflow proof using synthetic native runner fixtures;
-normal script tests use local HTTP fixtures and never create live issues.
+Only the hosted publisher has issues-write and contents-write. Its atomic
+`heads/cas-queue-flake-publication-lock` ref serializes issue updates across runs.
+After a lost create response it reads the acknowledged issue instead of creating
+a duplicate. A cancelled publisher can leave this lock; confirm the owning run
+(named in its commit) has finished before deleting the ref and reconciling its
+retained receipts. Successful exact-tree job reuse carries no new failure
+observations. Legacy job receipts containing recovered failures are not reused.
+Each native shard's first result still independently gates Fast Validation.
+Local script tests exercise runner and HTTP fixtures without creating live issues.
 
 When the queue's successful tree is pushed unchanged to main, the main-push Fast Validation lane
 reuses that receipt and names the validating run. `macOS Check` is advisory and
@@ -4125,18 +4192,6 @@ installed file, and the history ledger records both renders.
 and commit the regenerated JSON. Skipping it means the version you just replaced is not recognized as Cassy content downstream, so installs that still hold it will keep it forever instead of upgrading (cas-0c0a).
 
 Lanes never hand-merge the ledger (cas-fb11). `.gitattributes` marks it `merge=cas-generated`, so a merge keeps the target's copy without a conflict, and `scripts/regenerate-generated-artifacts.sh <pre-merge-head> <merged-head>` reruns the generator on the merged history and commits the result. Cassy's merge runs that script. After a manual `git merge`, run it yourself; run `python3 scripts/cas-merge-drivers.py install` once per clone first. The committed ledger then equals a fresh generator run, which the release gate's `builtin-projections` row checks. `scripts/test-regenerate-generated-artifacts.py` merges two lanes that both add builtin history.
-
-### Viktor distribution
-
-The managed Viktor surface has three coupled user-facing pieces: its Claude/Codex/Grok builtin
-skill mirrors, `cas viktor` credential-safe provisioning output, and the proxy's configured
-allowlist. Keep the skill body compact and put operational detail in its reference. The mirrors
-must retain identical meaning after their mechanical tool-prefix substitutions; run the builtin
-flavor-drift test. Never add a credential literal to source, fixtures, docs, or artifacts. The
-only supported user entry is `cas viktor key`; it prompts, validates, then saves the
-key in machine-scoped state, while `cas serve` still holds only the `VIKTOR_API_KEY` reference.
-For a new CLI or proxy-facing behavior, add a clean-project `cas init`/command assertion and a
-direct registry test so the source cannot exist without reaching all three downstream harnesses.
 
 ## Releasing
 
@@ -4616,14 +4671,14 @@ argument survive parsing. Quoted caller text remains data in these vectors.
 Raw `read_text()` command substrings, rendered output and ordinary whitespace
 splitting receive no exemption; `pin:` comments still cannot waive prose pins.
 
-Workers run `npm test`, `npm run typecheck` in `hub-web`, and
-`scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys
-at four workers. Independent QA consumes matching passing worker receipts
-(base/head, selected IDs, native results and execution environment), then runs
-independent adjacent/demo/visual cells; missing or incompatible evidence needs
-its own affected checks. The wrapper resolves the task's declared target;
-`--affected <base>` binds an explicit base. No browser runs for an empty impact
-selection; it emits an explicit receipt. Caller spec/grep filters are refused.
+Workers run touched Vitest files and `npm run typecheck` in `hub-web`.
+Release batch QA owns source-impact-selected journeys through
+`scripts/journey-eval.sh <task-artifact-dir>`; matching passing receipts are
+consumed before missing checks. The wrapper resolves the task target and
+`--affected <base>` binds an explicit base. An empty impact selection emits an
+explicit receipt without launching a browser. Follow `cas-writing-tests` for
+general quality and `cas-playwright-tests` for browser authoring; the latter
+owns the Faith contract, target policy, config and locators.
 
 Factory PreToolUse denies worker/reviewer `--full`, unfiltered Playwright and
 unfiltered journey npm scripts. Named spec or canonical-ID runs remain allowed
@@ -5047,3 +5102,22 @@ excluded. These rows describe attested work, never an inferred automatic event.
 Commit-to-main unwraps release-train main landings into their individual
 integrations. The observed delivery log identifies the train; Git retains
 individual integrations even when their local observations are absent.
+
+### Supervisor operator evidence
+
+The `H-47` hook checks supervisor `coordination action=message|interrupt`
+messages to `operator` and `commander:<label>`, including their preview summary.
+Each paragraph containing numeric literals, durations or completion claims
+needs `[evidence:<tool-use-id>]` from a successful tool result in the current
+user turn, or a leading `[unverified]` marker. Numeric literals must occur in
+the cited result; use a tool to calculate derived durations or local times.
+Clipboard claims require a cited `wl-paste` or `pbpaste` read after the most
+recent clipboard write. A missing transcript or turn boundary refuses evidence.
+This validates provenance and numeric support, not the semantics of all prose.
+
+The same policy labels unsupported MessageDisplay replies and refuses the
+first unsupported Stop. Reentrant Stop emits an uncertainty notice instead of
+blocking repeatedly. Stop cannot retract text already streamed to the pane.
+Coordination joins the existing mandatory MCP policy matcher for Claude and
+factory-role settings. Codex installs MCP policy in its user layer; the project
+layer keeps its Bash/apply_patch matcher. No new event or optional flag is needed.

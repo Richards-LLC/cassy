@@ -323,7 +323,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MAIN_BASELINE: ${{ needs.ci-diff.outputs.main-baseline }}
         run: scripts/check-ci-merge-queue-validation.sh
+      - name: Publish adopted train full-set identity
+        if: >-
+          github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+          && steps.tree-dedupe.outputs.reuse-source == 'full-gate'
+        uses: actions/upload-artifact@v4
+        with:
+          name: train-full-gate
+          path: target/full-gate-adoption/
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 90
 
   # Factory pushes and PRs that do not target the protected default branch get
   # one cheap target-scoped lane. Main PRs use the full required lanes below;
@@ -855,7 +867,7 @@ jobs:
 
       - name: Test portable installer fixtures
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (needs.ci-diff.outputs.rust-unaffected == 'true') }}"
-        run: python3 scripts/ci-queue-flakes.py step --id portable-installer -- ./scripts/test-cas-install.sh
+        run: ./scripts/test-cas-install.sh
 
       - name: Report Rust short-circuit
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected == 'true') }}"
@@ -905,13 +917,13 @@ jobs:
           && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true') }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: python3 scripts/ci-queue-flakes.py step --id rust-check -- cargo check -p cas
+        run: cargo check -p cas
 
       - name: Test portable x86_64 ISA audit
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' && !cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true') }}
-        run: python3 scripts/ci-queue-flakes.py step --id portable-isa -- ./scripts/test-check-portable-x86_64-isa.sh
+        run: ./scripts/test-check-portable-x86_64-isa.sh
 
       - name: Build (without MCP proxy)
         if: >-
@@ -919,7 +931,7 @@ jobs:
           && steps.classify-diff.outputs.rust-unaffected != 'true') }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: python3 scripts/ci-queue-flakes.py step --id rust-no-proxy-build -- cargo build -p cas --no-default-features
+        run: cargo build -p cas --no-default-features
 
       - name: Prepare the source-built CLI artifact
         id: cli-artifact
@@ -1116,7 +1128,7 @@ jobs:
         working-directory: slack-bridge
         run: |
           npm ci
-          python3 ../scripts/ci-queue-flakes.py step --id bridge-units -- npm test
+          npm test
           npm run build
 
       - name: Publish exact-tree job receipt
@@ -1177,14 +1189,14 @@ jobs:
 
       - name: Typecheck Commander
         if: "${{ steps.job-receipt.outputs.reused != 'true' }}"
-        run: python3 ../scripts/ci-queue-flakes.py step --id web-typecheck -- npm run typecheck
+        run: npm run typecheck
 
       - name: Test Commander units
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()) }}"
         run: |
-          python3 ../scripts/ci-queue-flakes.py step --id npm-units -- npm test
+          npm test
           # cas-4ce5: the journeys' failure upload really matches files in the hidden .results dir.
-          python3 ../scripts/ci-queue-flakes.py step --id journey-evidence-fixture -- bash ../scripts/test-ci-journey-evidence-upload.sh
+          bash ../scripts/test-ci-journey-evidence-upload.sh
 
       - name: Build Commander and check the committed bundle
         id: build
@@ -1192,7 +1204,7 @@ jobs:
         env:
           CHECK_COMMITTED_DIST: ${{ needs.ci-diff.outputs.web-dist-check-needed }}
         run: |
-          python3 ../scripts/ci-queue-flakes.py step --id web-build -- npm run build
+          npm run build
           # Only source-only lanes defer committed output to release.sh prepare.
           # Missing policy retains equality, including unknown comparison bases.
           if [[ "$CHECK_COMMITTED_DIST" != false ]]; then
@@ -1217,7 +1229,7 @@ jobs:
           fi
           # Use the full pinned browser we installed, rather than a system
           # Chrome or Playwright's default headless shell.
-          CHROME_PATH="$(node -p 'require("@playwright/test").chromium.executablePath()')" python3 ../scripts/ci-queue-flakes.py step --id web-visual-qa -- npm run visual-qa
+          CHROME_PATH="$(node -p 'require("@playwright/test").chromium.executablePath()')" npm run visual-qa
 
       - name: Publish exact-tree job receipt
         if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
@@ -1300,11 +1312,11 @@ jobs:
             echo "Chromium libraries present; skipping apt dependencies"
           fi
           python3 ../scripts/ci-queue-flakes.py run playwright --shard "$SHARD/6" \
-            --issues-repo Richards-LLC/cassy --out "$GITHUB_WORKSPACE/target/queue-flakes/playwright-$SHARD"
+            --out "$GITHUB_WORKSPACE/target/queue-flakes/playwright-$SHARD"
 
       # One artifact serves the queue fan-in and diagnosis. Infrastructure
       # failures can leave native reports without producing receipt.json.
-      - name: Upload Commander journey evidence and recovery receipts
+      - name: Upload Commander journey evidence and first-failure receipts
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (always()) }}"
         uses: actions/upload-artifact@v4
         with:
@@ -1476,7 +1488,7 @@ jobs:
           fi
           mkdir -p target/train-suite-build
           set -o pipefail
-          python3 scripts/ci-queue-flakes.py step --id suite-archive -- cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst 2>&1 | tee target/train-suite-build/build.log
+          cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst 2>&1 | tee target/train-suite-build/build.log
 
       - name: Preserve complete train suite build log
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')) }}"
@@ -1679,7 +1691,7 @@ jobs:
           export VERIFIED_TEST_LOG="target/ci-impact/full-shard-$SHARD.log"
           set +e
           python3 scripts/ci-queue-flakes.py run rust --shard "$SHARD/3" \
-            --issues-repo Richards-LLC/cassy --out "target/queue-flakes/rust-$SHARD"
+            --out "target/queue-flakes/rust-$SHARD"
           suite_status=$?
           set -e
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/epic/release-train-* ]]; then
@@ -1729,9 +1741,9 @@ jobs:
           export CAS_ROOT="$guard_dir/.cas"
           export CAS_REAL_DBS="$guard_dir/.cas/cas.db"
           export CARGO_CMD="nextest run --archive-file $GITHUB_WORKSPACE/fast-validation-suite.tar.zst --workspace-remap $GITHUB_WORKSPACE"
-          python3 scripts/ci-queue-flakes.py step --id real-store-guard -- make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'test(mcp_protocol_test::)'"
+          make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'test(mcp_protocol_test::)'"
 
-      - name: Publish queue rust recovery receipts
+      - name: Publish queue rust first-failure receipts
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))) }}"
         uses: actions/upload-artifact@v4
         with:
@@ -1757,7 +1769,7 @@ jobs:
 
   # Writable credentials live only in the hosted fan-in, never in test processes.
   queue-flake-publication:
-    name: Queue flake publication
+    name: Test repair publication
     if: >-
       always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
       && needs.ci-diff.outputs.class != 'docs-only'
@@ -1774,29 +1786,17 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          pattern: full-gate-job-*
-          path: target/full-gate-jobs
-      - name: Export job recovery observations
-        run: python3 scripts/train-ci.py job-export --evidence target/full-gate-jobs --out target/queue-flake-receipts
-      - name: Persist every recovered failure before allowing a green queue
+          pattern: queue-flakes-*
+          path: target/queue-flake-receipts
+      - name: Persist every first native failure as a P0 repair
         env:
           GH_TOKEN: ${{ github.token }}
-          RUST_UNAFFECTED: ${{ needs.ci-diff.outputs.rust-unaffected }}
-          RUN_SUITE: ${{ needs.fast-validation-main-push-dedupe.outputs.run-fast-validation }}
-          WEB_NEEDED: ${{ needs.ci-diff.outputs.journeys-check-needed }}
-          JOURNEYS_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-reuse }}
         run: |
-          expected=()
-          if [[ "$RUN_SUITE" == true && "$RUST_UNAFFECTED" != true ]]; then
-            for shard in 1 2 3; do expected+=(--expect "rust:$shard/3"); done
-          fi
-          if [[ "$WEB_NEEDED" == true && ( "$RUN_SUITE" == true || "$JOURNEYS_REUSE" != true ) ]]; then
-            for shard in 1 2 3 4 5 6; do expected+=(--expect "playwright:$shard/6"); done
-          fi
-          # Script-only jobs can publish recovered failures without native shards.
-          if (( ${#expected[@]} == 0 )) && [[ ! -d target/queue-flake-receipts ]]; then exit 0; fi
+          # Reused successful jobs have no new failure observations. Each native
+          # shard still independently gates Fast Validation on its first exit.
+          if [[ ! -d target/queue-flake-receipts ]]; then exit 0; fi
           python3 scripts/ci-queue-flakes.py reconcile --issues-repo Richards-LLC/cassy \
-            --receipts target/queue-flake-receipts "${expected[@]}"
+            --receipts target/queue-flake-receipts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -1959,7 +1959,7 @@ jobs:
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: python3 scripts/ci-queue-flakes.py step --id doctests -- scripts/run-verified-tests.sh test -p cas --doc
+        run: scripts/run-verified-tests.sh test -p cas --doc
 
       - name: Report sccache stats
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (always() && steps.classify-diff.outputs.rust-unaffected != 'true') }}"
@@ -2054,14 +2054,14 @@ jobs:
           test "$CI_DIFF" = success
           echo "Fast Validation is deferred to the canonical merge-queue tree."
 
-      - name: Require durable queue flake publication
+      - name: Require durable test repair publication
         if: github.event_name == 'merge_group' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-'))
         env:
           PUBLICATION: ${{ needs.queue-flake-publication.result }}
         run: |
           case "$PUBLICATION" in
             success|skipped) ;;
-            *) echo "::error::Queue flake publication did not complete"; exit 1 ;;
+            *) echo "::error::Test repair publication did not complete"; exit 1 ;;
           esac
 
       - name: Require every Fast Validation lane to pass
@@ -2103,9 +2103,10 @@ jobs:
           echo "::notice title=Fast Validation deduplicated::Skipped the main-push suite because merge-queue run $VALIDATING_RUN_ID already validated this exact tree: $PRIOR_RUN_URL"
           echo "Fast Validation reused successful merge-queue run [$VALIDATING_RUN_ID]($PRIOR_RUN_URL)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Report the full-gate receipt reused by this merge-queue run
+      - name: Report the adopted train full-set receipt
         if: >-
-          github.event_name == 'merge_group'
+          (github.event_name == 'merge_group'
+          || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
           && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
           && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
         env:
@@ -2117,7 +2118,7 @@ jobs:
           JOURNEYS_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-reuse }}
           JOURNEYS_PRIOR_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-prior-url }}
         run: |
-          # Preflight restored an identical-tree CLI or compiled the queue
+          # Preflight restored an identical-tree CLI or compiled the release
           # tree, then ran smoke. Journeys are covered separately (cas-9f70).
           test "$PREFLIGHT" = success
           [[ "$SLACK_BRIDGE" == success || "$SLACK_BRIDGE" == skipped ]]
@@ -2125,10 +2126,10 @@ jobs:
           if [[ "$JOURNEYS_REUSE" == true ]]; then
             journeys="the cumulative journey selection is covered by the train's full-set receipt ($JOURNEYS_PRIOR_URL)"
           else
-            journeys="the Commander journeys ran on the queue tree"
+            journeys="the Commander journeys ran on the release tree"
           fi
           echo "::notice title=Fast Validation reused the full gate::The release train's full-set receipt covers this source plus checked release plumbing ($VALIDATING_RUN_ID): $PRIOR_RUN_URL. Skipped the suite, CI tiers, web tests and doctests; $journeys; source-built smoke ran after exact-tree CLI restore or compilation; Release Prebuild owns pre-publish macOS proof."
-          echo "Fast Validation reused the release train's full gate ($VALIDATING_RUN_ID, $PRIOR_RUN_URL) for the suite, doctests and gate-covered preflight steps. On the queue tree, $journeys; Linux smoke ran after exact-tree CLI restore or compilation; Release Prebuild owns pre-publish macOS proof." >> "$GITHUB_STEP_SUMMARY"
+          echo "Fast Validation reused the release train's full gate ($VALIDATING_RUN_ID, $PRIOR_RUN_URL) for the suite, doctests and gate-covered preflight steps. On the release tree, $journeys; Linux smoke ran after exact-tree CLI restore or compilation; Release Prebuild owns pre-publish macOS proof." >> "$GITHUB_STEP_SUMMARY"
 
       # This artifact is published only after the merge-group Fast Validation
       # fan-in passes. A later main push may reuse it only after the workflow

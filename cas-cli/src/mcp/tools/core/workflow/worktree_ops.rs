@@ -72,6 +72,9 @@ struct BranchCiLookup {
     state: BranchCiState,
     repo: Option<String>,
     repository_lookup_attempted: bool,
+    /// gh api timed out or failed before GitHub answered. Admission still
+    /// reports `state`; an armed retry treats it as no answer yet.
+    gh_failed: bool,
 }
 
 const BRANCH_CI_ENDPOINT: &str = "repos/<unresolved-repository>/commits/{sha}/check-runs";
@@ -156,7 +159,14 @@ impl BranchCiState {
 /// workflow completing, an empty response or an unavailable forge.
 pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
     use crate::factory_ci_retry::CiStatus;
-    let state = lookup_branch_ci(sha, target, cwd).state;
+    let lookup = lookup_branch_ci(sha, target, cwd);
+    // GH #1899: a timed-out or failed gh api call is no CI answer. Stay armed
+    // for the next watch pass; the two-hour cap still bounds the wait.
+    if lookup.gh_failed {
+        tracing::warn!(%sha, state = ?lookup.state, "CI merge retry lookup failed; still waiting");
+        return CiStatus::Pending;
+    }
+    let state = lookup.state;
     if state.sha() != ci_sha && state.sha() != sha {
         return CiStatus::Stopped(format!("CI evidence moved to {}; request a fresh exact-SHA merge", state.sha()));
     }
@@ -172,8 +182,7 @@ pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str)
         | BranchCiState::UnvalidatedCode { reason, .. }
         | BranchCiState::CodeValidationUnconfirmed { reason, .. }
         | BranchCiState::MissingCommit { reason, .. } => CiStatus::Stopped(reason),
-        BranchCiState::GhFailure { status, .. } =>
-            CiStatus::Stopped(format!("CI lookup failed ({status}); check gh access and request the merge again")),
+        BranchCiState::GhFailure { .. } => CiStatus::Pending,
     }
 }
 
@@ -511,6 +520,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                 },
                 repo: None,
                 repository_lookup_attempted: false,
+                gh_failed: false,
             };
         }
     };
@@ -526,10 +536,12 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                 },
                 repo: None,
                 repository_lookup_attempted: true,
+                gh_failed: false,
             };
         }
     };
     let tip_output = fetch_branch_ci(&tip, cwd, &repo, &binary);
+    let mut gh_failed = false;
     let tip_has_code_checks = has_code_check_runs(&tip_output);
     let tip_state = if code_sha.is_some() {
         classify_code_ci_response(branch, &tip, tip_output)
@@ -571,10 +583,12 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     own
                 }
             };
+            gh_failed = matches!(state, BranchCiState::GhFailure { .. });
             require_code_validation(state)
         }
     };
     BranchCiLookup {
+        gh_failed: gh_failed || matches!(state, BranchCiState::GhFailure { .. }),
         state,
         repo: Some(repo),
         repository_lookup_attempted: true,
@@ -706,7 +720,7 @@ fn fast_lane_ci(lane: &crate::fast_lane::FastLaneConfig, sha: &str, cwd: &Path) 
         crate::fast_lane::Gate::Pending(_) => BranchCiState::CodePending { sha, url: None, waiting_for_rerun: false },
         crate::fast_lane::Gate::Red { url, .. } => BranchCiState::Red { sha, url },
     };
-    Some(BranchCiLookup { state, repo: Some(repo), repository_lookup_attempted: true })
+    Some(BranchCiLookup { state, repo: Some(repo), repository_lookup_attempted: true, gh_failed: false })
 }
 
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
@@ -4236,6 +4250,13 @@ impl CasCore {
         }
         let local_ref = format!("refs/heads/{branch}");
         match git.resolve_commit(&local_ref) {
+            Some(local) if local != anchor && anchor == recorded_anchor
+                && git.is_ancestor(&local, &anchor) => {
+                // A peer re-park may update task/origin before this hydrated ref.
+                // Advance only to that anchor, with CAS and checkout protection.
+                git.advance_local_branch(branch, &local, &anchor)
+                    .map_err(|error| refuse(format!("cannot update local {branch}: {error}")))?;
+            }
             Some(local) if local == recorded_anchor && anchor != recorded_anchor => {
                 // Only the exact retired anchor may be moved. Git refuses a
                 // branch checked out in any worktree; never reset that checkout.
@@ -4319,6 +4340,7 @@ impl CasCore {
             }
             cas_store::request_changes_for_parked_delivery(&self.cas_root, &task.id, &actor, &reason)
                 .map_err(|error| error.to_string())?;
+            let _ = crate::store::publish_direct_task_write(&self.cas_root, &task.id);
             let returned = store.get(&task.id).map_err(|error| error.to_string())?;
             let notice = crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_merge_conflict_reopen_notice(
                 &self.cas_root, &returned, source_tip, target_tip, &reason,
@@ -9400,5 +9422,42 @@ mod cas_6b42_peer_delivery_tests {
             .expect("the synced peer delivery resolves from origin");
         assert_eq!((remote.branch.as_str(), remote.anchor.as_str()), (branch, anchor.as_str()));
         assert_eq!(git(&repo, &["rev-parse", branch]), anchor, "bound at the recorded tip");
+
+        // Peer re-parks after rework: origin and the new task anchor advance,
+        // but the merge machine still has the previously hydrated local ref.
+        let publisher = dir.path().join("peer");
+        git(dir.path(), &["clone", "-q", "-b", branch, origin.to_str().unwrap(), publisher.to_str().unwrap()]);
+        std::fs::write(publisher.join("startup.rs"), "reworked\n").unwrap();
+        git(&publisher, &["commit", "-qam", "peer rework"]);
+        let reworked = git(&publisher, &["rev-parse", "HEAD"]);
+        git(&publisher, &["push", "-q", "origin", branch]);
+        task.deliverables.factory_branch_anchor = Some(reworked.clone());
+        core.open_task_store().unwrap().update(&task).unwrap();
+        let source = core.task_merge_source(&repo, Some(&task), "lively-eagle-82").unwrap();
+        let remote = core.prepare_remote_merge_source(&manager, Some(&task), "lively-eagle-82",
+            Some(false), source.as_ref()).expect("a stale ancestor ref must follow the anchored peer re-park").unwrap();
+        assert_eq!(remote.anchor, reworked);
+        assert_eq!(git(&repo, &["rev-parse", branch]), reworked);
+
+        // Independent local and peer commits must still refuse, preserving
+        // the local work instead of resetting it to the newer remote anchor.
+        git(&repo, &["checkout", "-q", branch]);
+        std::fs::write(repo.join("local-only.rs"), "local work\n").unwrap();
+        git(&repo, &["add", "local-only.rs"]);
+        git(&repo, &["commit", "-qm", "local follow-up"]);
+        let local = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(publisher.join("startup.rs"), "next peer rework\n").unwrap();
+        git(&publisher, &["commit", "-qam", "next peer rework"]);
+        let peer = git(&publisher, &["rev-parse", "HEAD"]);
+        git(&publisher, &["push", "-q", "origin", branch]);
+        task.deliverables.factory_branch_anchor = Some(peer.clone());
+        core.open_task_store().unwrap().update(&task).unwrap();
+        let source = core.task_merge_source(&repo, Some(&task), "lively-eagle-82").unwrap();
+        let refused = core.prepare_remote_merge_source(&manager, Some(&task), "lively-eagle-82",
+            Some(false), source.as_ref()).err().expect("divergent local work must be retained");
+        assert!(refused.message.contains("[G-96]"));
+        assert_eq!(git(&repo, &["rev-parse", branch]), local);
+        assert_eq!(git(&repo, &["rev-parse", &format!("origin/{branch}")]), peer);
     }
 }

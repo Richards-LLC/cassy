@@ -73,6 +73,14 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.add_with_mutation_receipt(task, receipt_id)
     }
 
+    fn record_mutation_receipt(&self, task_id: &str, receipt_id: &str) -> Result<()> {
+        self.inner.record_mutation_receipt(task_id, receipt_id)
+    }
+
+    fn publish_current_row(&self, task_id: &str) -> Result<()> {
+        self.inner.publish_current_row(task_id)
+    }
+
     fn create_atomic(
         &self,
         task: &Task,

@@ -211,6 +211,14 @@ fn pane_claims_are_labelled_before_display_gh1887() {
     // MessageDisplay's machine protocol carries the labelled payload; no prose pin.
     assert!(serde_json::to_value(&out).unwrap()["hookSpecificOutput"]["updatedMessage"].is_string());
     assert!(crate::gates::codes_in(out.system_message.as_deref().unwrap_or_default()).contains(&"H-47"));
+    let value = serde_json::to_value(&out).unwrap();
+    let transformed = value["hookSpecificOutput"]["updatedMessage"].as_str().unwrap();
+    // The caller's payload survives; the emitted label is understood by the
+    // same real guard on a second display, without pinning its human wording.
+    assert!(transformed.ends_with(input.display_text().unwrap()));
+    let mut labelled = input;
+    labelled.message = Some(transformed.to_owned());
+    assert!(handle_message_display(&labelled, Some(tmp.path())).unwrap().hook_specific_output.is_none());
 }
 
 
@@ -226,9 +234,10 @@ fn pane_stop_refuses_uncited_claim_without_reentrant_loop_gh1887() {
     ];
     std::fs::write(&transcript, rows.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")).unwrap();
     for reentrant in [false, true] {
+        if reentrant { std::fs::remove_file(&transcript).unwrap(); }
         let input: HookInput = serde_json::from_value(serde_json::json!({
             "session_id":"pane-evidence", "hook_event_name":"Stop", "transcript_path":transcript,
-            "stop_hook_active":reentrant
+            "stop_hook_active":reentrant, "last_assistant_message":"12:20 → 12:38 PM ET"
         })).unwrap();
         let out = handle_stop(&input, Some(tmp.path())).unwrap();
         assert_eq!(out.decision.as_deref(), if reentrant { None } else { Some("block") });

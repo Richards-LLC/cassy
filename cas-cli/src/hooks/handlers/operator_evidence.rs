@@ -231,6 +231,7 @@ fn failed(value: &Value) -> bool {
                 if line.starts_with("Process running with session ID")
                     || line.starts_with("Script running with cell ID")
                     || line.starts_with("Script error:")
+                    || line.starts_with("Script failed")
                 {
                     return true;
                 }
@@ -315,6 +316,9 @@ pub(super) fn pane_denial(input: &HookInput) -> Option<String> {
     if !crate::harness_policy::is_supervisor(input) {
         return None;
     }
-    let text = current_turn(input).reply?;
+    let text = input
+        .message
+        .clone()
+        .or_else(|| current_turn(input).reply)?;
     denial(input, &text)
 }

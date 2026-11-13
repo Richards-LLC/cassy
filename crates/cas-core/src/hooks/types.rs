@@ -299,7 +299,9 @@ pub struct HookInput {
     ///
     /// Read this through [`HookInput::display_text`], which also enforces the
     /// chunk-boundary rule documented on [`Self::message_is_final`].
-    #[serde(default, alias = "delta")]
+    /// Stop supplies the complete reply as `last_assistant_message`; evidence
+    /// checks use it even when the transcript tail lacks the turn boundary.
+    #[serde(default, alias = "delta", alias = "last_assistant_message")]
     pub message: Option<String>,
 
     /// `MessageDisplay`: true on the last chunk of an assistant message
@@ -1398,6 +1400,8 @@ mod tests {
                 "session_crons":[]}"#,
         )
         .expect("the real Stop payload must deserialize");
+        // Exact wire payload integrity: Stop evidence must inspect this reply.
+        assert_eq!(quiet.message.as_deref(), Some("DONE"));
         assert_eq!(quiet.stop_hook_active, Some(false));
         assert!(!quiet.stop_hook_is_reentrant());
 

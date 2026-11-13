@@ -417,6 +417,7 @@ path="tests/builtin_archive_portability_test.rs"
         split = json.loads(state.read_text())["split"]
         self.assertEqual((split["build"], split["ring"]), (["--workspace"], f"(all()) and not ({own})"), "a workspace plan runs whole, own first")
 
+    # cas-rule: rule-176 scope: "(2) Each check runs once per change, at the cheapest point that catches its defect. Running the same check in more places is a defect."
     def test_lane_attribution_reuses_only_exact_base_configuration_and_test_proof(self):
         failure = self.NEXTEST_FAILURE
         config = {"platform": "linux-x86_64", "rustc": "1.99.0", "profile": "test"}
@@ -467,6 +468,7 @@ path="tests/builtin_archive_portability_test.rs"
                     carried = json.loads(destination.with_name("base-receipt.json").read_text())
                     self.assertEqual((carried["head"], carried["failures"]), (self.base, [failure]))
 
+    # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
     def test_lane_attribution_timeout_keeps_early_receipt_and_fails_closed(self):
         failure = self.NEXTEST_FAILURE
         destination = self.root / "output/attribution.json"

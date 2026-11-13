@@ -379,6 +379,7 @@ jobs:
         run: python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json --github-output "$GITHUB_OUTPUT"
 
       # Publish the named failures before archiving or rebuilding the base.
+      # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
       - name: Publish own failure receipt before attribution
         if: always() && steps.own.outputs.failed == 'true'
         uses: actions/upload-artifact@v4
@@ -473,6 +474,7 @@ jobs:
           python3 scripts/ci-test-impact.py lane --phase ring --shard "$SHARD" \
             --archive lane-impact.tar.zst --out lane-impact/lane.json --github-output "$GITHUB_OUTPUT"
 
+      # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
       - name: Publish ring failure receipt before attribution
         if: always() && steps.ring.outputs.failed == 'true'
         uses: actions/upload-artifact@v4

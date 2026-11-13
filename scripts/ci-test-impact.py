@@ -382,6 +382,7 @@ def failure_key(failure):
     return failure["package"], failure["binary"], failure["test"]
 
 
+# cas-rule: rule-176 scope: "(2) Each check runs once per change, at the cheapest point that catches its defect. Running the same check in more places is a defect."
 def base_failure_proof(base, configuration, failures):
     """Only explicit failed identities at this exact SHA/config can be inherited.
 
@@ -443,6 +444,7 @@ def base_failure_proof(base, configuration, failures):
     return list(proven.values())
 
 
+# cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
 def lane_attribute(root, base, failures, destination, configuration=None):
     """Reuse exact-base failures, replay misses, and fail closed on incomplete work."""
     started = time.monotonic()

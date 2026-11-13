@@ -75,8 +75,9 @@ ledger or recorder identity participates in code acceptance; a QA receipt
 cannot replace a missing merge approval. The merge queue still proves the
 final release tree before `main`.
 
-Historical release ledgers remain readable. New release ledgers are limited
-to non-code evidence; code deliveries use their pre-merge verdicts.
+Historical release ledgers remain readable. New release-review ledgers are
+refused before recorder identity is resolved; deliveries use their existing
+approvals.
 
 Name who walked the ledger in `ledger_author` (agent id or name). For every
 listed tier 1 or tier 2 task, that author must be outside the same

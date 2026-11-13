@@ -1,5 +1,6 @@
 //! Structural evidence checks, not a semantic truth classifier. Claims cite
-//! `[evidence:<tool-use-id>]`; uncertain paragraphs start with `[unverified]`.
+//! successful same-turn results, optionally narrowed by `[evidence:<tool-use-id>]`.
+//! Uncertain paragraphs start with `[unverified]`.
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -12,7 +13,10 @@ use super::HookInput;
 
 static CITATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[evidence:([^\]\s]+)\]").unwrap());
-static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+(?:[.:]\d+)*").unwrap());
+// Match SHAs whole, before numbers: equal digit fragments do not prove a SHA.
+static LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b[0-9a-fA-F]{7,40}\b|\d+(?:[.:]\d+)*").unwrap()
+});
 static CLAIM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
     r"(?i)\b(merged|published|saved|deleted|completed|finished|done|passed|shipped|released|clipboard)\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|half|several|few)\s+(seconds?|minutes?|hours?|days?|tasks?|branches|deliveries|tests?)\b"
@@ -27,6 +31,7 @@ struct Turn {
 }
 
 struct Call {
+    command: String,
     clipboard_read: bool,
     output: Option<String>,
 }
@@ -191,6 +196,7 @@ impl Turn {
         self.calls.insert(
             id.to_owned(),
             Call {
+                command: command.to_owned(),
                 clipboard_read,
                 output: None,
             },
@@ -273,7 +279,7 @@ pub(super) fn denial(input: &HookInput, text: &str) -> Option<String> {
         return None;
     }
     let plain = CITATION.replace_all(text, "");
-    if !NUMBER.is_match(&plain) && !CLAIM.is_match(&plain) {
+    if !LITERAL.is_match(&plain) && !CLAIM.is_match(&plain) {
         return None;
     }
     let turn = current_turn(input);
@@ -281,31 +287,47 @@ pub(super) fn denial(input: &HookInput, text: &str) -> Option<String> {
         // A stable, explicit uncertainty marker qualifies the whole paragraph.
         let unverified = paragraph.trim_start().starts_with("[unverified]");
         let plain = CITATION.replace_all(paragraph, "");
-        if unverified || (!NUMBER.is_match(&plain) && !CLAIM.is_match(&plain)) {
+        if unverified || (!LITERAL.is_match(&plain) && !CLAIM.is_match(&plain)) {
             continue;
         }
-        let evidence = CITATION
-            .captures_iter(paragraph)
-            .filter_map(|capture| {
-                turn.calls
-                    .get(&capture[1])
-                    .filter(|call| call.output.is_some())
-            })
-            .collect::<Vec<_>>();
-        let numbers_match = NUMBER.find_iter(&plain).all(|number| {
+        // Claude Code does not expose tool-use IDs to the model. Resolve
+        // uncited claims against successful results; explicit IDs still narrow
+        // evidence and an invented ID must never fall back to unrelated output.
+        let evidence = if CITATION.is_match(paragraph) {
+            CITATION
+                .captures_iter(paragraph)
+                .filter_map(|capture| turn.calls.get(&capture[1]))
+                .filter(|call| call.output.is_some())
+                .collect::<Vec<_>>()
+        } else {
+            turn.calls
+                .values()
+                .filter(|call| call.output.is_some())
+                .collect::<Vec<_>>()
+        };
+        // Exact command references describe what ran, including numeric flags;
+        // numbers elsewhere in the claim must still occur in a result.
+        let plain = evidence.iter().fold(plain.into_owned(), |text, call| {
+            if call.command.is_empty() {
+                text
+            } else {
+                text.replace(&format!("`{}`", call.command), "")
+            }
+        });
+        let literals_match = LITERAL.find_iter(&plain).all(|literal| {
             evidence.iter().any(|call| {
-                NUMBER
+                LITERAL
                     .find_iter(call.output.as_deref().unwrap_or_default())
-                    .any(|seen| seen.as_str() == number.as_str())
+                    .any(|seen| seen.as_str() == literal.as_str())
             })
         });
         let clipboard = plain.to_ascii_lowercase().contains("clipboard");
         if evidence.is_empty()
-            || !numbers_match
+            || !literals_match
             || (clipboard && !evidence.iter().any(|call| call.clipboard_read))
         {
             return Some(String::from(
-                "Operator claim lacks matching same-turn evidence. Cite [evidence:<tool-use-id>] from a successful tool result in this turn for each factual paragraph, or prefix that paragraph with [unverified]. Numbers must occur in the cited result; calculate conversions with a tool. Clipboard claims need a wl-paste or pbpaste read after the latest overwrite.",
+                "Operator claim lacks matching same-turn evidence. Numbers and SHAs must occur in successful tool results from this turn; exact commands may be named in backticks. Optional [evidence:<tool-use-id>] citations narrow the results used. Otherwise prefix the paragraph with [unverified]; calculate conversions with a tool. Clipboard claims need a wl-paste or pbpaste read after the latest overwrite.",
             ));
         }
     }

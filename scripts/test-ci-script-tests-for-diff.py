@@ -18,16 +18,17 @@ TIER = ["python3 scripts/test-worker-memory.py", "python3 scripts/test-example.p
 
 
 class Selection(unittest.TestCase):
-    def test_shared_walk_kit_selects_its_suite_once(self):
+    def test_shared_skill_scripts_select_their_suite_once(self):
         commands = SELECTOR.tier_commands(Path(__file__).resolve().parents[1])
-        kit = "cas-cli/src/builtins/skills/cas-qa-craft/scripts/walk-kit.mjs"
-        suite = "scripts/test-walk-kit.mjs"
-        for changed in [[kit], [suite], [kit, suite], ["docs/unrelated.md"]]:
-            selected = SELECTOR.select(commands, changed)
-            selected = [(test, command) for test, command in selected if test == suite]
-            self.assertEqual(len(selected), 0 if changed == ["docs/unrelated.md"] else 1)
-            if selected:
-                self.assertEqual(selected[0][1], "node --test scripts/test-walk-kit.mjs")
+        for resource, suite, command in [
+            ("cas-cli/src/builtins/skills/cas-qa-craft/scripts/walk-kit.mjs", "scripts/test-walk-kit.mjs", "node --test scripts/test-walk-kit.mjs"),
+            ("cas-cli/src/builtins/skills/cas-test-audit/scripts/audit.py", "scripts/test-test-audit.py", "python3 scripts/test-test-audit.py"),
+            ("cas-cli/src/builtins/skills/cas-test-audit/scripts/history.py", "scripts/test-test-audit.py", "python3 scripts/test-test-audit.py"),
+            ("scripts/fixtures/test-audit/serve-teardown.rs.txt", "scripts/test-test-audit.py", "python3 scripts/test-test-audit.py"),
+        ]:
+            for changed in [[resource], [suite], [resource, suite], ["docs/unrelated.md"]]:
+                selected = [(test, cmd) for test, cmd in SELECTOR.select(commands, changed) if test == suite]
+                self.assertEqual(selected, [] if changed == ["docs/unrelated.md"] else [(suite, command)])
 
     def test_provisioned_suites_follow_real_pr_inputs_and_ignore_unrelated_pr(self):
         # Independent consumer inputs, not a copy of the selector's registry.
@@ -180,7 +181,7 @@ class Selection(unittest.TestCase):
                 "attempt = pathlib.Path('scripts/probe-ran')\nfailed = not attempt.exists()\n"
                 "with attempt.open('a') as out: out.write('attempt\\n')\n"
                 "sys.exit(int(failed))\n")
-            env = dict(os.environ, GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/epic/release-train-x',
+            env = dict(os.environ, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/epic/release-train-x',
                        FULL_SET='true', BASE_SHA='abc')
             result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all',
                                      '--only', 'scripts/test-probe.py'],

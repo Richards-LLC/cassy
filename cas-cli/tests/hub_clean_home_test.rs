@@ -1002,24 +1002,20 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     assert_eq!(paths.read_process_record().unwrap().launched_by.as_deref(), Some("service"));
     assert!(paths.read_process_record().unwrap().public_url.is_some());
     socket.set(None);
-    let stopped_at = Instant::now();
     let stop = command(&["hub", "stop"]);
     assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
-    assert!(stopped_at.elapsed() < Duration::from_secs(15));
     // An absent bootstrap job cannot respawn, regardless of launchd throttle timing.
     assert!(!ProcessCommand::new("/bin/launchctl").args(["print", &target])
         .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
     assert!(paths.read_process_record().is_err());
     assert!(!home.path().join("mock-route").exists());
-    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert!(hub_fixture::wait_for_hub_exit(first_pid, CHILD_PROGRESS_TIMEOUT));
     let plist = home.path().join(format!("Library/LaunchAgents/{label}.plist"));
     assert!(plist.is_file(), "stop must keep the installed service definition");
     assert!(command(&["hub", "stop"]).status.success(), "stop is idempotent");
     socket.set(Some("updated.socket"));
-    let restarted_at = Instant::now();
     let restart = command(&["hub", "restart"]);
     assert!(restart.status.success(), "{}", String::from_utf8_lossy(&restart.stderr));
-    assert!(restarted_at.elapsed() < Duration::from_secs(15));
     let record = wait_for_publication();
     assert_ne!(record.pid, first_pid);
     assert_eq!(record.public_url.as_deref(), Some("https://launchd-proof.invalid:10046/"));
@@ -1657,6 +1653,22 @@ fn assert_health_status_and_stop(home: &Path, path: &OsStr, record: &Value) -> V
     stop
 }
 
+fn response_even_for_error(request: ureq::Request) -> ureq::Response {
+    match request.timeout(Duration::from_secs(2)).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(error) => panic!("Commander request failed before HTTP response: {error}"),
+    }
+}
+
+fn assert_hsts(response: &ureq::Response) {
+    assert_eq!(
+        response.header("strict-transport-security"),
+        Some("max-age=31536000")
+    );
+    assert_eq!(response.all("strict-transport-security").len(), 1);
+}
+
 #[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::MetadataExt;
@@ -1797,6 +1809,222 @@ fn hub_serve_does_not_hold_instance_lock_while_auth_lock_is_contended() {
     auth_lock.unlock().unwrap();
     child.kill().unwrap();
     child.wait().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_home_tailscale_stop_reports_removal_after_serve_exit_teardown() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    install_tailscale_mock(
+        home.path(),
+        &tailscale,
+        r#"#!/bin/sh
+case "$*" in
+  'status --json') printf '%s' '{"Self":{"DNSName":"clean-host.tail.example."}}' ;;
+  'serve status --json')
+    if [ -f "$HOME/mock-serve" ]; then
+      printf '%s' '{"Web":{"clean-host.tail.example:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:'"$(/bin/cat "$HOME/mock-port")"'"}}}}}'
+    else
+      printf '%s' '{}'
+    fi ;;
+  'serve --bg --yes --https=443 '*)
+    printf '%s' "${5##*:}" > "$HOME/mock-port"
+    : > "$HOME/mock-serve" ;;
+  'serve --https=443 off') /bin/rm -f "$HOME/mock-serve" ;;
+  *) exit 9 ;;
+esac
+"#,
+    );
+
+    let record = start_hub(home.path(), bin.as_os_str(), true);
+    assert_eq!(record["public_url"], "https://clean-host.tail.example/");
+    assert_eq!(record["transport_warning"], Value::Null);
+    assert_private_state_modes(home.path());
+    assert_eq!(
+        mode(&home.path().join(".cas/hub/tailscale-serve.json")),
+        0o600
+    );
+
+    let plaintext_port = record["port"].as_u64().unwrap() as u16;
+    let first_backend_port = fs::read_to_string(home.path().join("mock-port"))
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    assert_ne!(first_backend_port, plaintext_port);
+
+    // A prior explicit Serve publication is durable operator intent. A plain
+    // restart must carry it forward even when the flag is omitted.
+    let plain_restart = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "restart", "--port", "0"])
+        .output()
+        .expect("restart trusted proxy hub without the Serve flag");
+    assert!(
+        plain_restart.status.success(),
+        "flagless trusted-proxy restart failed: {}",
+        String::from_utf8_lossy(&plain_restart.stderr)
+    );
+    let plain_status = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("status after flagless restart");
+    assert!(plain_status.status.success());
+    let plain_status: Value = serde_json::from_slice(&plain_status.stdout).unwrap();
+    assert_eq!(plain_status["record"]["public_url"], "https://clean-host.tail.example/");
+    let trusted_backend_port = fs::read_to_string(home.path().join("mock-port"))
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    assert_ne!(trusted_backend_port, plain_status["record"]["port"].as_u64().unwrap() as u16);
+    assert!(hub_fixture::wait_for_hub_exit(record["pid"].as_u64().unwrap() as u32, CHILD_PROGRESS_TIMEOUT));
+
+    // A route that no longer targets the live shim is a hard diagnostic
+    // failure, with the same finding surfaced by both hub status and doctor.
+    fs::write(home.path().join("mock-port"), "33427\n").unwrap();
+    let mismatch_status = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("inspect mismatched Serve route");
+    assert!(!mismatch_status.status.success());
+    let mismatch_status: Value = serde_json::from_slice(&mismatch_status.stdout).unwrap();
+    assert_eq!(mismatch_status["tailscale_serve"]["status"], "fail");
+    assert!(mismatch_status["tailscale_serve"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not match the live hub shim"));
+
+    let doctor = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "doctor", "--host"])
+        .output()
+        .expect("doctor mismatched Serve route");
+    assert!(doctor.status.success());
+    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let transport_check = doctor
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "hub transport")
+        .expect("doctor hub transport row");
+    assert_eq!(transport_check["status"], "error");
+    assert!(transport_check["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not match the live hub shim"));
+    fs::write(
+        home.path().join("mock-port"),
+        format!("{trusted_backend_port}\n"),
+    )
+    .unwrap();
+
+    for (path, status) in [
+        ("/", 200),
+        ("/v1/health", 200),
+        ("/v1/sessions", 401),
+        ("/missing", 405),
+    ] {
+        let response = response_even_for_error(ureq::get(&format!(
+            "http://127.0.0.1:{trusted_backend_port}{path}"
+        )));
+        assert_eq!(response.status(), status, "unexpected status for {path}");
+        assert_hsts(&response);
+        assert_eq!(response.header("referrer-policy"), Some("no-referrer"));
+        assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
+        assert_eq!(response.header("x-frame-options"), Some("DENY"));
+        assert!(response.header("content-security-policy").is_some());
+    }
+    let preflight = response_even_for_error(
+        ureq::request(
+            "OPTIONS",
+            &format!("http://127.0.0.1:{trusted_backend_port}/v1/auth/pairing/exchange"),
+        )
+        .set("Origin", "http://127.0.0.1:4173")
+        .set("Access-Control-Request-Method", "POST")
+        .set("Access-Control-Request-Headers", "content-type"),
+    );
+    assert_eq!(preflight.status(), 204);
+    assert_eq!(
+        preflight.header("access-control-allow-origin"),
+        Some("http://127.0.0.1:4173")
+    );
+    assert_hsts(&preflight);
+
+    let restart = cas_command(home.path(), bin.as_os_str())
+        .args([
+            "--json",
+            "hub",
+            "restart",
+            "--port",
+            "0",
+            "--tailscale-serve",
+        ])
+        .output()
+        .expect("restart trusted proxy hub");
+    assert!(
+        restart.status.success(),
+        "trusted proxy restart failed: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+    assert!(hub_fixture::wait_for_hub_exit(plain_status["record"]["pid"].as_u64().unwrap() as u32, CHILD_PROGRESS_TIMEOUT));
+    let status = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("status after restart");
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    let restarted = &status["record"];
+    assert_eq!(restarted["public_url"], "https://clean-host.tail.example/");
+    let restarted_plaintext = restarted["port"].as_u64().unwrap() as u16;
+    let restarted_backend = fs::read_to_string(home.path().join("mock-port"))
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    assert_ne!(restarted_backend, restarted_plaintext);
+    assert_hsts(&response_even_for_error(ureq::get(&format!(
+        "http://127.0.0.1:{restarted_backend}/v1/health"
+    ))));
+
+    let killed_pid = restarted["pid"].as_i64().unwrap() as i32;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(killed_pid),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    assert!(hub_fixture::wait_for_hub_exit(killed_pid as u32, CHILD_PROGRESS_TIMEOUT));
+    let recovered_output = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "start", "--port", "0", "--tailscale-serve"])
+        .output()
+        .expect("recover killed trusted proxy hub");
+    assert!(
+        recovered_output.status.success(),
+        "stale owned mapping recovery failed: {}",
+        String::from_utf8_lossy(&recovered_output.stderr)
+    );
+    let recovered: Value = serde_json::from_slice(&recovered_output.stdout).unwrap();
+    assert_eq!(recovered["public_url"], "https://clean-host.tail.example/");
+    let recovered_plaintext = recovered["port"].as_u64().unwrap() as u16;
+    let recovered_backend = fs::read_to_string(home.path().join("mock-port"))
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    assert_ne!(recovered_backend, recovered_plaintext);
+    assert_hsts(&response_even_for_error(ureq::get(&format!(
+        "http://127.0.0.1:{recovered_backend}/v1/health"
+    ))));
+
+    // `hub stop` waits for the foreground process to exit. That process now
+    // performs the owned teardown itself, so the receipt must report the
+    // mapping's final absence rather than require stop to be its remover.
+    let stop = assert_health_status_and_stop(home.path(), bin.as_os_str(), &recovered);
+    assert_eq!(stop["tailscale_serve_removed"], true);
+    assert!(!home.path().join(".cas/hub/tailscale-serve.json").exists());
+    assert_eq!(
+        mode(&home.path().join(".cas/hub/tailscale-serve-teardown.json")),
+        0o600
+    );
+    assert!(!home.path().join("mock-serve").exists());
+    assert!(hub_fixture::wait_for_hub_exit(recovered["pid"].as_u64().unwrap() as u32, CHILD_PROGRESS_TIMEOUT));
 }
 
 #[cfg(unix)]

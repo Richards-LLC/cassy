@@ -38,12 +38,13 @@ fn receipt(repo: &Path, root: &Path, outcome: &str) {
     std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
 }
 
-/// The Nov 6 design: a green exact tip with fragments is cut by Cassy, inside
-/// the cadence, never while red, paused or queued, and never without the
-/// supervisor's notes, which it waits for with one wake.
+/// The Nov 6 design: a train with fragments is cut by Cassy, inside the
+/// cadence, never while paused or queued, and never without the supervisor's
+/// notes, which it waits for with one wake. cas-0fc56: the freeze needs no
+/// green, because it starts the one train suite; the cut waits for its green.
 #[cfg(unix)]
 #[test]
-fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
+fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     let _env = TestEnvGuard::temp_home();
     let temp = tempfile::TempDir::new().unwrap();
     let repo = temp.path();
@@ -70,16 +71,11 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     let frozen = || release_freeze::freeze_of(&open_task_store(&root).unwrap().get("cas-tr").unwrap()).is_some();
     let wakes = || open_supervisor_queue_store(&root).unwrap().peek("sup-id", 10).unwrap();
 
-    receipt(repo, &root, "PASS");
     poll(&none);
-    assert!(!frozen(), "green, but no changelog fragments");
+    assert!(!frozen(), "no changelog fragments");
     run(repo, &["checkout", "-q", LANE]);
     commit(repo, "changelog.d/cas-x.md");
     run(repo, &["checkout", "-q", "main"]);
-    receipt(repo, &root, "FAIL");
-    poll(&none);
-    assert!(!frozen(), "a red tip never cuts");
-    receipt(repo, &root, "PASS");
     set_paused(&root, "cas-tr", "operator", true).unwrap();
     poll(&none);
     assert!(!frozen(), "paused in Commander");
@@ -106,13 +102,18 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
 
     poll(&none);
     poll(&none);
-    assert!(frozen(), "green tip with fragments freezes for its cut");
+    assert!(frozen(), "a ready tip with fragments freezes, starting its train suite");
     assert_eq!(wakes().len(), 1, "a missing notes draft wakes the supervisor once");
     let draft = notes_draft(&root, "cas-tr").unwrap();
     assert!(wakes()[0].payload.contains(&draft.display().to_string()), "{}", wakes()[0].payload);
-    assert!(!repo.join("release-ran").exists(), "no cut without notes");
 
+    std::fs::create_dir_all(draft.parent().unwrap()).unwrap();
     std::fs::write(&draft, "notes\n").unwrap();
+    poll(&none);
+    receipt(repo, &root, "FAIL");
+    poll(&none);
+    assert!(!repo.join("release-ran").exists(), "no cut before green, nor on red");
+    receipt(repo, &root, "PASS");
     poll(&none);
     let log = draft.with_file_name("auto-cut.log");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

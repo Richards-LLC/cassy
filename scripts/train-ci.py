@@ -25,6 +25,8 @@ WORKFLOW = 'full-validation.yml'
 REQUIRED_JOBS = ('fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-validation-web',
                  'fast-validation-suite', 'fast-validation-docs', 'queue-flake-publication')
 PREFIX = 'epic/release-train-'
+# cas-0fc56: Cassy dispatches the one train run at a release freeze; merges start none.
+TRAIN_EVENT = 'workflow_dispatch'
 MANIFESTS = {'cas-cli/Cargo.toml': 'cas', **{f'crates/{name}/Cargo.toml': name for name in
              ('cas-types', 'cas-search', 'cas-store', 'cas-core', 'cas-mcp')}}
 
@@ -215,7 +217,7 @@ def job_check(args):
             run=api('actions/runs/'+run_id)
             if run.get('status')!='completed' or run.get('path') not in ('.github/workflows/'+WORKFLOW,WORKFLOW):
                 continue
-            if run.get('event') not in ('merge_group','push'):
+            if run.get('event') not in ('merge_group',TRAIN_EVENT):
                 continue
             with tempfile.TemporaryDirectory() as temporary:
                 command([args.gh,'run','download',run_id,'--name',expected['artifact'],'--dir',temporary],args.repo)
@@ -356,7 +358,7 @@ def reuse(args):
                        if row.get('context') == 'cas/full-gate'), {})
         return latest.get('state') == 'success' and latest.get('description') == 'PASS tree=' + tree
     head = git(args.repo, 'rev-parse', 'HEAD')
-    if event == 'push' and ref.startswith('refs/heads/' + PREFIX):
+    if event == TRAIN_EVENT and ref.startswith('refs/heads/' + PREFIX):
         branch = ref.removeprefix('refs/heads/')
         pr_head = head
         queue_main = os.environ.get('MAIN_BASELINE') or git(args.repo, 'rev-parse',
@@ -376,7 +378,7 @@ def reuse(args):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
             return
     if not branch.startswith(PREFIX): return
-    runs = api(f'actions/workflows/{WORKFLOW}/runs?branch={branch}&event=push&per_page=100')['workflow_runs']
+    runs = api(f'actions/workflows/{WORKFLOW}/runs?branch={branch}&event={TRAIN_EVENT}&per_page=100')['workflow_runs']
     candidates = sorted((run for run in runs if run['status'] == 'completed' and run['conclusion'] == 'success'),
                         key=lambda run: (run['id'], run.get('run_attempt', 1)), reverse=True)
     for candidate in candidates:
@@ -393,7 +395,7 @@ def reuse(args):
         source, source_tree = state['head'], state['tree']
         if source != original and not green_status(source, source_tree): continue
         if not plumbing_only(args.repo, source, head): continue
-        if event == 'push' and args.adoption_out:
+        if event == TRAIN_EVENT and args.adoption_out:
             write(args.adoption_out/'receipt.json', {**identity(), 'schema':2,
                 'scope':'full-set-adoption', 'head':head, 'branch':branch, 'tree':queue_tree,
                 'artifact':ARTIFACT, 'outcome':'PASS', 'main_baseline':queue_main,
@@ -471,8 +473,8 @@ def observe(args):
     def api(endpoint, *fields):
         return json.loads(command([gh, 'api', '-X', 'GET', f'repos/{slug}/{endpoint}', *fields], args.repo))
 
-    runs = api(f'actions/workflows/{WORKFLOW}/runs', '-f', f'branch={branch}', '-f', 'event=push', '-f', 'per_page=100')['workflow_runs']
-    candidates = [run for run in runs if run['head_sha'] == head and run['head_branch'] == branch and run['event'] == 'push']
+    runs = api(f'actions/workflows/{WORKFLOW}/runs', '-f', f'branch={branch}', '-f', f'event={TRAIN_EVENT}', '-f', 'per_page=100')['workflow_runs']
+    candidates = [run for run in runs if run['head_sha'] == head and run['head_branch'] == branch and run['event'] == TRAIN_EVENT]
     run = max(candidates, key=lambda item: (item['id'], item.get('run_attempt', 1)), default=None)
     state = {**previous, 'branch': branch, 'head': head, 'outcome': 'PENDING'}
     if not run or run['status'] != 'completed' or run['conclusion'] in ('cancelled', 'skipped'):

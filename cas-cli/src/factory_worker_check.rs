@@ -2402,11 +2402,11 @@ mod tests {
             fixture_commit(&repo);
             std::fs::create_dir_all(repo.join("src")).unwrap();
             std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() {}\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n").unwrap();
             fixture_commit_as(&repo, "base");
             let base = fixture_head(&repo);
             git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() {}\n#[test]\nfn owned_new() {}\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n#[test]\nfn owned_new() {}\n").unwrap();
             fixture_commit_as(&repo, "new test");
             env.set_current_dir(&repo);
             let cargo = repo.join("target/fake-cargo");

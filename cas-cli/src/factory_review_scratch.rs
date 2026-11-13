@@ -1145,84 +1145,109 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
     render_until(cas, clean, None)
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct ReviewRow {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub reclaimable_bytes: u64,
+    pub disposition: String,
+}
+
+#[derive(Default, Debug, Serialize)]
+pub(crate) struct ReviewReport {
+    schema_version: u8,
+    pub rows: Vec<ReviewRow>,
+    reclaimed_bytes: u64,
+    reclaimable_bytes: u64,
+    pending_reclaim_bytes: u64,
+    dry_run: bool,
+    deferred: bool,
+    pub incomplete: bool,
+}
+
+impl ReviewReport {
+    pub fn render(&self) -> String {
+        let mut out = format!(
+            "\nManaged review scratch: {} checkouts; reclaimed {} bytes\nReclaimable: {} bytes; pending deletion: {} bytes{}{}\n",
+            self.rows.len(), self.reclaimed_bytes, self.reclaimable_bytes, self.pending_reclaim_bytes,
+            if self.deferred { "; deletion deferred (collector busy or unavailable)" } else { "" },
+            if self.incomplete { "; report inventory incomplete (scan budget exhausted)" } else { "" },
+        );
+        for row in &self.rows {
+            out.push_str(&format!("- {}: {} ({} bytes)\n", row.path.display(), row.disposition, row.bytes));
+        }
+        out.push_str(&format!("REVIEW_SCRATCH_STATUS_JSON={}\n", serde_json::to_string(self).unwrap()));
+        out
+    }
+}
+
 pub(crate) fn render_until(cas: &Path, clean: bool, deadline: Option<std::time::Instant>) -> String {
+    collect_until(cas, clean, deadline, |_, _| false).render()
+}
+
+/// The host supplies its cross-project citation snapshot. Check it before
+/// reclaim(), which can mutate seed stages and targets as well as source.
+pub(crate) fn collect_until(
+    cas: &Path,
+    clean: bool,
+    deadline: Option<std::time::Instant>,
+    cited: impl Fn(&Path, &str) -> bool,
+) -> ReviewReport {
     let cas = cas.canonicalize().unwrap_or_else(|_| cas.to_path_buf());
     let cas = cas.as_path();
     let base = base(cas);
-    let mut rows = Vec::new();
-    let mut reclaimed = 0u64;
-    let mut reclaimable = 0u64;
-    let mut pending_total = 0u64;
+    let mut report = ReviewReport { schema_version: 1, dry_run: !clean, ..Default::default() };
     let mut cleaned = 0usize;
     let collector = clean
         .then(|| collector_lock(cas, false).ok().flatten())
         .flatten();
+    report.deferred = clean && collector.is_none();
     for task in entries(&base) {
         for directory in entries(&task) {
             let Some(sizes) = review_bytes_until(&directory, deadline) else {
-                return "\nManaged review scratch: report inventory incomplete (scan budget exhausted; none deleted)\n".into();
+                report.incomplete = true;
+                return report;
             };
-            let size = sizes.total;
             let mutate = collector.is_some() && cleaned < MAX_RECLAIMS_PER_PASS;
             let pending = trash(cas, &directory)
                 .ok()
                 .flatten()
                 .map_or(0, |_| sizes.pending);
             let mut candidate_bytes = 0;
-            let mode = if mutate {
-                ReclaimMode::Collect
-            } else {
-                ReclaimMode::Inspect
-            };
-            let disposition = match reclaim(cas, &directory, mode, false, Some(&sizes)) {
+            let mut reclaimed_bytes = 0;
+            let mode = if mutate { ReclaimMode::Collect } else { ReclaimMode::Inspect };
+            let outcome = owner(cas, &directory).and_then(|record| {
+                ensure!(!cited(&directory, &record.task_id), "cited by live work or retained releases");
+                reclaim(cas, &directory, mode, false, Some(&sizes))
+            });
+            let disposition = match outcome {
                 Ok((status, bytes)) => {
                     candidate_bytes = bytes;
-                    if mutate && matches!(status, "reclaimed" | "target reclaimed; source retained")
-                    {
-                        reclaimed += bytes;
+                    if mutate && matches!(status, "reclaimed" | "target reclaimed; source retained") {
+                        reclaimed_bytes = bytes;
+                        report.reclaimed_bytes += bytes;
                         cleaned += 1;
-                    }
-                    if !(mutate
-                        && matches!(status, "reclaimed" | "target reclaimed; source retained"))
-                    {
-                        pending_total = pending_total.saturating_add(pending);
+                    } else {
+                        report.pending_reclaim_bytes = report.pending_reclaim_bytes.saturating_add(pending);
                     }
                     status.to_owned()
                 }
                 Err(error) => {
                     // A failed collection may have unlinked part of the queue;
                     // retain the pre-pass snapshot as a conservative bound.
-                    pending_total = pending_total.saturating_add(pending);
+                    report.pending_reclaim_bytes = report.pending_reclaim_bytes.saturating_add(pending);
                     format!("retained: {error:#}")
                 }
             };
-            reclaimable += candidate_bytes;
-            rows.push(
-                serde_json::json!({"path": directory, "bytes": size, "reclaimable_bytes": candidate_bytes, "disposition": disposition}),
-            );
+            report.reclaimable_bytes += candidate_bytes;
+            report.rows.push(ReviewRow {
+                path: directory, bytes: sizes.total, reclaimed_bytes,
+                reclaimable_bytes: candidate_bytes, disposition,
+            });
         }
     }
-    let pending = pending_total;
-    let deferred = clean && collector.is_none();
-    let deferred_text = if deferred {
-        "; deletion deferred (collector busy or unavailable)"
-    } else {
-        ""
-    };
-    let mut out = format!(
-        "\nManaged review scratch: {} checkouts; reclaimed {reclaimed} bytes\nReclaimable: {reclaimable} bytes; pending deletion: {pending} bytes{deferred_text}\n",
-        rows.len()
-    );
-    for row in &rows {
-        out.push_str(&format!(
-            "- {}: {} ({} bytes)\n",
-            row["path"].as_str().unwrap_or("?"),
-            row["disposition"].as_str().unwrap_or("?"),
-            row["bytes"]
-        ));
-    }
-    out.push_str(&format!("REVIEW_SCRATCH_STATUS_JSON={}\n", serde_json::json!({"schema_version": 1, "rows": rows, "reclaimable_bytes": reclaimable, "reclaimed_bytes": reclaimed, "pending_reclaim_bytes": pending, "dry_run": !clean, "deferred": deferred})));
-    out
+    report
 }
 
 /// Inventory-only evidence for the ad-hoc siblings that motivated this GC.

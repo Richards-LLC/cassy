@@ -229,6 +229,60 @@ mod tests {
                 if old && !cited { expired.push(path); } else { kept.push(path); }
             }
         }
+        // Real managed reviews use their own collector, including targets and
+        // seed stages. Cross-project explicit citations must guard all of it.
+        let repo = roots[0].parent().unwrap();
+        git(repo, &["init", "-b", "main"]);
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "fixture"]);
+        let head = std::process::Command::new("git").arg("-C").arg(repo)
+            .args(["rev-parse", "HEAD"]).output().unwrap();
+        let head = String::from_utf8(head.stdout).unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "target/\n").unwrap();
+        let mut review_kept = Vec::new();
+        let mut review_removed = Vec::new();
+        for kind in ["live-cited", "release-cited", "owner-only", "uncited"] {
+            let mut task = cas_types::Task::new(format!("cas-review-{kind}"), "Managed preservation fixture".into());
+            let tasks = crate::store::open_task_store_local(&roots[0]).unwrap();
+            tasks.add(&task).unwrap();
+            let review = crate::factory_review_scratch::create(&roots[0], repo, &task.id, None, head.trim()).unwrap();
+            let checkout = review.path.clone();
+            let directory = checkout.parent().unwrap().to_path_buf();
+            drop(review);
+            let marker = directory.join("owner.json");
+            let mut owner: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+            owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+            owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+            std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+            std::fs::create_dir(checkout.join("target")).unwrap();
+            std::fs::write(checkout.join("target/output"), b"disposable").unwrap();
+            task.status = cas_types::TaskStatus::Closed;
+            if kind == "owner-only" { task.notes = directory.to_string_lossy().into_owned(); }
+            tasks.update(&task).unwrap();
+            match kind {
+                "live-cited" => {
+                    // A task with the same local id in another project is a
+                    // different owner and its explicit citation still counts.
+                    let mut reference = cas_types::Task::new(task.id.clone(), "Cross-project review citation".into());
+                    reference.notes = directory.to_string_lossy().into_owned();
+                    store.add(&reference).unwrap();
+                }
+                "release-cited" => {
+                    let mut release = cas_store::NewQualityEvent::new("release-review", cas_store::QualityPayload::Release {
+                        commit_to_main_minutes: None, main_to_published_minutes: None, ejections: 0, rescues: 0,
+                    });
+                    release.local_note = Some(directory.to_string_lossy().into_owned());
+                    cas_store::record_quality_event(&roots[1], &release).unwrap();
+                }
+                _ => {}
+            }
+            if kind.ends_with("-cited") {
+                review_kept.push(directory.clone());
+                kept.push(checkout.join("target/output"));
+            } else {
+                review_removed.push(directory.clone());
+                expired.push(directory);
+            }
+        }
         #[cfg(unix)]
         {
             let external = env.home().join("outside-retention");
@@ -261,6 +315,12 @@ mod tests {
         let report = crate::artifacts::retention::host::last_report().unwrap();
         assert!(report.reclaimed_bytes() > 0);
         assert!(!report.incomplete, "{:?}", report);
+        for path in &review_kept {
+            assert!(report.rows.iter().any(|row| &row.path == path && row.reclaimed_bytes == 0 && row.bytes > 0), "{report:?}");
+        }
+        for path in &review_removed {
+            assert!(report.rows.iter().any(|row| &row.path == path && row.reclaimed_bytes > 0), "{report:?}");
+        }
         for category in ["artifacts", "worktrees", "targets", "scratch", "review-scratch"] {
             assert!(report.rows.iter().any(|row| row.category == category && row.reclaimed_bytes > 0), "{category}: {report:?}");
         }
@@ -281,6 +341,30 @@ mod tests {
         crate::artifacts::retention::host::automatic(&roots[0], true);
         assert!(!automatic_path.exists());
         assert!(crate::artifacts::retention::host::last_report().unwrap().reclaimed_bytes() > 0);
+        #[cfg(unix)]
+        {
+            // Neither the namespace itself nor a configured ancestor may lead
+            // retention into a different evidence tree after canonicalization.
+            let base = crate::config::resolved_factory_artifacts_root(None);
+            let namespace = crate::config::project_factory_artifacts_root(&roots[1], &base);
+            let proof = namespace.join("cas-two-old/proof.txt");
+            std::fs::create_dir_all(proof.parent().unwrap()).unwrap();
+            std::fs::write(&proof, b"must survive namespace links").unwrap();
+            let old = std::time::SystemTime::now() - Duration::from_secs(30 * 86400);
+            for path in [proof.as_path(), proof.parent().unwrap()] {
+                std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+            }
+            for original in [&namespace, &base] {
+                let external = env.home().join("linked-evidence");
+                std::fs::rename(original, &external).unwrap();
+                std::os::unix::fs::symlink(&external, original).unwrap();
+                run(&[]);
+                assert_eq!(std::fs::read(&proof).unwrap(), b"must survive namespace links");
+                assert_eq!(crate::artifacts::retention::host::last_report().unwrap().reclaimed_bytes(), 0);
+                std::fs::remove_file(original).unwrap();
+                std::fs::rename(external, original).unwrap();
+            }
+        }
     }
 
     #[test]

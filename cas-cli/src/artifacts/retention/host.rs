@@ -72,7 +72,7 @@ struct Project {
 }
 
 #[derive(Default)]
-struct References(String);
+struct References(String, Vec<(PathBuf, Option<String>, String)>);
 impl References {
     fn add(&mut self, value: impl Serialize) -> Result<()> {
         self.0.push_str(&serde_json::to_string(&value)?);
@@ -80,6 +80,14 @@ impl References {
         Ok(())
     }
     fn cites(&self, key: &str) -> bool { !key.is_empty() && self.0.contains(key) }
+    fn add_review(&mut self, project: &Path, task: Option<&str>, value: impl Serialize) -> Result<()> {
+        self.1.push((project.to_path_buf(), task.map(str::to_owned), serde_json::to_string(&value)?));
+        Ok(())
+    }
+    fn cites_review(&self, path: &Path, project: &Path, owner: &str) -> bool {
+        let path = path.to_string_lossy();
+        self.1.iter().any(|(root, source, text)| (root != project || source.as_deref() != Some(owner)) && text.contains(path.as_ref()))
+    }
 }
 
 fn state_dir() -> PathBuf { crate::store::known_repos::host_cas_dir().join("retention") }
@@ -137,6 +145,7 @@ fn load_projects(cas: &Path, deadline: Instant, include_recent: bool) -> Result<
         if exists { cas_store::SqliteTaskStore::open(&global)?.list(None)? } else { Vec::new() }
     };
     for task in global_tasks.iter().filter(|task| !task.is_terminal() || (include_recent && task.updated_at >= Utc::now() - chrono::Duration::days(14))) { refs.add(task)?; }
+    for task in global_tasks.iter().filter(|task| !task.is_terminal()) { refs.add_review(&global, Some(&task.id), task)?; }
     let mut seen = BTreeSet::new();
     for root in roots {
         ensure!(Instant::now() < deadline, "reference inventory budget exhausted; nothing deleted");
@@ -146,14 +155,16 @@ fn load_projects(cas: &Path, deadline: Instant, include_recent: bool) -> Result<
         ensure!(root.join("cas.db").is_file(), "registered store has no database: {}", root.display());
         let tasks = cas_store::SqliteTaskStore::open(&root)?.list(None)?;
         for task in tasks.iter().filter(|task| !task.is_terminal() || (include_recent && task.updated_at >= Utc::now() - chrono::Duration::days(14))) { refs.add(task)?; }
+        for task in tasks.iter().filter(|task| !task.is_terminal()) { refs.add_review(&root, Some(&task.id), task)?; }
         // Publication events and their task records carry portable references.
         let mut releases = BTreeSet::new();
         for release in cas_store::quality_release_events(&root)? {
             if !releases.insert(release.release_version.clone().unwrap_or_else(|| release.id.clone())) { continue; }
             if releases.len() > 3 { break; }
             refs.add((&release.task_id, &release.release_version, &release.local_note, &release.title, &release.link))?;
+            refs.add_review(&root, release.task_id.as_deref(), (&release.local_note, &release.title, &release.link))?;
             if let Some(id) = &release.task_id
-                && let Some(task) = tasks.iter().find(|task| &task.id == id) { refs.add(task)?; }
+                && let Some(task) = tasks.iter().find(|task| &task.id == id) { refs.add(task)?; refs.add_review(&root, Some(id), task)?; }
         }
         // Immutable release closeouts include no-code proofs and reviewed ledgers.
         let db = cas_store::shared_db::shared_connection(&root.join("cas.db"))?;
@@ -162,13 +173,21 @@ fn load_projects(cas: &Path, deadline: Instant, include_recent: bool) -> Result<
             let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |row| row.get(0))?;
             if exists {
                 let mut statement = conn.prepare(&format!("SELECT receipt_json FROM {table} ORDER BY {order} DESC LIMIT 3"))?;
-                for value in statement.query_map([], |row| row.get::<_, String>(0))? { refs.0.push_str(&value?); }
+                for value in statement.query_map([], |row| row.get::<_, String>(0))? {
+                    let value = value?;
+                    let parsed: serde_json::Value = serde_json::from_str(&value)?;
+                    refs.add_review(&root, parsed.get("task_id").and_then(|id| id.as_str()), &parsed)?;
+                    refs.0.push_str(&value);
+                }
             }
         }
         drop(conn);
         let config = crate::config::Config::load(&root)?;
         let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
         let artifacts = crate::config::project_factory_artifacts_root(&root, &base);
+        // Validate the unresolved namespace: canonicalizing first hides links
+        // into another project's evidence (including links in its ancestors).
+        no_symlink_ancestors(&artifacts)?;
         let artifacts = artifacts.canonicalize().unwrap_or(artifacts);
         let agents = cas_store::SqliteAgentStore::open(&root)?.list(None)?;
         projects.push(Project { root, tasks, agents, artifacts });
@@ -436,8 +455,16 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
     }
     for project in &projects {
         if Instant::now() >= deadline { report.incomplete = true; break; }
-        report.managed_review_reports.push(crate::factory_review_scratch::render_until(
-            &project.root, apply, Some(deadline)));
+        let reviews = crate::factory_review_scratch::collect_until(
+            &project.root, apply, Some(deadline),
+            |path, owner| refs.cites_review(path, &project.root, owner));
+        report.incomplete |= reviews.incomplete;
+        report.rows.extend(reviews.rows.iter().map(|row| Row {
+            project: project.root.clone(), category: "review-scratch".into(),
+            path: row.path.clone(), bytes: row.bytes, reclaimed_bytes: row.reclaimed_bytes,
+            disposition: row.disposition.clone(),
+        }));
+        report.managed_review_reports.push(reviews.render());
         let mut found = match candidates(project, &refs, Utc::now(), deadline) {
             Ok(found) => found,
             Err(error) => { report.errors.push(format!("{}: {error}", project.root.display())); continue; }

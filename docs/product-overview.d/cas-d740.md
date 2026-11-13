@@ -15,3 +15,9 @@ symlinks and unavailable reference evidence preserve files.
 it, and `--dry-run` previews retention. Each applied sweep records paths and
 per-project/category bytes in `~/.cas/retention/sweeps.jsonl`. Preflight reports
 `disk.pressure` above 80% with the last sweep and retained paths.
+
+Managed reviews explicitly cited by another live task or a retained release stay
+protected before any collector mutation. Their reclaimed bytes and retained paths
+contribute to host sweep totals and preflight evidence. An owner's own identity or
+closed-task snapshot adds no retention window. Artifact namespaces and their
+ancestors are checked for symlinks before resolving their paths.

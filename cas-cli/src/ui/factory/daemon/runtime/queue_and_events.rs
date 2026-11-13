@@ -14339,17 +14339,8 @@ mod tests {
             attempts,
             "reconnected device starts at one second"
         );
-        daemon
-            .acknowledge_operator_reply(id, "wrong-device")
-            .unwrap_err();
-        daemon.forward_operator_replies(vec![reply.clone()]);
-        assert_eq!(
-            log_count(),
-            attempts,
-            "invalid receipts cannot reset retries"
-        );
-        // A valid receipt proves the transport recovered; other pending replies
-        // should immediately retry with a fresh one-second schedule.
+        // Broadcast replies accept any paired device. Use an addressed row
+        // to check that a misrouted receipt cannot reset another row's retry.
         let other = queue
             .enqueue_with_session(
                 "supervisor",
@@ -14358,6 +14349,16 @@ mod tests {
                 "provision-test",
             )
             .unwrap();
+        queue.stamp_recipient_device(other, "paired-device").unwrap();
+        daemon
+            .acknowledge_operator_reply(other, "wrong-device")
+            .unwrap_err();
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        assert_eq!(
+            log_count(),
+            attempts,
+            "invalid receipts cannot reset retries"
+        );
         daemon
             .persist_operator_reply_receipt(other, "*")
             .unwrap_err();

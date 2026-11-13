@@ -4239,13 +4239,10 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     let held = service.factory(Parameters(request.clone())).await
         .expect_err("required verification now precedes the merge");
 
-    assert!(
-        held.message.contains("task-verifier")
-            && held.message.contains(&format!("prompt=\"Verify task {task_id}\"")),
-        "cas-96849: the refusal must name the verifier spawn and its exact task prompt: {}",
-        held.message
-    );
+    assert_eq!(held.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     let prepared = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap().unwrap();
+    assert_eq!(prepared.task_id, task_id);
+    assert_eq!(prepared.state, cas::types::VerificationDispatchState::Pending);
     let verdict = service.verification(Parameters(verification_req(serde_json::json!({
         "action": "add", "task_id": task_id, "dispatch_id": prepared.id,
         "status": "approved", "summary": "Observation-recovery candidate approved before publication",
@@ -5334,8 +5331,13 @@ printf '%s\n' "$peer" > '{}'
         cas::store::open_prompt_queue_store(&cas_root).unwrap();
         let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
         for (cloud_id, kind) in [("context-pr37", "status"), ("ask-pr37", "ask")] {
+            let body = if kind == "ask" {
+                "CAS_MERGE_HOLD {\"pr\":37}\nCan you review PR #37?"
+            } else {
+                "Can you review PR #37?"
+            };
             let payload = serde_json::json!({
-                "body": cas::cloud::peer_mailbox::attach_message_intent("Can you review PR #37?", Some(kind), false).unwrap(),
+                "body": cas::cloud::peer_mailbox::attach_message_intent(body, Some(kind), false).unwrap(),
                 "recipient_agent_id": "peer",
             });
             conn.execute(

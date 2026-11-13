@@ -15337,8 +15337,10 @@ mod child_test_evidence;
 // Public MCP lifecycle regressions (cas-3e3a).
 #[tokio::test]
 async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() {
+    if run_authenticated_recycle_child("cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force") { return; }
     for action in ["recycle_worker", "clear_context"] {
         let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-3e3a")]);
+        write_codex_account_fixture(&_guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
         let env = FactoryTestEnv::new();
         let path = init_pushed_worker_repo(&env, "checkpoint-worker");
         let worker = register_codex_worker_at(&env, "checkpoint-worker", "session-3e3a", &path);

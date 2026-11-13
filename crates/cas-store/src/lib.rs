@@ -644,6 +644,22 @@ pub trait TaskStore: Send + Sync {
         ))
     }
 
+    /// Bind a mutation receipt to the row's current revision. A syncing
+    /// wrapper uses it to publish a lifecycle write that another store module
+    /// committed directly (cas-a836).
+    fn record_mutation_receipt(&self, _task_id: &str, _receipt_id: &str) -> Result<()> {
+        Err(StoreError::Other(
+            "task mutation receipts are unsupported by this store".to_string(),
+        ))
+    }
+
+    /// Queue the row's current state for cloud sync after a write that
+    /// bypassed this store, such as `request_changes` (cas-a836). Stores
+    /// without cloud sync have nothing to publish.
+    fn publish_current_row(&self, _task_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Canonical project identity attached to this store, when available.
     /// Used by shared context builders that cannot depend on the CLI's cloud
     /// configuration module.

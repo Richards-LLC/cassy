@@ -131,25 +131,14 @@ impl FactoryDaemon {
         while let Some(Ok((tcp_stream, addr))) = listener.accept().now_or_never() {
             tracing::info!("WS TCP connection from {}", addr);
 
-            // Perform the WebSocket handshake. cas-ca22: note whether the
-            // client presented this daemon's relay token (the hub relay).
-            let mut presented = None;
-            let capture = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                           response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                presented = crate::ui::factory::relay_token::presented_token(request);
-                Ok(response)
-            };
-            let ws_stream = match tokio_tungstenite::accept_hdr_async(tcp_stream, capture).await {
-                Ok(ws) => ws,
+            let (ws_stream, relay_trusted) = match crate::ui::factory::relay_token::accept(tcp_stream, self.relay_token.as_deref()).await {
+                Ok(client) => client,
                 Err(e) => {
                     tracing::warn!("WS handshake failed from {}: {}", addr, e);
                     continue;
                 }
             };
 
-            let relay_trusted = self.relay_token.as_deref().is_some_and(|expected| {
-                crate::ui::factory::relay_token::matches(presented.as_deref(), expected)
-            });
             if relay_trusted {
                 tracing::info!("WS client from {} presented the Commander relay token", addr);
             }

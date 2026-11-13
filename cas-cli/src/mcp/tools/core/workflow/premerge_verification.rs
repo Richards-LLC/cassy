@@ -2200,6 +2200,72 @@ mod tests {
         assert_eq!(ready[0].target, "supervisor");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_merge_candidate_returns_durable_receipt_and_later_notice_cas_f39e() {
+        use crate::mcp::tools::service::CasService;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        let target = commit_file(repo, ".gitignore", ".cas/\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
+        run(repo, &["checkout", "-q", "main"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("merge-owner".into());
+        core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+            "merge-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        )).unwrap();
+        let mut task = Task::new("cas-f39e".into(), "Slow merge candidate".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(source.clone());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let digest = context_digest(&root, &task).unwrap();
+        let key = bound_candidate_key(&task.id, &repo.canonicalize().unwrap(),
+            "factory/w", &source, "main", &target, &digest, None).unwrap();
+        let directory = root.join("verification-candidates").join(key);
+        let held = crate::worktree::target_lock::lock_delivery_target(
+            &root, repo, &format!("candidate:{}", directory.display()),
+        ).unwrap();
+        let service = CasService::new(core.clone(), #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({"action":"worktree_merge", "id":"factory/w", "task_id":task.id});
+        let worker = core.clone();
+        let build_repo = repo.to_path_buf();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let future = async move {
+            crate::mcp::tools::service::mutation_receipt::run_on_blocking_pool(async move {
+                let result = worker.build_verification_candidate_sync(&task, &build_repo,
+                    "factory/w", "main", digest, None).map(|candidate| {
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(candidate.source_sha)])
+                });
+                let _ = done.send(());
+                result
+            }).await.unwrap()
+        };
+        let answer = service.call_with_deadline_and_grace("factory", arguments.as_object(),
+            std::time::Duration::from_millis(20), std::time::Duration::ZERO, future).await;
+        // Release the real candidate lock before any assertion, including red.
+        drop(held);
+        finished.await.unwrap();
+        service.tool_work.wait_idle().await;
+        let data = answer.expect("slow merge must return a receipt, not UNKNOWN").structured_content.unwrap();
+        assert_eq!(data["mutation_outcome"], "IN_PROGRESS");
+        assert_eq!(data["state"], "preparing");
+        let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            data["receipt_path"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(stored["state"], "completed");
+        let rows = crate::store::open_supervisor_queue_store(&root).unwrap().poll("merge-owner", 10).unwrap();
+        let notices: Vec<serde_json::Value> = rows.iter().map(|row| serde_json::from_str(&row.payload).unwrap()).collect();
+        assert!(notices.iter().any(|notice| notice["kind"] == "merge_outcome"
+            && notice["context"]["receipt_id"] == data["receipt_id"]));
+        assert!(directory.join("candidate.json").exists());
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
+    }
+
     #[test]
     fn candidate_regenerates_dist_like_worktree_merge_cas_e4b9() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();

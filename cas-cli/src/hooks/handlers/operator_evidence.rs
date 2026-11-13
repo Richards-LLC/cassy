@@ -266,6 +266,7 @@ pub(super) fn outgoing_denial(input: &HookInput) -> Option<String> {
     denial(input, &text)
 }
 
+// gate-audit[forward]: H-47 Pure classifier; PreToolUse, MessageDisplay and Stop boundaries emit the refusal tag.
 // gate[H-47 pre-tool]: Supervisor operator claims require current-turn evidence
 pub(super) fn denial(input: &HookInput, text: &str) -> Option<String> {
     if !crate::harness_policy::is_supervisor(input) {

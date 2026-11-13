@@ -72,6 +72,9 @@ struct BranchCiLookup {
     state: BranchCiState,
     repo: Option<String>,
     repository_lookup_attempted: bool,
+    /// gh api timed out or failed before GitHub answered. Admission still
+    /// reports `state`; an armed retry treats it as no answer yet.
+    gh_failed: bool,
 }
 
 const BRANCH_CI_ENDPOINT: &str = "repos/<unresolved-repository>/commits/{sha}/check-runs";
@@ -156,7 +159,14 @@ impl BranchCiState {
 /// workflow completing, an empty response or an unavailable forge.
 pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
     use crate::factory_ci_retry::CiStatus;
-    let state = lookup_branch_ci(sha, target, cwd).state;
+    let lookup = lookup_branch_ci(sha, target, cwd);
+    // GH #1899: a timed-out or failed gh api call is no CI answer. Stay armed
+    // for the next watch pass; the two-hour cap still bounds the wait.
+    if lookup.gh_failed {
+        tracing::warn!(%sha, state = ?lookup.state, "CI merge retry lookup failed; still waiting");
+        return CiStatus::Pending;
+    }
+    let state = lookup.state;
     if state.sha() != ci_sha && state.sha() != sha {
         return CiStatus::Stopped(format!("CI evidence moved to {}; request a fresh exact-SHA merge", state.sha()));
     }
@@ -172,8 +182,7 @@ pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str)
         | BranchCiState::UnvalidatedCode { reason, .. }
         | BranchCiState::CodeValidationUnconfirmed { reason, .. }
         | BranchCiState::MissingCommit { reason, .. } => CiStatus::Stopped(reason),
-        BranchCiState::GhFailure { status, .. } =>
-            CiStatus::Stopped(format!("CI lookup failed ({status}); check gh access and request the merge again")),
+        BranchCiState::GhFailure { .. } => CiStatus::Pending,
     }
 }
 
@@ -511,6 +520,7 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                 },
                 repo: None,
                 repository_lookup_attempted: false,
+                gh_failed: false,
             };
         }
     };
@@ -526,10 +536,12 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                 },
                 repo: None,
                 repository_lookup_attempted: true,
+                gh_failed: false,
             };
         }
     };
     let tip_output = fetch_branch_ci(&tip, cwd, &repo, &binary);
+    let mut gh_failed = false;
     let tip_has_code_checks = has_code_check_runs(&tip_output);
     let tip_state = if code_sha.is_some() {
         classify_code_ci_response(branch, &tip, tip_output)
@@ -571,10 +583,12 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
                     own
                 }
             };
+            gh_failed = matches!(state, BranchCiState::GhFailure { .. });
             require_code_validation(state)
         }
     };
     BranchCiLookup {
+        gh_failed: gh_failed || matches!(state, BranchCiState::GhFailure { .. }),
         state,
         repo: Some(repo),
         repository_lookup_attempted: true,
@@ -706,7 +720,7 @@ fn fast_lane_ci(lane: &crate::fast_lane::FastLaneConfig, sha: &str, cwd: &Path) 
         crate::fast_lane::Gate::Pending(_) => BranchCiState::CodePending { sha, url: None, waiting_for_rerun: false },
         crate::fast_lane::Gate::Red { url, .. } => BranchCiState::Red { sha, url },
     };
-    Some(BranchCiLookup { state, repo: Some(repo), repository_lookup_attempted: true })
+    Some(BranchCiLookup { state, repo: Some(repo), repository_lookup_attempted: true, gh_failed: false })
 }
 
 /// API endpoints bind the canonical repository explicitly; gh api has no -R.
@@ -7125,6 +7139,22 @@ mod tests {
             env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
             assert_eq!(super::retry_ci_status(&tip, "main", repo.path(), &code_sha), expected, "tip CI: {tip_response}");
         }
+    }
+
+    /// GH #1899: a gh api timeout while an armed retry watches running CI is
+    /// no CI answer, so the retry stays armed instead of stopping.
+    #[cfg(unix)]
+    #[test]
+    fn retry_stays_armed_when_the_ci_lookup_times_out_gh_1899() {
+        use crate::factory_ci_retry::CiStatus;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, code_sha, tip) = delivery_ci_fixture_with(true, "", "");
+        let fake_gh = repo.path().join("gh-fixture");
+        crate::test_paths::warm_stub(&fake_gh, &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{code_sha}/check-runs) exec sleep 5 ;;\n*/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[]}}' ;;\n*) exit 97 ;;\nesac\n"
+        ));
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+        assert_eq!(super::retry_ci_status(&tip, "main", repo.path(), &code_sha), CiStatus::Pending);
     }
 
     /// A target-sync merge can contain code in its first-parent diff even

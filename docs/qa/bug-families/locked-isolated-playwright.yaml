@@ -1,4 +1,0 @@
-title: Locked headless Playwright clients isolate browser state while worker homes and real test-job liveness remain correct
-tasks: [cas-0010]
-invariants: [FACTORY-ISOLATED-PLAYWRIGHT]
-journeys: [FACTORY-SPAWN]

@@ -874,7 +874,7 @@ async fn recovered_close_counts_supervisor_module_receipts_cas_231c() {
     agents.update(&worker).unwrap();
     let branch = "factory/retired-implementer";
     git(&recovered, &["checkout", "-qb", branch]);
-    for module in ["registry_tests", "receipt_scope", "worktree_ops", "lifecycle", "teams"] {
+    for module in ["registry", "receipts", "workflow", "lifecycle", "teams"] {
         std::fs::write(recovered.join(format!("crates/widget/src/{module}.rs")), "pub fn changed() {}\n").unwrap();
     }
     git(&recovered, &["add", "."]);
@@ -894,7 +894,7 @@ async fn recovered_close_counts_supervisor_module_receipts_cas_231c() {
     let missing = call(&f.supervisor, close.clone()).await;
     assert_eq!(f.task().status, TaskStatus::InProgress, "{missing}");
     let logs = tempfile::tempdir().unwrap();
-    for module in ["gear", "registry_tests", "receipt_scope", "worktree_ops", "lifecycle", "teams"] {
+    for module in ["gear", "registry", "receipts", "workflow", "lifecycle", "teams"] {
         let log = logs.path().join(format!("{module}.log"));
         std::fs::write(&log, "Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
         let proof = serde_json::json!({

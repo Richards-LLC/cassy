@@ -448,11 +448,25 @@ fn published_train_closes_members_independently_cas_734b() {
     let held = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
     for id in later.task_heads.keys() {
         assert!(matches!(held.get(id), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
+        use crate::mcp::tools::core::workflow::premerge_verification::cycle;
+        let current = cycle::current(&conn, &tasks.get(id).unwrap(), &anchor).unwrap();
+        let mut reviewed = boundary.clone();
+        reviewed.receipt_id = current.clone();
         let dispatch = cas_store::create_verification_dispatch_bound(&root, id, "worker", "supervisor",
-            &boundary, chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+            &reviewed, chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
         conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
+        let verdict = format!("ver-repaired-{id}");
         conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES (?1,?2,'reviewer','task','approved','pass','[]',?3,?4)",
-            rusqlite::params![format!("ver-repaired-{id}"), id, chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+            rusqlite::params![verdict, id, chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+        if let Some(cycle_id) = current {
+            let event = cas_types::Event::new(cas_types::EventType::VerificationAdded,
+                cas_types::EventEntityType::Verification, &verdict, "review")
+                .with_metadata(serde_json::to_value(cycle::Stamp {
+                    cycle_id, approved_anchor: anchor.clone(), dispatch_id: dispatch.id,
+                    verdict_id: verdict, registry_version: Some(crate::gates::registry_version_in_force()),
+                }).unwrap());
+            cas_store::record_event_with_conn(&conn, &event).unwrap();
+        }
     }
     // Existing merge approvals alone complete the operation; no ledger author
     // or recorder participates in code acceptance.

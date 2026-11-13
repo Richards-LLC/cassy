@@ -3054,63 +3054,52 @@ async fn queued_stale_tasks_are_skipped_with_notes_cas_8488() {
     assert!(!queue.starting);
 }
 
-/// GH #1863, through real task close: the reported delivery extended an
-/// existing inline family's statement (same task, same invariant) and was
-/// refused G3. That extension now parks. An unchanged family still refuses,
-/// and an unsupported family field is refused by the registry schema.
+/// GH #1863: an extended inline family parks through real task close.
+/// Registry/schema refusals are owned by the lane lint (cas-4b33), not park.
 #[tokio::test]
 async fn bug_family_statement_extension_parks_through_close_cas_f63f() {
-    let family = |statement: &str, extra: &str| format!(
-        "version: 1\nupdated: '2026-11-12'\ninvariants:\n  am-payment-to-qbo-2: {{statement: Arrived, check: Read state}}\nbug_families:\n  paid-invoice-duplicated-by-manual-sync:\n    title: Paid invoice duplicated by manual sync\n    statement: {statement}\n{extra}    tasks: [cas-f63f]\n    invariants: [am-payment-to-qbo-2]\n    journeys: [FLOW]\njourneys:\n  - id: FLOW\n    status: live\n    entry: {{url: /flow, trigger: Open}}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [am-payment-to-qbo-2]\n"
+    let family = |statement: &str| format!(
+        "version: 1\nupdated: '2026-11-12'\ninvariants:\n  am-payment-to-qbo-2: {{statement: Arrived, check: Read state}}\nbug_families:\n  paid-invoice-duplicated-by-manual-sync:\n    title: Paid invoice duplicated by manual sync\n    statement: {statement}\n    tasks: [cas-f63f]\n    invariants: [am-payment-to-qbo-2]\n    journeys: [FLOW]\njourneys:\n  - id: FLOW\n    status: live\n    entry: {{url: /flow, trigger: Open}}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [am-payment-to-qbo-2]\n"
     );
     let base = "Manual sync never duplicates a paid invoice";
     let extended = format!("{base}, including linked off-platform PENDING bitcoin webhook evidence and typed-discount exclusion");
-    for (registry, parks, code) in [
-        (family(&extended, ""), true, None),
-        (family(base, ""), false, Some("G3")),
-        (family(&extended, "").replace("tasks: [cas-f63f]", "tasks: [cas-other]"), false, Some("G3")),
-        (family(base, "    note: changed\n"), false, Some("unsupported_bug_family_field")),
-    ] {
-        let mut env = TestEnvGuard::temp_home();
-        let f = fixture(&mut env, "main");
-        let checkout = f.cas_dir().join("worktrees").join(WORKER);
-        std::fs::create_dir_all(checkout.join("docs/qa")).unwrap();
-        std::fs::write(checkout.join("docs/qa/journeys.yaml"), family(base, "")).unwrap();
-        git(&checkout, &["add", "."]);
-        git(&checkout, &["commit", "-qm", "docs: base registry"]);
-        git(&checkout, &["push", "-q", "origin", LANE]);
-        git(f.dir.path(), &["merge", "-q", "--ff-only", LANE]);
-        git(f.dir.path(), &["push", "-q", "origin", "main"]);
-        let agents = open_agent_store(&f.cas_dir()).unwrap();
-        let mut agent = agents.get("nocode-worker-session").unwrap();
-        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
-        agents.update(&agent).unwrap();
-        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
-        for (key, value) in [("qa.mode", "batch"), ("qa.evidence_gate", "false"),
-            ("qa.independent_pass", "false"), ("qa.registry.enforce", "enforce")] {
-            config.set(key, value).unwrap();
-        }
-        config.save(&f.cas_dir()).unwrap();
-        env.set("CAS_AGENT_ROLE", "worker");
-        let id = "cas-f63f";
-        let mut task = assigned(id, TaskType::Bug, "main");
-        task.status = TaskStatus::Open;
-        f.put(&task);
-        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
-        std::fs::create_dir_all(checkout.join("src")).unwrap();
-        std::fs::write(checkout.join("src/flow.ts"), "export const flow = true;\n").unwrap();
-        std::fs::write(checkout.join("docs/qa/journeys.yaml"), &registry).unwrap();
-        git(&checkout, &["add", "."]);
-        git(&checkout, &["commit", "-qm", "fix: manual sync never duplicates a paid invoice"]);
-        let tip = git(&checkout, &["rev-parse", "HEAD"]);
-        git(&checkout, &["push", "-q", "origin", LANE]);
-        let reply = call(&f.worker, serde_json::json!({"action":"close", "id":id, "reason":format!("PASS {tip}")})).await;
-        let status = f.task(id).status;
-        assert_eq!(status == TaskStatus::AwaitingMerge, parks, "{reply}");
-        if let Some(code) = code {
-            assert!(reply.to_string().contains(code), "{reply}");
-        }
+    let registry = family(&extended);
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    std::fs::create_dir_all(checkout.join("docs/qa")).unwrap();
+    std::fs::write(checkout.join("docs/qa/journeys.yaml"), family(base)).unwrap();
+    git(&checkout, &["add", "."]);
+    git(&checkout, &["commit", "-qm", "docs: base registry"]);
+    git(&checkout, &["push", "-q", "origin", LANE]);
+    git(f.dir.path(), &["merge", "-q", "--ff-only", LANE]);
+    git(f.dir.path(), &["push", "-q", "origin", "main"]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+    agents.update(&agent).unwrap();
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    for (key, value) in [("qa.mode", "batch"), ("qa.evidence_gate", "false"),
+        ("qa.independent_pass", "false"), ("qa.registry.enforce", "enforce")] {
+        config.set(key, value).unwrap();
     }
+    config.save(&f.cas_dir()).unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let id = "cas-f63f";
+    let mut task = assigned(id, TaskType::Bug, "main");
+    task.status = TaskStatus::Open;
+    f.put(&task);
+    call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::write(checkout.join("src/flow.ts"), "export const flow = true;\n").unwrap();
+    std::fs::write(checkout.join("docs/qa/journeys.yaml"), &registry).unwrap();
+    git(&checkout, &["add", "."]);
+    git(&checkout, &["commit", "-qm", "fix: manual sync never duplicates a paid invoice"]);
+    let tip = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["push", "-q", "origin", LANE]);
+    let reply = call(&f.worker, serde_json::json!({"action":"close", "id":id, "reason":format!("PASS {tip}")})).await;
+    let status = f.task(id).status;
+    assert_eq!(status, TaskStatus::AwaitingMerge, "{reply}");
 }
 
 /// GH #1596/#1597: refusing A must leave B editable and preserve its owner

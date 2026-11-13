@@ -7,6 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.25.0] - 2026-11-13
+
+### Fixed — Release flow
+
+- **Reuse delivery approvals at release** — Tier 1 code receives review before merge in batch mode. Release cuts use existing merge approvals and the green train receipt, name missing approvals, and need no separate code-review ledger or recorder. Deliberate light, sampled and Tier 0 exemptions use green lane CI alongside the train run.
+
+### Fixed — Releases
+
+- **Reuse green train proof after release documentation changes** — CODEMAP, changelog, release notes and reports can follow a green train run without another full train CI. Pending CODEMAP edits join the release commit. The release verdict uses existing member approvals and the green frozen-train receipt, without a separate batch release review. Missing required approvals still refuse the cut.
+
+- **Prepared retries and completed reports** — Compiled product overview and journey docs retain green train proof on cut retries. Already closed no-code members keep their original external links without being rebound to artifact metadata. Open report deliveries still require valid artifact proof and remain open until approved.
+
+### Fixed — CI
+
+- **Reuse exact-base failure proof** — Lane attribution reuses configuration-matched failing-test receipts before rebuilding the base, publishes failures early, and keeps incomplete attribution red within a bounded replay budget.
+- **Delivery-only lane selection** — Select changes against the live target merge-base, keep recorded bases for attribution, and run only file-reading Rust contracts for script/workflow changes. Agent configuration and documentation no longer widen Rust selection.
+
+### Fixed — Factory
+
+- **Same-millisecond mail reaches the next tool boundary** — Was: a message
+  whose inbox signal shared the millisecond of the worker's last tool-boundary
+  check stayed hidden until unrelated mail arrived. Now: an equal signal
+  triggers one more check, and already shown mail is never repeated.
+
+### Fixed — Factory merges
+
+- **Keep approval while a candidate rebuild continues** — an unchanged delivery's approval now survives a candidate rebuild that exceeds the response deadline. Retrying the merge reuses the existing approval after preparation finishes. Disjoint train changes retain the original dispatch and record the carried approval on the task; changed deliveries and conflicts retain their existing review checks.
+
+### Fixed — Factory routing
+
+- **Routed builds ship their evidence to the reviewing machine** — Was: a delivery built on another machine (a routed build) left its LEDGER.md and logs in that machine's artifacts root, so the routing machine's pre-merge verifier found no evidence directory and a supervisor copied the files by hand. Now: parking a routed build publishes every file in the task evidence directory, including nested `qa/` captures and empty files, through the artifact path and records a sha256 manifest; the reviewing machine restores those exact bytes where its verifier reads before dispatch. If a file cannot be published or restored, park or review refuses and names both machines' evidence directories.
+
 ## [4.24.0] - 2026-11-13
 
 ### Changed — Release validation

@@ -1693,6 +1693,10 @@ bug_families:
     statement: A command sent while the supervisor's native turn is open is queued, typed exactly once after the turn completes and replays return the same receipt; drafts and native modals still refuse.
     tasks: [cas-4e11]
     journeys: [HUB-J27]
+  docs-only-train-receipt-reuse:
+    title: Release documentation must not invalidate green train proof or wait for the closure verdict
+    tasks: [cas-5b88]
+    journeys: [FACTORY-MERGE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

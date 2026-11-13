@@ -876,6 +876,11 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         self.assertTrue(self.gh_expr(prepare['if'], {'runner.environment': 'self-hosted'}))
         self.assertFalse(self.gh_expr(prepare['if'], {'runner.environment': 'github-hosted'}))
         self.assertEqual(prepare['env']['LANE_TEMP_ROOT'], '/var/tmp')
+        cache = next(step for step in setup['runs']['steps'] if step.get('id') == 'cargo-cache')
+        for environment in ['self-hosted', 'github-hosted']:
+            self.assertEqual(self.gh_expr(cache['if'], {
+                'runner.environment': environment, 'inputs.toolchain-only': 'false'}),
+                environment == 'github-hosted')
         for step in setup['runs']['steps'][1:]:
             self.assertFalse(self.gh_expr(step.get('if', 'true'),
                 {'inputs.toolchain-only': 'true', 'env.RUSTC_WRAPPER': ''}))
@@ -949,19 +954,23 @@ esac
                 if mode in ['installed', 'nextest-missing', 'install-failure']: ready.touch()
                 if mode == 'installed': nextest_ready.touch()
                 github_path = fixture / 'github-path'; github_env = fixture / 'github-env'
-                result = self.run_body(prepare['run'], {
+                inputs = {
                     'PATH': str(commands)+':/usr/bin:/bin', 'CARGO_HOME': str(cargo_home),
                     'RUSTUP_HOME': str(rustup_home), 'RUNNER_TEMP': str(runner_temp),
                     'GITHUB_WORKSPACE': str(workspace), 'LANE_TEMP_ROOT': str(private_var_tmp),
                     'GITHUB_PATH': str(github_path), 'GITHUB_ENV': str(github_env),
                     'CALLS': str(calls), 'READY': str(ready), 'NEXTEST_READY': str(nextest_ready), 'MODE': mode,
                     'INITIALIZER': str(initializer), 'CARGO_TEMPLATE': str(cargo),
-                    'RUSTUP_TEMPLATE': str(rustup)})
+                    'RUSTUP_TEMPLATE': str(rustup)}
+                result = self.run_body(prepare['run'], inputs)
                 self.assertEqual(github_path.read_text().splitlines(), [str(cargo_home / 'bin')])
                 published = dict(line.split('=', 1) for line in github_env.read_text().splitlines())
                 disk_temp = private_var_tmp / 't'
                 self.assertEqual(published['TMPDIR'], str(disk_temp))
                 self.assertEqual(published['CARGO_TARGET_TMPDIR'], str(private_var_tmp / 'ct'))
+                target = runner / 'cargo-target'
+                self.assertEqual(published['CARGO_TARGET_DIR'], str(target))
+                self.assertTrue(target.is_dir())
                 self.assertTrue(disk_temp.is_dir())
                 self.assertTrue((private_var_tmp / 'ct').is_dir())
                 self.assertFalse(disk_temp.is_relative_to(workspace))
@@ -986,6 +995,21 @@ esac
                     self.assertEqual('curl' in observed, mode == 'missing')
                     nextest_install = f'cargo install cargo-nextest --locked --version fixture-nextest --target-dir {disk_temp}/nextest-build'
                     self.assertEqual(nextest_install in observed, mode != 'installed')
+                    if mode == 'installed':
+                        # A later job keeps the same slot's build state; another
+                        # listener gets its own cache rather than a shared writer.
+                        marker = target / 'cached-build'; marker.write_bytes(b'compiled')
+                        self.assertEqual(self.run_body(prepare['run'], inputs).returncode, 0)
+                        self.assertEqual(marker.read_bytes(), b'compiled')
+                        other_temp = service_home / 'other-runner/_work/_temp'
+                        other_temp.mkdir(parents=True)
+                        inputs['RUNNER_TEMP'] = str(other_temp)
+                        self.assertEqual(self.run_body(prepare['run'], inputs).returncode, 0)
+                        published = dict(line.split('=', 1) for line in github_env.read_text().splitlines())
+                        other_target = Path(published['CARGO_TARGET_DIR'])
+                        self.assertNotEqual(other_target, target)
+                        self.assertTrue(other_target.is_dir())
+                        self.assertFalse((other_target / marker.name).exists())
 
     def test_lane_temp_sampling_preserves_phase_status_and_arguments(self):
         jobs = policy.load(self.root / '.github/workflows/lane.yml')['jobs']

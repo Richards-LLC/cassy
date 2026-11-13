@@ -3276,6 +3276,14 @@ Rustup installer and nextest build temporaries use that disk root rather than
 RAM-backed service `PrivateTmp`. Own/ring phases sample private `/tmp` and the
 disk temp directories while running, preserving the test command's exit status.
 Hosted temp placement and systemd units are unchanged.
+Local setup explicitly publishes a persistent `CARGO_TARGET_DIR` under each
+listener's runner root. Local jobs keep that directory across cleaned checkouts
+and skip remote Cargo cache restoration, which would replace warm local state.
+The producer packages the CLI from that target for archive consumers.
+Impact tests use sixteen concurrent nextest slots to overlap disk fixture I/O
+within the existing service CPU quota. This is a scheduling choice, not an
+increase in available CPUs; native comparisons must report test counts, elapsed
+time and cgroup CPU usage before claiming hosted-equivalent performance.
 
 The six existing `cas-lane-light` listeners reserve GitHub-hosted width for
 release PR checks, frozen-train validation, merge-group validation and Release

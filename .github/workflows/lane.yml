@@ -355,6 +355,8 @@ jobs:
     env: &lane-impact-env
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
+      # Disk-backed fixture I/O can overlap even within the unit's CPU quota.
+      NEXTEST_TEST_THREADS: "16"
       # The train archive profile, so the main-primed dependency cache applies.
       ZIG: ${{ github.workspace }}/.context/zig/zig
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -437,8 +439,8 @@ jobs:
           read -ra build <<< "$BUILD_ARGS"
           cargo nextest archive "${build[@]}" --archive-file lane-impact.tar.zst
           # Integration tests spawn target/debug/cas; artifacts drop mode bits.
-          if [[ -x target/debug/cas ]]; then
-            tar -C target/debug --transform='s,^cas$,target/debug/cas,' -czf lane-impact-runner.tar.gz cas
+          if [[ -x "$CARGO_TARGET_DIR/debug/cas" ]]; then
+            tar -C "$CARGO_TARGET_DIR/debug" --transform='s,^cas$,target/debug/cas,' -czf lane-impact-runner.tar.gz cas
           fi
 
       - name: Upload the selection archive

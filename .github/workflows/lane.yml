@@ -11,9 +11,9 @@
 #
 # With CAS_LANE_SLIM unset, the `full` job calls ci.yml itself, so a factory
 # push validates exactly as before (rollback: unset CAS_LANE_SLIM). Runner
-# placement follows cas-14e0: local runners only when CASSY_LANE_SELF_HOSTED is
-# enabled, and only the light lane slots (label cas-lane-light, cas-3b5e), so a
-# burst of lanes never queues behind merge-queue Rust jobs on cas-ci-32core.
+# placement reserves hosted capacity for releases (cas-3126): every lane job,
+# including Rust impact work, queues on cas-lane-light. Busy/offline local
+# runners never spill lane traffic onto the release path's hosted capacity.
 # This workflow has no pull_request trigger, so a fork cannot reach self-hosted
 # runners. scripts/ci_tiers/test-policy.py pins all of this.
 #
@@ -53,7 +53,7 @@ jobs:
   ci-diff:
     name: Classify CI diff
     if: vars.CAS_LANE_SLIM == 'true'
-    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, X64, cas-lane-light]
     timeout-minutes: 10
     outputs:
       comparison-base: ${{ steps.classify-diff.outputs.comparison-base }}
@@ -106,7 +106,7 @@ jobs:
     name: Docs Lint
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class == 'docs-only'
     needs: ci-diff
-    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, X64, cas-lane-light]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -147,7 +147,7 @@ jobs:
     if: >-
       vars.CAS_LANE_SLIM == 'true' && (needs.ci-diff.outputs.class != 'docs-only' || needs.ci-diff.outputs.script-tests-needed == 'true')
     needs: ci-diff
-    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, X64, cas-lane-light]
     timeout-minutes: 15
     env:
       LEGACY_SCOPED: ${{ vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only' }}
@@ -236,7 +236,7 @@ jobs:
       contents: read
       actions: read
       pull-requests: read
-    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, X64, cas-lane-light]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -323,7 +323,7 @@ jobs:
     name: Scoped Validation — impact own tests
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.rust-unaffected != 'true'
     needs: ci-diff
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, cas-lane-light]
     timeout-minutes: 45
     env: &lane-impact-env
       CARGO_TERM_COLOR: always
@@ -427,7 +427,7 @@ jobs:
     name: Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}
     if: needs.lane-impact.outputs.ring-shards != '' && needs.lane-impact.outputs.ring-shards != '[]'
     needs: lane-impact
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, cas-lane-light]
     timeout-minutes: 45
     strategy:
       fail-fast: false

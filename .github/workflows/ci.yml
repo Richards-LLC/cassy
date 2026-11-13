@@ -81,9 +81,11 @@ jobs:
   # this as a job (rather than a step) lets docs-only merge-group trees skip
   # runner allocation for the full validation family while still producing a
   # cheap docs check.
+  # cas-3126: legacy full factory lanes also stay local; release/PR/queue
+  # events retain hosted width. A pull request cannot select the lane pool.
   ci-diff:
     name: Classify CI diff
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     outputs:
       comparison-base: ${{ steps.classify-diff.outputs.comparison-base }}
       class: ${{ steps.classify-diff.outputs.class }}
@@ -133,7 +135,7 @@ jobs:
       || github.event_name == 'merge_group'
       || github.event_name == 'push')
     needs: ci-diff
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -378,7 +380,7 @@ jobs:
     concurrency:
       group: scoped-validation-fast-${{ github.ref }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     env:
       LEGACY_SCOPED: ${{ needs.ci-diff.outputs.class != 'docs-only' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') }}
     steps:
@@ -557,7 +559,7 @@ jobs:
     concurrency:
       group: scoped-validation-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:

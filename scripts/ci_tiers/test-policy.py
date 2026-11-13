@@ -417,18 +417,16 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             if s.get('with',{}).get('name')=='fast-validation-suite-archive')
         self.assertEqual(download['with']['run-id'], '${{ needs.fast-validation-suite-build.outputs.producer-run || github.run_id }}')
 
-    def test_slim_factory_lanes_run_only_in_lane_yml_on_opted_in_runners_cas_32e9_cas_3b5e(self):
-        """cas-14e0/cas-32e9: factory pushes start in lane.yml. Slim on: only
-        the named lane jobs run, locally when CASSY_LANE_SELF_HOSTED is enabled.
-        Slim off: the full ci.yml is called. No fork-capable trigger reaches
-        the local runners, and ci.yml routes nothing else there."""
+    def test_factory_lanes_reserve_hosted_capacity_for_release(self):
+        """Slim and legacy factory lanes queue locally, leaving hosted runners
+        for release events even when the local pool is busy or disabled."""
         lane = policy.load(self.root / '.github/workflows/lane.yml')
         ci = self.ci()
         local = ['self-hosted', 'Linux', 'X64', 'cas-lane-light']
         self.assertEqual((lane['name'], ci['name']), ('CI', 'CI'), 'ci_completed and the CI watcher select runs by name')
         # cas-3b5e: the light slots take lanes only; the 12-way Rust jobs of the
         # merge queue and release never select them.
-        for source in ('ci.yml', 'release.yml'):
+        for source in ('release.yml', 'release-prebuild.yml', 'full-validation.yml'):
             text = (self.root / '.github/workflows' / source).read_text()
             self.assertNotIn('cas-lane-light', text, source)
         self.assertNotIn('cas-ci-32core', json.dumps(lane['jobs']))
@@ -485,11 +483,9 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
              'Scoped Validation — impact own tests',
              'Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}'},
             'merge admission and the CI watchers read these exact check names')
-        # cas-2e1b: the train's impact selection runs on hosted runners for a
-        # Rust diff, own tests first; ring shards wait for them (fail fast).
+        # Own tests still precede the ring; both now share the local lane pool.
         impact = {name: slim_jobs.pop(name) for name in ('lane-impact', 'lane-impact-ring')}
         self.assertEqual(impact['lane-impact-ring']['needs'], 'lane-impact')
-        self.assertEqual({job['runs-on'] for job in impact.values()}, {'ubuntu-latest'})
         for slim, unaffected in itertools.product(('true', ''), ('true', 'false')):
             ctx = {'vars.CAS_LANE_SLIM': slim, 'needs.ci-diff.outputs.rust-unaffected': unaffected}
             self.assertEqual(self.gh_expr(impact['lane-impact']['if'], ctx), slim == 'true' and unaffected == 'false')
@@ -499,12 +495,44 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             for name in ('ci-diff', 'scoped-validation-fast', 'scoped-validation'):
                 with self.subTest(job=name, slim=slim):
                     self.assertEqual(self.gh_expr(slim_jobs[name]['if'], ctx), slim == 'true')
-        for name, job in slim_jobs.items():
+        # No executable lane.yml job may target hosted capacity, regardless
+        # of old opt-ins. A saturated/offline local pool must queue locally.
+        for name, job in {**slim_jobs, **impact}.items():
             with self.subTest(job=name):
-                runner = lambda enabled: self.gh_value(job['runs-on'], {'vars.CASSY_LANE_SELF_HOSTED': enabled})
-                self.assertEqual(runner('enabled'), local)
-                for off in ('', 'disabled'):
-                    self.assertEqual(runner(off), 'ubuntu-latest')
+                self.assertEqual(job['runs-on'], local)
+        # The non-slim lane calls ci.yml. Evaluate its selected jobs too so
+        # rollback cannot silently put factory work back on hosted runners.
+        for event, ref in [('push', 'refs/heads/factory/worker'),
+                           ('pull_request', 'refs/pull/1/merge'),
+                           ('pull_request', 'refs/heads/factory/worker'),
+                           ('push', 'refs/heads/factory-adjacent'),
+                           ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1'),
+                           ('push', 'refs/heads/epic/release-train-fixture'),
+                           ('workflow_dispatch', 'refs/heads/precheck/'+'a'*40)]:
+            for kind in ['rust-touched', 'docs-only']:
+                context = {'github.event_name': event, 'github.ref': ref,
+                    'github.base_ref': 'main', 'github.event.repository.default_branch': 'main',
+                    'needs.ci-diff.outputs.class': kind,
+                    'needs.ci-diff.outputs.script-tests-needed': 'true',
+                    'needs.ci-diff.outputs.rust-unaffected': 'false',
+                    'needs.ci-diff.outputs.web-check-needed': 'true',
+                    'needs.ci-diff.outputs.journeys-check-needed': 'true',
+                    'needs.ci-diff.outputs.bridge-check-needed': 'true',
+                    'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'true',
+                    'needs.fast-validation-runner-route.outputs.mode': 'hosted',
+                    'needs.fast-validation-runner-route.outputs.runner': '["ubuntu-latest"]'}
+                selected = {name: job for name, job in ci['jobs'].items()
+                            if self.gh_expr(job.get('if', 'true'), context)}
+                self.assertIn('ci-diff', selected)
+                for name, job in selected.items():
+                    with self.subTest(event=event, kind=kind, job=name):
+                        runner = job['runs-on']
+                        if isinstance(runner, str):
+                            runner = self.gh_value(runner, context)
+                        if event == 'push' and ref.startswith('refs/heads/factory/'):
+                            self.assertEqual(runner, local)
+                        else:
+                            self.assertNotEqual(runner, local)
         for name, job in ci['jobs'].items():
             if name != 'fast-validation-runner-route':
                 self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)

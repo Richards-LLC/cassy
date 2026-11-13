@@ -3175,7 +3175,7 @@ queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
 Slim lanes omit broad Rust tests for factory pushes, but run the train's
 impact selection (`scripts/ci-test-impact.py`, unchanged) for the delivery's
-range on hosted runners (cas-2e1b). The range starts at the delivery's
+range on the self-hosted lane pool (cas-2e1b, cas-3126). The range starts at the delivery's
 recorded start base when `refs/cas/delivery-base/<branch>` exists and is an
 ancestor of the pushed head (task start pushes that ref, best effort, each
 time it records a new start base); otherwise it uses the classifier's inferred
@@ -3232,23 +3232,33 @@ follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback.
 
 Factory pushes start in `.github/workflows/lane.yml` (cas-32e9), also named
 `CI`. With `CAS_LANE_SLIM=true` it runs only Classify CI diff, the two Scoped
-Validation checks (Docs Lint for a docs-only diff) and the hosted impact jobs
-above under their usual names, so a
-lane is not held up by dozens of skipped `ci.yml` jobs. Unset, it calls `ci.yml`
-and the lane runs exactly as before. When the repository variable
-`CASSY_LANE_SELF_HOSTED` is `enabled` (cas-14e0), those slim jobs run on the
-local light lane slots instead of waiting for a hosted slot: runner slots 3
-and 4 (cas-3b5e) carry only the `cas-lane-light` label, so merge-queue and
-release Rust jobs keep slots 1 and 2 (`cas-ci-32core`). The light units run at
-`Nice=10`, `CPUWeight=25`, `CPUQuota=200%` and `CARGO_BUILD_JOBS=2`, with no
-sccache; `scripts/install-cassy-actions-runner.sh` provisions them
-(`RUNNER_SLOT=3|4`). `lane.yml` has no pull request trigger, so forks
-never reach those runners; `scripts/ci_tiers/test-policy.py` pins the routing.
-Rollback is one setting: `gh variable delete CASSY_LANE_SELF_HOSTED --repo
-Richards-LLC/cassy` keeps the slim lane on hosted runners, and unsetting
-`CAS_LANE_SLIM` restores the full lane. Retiring the light slots also means
-`systemctl disable --now cassy-actions-runner-3 cassy-actions-runner-4` and
-reverting `lane.yml`'s label.
+Validation checks (Docs Lint for a docs-only diff) and the impact jobs above
+under their usual names. Unset, it calls `ci.yml` for the legacy lane checks.
+Both paths always use `[self-hosted, Linux, X64, cas-lane-light]` (cas-3126),
+including Rust impact own tests and ring shards. A busy or offline local pool
+queues lane work there; it never spills onto GitHub-hosted runners.
+`CASSY_LANE_SELF_HOSTED` no longer controls routing. Unsetting `CAS_LANE_SLIM`
+restores the legacy checks while keeping factory work on the local pool.
+
+The six existing `cas-lane-light` listeners reserve GitHub-hosted width for
+release PR checks, frozen-train validation, merge-group validation and Release
+Prebuild. `CASSY_MERGE_QUEUE_SELF_HOSTED` remains disabled; the shared train and
+queue graph, required checks and prebuild platform choices are unchanged.
+There is no preemption, cancellation/requeue stage or new runner provisioning.
+The lane workflow has only a factory-branch push trigger; `ci.yml` selects the
+local label only for that same event and ref, keeping pull requests on hosted
+runners. `scripts/ci_tiers/test-policy.py` covers both lane paths and retains
+the train/queue graph equality checks.
+
+The v4.24.0 baseline was 9m56s from release PR open to queue entry (PR #1927),
+including a 104s runner wait for the final Fast Validation job in run
+43484879525. The release supervisor measures the next real release with a
+saturated local lane pool: native job creation/start timestamps for every
+release-path workflow must show runner waits of at most one minute, with no
+manual lane cancellations, and all lane jobs must use the local pool. Record
+PR creation and queue-entry timestamps against the baseline. These next-release
+latency results remain unverified until that measurement; routing isolation
+alone does not guarantee hosted capacity is available.
 
 The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and

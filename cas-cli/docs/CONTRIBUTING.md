@@ -5076,5 +5076,6 @@ This validates provenance and numeric support, not the semantics of all prose.
 The same policy labels unsupported MessageDisplay replies and refuses the
 first unsupported Stop. Reentrant Stop emits an uncertainty notice instead of
 blocking repeatedly. Stop cannot retract text already streamed to the pane.
-The Claude, factory-role and Codex hook projections include coordination calls;
-no new event or optional configuration flag is needed.
+Coordination joins the existing mandatory MCP policy matcher for Claude and
+factory-role settings. Codex installs MCP policy in its user layer; the project
+layer keeps its Bash/apply_patch matcher. No new event or optional flag is needed.

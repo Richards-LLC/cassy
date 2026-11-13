@@ -32,3 +32,9 @@ deserializing these retained captures into the real `HookInput`. Unsupported
 metadata syntax fails closed and needs an explicit parser update. The inventory
 regressions cover additive aliases/renames, changed names, removed aliases and
 the historical prompt-to-subagent alias move.
+
+`cas-f3e3-stop.json` retains the raw Claude Code 2.1.224 Stop payload previously
+embedded in `stop_payload_carries_stop_hook_active` in types.rs, from the same
+2026-08-07 live audit. Its existing `last_assistant_message` value now has an
+explicit wire-key/consumed-field parse binding in wire_contract.rs. No new live
+capture was taken for this extraction.

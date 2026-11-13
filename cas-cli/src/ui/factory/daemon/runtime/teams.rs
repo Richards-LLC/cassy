@@ -1006,7 +1006,6 @@ impl TeamsManager {
             "SendMessage",
             "Agent",
             crate::config::hooks::SLACK_POLICY_MATCHER,
-            crate::config::hooks::OPERATOR_EVIDENCE_MATCHER,
         ]
     }
 

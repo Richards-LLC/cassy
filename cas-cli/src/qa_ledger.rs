@@ -225,7 +225,14 @@ pub fn coverage(body: &str) -> Report {
 pub fn parse(body: &str, min_rows: usize) -> Report {
     let mut report = coverage(body);
     let mut declared_schema = false;
-    let cited = regex::Regex::new(r"\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[1-9][0-9]*\b").unwrap();
+    // Match complete path:line tokens, including extensionless sources,
+    // without accepting a URL suffix or a clock time as a citation.
+    let cited = regex::Regex::new(r#"(?x)
+        (?:^|[\s(\[`"'])
+        /?(?:[A-Za-z0-9_.-]+/)*
+        [A-Za-z0-9_.-]*[A-Za-z_][A-Za-z0-9_.-]*:[1-9][0-9]*
+        (?:$|[\s)\]`"',.;])
+    "#).unwrap();
     let user_outcome = regex::Regex::new(r"(?:^|;\s*)(?:visible|terminal|http):\s*[^;\s]").unwrap();
     let mut header = false;
     let mut matrix = false;

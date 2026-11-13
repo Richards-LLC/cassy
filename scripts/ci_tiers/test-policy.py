@@ -1102,7 +1102,7 @@ else:
 
     def test_mac_release_runner_takes_only_trusted_refs_cas_195e(self):
         workflow = policy.load(self.root / '.github/workflows/release-prebuild.yml')
-        guard = next(s for s in workflow['jobs']['build-macos']['steps'] if s.get('name') == 'Verify the self-hosted Mac trust boundary')
+        guard = next(s for s in workflow['jobs']['build-macos']['steps'] if s.get('id') == 'mac-trust')
         trusted = {('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', ''), ('push', 'refs/heads/main', '')}
         refs = ['refs/heads/main', 'refs/heads/gh-readonly-queue/main/pr-1-abc', 'refs/heads/feature', 'refs/pull/1/merge', 'refs/tags/v1.0.0']
         for event, ref, platform in itertools.product(['merge_group', 'push', 'pull_request', 'workflow_dispatch'], refs, ['', 'macos']):

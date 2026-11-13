@@ -378,6 +378,7 @@ jobs:
       # The routing guard runs again after assignment, on the machine itself,
       # so a future expression edit cannot hand the runner untrusted input.
       - name: Verify the self-hosted Mac trust boundary
+        id: mac-trust
         if: env.SELF_HOSTED == 'true'
         env:
           REF: ${{ github.ref }}

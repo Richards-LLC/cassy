@@ -311,6 +311,9 @@ async fn declined_peer_ask_wakes_after_the_turn_ends_on_a_repainting_pane_cas_73
     let (root, mut daemon) = peer_fixture().await;
     let cas = daemon.app.cas_dir().to_path_buf();
     let name = daemon.app.supervisor_name().to_string();
+    // The fixture shell already emitted ready; model completed harness startup explicitly.
+    daemon.app.mux.get_mut(&name).unwrap().backdate_spawn_for_test(Duration::from_secs(6));
+    assert!(daemon.app.mux.pane_ready_for_injection(&name));
     let mut turn = vec![
         r#"{"type":"user","timestamp":"2026-11-05T14:35:18Z","message":{"role":"user","content":"<task-notification>review finished</task-notification>"}}"#.to_string(),
         r#"{"type":"assistant","timestamp":"2026-11-05T14:35:20Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_73f7","name":"mcp__cas__coordination","input":{"action":"inbox_poll"}}],"stop_reason":"tool_use"}}"#.to_string(),
@@ -328,6 +331,8 @@ async fn declined_peer_ask_wakes_after_the_turn_ends_on_a_repainting_pane_cas_73
     daemon.process_prompt_queue().await.unwrap();
     super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
     let declined = queue.message_delivery_report(id).unwrap().unwrap();
+    assert!(daemon.queue_jobs.prompt_preparation.recipient(&name)
+        .is_some_and(|inputs| inputs.has_transcript && !inputs.turn_completed()));
     assert_ne!(declined.wake_attempt, cas_store::WakeAttempt::Fired, "{declined:?}");
     assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
     let recheck: String = rusqlite::Connection::open(cas.join("cas.db")).unwrap()
@@ -337,6 +342,9 @@ async fn declined_peer_ask_wakes_after_the_turn_ends_on_a_repainting_pane_cas_73
     // The turn ends; the pane keeps repainting. The recheck comes due.
     turn.push(r#"{"type":"assistant","timestamp":"2026-11-05T14:35:23Z","message":{"role":"assistant","content":[{"type":"text","text":"Nothing needs you yet."}],"stop_reason":"end_turn"}}"#.to_string());
     std::fs::write(&transcript, turn.join("\n") + "\n").unwrap();
+    // This phase starts at a fresh wake-read boundary. Reusing the prior100ms
+    // snapshot would decline again and park the due row for another20 seconds.
+    daemon.queue_jobs.prompt_preparation.forget_pane(&name);
     rusqlite::Connection::open(cas.join("cas.db")).unwrap()
         .execute("UPDATE prompt_queue SET next_attempt_at=? WHERE id=?",
             rusqlite::params![Utc::now().to_rfc3339(), id]).unwrap();
@@ -352,6 +360,8 @@ async fn declined_peer_ask_wakes_after_the_turn_ends_on_a_repainting_pane_cas_73
         tokio::task::yield_now().await;
     }
     let woke = queue.message_delivery_report(id).unwrap().unwrap();
+    assert!(daemon.queue_jobs.prompt_preparation.recipient(&name)
+        .is_some_and(|inputs| inputs.has_transcript && inputs.turn_completed()));
     assert_eq!(woke.wake_attempt, cas_store::WakeAttempt::Fired, "{woke:?}");
 }
 

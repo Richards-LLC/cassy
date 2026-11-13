@@ -15863,17 +15863,23 @@ mod tests {
 
         let locker = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         locker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let (observer, release) = crate::test_support::sqlite_retry_release(locker);
+        let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
+        let release = crate::test_support::SqliteBusyRelease::install(&shared.lock().unwrap(), locker);
         let request = serde_json::from_value(serde_json::json!({
             "action": "shutdown_workers", "worker_names": "locked-worker", "force": true
         }))
         .unwrap();
-        use tracing::instrument::WithSubscriber;
-        let result = service.factory_shutdown_workers(request).with_subscriber(observer).await;
-        release.join().unwrap();
+        let result = service.factory_shutdown_workers(request).await;
+        release.assert_released();
+        cas_store::shared_db::install_busy_handler(&shared.lock().unwrap()).unwrap();
         let text = response_text(result.expect("force shutdown waits out a brief write lock"));
-        assert!(text.contains("Queued shutdown request"), "{text}");
-        assert!(text.contains("cas-0e57-held"), "{text}");
+        assert!(text.contains(&task.id), "{text}");
+        let requests = crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].action, cas_store::SpawnAction::Shutdown);
+        assert_eq!(requests[0].worker_names, vec![worker.name]);
+        assert!(requests[0].force);
+        assert_eq!(requests[0].factory_session.as_deref(), Some("shutdown-locked"));
     }
 
     /// cas-0e57: a safety check that cannot read task state says so, demands

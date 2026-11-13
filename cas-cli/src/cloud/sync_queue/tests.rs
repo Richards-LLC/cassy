@@ -1989,12 +1989,12 @@ fn reopen_reads_only_and_writes_wait_for_a_foreign_lock_cas_0e57() {
     // The foreign writer remains held through reopen/init, so no elapsed bound is needed.
     let queue = SyncQueue::open(temp.path()).unwrap();
     queue.init().unwrap();
-    queue.conn.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
-    let (observer, release) = crate::test_support::sqlite_retry_release(locker);
-    tracing::dispatcher::with_default(&observer, || queue
-        .enqueue(EntityType::Task, "cas-0e57-b", SyncOperation::Upsert, Some("{}")))
+    let release = crate::test_support::SqliteBusyRelease::install(&queue.conn.lock().unwrap(), locker);
+    queue.enqueue(EntityType::Task, "cas-0e57-b", SyncOperation::Upsert, Some("{}"))
         .expect("an observed foreign write lock is waited out");
-    release.join().unwrap();
+    release.assert_released();
+    cas_store::shared_db::install_busy_handler(&queue.conn.lock().unwrap()).unwrap();
+    assert!(queue.pending(10, 5).unwrap().iter().any(|row| row.entity_id == "cas-0e57-b"));
 }
 
 /// cas-abad: only personal upserts equal to the team's current row (apart from

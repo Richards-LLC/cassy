@@ -1,4 +1,6 @@
-## First-failure CI repair
+## Core Concepts
+
+### First-failure CI repair
 
 The release queue executes native shards once and preserves every nonzero exit.
 It no longer excludes tests through issue labels. A hosted publisher files one

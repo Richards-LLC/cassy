@@ -876,7 +876,8 @@ async fn orphaned_delivery_still_requires_its_approval_cas_5a22() {
 
     let close = fx.close("cas-bq01").await;
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{close}");
-    assert!(cas_store::get_latest_verification_dispatch(&fx.repo.join(".cas"), "cas-bq01").unwrap().is_some());
+    assert!(close.contains("[G-70]"), "{close}");
+    assert!(cas_store::get_latest_verification_dispatch(&fx.repo.join(".cas"), "cas-bq01").unwrap().is_none());
 }
 
 impl Fx {

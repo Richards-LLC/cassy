@@ -276,7 +276,8 @@ async fn rapid_response_window_samples_close_verification() {
     // Without the explicit response window, the delivery keeps its own review.
     let control = close(control_id.clone()).await;
     assert_ne!(task_store.get(&control_id).unwrap().status, TaskStatus::Closed, "{control}");
-    assert!(cas_store::get_latest_verification_dispatch(&cas_dir, &control_id).unwrap().is_some());
+    assert!(control.contains("[G-70]"), "{control}");
+    assert!(cas_store::get_latest_verification_dispatch(&cas_dir, &control_id).unwrap().is_none());
     let window = cas::rapid_response::enable(
         &cas_dir, task_store.as_ref(), &epic_id, chrono::Duration::hours(1), "outage", "revert", chrono::Utc::now(),
     )

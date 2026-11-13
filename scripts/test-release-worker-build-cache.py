@@ -63,6 +63,9 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         # A hermetic `cas` answers `config get factory.scratch_root` (cas-3f93).
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        zig = self.bin / "zig"
+        zig.write_text("#!/bin/sh\nprintf '0.0.0-fixture\\n'\n")
+        zig.chmod(0o755)
         fake_cas = self.bin / "cas"
         fake_cas.write_text(
             "#!/usr/bin/env bash\n"
@@ -72,6 +75,7 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         self.receipt = self.root / "host-update.json"
         self.env = patch.dict(os.environ, {
             "CARGO": str(self.cargo), "FIXTURE_RELEASED": self.released,
+            "ZIG": str(zig),
             "FIXTURE_CARGO_EXIT": "0", "CAS_ROOT": str(self.root / "wrong-root"),
             "CAS_RELEASE_TRAIN_WORKER_CACHE_CMD": str(SCRIPTS / "refresh-worker-build-cache.sh"),
             "CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS": "60",

@@ -363,7 +363,7 @@ for timeout_status in 124 137; do
   out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
     RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 run_lookup timeoutcommit 2>&1)"
   expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
-  if grep -qE "reason=.*[^0-9]$timeout_status([^0-9]|$)" <<<"$out" \
+  if grep -qE "(^|[^0-9])$timeout_status([^0-9]|$)" <<<"$out" \
       && ! grep -qF 'fixture-secret' <<<"$out"; then
     printf 'ok   a timed-out poll reports exit %s without leaking API error contents\n' "$timeout_status"
     pass=$((pass + 1))

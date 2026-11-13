@@ -118,11 +118,14 @@ fn idle_pane_injection_auto_submits_real_pty() {
     // Drain startup output so `total_bytes_received` advances the same way
     // the daemon's poll loop does — this is exactly what
     // `ready_for_injection()` gates on.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
         let _ = pane.drain_output();
+        if pane.dump_viewport().expect("bash viewport").contains("cas893c$ ") { break; }
+        assert!(std::time::Instant::now() < deadline, "bash printed its fixture prompt");
         std::thread::sleep(Duration::from_millis(50));
     }
+    pane.backdate_spawn_for_test(Duration::from_secs(5));
 
     eprintln!(
         "DEBUG bytes_received={} ready={} exited={:?}",
@@ -181,15 +184,11 @@ fn idle_pane_injection_auto_submits_real_pty() {
 fn non_urgent_injection_does_not_break_in_flight_turn() {
     let _serial = real_pty_serial::lock();
 
-    let tmp = std::env::temp_dir().join(format!(
-        "cas-a5a7-nonurgent-{}-{}.log",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::remove_file(&tmp);
+    let fixture = tempfile::tempdir().expect("owned shell handshake");
+    let tmp = fixture.path().join("output.log");
+    let started = fixture.path().join("started");
+    let release = fixture.path().join("release");
+    let quote = |path: &std::path::Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
 
     let config = PtyConfig {
         command: "bash".to_string(),
@@ -216,20 +215,28 @@ fn non_urgent_injection_does_not_break_in_flight_turn() {
     .expect("wrap pty in pane");
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let startup_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < startup_deadline {
+    let startup_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
         let _ = pane.drain_output();
+        if pane.dump_viewport().expect("bash viewport").contains("casa5a7$ ") { break; }
+        assert!(std::time::Instant::now() < startup_deadline, "bash printed its fixture prompt");
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let first = format!("sleep 2; echo FIRST-TURN-DONE >> {}", tmp.display());
+    let first = format!("printf started > {}; while [ ! -e {} ]; do sleep 0.01; done; echo FIRST-TURN-DONE >> {}", quote(&started), quote(&release), quote(&tmp));
     rt.block_on(pane.inject_prompt(&first))
         .expect("start in-flight turn");
-    std::thread::sleep(Duration::from_millis(750));
+    let active_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !started.exists() {
+        let _ = pane.drain_output();
+        assert!(std::time::Instant::now() < active_deadline, "the first shell command reached its active barrier");
+        std::thread::sleep(Duration::from_millis(25));
+    }
 
-    let followup = format!("echo NONURGENT-AFTER >> {}", tmp.display());
+    let followup = format!("echo NONURGENT-AFTER >> {}", quote(&tmp));
     rt.block_on(pane.inject_prompt(&followup))
         .expect("queue non-urgent input");
+    std::fs::write(&release, "release").expect("release the first active command");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     let mut got = String::new();

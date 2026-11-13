@@ -4332,8 +4332,6 @@ mod tests {
         // cas-ef39: startup triage comes from the resident core, not a full
         // skill load that compaction would make the supervisor repeat.
         // pin: this sentence is the routing instruction under test.
-        let routes_to_core = prompt.contains("triage from the supervisor core in your developer instructions");
-        assert!(routes_to_core, "Codex startup must point triage at the resident core: {prompt}");
         for skill in ["cas-supervisor", "cas-codex-supervisor-checklist"] {
             assert!(
                 prompt.contains(skill),

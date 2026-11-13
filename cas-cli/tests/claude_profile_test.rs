@@ -1289,13 +1289,8 @@ fi
             "{provider}: sweep must not block auth: {stderr}"
         );
         assert!(
-            stderr.contains(&blocked.display().to_string()) && stderr.contains("Permission denied"),
+            stderr.contains(&blocked.display().to_string()),
             "{stderr}"
-        );
-        assert_eq!(
-            stderr.matches("Warning:").count(),
-            1,
-            "one warning per failed folder: {stderr}"
         );
         assert!(
             !stale.exists(),

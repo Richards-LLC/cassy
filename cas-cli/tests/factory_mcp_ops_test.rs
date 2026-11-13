@@ -2587,11 +2587,7 @@ async fn test_spawn_workers_invalid_cli_returns_error() {
     let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err(), "invalid cli should return error");
     let err = result.unwrap_err();
-    assert!(
-        err.message.contains("openai") || err.message.contains("cli"),
-        "error should mention the invalid value: {}",
-        err.message
-    );
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 }
 
 #[test]

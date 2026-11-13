@@ -8,7 +8,7 @@ const REQUIREMENTS: [&str; 4] = [
     "at least 3 loops/runs (loops=3, 3 loops, 3x or -j16 x3)",
     "passing result (PASS, SUCCESS, exit 0, or status 0)",
 ];
-const EXAMPLE: &str = "LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/example.test.js) parallelism=16 loops=3 result=PASS";
+pub(super) const EXAMPLE: &str = "LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/example.test.js) parallelism=16 loops=3 result=PASS";
 
 pub(super) fn has_structured_target_scope(lower: &str) -> bool {
     lower.split([';', ',', '|']).any(|field| {
@@ -39,7 +39,7 @@ pub(super) fn has_structured_target_scope(lower: &str) -> bool {
     })
 }
 
-pub(super) struct Fields([bool; 4]);
+pub(super) struct Fields(pub(super) [bool; 4]);
 
 impl Fields {
     pub(super) fn complete(&self) -> bool {

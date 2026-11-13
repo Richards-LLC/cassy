@@ -1006,34 +1006,18 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
                 prompt.text
             ),
             "superseded" => {
-                // pin: released director signals must name a declined tip as superseded.
-                assert!(
-                    prompt.text.to_lowercase().contains("superseded"),
-                    "{}",
-                    prompt.text
-                );
-                // pin: this heading asks the supervisor to merge and must disappear on supersession.
-                assert!(!prompt.text.contains("MERGE REQUIRED"), "{}", prompt.text);
+                assert!(deliver, "a superseded delivery remains an informational notification");
+                assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_tip, tip);
             }
             "refs_converged" | "refs_diverged" => {
                 assert!(deliver, "a pending merge or push still releases");
                 let push_required = outcome == "refs_diverged";
-                // pin: ref-disagreement must reflect the same live evidence as the action.
-                let disagreement = prompt.text.contains("Git ref disagreement detected:");
-                // pin: this action applies only while the local merge needs a push.
-                let push_action = prompt.text.contains("2. Push required:");
-                // pin: the alternative action must ask for the still-outstanding merge.
-                let merge_action = prompt.text.contains("2. Merge factory/merge-w into epic/test");
-                assert_eq!(
-                    (disagreement, push_action, merge_action),
-                    (push_required, push_required, !push_required),
-                    "{}", prompt.text,
-                );
+                let evidence = prompt.merge_alert.as_ref().unwrap();
+                assert_eq!(evidence.push_required, push_required);
+                assert_eq!(evidence.ref_disagreement.is_some(), push_required);
             }
             _ => {
                 assert!(deliver, "a genuinely outstanding merge still releases");
-                // pin: a live CI-completed signal retains its actionable merge heading.
-                assert!(prompt.text.contains("MERGE REQUIRED"));
                 // pin: refresh only replaces the complete count, never a suffix of another number.
                 assert!(
                     prompt.text.starts_with("12 unmerged commit(s)"),

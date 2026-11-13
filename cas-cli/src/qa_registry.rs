@@ -1763,10 +1763,7 @@ journeys:
                 );
             }
             if let Some(owed) = report.debt.iter().find(|p| p.code == "unlabeled_fixture") {
-                assert_eq!(
-                    owed.message,
-                    "no label for labeled criterion MANUAL-SLIDES (journey B2-home)"
-                );
+                assert!(owed.message.contains("MANUAL-SLIDES") && owed.message.contains("B2-home"));
             }
         }
     }

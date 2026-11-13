@@ -127,10 +127,9 @@ fn cas_e1f4_dry_run_lists_planned_links_merges_and_conflicts() {
         labels,
         [".claude", ".claude-alt", ".claude-a@x.cmo", ".claude-a@x.com", ".claude-c@x.com"]
     );
-    assert!(plan.dir_changes.contains(&DirChange::Retire {
-        label: ".claude".into(),
-        reason: "login a@x.com duplicates .claude-a@x.com".into(),
-    }));
+    assert!(plan.dir_changes.iter().any(|change| matches!(
+        change, DirChange::Retire { label, .. } if label == ".claude"
+    )));
     assert!(plan.dir_changes.contains(&DirChange::Rename {
         label: ".claude-alt".into(),
         to: ".claude-b@x.com".into(),

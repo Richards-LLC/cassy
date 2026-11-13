@@ -48,38 +48,26 @@ fn doc(path: &str, content: &str) -> LoadedSource {
     LoadedSource::from_content(path, content, SourceKind::Doc)
 }
 
-/// Scripted runner that answers every stage-A call with a plan and every
-/// stage-B call with the given page. Distinguishing on the prompt text keeps
-/// the script order-independent.
+/// Each stage reads its own typed response fields; prose in the request
+/// never chooses the fake's behavior. Unknown fields are accepted by the real
+/// plan, page and rewrite parsers.
 struct TwoStageMock {
     inner: ScriptedLlm,
-    page_type: String,
-    title: String,
-    body: String,
 }
 
 impl TwoStageMock {
     fn new(page_type: &str, title: &str, body: &str) -> Self {
-        Self {
-            inner: ScriptedLlm::always(""),
-            page_type: page_type.to_string(),
-            title: title.to_string(),
-            body: body.to_string(),
-        }
+        let mut response: serde_json::Value = serde_json::from_str(&plan_response()).unwrap();
+        response["pages"] = serde_json::from_str::<serde_json::Value>(&page_response(page_type, title, body)).unwrap()["pages"].clone();
+        response["body"] = body.into();
+        response["snippet"] = "rewritten".into();
+        Self { inner: ScriptedLlm::always(response.to_string()) }
     }
 }
 
 impl LlmRunner for TwoStageMock {
     fn complete(&self, prompt: &str) -> Result<String, cas::knowledge::LlmError> {
-        // Count the call through the inner runner so `calls()` stays honest.
-        let _ = self.inner.complete(prompt);
-        if prompt.contains("stage A") {
-            Ok(plan_response())
-        } else if prompt.contains("merge — full rewrite") {
-            Ok(serde_json::json!({"body": self.body, "snippet": "rewritten"}).to_string())
-        } else {
-            Ok(page_response(&self.page_type, &self.title, &self.body))
-        }
+        self.inner.complete(prompt)
     }
 
     fn calls(&self) -> usize {
@@ -546,11 +534,7 @@ fn an_empty_extraction_plan_degrades_to_a_single_stage_call() {
 
     assert_eq!(report.pages_written, 1);
     assert_eq!(report.llm_calls, 2);
-    let prompts = runner.prompts();
-    assert!(
-        prompts[1].contains("single stage"),
-        "expected the degrade path"
-    );
+    assert_eq!(store.list_pages().unwrap()[0].title, "Fallback Page");
 }
 
 #[test]

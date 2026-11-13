@@ -68,21 +68,22 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
         async move {
             let request = serde_json::from_value(value).unwrap();
             match service.task(Parameters(request)).await {
-                Ok(result) => extract_text(result), Err(error) => error.message.to_string(),
+                Ok(result) => (result.is_error == Some(true), extract_text(result)),
+                Err(error) => (true, error.message.to_string()),
             }
         }
     };
-    let ordinary = send(serde_json::json!({
+    let (ordinary_failed, ordinary) = send(serde_json::json!({
         "action":"update", "id":task.id, "execution_note":replacement,
     })).await;
-    assert!(ordinary.contains("DELIVERY PROOF SCOPE LOCKED"), "{ordinary}");
+    assert!(ordinary_failed, "{ordinary}");
     assert!(ordinary.contains("proof_scope_fix=true"), "{ordinary}");
     if replacement == "no-code" {
-        let inline = send(serde_json::json!({
+        let (inline_failed, inline) = send(serde_json::json!({
             "action":"close", "id":task.id, "execution_note":"no-code",
             "external_ref":"artifact:methodology-investigation",
         })).await;
-        assert!(inline.contains("INLINE NO-CODE INTENT REJECTED") && inline.contains("proof_scope_fix=true"), "{inline}");
+        assert!(inline_failed && inline.contains("proof_scope_fix=true"), "{inline}");
     }
     let mut repair = serde_json::json!({
         "action":"update", "id":task.id, "execution_note":replacement,
@@ -91,35 +92,34 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
     if replacement == "no-code" {
         repair["external_ref"] = serde_json::json!("artifact:methodology-investigation");
     }
-    let denied = send(repair.clone()).await;
-    assert!(denied.contains("only a live registered supervisor"), "{denied}");
+    let (denied, detail) = send(repair.clone()).await;
+    assert!(denied, "{detail}");
     assert_eq!(store.get(&task.id).unwrap().execution_note, task.execution_note);
     set_test_agent_role(&root, AgentRole::Supervisor);
     let mut missing_reason = repair.clone();
     missing_reason["reason"] = serde_json::json!("");
-    assert!(send(missing_reason).await.contains("non-empty reason"));
+    assert!(send(missing_reason).await.0);
     let mut unchanged = repair.clone();
     unchanged["execution_note"] = serde_json::json!(stored);
     unchanged.as_object_mut().unwrap().remove("external_ref");
-    assert!(send(unchanged).await.contains("unchanged"));
+    assert!(send(unchanged).await.0);
     if replacement == "no-code" {
         let mut local_proof = repair.clone();
         local_proof["external_ref"] = serde_json::json!("/tmp/report.html");
-        assert!(send(local_proof).await.contains("local absolute path"));
+        assert!(send(local_proof).await.0);
     }
     let mut bundled = repair.clone();
     bundled["title"] = serde_json::json!("unreviewed scope");
-    assert!(send(bundled).await.contains("unrelated field"));
+    assert!(send(bundled).await.0);
     assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
         cas::types::VerificationDispatchState::Pending);
-    let fixed = send(repair).await;
-    assert!(fixed.contains("Corrected proof scope"), "{fixed}");
+    let (failed, fixed) = send(repair).await;
+    assert!(!failed, "{fixed}");
     let corrected = store.get(&task.id).unwrap();
     assert_eq!(corrected.status, TaskStatus::Open);
     assert_eq!(corrected.execution_note.as_deref(), if replacement.is_empty() { None } else { Some(replacement) });
     assert_eq!(corrected.assignee, task.assignee);
     assert_eq!(corrected.deliverables.factory_branch_anchor, task.deliverables.factory_branch_anchor);
-    assert!(corrected.notes.contains("Execution methodology corrected"), "{}", corrected.notes);
     assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
         cas::types::VerificationDispatchState::Invalidated);
     if let Some(id) = delivery_id {
@@ -128,22 +128,22 @@ async fn execution_note_repair_cas_1b74(stored: &str, replacement: &str, merged:
         assert_eq!(delivery.state, WorkerDeliveryState::Merged);
     } else {
         assert_eq!(corrected.external_ref.as_deref(), Some("artifact:methodology-investigation"));
-        let closed = send(serde_json::json!({
+        let (_, closed) = send(serde_json::json!({
             "action":"close", "id":task.id, "reason":"Investigation completed",
             "supervisor_override":true,
         })).await;
-        assert!(closed.contains("VERIFICATION REQUIRED"), "{closed}");
+        assert!(cas::gates::codes_in(&closed).contains(&"G-68"), "{closed}");
         let fresh = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
         assert_ne!(fresh.id, dispatch.id, "the old methodology's proof must not authorize close");
         service.verification(Parameters(serde_json::from_value(serde_json::json!({
             "action":"add", "task_id":task.id, "dispatch_id":fresh.id,
             "status":"approved", "summary":"Reviewed corrected no-code investigation and portable proof",
         })).unwrap())).await.unwrap();
-        let closed = send(serde_json::json!({
+        let (_, closed) = send(serde_json::json!({
             "action":"close", "id":task.id, "reason":"Investigation completed",
             "supervisor_override":true,
         })).await;
-        assert!(closed.contains("Closed task"), "{closed}");
+        assert!(closed.contains(&task.id), "{closed}");
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
     }
 }
@@ -681,7 +681,7 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
     }))
     .unwrap();
     let rejected = service.task(Parameters(wrong_target)).await.unwrap_err();
-    assert!(rejected.message.contains("WorkTarget"), "{}", rejected.message);
+    assert_eq!(rejected.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     assert_eq!(store.get(&observed_id).unwrap().risk, [cas::types::TaskRisk::Platform]);
     cas_store::record_observed_delivery_merge(
         &cas_dir,

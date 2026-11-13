@@ -993,7 +993,7 @@ mod tests {
         let measurement = super::super::docs_freshness::Measurement::for_store(&cas_root);
         assert_eq!(measurement.root, worker);
         let message = measurement.annotate("<codemap-freshness>\nDrift\n</codemap-freshness>".into());
-        assert!(message.contains("Measured ref: origin/epic/{a,b}!e"));
+        assert!(message.contains("origin/epic/{a,b}!e"));
         let evaluation = evaluate_codemap_freshness(&cas_root).unwrap();
         assert_eq!(evaluation.evaluated_ref, "origin/epic/{a,b}!e");
         assert!(matches!(evaluation.staleness, Some(CodemapStaleness::Stale { total_changes: 1, .. })));

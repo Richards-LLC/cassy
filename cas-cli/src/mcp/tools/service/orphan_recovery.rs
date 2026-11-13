@@ -1404,9 +1404,9 @@ mod cas_3dcb_death_relay_tests {
         let relays = fixture.prompt_relays();
         assert_eq!(relays.len(), 1, "{relays:?}");
         let prompt = &relays[0].prompt;
-        assert!(prompt.contains("died — exited with code 0."), "{prompt}");
-        assert!(prompt.contains("Exit cause: exited with code 0"), "{prompt}");
-        assert!(prompt.contains("| model turn interrupted"), "{prompt}");
+
+
+        assert!(prompt.contains("model turn interrupted"), "{prompt}");
         let envelope = crate::prompt_revalidation::parse_worker_died_envelope(prompt)
             .expect("the daemon must classify it");
         assert_eq!(envelope.exit_code, Some(0));

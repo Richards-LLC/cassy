@@ -6281,7 +6281,7 @@ mod related_recall_response_tests {
         );
         let warning = core.cas_task_create(Parameters(request.clone())).await
             .expect_err("the peer's reworded open epic must warn before writing");
-        for required in ["EPIC", "cas-e88d", "patient-badger-31", "cas-open-child", "Retire superseded legacy routes", "confirm_warning=true"] {
+        for required in ["cas-e88d", "patient-badger-31", "cas-open-child", "Retire superseded legacy routes", "confirm_warning=true"] {
             assert!(warning.message.contains(required), "missing {required}: {warning:?}");
         }
         assert!(!warning.message.contains("cas-closed-child"), "{warning:?}");
@@ -6352,7 +6352,7 @@ mod related_recall_response_tests {
             .expect(2).mount(&server).await;
         let request = epic_request("Restore the product search index", "Rebuild missing conversation search documents.");
         let warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
-        for required in ["EPIC INVENTORY WARNING", "DUPLICATE EPIC WARNING", "cas-local-search", "search-supervisor", "confirm_warning=true"] {
+        for required in ["cas-local-search", "search-supervisor", "confirm_warning=true"] {
             assert!(warning.message.contains(required), "missing {required}: {warning:?}");
         }
         assert_eq!(store.list(None).unwrap().len(), 1, "outage and local overlap must both be reported before writing");

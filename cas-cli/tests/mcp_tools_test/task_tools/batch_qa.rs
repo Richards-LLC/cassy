@@ -1769,7 +1769,7 @@ async fn batch_qa_receipt_synced_from_peer_satisfies_close_cas_6048() {
     db.execute("DELETE FROM qa_batch_receipts", []).unwrap();
     db.execute("DELETE FROM artifacts", []).unwrap();
     std::fs::remove_file(&fx.ledger).unwrap();
-    assert!(show(id.clone()).await.unwrap_err().message.contains("not found"));
+    assert!(show(id.clone()).await.is_err());
     let refused = fx.close("cas-bq01").await;
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{refused}");
 

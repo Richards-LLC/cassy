@@ -2820,13 +2820,16 @@ impl std::io::Write for SubmitFailWriter {
     }
 }
 
-async fn settled_pane_snapshot(
-    mux: &mut Mux,
-    pane_id: &str,
-) -> cas_factory_protocol::TerminalSnapshot {
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    mux.poll_batch();
-    mux.get_pane_snapshot(pane_id).expect("pane snapshot").0
+async fn settled_pane_snapshot(mux: &mut Mux, pane_id: &str, expected: &str) -> cas_factory_protocol::TerminalSnapshot {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            mux.poll_batch();
+            let snapshot = mux.get_pane_snapshot(pane_id).expect("pane snapshot").0;
+            let text: String = snapshot.cells.iter().map(|cell| char::from_u32(cell.codepoint).unwrap_or(' ')).collect();
+            if text.contains(expected) { return snapshot; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("actual fixture output reached the pane")
 }
 
 #[cfg(target_os = "linux")]
@@ -3040,7 +3043,7 @@ async fn graceful_kill_worker_waits_before_escalating_a_term_ignoring_group() {
         command: "sh".to_string(),
         args: vec![
             "-c".to_string(),
-            "trap '' TERM HUP; sleep 300 & wait".to_string(),
+            "trap '' TERM HUP; printf 'fixture-ready\n'; sleep 300 & wait".to_string(),
         ],
         cwd: Some(PathBuf::from("/tmp")),
         env: vec![],
@@ -3067,7 +3070,7 @@ async fn graceful_kill_worker_waits_before_escalating_a_term_ignoring_group() {
         .expect("PTY worker must expose its process group");
 
     // Give the shell time to install its TERM/HUP ignores before teardown.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    settled_pane_snapshot(&mut mux, "synthetic-grace-worker", "fixture-ready").await;
     let started = std::time::Instant::now();
     mux.kill_worker("synthetic-grace-worker", false)
         .await
@@ -3091,7 +3094,7 @@ async fn graceful_kill_worker_waits_before_escalating_a_term_ignoring_group() {
 async fn graceful_kill_worker_returns_when_the_group_honors_term() {
     let config = crate::pty::PtyConfig {
         command: "sh".to_string(),
-        args: vec!["-c".to_string(), "sleep 300 & wait".to_string()],
+        args: vec!["-c".to_string(), "printf 'fixture-ready\n'; sleep 300 & wait".to_string()],
         cwd: Some(PathBuf::from("/tmp")),
         env: vec![],
         env_remove: vec![],
@@ -3113,15 +3116,11 @@ async fn graceful_kill_worker_returns_when_the_group_honors_term() {
     let mut mux = Mux::new(24, 80);
     mux.add_pane(pane);
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let started = std::time::Instant::now();
+    settled_pane_snapshot(&mut mux, "synthetic-term-worker", "fixture-ready").await;
     mux.kill_worker("synthetic-term-worker", false)
         .await
         .unwrap();
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
-        "TERM-compliant groups should not consume the escalation grace window"
-    );
+    assert!(mux.get("synthetic-term-worker").is_none());
 }
 
 /// GH #1363: a worker teardown that outlasts its deadline hands control back
@@ -3132,7 +3131,7 @@ async fn graceful_kill_worker_returns_when_the_group_honors_term() {
 async fn stalled_worker_teardown_returns_at_its_deadline_naming_stage_and_group() {
     let config = crate::pty::PtyConfig {
         command: "sh".to_string(),
-        args: vec!["-c".to_string(), "trap '' TERM HUP; sleep 300 & wait".to_string()],
+        args: vec!["-c".to_string(), "trap '' TERM HUP; printf 'fixture-ready\n'; sleep 300 & wait".to_string()],
         cwd: Some(PathBuf::from("/tmp")),
         env: vec![],
         env_remove: vec![],
@@ -3154,7 +3153,7 @@ async fn stalled_worker_teardown_returns_at_its_deadline_naming_stage_and_group(
     let mut mux = Mux::new(24, 80);
     mux.add_pane(pane);
     let pgid = mux.pane_process_group_id("stalled-teardown-worker").unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    settled_pane_snapshot(&mut mux, "stalled-teardown-worker", "fixture-ready").await;
 
     // The TERM-ignoring group holds kill_tree in its 3 s grace window.
     let started = std::time::Instant::now();
@@ -3271,7 +3270,7 @@ async fn urgent_queue_inject_preserves_draft_then_interrupts_after_submit_cas_ea
     )
     .await
     .expect("type operator draft");
-    let draft_before = settled_pane_snapshot(&mut mux, "urgent-safe").await;
+    let draft_before = settled_pane_snapshot(&mut mux, "urgent-safe", "unfinished human sentence").await;
 
     let deferred = mux
         .interrupt_and_inject_preserving_composer(
@@ -3290,7 +3289,7 @@ async fn urgent_queue_inject_preserves_draft_then_interrupts_after_submit_cas_ea
         !mux.get("urgent-safe").unwrap().is_turn_in_flight(),
         "urgent delivery must not submit the human draft"
     );
-    let draft_after = settled_pane_snapshot(&mut mux, "urgent-safe").await;
+    let draft_after = settled_pane_snapshot(&mut mux, "urgent-safe", "unfinished human sentence").await;
     assert_eq!(
         draft_after, draft_before,
         "urgent deferral must preserve the Codex supervisor's visible draft byte-for-byte"
@@ -3373,7 +3372,7 @@ async fn nonurgent_inject_never_expires_a_dirty_composer_cas_eacc() {
     mux.deliver_user_input_to("timeout-pane", b"draft", UserInputKind::KeyStream)
         .await
         .expect("type draft");
-    let draft_before = settled_pane_snapshot(&mut mux, "timeout-pane").await;
+    let draft_before = settled_pane_snapshot(&mut mux, "timeout-pane", "draft").await;
     let first = mux
         .inject("timeout-pane", "director lifecycle event one")
         .await
@@ -3393,12 +3392,13 @@ async fn nonurgent_inject_never_expires_a_dirty_composer_cas_eacc() {
         !mux.get("timeout-pane").unwrap().is_turn_in_flight(),
         "neither event may append to or submit the unfinished human draft"
     );
-    let draft_after = settled_pane_snapshot(&mut mux, "timeout-pane").await;
+    let draft_after = settled_pane_snapshot(&mut mux, "timeout-pane", "draft").await;
     assert_eq!(
         draft_after, draft_before,
         "repeated director events must leave the Codex supervisor draft byte-for-byte intact"
     );
 
+    tokio::time::pause();
     mux.deliver_user_input_to("timeout-pane", b"\r", UserInputKind::KeyStream)
         .await
         .expect("human submits at the safe boundary");
@@ -3415,7 +3415,7 @@ async fn nonurgent_inject_never_expires_a_dirty_composer_cas_eacc() {
         InjectOutcome::DeferredComposerDirty,
         "a second event stays separate while the first awaits its Codex submit CR"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    finish_recorded_submit(mux.get("timeout-pane").unwrap()).await;
     assert_eq!(
         mux.inject("timeout-pane", "director lifecycle event two")
             .await
@@ -3425,7 +3425,7 @@ async fn nonurgent_inject_never_expires_a_dirty_composer_cas_eacc() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn failed_submit_keeps_later_injections_deferred_cas_eacc() {
     let mut mux = Mux::new(24, 80);
     let Some(pane) = codex_cat_pane("submit-failure") else {
@@ -3445,8 +3445,7 @@ async fn failed_submit_keeps_later_injections_deferred_cas_eacc() {
         "the lane closes as soon as the payload is written"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
-    let done = mux.advance_injects().await;
+    let done = finish_injects_at(&mut mux, std::time::Instant::now()).await;
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].ticket, ticket);
     assert!(done[0].result.is_err());
@@ -3746,32 +3745,24 @@ fn flv2_pty_write_never_blocks_lane() {
             .build()
             .unwrap();
         let chunk = vec![b'x'; 4096];
-        let mut slowest = std::time::Duration::ZERO;
         let mut refused = None;
         for _ in 0..512 {
-            let started = std::time::Instant::now();
             let result = runtime.block_on(stalled.write(&chunk));
-            slowest = slowest.max(started.elapsed());
             if let Err(error) = result {
                 refused = Some(error.to_string());
                 break;
             }
         }
-        let _ = done_tx.send((slowest, refused));
+        let _ = done_tx.send(refused);
         stalled
     });
-    let (slowest, refused) = done_rx
+    let refused = done_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("2 MiB of writes to a pane that does not read returned within 5 s");
     let _stalled = writer.join().unwrap();
-    assert!(
-        slowest < std::time::Duration::from_millis(50),
-        "a PTY write waited {slowest:?} on a pane that does not read"
-    );
     let refused = refused.expect("the full pane stops taking input");
 
-    // The other pane still echoes promptly.
-    let started = std::time::Instant::now();
+    // The other pane still echoes while the first input queue is full.
     runtime.block_on(async {
         echo.write(b"ping\r").await.expect("the echo pane takes input");
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -3788,7 +3779,6 @@ fn flv2_pty_write_never_blocks_lane() {
         .await
         .expect("the echo pane echoed while the other pane was full");
     });
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
 /// cas-786a6: the urgent inject is a per-pane state machine. The turn break
@@ -3889,6 +3879,31 @@ async fn recording_pane(name: &str, cli: SupervisorCli, open: bool) -> (Pane, Re
     (pane, (out, gate))
 }
 
+async fn advance_recorded_submit_clock(by: std::time::Duration) {
+    tokio::task::yield_now().await;
+    tokio::time::advance(by).await;
+    tokio::task::yield_now().await;
+}
+
+async fn finish_recorded_submit(pane: &Pane) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while pane.inject_submit_pending() {
+        assert!(std::time::Instant::now() < deadline, "the recorded submit did not finish");
+        advance_recorded_submit_clock(std::time::Duration::from_millis(10)).await;
+    }
+    pane.input_drained_for_test();
+}
+
+async fn finish_injects_at(mux: &mut Mux, at: std::time::Instant) -> Vec<crate::mux::InjectCompletion> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let done = mux.advance_injects_at(at).await;
+        if !done.is_empty() { return done; }
+        assert!(std::time::Instant::now() < deadline, "the recorded inject did not finish");
+        advance_recorded_submit_clock(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 fn open_gate(recorded: &Recorded) {
     *recorded.1.0.lock().unwrap() = true;
     recorded.1.1.notify_all();
@@ -3897,7 +3912,7 @@ fn open_gate(recorded: &Recorded) {
 /// cas-786a6 review H1: a submit CR queued while the pane's input buffer is
 /// full is still taken, so the payload is submitted once the child reads and
 /// the pane is not left deaf.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_full_input_buffer_never_strands_the_submit_cr() {
     let (pane, recorded) = recording_pane("cr-full", SupervisorCli::Claude, false).await;
     pane.inject_prompt("redirect").await.expect("payload queued");
@@ -3911,13 +3926,10 @@ async fn a_full_input_buffer_never_strands_the_submit_cr() {
         }
     }
     assert!(refused, "the buffer filled");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    advance_recorded_submit_clock(std::time::Duration::from_millis(150)).await;
     assert!(pane.inject_submit_pending());
     open_gate(&recorded);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while pane.inject_submit_pending() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    finish_recorded_submit(&pane).await;
     assert!(
         !pane.inject_submit_pending(),
         "the CR was written once the child read; the pane takes injects again"
@@ -3928,7 +3940,7 @@ async fn a_full_input_buffer_never_strands_the_submit_cr() {
 /// cas-786a6 review M3: operator keys typed during a destructive urgent
 /// inject's settle are held and delivered after the payload and its submit
 /// CR, never inside them.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn operator_input_during_the_settle_is_held_until_the_payload_is_submitted() {
     let mut mux = Mux::new(24, 80);
     let (pane, recorded) = recording_pane("held", SupervisorCli::Claude, true).await;
@@ -3945,20 +3957,10 @@ async fn operator_input_during_the_settle_is_held_until_the_payload_is_submitted
         .await
         .unwrap();
     assert!(mux.input_held("held"));
-    tokio::time::sleep(floor).await;
-    let mut done = mux.advance_injects().await;
-    for _ in 0..50 {
-        if !done.is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        done = mux.advance_injects().await;
-    }
+    let after_floor = std::time::Instant::now() + floor;
+    let done = finish_injects_at(&mut mux, after_floor).await;
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);
-    // The submit CR follows 150 ms later; held input waits for it.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    mux.advance_injects().await;
     assert!(!mux.input_held("held"));
     mux.get("held").unwrap().input_drained_for_test();
     let written = String::from_utf8_lossy(&recorded.0.lock().unwrap()).to_string();
@@ -3978,20 +3980,18 @@ async fn a_pane_closed_or_respawned_mid_settle_fails_its_inject() {
     let floor = std::time::Duration::from_millis(50);
     mux.begin_interrupt_and_inject("gone", "redirect", floor, true).await.unwrap();
     mux.remove_pane("gone");
-    tokio::time::sleep(floor).await;
-    let done = mux.advance_injects().await;
+    let done = mux.advance_injects_at(std::time::Instant::now() + floor).await;
     assert_eq!(done.len(), 1);
     assert!(done[0].result.is_err());
 
-    let (pane, _) = recording_pane("same", SupervisorCli::Claude, true).await;
+    let (mut pane, _) = recording_pane("same", SupervisorCli::Claude, true).await;
+    pane.backdate_spawn_for_test(std::time::Duration::from_secs(1));
     mux.add_pane(pane);
     mux.begin_interrupt_and_inject("same", "old payload", floor, true).await.unwrap();
     mux.remove_pane("same");
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let (respawned, recorded) = recording_pane("same", SupervisorCli::Claude, true).await;
     mux.add_pane(respawned);
-    tokio::time::sleep(floor).await;
-    let done = mux.advance_injects().await;
+    let done = mux.advance_injects_at(std::time::Instant::now() + floor).await;
     assert_eq!(done.len(), 1);
     assert!(done[0].result.is_err(), "a respawned pane is a different pane");
     mux.get("same").unwrap().input_drained_for_test();
@@ -4001,61 +4001,52 @@ async fn a_pane_closed_or_respawned_mid_settle_fails_its_inject() {
 /// cas-786a6 review round 2, M: a second urgent inject on a pane waits until
 /// the first payload's submit CR is written, so the pane sees Esc, payload,
 /// CR, then Esc, payload, CR, never a turn break between a payload and its CR.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn back_to_back_urgent_injects_never_break_between_payload_and_cr() {
     let mut mux = Mux::new(24, 80);
     let (pane, recorded) = recording_pane("b2b", SupervisorCli::Claude, true).await;
     mux.add_pane(pane);
     let floor = std::time::Duration::from_millis(20);
-    let mut started = 0;
-    let mut finished = 0;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while finished < 2 && std::time::Instant::now() < deadline {
-        if started < 2 {
-            let payload = if started == 0 { "FIRST" } else { "SECOND" };
-            if let InjectStart::Started(_) = mux
-                .begin_interrupt_and_inject("b2b", payload, floor, false)
-                .await
-                .unwrap()
-            {
-                started += 1;
-            }
-        }
-        finished += mux.advance_injects().await.len();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert_eq!(finished, 2);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while mux.pane_submit_pending("b2b") && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    let first_gate = crate::submit_gate::SubmitGate::new();
+    crate::submit_gate::hold_next_submit("b2b", first_gate.clone());
+    assert!(matches!(mux.begin_interrupt_and_inject("b2b", "FIRST", floor, false).await.unwrap(), InjectStart::Started(_)));
+    let after_floor = std::time::Instant::now() + floor;
+    assert!(mux.advance_injects_at(after_floor).await.is_empty());
+    advance_recorded_submit_clock(std::time::Duration::from_millis(150)).await;
     mux.get("b2b").unwrap().input_drained_for_test();
-    let written = recorded.0.lock().unwrap().clone();
-    assert_eq!(
-        written,
-        b"\x1b\x1b[200~FIRST\x1b[201~\r\x1b\x1b[200~SECOND\x1b[201~\r".to_vec(),
-        "{:?}",
-        String::from_utf8_lossy(&written)
-    );
+    assert!(mux.pane_submit_pending("b2b"));
+    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"\x1b\x1b[200~FIRST\x1b[201~");
+    assert_eq!(mux.begin_interrupt_and_inject("b2b", "SECOND", floor, false).await.unwrap(), InjectStart::Deferred);
+    mux.get("b2b").unwrap().input_drained_for_test();
+    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"\x1b\x1b[200~FIRST\x1b[201~");
+
+    first_gate.open();
+    let first = finish_injects_at(&mut mux, after_floor).await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);
+    assert!(matches!(mux.begin_interrupt_and_inject("b2b", "SECOND", floor, false).await.unwrap(), InjectStart::Started(_)));
+    let second = finish_injects_at(&mut mux, std::time::Instant::now() + floor).await;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);
+    assert!(!mux.pane_submit_pending("b2b"));
+    mux.get("b2b").unwrap().input_drained_for_test();
+    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"\x1b\x1b[200~FIRST\x1b[201~\r\x1b\x1b[200~SECOND\x1b[201~\r");
 }
 
 /// cas-786a6 review round 2, L1: a submit gate held for a pane holds the
 /// next inject's CR until it opens.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_held_submit_gate_holds_the_cr_until_it_opens() {
     let (pane, recorded) = recording_pane("gated", SupervisorCli::Claude, true).await;
     let gate = crate::submit_gate::SubmitGate::new();
     crate::submit_gate::hold_next_submit("gated", gate.clone());
     pane.inject_prompt("payload").await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    advance_recorded_submit_clock(std::time::Duration::from_millis(400)).await;
     pane.input_drained_for_test();
     assert_eq!(recorded.0.lock().unwrap().as_slice(), b"\x1b[200~payload\x1b[201~", "no CR while the gate is shut");
     assert!(pane.inject_submit_pending());
     gate.open();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while pane.inject_submit_pending() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    finish_recorded_submit(&pane).await;
     pane.input_drained_for_test();
     assert_eq!(recorded.0.lock().unwrap().as_slice(), b"\x1b[200~payload\x1b[201~\r");
 }

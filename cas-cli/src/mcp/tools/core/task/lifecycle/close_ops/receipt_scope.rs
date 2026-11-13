@@ -896,8 +896,8 @@ mod tests {
         );
         let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main", None)
             .expect("an untested crate is refused at park");
-        assert!(refusal.contains("FOCUSED PROOF REQUIRED"), "{refusal}");
-        assert!(refusal.contains(&format!("at {}: cas-store.", &head[..12])), "{refusal}");
+        assert!(crate::gates::codes_in(&refusal).contains(&"G-61"), "{refusal}");
+        assert!(refusal.contains(&head[..12]) && refusal.contains("cas-store"), "{refusal}");
 
         task.proof_targets.push("prompt_queue_store::operator_cloud".into());
         let mut plain = task.clone();
@@ -980,7 +980,7 @@ mod tests {
         let changed = vec!["hub-web/src/app.ts".to_string()];
         let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &source_only, "main", None)
             .expect("product source without a changelog entry must be refused");
-        assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
+        assert!(crate::gates::codes_in(&refusal).contains(&"G-62"), "{refusal}");
 
         std::fs::write(
             repo.path().join("CHANGELOG.md"),
@@ -991,7 +991,7 @@ mod tests {
         let changed = vec!["CHANGELOG.md".to_string(), "hub-web/src/app.ts".to_string()];
         let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &untitled, "main", None)
             .expect("an untitled Unreleased bullet is not release evidence");
-        assert!(refusal.contains("CHANGELOG [Unreleased] REQUIRED"), "{refusal}");
+        assert!(crate::gates::codes_in(&refusal).contains(&"G-62"), "{refusal}");
 
         std::fs::write(
             repo.path().join("CHANGELOG.md"),

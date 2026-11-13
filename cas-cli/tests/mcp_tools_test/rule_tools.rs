@@ -1054,7 +1054,7 @@ async fn rule_create_refuses_rule_naming_another_registered_project_cas_caae() {
         .expect_err("a rule naming another registered project is refused");
     assert!(refusal.message.contains("zephyr-quokka"), "{}", refusal.message);
     assert!(
-        refusal.message.contains("`project:zephyr-quokka`"),
+        refusal.message.contains("project:zephyr-quokka"),
         "the refusal names the opt-in marker: {}",
         refusal.message
     );

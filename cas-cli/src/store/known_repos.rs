@@ -791,12 +791,10 @@ mod tests {
                 &anyhow::anyhow!("database error: database is locked"),
             );
 
-            assert!(message.starts_with("HOST REGISTRY UNAVAILABLE:"));
-            assert!(!message.contains("WORK TARGET REJECTED"));
+            assert!(message.contains(&repo.display().to_string()));
+            assert!(message.contains(&db_path.display().to_string()));
             #[cfg(target_os = "linux")]
-            assert!(message.contains(&format!("holding PID: {}", std::process::id())));
-            #[cfg(not(target_os = "linux"))]
-            assert!(message.contains("holding PID could not be identified"));
+            assert!(message.contains(&std::process::id().to_string()));
             assert!(message.contains("fuser -v"));
             assert!(message.contains("SIGTERM"));
             assert!(message.contains("SIGKILL"));

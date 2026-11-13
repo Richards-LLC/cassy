@@ -236,7 +236,7 @@ fn genuine_minified_drop_close_and_epic_reject_cas_5f0b() {
     let (dir, task, _) = fixture(true, false);
     match close_gate(dir.path(), &task) {
         MergeStateGateOutcome::Reject(message) => assert!(
-            message.contains("DELIVERY CONTENT DROPPED") && message.contains(DIST),
+            crate::gates::codes_in(&message).contains(&"G-56") && message.contains(DIST),
             "{message}"
         ),
         other => panic!("dropping integration must reject: {other:?}"),
@@ -390,7 +390,7 @@ fn imported_baseline_inverse_close_and_epic_reject_cas_5f0b() {
         );
         match close_gate(repo, &task) {
             MergeStateGateOutcome::Reject(message) => assert!(
-                message.contains("DELIVERY CONTENT DROPPED") && message.contains(DIST),
+                crate::gates::codes_in(&message).contains(&"G-56") && message.contains(DIST),
                 "{subject}: {message}"
             ),
             other => panic!(
@@ -484,7 +484,7 @@ fn attributed_shared_helper_survival_close_and_epic_cas_5f0b() {
             (false, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)) => {
             }
             (true, MergeStateGateOutcome::Reject(message)) => assert!(
-                message.contains("DELIVERY CONTENT DROPPED") && message.contains("shared.rs"),
+                crate::gates::codes_in(&message).contains(&"G-56") && message.contains("shared.rs"),
                 "{message}"
             ),
             (_, other) => {
@@ -584,17 +584,9 @@ fn missing_attributed_base_keeps_identical_delivery_but_rejects_drops_cas_3474()
             mode,
             "dropped" | "missing" | "reverted" | "imported baseline" | "rebuilt recreated"
         ) {
-            let expected = if mode == "imported baseline" {
-                "DELIVERY CONTENT UNVERIFIABLE"
-            } else {
-                "DELIVERY CONTENT DROPPED"
-            };
             assert!(
                 matches!(&result, MergeStateGateOutcome::Reject(message)
-                    if message.contains(expected)
-                        && (mode != "imported baseline" || message.contains(
-                            "no task-attributed non-merge content commits with a tree effect"
-                        ))),
+                    if crate::gates::codes_in(message).contains(&"G-56")),
                 "{mode}: {result:?}"
             );
         } else {

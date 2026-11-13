@@ -29198,10 +29198,12 @@ mod merge_state_gate_tests {
         let (is_error, text) = close_text(&fixture).await;
         assert_eq!(is_error, Some(true), "{text}");
         assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
-        let parked = fixture.store.get(&fixture.task_id).unwrap();
+        let mut parked = fixture.store.get(&fixture.task_id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{}", parked.notes);
 
-        // The routing machine holds only the synced task row.
+        // The routing machine holds only the synced task row, targeting its
+        // own fixture checkout.
+        parked.deliverables.work_target = None;
         let reviewer = crate::artifacts::proof::PeerReviewer::new(&server.uri(), parked);
         let reviewer_evidence = reviewer.evidence_dir();
         fixture._env.set("CAS_ROOT", &reviewer.root);

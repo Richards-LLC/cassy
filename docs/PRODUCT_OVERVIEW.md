@@ -254,6 +254,8 @@ Supervisor answers recorded with `verification action=add status=supervisor_call
 
 **Merge response receipts.** A slow delivery merge returns a preparing receipt after a short wait while its existing safety checks continue in the background. The receipt path records the complete final result, and a supervisor notice reports completion. A published merge reports COMMITTED even when its close follow-up is still running. Callers use the receipt and notice before deciding whether another merge request is needed.
 
+Prepared release pushes and merge-queue entries reuse an ancestor's successful full-set proof when only release plumbing changed and main is unchanged. A durable adoption artifact records the release head/tree and original native producer head/run/attempt. Consumers verify both completed workflows, complete logs, source proof and the actual queue delta before suppressing suite jobs. Compile, launch, generated assets and Release Prebuild remain checked against the release tree. Any source edit or invalid proof keeps the full suite selected.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

@@ -1262,7 +1262,7 @@ async fn cleared_target_no_code_spike_closes_without_branch_or_merge_tree_gh1167
 /// GH #1901: a completed documentation delivery is not the current artifact.
 #[tokio::test]
 async fn artifact_scope_fix_retires_parked_docs_and_refuses_code_cas_3ff6() {
-    for code in [false, true] {
+    for (code, already_cleared) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture(&mut env, "main");
         let id = "cas-8156";
@@ -1286,6 +1286,11 @@ async fn artifact_scope_fix_retires_parked_docs_and_refuses_code_cas_3ff6() {
         task.deliverables.historical_factory_branch_anchors.push(old_tip.clone());
         task.deliverables.parked_branch = Some(lane.clone());
         task.deliverables.files_changed = vec![path.into()];
+        if already_cleared {
+            task.deliverables.work_target = None;
+            task.deliverables.work_target_cleared = true;
+        }
+        let prior_target = task.deliverables.work_target.clone();
         f.put(&task);
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
@@ -1298,7 +1303,7 @@ async fn artifact_scope_fix_retires_parked_docs_and_refuses_code_cas_3ff6() {
         if code {
             assert!(corrected.is_err(), "{corrected:?}");
             assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(), Some(old_tip.as_str()));
-            assert!(f.task(id).deliverables.work_target.is_some());
+            assert_eq!(f.task(id).deliverables.work_target, prior_target);
             continue;
         }
         assert!(corrected.is_ok(), "{corrected:?}");

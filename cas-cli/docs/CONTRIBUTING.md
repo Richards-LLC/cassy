@@ -3174,23 +3174,37 @@ non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
 Slim lanes omit broad Rust tests for factory pushes, but run the train's
-impact selection (`scripts/ci-test-impact.py`, unchanged) for the delivery's
-range on hosted runners (cas-2e1b). The range starts at the delivery's
-recorded start base when `refs/cas/delivery-base/<branch>` exists and is an
-ancestor of the pushed head (task start pushes that ref, best effort, each
-time it records a new start base); otherwise it uses the classifier's inferred
-comparison base. The plan step logs which one it used. `Scoped Validation — impact own tests`
-builds the selection and runs the changed modules' unit tests, edited
-integration suites and directly changed crates first; up to three `impact ring`
-shards then run the rest of the selection from its archive, only after the own
-tests pass. A workspace plan (build/test policy, `scripts/`, `.github/` or an
-unmappable path) runs the whole workspace, still own tests first, exactly as
-the selector decided. A failed test fails the lane only when it passes (or
-does not exist) at the delivery's base: the same job checks out that base and
-reruns just the failed tests. Tests that fail there too are named in the job
-summary as inherited from the base and do not fail the delivery. Lane receipts are published as `lane-impact-*`, outside the
-selector's failure history. Merges into a release train start no train
-suite; lane CI already proved each delivery. The daemon's train CI scan
+impact selection (`scripts/ci-test-impact.py`) for the delivery's range on hosted
+runners (cas-2e1b). Selection compares the pushed head with its merge-base with
+the live target, as resolved by the classifier. Content merged in from the
+train is excluded. The recorded start base in `refs/cas/delivery-base/<branch>`
+is used only for failure attribution, falling back to the inferred base when
+missing or not an ancestor. The plan logs both bases separately.
+`Scoped Validation — impact own tests` builds the selection and runs the changed
+modules' unit tests, edited integration suites, directly changed crates and
+explicit file-reading contracts first; up to three `impact ring` shards run the
+rest from its archive after own tests pass. Agent/config roots `.claude/`,
+`.codex/`, `.grok/`, `docs/` and `changelog.d/` select no Rust tests. Script and
+workflow inputs use their existing script/CI contract tier plus Rust test
+functions with matching file literals, including local helper/constant reads.
+Cargo manifests/lockfiles, nextest configuration, `.cargo/`, `vendor/` and
+unmapped code retain conservative workspace/crate selection. No Rust match
+produces an explicit empty selection and invokes no Cargo. A failed test fails the lane only when it passes (or
+does not exist) at the delivery's base. The same job first looks for explicit
+failure receipts from existing CI runs at that exact SHA, matching package,
+binary, test, compiler, nextest, runner image and profile/configuration. A prior
+lane's explicit base replay can supply this proof even when its own head differs.
+It reuses matching failures without preparing or compiling the base, then checks
+out the base and reruns only identities without proof. Missing, expired,
+configuration-mismatched or legacy receipts are misses. Tests that fail at the
+base are named in the job summary as inherited and do not fail the delivery.
+Named failure receipts are uploaded before attribution. Attribution records
+lookup, worktree, build and test times, with a twenty-minute total replay budget
+inside the unchanged forty-five-minute job. Interrupted or failed preparation
+leaves explicit unresolved identities and keeps the lane red. Lane receipts are
+published as `lane-impact-*`, outside the selector's failure history.
+Merges into a release train start no train suite; lane CI already proved each
+delivery. The daemon's train CI scan
 dispatches `full-validation.yml` once per frozen train tip (cas-0fc56), and a
 frozen train accepts no merge that could supersede it. That dispatched run and
 merge-group events call the same reusable `ci.yml` through

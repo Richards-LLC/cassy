@@ -13014,6 +13014,7 @@ fn failed_ancestry_check_warns_without_epic_specific_wording() {
 /// epic. Rebasing it would destroy the tip under review, so assignment must
 /// proceed and say so instead of refusing.
 #[tokio::test]
+// cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
     for per_task in [false, true] {
         let home = TempDir::new().expect("home tempdir");
@@ -13109,9 +13110,23 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         let published = git_stdout(&worker_path, &["ls-remote", "origin", &record]);
         assert_eq!(published.split_whitespace().next(), Some(start.base_sha.as_str()));
         git_stdout(&worker_path, &["fetch", "-q", "origin", &format!("+{record}:{record}")]);
+
+        std::fs::write(worker_path.join("delivery.txt"), "delivery change\n").unwrap();
+        git_stdout(&worker_path, &["add", "delivery.txt"]);
+        git_stdout(&worker_path, &["commit", "-m", "delivery change"]);
+        let project = env.cas_root.parent().unwrap();
+        git_stdout(project, &["checkout", "epic/requested"]);
+        std::fs::write(project.join("train.txt"), "train change\n").unwrap();
+        git_stdout(project, &["add", "train.txt"]);
+        git_stdout(project, &["commit", "-m", "train change"]);
+        git_stdout(project, &["checkout", "main"]);
+        git_stdout(&worker_path, &["merge", "--no-edit", "epic/requested"]);
+        let impact_base = git_stdout(&worker_path, &["merge-base", "HEAD", "epic/requested"]);
+        assert_ne!(impact_base, start.base_sha);
+
         let plan = std::process::Command::new("python3")
             .arg(cas::test_paths::workspace_root().join("scripts/ci-test-impact.py"))
-            .args(["lane", "--phase", "plan", "--base-sha", "HEAD", "--recorded-base-ref", &record])
+            .args(["lane", "--phase", "plan", "--base-sha", "epic/requested", "--recorded-base-ref", &record])
             .arg("--history")
             .arg(home.path().join("no-history.json"))
             .arg("--out")
@@ -13122,8 +13137,8 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         assert!(plan.status.success(), "{}", String::from_utf8_lossy(&plan.stderr));
         let lane: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.path().join("lane.json")).unwrap()).unwrap();
-        assert_eq!(lane["plan"]["base"], start.base_sha.as_str());
-        assert_eq!(lane["plan"]["base_source"], "recorded start base");
+        assert_eq!(lane["plan"]["base"], impact_base);
+        assert_eq!(lane["plan"]["attribution_base"], start.base_sha);
     }
 }
 

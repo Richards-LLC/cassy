@@ -933,6 +933,45 @@ mod tests {
         assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
     }
 
+    #[test]
+    fn park_requires_owned_test_stability_at_the_exact_tip_cas_9e02e() {
+        use crate::factory_worker_check::stability::{self, Identity, Proof};
+        let repo = changelog_fixture();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        std::fs::write(repo.path().join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+        std::fs::write(repo.path().join("src/lib.rs"), "mod child;\n").unwrap();
+        std::fs::write(repo.path().join("src/child.rs"), "#[test]\nfn untouched() {}\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "base test");
+        assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &base])
+            .current_dir(repo.path()).status().unwrap().success());
+        let identity = Identity { path: "src/child.rs".into(), name: "child::owned".into() };
+        stability::record(root.path(), repo.path(), &base, Proof { runner: "nextest".into(),
+            tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+        std::fs::write(repo.path().join("src/child.rs"), "#[test]\nfn untouched() {}\n#[test]\nfn owned() {}\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "add owned test");
+        let mut task = Task::new("cas-9e02e".into(), "stability fixture".into());
+        task.notes = "no changelog: test-only stability fixture".into();
+        let paths = vec![identity.path.clone()];
+        crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(child)");
+        let started = std::time::Instant::now();
+        let held = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None).unwrap();
+        let missing_us = started.elapsed().as_micros();
+        assert!(held.contains(&identity.path) && held.contains(&identity.name));
+        assert!(!held.contains("untouched"));
+        stability::record(root.path(), repo.path(), &head, Proof { runner: "nextest".into(),
+            tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+        let started = std::time::Instant::now();
+        let admitted = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None);
+        eprintln!("stability park read: missing_us={missing_us} present_us={}", started.elapsed().as_micros());
+        assert!(admitted.is_none(), "{admitted:?}");
+        std::fs::write(repo.path().join("README.md"), "new delivery tip\n").unwrap();
+        let moved = commit_changelog_fixture(repo.path(), "move source tip");
+        crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &moved, "fixture", "test(child)");
+        assert!(park_refusal(root.path(), repo.path(), &task, &paths, &moved, "main", None)
+            .unwrap().contains(&identity.name));
+    }
+
     fn changelog_fixture() -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {

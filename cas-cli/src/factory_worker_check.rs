@@ -176,6 +176,10 @@ impl TestReceipt {
         if let Some(log) = &self.selected_log {
             note.push_str(&format!(" [selected log: {}]", log.display()));
         }
+        if let Some(proof) = &self.stability {
+            note.push_str(&format!(" [stability: {} consecutive passes; changed_tests={}; runner={}; elapsed_ms={}]",
+                proof.consecutive_passes, proof.tests.len(), proof.runner, proof.elapsed_ms));
+        }
         note
     }
 }
@@ -2391,28 +2395,33 @@ mod tests {
             fixture_commit(&repo);
             std::fs::create_dir_all(repo.join("src")).unwrap();
             std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "pub fn existing() {}\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() {}\n").unwrap();
             fixture_commit_as(&repo, "base");
             let base = fixture_head(&repo);
             git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "pub fn existing() {}\n#[test]\nfn owned_new() {}\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() {}\n#[test]\nfn owned_new() {}\n").unwrap();
             fixture_commit_as(&repo, "new test");
             env.set_current_dir(&repo);
             let cargo = repo.join("target/fake-cargo");
             std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
-            fake_cargo(&cargo, &format!(r#"python3 - <<'PY'
+            fake_cargo(&cargo, &format!(r#"python3 - "$@" <<'PY'
 from pathlib import Path
+import sys
 p = Path('target/attempts')
 n = int(p.read_text()) + 1 if p.exists() else 1
 p.write_text(str(n))
+names = ['owned_new'] + (['untouched'] if 'untouched' in sys.argv[-1] else [])
+with Path('target/executed').open('a') as output:
+    output.write(','.join(names) + '\n')
 if {seeded_failure} and n % 3 == 0:
     print('        FAIL [ 0.01s] (1/1) fixture owned_new')
     print('     Summary [ 0.01s] 1 test run: 0 passed, 1 failed')
     raise SystemExit(1)
-print('        PASS [ 0.01s] (1/1) fixture owned_new')
-print('     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped')
+for name in names:
+    print(f'        PASS [ 0.01s] (1/{{len(names)}}) fixture {{name}}')
+print(f'     Summary [ 0.01s] {{len(names)}} tests run: {{len(names)}} passed, 0 skipped')
 PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
-            let args = ["nextest", "run", "-p", "fixture", "--lib", "-E", "test(owned_new)"].map(str::to_owned);
+            let args = ["nextest", "run", "-p", "fixture", "--lib", "-E", "test(owned_new) | test(untouched)"].map(str::to_owned);
             let result = execute_at(&root, &args, &repo, &cargo);
             if seeded_failure {
                 assert!(result.is_err());
@@ -2425,6 +2434,16 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
                 let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
                 assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 5);
                 assert_eq!(receipt["test"]["stability"]["tests"][0]["name"], "owned_new");
+                assert_eq!(receipt["test"]["count"], 2);
+                let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
+                assert_eq!(executed.lines().filter(|line| line.split(',').any(|name| name == "untouched")).count(), 1);
+                let script = std::fs::read_to_string(&cargo).unwrap().replace("if False and", "if True and");
+                std::fs::write(&cargo, script).unwrap();
+                std::fs::write(repo.join("target/attempts"), "0").unwrap();
+                let mut overlap = args.clone();
+                overlap[6] = "test(owned_new) & test(owned_new)".into();
+                assert!(execute_at(&root, &overlap, &repo, &cargo).is_err());
+                assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
             }
         }
     }

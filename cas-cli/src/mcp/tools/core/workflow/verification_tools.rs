@@ -1059,8 +1059,10 @@ impl CasCore {
                         verification.id, deadline.to_rfc3339(), now.to_rfc3339(), task.id],
                 ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
                 if changed != 1 {
+                    // gate[G-154 verification]: Supervisor-answer exact verifier claim binding
                     return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                        "Supervisor answer rejected: the question's exact verifier claim changed or expired; inspect the current dispatch."));
+                        crate::gates::tag("G-154",
+                            "Supervisor answer rejected: the question's exact verifier claim changed or expired; inspect the current dispatch.")));
                 }
                 resume_verifier = true;
             }

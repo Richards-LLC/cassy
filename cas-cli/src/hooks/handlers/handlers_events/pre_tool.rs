@@ -3792,7 +3792,8 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
                      literal: &mut bool,
                      word_quoted: &mut bool,
                      ends: &mut Vec<usize>, end: usize| {
-        if !word.is_empty() {
+        // Argument consumers must preserve quoted empty values (e.g. --shuffle '').
+        if !word.is_empty() || (arguments_only && *word_quoted) {
             tokens.push(ShellToken::Word(std::mem::take(word)));
             literals.push(*literal);
             ends.push(end);

@@ -660,7 +660,7 @@ fn busy_worker_sees_a_mid_turn_message_at_the_next_tool_boundary_cas_b5e4() {
         .enqueue_with_session("supervisor", WORKER, turn_prompt, SESSION)
         .unwrap();
     store.mark_transport_delivered(injected).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let turn_started = chrono::Utc::now();
     let transcript = project.path().join("session.jsonl");
     let mut hook = input("worker");
@@ -689,7 +689,7 @@ fn busy_worker_sees_a_mid_turn_message_at_the_next_tool_boundary_cas_b5e4() {
     );
 
     // Mid-turn, the peer's reply is enqueued and handed off to the worker.
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let reply = store
         .enqueue_with_session("gold-fox", WORKER, "schema agreed: use v2 columns", SESSION)
         .unwrap();
@@ -754,6 +754,16 @@ fn pin_inbox_signal_to_cursor(cas_root: &std::path::Path, hook: &HookInput) {
         cursor.to_string(),
     )
     .unwrap();
+}
+
+/// Rows, receipts and turn starts compare at the store's millisecond
+/// resolution (SQLite `julianday`), so an ordered step waits for the clock to
+/// leave the millisecond of everything before it, not a fixed sleep.
+fn next_millisecond() {
+    let now = chrono::Utc::now().timestamp_millis();
+    while chrono::Utc::now().timestamp_millis() <= now {
+        std::hint::spin_loop();
+    }
 }
 
 fn store_at_root(cas_root: &std::path::Path) -> SqlitePromptQueueStore {
@@ -1035,7 +1045,7 @@ fn ct2_p1_one_body_per_message_teams() {
     // The count is over what the hooks actually output (cas-1f0c review).
     let busy = "Take (B), but keep the flag operator-only.";
     let mut context = worker.start_turn("working through cas-x");
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let id = store.enqueue_with_session("supervisor", WORKER, busy, SESSION).unwrap();
     claim_for_claude_teams(&store, &mut worker, id, busy);
     store.record_wake_gate_decline(id, "pane has not been silent long enough").unwrap();
@@ -1414,7 +1424,7 @@ fn a_never_silent_worker_sees_a_claimed_message_at_its_next_tool_boundary_cas_b5
 
     // Mid-turn: the supervisor decides, and the daemon claims the row for
     // the teams transport; its wake is then declined, so nothing else moves.
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let decision = "Take (B), but make verification.enabled operator-only.";
     let id = store
         .enqueue_with_session("supervisor", WORKER, decision, SESSION)
@@ -1631,7 +1641,7 @@ fn a_decision_claimed_before_the_current_turn_began_still_surfaces_cas_a1ed() {
     worker.start_turn("turn-1", chrono::Utc::now() - chrono::Duration::minutes(20), "resume cas-d757");
     let review = worker.supervisor_decides("Round 3: one High. Do this BEFORE continuing cas-d757.");
     let ci = worker.supervisor_decides("CI failed on one test; fold the fix into round 4.");
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     worker.start_turn(
         "turn-2",
         chrono::Utc::now(),
@@ -1676,7 +1686,7 @@ fn a_teams_copy_rendered_as_a_turn_is_recorded_and_not_shown_again_cas_a1ed() {
         "a body rendered into a turn is surfaced, not merely claimed"
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     worker.start_turn("turn-3", chrono::Utc::now(), "continue");
     let later = worker.call_tool(1024).unwrap_or_default();
     assert!(!later.contains(body), "a rendered copy is not shown a second time: {later}");
@@ -1723,7 +1733,7 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
     let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
 
     let first_turn = worker.start_turn("working through cas-x");
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let kept = "Rebase onto v43, then re-run the named tests.\n".repeat(60);
     let acked = "FYI: lane CI is green.";
     let kept_id = store.enqueue_with_session("supervisor", WORKER, &kept, SESSION).unwrap();
@@ -1735,7 +1745,7 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
     let same_turn = worker.tool_call();
     assert!(!same_turn.contains(kept.trim()) && !same_turn.contains(acked), "{first_turn}{same_turn}");
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let next_turn = worker.take_turn("continuing my work");
     println!("AFE0_FIXTURE input_body_bytes={} repeat_hook_bytes={}", kept.len(), next_turn.len());
     // Durable diagnostics for replaying this synthetic fixture on the base
@@ -1778,17 +1788,17 @@ fn cas_6ccb_a_teammate_turn_shows_a_polled_unacked_row_at_its_tool_boundary() {
     let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
 
     worker.start_turn("working through cas-x");
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let kept = "Hold the merge until the QA pass lands.";
     let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
     assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
     assert!(!worker.tool_call().contains(kept));
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let next = "Also: rebase first.";
     let next_id = store.enqueue_with_session("supervisor", WORKER, next, SESSION).unwrap();
     deliver_to_claude_worker(&store, &mut worker, next_id, next);
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let teammate_turn = worker.next_teammate_turn().unwrap();
     assert_eq!(teammate_turn.matches(kept).count(), 0, "{teammate_turn}");
     assert!(teammate_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{teammate_turn}");
@@ -1809,14 +1819,14 @@ fn cas_6ccb_the_repeat_runs_once_per_turn_without_new_mail() {
     let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
 
     worker.start_turn("working through cas-x");
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let kept = "Keep the flag operator-only.";
     let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
     assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
     // Every later tool call in the polling turn runs the mail check.
     assert!(!worker.tool_call().contains(kept));
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let turn = worker.take_turn_without_prompt_hook("<teammate-message teammate_id=\"peer\">\nping\n</teammate-message>");
     assert_eq!(turn.matches(kept).count(), 0, "{turn}");
     assert!(turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{turn}");
@@ -1837,7 +1847,7 @@ fn cas_6ccb_a_reply_to_the_sender_ends_the_repeat() {
     let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
 
     worker.start_turn("working through cas-x");
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let answered = "Which epic should this target?";
     store.enqueue_with_session("supervisor", WORKER, answered, SESSION).unwrap();
     assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
@@ -1847,7 +1857,7 @@ fn cas_6ccb_a_reply_to_the_sender_ends_the_repeat() {
         .ack_delivered_for_recipient(&[WORKER], &["supervisor"], Some(SESSION), reply_at)
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let next_turn = worker.take_turn("continuing my work");
     assert!(!next_turn.contains(answered), "{next_turn}");
 }
@@ -1863,7 +1873,7 @@ fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
     let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
 
     worker.start_turn("working through cas-x");
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let body = "Ship the dedupe, then close the issue.";
     let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
     assert!(store.claim_recipient_transport(id, WORKER).unwrap());
@@ -1871,7 +1881,7 @@ fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
     // The agent polls the row by the id its pointer named.
     assert_eq!(store.poll_named_for_recipient(WORKER, Some(SESSION), &[id]).unwrap().len(), 1);
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    next_millisecond();
     let woken = worker.take_turn(&wake);
     assert_eq!(woken.matches(body).count(), 0, "{woken}");
     assert!(woken.contains(&format!("[not acknowledged] Message #{id}")), "{woken}");

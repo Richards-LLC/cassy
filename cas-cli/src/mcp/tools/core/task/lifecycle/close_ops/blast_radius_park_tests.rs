@@ -1253,10 +1253,8 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         }
         // The synced target changes compiled crate inputs: an old receipt
         // cannot be reused through the documentation-only proof shortcut.
-        let lib = repo.join("crates/widget/src/lib.rs");
-        let body = std::fs::read_to_string(&lib).unwrap();
-        std::fs::write(lib, format!("{body}pub const SYNCED: bool = true;\n")).unwrap();
-        git(repo, &["add", "crates/widget/src/lib.rs"]);
+        std::fs::write(repo.join("crates/widget/src/embedded.md"), "synced compiled input\n").unwrap();
+        git(repo, &["add", "crates/widget/src/embedded.md"]);
         git(repo, &["commit", "-q", "-m", "fix(cas-a0b1): target update"]);
         git(repo, &["push", "-q", "origin", "main"]);
         git(&f.worker_path, &["rebase", "origin/main"]);

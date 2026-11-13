@@ -585,7 +585,6 @@ function mountConversation(key: string, mount: HTMLElement): void {
       phase: () => livePhase(statuses.get(threadKey)?.supervisor_phase, {
         connected: conversationConnection(threadMachineId, threadSession)?.phase === "live" && !conversationConnection(threadMachineId, threadSession)?.authFailure,
         stale: statusFailures.has(threadKey) || conversationConnection(threadMachineId, threadSession)?.degraded === true,
-        daemonRunning: (statuses.get(threadKey)?.session as { is_running?: boolean } | undefined)?.is_running,
         waiting: waitingOnOperator(history) > 0,
         working: working(),
         now: performance.now(), receivedAt: statusReceivedAt.get(threadKey),

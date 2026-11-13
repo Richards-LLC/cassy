@@ -2244,9 +2244,6 @@ dialog form > *,
 .thread .conversation-attachment { margin-top: 8px; }
 .thread .conversation-attachment a { color: inherit; }
 .thread :is(.working, .phase-line) { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
-.thread .phase-line[data-state="busy"] { color: var(--state-warn); }
-.thread .phase-line[data-state="idle"] { color: var(--state-ok); }
-.thread .phase-step { overflow-wrap: anywhere; }
 .thread .phase-clock { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .thread .phase-line[data-active="false"] .dots i { animation: none; }
 .thread .dots { display: flex; gap: 4px; }

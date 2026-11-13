@@ -109,7 +109,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("remind_message", "Text; ask: deadline default."),
     ("remind_delay_secs", "Reminder/ask deadline in seconds."),
     ("remind_event", "task_*|worker_idle|epic_completed|epic_split_decided|ci_completed|branch_contained_in|tag_exists; external: cross_session=true."),
-    ("remind_filter", "split {\"split_id\":\"<id>\"}; branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"ci.yml\"} (workflow optional: exact display name, file path or numeric GitHub ID, resolved before registration); task {\"task_id\":\"cas-1234\"}."),
+    ("remind_filter", "split {\"split_id\":\"<id>\"}; branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\"}; optional workflow: name/file/ID; task {\"task_id\":\"cas-1234\"}."),
     ("remind_id", "remind_cancel: reminder id."),
     ("remind_ttl_secs", "TTL default 3600 (task-bound 0); external default 604800; 0=never."),
     ("cross_session", "remind: survive session/task end."),

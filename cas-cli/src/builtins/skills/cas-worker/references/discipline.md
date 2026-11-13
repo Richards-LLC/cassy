@@ -71,6 +71,13 @@ committed first and backgrounded with a Git-ignored log; the hook's refusal name
 the exact shapes. Otherwise run the project's own targeted test commands
 directly and record their exit status and test count.
 <!-- cas-src:end -->
+Park requires five consecutive capped passes at the exact tip for new or changed
+test functions. The Rust runner repeats only those functions in the requested
+selection automatically. For Vitest, Jest or Playwright, use
+`cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`.
+The receipt includes the repeated source identities; park reads it without
+running tests. A failure stops the run: fix or delete the test before a new run.
+
 Before rewording user-facing text, grep the tests for the old wording. Measure
 a size or count claim on a real tree as well as a fixture. List each module run
 in the close reason.

@@ -213,7 +213,9 @@ pub(crate) fn selected(repo: &Path, base: &str, head: &str, test: &TargetedTest)
 }
 
 pub(crate) fn repeat_filter(tests: &[Test]) -> String {
-    tests.iter().map(|test| if test.parameterized { format!("test({}::)", test.identity.name) }
+    tests.iter().map(|test| if test.parameterized {
+        format!("test(/^{}(?:::|$)/)", regex::escape(&test.identity.name))
+    }
         else { format!("test(={})", test.identity.name) }).collect::<Vec<_>>().join(" | ")
 }
 

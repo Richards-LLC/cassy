@@ -158,10 +158,6 @@ fn cas_bb7e_qa_reviewers_load_verification_in_worker_contract() {
     ] {
         let contract = cas_mux::rendered_contract_surface(harness, cas_mux::ContractRole::Worker);
         assert!(
-            contract.contains(&format!("{prefix}verification")),
-            "{contract}"
-        );
-        assert!(
             contract.contains(&format!("{prefix}verification action=qa_record")),
             "{contract}"
         );

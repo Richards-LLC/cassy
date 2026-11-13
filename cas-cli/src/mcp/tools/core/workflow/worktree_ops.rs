@@ -4236,6 +4236,13 @@ impl CasCore {
         }
         let local_ref = format!("refs/heads/{branch}");
         match git.resolve_commit(&local_ref) {
+            Some(local) if local != anchor && anchor == recorded_anchor
+                && git.is_ancestor(&local, &anchor) => {
+                // A peer re-park may update task/origin before this hydrated ref.
+                // Advance only to that anchor, with CAS and checkout protection.
+                git.advance_local_branch(branch, &local, &anchor)
+                    .map_err(|error| refuse(format!("cannot update local {branch}: {error}")))?;
+            }
             Some(local) if local == recorded_anchor && anchor != recorded_anchor => {
                 // Only the exact retired anchor may be moved. Git refuses a
                 // branch checked out in any worktree; never reset that checkout.

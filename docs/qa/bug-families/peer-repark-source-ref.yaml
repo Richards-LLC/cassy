@@ -1,0 +1,3 @@
+title: Anchored peer re-parks advance stale ancestor refs while divergent local work remains protected
+tasks: [cas-8eb3]
+journeys: [FACTORY-MERGE]

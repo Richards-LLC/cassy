@@ -3861,6 +3861,38 @@ mod tests {
     }
 
     #[test]
+    fn open_artifact_scope_repair_keeps_status_and_revision_guards_cas_3ff6() {
+        for (reviewed, raced) in [(true, false), (false, false), (true, true)] {
+            let dir = TempDir::new().unwrap();
+            let store = SqliteTaskStore::open(dir.path()).unwrap();
+            store.init().unwrap();
+            let mut task = Task::new("cas-8156".into(), "Artifact design".into());
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some("artifact:art-current-design".into());
+            task.deliverables.work_target_cleared = reviewed;
+            task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+            store.add(&task).unwrap();
+            let mut corrected = store.get(&task.id).unwrap();
+            let expected = corrected.updated_at;
+            corrected.deliverables.factory_branch_anchor = None;
+            corrected.deliverables.work_target_cleared = true;
+            corrected.updated_at = Utc::now();
+            if raced {
+                let mut newer = store.get(&task.id).unwrap();
+                newer.title = "Concurrent update".into();
+                store.update(&newer).unwrap();
+            }
+            let result = correct_parked_delivery_proof_scope(
+                dir.path(), &corrected, expected, "supervisor", "Retire measured documentation source",
+            );
+            assert_eq!(result.is_ok(), reviewed && !raced, "{result:?}");
+            let saved = store.get(&task.id).unwrap();
+            assert_eq!(saved.status, TaskStatus::Open);
+            assert_eq!(saved.deliverables.factory_branch_anchor.is_none(), reviewed && !raced);
+        }
+    }
+
+    #[test]
     fn exact_sha_observation_allows_proof_targets_correction_with_unmerged_delivery() {
         let dir = TempDir::new().unwrap();
         let task_store = SqliteTaskStore::open(dir.path()).unwrap();

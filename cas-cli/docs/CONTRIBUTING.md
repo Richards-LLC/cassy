@@ -5140,7 +5140,10 @@ completed impact failure still refuses, and missing freeze or check evidence
 falls back to ordinary lane admission. After publishing the merge, Cassy
 cancels that lane run only when its remaining unfinished jobs are all impact
 jobs; a failed cancel does not undo the merge
-(`worktree_ops/frozen_train_ci.rs`). Task create retargets new work aimed at a
+(`worktree_ops/frozen_train_ci.rs`). A cut train also admits its own nonterminal
+`release-repair` child while its freeze is active and its red is recorded; this leaves
+both cut and freeze markers intact, and ordinary work, another train's repair and
+repairs without red evidence remain refused. Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), through the operator's Commander

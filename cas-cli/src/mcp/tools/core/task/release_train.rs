@@ -214,6 +214,8 @@ pub(crate) fn mark_cut_trains(
 /// A frozen train (cas-2f4d) admits only repairs of its red.
 // gate[G-100 merge-admission integrity]: Release train cut or frozen (merge refused)
 pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
+    use crate::mcp::tools::core::workflow::release_freeze;
+
     let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
     for train in store.list(None).map_err(|error| error.to_string())? {
         if !is_cut_train(&train) {
@@ -223,12 +225,23 @@ pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&st
         if super::repo_context::effective_epic_ref(cas_root, lane) != target {
             continue;
         }
+        // A cut ejected for red CI must still take its own repair. Keep both
+        // control markers and let the freeze gate verify/audit the red below.
+        if release_freeze::active(cas_root, &train).is_some()
+            && let Some(task) = task_id.and_then(|id| store.get(id).ok())
+            && !task.is_terminal()
+            && task.labels.iter().any(|label| label == release_freeze::REPAIR_LABEL)
+            && store.get_parent_epic(&task.id).map_err(|error| error.to_string())?
+                .is_some_and(|parent| parent.id == train.id)
+        {
+            continue;
+        }
         return Err(crate::gates::tag("G-100", format!(
             "RELEASE TRAIN CUT: {target} ({}) is frozen and accepts no further merges. No merge was attempted. Retarget unfinished work to the next train before retrying worktree_merge.",
             train.id
         )));
     }
-    crate::mcp::tools::core::workflow::release_freeze::check_merge(cas_root, target, task_id)
+    release_freeze::check_merge(cas_root, target, task_id)
 }
 
 /// A frozen train keeps its own work but takes no new tasks (cas-2f4d).

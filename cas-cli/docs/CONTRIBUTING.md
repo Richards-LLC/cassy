@@ -169,7 +169,10 @@ is not a declaration on the peer ask; use the explicit message header above.
 The hold applies to the sender's `worktree_merge`, protected PR arming and raw `gh pr merge`.
 If a raw PR merge cannot resolve its PR number, a valid explicit hold still fails closed;
 an unscoped question does not block it. Existing linked or unambiguous typed peer answers
-clear scoped asks. Ambiguous answers remain visible with their reply ID for linking; a
+clear scoped asks. An incoming peer message with an exact Cloud `in_reply_to`
+resolves its outgoing ask before wake-kind filtering, including quiet build-route
+answers. Quiet, status and receipt messages without that link still cannot answer
+an ask implicitly. Ambiguous answers remain visible with their reply ID for linking; a
 `PEER ASK OVERRIDE <ask-id>: <reason>` task note permits an audited override as before.
 
 ## Worker contracts across machines

@@ -480,7 +480,6 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
         let Some(reply) = parse_envelope(&prompt) else { continue; };
         if source != format!("peer:{}@{}", reply.sender_name, reply.machine)
             || !seen.insert(reply.id.clone())
-            || matches!(reply.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet | PeerMessageKind::Status))
         {
             continue;
         }
@@ -509,6 +508,11 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
                     }
                 }
             }
+            continue;
+        }
+        // Wake intent must not discard an explicit Cloud answer link. These
+        // kinds still cannot answer an ask through implicit correlation.
+        if matches!(reply.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet | PeerMessageKind::Status)) {
             continue;
         }
         let candidates: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {

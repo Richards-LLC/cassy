@@ -38,6 +38,7 @@ fn denial(output: HookOutput) -> Option<String> {
 
 fn assert_operator_credential_refusal(output: HookOutput, attempt: &str) {
     let reason = denial(output).unwrap_or_else(|| panic!("worker access was allowed: {attempt}"));
+    assert!(reason.contains("[H-09]"), "{attempt}: {reason}");
 }
 
 fn role_env(role: &str) -> (TestEnvGuard, tempfile::TempDir) {
@@ -279,7 +280,7 @@ PY"#;
 
 #[test]
 fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
-    let (_env, _config_home) = role_env("worker");
+    let (mut env, _config_home) = role_env("worker");
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
     let store = home.join(".config/neonctl");
     std::fs::create_dir_all(&store).unwrap();
@@ -287,6 +288,7 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     // From a project dir, as a worker runs it; the fixture's config home is
     // itself a store parent.
     let project = tempfile::tempdir().unwrap();
+    env.set("CAS_CLONE_PATH", project.path());
     let cwd = &project;
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     // GH #1838 and GH #1700: names only, no file is opened.

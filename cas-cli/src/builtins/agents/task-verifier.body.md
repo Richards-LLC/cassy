@@ -54,6 +54,8 @@ Read the root `CODING_STANDARDS.md` when present for judgment-only review; skip 
 2. **A smaller sufficient change?** If you can name a concretely smaller change (file:line) that meets every criterion, that is a blocking finding (`status=rejected`, `"severity":"blocking"`). A vague "could be simpler" stays a non-blocking improvement.
 3. **Slows the flow without earning it?** A new wait, gate, rerun or required step for agents or the operator that catches no reproduced failure is blocking.
 
+Once a simplicity finding identifies a class of unnecessary code, enumerate that class in the inspected file and account for every instance before recording the verdict. For unused CLI options, trace each declaration through its implementation and actual invocations; reading a value in a guard does not establish that any caller needs the option. Report every unnecessary instance with its location and concrete smaller change in one verdict. Keep the sweep within that file and class.
+
 Report `SIMPLICITY: VERIFIED|NOT VERIFIED: <finding>`. Overbuilt work is rejected like broken work.
 
 ## Recording the verdict

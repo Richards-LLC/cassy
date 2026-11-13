@@ -3211,6 +3211,7 @@
     ],
     "skills/cas-test-audit/SKILL.md": [
       "0dce056bb5ccedc1f50e210d065040187ec0d49b013351f860ecbb86531b1ea2",
+      "6872aa02a587c4ea8256e7e440c940c91b0cd235a2aef74206eec02f611d07ed",
       "8cb32876246b6be2c6474aff954577b48fd1cbdcc3ff27ea0a6c51ac16c556a8"
     ],
     "skills/cas-test-audit/references/ci-timing.md": [
@@ -3218,10 +3219,18 @@
     ],
     "skills/cas-test-audit/references/detectors.md": [
       "43b1f66f234eba5ab7e5b33fc0471c5dd33026815761d7c7ec6a8a5b36a681e2",
-      "6c30c3b7afda2d9cdd2a93a8e6953efa98a1014c7ad8310db0a4c49b7c6a05f1"
+      "6c30c3b7afda2d9cdd2a93a8e6953efa98a1014c7ad8310db0a4c49b7c6a05f1",
+      "a7ba1371238c2367c614d70eec454fb2325916e0d1060f63c96542b537173082"
     ],
     "skills/cas-test-audit/references/ledger.md": [
+      "3fdaaa242812aaede24b93bc83ef821a8aad1a1e0054f8760a48b4d4a8743c12",
       "4e63d3eea21fd1b794e81a7ea22ad43e4d4458a8649e498a3efe675f0dd7574b"
+    ],
+    "skills/cas-test-audit/scripts/audit.py": [
+      "61e58f6da9037c2ea7b814cf46ace9746c4fd4d8b24809ad0e4ed52fddaed019"
+    ],
+    "skills/cas-test-audit/scripts/history.py": [
+      "d7628fa5e4e7798bb7cb96bb6ee978fbfe046d88eadf714427d938837ec516b9"
     ],
     "skills/cas-to-questionnaire/SKILL.md": [
       "1232c0f5c1629f9e8f362dc1fbec6b62f3e7bdc66e6f47c37e2a6340edb39449",

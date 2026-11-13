@@ -99,7 +99,7 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     }
     let mut cwd = initial_cwd.to_path_buf();
     let mut directory_stack = Vec::new();
-    // Nested shells are not listings or filters, so their payloads never
+    // Nested shells are not standalone listings, so their payloads never
     // reach here with inert names.
     let names_inert = depth == 0 && listed_names_stay_inert(command);
     let statements = super::pre_tool::shell_statement_words(command);
@@ -367,28 +367,17 @@ fn find_lists_names_only(args: &[String]) -> bool {
     true
 }
 
-/// Listed names stay names only while nothing can turn one into a file
-/// read: every statement runs a listing or a stdin text filter, and no
-/// substitution can splice a name into another command's argv. `xargs`,
-/// `read` loops, interpreters and nested shells all keep the old refusal.
+/// Only a standalone listing (optionally redirected to a file) qualifies.
+/// A pipeline consumer can open the listed files, even when it also works
+/// as a text filter (`sort --files0-from=-`). Substitutions can likewise
+/// turn names into file operands. Leave those forms to normal inspection.
 fn listed_names_stay_inert(command: &str) -> bool {
-    if command.contains("$(") || command.contains('`') || command.contains("<(") {
+    if command.contains("$(") || command.contains('`') || command.contains("<(")
+        || command.contains(">(")
+    {
         return false;
     }
-    super::pre_tool::shell_statement_words(command).iter().all(|words| {
-        let Some(index) = super::pre_tool::executable_word_index(words) else {
-            return true;
-        };
-        let name = Path::new(&words[index])
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&words[index]);
-        matches!(
-            name,
-            "cd" | "rg" | "find" | "grep" | "egrep" | "fgrep" | "head" | "tail" | "sort"
-                | "uniq" | "wc" | "cut" | "tr"
-        )
-    })
+    super::pre_tool::shell_statement_words(command).len() == 1
 }
 
 fn cwd_is_store_or_parent(cwd: &Path) -> bool {

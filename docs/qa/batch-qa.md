@@ -76,6 +76,11 @@ owned by release review, its exact-anchor coverage also satisfies deferred
 batch debt. It does not replace Tier 2 probes or a dedicated review. A verdict recorded after an expired dispatch supersedes
 that old wait; live or newer dispatches and rejected verdicts retain authority.
 
+The release cut records the close preview, including missing release reviews,
+without waiting for that verdict. An all-held preview can still be tracked and
+admitted to the merge queue. Publication does not manufacture an approval:
+review gaps continue to hold delivery closure until the verdict covers them.
+
 For a release verdict, omit `task_ids` and `staging_sha`: Cassy derives them
 from the published ledger's `covers:` and `build:` headers. Scaffolding with
 `--release-scope` fills those headers from the release inventory and reviewed

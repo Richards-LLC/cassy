@@ -95,12 +95,7 @@ impl ReleasePreview {
         value
     }
 
-    fn allow_cut(&self) -> Result<()> {
-        ensure!(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0),
-            "release cut refused: {} members, zero would-close; by_reason {:?}; review_missing {:?}",
-            self.members, self.by_reason, self.review_missing);
-        Ok(())
-    }
+
 }
 
 fn preview_scope(root: &Path, repo: &Path, scope: ReleaseScope) -> Result<ReleasePreview> {
@@ -410,7 +405,7 @@ fn track_on_train(
         crate::gates::tag("G-121", "cut report proof differs from the recorded member reference"));
     let mut rebuilt = ReleasePreview::from_members(scope.clone(), preview.members_by_id.clone());
     rebuilt.candidate_build_seconds = preview.candidate_build_seconds;
-    rebuilt.allow_cut()?;
+    // The preview records closure debt; publication and its verdict resolve it.
     crate::release_reconcile::record_preview(root, repo, scope, serde_json::to_value(&rebuilt)?)
         .map_err(anyhow::Error::msg)?;
     // This is the cut boundary, before push/enqueue and independent of

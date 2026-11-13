@@ -451,18 +451,18 @@ def observe(args):
     run = latest.get(head)
     if getattr(args, 'command', None) == 'check' and (not run or run['status'] != 'completed'
                                    or run['conclusion'] in ('cancelled', 'skipped')):
-        # Walk nearest first. Every intervening commit must be release assets,
-        # including edits later reverted; a net diff could hide source changes.
-        for ancestor in git(args.repo, 'rev-list', '--first-parent', head).splitlines()[1:]:
+        # Walk nearest first, checking each commit so a reverted source edit
+        # cannot hide in a net diff. Our validated version preparation may sit
+        # between a documentation follow-up and its original green source.
+        for ancestor in git(args.repo, 'rev-list', '--first-parent', head).splitlines():
             candidate = latest.get(ancestor)
-            if not candidate or candidate['status'] != 'completed' or candidate['conclusion'] != 'success':
-                continue
-            paths = git(args.repo, 'log', '--format=', '--name-only', '--no-renames',
-                        '--diff-merges=first-parent', f'{ancestor}..{head}').splitlines()
-            if not all(release_asset(path) for path in paths if path):
+            if candidate and candidate['status'] == 'completed' and candidate['conclusion'] == 'success':
+                head, run = ancestor, candidate
                 break
-            head, run = ancestor, candidate
-            break
+            paths = git(args.repo, 'diff-tree', '--root', '--no-commit-id', '--name-only',
+                        '--no-renames', '-r', '-m', '--first-parent', ancestor).splitlines()
+            if not all(release_asset(path) for path in paths) and not prepared(args.repo, ancestor):
+                break
     state = {**previous, 'branch': branch, 'head': head, 'outcome': 'PENDING'}
     if not run or run['status'] != 'completed' or run['conclusion'] in ('cancelled', 'skipped'):
         write(state_path, state)

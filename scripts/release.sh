@@ -335,7 +335,8 @@ prepare() {
         [[ -f "$notes_file" ]] || die "--notes file not found: $notes_file"
     fi
     if [[ -n "$prepared_commit" && "$current" == "$version" ]] && grep -q "^## \[$version\] - " CHANGELOG.md \
-        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]]; then
+        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]] \
+        && git diff --quiet HEAD -- .claude/CODEMAP.md; then
         mapfile -t prepared_drafts < <(git ls-files "docs/release-notes/*-v$version-slack.md")
         if ((${#prepared_drafts[@]} == 1)); then
             lint_release_draft "${prepared_drafts[0]}"

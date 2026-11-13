@@ -2716,6 +2716,16 @@ Merge-queue proof reuse accepts successful completed `merge_group` runs from
 colon. Repository identities, queue branch, exact tree receipt and landed
 containment remain mandatory.
 
+Release cuts accept the nearest green train ancestor when all intervening commits
+change only the release assets recognized by `scripts/train-ci.py`. This includes
+CODEMAP, changelog, notes, release reports and per-task doc fragments. Source
+changes, even if reverted later, require fresh proof. The receipt still needs
+matching run identity, complete logs, successful full-set jobs and the current
+main baseline. Normal train observation continues to report the exact tip.
+A pending `.claude/CODEMAP.md` edit can ride the release commit without a
+separate train commit. Release review gaps remain in the saved preview; they
+hold delivery closure after publication, while the cut proceeds to the merge queue.
+
 Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
 Name cached or recorded state as such; a successful mutation does not establish
 that its follow-up, release publication, or installation on another host completed.

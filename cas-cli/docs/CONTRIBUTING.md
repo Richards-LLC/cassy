@@ -2292,11 +2292,15 @@ spawn/reuse means enforcement is not proven.
 
 At park, `receipt_scope::park_refusal` reads passing capped test receipts for
 every changed Rust crate; missing tests produce `FOCUSED PROOF REQUIRED`.
-A fresh park evaluates focused proof at the measured pushed source tip, not
-an older commit-time checkpoint. A rebase that restores the checkpoint through
+A fresh park on an owned per-task branch evaluates focused proof at the measured
+pushed source tip, not an older commit-time checkpoint. A rebase that restores the checkpoint through
 an identical-tree merge uses the same patch, ownership and sibling checks as
 a parked retry. An unattributable advance reports its attribution refusal
-before proof advice; it never asks for tests at the older checkpoint.
+before proof advice; it never asks for tests at the older checkpoint. A shared
+lane that intentionally retains task A's boundary while task B is stacked above
+it still parks and scopes proof to A. Ordinary shared-lane corrections retain
+their subject-ownership checks; a foreign task named in the subject cannot be
+adopted by mentioning this task in the commit body.
 Park executes neither checks nor tests. Local fast-row receipts are not park
 proof because workers can write them, and park reads no fast-row exception
 file. CI runs the fast rows before merge admission; the pre-push hook provides

@@ -7146,7 +7146,15 @@ impl CasCore {
         // A rebase followed by an identical-tree merge restores the old
         // checkpoint as a side parent. Reuse the parked delivery's positive
         // patch/ancestry proof, rather than silently keeping that checkpoint.
+        // Only that merge shape needs this exception. Ordinary shared-lane
+        // continuations retain the stricter fresh subject-ownership checks.
         let advance = advance || (task.status == TaskStatus::InProgress && named_final_tip
+            && resolve_branch_sha(repo_path, &format!("{tip}^1")).is_some_and(|rebased| {
+                restored_anchor_merge_is_attributable(
+                    repo_path, recorded, &rebased, &tip, &task.id,
+                    self.sibling_lease_boundary(task_store, task),
+                )
+            })
             && self.eligible_same_delivery_advance(
                 task_store, task, repo_path, parent_branch, Some(&tip),
             ).as_deref() == Some(tip.as_str()));
@@ -9549,10 +9557,17 @@ impl CasCore {
                             }
                         }
                     }
-                    // A fresh checkpoint that cannot advance needs the same
-                    // attribution refusal as a parked retry, before proof is
-                    // read. Other collected refusals did not attempt advance.
-                    if (task.status == TaskStatus::AwaitingMerge || gate_refusals.is_empty())
+                    // A per-task branch identifies the delivery being replaced.
+                    // A shared lane can deliberately retain task A's boundary
+                    // while task B is stacked above it; that is still a valid park.
+                    let own_task_branch = measured_branch.as_deref().is_some_and(|branch| {
+                        task.assignee.as_deref().is_some_and(|assignee| {
+                            branch.strip_prefix("origin/").unwrap_or(branch)
+                                == crate::factory_isolation::worker_task_branch(assignee, &task.id)
+                        })
+                    });
+                    if (task.status == TaskStatus::AwaitingMerge
+                        || (own_task_branch && gate_refusals.is_empty()))
                         && tip_is_pushed
                         && let (Some(recorded), Some(tip)) = (
                             task.deliverables.factory_branch_anchor.as_deref(), anchor.as_deref(),
@@ -9594,8 +9609,10 @@ impl CasCore {
                     // fix them; cas-d6eb: the blast-radius module check before
                     // parking locks the proof scope.
                     // A refused attempt skips speculative anchor advancement, but
-                    // still checks proof against the pushed tip, not its old anchor.
-                    let receipt_tip = if task.status == TaskStatus::AwaitingMerge
+                    // still checks proof against the pushed tip on an owned task
+                    // branch. A deliberately retained shared-lane boundary keeps
+                    // proof scoped to that delivery, not its stacked successor.
+                    let receipt_tip = if (task.status == TaskStatus::AwaitingMerge || !own_task_branch)
                         && tip_is_pushed && gate_refusals.is_empty()
                     {
                         park_anchor.as_deref()

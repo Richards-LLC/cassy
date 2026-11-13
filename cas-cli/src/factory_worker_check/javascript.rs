@@ -319,9 +319,9 @@ mod tests {
     #[test]
     fn javascript_discovery_selects_changed_functions_and_rejects_dynamic_names() {
         let source = "\ndescribe('group', () => {\n  test('unchanged', () => {\n    expect(1).toBe(1);\n  });\n  test('changed', () => {\n    expect(2).toBe(2);\n  });\n});\n";
-        assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "group changed")]);
+        assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", &["group", "changed"].join(" "))]);
         assert_eq!(source_tests("a.test.ts", source, &[(2, 2)]).unwrap(),
-            [id("a.test.ts", "group unchanged"), id("a.test.ts", "group changed")]);
+            [id("a.test.ts", &["group", "unchanged"].join(" ")), id("a.test.ts", &["group", "changed"].join(" "))]);
         for source in ["test(title, () => {});", "describe(title, () => { test('child', () => {}); });",
             "test.each([1, 2])('row %i', () => {});"] {
             assert!(source_tests("a.test.ts", source, &[(1, 1)]).is_err(), "{source}");

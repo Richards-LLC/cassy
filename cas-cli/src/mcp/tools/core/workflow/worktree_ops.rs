@@ -4236,6 +4236,13 @@ impl CasCore {
         }
         let local_ref = format!("refs/heads/{branch}");
         match git.resolve_commit(&local_ref) {
+            Some(local) if local != anchor && anchor == recorded_anchor
+                && git.is_ancestor(&local, &anchor) => {
+                // A peer re-park may update task/origin before this hydrated ref.
+                // Advance only to that anchor, with CAS and checkout protection.
+                git.advance_local_branch(branch, &local, &anchor)
+                    .map_err(|error| refuse(format!("cannot update local {branch}: {error}")))?;
+            }
             Some(local) if local == recorded_anchor && anchor != recorded_anchor => {
                 // Only the exact retired anchor may be moved. Git refuses a
                 // branch checked out in any worktree; never reset that checkout.
@@ -9401,5 +9408,42 @@ mod cas_6b42_peer_delivery_tests {
             .expect("the synced peer delivery resolves from origin");
         assert_eq!((remote.branch.as_str(), remote.anchor.as_str()), (branch, anchor.as_str()));
         assert_eq!(git(&repo, &["rev-parse", branch]), anchor, "bound at the recorded tip");
+
+        // Peer re-parks after rework: origin and the new task anchor advance,
+        // but the merge machine still has the previously hydrated local ref.
+        let publisher = dir.path().join("peer");
+        git(dir.path(), &["clone", "-q", "-b", branch, origin.to_str().unwrap(), publisher.to_str().unwrap()]);
+        std::fs::write(publisher.join("startup.rs"), "reworked\n").unwrap();
+        git(&publisher, &["commit", "-qam", "peer rework"]);
+        let reworked = git(&publisher, &["rev-parse", "HEAD"]);
+        git(&publisher, &["push", "-q", "origin", branch]);
+        task.deliverables.factory_branch_anchor = Some(reworked.clone());
+        core.open_task_store().unwrap().update(&task).unwrap();
+        let source = core.task_merge_source(&repo, Some(&task), "lively-eagle-82").unwrap();
+        let remote = core.prepare_remote_merge_source(&manager, Some(&task), "lively-eagle-82",
+            Some(false), source.as_ref()).expect("a stale ancestor ref must follow the anchored peer re-park").unwrap();
+        assert_eq!(remote.anchor, reworked);
+        assert_eq!(git(&repo, &["rev-parse", branch]), reworked);
+
+        // Independent local and peer commits must still refuse, preserving
+        // the local work instead of resetting it to the newer remote anchor.
+        git(&repo, &["checkout", "-q", branch]);
+        std::fs::write(repo.join("local-only.rs"), "local work\n").unwrap();
+        git(&repo, &["add", "local-only.rs"]);
+        git(&repo, &["commit", "-qm", "local follow-up"]);
+        let local = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(publisher.join("startup.rs"), "next peer rework\n").unwrap();
+        git(&publisher, &["commit", "-qam", "next peer rework"]);
+        let peer = git(&publisher, &["rev-parse", "HEAD"]);
+        git(&publisher, &["push", "-q", "origin", branch]);
+        task.deliverables.factory_branch_anchor = Some(peer.clone());
+        core.open_task_store().unwrap().update(&task).unwrap();
+        let source = core.task_merge_source(&repo, Some(&task), "lively-eagle-82").unwrap();
+        let refused = core.prepare_remote_merge_source(&manager, Some(&task), "lively-eagle-82",
+            Some(false), source.as_ref()).err().expect("divergent local work must be retained");
+        assert!(refused.message.contains("[G-96]"));
+        assert_eq!(git(&repo, &["rev-parse", branch]), local);
+        assert_eq!(git(&repo, &["rev-parse", &format!("origin/{branch}")]), peer);
     }
 }

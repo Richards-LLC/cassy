@@ -1958,6 +1958,10 @@ mod tests {
 
     #[test]
     fn disk_pressure_threshold_and_last_sweep_cas_d740() {
+        let last = crate::artifacts::retention::host::SweepReport { at: 1_000, applied: true, used_percent: 70, ..Default::default() };
+        for (percent, idle, now, due) in [(80, false, 1_001, false), (81, false, 1_001, true), (70, true, 1_001, false), (70, true, 1_300, true)] {
+            assert_eq!(crate::artifacts::retention::host::automatic_due(Some(&last), percent, idle, now), due);
+        }
         for (percent, warning) in [(79, false), (80, false), (81, true), (84, true)] {
             let mut facts = healthy_facts();
             facts.disk_percent = Some(percent);

@@ -133,6 +133,10 @@ mod tests {
                 let path = artifacts.join(&id);
                 std::fs::create_dir_all(&path).unwrap();
                 std::fs::write(path.join("proof.txt"), b"fixture proof").unwrap();
+                let modified = std::time::SystemTime::now() - Duration::from_secs(age as u64 * 86400);
+                for item in [path.join("proof.txt"), path.clone()] {
+                    std::fs::File::open(item).unwrap().set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+                }
                 if suffix == "old" { expired.push(path); } else { kept.push(path); }
                 if matches!(suffix, "cited" | "release") {
                     cas_store::SqliteArtifactStore::open(&root).unwrap().record_local(&cas_store::NewArtifact {
@@ -215,6 +219,14 @@ mod tests {
                 }
                 if old && !cited { expired.push(path); } else { kept.push(path); }
             }
+        }
+        #[cfg(unix)]
+        {
+            let external = env.home().join("outside-retention");
+            std::fs::create_dir_all(&external).unwrap();
+            std::fs::write(external.join("proof.txt"), "must survive").unwrap();
+            std::os::unix::fs::symlink(&external, roots[0].join("scratch/linked")).unwrap();
+            kept.push(external);
         }
         env.set_current_dir(roots[0].parent().unwrap());
         env.set("CAS_ROOT", &roots[0]);

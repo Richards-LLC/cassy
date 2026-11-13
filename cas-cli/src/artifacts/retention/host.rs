@@ -186,6 +186,8 @@ struct Candidate {
     category: String,
     path: PathBuf,
     keys: Vec<String>,
+    #[serde(default)]
+    preserve: Option<String>,
 }
 
 fn cited(candidate: &Candidate, refs: &References) -> bool {
@@ -225,13 +227,14 @@ fn git(path: &Path, args: &[&str], deadline: Instant) -> Result<String> {
 }
 
 struct Tree { bytes: u64, newest: SystemTime, repositories: Vec<PathBuf> }
-fn inspect_tree(path: &Path, deadline: Instant) -> Result<Tree> {
+fn inspect_tree(path: &Path, deadline: Instant, exclude: Option<&Path>) -> Result<Tree> {
     no_symlink_ancestors(path)?;
     let mut tree = Tree { bytes: 0, newest: SystemTime::UNIX_EPOCH, repositories: Vec::new() };
     let mut entries = walkdir::WalkDir::new(path).follow_links(false).into_iter();
     while let Some(entry) = entries.next() {
         ensure!(Instant::now() < deadline, "tree inventory budget exhausted");
         let entry = entry?;
+        if exclude == Some(entry.path()) { entries.skip_current_dir(); continue; }
         // Nested links are retained rather than trusting an age from a target.
         ensure!(!entry.file_type().is_symlink(), "symlink inside retention tree");
         let metadata = entry.metadata()?;
@@ -250,15 +253,16 @@ fn inspect_tree(path: &Path, deadline: Instant) -> Result<Tree> {
 fn candidates(project: &Project, refs: &References, now: DateTime<Utc>, deadline: Instant) -> Result<Vec<(Candidate, Duration)>> {
     let mut found = Vec::new();
     let artifacts = cas_store::SqliteArtifactStore::open(&project.root)?;
-    for task in project.tasks.iter().filter(|task| task.is_terminal()
-        && task.closed_at.is_some_and(|closed| now.signed_duration_since(closed).num_days() >= ARTIFACT_DAYS)) {
+    for task in &project.tasks {
         ensure!(Path::new(&task.id).components().count() == 1 && !task.id.starts_with('.'), "invalid task directory");
         let mut keys = vec![task.id.clone()];
         for artifact in artifacts.list_for_task(&task.id)? {
             keys.push(artifact.id);
             keys.extend([artifact.cloud_artifact_id, artifact.cloud_url, artifact.slack_permalink].into_iter().flatten());
         }
-        found.push((Candidate { project: project.root.clone(), category: "artifacts".into(), path: project.artifacts.join(&task.id), keys }, Duration::ZERO));
+        found.push((Candidate { project: project.root.clone(), category: "artifacts".into(), path: project.artifacts.join(&task.id), keys,
+            preserve: (!(task.is_terminal() && task.closed_at.is_some_and(|closed| now.signed_duration_since(closed).num_days() >= ARTIFACT_DAYS)))
+                .then(|| "task is live, recently closed or has unknown close date".into()) }, Duration::from_secs(14 * 86400)));
     }
     for category in ["scratch", "review-scratch"] {
         for path in children(&project.root.join(category))? {
@@ -266,7 +270,7 @@ fn candidates(project: &Project, refs: &References, now: DateTime<Utc>, deadline
             if let Some(id) = path.file_name().and_then(|name| name.to_str()) {
                 keys.extend(project.tasks.iter().filter(|task| id.contains(&task.id)).map(|task| task.id.clone()));
             }
-            found.push((Candidate { project: project.root.clone(), category: category.into(), path, keys }, Duration::from_secs(86400)));
+            found.push((Candidate { project: project.root.clone(), category: category.into(), path, keys, preserve: None }, Duration::from_secs(86400)));
         }
     }
     for path in children(&project.root.join("worktrees"))? {
@@ -280,10 +284,10 @@ fn candidates(project: &Project, refs: &References, now: DateTime<Utc>, deadline
         if (owners.is_empty() && !branch.starts_with("factory/")) || owners.iter().any(|agent|
             crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent).is_live()) { continue; }
         let keys = vec![worker.to_string(), branch];
-        let source = Candidate { project: project.root.clone(), category: "worktrees".into(), path: path.clone(), keys: keys.clone() };
+        let source = Candidate { project: project.root.clone(), category: "worktrees".into(), path: path.clone(), keys: keys.clone(), preserve: None };
         if cited(&source, refs) { continue; }
         // Build output is regenerable even when an unpushed source branch is kept.
-        found.push((Candidate { project: project.root.clone(), category: "targets".into(), path: crate::factory_scratch::worker_target_dir(&path), keys }, Duration::ZERO));
+        found.push((Candidate { project: project.root.clone(), category: "targets".into(), path: crate::factory_scratch::worker_target_dir(&path), keys, preserve: None }, Duration::ZERO));
         found.push((source, Duration::ZERO));
     }
     Ok(found)
@@ -347,7 +351,7 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
         lock.try_lock_exclusive().context("host retention already running")?;
         lock
     } else { tempfile::tempfile()? };
-    let mut report = SweepReport { at: Utc::now().timestamp(), applied: apply, used_percent: disk_percent(cas).unwrap_or(0), ..Default::default() };
+    let mut report = SweepReport { at: Utc::now().timestamp(), applied: apply, used_percent: disk_percent(cas).unwrap_or(0).max(disk_percent(&crate::store::known_repos::host_cas_dir()).unwrap_or(0)), ..Default::default() };
     let (projects, refs) = match load_projects(cas, deadline) {
         Ok(snapshot) => snapshot,
         Err(error) => { report.errors.push(error.to_string()); report.incomplete = true; if apply { persist(&report)?; } return Ok(report); }
@@ -384,9 +388,11 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
             let mut row = Row { project: candidate.project.clone(), category: candidate.category.clone(), path: candidate.path.clone(), bytes: 0, reclaimed_bytes: 0, disposition: String::new() };
             let attempt = (|| -> Result<()> {
                 validate_candidate(&candidate, &projects)?;
-                ensure!(!cited(&candidate, &refs), "cited by live work or retained releases");
-                let tree = inspect_tree(&candidate.path, deadline)?;
+                let excluded = (candidate.category == "worktrees").then(|| crate::factory_scratch::worker_target_dir(&candidate.path));
+                let tree = inspect_tree(&candidate.path, deadline, excluded.as_deref())?;
                 row.bytes = tree.bytes;
+                ensure!(!cited(&candidate, &refs), "cited by live work or retained releases");
+                ensure!(candidate.preserve.is_none(), "{}", candidate.preserve.as_deref().unwrap_or_default());
                 ensure!(SystemTime::now().duration_since(tree.newest).unwrap_or_default() >= age, "inside retention window");
                 ensure!(!crate::factory_target_cache::review_output_in_use(&candidate.path, &lock), "live or unverifiable native process");
                 if apply {

@@ -330,8 +330,7 @@ dry_release_rebuilds_commander() {
 }
 check 'dry_release_rebuilds_commander' 'cas-56bbc: dry release commits Commander dist identical to a fresh post-bump build'
 
-# cas-4b33: shared docs are generated at the cut. A stale CODEMAP stops prep;
-# once regenerated, the release commit carries the compiled overview fragment.
+# Shared docs join the release commit without a separate train push.
 docs_generated_at_the_cut() {
     local fixture="$tmp/docs-cut" before status=0
     clone_epic "$fixture" epic/docs-cut docs-cut
@@ -343,17 +342,16 @@ docs_generated_at_the_cut() {
     git -C "$fixture" add docs && git -C "$fixture" commit --quiet -m 'overview and fragment'
     write_valid_draft "$tmp/docs-cut-draft.md"
     before="$(git -C "$fixture" rev-parse HEAD)"
-    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || status=$?
-    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
-        grep -q 'CODEMAP.md predates' "$tmp/docs-cut.log" || return 1
     printf '# Map\n\n- docs/ - overview\n' >"$fixture/.claude/CODEMAP.md"
-    git -C "$fixture" commit --quiet -am 'regenerate map'
-    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >>"$tmp/docs-cut.log" 2>&1 || return 1
+    # A pending map refresh must ride the release commit, without its own CI.
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD^)" == "$before" ]] &&
+        git -C "$fixture" show HEAD:.claude/CODEMAP.md | grep -q 'docs/ - overview' || return 1
     git -C "$fixture" show HEAD:docs/PRODUCT_OVERVIEW.md | grep -q 'Fragment pitch line.' &&
         ! git -C "$fixture" cat-file -e HEAD:docs/product-overview.d/cas-0006.md 2>/dev/null &&
         [[ -z "$(git -C "$fixture" status --porcelain)" ]]
 }
-check 'docs_generated_at_the_cut || { cat "$tmp/docs-cut.log"; false; }' 'cas-4b33: stale CODEMAP stops prep; the release commit carries compiled doc fragments'
+check 'docs_generated_at_the_cut || { cat "$tmp/docs-cut.log"; false; }' 'release commit folds a pending CODEMAP refresh and compiled doc fragments together'
 
 commander_build_failure_stops_release() {
     local fixture="$tmp/web-failure" before status=0
@@ -587,13 +585,24 @@ PY
     [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
     cp "$tmp/train-ci-green.json" "$FAKE_TRAIN_ARTIFACT/receipt.json"
     rm -rf "$fixture/.git/cas/train-ci"
+    mkdir -p "$fixture/.claude"
+    printf '# Updated map\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" add .claude/CODEMAP.md
+    git -C "$fixture" commit --quiet -m 'CODEMAP-only follow-up to green train'
+    before="$(git -C "$fixture" rev-parse HEAD)"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     after="$(git -C "$fixture" rev-parse HEAD)"
     [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
-    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]]
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]] || return 1
+    echo 'source needs fresh CI' >>"$fixture/train-ci.txt"
+    git -C "$fixture" commit --quiet -am 'source after green receipt'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    status=0
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]]
 }
-check 'train_receipt_cut' 'train cut requires green starting-tip receipt and reuses it on an unchanged prepared retry'
+check 'train_receipt_cut' 'train cut reuses green proof after CODEMAP-only work and prepared retries; source requires fresh proof'
 unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
@@ -679,18 +688,12 @@ cut_own_review_missing() {
     : >"$FAKE_GH_LOG"
     FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
-    # REVIEW_MISSING is the machine refusal identifier; a trailing gate frame
-    # must not hide its task IDs or turn the unrelated preview member into one.
-    refusal="$(grep -F 'REVIEW_MISSING' "$tmp/own-review.log" | tail -1)"
-    [[ "$status" == 1 ]] &&
-        grep -q 'cas-000a' <<<"$refusal" &&
-        grep -q 'cas-000b' <<<"$refusal" &&
-        ! grep -q 'cas-dead' <<<"$refusal" &&
-        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/own-review &&
-        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
-        ! grep -Eq '^pr (create|merge) ' "$FAKE_GH_LOG"
+    [[ "$status" == 0 ]] &&
+        [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/own-review)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
+        grep -q '^release track ' "$FAKE_CAS_LOG" &&
+        grep -q '^pr merge ' "$FAKE_GH_LOG"
 }
-check 'cut_own_review_missing' 'own included deliveries missing review refuse with their ids even when another member would close'
+check 'cut_own_review_missing' 'included deliveries missing release review still reach queue admission'
 
 cut_preview_gate() {
     local fixture="$tmp/preview-cut" status=0
@@ -700,12 +703,7 @@ cut_preview_gate() {
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
     FAKE_WOULD_CLOSE=0 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
-    [[ "$status" != 0 ]] &&
-        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
-        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
-        ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
-    : >"$FAKE_CAS_LOG"
-    FAKE_WOULD_CLOSE=1 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
+    [[ "$status" == 0 ]] && grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
     # cas-a6c8: receipts may already have closed all thirteen members.
     local closed_fixture="$tmp/already-closed-cut"
     clone_epic "$closed_fixture" epic/already-closed-cut already-closed-cut
@@ -717,7 +715,7 @@ cut_preview_gate() {
         grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
         grep -q '^release track .* --first-child ' "$FAKE_CAS_LOG"
 }
-check 'cut_preview_gate' 'cut refuses all-held members, permits all-already-closed members and keeps older-release residuals nonblocking'
+check 'cut_preview_gate' 'cut admits all-held and all-already-closed members and preserves the close preview'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

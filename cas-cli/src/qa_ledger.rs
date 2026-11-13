@@ -225,7 +225,14 @@ pub fn coverage(body: &str) -> Report {
 pub fn parse(body: &str, min_rows: usize) -> Report {
     let mut report = coverage(body);
     let mut declared_schema = false;
-    let cited = regex::Regex::new(r"\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[1-9][0-9]*\b").unwrap();
+    // Match complete path:line tokens, including extensionless sources,
+    // without accepting a URL suffix or a clock time as a citation.
+    let cited = regex::Regex::new(r#"(?x)
+        (?:^|[\s(\[`"'])
+        /?(?:[A-Za-z0-9_.-]+/)*
+        [A-Za-z0-9_.-]*[A-Za-z_][A-Za-z0-9_.-]*:[1-9][0-9]*
+        (?:$|[\s)\]`"',.;])
+    "#).unwrap();
     let user_outcome = regex::Regex::new(r"(?:^|;\s*)(?:visible|terminal|http):\s*[^;\s]").unwrap();
     let mut header = false;
     let mut matrix = false;
@@ -699,6 +706,11 @@ mod tests {
             ("schema: 2", "Revised hook [source: docs/guide.md:17]", "visible: revised card; readback: row saved", "PASS", None),
             ("schema: 2", "Created [source: docs/api.md:9]", "http: 201 created", "PASS", None),
             ("schema: 2", "Usage [source: docs/cli.md:3]", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage (skills/local-image/scripts/gen:213)", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage [source: README:3]", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage (skills/local-image/scripts/gen:0)", "terminal: Usage: app", "PASS", Some("expectation_source")),
+            ("schema: 2", "Usage at 12:30", "terminal: Usage: app", "PASS", Some("expectation_source")),
+            ("schema: 2", "Usage https://example.com/scripts/gen.py:213", "terminal: Usage: app", "PASS", Some("expectation_source")),
             ("schema: 2", "Hook [source: docs/guide.md:0]", "visible: revised card", "PASS", Some("expectation_source")),
             ("schema: 3", "Hook", "database: row saved", "PASS", Some("ledger_schema")),
             ("schema: 1", "Legacy expectation", "database: row saved", "PASS", None),

@@ -54,6 +54,7 @@ env:
   # default idle shutdown allows only 10s for active clients before exiting.
   SCCACHE_IDLE_TIMEOUT: "0"
   SCCACHE_GHA_VERSION: "cas-v2"
+  SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
   RELEASE_PROFILE: release-fast
   RELEASE_DIR: release-fast
 

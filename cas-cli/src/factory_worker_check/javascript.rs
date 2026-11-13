@@ -114,7 +114,8 @@ fn walk(node: Node<'_>, source: &str, path: &str, lines: &[(usize, usize)],
         if suite {
             let mut nested = suites.to_vec();
             if let Some(name) = name { nested.push(name); }
-            let callback = (0..args.named_child_count()).filter_map(|i| args.named_child(i))
+            let mut cursor = args.walk();
+            let callback = args.named_children(&mut cursor)
                 .find(|arg| matches!(arg.kind(), "arrow_function" | "function_expression"));
             let header_changed = lines.iter().any(|(start, end)| *end >= node.start_position().row + 1
                 && *start <= callback.map_or(node.start_position().row + 1, |cb| cb.start_position().row + 1));

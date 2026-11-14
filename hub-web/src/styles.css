@@ -815,6 +815,7 @@ main {
 .fleet-ops button.danger { color: var(--state-crit); }
 .fleet-ops .primary, .fleet-ops-header .primary { width: auto; min-height: var(--rail-item-min); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); cursor: pointer; }
 .fleet-ops-menu { display: grid; gap: var(--space-1); min-width: 12rem; padding: var(--space-2); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); z-index: 2; }
+.fleet-ops-epics[role="menu"] { max-block-size: min(20rem, 50dvh); overflow-y: auto; overflow-wrap: anywhere; }
 .fleet-ops-menu [role="menuitem"] { justify-self: stretch; text-align: left; border-color: transparent; }
 .fleet-ops-separator { height: var(--line-width); margin: var(--space-1) 0; background: var(--line-subtle); }
 .fleet-ops-reason, .fleet-ops-instruction { display: block; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
@@ -832,7 +833,7 @@ main {
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .fleet-ops-panel select { min-height: var(--rail-item-min); max-width: 100%; }
 /* cas-ab04: Write access — task, folder, modes and reason; then confirm. */
-.write-grant { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); align-items: stretch; }
+.write-grant, .fleet-ops-add-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); align-items: stretch; }
 .write-grant-field { display: grid; gap: var(--space-1); font-size: var(--fs-meta); color: var(--text-mid); }
 .write-grant-field select, .write-grant-field input { min-height: var(--rail-item-min); width: 100%; min-width: 0; box-sizing: border-box; padding: 0 var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-regular) var(--fs-base)/1.3 var(--font-ui); }
 .write-grant-path { font-family: var(--font-mono); }
@@ -923,6 +924,16 @@ main {
   font-family: var(--font-ui);
   font-size: var(--fs-meta);
   text-wrap: pretty;
+}
+
+/* cas-93d1: opens the parked delivery's candidate build in its read-only preview. */
+.status-preview-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--rail-item-min);
+  color: var(--ink);
+  font-size: var(--fs-meta);
+  text-decoration: underline;
 }
 
 .status-empty {
@@ -1776,8 +1787,6 @@ dialog form > *,
 .conversation-list-title { display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
 .conversation-list-title h1 { min-width: 0; }
 .conversation-list-tools { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); margin-inline-start: auto; }
-.conversation-list-tools #pair-toggle { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); white-space: nowrap; }
-.conversation-list-tools #pair-toggle.primary { width: auto; color: var(--you-fg); background: var(--you-bg); }
 .conversation-list-title h1 { font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; margin: 0 6px; }
 /* Header controls are text buttons (P15, cas-9616): no chip on the paper, the hover step on hover. */
 .conversation-list-title button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
@@ -1785,7 +1794,6 @@ dialog form > *,
 .conversation-list-title .primary { width: auto; color: var(--you-fg); background: var(--you-bg); }
 /* First run on a wide screen: the welcome's Pair a machine is the one primary action. */
 .welcome-pairs #pair-toggle { display: none; }
-.conversation-list-heading p { color: var(--ink-mid); margin: var(--space-3) 6px 0; }
 /* Journey F8: a visible name search at the top of the list; Ctrl/Cmd+K lands here. */
 .conversation-search { position: relative; display: flex; align-items: center; margin: var(--space-4) 0 0; }
 .conversation-search svg { position: absolute; left: 14px; width: 16px; height: 16px; color: var(--ink-mid); pointer-events: none; }
@@ -1861,6 +1869,8 @@ dialog form > *,
 .conversation-skeleton-row { animation: conversation-skeleton-pulse 1.4s ease-in-out infinite; }
 @keyframes conversation-skeleton-pulse { 50% { opacity: .55; } }
 @media (prefers-reduced-motion: reduce) { .conversation-skeleton-row { animation: none; } }
+/* A landscape phone has room for two placeholder rows beside the footer's two lines (cas-da546). */
+@media (max-height: 30rem) { .conversation-skeleton-row:nth-child(n+3) { display: none; } }
 /* Journey F15: a labelled bar in the list's own flow, above the status footer,
    so it reserves its space instead of floating over "2 paired machines". */
 .compose-fab { display: none; flex-shrink: 0; align-items: center; justify-content: center; gap: var(--space-2); min-height: var(--space-12); margin: auto 12px var(--space-2); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift); font: var(--weight-semibold) var(--fs-md)/1.2 var(--font-ui); }
@@ -1939,8 +1949,8 @@ dialog form > *,
   .conversation-tabs [role="tab"] { border-bottom-color: Canvas; }
   .conversation-tabs [aria-selected="true"] { color: Highlight; border-bottom-color: Highlight; }
 }
-/* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
-.conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: calc(var(--space-3) + env(safe-area-inset-top)) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
+/* One shared row: identity left, actions right, with secondary phone actions in overflow. */
+.conversation-heading { container: conversation-thread-heading / inline-size; display: block; padding: calc(var(--space-3) + env(safe-area-inset-top)) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
 /* Journey F17: where the list is on screen beside the thread, "‹ Conversations"
    is a step that goes nowhere; the phone layout below shows it again. */
@@ -1948,22 +1958,32 @@ dialog form > *,
 
 .conversation-topline .cloud-brand { display: none; }
 .conversation-topline button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
-/* cas-0546: the conversation's own actions — Raw output and Interrupt —
-   on the row above the identity. Unavailable, they stay focusable and in
-   full ink (the global aria-disabled fade would put them below AA), marked
-   by a dashed edge; their reason is their description. */
+/* Unavailable actions remain focusable, with their existing reason description. */
 .conversation-header-actions { display: inline-flex; align-items: center; gap: var(--space-2); margin-inline-start: auto; }
+/* The popover UA sheet adds overflow: auto; inline, the menu is not a scroller. */
+.conversation-more-menu { display: contents; overflow: visible; }
+.conversation-topline .conversation-action.conversation-more-toggle { display: none; }
+.conversation-title-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; block-size: var(--space-6); }
+.conversation-title-line h1 { min-width: 0; }
+.conversation-more-count { color: var(--state-warn); }
+.conversation-state { flex: none; font-weight: var(--weight-regular); }
+.conversation-state[data-phase="live"] { color: var(--state-ok); }
+.conversation-state[data-phase="live"][data-degraded="true"] { color: var(--state-warn); }
+@container conversation-thread-heading (max-width: 40rem) {
+  .conversation-header-actions .conversation-action .action-label { display: none; }
+}
+
 .conversation-topline .conversation-action { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); white-space: nowrap; }
 .conversation-topline .conversation-action:hover:not([aria-disabled="true"]) { background: var(--bg-hover); }
 .conversation-topline .conversation-action:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
 .conversation-action .action-icon { width: 16px; height: 16px; flex: none; }
 .conversation-topline .conversation-interrupt { border-color: currentColor; color: var(--state-crit); }
 .conversation-topline .conversation-action[aria-disabled="true"] { opacity: 1; border-style: dashed; border-color: var(--line-strong); color: var(--ink-mid); cursor: not-allowed; }
-.conversation-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.conversation-identity { display: flex; flex: 1; align-items: center; gap: var(--space-3); min-width: 0; }
 .conversation-identity .conversation-avatar { flex: none; }
 .conversation-identity .id { min-width: 0; }
-.conversation-identity h1 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
-.conversation-identity h1 b { font-weight: inherit; }
+.conversation-identity h1 { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-2); margin: 0; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
+.conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: inherit; }
 /* One line at every width (3.30.0 journey F9): a long codename ellipsises
    inside "machine · codename" (its title carries it whole) and the connection
    state after it stays visible, instead of the line wrapping to three. */
@@ -1987,7 +2007,12 @@ dialog form > *,
    technique), never display:none, so the line is heard whole at any width. */
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
-#conversation-connection, #conversation-control { flex: none; white-space: pre; }
+#conversation-control { flex: none; white-space: pre; }
+/* cas-e1db: the state chip is one fixed-height line in any font, so swapping
+   Live for a reconnecting state cannot change the header's height and move
+   the reader's thread. */
+#conversation-connection { flex: none; display: inline-block; block-size: var(--space-6); line-height: var(--space-6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#conversation-connection[hidden] { display: none; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .conversation-stage { display: block; position: relative; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 /* The thread's own slot beside the hidden pane host (cas-0546). */
@@ -2221,6 +2246,10 @@ dialog form > *,
 .thread :is(.working, .phase-line) { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
 .thread .phase-clock { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .thread .phase-line[data-active="false"] .dots i { animation: none; }
+.thread .phase-line[data-state="busy"] .dots i { background: var(--state-ok); }
+.thread .phase-line[data-state="idle"] .dots i { background: var(--state-idle); }
+.thread .phase-line[data-state="unknown"] .dots i { background: var(--state-off); }
+.thread .phase-step { font-family: var(--font-mono); overflow-wrap: anywhere; }
 .thread .dots { display: flex; gap: 4px; }
 .thread .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-mid); }
 @media (forced-colors: none) and (prefers-reduced-motion: no-preference) { .thread .dots i { animation: thread-working 1.2s ease-in-out infinite; } }
@@ -2604,38 +2633,36 @@ button.chip:disabled { cursor: default; }
      Interrupt with its word). The lockup stays on the list screen only
      (DESIGN.md §Brand). The topline dissolves into the heading grid so its
      buttons flank the identity on the same row. */
-  .conversation-heading { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-1); padding: calc(6px + env(safe-area-inset-top)) calc(var(--space-2) + env(safe-area-inset-right)) 6px calc(var(--space-1) + env(safe-area-inset-left)); }
-  .conversation-topline { display: contents; }
+  .conversation-heading { display: block; padding: calc(6px + env(safe-area-inset-top)) calc(var(--space-2) + env(safe-area-inset-right)) 6px calc(var(--space-1) + env(safe-area-inset-left)); }
+  .conversation-topline { display: flex; gap: var(--space-1); }
   .conversation-topline .cloud-brand { display: none; }
   #conversation-back { grid-column: 1; grid-row: 1; width: 40px; min-width: 40px; min-height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--color-transparent); color: var(--ink); }
   #conversation-back .back-glyph { font: var(--weight-regular) 30px/1 var(--font-ui); }
   #conversation-back .back-label { display: none; } /* aria-label keeps the full name */
-  /* cas-d043 G01: the identity takes its own full-width row beneath the back
-     link and the actions, always (cas-97d58 F07 did it only with the
-     attention chip). Beside Raw output and Interrupt it had about 150px, so a
-     plain "Atlas" read "A… · Reconnecting" and "Build Server" "Build Se…". */
-  .conversation-identity { grid-column: 1 / -1; grid-row: 2; gap: 10px; padding: 2px var(--space-1) 2px 40px; }
+  /* Keep the identity in the same row as the compact action cluster. */
+  .conversation-identity { flex: 1; gap: var(--space-2); padding: 0; }
   .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
   /* The actions always take the last column, whichever others show. */
-  .conversation-header-actions { grid-column: -2 / -1; grid-row: 1; gap: 4px; margin: 0; }
+  .conversation-header-actions { flex: none; gap: var(--space-1); margin: 0; }
+  .conversation-topline .conversation-action.conversation-more-toggle { display: inline-flex; }
+  #conversation-raw-output .action-label, #conversation-interrupt .action-label { display: none; }
+  .conversation-more-menu:not(:popover-open) { display: none; }
+  .conversation-more-menu:popover-open { display: flex; flex-direction: column; gap: var(--space-1); inset: auto var(--space-2) auto auto; top: calc(56px + env(safe-area-inset-top)); max-height: calc(100dvh - 56px - env(safe-area-inset-top)); overflow: auto; width: max-content; max-width: calc(100vw - 2 * var(--space-2)); margin: 0; padding: var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--ink); box-shadow: var(--lift-strong); }
+  .conversation-more-menu :is(#conversation-commands, #conversation-show-work) .action-label { display: inline; }
+  .conversation-more-menu .conversation-action, .conversation-more-menu #conversation-fleet { justify-content: flex-start; border: 0; border-radius: var(--radius-card); padding-inline: var(--space-2); font: var(--weight-medium) var(--fs-meta)/1.3 var(--font-ui); }
+  .conversation-more-menu #conversation-attention:not([hidden]) { border: 0; justify-content: flex-start; font: var(--weight-medium) var(--fs-meta)/1.3 var(--font-ui); }
   .conversation-topline .conversation-action { min-height: 44px; min-width: 44px; justify-content: center; padding: 0 10px; font-size: var(--fs-xs); }
-  /* cas-d043 G02: the identity has its own row (G01), so Raw output keeps
-     its word beside Interrupt instead of a bare ">_" glyph; the glyph steps
-     aside, as Interrupt's does. */
+  /* Direct phone actions keep their accessible names and 44px targets. */
   #conversation-raw-output { padding: 0 var(--space-2); }
-  #conversation-raw-output .action-icon { display: none; }
-  /* Interrupt keeps its word, not its glyph, so the project title keeps its room. */
+  #conversation-raw-output .action-icon { display: block; }
+  /* Interrupt keeps its critical icon beside Raw output. */
   #conversation-interrupt { padding: 0 var(--space-2); }
-  #conversation-interrupt .action-icon { display: none; }
+  #conversation-interrupt .action-icon { display: block; }
 
   /* cas-5c22: the session's open Attention, one tap from the thread. */
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */
-  .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
   #conversation-attention:not([hidden]) { grid-column: 3; grid-row: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; min-width: 44px; justify-content: center; padding: 0 10px; border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--warn-text); font: var(--weight-semibold) var(--fs-xs)/1 var(--font-ui); }
-  /* With a warning badge, Raw output uses its existing icon to keep every
-     phone action inside the header; its accessible name and 44px target stay. */
-  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-raw-output .action-label { display: none; }
-  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-raw-output .action-icon { display: block; }
+
   #conversation-attention svg { width: 16px; height: 16px; flex: none; }
   #conversation-attention:hover:not(:disabled) { background: var(--bg-hover); }
   /* The rail, laid over the thread as a sheet holding only Attention. */
@@ -2647,7 +2674,7 @@ button.chip:disabled { cursor: default; }
   .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
   .conversation-identity .conversation-host { display: flex; font-size: 12px; white-space: nowrap; }
   .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #conversation-connection { flex: none; white-space: pre; }
+  #conversation-connection { flex: none; white-space: nowrap; }
   /* Phone composer: the send pill folds to its glyph; the label stays for the reader. */
   .conversation-composer { column-gap: 2px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
   .conversation-composer textarea { padding: 12px 10px; }
@@ -2685,12 +2712,7 @@ button.chip:disabled { cursor: default; }
   .conversation-identity .conversation-host { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
   /* One row again, so the toast sits under 56 px (cas-002e). */
   body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
-  /* With the machine line hidden the title alone fits beside the actions, so
-     a short screen (a phone with its keyboard up) keeps the one-row header
-     and the thread keeps its room (cas-d043 G01). The attention chip still
-     takes the row, so the identity stays beneath it then. */
-  .conversation-identity { gap: var(--space-2); grid-column: 2; grid-row: 1; padding: 0; }
-  .conversation-heading:has(#conversation-attention:not([hidden])) .conversation-identity { grid-column: 1 / -1; grid-row: 2; padding: 0 var(--space-1) 0 40px; }
+
   .conversation-composer { padding-top: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
   .conversation-composer textarea { height: var(--rail-item-min); min-height: var(--rail-item-min); padding-top: 10px; padding-bottom: 10px; }
   .conversation-composer .composer-clip { width: var(--rail-item-min); height: var(--rail-item-min); }
@@ -2701,7 +2723,7 @@ button.chip:disabled { cursor: default; }
 .conversation-context .status-identifier { display: none; }
 /* cas-a474: an agent row the operator can act on names its worker; the ⋯ menu
    would otherwise be the only place the name appears. */
-.conversation-context .status-agent .status-line > .status-identifier:first-child { display: inline; }
+.conversation-context .status-agent .status-line > .status-identifier { display: inline; }
 
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -2717,7 +2739,10 @@ button.chip:disabled { cursor: default; }
 .pairing-dot.partial { background: var(--state-warn); }
 .hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
 .machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
-.machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }
+/* cas-5e8b: Close is an icon-only 40px circle; touch still reaches 44px. */
+.machines-dialog-heading button { position: relative; width: var(--button-height); min-width: var(--button-height); padding: 0; border-radius: var(--radius-pill); }
+.machines-dialog-heading button::after { content: ""; position: absolute; inset: calc((var(--button-height) - var(--rail-item-min)) / 2); }
+#paired-machine-filters { flex-wrap: wrap; margin-block: var(--space-3) var(--space-2); }
 /* Both axes scroll: dialog[open] hides x, and a hidden axis makes the strict
    visual-qa probe read a third paired machine below the fold as clipped. */
 #paired-machines-dialog { padding: var(--space-6); overflow: auto; }
@@ -2750,7 +2775,6 @@ button.chip:disabled { cursor: default; }
 @media (max-height: 30rem) {
   .conversation-list-heading { padding: calc(var(--space-3) + env(safe-area-inset-top)) calc(var(--space-6) + env(safe-area-inset-right)) var(--space-3) calc(var(--space-6) + env(safe-area-inset-left)); }
   .conversation-list-title { margin-top: var(--space-2); }
-  .conversation-list-heading p { display: none; }
   .conversation-sidebar > footer { padding-top: var(--space-2); padding-bottom: var(--space-2); }
   .hub-footer-badges { margin-bottom: var(--space-1); gap: var(--space-1); }
 }
@@ -2904,6 +2928,7 @@ button.chip:disabled { cursor: default; }
   .launch-list { max-height: none; }
   .launch-row { min-height: 52px; }
   .launch-actions button { flex: 1 1 0; }
+  .launch-sheet .dialog-actions button, .launch-tabs [role=tab] { min-height: var(--rail-item-min); }
   /* The sticky bar reads as a bar over the scrolling form, not as the form's last row. */
   .launch-actions { border-top: var(--line-width) solid var(--line-subtle); }
 }
@@ -3116,7 +3141,7 @@ button.chip:disabled { cursor: default; }
   }
   #fleet-phone-undo > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   #fleet-phone-undo > button { flex: none; min-width: var(--rail-item-min); }
-  .fleet-ops-picker h2 { margin: 0; font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); overflow-wrap: anywhere; }
+  .fleet-ops-picker h2, .fleet-sheet-title { margin: 0; font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); overflow-wrap: anywhere; }
   .fleet-picker-context { margin: 0; color: var(--text-mid); overflow-wrap: anywhere; }
 }
 @media (forced-colors: active) {
@@ -3125,11 +3150,7 @@ button.chip:disabled { cursor: default; }
 }
 
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  .conversation-heading { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
-  #conversation-fleet { grid-column: 3; grid-row: 1; }
 
-  .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto auto; }
-  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-fleet { grid-column: 4; }
 
   .fleet-ops-picker { display: grid; gap: var(--space-3); }
   .fleet-ops-picker [role="menuitem"][hidden], .fleet-ops-no-match[hidden], #fleet-phone-undo[hidden] { display: none; }
@@ -3324,7 +3345,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .work-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0; padding: 0 var(--space-2); list-style: none; }
 .work-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-raised); color: var(--ink-mid); font-size: var(--fs-xs); }
 .work-chip-dot { width: 6px; height: 6px; border-radius: var(--radius-pill); background: currentColor; flex: none; }
-.work-chip-id { font-family: var(--font-mono); color: var(--ink); }
+.work-chip-title { color: var(--ink); }
 .work-chip--ok { color: var(--state-ok); }
 .work-chip--warn { color: var(--warn-text); }
 .work-chip--crit { color: var(--state-crit); }
@@ -3370,7 +3391,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .work-targets { margin: 0; padding-inline-start: var(--space-4); font: var(--fs-xs)/1.45 var(--font-mono); }
 .work-path { margin: 0; font: var(--fs-xs)/1.45 var(--font-mono); }
 .work-detail-limit { margin: var(--space-2) 0 0; color: var(--ink-mid); font-size: var(--fs-xs); }
-.status-timeline { margin-left: auto; min-height: 28px; padding: 0 var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--color-action); font: var(--weight-medium) var(--fs-xs)/1 var(--font-ui); cursor: pointer; }
+.status-timeline { min-height: var(--rail-item-min); padding: 0; border: 0; border-radius: 0; background: var(--color-transparent); color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.status-timeline:is(:hover, :focus-visible) { text-decoration: underline; }
 .worker-timeline-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; padding: var(--space-3) var(--space-3) var(--space-4); gap: var(--space-2); }
 .worker-timeline .raw-output-subject { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .worker-timeline-rows { padding-left: 0; }
@@ -3400,7 +3422,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 }
 .release-progress { padding-bottom: var(--space-4); margin-bottom: var(--space-3); border-bottom: var(--line-width) solid var(--line-subtle); color: var(--ink); }
 .release-eyebrow { margin: 0 0 var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
-.release-progress h3 { margin: 0; font: var(--weight-medium) var(--fs-lg)/1.3 var(--font-display); overflow-wrap: anywhere; }
+.release-progress h3 { margin: 0; font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); overflow-wrap: anywhere; }
 .release-count { margin: var(--space-3) 0 var(--space-2); font-weight: var(--weight-semibold); }
 /* A hollow, outlined track: zero reads as empty, not as one solid full bar (cas-d640). */
 .release-progress progress { display: block; box-sizing: border-box; width: 100%; height: var(--space-2); appearance: none; border: var(--line-width) solid var(--ink-mid); border-radius: var(--radius-pill); overflow: hidden; background: transparent; color: var(--color-action); }
@@ -3414,8 +3436,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .fleet-permissions a { display: inline-block; padding-block: var(--space-2); color: var(--color-action); }
 .progress-filter { margin: var(--space-4) 0 0; padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); color: var(--ink); background: var(--bg-panel); font: inherit; }
 .conversation-context .status-task { padding-inline: 0; background: var(--color-transparent); border-top: var(--line-width) solid var(--line-subtle); border-radius: 0; }
-.conversation-context .status-agent .status-line { align-items: start; flex-wrap: wrap; }
-.conversation-context .status-agent .status-timeline { margin-left: 0; }
+.conversation-context .status-agent .status-line { align-items: center; flex-wrap: wrap; }
+.conversation-context .status-agent .status-line > .status-timeline { display: inline-flex; align-items: center; }
 .conversation-reading, .conversation-context { scrollbar-width: thin; scrollbar-color: var(--ink-mid) var(--color-transparent); }
 .conversation-reading::-webkit-scrollbar, .conversation-context::-webkit-scrollbar { width: var(--space-2); height: var(--space-2); }
 .conversation-reading::-webkit-scrollbar-thumb, .conversation-context::-webkit-scrollbar-thumb { background: var(--ink-mid); border: 2px solid var(--panel); border-radius: var(--radius-pill); }
@@ -3435,30 +3457,9 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 /* Project-first register: the project owns the boundary; its supervisors
    carry identity and work. The boundary is a meaningful mark (>= 3:1). */
 .project-card { border-color: var(--ink-mid); }
-.project-card-toggle { display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 0; min-height: var(--rail-item-min); padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-card); background: var(--color-transparent); color: var(--ink); text-align: left; }
-.project-card-toggle:hover { background: var(--bg-hover); color: var(--ink); }
-.project-card-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); }
-.project-card-count { color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono); }
-.project-card-chevron { color: var(--ink-mid); }
-.project-card-toggle[aria-expanded="false"] .project-card-chevron { rotate: -90deg; }
-.project-machine-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: 0 var(--space-3); }
-.project-machine-chip { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; min-height: 28px; padding: var(--space-1) var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
-.project-machine-chip:hover { background: var(--bg-hover); color: var(--ink); }
-.project-machine-chip { flex-wrap: wrap; }
-.machine-version { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; max-width: 100%; color: var(--ink-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
-.machine-version-installed { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.machine-version-update { color: var(--state-warn); }
-.machine-online-dot { width: var(--space-2); height: var(--space-2); border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); flex: none; }
-.machine-online-dot.online { background: var(--state-ok); border-color: var(--state-ok); }
-.machine-online-dot.offline { background: var(--color-transparent); border-color: var(--ink-mid); }
-.project-card-summary { margin: 0; padding: 0 var(--space-3) var(--space-1); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); }
-.project-card-rows { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
-.project-card-rows[hidden] { display: none; }
-.project-card .conversation-row.grouped { padding-inline-start: var(--space-3); }
-.project-card .conversation-who { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
-.project-card .conversation-supervisor { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.project-card .conversation-session-mark { margin-inline-start: 0; }
-.conversation-account { display: block; max-width: 100%; overflow-wrap: anywhere; color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); }
+/* cas-da546: one compact card per project. Head: the name (the collapse
+   toggle) and its machines as dots; then the train bar and one status line;
+   then one line per session. A quiet project steps back. */
 .conversation-avatar { position: relative; }
 .conversation-avatar.harness-mark { background: var(--bg-panel); color: var(--ink); font-family: var(--font-mono); }
 .supervisor-state { position: absolute; right: 0; bottom: 0; width: var(--space-3); height: var(--space-3); border: var(--state-rule-width) solid var(--bg-raised); border-radius: var(--radius-pill); background: var(--state-idle); }
@@ -3466,33 +3467,88 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .supervisor-state.idle { background: var(--state-idle); }
 .supervisor-state.needs-you { background: var(--state-warn); }
 .supervisor-state.offline { background: var(--state-off); }
-.conversation-filters { display: flex; flex: none; gap: var(--space-1); padding: 0 var(--space-4) var(--space-2); overflow-x: auto; min-width: 0; }
-.conversation-filter { flex: none; min-height: 32px; padding: var(--space-1) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui); white-space: nowrap; }
+.project-card-head { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
+.project-card-toggle { display: flex; flex: 1 1 auto; align-items: center; gap: var(--space-1); min-width: 0; min-height: 32px; padding: var(--space-1) var(--space-2); border: 0; border-radius: var(--radius-card); background: var(--color-transparent); color: var(--ink); text-align: left; }
+.project-card-toggle:hover { background: var(--bg-hover); color: var(--ink); }
+.project-card-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); }
+.project-card-chevron { color: var(--ink-mid); font-size: var(--fs-xs); opacity: 0; }
+.project-card-toggle:is(:hover, :focus-visible) .project-card-chevron, .project-card-toggle[aria-expanded="false"] .project-card-chevron { opacity: 1; }
+.project-card-toggle[aria-expanded="false"] .project-card-chevron { rotate: -90deg; }
+.project-machine-chips { display: flex; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 0 var(--space-1); min-width: 0; }
+.project-machine-chip { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; min-height: 28px; padding: 0 var(--space-1); border: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+.project-machine-chip:hover { background: var(--bg-hover); color: var(--ink); }
+.project-machine-chip .machine-version { padding: 0 var(--space-1); border: var(--line-width) solid var(--state-warn); border-radius: var(--radius-card); }
+.machine-version { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; max-width: 100%; color: var(--warn-text); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.machine-version-installed { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.machine-version-update { color: var(--warn-text); }
+.machine-online-dot { width: var(--space-2); height: var(--space-2); border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); flex: none; }
+.machine-online-dot.online { background: var(--state-ok); border-color: var(--state-ok); }
+.machine-online-dot.offline { background: var(--color-transparent); border-color: var(--ink-mid); }
+.project-card-summary { display: flex; align-items: center; gap: var(--space-2); margin: 0; padding: 0 var(--space-2) var(--space-1); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); }
+.project-card-summary[hidden] { display: none; }
+.project-card-summary > .split-bar { flex: 0 0 64px; }
+.project-card-status { min-width: 0; overflow-wrap: anywhere; }
+.project-card-blocked { color: var(--state-crit); font-weight: var(--weight-semibold); }
+.project-card.is-quiet .project-card-name { color: var(--ink-mid); }
+.project-card-rows { display: flex; flex-direction: column; min-width: 0; }
+.project-card-rows[hidden] { display: none; }
+.project-card .conversation-row { grid-template-columns: auto minmax(0, 1fr) auto auto; column-gap: var(--space-2); min-height: 36px; padding: var(--space-1) var(--space-2); border-radius: var(--radius-card); border-top: var(--line-width) solid var(--line-subtle); }
+.project-card .conversation-row:first-child { border-top: 0; }
+.project-card .conversation-row[aria-current="true"]::before { top: var(--space-2); bottom: var(--space-2); left: 1px; }
+/* DESIGN.md Avatars: card rows keep the full avatar disc; the auto column fits it, so the name starts one --space-2 gap after it (cas-be27). */
+.project-card .conversation-avatar { grid-row: auto; }
+.project-card .conversation-avatar .supervisor-state { width: 8px; height: 8px; border-width: 1px; }
+.project-card .conversation-who { flex-wrap: nowrap; gap: var(--space-1); min-width: 0; overflow: hidden; white-space: nowrap; font: var(--weight-regular) var(--fs-meta)/1.35 var(--font-ui); }
+.conversation-role { flex: none; color: var(--ink); font-weight: var(--weight-medium); }
+/* cas-d898: in a narrow card the machine name and an unused Most recent slot give way; the supervisor name keeps its width and ellipsizes only when it alone exceeds the line (less its two gaps). */
+.project-card .conversation-role { max-width: calc(100% - var(--space-2)); overflow: hidden; text-overflow: ellipsis; }
+.project-card .conversation-machine-name { flex: 0 1000 auto; color: var(--ink-mid); font-size: var(--fs-xs); }
+.project-card .conversation-session-slot[aria-hidden="true"] { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
+.project-card .conversation-machine-name::before { content: "· "; }
+.project-card .conversation-supervisor-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
+.project-card .conversation-when { font-family: var(--font-mono); }
+.project-card .conversation-marks { grid-column: 4; grid-row: 1; display: inline-flex; align-items: center; gap: var(--space-1); }
+.project-card .conversation-preview { grid-column: 2 / -1; -webkit-line-clamp: 1; line-clamp: 1; max-height: 1.4em; font-size: var(--fs-xs); }
+.conversation-filters { display: flex; flex: none; gap: var(--space-1); min-width: 0; }
+.conversation-filters[hidden] { display: none; }
+/* Search keeps a usable width; the Needs you pill wraps beneath it before squeezing it. */
+.conversation-search-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; margin-top: var(--space-4); }
+.conversation-search-row > .conversation-search { flex: 1 1 16rem; min-width: min(16rem, 100%); margin-top: 0; }
+.conversation-filter { flex: none; display: inline-flex; align-items: center; gap: var(--space-1); min-height: 32px; padding: var(--space-1) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); white-space: nowrap; }
+.conversation-filter.needs-you-filter { border-color: var(--state-warn); background: var(--tint-warn); }
 .conversation-filter[aria-pressed="true"] { border-color: var(--color-action); background: var(--bg-active); color: var(--color-action); }
 .conversation-filter:hover { background: var(--bg-hover); color: var(--ink); }
-.needs-you-section { flex: none; display: flex; flex-direction: column; gap: var(--space-1); margin-block-end: var(--space-2); padding: var(--space-2); border: var(--line-width) solid var(--state-warn); border-radius: var(--radius-pane); background: var(--bg-raised); color: var(--ink); }
-.needs-you-section h2 { margin: 0; padding: var(--space-1) var(--space-2); font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
-.needs-you-shortcut { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-2); row-gap: var(--space-1); min-height: var(--rail-item-min); padding: var(--space-2); text-align: left; border: 0; border-radius: var(--radius-card); background: var(--color-transparent); color: var(--ink); }
+.needs-you-count, .needs-you-badge { min-width: 18px; padding: 0 var(--space-1); border-radius: var(--radius-pill); background: var(--ask-bg, var(--state-warn)); color: var(--ask-fg, var(--ink)); text-align: center; font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
+.project-nav-eyebrow { margin: var(--space-2) var(--space-2) var(--space-1); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: 0.08em; text-transform: uppercase; }
+.needs-you-section { flex: none; display: flex; flex-direction: column; gap: var(--space-1); margin-block-end: var(--space-2); }
+.needs-you-shortcut { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); min-height: var(--rail-item-min); padding: var(--space-2) var(--space-3); text-align: left; border: var(--line-width) solid var(--state-warn); border-inline-start-width: 3px; border-radius: var(--radius-pane); background: var(--bg-raised); color: var(--ink); }
 .needs-you-shortcut:hover { background: var(--bg-hover); color: var(--ink); }
-.needs-you-shortcut strong { font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
-.needs-you-shortcut .codename { font-size: var(--fs-xs); overflow-wrap: anywhere; }
-.needs-you-shortcut small { flex-basis: 100%; color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+.needs-you-line { display: flex; align-items: baseline; gap: var(--space-1); min-width: 0; }
+.needs-you-line strong { flex: none; font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
+.needs-you-who { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-mid); font-size: var(--fs-xs); }
+.needs-you-who::before { content: "· "; }
+.needs-you-who .codename { font-family: var(--font-mono); }
+.needs-you-when { flex: none; color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); }
+.needs-you-question { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; color: var(--ink); font: var(--weight-regular) var(--fs-meta)/1.4 var(--font-ui); overflow-wrap: anywhere; }
+.needs-you-shortcut small { color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+.conversation-sidebar footer:has(.conversation-footer-actions) .hub-footer-badges { margin-bottom: var(--space-1); }
+.conversation-footer-actions { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
+.conversation-sidebar footer .conversation-footer-actions button { width: auto; }
+.conversation-footer-actions #pair-toggle.primary { color: var(--you-fg); background: var(--you-bg); }
 .project-nav-empty { color: var(--ink-mid); margin: var(--space-3); font-size: var(--fs-meta); }
 .project-nav-dismissed { justify-content: flex-start; margin: var(--space-2) var(--space-1) 0; }
 .project-nav-dismissed .conversation-action { align-self: flex-start; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .conversation-list-heading { padding: calc(var(--space-3) + env(safe-area-inset-top)) calc(var(--space-3) + env(safe-area-inset-right)) var(--space-2) calc(var(--space-3) + env(safe-area-inset-left)); }
   .conversation-list-title { margin-top: var(--space-2); }
-  .conversation-list-heading p { margin-top: var(--space-1); }
-  .conversation-search { margin-top: var(--space-2); }
-  .conversation-filters { padding-inline: var(--space-3); }
-  .conversation-sidebar > .conversation-filters { padding-inline-start: calc(var(--space-3) + env(safe-area-inset-left)); padding-inline-end: calc(var(--space-3) + env(safe-area-inset-right)); }
+  .conversation-search-row { margin-top: var(--space-2); }
   .conversation-filter { min-height: var(--rail-item-min); }
   .project-machine-chip { min-height: var(--rail-item-min); }
-  /* Keep six sessions visible below the project header and filter bar.
-     The 42px avatar and separate 44px End target keep their full size. */
-  .project-card .conversation-row { padding-block: var(--space-1); }
+  /* One-line sessions keep a 44px touch target on a phone. */
+  .project-card .conversation-row { min-height: var(--rail-item-min); }
   .project-card .conversation-end[data-state="idle"] .conversation-end-ask { bottom: var(--space-1); }
+  /* The card's row padding must not undo the End column the row gives up (cas-339a). */
+  .project-card .conversation-row.endable { padding-right: 56px; }
 }
 @media (forced-colors: active) {
   .project-card, .needs-you-section, .project-machine-chip, .conversation-filter { border-color: CanvasText; background: Canvas; color: CanvasText; }
@@ -3530,6 +3586,13 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   padding: var(--space-3); background: var(--bg-raised); color: var(--ink); box-shadow: var(--lift);
 }
 .supervisor-command-palette[hidden] { display: none; }
+.supervisor-command-dropdown { position: fixed; inset: auto; width: min(26rem, calc(100vw - var(--space-4))); }
+.conversation-reload { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: 0 var(--space-3) var(--space-2); color: var(--ink-mid); font-size: var(--fs-xs); }
+.conversation-reload[hidden] { display: none; }
+.conversation-reload button { min-height: var(--rail-item-min); padding: var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--color-action); font: inherit; cursor: pointer; }
+.conversation-reload p { margin: 0; overflow-wrap: anywhere; }
+.conversation-reload-receipt { flex-basis: 100%; }
+.conversation-reload button:disabled { color: var(--ink-mid); cursor: default; }
 .supervisor-command-palette > strong { display: block; margin-block-end: var(--space-2); font-size: var(--fs-meta); }
 .supervisor-command-palette > button {
   display: flex; flex-direction: column; align-items: start; width: 100%; min-height: 44px;
@@ -3553,8 +3616,12 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   .supervisor-command-palette .supervisor-command-actions button { width: 100%; }
 }
 .supervisor-command-receipts { margin: var(--space-4); }
-.supervisor-command-receipt { border-block-start: var(--line-width) solid var(--line-subtle); padding: var(--space-3); background: var(--bg-panel); color: var(--ink-mid); }
+.supervisor-command-receipt { inline-size: fit-content; max-inline-size: min(100%, var(--dialog-width)); border-block-start: var(--line-width) solid var(--line-subtle); padding: var(--space-3); background: var(--bg-panel); color: var(--ink-mid); }
 .supervisor-command-receipt strong { color: var(--ink); font-family: var(--font-mono); }
+.supervisor-command-receipt.command-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1) var(--space-2); padding: var(--space-2); }
+.supervisor-command-receipt.command-status strong { grid-column: 1; }
+.supervisor-command-receipt.command-status p { grid-column: 1; margin: 0; font-size: var(--fs-xs); }
+.supervisor-command-receipt.command-status button { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin: 0; min-width: var(--rail-item-min); }
 .supervisor-command-receipt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font: var(--fs-xs)/var(--line-ui) var(--font-mono); }
 #conversation-commands .action-label { display: none; }
 
@@ -3583,7 +3650,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   .conversation-composer:has(#message-emoji):has(.composer-uploads:not([hidden])) { grid-template-areas: "uploads uploads" "field field" "clip send" "status status"; }
   .conversation-composer:has(#message-emoji) .composer-actions { justify-content: flex-end; }
 }
-.conversation-composer textarea { font-family: Inter, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", ui-sans-serif, system-ui, sans-serif; font-variant-emoji: emoji; }
+.conversation-composer textarea { font-family: Inter, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", ui-sans-serif, system-ui, sans-serif; }
 
 /* The running MCP belongs to the supervisor identity, below the project. */
 .supervisor-version { display: inline-flex; align-items: baseline; gap: var(--space-1); margin-inline-start: var(--space-1); padding-inline: var(--space-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); white-space: nowrap; }
@@ -3600,3 +3667,86 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .launch-account-entry { min-width: 0; }
 .launch-account-entry > .account-usage-check { margin-inline: var(--space-3); }
 @media print { .account-usage-check button { display: none; } }
+
+/* Live epics in Tasks & progress (cas-9b99): a three-line row grid (title and
+   ratio, split bar, split and worker dots) on the card rhythm. Only blocked
+   uses the critical tone; counts are tabular mono so updates never shift. */
+.live-epics { margin: 0 0 var(--space-3); padding-bottom: var(--space-4); border-bottom: var(--line-width) solid var(--line-subtle); }
+.live-epic-list { display: grid; gap: var(--space-1); margin: var(--space-1) 0 0; padding: 0; list-style: none; }
+.live-epic { min-width: 0; border-radius: var(--radius-card); background: var(--bg-raised); box-shadow: inset 0 0 0 var(--line-width) var(--line-subtle); }
+.live-epic.is-blocked { box-shadow: inset var(--state-rule-width) 0 0 var(--state-crit), inset 0 0 0 var(--line-width) var(--line-subtle); }
+.live-epic-toggle { display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--space-2); column-gap: var(--space-3); align-items: center; width: 100%; min-height: var(--rail-item-min); box-sizing: border-box; padding: var(--space-3); border: 0; border-radius: inherit; background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.live-epic-toggle:hover { background: var(--bg-hover); }
+.live-epic-toggle:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.live-epic-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; font-size: var(--fs-meta); font-weight: var(--weight-semibold); line-height: var(--line-ui); }
+.live-epic-ratio, .live-epic-task-worker { font-family: var(--font-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.live-epic-ratio { justify-self: end; align-self: start; color: var(--ink-mid); white-space: nowrap; }
+.live-epic-toggle > .split-bar { grid-column: 1 / -1; }
+.live-epic-line { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
+.live-epic-split { color: var(--ink-mid); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.live-epic-blocked { color: var(--state-crit); font-weight: var(--weight-semibold); white-space: nowrap; }
+.live-epic-dots { display: flex; flex: none; flex-wrap: wrap; justify-content: end; gap: var(--space-1); max-width: 10ch; }
+.live-epic-dot { width: var(--space-2); height: var(--space-2); box-sizing: border-box; border-radius: var(--radius-pill); background: var(--state-ok); border: var(--line-width) solid var(--state-ok); }
+.live-epic-dot.is-waiting { background: transparent; }
+.live-epic-tasks[hidden] { display: none; }
+.live-epic-tasks { display: grid; gap: var(--space-3); padding: 0 var(--space-3) var(--space-3); }
+.live-epic.is-opening > .live-epic-tasks { animation: live-epic-open var(--attention-motion-duration) var(--motion-easing) 1; }
+@keyframes live-epic-open { from { opacity: 0; transform: translateY(calc(-1 * var(--space-1))); } }
+.live-epic-group { display: grid; gap: var(--space-1); min-width: 0; }
+.live-epic-group-label { margin: 0; color: var(--ink-mid); font-size: var(--fs-xs); font-weight: var(--weight-medium); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.live-epic-merged > summary { display: flex; align-items: center; padding-block: var(--space-1); cursor: pointer; }
+.live-epic-merged > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-card); }
+.live-epic-merged-note { margin: 0; font-size: var(--fs-meta); }
+.live-epic-task-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.live-epic-task { display: grid; gap: var(--space-1); padding: var(--space-2) 0; border-top: var(--line-width) solid var(--line-subtle); }
+.live-epic-task.is-blocked { padding-left: var(--space-2); box-shadow: inset var(--state-rule-width) 0 0 var(--state-crit); }
+.live-epic-task-title { color: var(--ink); font-size: var(--fs-meta); line-height: var(--line-ui); overflow-wrap: anywhere; }
+.live-epic-task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); color: var(--ink-mid); font-size: var(--fs-xs); }
+.live-epic-task-machine { color: var(--ink-mid); }
+.live-epic-chip { margin-left: auto; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink-mid); font-size: var(--fs-xs); font-weight: var(--weight-medium); line-height: 1.8; }
+.live-epic-chip--building { color: var(--state-ok); }
+.live-epic-chip--blocked { color: var(--state-crit); }
+.live-epics-notice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-1) 0 0; color: var(--ink-mid); font-size: var(--fs-meta); }
+.live-epics-retry, .live-epics-more { min-height: var(--rail-item-min); padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); cursor: pointer; }
+.live-epics-more { margin-top: var(--space-2); width: 100%; }
+.live-epics-footer { margin: var(--space-2) 0 0; font-size: var(--fs-meta); color: var(--ink-mid); }
+.live-epics-footer a, .live-epic-merged-note a { color: var(--color-action); }
+/* The shared split bar: merged solid, in progress hatched, open is the track. */
+.split-bar { display: flex; height: var(--space-1); overflow: hidden; border-radius: var(--radius-pill); background: var(--bg-active); box-shadow: inset 0 0 0 var(--line-width) var(--line-subtle); }
+.split-bar > span { flex: none; min-width: 0; }
+.split-bar-merged { background: var(--color-action); }
+.split-bar-in-progress { background: repeating-linear-gradient(135deg, var(--color-action) 0 calc(2 * var(--line-width)), transparent 0 calc(4 * var(--line-width))); }
+.release-progress .split-bar { height: var(--space-2); }
+.release-split, .release-activity { margin: var(--space-2) 0 0; font-size: var(--fs-meta); color: var(--ink-mid); font-variant-numeric: tabular-nums; }
+.team-panel .release-split, .team-panel .release-activity, .team-panel .release-progress .split-bar { grid-column: 1 / -1; }
+/* cas-2f4d: a frozen train's measured line and its one-tap Freeze/Lift. */
+.release-freeze { margin: var(--space-2) 0 0; font: var(--weight-medium) var(--fs-meta)/1.3 var(--font-ui); color: var(--warn-text); font-variant-numeric: tabular-nums; }
+.release-freeze-controls { margin-top: var(--space-2); }
+.team-panel .release-freeze { grid-column: 1 / -1; }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .live-epic-merged > summary { min-height: var(--rail-item-min); padding-block: 0; }
+  .live-epic-chip { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-epic.is-opening > .live-epic-tasks { animation: none; }
+}
+@media (forced-colors: active) {
+  .live-epic { box-shadow: none; border: 1px solid CanvasText; }
+  .live-epic.is-blocked { border-left: 3px solid CanvasText; }
+  .live-epic-dot { forced-color-adjust: none; background: CanvasText; border-color: CanvasText; }
+  .live-epic-dot.is-waiting { background: Canvas; }
+  .split-bar { forced-color-adjust: none; background: Canvas; border: 1px solid CanvasText; box-shadow: none; }
+  .split-bar-merged { background: Highlight; }
+  .split-bar-in-progress { background: repeating-linear-gradient(135deg, Highlight 0 calc(2 * var(--line-width)), Canvas 0 calc(4 * var(--line-width))); }
+}
+@media print {
+  .live-epic-tasks[hidden], .live-epic[hidden] { display: grid; }
+}
+
+/* cas-85bfb: a reply's inline image. Bounded so a screenshot never takes over
+   the thread; the image viewer enlarges it. */
+.markdown-image { display: block; max-width: 100%; margin: var(--space-2) 0; padding: 0; overflow: hidden; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-raised); cursor: zoom-in; }
+.markdown-image img { display: block; max-width: 100%; max-height: min(24rem, 60vh); width: auto; height: auto; object-fit: contain; }
+.markdown-image[data-state="loading"] img { min-width: var(--space-16); min-height: var(--space-12); }
+.markdown-image:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+@media (forced-colors: active) { .markdown-image { border-color: CanvasText; } }

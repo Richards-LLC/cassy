@@ -398,7 +398,7 @@ for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation
       await measure("reconnect", async () => {
         hub.drop(capture.session);
         await expect.poll(() => hub.attaches.length, { timeout: 20_000 }).toBeGreaterThan(attaches);
-        await expect(page.locator("#conversation-connection")).toContainText("Live");
+        await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
         await drainPending();
       });
       await page.evaluate(() => sessionStorage.setItem("perf:reload", "1"));

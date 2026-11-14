@@ -273,6 +273,10 @@ impl RecordingReader {
         })
     }
 
+    pub(crate) fn into_resume_parts(self) -> (Vec<u8>, RecordingHeader, KeyframeIndex) {
+        (self.data.as_slice()[..self.index_offset].to_vec(), self.header, self.index)
+    }
+
     /// Get the recording header.
     pub fn header(&self) -> &RecordingHeader {
         &self.header

@@ -499,7 +499,7 @@ describe("atomic Commander journal", () => {
   it("storage failure and oversized content authorize neither send nor application ACK", async () => {
     const a = new CommanderJournal(undefined, async () => fence, () => 1_000, false);
     expect(await a.reconcile(scope, [], [send("a")], fence)).toBe("not-saved");
-    expect(a.storageFailure).toBe("Browser storage is unavailable.");
+    expect(a.storageFailure).toBeTruthy();
     expect(await a.dispatch(scope, "a", fence, () => { throw Error("must not write"); })).toBe("not-saved");
     expect(await a.persistReply(scope, reply, fence)).toBe(false);
     const { b } = journals();

@@ -50,6 +50,8 @@ impl CasCore {
         )?))
     }
 
+    // gate-audit[supervisor_override]: bypass G-131 Explicitly accepts an oversized decision/discovery note after supervisor authorization.
+    // gate-audit[override_accepted]: selector Derived oversized-note waiver already authorized under G-131; final note response carries its tag.
     pub async fn cas_task_notes(
         &self,
         Parameters(req): Parameters<TaskNotesRequest>,
@@ -212,9 +214,13 @@ impl CasCore {
         for warning in warnings {
             response.push_str(&format!("\nWarning: {warning}"));
         }
+        if override_accepted && req.note.chars().count() > crate::mcp::tools::traffic_limits::note_body_limit(&self.load_config()) {
+            response = crate::gates::override_tag("G-131", response);
+        }
         Ok(Self::success(response))
     }
 
+    // gate-audit[supervisor_override_reason]: selector Records accepted note-waiver provenance; it does not admit another oversized note.
     fn record_task_note_activity(
         &self,
         task_id: &str,
@@ -249,7 +255,13 @@ impl CasCore {
         .with_session(agent_id)
         .with_metadata(metadata);
 
-        event_store.record(&event)?;
+        let event_id = event_store.record(&event)?;
+        if note_type.eq_ignore_ascii_case("decision")
+            && let Ok(supervisor) = self.resolve_live_supervisor_authority()
+        {
+            super::block_hold::record_supervisor_decision(&self.cas_root, &supervisor, task_id, event_id)
+                .map_err(anyhow::Error::msg)?;
+        }
         Ok(())
     }
 }

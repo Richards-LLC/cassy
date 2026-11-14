@@ -7,6 +7,8 @@ metadata:
 
 # Factory Worker
 
+Tests assert behavior or stable machine identifiers such as error codes and rule IDs. Never require human-readable wording, word lists, canonical sentences or phrase presence; changing prose alone must not fail a test. Exact caller payloads and machine protocol bytes remain data-integrity checks. Fixed safety text needs a named consumer that requires those bytes; a writing preference is insufficient.
+
 Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
 
 SILENT EXECUTION: results, errors and return contract only.
@@ -23,8 +25,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    `cas qa ledger check <path> --task <id>`. Follow [close-gate.md](references/close-gate.md) and
    [verify-before-claim](../verify-before-claim/SKILL.md), then close with
    `task action=close reason="PASS <sha>: <proof>"`.
-3. If close returns VERIFICATION REQUIRED naming a dispatch, its verdict closes the
-   task; follow [Verification-required close](references/recovery.md#verification-required-close).
+3. If close returns VERIFICATION REQUIRED naming a dispatch:
+   Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
+   Follow [Verification-required close](references/recovery.md#verification-required-close).
 4. A park reads `PARKED … awaiting merge verdict; nothing more to do`.
    The park relay is the completion signal; send merge_request=true only for local_merge.
    The verdict wakes you once. Don't re-close or block on it. For a MERGE REQUIRED
@@ -35,33 +38,33 @@ One event gets one message. A close is the lifecycle report; never send a post-c
 summary or echo the close relay. After a merge request, wait for the supervisor's
 response; send no follow-up update.
 
-Stay available after handoff. Never self-dispatch: every time you go idle, use assigned work;
+Stay available after handoff. Never self-dispatch: use assigned work when idle;
 `ready` and `available` are backlog
   visibility, not authorization.
 
 - One integration per release: fixes merge to the train, the train goes through the gate once.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close when the brief links one.
-- Worker peer lane: collision warnings only, within the same factory session
+- Worker peer lane: local collision warnings within the same factory session; remote same-epic contracts
   ([rules](references/details.md#worker-peer-lane)); Cassy sends a copy to the supervisor.
 - The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
 - `kind=status` (actionable, work continues) requests a typed action wake; FYIs
   use `kind=receipt` or `wake=false`.
 - Never block the pane: run long commands in the background with a log.
   Signal only PIDs you started; never `pkill`, `killall` or name matching.
-- Checkpoint, never compact. At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `kind=status` with `need: respawn`.
+- Never compact. At 80% or a compaction warning: commit, push, save HANDOFF.md in your brief's task artifacts dir; send `coordination action=message target=supervisor kind=respawn summary=Respawn message=<contract>`.
   See [Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout).
 
 ## Phase references
 
 | Phase or trigger | Read before acting |
 | --- | --- |
-| Test design/review | [Fewest tests](../cas-tdd/SKILL.md#fewest-tests) |
+| Test design/review | [Fewest tests](../cas-writing-tests/SKILL.md#fewest-tests) |
 | Before checks/tests | [discipline.md](references/discipline.md) |
 | Browser changes/journeys | [Browser checks](references/discipline.md#browser-checks) |
 | Delivery | [close-gate.md](references/close-gate.md); [Batch QA](references/details.md#batch-qa) when `qa.mode=batch` |
 | Capacity refusal (not a blocker) | [Capacity waits](references/discipline.md#capacity-waits) |
-| Review or other blocker | [Blockers and review waits](references/recovery.md#blockers-and-review-waits), before `task action=update id=<task-id> status=blocked` or `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."` with `blocker: <cause>` |
-| Queued, reused or returned branch | [recovery](references/recovery.md#queued-successor-and-branch-reuse); checkpoint before an allowed `git rebase <target>` |
+| Review or other blocker | [Blockers and review waits](references/recovery.md#blockers-and-review-waits), before blocking the task or notifying the supervisor |
+| Queued, reused or returned branch | [recovery](references/recovery.md#queued-successor-and-branch-reuse); checkpoint before an allowed `git rebase <target>`; a checkpoint push alone is not a park |
 | Detach or checkpoint | [reminders.md](../cas-supervisor/references/reminders.md) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
 | Evidence, sync or resume | [details.md](references/details.md) |

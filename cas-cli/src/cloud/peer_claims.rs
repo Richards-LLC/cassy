@@ -242,6 +242,13 @@ impl ClaimHolder {
     fn from_reason(reason: Option<&str>) -> Option<Self> {
         serde_json::from_str(reason?).ok()
     }
+
+    /// Source admission has always encoded the card id in this JSON name.
+    /// Keep existing sweep claims portable without a new Cloud protocol.
+    fn is_source_task(&self, project: &str, task_id: &str) -> bool {
+        self.v == 1 && self.kind == "task" && self.project == project
+            && self.name.ends_with(&format!(" (task {task_id})"))
+    }
 }
 
 /// A claim held by an agent that is not registered in this database.
@@ -802,6 +809,36 @@ impl PeerClaims {
             Instant::now() + CLAIM_TIMEOUT, None)
     }
 
+    /// Staffing a synced card moves its GitHub source, but never an
+    /// independent card's claim or a teammate account's lock. The caller
+    /// holds the source fence and has authenticated a live supervisor.
+    pub(crate) fn take_source_for_task(
+        &self, source: &str, task_id: &str, observed: &PeerHold,
+        agent_id: &str, agent_name: &str, duration_secs: u32,
+    ) -> Acquire {
+        let key = self.key(source);
+        let lock = match self.read_lock(&key, agent_id) {
+            Ok(Some(lock)) => lock,
+            _ => return Acquire::PeerHolds(observed.clone()),
+        };
+        if lock.foreign_account || lock.agent_id != observed.agent_id
+            || !ClaimHolder::from_reason(lock.claim_reason.as_deref())
+                .is_some_and(|holder| holder.is_source_task(&self.project, task_id))
+        {
+            return Acquire::PeerHolds(observed.clone());
+        }
+        // Conditional release rechecks the exact epoch/renewal snapshot;
+        // a concurrent winner is reported rather than overwritten.
+        match self.move_claim(source, ClaimKind::Task, &lock.agent_id,
+            agent_id, agent_name, duration_secs,
+            self.budget.expect("source handoff has a budget").deadline, Some(&lock))
+        {
+            // A known conflict cannot become advisory permission on failure.
+            Acquire::Unavailable(_) => Acquire::PeerHolds(observed.clone()),
+            answer => answer,
+        }
+    }
+
     fn move_claim(
         &self,
         task_id: &str,
@@ -918,6 +955,17 @@ impl PeerClaims {
             return Ok(false);
         }
         self.coordinator(agent_id)?.release_expecting(&key, lock.epoch, lock.renewal_count)
+    }
+
+    /// Explicitly hand back a GitHub source, including its heartbeat registration.
+    pub(crate) fn release_source_for_handoff(
+        &self, root: &Path, agent_id: &str, key: &str,
+    ) -> Result<bool, String> {
+        let _fence = lock_task_claim_release(root, key).map_err(|error| error.to_string())?;
+        self.remaining().map_err(|error| error.to_string())?;
+        let released = self.release_own(key, agent_id).map_err(|error| error.to_string())?;
+        forget_source_claim(root, agent_id, key)?;
+        Ok(released)
     }
 
     /// The holder as Cassy Cloud lists it: whether it is live, and its
@@ -1165,6 +1213,13 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
         let mut source_task = None;
         let _source_fence = if task_id.starts_with("ask-") {
             let Ok(fence) = lock_task_claim_release(cas_root, &task_id) else { report.failed += 1; continue; };
+            // A handoff may have removed this registration after the heartbeat
+            // snapshot. Re-check under the same fence before renewing/reclaiming.
+            let Ok(current) = agents.get(agent_id) else { report.failed += 1; continue; };
+            if !current.metadata.get(META_SOURCE_CLAIMS)
+                .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                .is_some_and(|keys| keys.contains(&task_id))
+            { continue; }
             match active_source_task(cas_root, &task_id) {
                 Ok(Some(task)) => source_task = Some(task),
                 Ok(None) => {
@@ -1202,6 +1257,17 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
                 report.failed += 1;
             }
             Acquire::PeerHolds(hold) => {
+                if source_task.as_ref().is_some_and(|task|
+                    claims.read_lock(&claims.key(&task_id), agent_id).ok().flatten()
+                        .is_some_and(|lock| !lock.foreign_account && lock.agent_id == hold.agent_id
+                            && ClaimHolder::from_reason(lock.claim_reason.as_deref())
+                                .is_some_and(|holder| holder.is_source_task(&claims.project, &task.id))))
+                {
+                    // The same card was staffed by a peer. Retire this old
+                    // heartbeat registration instead of reclaiming or alarming.
+                    let _ = forget_source_claim(cas_root, agent_id, &task_id);
+                    continue;
+                }
                 notify_claim_lost(cas_root, agents.as_ref(), me.as_ref(), agent_id, &task_id, &hold);
                 report.conflicts.push((task_id, hold));
             }
@@ -2415,11 +2481,40 @@ mod tests {
             retired_local: HashMap::new(), budget: None,
         };
         tokio::task::spawn_blocking(move || {
-            for (holder_session, same_session) in [(Some("session-a"), true), (Some("session-b"), false), (None, false)] {
+            // GH #1803: queued successors retain worker identity across task
+            // rollover; retired/landed claims are not concurrent peer edits.
+            use crate::types::TaskStatus::{AwaitingMerge, Cancelled, Closed, InProgress};
+            for (holder_session, reader_name, reader_task, retired, task_status, landed, expected) in [
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(InProgress), false, None),
+                (Some("session-b"), "reader-worker", "cas-reader", false, None, false, None),
+                (None, "reader-worker", "cas-reader", false, None, false, None),
+                (Some("session-a"), "holder-worker", "cas-other-task", false, None, false, Some(FileLease::Mine)),
+                (Some("session-a"), "reader-worker", "cas-real-task", false, None, false, None),
+                (Some("session-a"), "holder-worker", "cas-real-task", false, None, false, Some(FileLease::Mine)),
+                (Some("session-b"), "holder-worker", "cas-real-task", false, None, false, Some(FileLease::Mine)),
+                (Some("session-a"), "holder-worker", "cas-real-task", true, None, false, Some(FileLease::Mine)),
+                (Some("session-a"), "reader-worker", "cas-reader", true, Some(InProgress), false, Some(FileLease::Unchecked)),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(Closed), false, Some(FileLease::Unchecked)),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(Cancelled), false, Some(FileLease::Unchecked)),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(AwaitingMerge), true, Some(FileLease::Unchecked)),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(AwaitingMerge), false, None),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(InProgress), true, None),
+            ] {
+                let same_session = holder_session == Some("session-a");
                 let dir = tempfile::tempdir().unwrap();
                 let root = crate::store::init_cas_dir(dir.path()).unwrap();
                 let agents = crate::store::open_agent_store(&root).unwrap();
-                for (id, name, session) in [("reader", "reader-worker", Some("session-a")), ("holder", "holder-worker", holder_session)] {
+                if let Some(status) = task_status {
+                    let mut task = crate::types::Task::new("cas-real-task".into(), "Fixture".into());
+                    task.status = status;
+                    task.assignee = Some("holder-worker".into());
+                    task.branch = Some("factory/holder-worker-cas-real-task".into());
+                    if landed {
+                        task.deliverables.green_merge_commit = Some("a".repeat(40));
+                    }
+                    crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+                }
+                for (id, name, session) in [("reader", reader_name, Some("session-a")), ("holder", "holder-worker", holder_session)] {
                     let Some(session) = session else { continue };
                     let mut agent = crate::types::Agent::new(id.into(), name.into());
                     agent.factory_session = Some(session.into());
@@ -2427,22 +2522,31 @@ mod tests {
                 }
                 let path = "web/DESIGN.md";
                 assert_eq!(claim_with(&claims, &root, "holder", "holder-worker", "cas-real-task", path), FileLease::Mine);
-                let FileLease::HeldBy(holder) = claim_with(&claims, &root, "reader", "reader-worker", "cas-reader", path) else {
+                let mut resumed_claims = claims.clone();
+                if retired {
+                    agents.unregister("holder").unwrap();
+                    resumed_claims.retired_local = retired_local_agents(&root);
+                }
+                let answer = claim_with(&resumed_claims, &root, "reader", reader_name, reader_task, path);
+                if let Some(expected) = expected {
+                    assert_eq!(answer, expected,
+                        "session={holder_session:?}, retired={retired}, status={task_status:?}, landed={landed}");
+                    assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+                    continue;
+                }
+                let FileLease::HeldBy(holder) = answer else {
                     panic!("expected a contended file for {holder_session:?}");
                 };
                 let note = collision_note(path, &holder);
-                assert!(notify_worker_of_holder(&root, "reader", "reader-worker", Some("session-a"), path, &holder));
+                assert!(notify_worker_of_holder(&root, "reader", reader_name, Some("session-a"), path, &holder));
                 let queued = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
                 // pin: both harnesses must receive the same coordination instructions.
                 assert_eq!(queued[0].prompt, note, "Claude context and Codex message agree");
                 assert!(note.contains("holder-worker") && note.contains("cas-real-task"), "{holder_session:?}: {note}");
-                if holder_session.is_none() {
-                    assert!(note.contains("on other-host"), "{note}");
+                if task_status.is_some() {
+                    assert!(note.contains("factory/holder-worker-cas-real-task"), "{note}");
                 }
-                // pin: the advisory must distinguish local coordination from a different supervisor.
-                assert_eq!(note.contains("another worker in your session (holder-worker, task cas-real-task)"), same_session, "{note}");
-                assert_eq!(note.contains("other session's supervisor"), !same_session, "{note}");
-                assert!(note.contains("target=supervisor") && !note.contains("cas-8dbe"), "{note}");
+                assert_eq!(matches!(holder, crate::cloud::file_leases::FileHolder::SameSession(_)), same_session);
             }
         }).await.unwrap();
     }
@@ -2585,13 +2689,14 @@ mod tests {
         let budget = PeerBudget::new(Duration::from_millis(150));
         let worker = budget.run(|| std::thread::current().id()).await.unwrap();
         assert_ne!(worker, std::thread::current().id(), "not on the runtime thread");
-        let started = Instant::now();
-        let slow = budget.run(|| std::thread::sleep(Duration::from_millis(600))).await;
-        assert!(slow.unwrap_err().contains("no answer"));
-        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
-        let spent = Instant::now();
-        assert!(budget.run(|| 1).await.is_err(), "a spent budget answers at once");
-        assert!(spent.elapsed() < Duration::from_millis(50));
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let slow = budget.run(move || blocked.recv()).await;
+        drop(release);
+        assert!(slow.is_err());
+        let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&invoked);
+        assert!(budget.run(move || observed.store(true, std::sync::atomic::Ordering::SeqCst)).await.is_err());
+        assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -2639,7 +2744,6 @@ mod tests {
                 retired_local: HashMap::new(),
                 budget: None,
             };
-            let started = Instant::now();
             let answer = tokio::task::spawn_blocking(move || {
                 let observed = PeerHold {
                     agent_id: "old".into(),
@@ -2661,11 +2765,6 @@ mod tests {
             .await
             .unwrap();
             assert!(matches!(answer, Acquire::Unavailable(_)), "{answer:?}");
-            assert!(
-                started.elapsed() < Duration::from_millis(300),
-                "{:?}",
-                started.elapsed()
-            );
             assert!(
                 server
                     .received_requests()

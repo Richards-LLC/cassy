@@ -18,14 +18,36 @@ waiver ends that per-task obligation; deferred batch evidence is still owed.
 Once per release, at the frozen tip after the fix-diff re-review, the supervisor
 builds a candidate, walks the combined batch matrix and records the reviewed
 revision.
-In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. Until that receipt exists,
-a deferred delivery reports "waiting for batch receipt".
+In qa.mode=batch, recording QA retries close using each delivery's existing merge approval. A QA receipt cannot replace that approval. A deferred delivery reports its remaining QA or verification gate. Covered QA anchors are not offered again. The supervisor gets one
+offer per distinct uncovered delivery set. Advancing main alone stays quiet; a
+changed set receives an offer naming the current published tip in its receipt call.
+
+For parked deliveries already on `origin/<target>`, Cassy offers the supervisor
+the exact receipt call once per target branch and live parked task set. Unrelated
+merges that only move the target tip do not repeat it. A new task set receives
+an offer using the current target SHA; the supervisor still records the receipt.
+
+Offers belong to the epic's current verification owner. Ownership transfers
+create a new offer for that owner; an owner absent from this machine never
+falls back to an unrelated supervisor. Delivery and inbox reads recheck both
+ownership and outstanding QA. Old hourly `qa_batch_overdue` notices and offers
+already covered by QA are withheld with their stored history retained, even
+when a different close gate still holds the shipped task open.
 
 While building, implementers capture before/after evidence at 390 and 1440
 pixels for visual changes. A non-implementer walks the frozen-tip candidate (or
 deployed staging where one exists), capped per release, and writes one ledger
 citing that evidence; uncovered changes are `NOT EXERCISED`. Include only tasks that passed;
 failed or unreviewed tasks remain open.
+
+Before the walk, run `cas qa ledger init --task <batch-task-or-epic>
+--covers cas-delivery-a,cas-delivery-b` with every intended receipt delivery.
+The generated `covers:` header names those IDs; without `--covers`, init uses
+its owner task. Before publishing, run `cas qa ledger check <path>
+--task <batch-task-or-epic> --covers cas-delivery-a,cas-delivery-b` with the same
+set. Missing, malformed or incomplete coverage fails preflight. QA and release
+receipts enforce declared coverage even when other tasks appear in the prose.
+Historical ledgers without this header retain their existing receipt checks.
 
 Publish the ledger using `artifact action=publish task_id=<batch-task-or-epic>
 path=<absolute-ledger-path>`. Cloud storage is optional: a locally published
@@ -45,12 +67,17 @@ there, and still byte-checks a ledger that is published locally. The
 independent-author check runs against the closing machine's own record of who
 implemented each task.
 
-A release verdict uses the same action with `verification_type=release`: one
-review of the assembled tip, whose published report names every delivery. It rides
-task sync on a reserved `RELEASE_VERDICT_PROOF:` line. For Tier 1 deliveries
-owned by release review, its exact-anchor coverage also satisfies deferred
-batch debt. It does not replace Tier 2 probes or a dedicated review. A verdict recorded after an expired dispatch supersedes
-that old wait; live or newer dispatches and rejected verdicts retain authority.
+Code review happens before each delivery merges, including Tier 1 in batch
+mode. The release cut computes its verdict from those existing approvals
+(local or peer) and the green frozen-train full-set receipt. A missing
+approval is reported by task ID before push or enqueue. No release review
+ledger or recorder identity participates in code acceptance; a QA receipt
+cannot replace a missing merge approval. The merge queue still proves the
+final release tree before `main`.
+
+Historical release ledgers remain readable. New release-review ledgers are
+refused before recorder identity is resolved; deliveries use their existing
+approvals.
 
 Name who walked the ledger in `ledger_author` (agent id or name). For every
 listed tier 1 or tier 2 task, that author must be outside the same
@@ -102,6 +129,32 @@ anchor and matching QA. This
 recovers delivery identity for QA; it does not restore declined merge authority
 or clear deferred evidence without its receipt or passed independent round.
 
+If a shipped historical or conflict-recovered task has lost its usable anchor
+and implementer, a live registered supervisor can bind its integrated identity
+before recording the batch receipt:
+
+```json
+{
+  "action": "recover_delivery",
+  "id": "cas-a123",
+  "commit_receipt": "<integrated task commit>",
+  "reason": "Inspected the released task and its integrated content"
+}
+```
+
+This task MCP action requires an attributable commit with a nonempty diff,
+preserved content and containment on the configured target. A known source's
+tree-equivalent integrated squash can also establish attribution. An unrelated
+target commit cannot. Recovery refuses active task leases, replacement of a
+resolvable active anchor and identities owned by immutable delivery transactions.
+It retains previous anchors, records the supervisor and reason, and binds the
+full integrated SHA using a guarded task write. Replaying that binding is a no-op.
+Assignment and task status stay unchanged; existing lease, branch and receipt
+actors remain in the implementation lineage, joined by the recovered commit's
+Git actors. The independent recorder and author checks still apply. Recovery
+neither records a QA PASS nor waives deferred batch evidence or release review:
+record the independent receipt, then retry ordinary close.
+
 The runtime verifies nonempty UTF-8 ledger bytes against the published
 artifact's size and SHA-256. It stores an immutable receipt with project,
 recorder, time, staging commit, ledger binding and deduplicated task anchors.
@@ -149,3 +202,5 @@ reviews retain their own verdicts, and Tier 2 still needs an adversarial probe.
 CI overrides remain subject to independent QA. Close rechecks these gates; appearing in recovery never approves or closes a delivery.
 Unreadable verification metadata skips and reports that row while preserving
 the other recovery actions and the inherited supervisor handoff.
+
+Deliberate depth=light, rapid-response sampling and Tier 0 exemptions use green lane CI plus the green frozen-train run. Pending or rejected reviews retain their authority. Missing lane CI is named separately from a missing required review.

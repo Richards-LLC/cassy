@@ -46,6 +46,10 @@ pub struct Config {
     #[serde(default)]
     pub sync: SyncConfig,
 
+    /// Draft rule expiry, applied by the existing maintenance pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<RulesConfig>,
+
     /// Optional skill validation sandbox policy. When omitted, validation
     /// uses the degraded fallback if bubblewrap is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,10 +212,6 @@ pub struct Config {
     /// and typecheck, owing a post-merge receipt (cas-5ea7). Off by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_lane: Option<crate::fast_lane::FastLaneConfig>,
-
-    /// Machine-wide control for the managed Viktor upstream.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub viktor: Option<ViktorConfig>,
 }
 
 /// Host `.cas` directory used for settings that apply across projects.
@@ -282,6 +282,7 @@ impl Config {
             };
         }
         merge_option!(accounts);
+        merge_option!(rules);
         merge_option!(cloud);
         merge_option!(skill_validation);
         merge_option!(skills);
@@ -316,18 +317,12 @@ impl Config {
         merge_option!(release);
         merge_option!(fast_lane);
         merge_option!(slack);
-        merge_option!(viktor);
         changed
     }
 
     /// Get daemon maintenance config with defaults.
     pub fn daemon(&self) -> DaemonSettings {
         self.daemon.clone().unwrap_or_default()
-    }
-
-    /// Managed Viktor is enabled by default for existing installations.
-    pub fn viktor_enabled(&self) -> bool {
-        self.viktor.as_ref().is_none_or(ViktorConfig::enabled)
     }
 
     /// Whether a probed Claude account e-mail may run the one-shot

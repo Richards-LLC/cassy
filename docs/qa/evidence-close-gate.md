@@ -330,7 +330,7 @@ healer-only delivery is test-only, so eligibility alone would never see it.
 | --- | --- | --- |
 | Question | Did the implementer run it? | Did someone else confirm it? |
 | Moment | Every close, before the merge gate | Dispatch at park, gates at merge and Cassy's post-merge completion |
-| Evidence dir | `<task>/qa/` (or `<task>/journeys/<id>/`) | `<task>/independent-qa/round-<n>/` |
+| Evidence dir | `<task>/qa/` (or `<task>/journeys/<id>/`) | `<task>/independent-qa/<full-head>/<pass-id>/round-<n>/` |
 | Eligibility | The shared `user_facing_reasons` | The shared `user_facing_reasons` |
 | Waiver | `supervisor_override` on close, logged | `qa_waive`, logged |
 
@@ -434,3 +434,5 @@ changed final content fail containment. The original delivery anchor remains
 its QA and executable-hook identity; batch containment supplies merge evidence
 and does not waive review or evidence requirements. `commit_receipt=<squash>`
 can name the integration explicitly; it does not require `supervisor_override`.
+
+A cas-allow-skip reason satisfies the static marker check only. It does not approve missing required coverage or focused tests in CI. Follow cas-playwright-tests: required fixture/auth/data failures fail, declared optional lanes report their reasons, and the merged full report rejects unexplained skips or zero required execution. CI forbidOnly remains independent.

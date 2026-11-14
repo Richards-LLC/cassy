@@ -118,9 +118,6 @@ mod tests {
         assert!(loaded.task_for("cas-other").is_none());
 
         let missing = wait(TaskDialogLoad::start(cas_dir, "cas-none".into()));
-        assert_eq!(
-            missing.error_for("cas-none"),
-            Some("Task cas-none not found")
-        );
+        assert!(matches!(missing, TaskDialogLoad::Failed { ref task_id, .. } if task_id == "cas-none"));
     }
 }

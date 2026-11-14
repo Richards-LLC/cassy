@@ -215,6 +215,9 @@ struct TranscriptIndex {
     events: Vec<Indexed>,
     open_calls: HashMap<String, usize>,
     turn: Option<String>,
+    /// The harness's own turn boundary, which encloses every tool in it.
+    native_turn: Option<WorkLifecycle>,
+    last_activity_at: Option<DateTime<Utc>>,
     command_sessions: HashMap<String, usize>,
     poll_parents: HashMap<String, usize>,
     changed_files: HashMap<Option<String>, Vec<WorkChangedFile>>,
@@ -230,6 +233,8 @@ impl TranscriptIndex {
             events: Vec::new(),
             open_calls: HashMap::new(),
             turn: None,
+            native_turn: None,
+            last_activity_at: None,
             command_sessions: HashMap::new(),
             poll_parents: HashMap::new(),
             changed_files: HashMap::new(),
@@ -512,6 +517,32 @@ impl TranscriptIndex {
         });
     }
 
+    /// A tool finishing never ends the harness turn; only its own end does.
+    fn native_boundary(&mut self, at: DateTime<Utc>, start: bool, outcome: Option<&str>) {
+        let open = self.native_turn.as_ref().filter(|turn| turn.stage != "end").cloned();
+        if start {
+            // Claude appends prompts queued into a running turn; Codex names each turn.
+            if open.is_some() && self.source.cli != cas_mux::SupervisorCli::Codex {
+                return;
+            }
+            self.native_turn = Some(WorkLifecycle {
+                id: self.turn.clone().unwrap_or_else(|| format!("turn:{}", at.timestamp_millis())),
+                stage: "start".into(),
+                phase: None,
+                outcome: None,
+                started_at: Some(at.to_rfc3339()),
+                ended_at: None,
+            });
+        } else if let Some(open) = open {
+            self.native_turn = Some(WorkLifecycle {
+                stage: "end".into(),
+                outcome: outcome.map(str::to_owned),
+                ended_at: Some(at.to_rfc3339()),
+                ..open
+            });
+        }
+    }
+
     fn index_line(&mut self, offset: u64, bytes: &[u8]) {
         match self.source.cli {
             cas_mux::SupervisorCli::Codex => self.index_codex(offset, bytes),
@@ -535,6 +566,7 @@ impl TranscriptIndex {
             return;
         }
         let Some(at) = timestamp(&value) else { return };
+        self.last_activity_at = Some(at);
         let content = value.pointer("/message/content");
         match value.get("type").and_then(Value::as_str) {
             Some("user") => {
@@ -618,6 +650,13 @@ impl TranscriptIndex {
             },
             _ => {}
         }
+        use crate::mcp::tools::service::harness_observation as native;
+        if native::claude_user_text(&value).is_some() {
+            self.native_boundary(at, true, None);
+        } else if native::claude_is_turn_end(&value) {
+            let interrupted = value.get("type").and_then(Value::as_str) == Some("user");
+            self.native_boundary(at, false, Some(if interrupted { "cancelled" } else { "unknown" }));
+        }
     }
 
     fn index_codex(&mut self, offset: u64, bytes: &[u8]) {
@@ -625,6 +664,7 @@ impl TranscriptIndex {
             return;
         };
         let Some(at) = timestamp(&value) else { return };
+        self.last_activity_at = Some(at);
         let Some(payload) = value.get("payload") else {
             return;
         };
@@ -635,6 +675,7 @@ impl TranscriptIndex {
                     self.turn = Some(turn.to_owned());
                 }
                 self.lifecycle_notice(at, offset, "start", None, None);
+                self.native_boundary(at, true, None);
             }
             Some("event_msg")
                 if matches!(
@@ -642,19 +683,15 @@ impl TranscriptIndex {
                     Some("task_complete" | "turn_complete" | "turn_aborted")
                 ) =>
             {
-                self.lifecycle_notice(
-                    at,
-                    offset,
-                    "end",
-                    None,
-                    Some(if kind == Some("turn_aborted") {
-                        "cancelled"
-                    } else if payload.get("error").is_some_and(|error| !error.is_null()) {
-                        "error"
-                    } else {
-                        "success"
-                    }),
-                );
+                let outcome = if kind == Some("turn_aborted") {
+                    "cancelled"
+                } else if payload.get("error").is_some_and(|error| !error.is_null()) {
+                    "error"
+                } else {
+                    "success"
+                };
+                self.lifecycle_notice(at, offset, "end", None, Some(outcome));
+                self.native_boundary(at, false, Some(outcome));
             }
             Some("compacted") => {
                 self.lifecycle_notice(at, offset, "phase", Some("compacted"), Some("success"))
@@ -1283,6 +1320,12 @@ pub(crate) struct SupervisorPhase {
     pub(crate) event_id: String,
     pub(crate) kind: WorkEventKind,
     pub(crate) lifecycle: WorkLifecycle,
+    /// The open turn's running tool, by name only: never its input or output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) step: Option<String>,
+    /// The newest transcript record, whatever it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_activity_at: Option<String>,
     pub(crate) observed_at: String,
     pub(crate) stale: bool,
 }
@@ -1363,6 +1406,7 @@ fn phase_hooks(cas_dir: &Path, session: &str, supervisor: &str, now: DateTime<Ut
                 outcome: completed.then(|| "success".into()), started_at,
                 ended_at: completed.then(|| at.to_rfc3339()),
             },
+            step: None, last_activity_at: None,
             observed_at: Utc::now().to_rfc3339(), stale: false,
         });
     }
@@ -1417,7 +1461,11 @@ fn supervisor_phase_for_session_at(
     }
     let transcript_phase = indexes.entry(key).or_default().supervisor_phase(&scope, &resolve);
     let phase = match (transcript_phase, hooks.phase) {
-        (Some(native), Some(hook)) => Some(if hook.at() > native.at() { hook } else { native }),
+        // A finished compaction inside an open native turn does not end it.
+        (Some(native), Some(hook)) if hook.at() > native.at() && !(hook.lifecycle.stage == "end"
+            && native.kind == WorkEventKind::Notice && native.lifecycle.stage == "start") => Some(SupervisorPhase {
+            last_activity_at: native.last_activity_at, ..hook
+        }),
         (native, hook) => native.or(hook),
     }?;
     // PreCompact has no cancellation hook. After five minutes without a
@@ -1452,18 +1500,31 @@ impl WorkEventIndex {
         let sources = scope.transcripts(None);
         let fresh = self.refresh(scope, &sources, resolve);
         if fresh { self.phase_observed_at = Some(Utc::now().to_rfc3339()); }
-        let events: Vec<&WorkEvent> = sources.iter()
+        let indexes: Vec<&TranscriptIndex> = sources.iter()
             .filter_map(|source| self.transcripts.get(&source.agent_id))
+            .collect();
+        let events: Vec<&WorkEvent> = indexes.iter()
             .flat_map(|index| index.events.iter().map(|item| &item.event))
             .collect();
+        let millis = |at: &str| DateTime::parse_from_rfc3339(at).map(|at| at.timestamp_millis()).unwrap_or(0);
         let latest = events.iter().copied().filter(|event| event.lifecycle.is_some())
             .max_by_key(|event| {
                 event.lifecycle.as_ref().and_then(|life| life.ended_at.as_deref())
-                    .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-                    .map(|at| at.timestamp_millis())
-                    .unwrap_or_else(|| DateTime::parse_from_rfc3339(&event.at).map(|at| at.timestamp_millis()).unwrap_or(0))
-            })?;
-        let mut lifecycle = latest.lifecycle.clone()?;
+                    .map(millis).unwrap_or_else(|| millis(&event.at))
+            });
+        let boundary = |life: &WorkLifecycle| millis(life.ended_at.as_deref().or(life.started_at.as_deref()).unwrap_or(""));
+        let turn = indexes.iter().filter_map(|index| index.native_turn.as_ref()).max_by_key(|turn| boundary(turn));
+        // A tool lifecycle is one step of the native turn enclosing it: its end
+        // is not the turn's end (cas-c3377). Only a newer boundary outside an
+        // open turn, such as compaction after the turn ended, replaces it.
+        let (event_id, kind, mut lifecycle) = match (turn, latest) {
+            (Some(turn), Some(event)) if turn.stage == "end"
+                && event.lifecycle.as_ref().is_some_and(|life| boundary(life) > boundary(turn)) =>
+                (event.id.clone(), event.kind, event.lifecycle.clone()?),
+            (Some(turn), _) => (turn.id.clone(), WorkEventKind::Notice, turn.clone()),
+            (None, Some(event)) => (event.id.clone(), event.kind, event.lifecycle.clone()?),
+            (None, None) => return None,
+        };
         // Only the matching operation's recorded start can complete an end.
         // A compaction boundary has no in-progress interval to recover.
         if lifecycle.stage == "end" && lifecycle.started_at.is_none() {
@@ -1471,9 +1532,15 @@ impl WorkEventIndex {
                 .find(|prior| prior.id == lifecycle.id && prior.stage == "start")
                 .and_then(|prior| prior.started_at.clone());
         }
+        let step = indexes.iter().filter(|index| index.native_turn.as_ref() == turn && lifecycle.stage == "start")
+            .filter_map(|index| index.open_calls.values().max().map(|&newest| &index.events[newest].event))
+            .find(|event| millis(&event.at) >= boundary(&lifecycle))
+            .and_then(|event| event.tool.as_ref()).map(|tool| tool.name.clone());
+        let last_activity_at = indexes.iter().filter_map(|index| index.last_activity_at).max().map(|at| at.to_rfc3339());
         Some(SupervisorPhase {
-            event_id: latest.id.clone(), kind: latest.kind, lifecycle,
-            observed_at: self.phase_observed_at.clone().unwrap_or_else(|| latest.at.clone()),
+            event_id, kind, lifecycle, step,
+            observed_at: self.phase_observed_at.clone().or(last_activity_at.clone()).unwrap_or_default(),
+            last_activity_at,
             stale: !fresh,
         })
     }
@@ -1826,6 +1893,7 @@ impl WorkEventService {
     /// Whether the change probe should run: a live client follows the stream
     /// and the last probe is `PROBE_INTERVAL` old (cas-ff22). The probe runs
     /// on the blocking lane like a page; the loop only compares strings.
+    // gate[W-68 watchdog]: Commander work-events change probe
     pub(crate) fn probe_due(&mut self, now: Instant, live: impl Fn(usize) -> bool) -> bool {
         self.subscribers.retain(|client| live(*client));
         if self.subscribers.is_empty() {

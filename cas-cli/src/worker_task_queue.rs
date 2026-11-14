@@ -53,7 +53,11 @@ pub(crate) fn worker_lock(root: &Path, worker: &Agent, operation: &str) -> Resul
 /// Plain starts serialize without a queue-specific contention refusal. Keep
 /// the runtime free while waiting for another process's start to finish.
 pub(crate) async fn wait_for_worker_start(root: &Path, worker: &Agent) -> Result<File, McpError> {
-    let file = worker_lock_file(root, worker, "start")?;
+    wait_for_worker_lock(root, worker, "start").await
+}
+
+async fn wait_for_worker_lock(root: &Path, worker: &Agent, operation: &str) -> Result<File, McpError> {
+    let file = worker_lock_file(root, worker, operation)?;
     tokio::task::spawn_blocking(move || {
         file.lock_exclusive().map_err(error)?;
         Ok(file)
@@ -82,6 +86,76 @@ impl QueueStartPrincipal {
     pub(crate) fn agent(&self) -> &Agent {
         &self.0
     }
+}
+
+/// Resolve booting names through their durable, session-scoped spawn receipt.
+/// A later failed spawn must not fall back to an older launch of the same name.
+fn assignment_worker(
+    root: &Path, assignee: &str, live: Option<&Agent>,
+) -> crate::Result<Option<(Agent, Option<cas_store::SpawnLifecycle>)>> {
+    let Some(session) = (match live {
+        Some(worker) => worker.factory_session.clone(),
+        None => std::env::var("CAS_FACTORY_SESSION").ok().filter(|s| !s.is_empty()),
+    })
+    else { return Ok(None); };
+    let name = live.map_or(assignee, |worker| worker.name.as_str());
+    let receipt = crate::store::open_spawn_queue_store(root)?
+        .recent_spawn_lifecycle(&session, 100)?
+        .into_iter()
+        .find(|r| r.worker_name.as_deref().is_some_and(|worker| worker.eq_ignore_ascii_case(name))
+            || (r.worker_name.is_none() && r.requested_names.len() == 1
+                && r.requested_names[0].eq_ignore_ascii_case(name)));
+    let worker = match live {
+        Some(worker) => worker.clone(),
+        None => {
+            let Some(receipt) = receipt.as_ref().filter(|r| !r.state.is_terminal()) else {
+                return Ok(None);
+            };
+            let name = receipt.worker_name.clone().unwrap_or_else(|| receipt.requested_names[0].clone());
+            let mut worker = Agent::new_with_role(String::new(), name, AgentRole::Worker);
+            worker.factory_session = Some(session);
+            worker
+        }
+    };
+    Ok(Some((worker, receipt)))
+}
+
+/// Admit mutation/director assignments once, including the pre-registration
+/// gap. Spawn binding happens first so it cannot overwrite an admitted tail.
+pub(crate) fn admit_assignment(root: &Path, task: &cas_types::Task, live: Option<&Agent>) -> crate::Result<bool> {
+    if task.status != TaskStatus::Open { return Ok(false); }
+    let Some(assignee) = task.assignee.as_deref() else { return Ok(false); };
+    let Some((worker, receipt)) = assignment_worker(root, assignee, live)? else { return Ok(false); };
+    let session = worker.factory_session.as_deref().expect("assignment session");
+    let queues = SqliteWorkerTaskQueueStore::open(root)?;
+    if let Some(receipt) = &receipt {
+        queues.bind_spawn(receipt.id, session, &worker.name)?;
+    }
+    let tasks = crate::store::open_task_store(root)?;
+    // A director snapshot may predate a cancellation or reassignment.
+    let current = tasks.get(&task.id)?;
+    if current.status != TaskStatus::Open || current.assignee != task.assignee {
+        return Ok(false);
+    }
+    let queue = queues.get(session, &worker.name)?;
+    let head = if queue.revision == 0 {
+        let active = if live.is_some() && worker.metadata.contains_key("clone_path") {
+            tasks.list(Some(TaskStatus::InProgress))?.into_iter().find(|t|
+                t.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id))
+        } else { None };
+        let head = active.or_else(|| receipt.as_ref()
+            .filter(|r| !matches!(r.state, cas_store::SpawnLifecycleState::Failed | cas_store::SpawnLifecycleState::Stopped))
+            .and_then(|r| r.task_id.as_ref()).and_then(|id| tasks.get(id).ok()));
+        // A single-task spawn keeps its existing startup path until a tail is
+        // actually assigned. Ordinary independent assignments also stay plain.
+        head
+    } else { None };
+    let admitted = queues.admit_assignment(session, &worker.name, &task.id,
+        head.as_ref().map(|head| (head.id.as_str(), head.status == TaskStatus::InProgress)))?;
+    if admitted {
+        let _ = cas_factory::notify_daemon(root);
+    }
+    Ok(admitted)
 }
 
 impl CasCore {
@@ -177,6 +251,21 @@ impl CasCore {
                 source_notices.push_str(&admission.notice);
                 source_admissions.push(admission);
             }
+            // Open work without a live lease is pending, even when an old
+            // execution left it as the durable cursor (cas-6184).
+            if let Some(id) = queue.current_task.as_deref()
+                && tasks.get(id).map_err(error)?.status == TaskStatus::Open
+                && self.open_agent_store()?.get_lease(id).map_err(error)?
+                    .is_none_or(|lease| lease.status != cas_types::LeaseStatus::Active
+                        || lease.expires_at <= chrono::Utc::now())
+            {
+                queue.current_task = None;
+                queue.current_started = false;
+                queue.starting = false;
+                queue.dispatch_from = None;
+                queue.context_reset_from = None;
+                queue.context_reset_request = None;
+            }
             if queue.current_task.is_none() {
                 queue.current_task = tasks
                     .list(Some(TaskStatus::InProgress))
@@ -223,7 +312,8 @@ impl CasCore {
                 .await?;
             queue = queues.get(session, &worker.name).map_err(error)?;
         }
-        Ok(format!("{}{source_notices}", render(&worker.name, &queue)))
+        let tasks = self.open_task_store()?;
+        Ok(format!("{}{source_notices}", render(&worker, &queue, tasks.as_ref()).map_err(error)?))
     }
 
     /// Called after either close or park commits, including immutable receipts.
@@ -271,6 +361,83 @@ impl CasCore {
             return Ok(None);
         }
         self.advance_worker_task_queue(worker, Some(id)).await
+    }
+
+    /// cas-526e: a release returns work to the pool, so it also leaves the
+    /// worker's queue. Left as the cursor, queue repair restarted it at once.
+    /// A released cursor advances the queue to its next pending task.
+    pub(crate) async fn drop_released_from_queue(
+        &self,
+        id: &str,
+        worker: &str,
+    ) -> Result<Option<String>, McpError> {
+        let Some((registration, lock)) = self.lock_assignment_queue(worker).await? else {
+            return Ok(None);
+        };
+        self.drop_from_locked_queue(id, registration, lock, "released").await
+    }
+
+    /// Hold the queue across assignment persistence and lease cleanup so repair
+    /// cannot reclaim the old cursor between unassignment and removal.
+    pub(crate) async fn lock_assignment_queue(
+        &self,
+        worker: &str,
+    ) -> Result<Option<(Agent, File)>, McpError> {
+        let Some(registration) = self
+            .open_agent_store()?
+            .list(None)
+            .map_err(error)?
+            .into_iter()
+            .filter(|a| a.role == AgentRole::Worker && (a.name == worker || a.id == worker))
+            .max_by_key(|a| a.registered_at)
+        else {
+            return Ok(None);
+        };
+        if registration.factory_session.is_none() {
+            return Ok(None);
+        }
+        let lock = wait_for_worker_lock(&self.cas_root, &registration, "queue").await?;
+        Ok(Some((registration, lock)))
+    }
+
+    pub(crate) async fn drop_from_locked_queue(
+        &self,
+        id: &str,
+        registration: Agent,
+        lock: File,
+        reason: &str,
+    ) -> Result<Option<String>, McpError> {
+        let session = registration.factory_session.as_deref().expect("validated session");
+        let queues = SqliteWorkerTaskQueueStore::open(&self.cas_root).map_err(error)?;
+        let mut queue = queues.get(session, &registration.name).map_err(error)?;
+        let current = queue.current_task.as_deref() == Some(id);
+        if current && self.open_agent_store()?.get_lease(id).map_err(error)?
+            .is_some_and(|lease| lease.status == cas_types::LeaseStatus::Active
+                && lease.expires_at > chrono::Utc::now())
+        {
+            return Ok(None);
+        }
+        if queue.revision == 0 || (!current && !queue.pending.iter().any(|p| p == id)) {
+            return Ok(None);
+        }
+        queue.pending.retain(|p| p != id);
+        if current {
+            queue.current_task = None;
+            queue.current_started = false;
+            queue.starting = false;
+            queue.dispatch_from = None;
+            queue.context_reset_from = None;
+            queue.context_reset_request = None;
+        }
+        let note = format!("Task queue dropped {id}: {reason}");
+        queue.notes.push(note.clone());
+        queues.save(&session, &registration.name, &mut queue).map_err(error)?;
+        drop(lock);
+        if !current {
+            return Ok(Some(note));
+        }
+        let advanced = self.advance_worker_task_queue(&registration.name, None).await?;
+        Ok(Some(advanced.map_or(note.clone(), |advanced| format!("{note}\n{advanced}"))))
     }
 
     async fn advance_worker_task_queue(
@@ -651,16 +818,29 @@ impl CasCore {
     }
 }
 
-pub(crate) fn render(worker: &str, queue: &WorkerTaskQueue) -> String {
-    let current = queue.current_task.as_deref().unwrap_or("none");
+pub(crate) fn render(
+    worker: &Agent,
+    queue: &WorkerTaskQueue,
+    tasks: &dyn cas_store::TaskStore,
+) -> cas_store::Result<String> {
+    // The cursor retains held work for dispatch recovery; execution and holds
+    // come from current task state, without rewriting that durable position.
+    let owns = |task: &cas_types::Task| task.assignee.as_deref()
+        .is_some_and(|assignee| assignee == worker.name || assignee == worker.id);
+    let current = tasks.list(Some(TaskStatus::InProgress))?.into_iter()
+        .find(|task| owns(task)).map(|task| task.id).unwrap_or_else(|| "none".into());
+    let mut held = tasks.list(Some(TaskStatus::Blocked))?.into_iter()
+        .filter(|task| owns(task)).map(|task| task.id).collect::<Vec<_>>();
+    held.sort();
+    let held = if held.is_empty() { "none".into() } else { held.join(", ") };
     let pending = if queue.pending.is_empty() {
         "none".into()
     } else {
         queue.pending.join(" -> ")
     };
     let mut output = format!(
-        "Task queue for {worker} (revision {})\nCurrent: {current}\nPending: {pending}",
-        queue.revision
+        "Task queue for {} (revision {})\nCurrent: {current}\nHeld: {held}\nPending: {pending}",
+        worker.name, queue.revision
     );
     if queue.starting && queue.context_reset_from.is_some() {
         output.push_str(&format!("\nContext reset: waiting for fresh conversation (request {})",
@@ -669,7 +849,7 @@ pub(crate) fn render(worker: &str, queue: &WorkerTaskQueue) -> String {
     if let Some(note) = queue.notes.last() {
         output.push_str(&format!("\n{note}"));
     }
-    output
+    Ok(output)
 }
 
 /// Recover durable cursors after lock contention, process loss or an invalid

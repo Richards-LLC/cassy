@@ -74,22 +74,10 @@ fn rows(
 }
 
 pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Result<()> {
-    let identity: Option<(String, String, String, Option<String>, Option<String>)> = conn
-        .query_row(
-            "SELECT name, role, registered_at, machine_id, factory_session FROM agents WHERE id=?",
-            [id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
+    let epoch: Option<String> = conn
+        .query_row("SELECT registered_at FROM agents WHERE id=?", [id], |row| row.get(0))
         .optional()?;
-    let Some((name, role, epoch, machine, session)) = identity else {
+    let Some(epoch) = epoch else {
         return Ok(());
     };
     let reason = reason
@@ -111,6 +99,39 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         }
         return Ok(());
     }
+    let Some((handoff, role, machine)) = snapshot(conn, id, reason)? else {
+        return Ok(());
+    };
+    let encoded = serde_json::to_string(&handoff).map_err(|e| StoreError::Other(e.to_string()))?;
+    conn.execute("INSERT INTO agent_session_ends (id,agent_id,registered_at,machine_id,role,reason,payload,ended_at) VALUES (?,?,?,?,?,?,?,?)", params![handoff.id,id,epoch,machine,role,reason,encoded,Utc::now().to_rfc3339()])?;
+    Ok(())
+}
+
+/// The lane facts a session end records, without recording an end. cas-5f67
+/// reuses it for a supervisor whose context is cleared while it keeps running.
+fn snapshot(
+    conn: &Connection,
+    id: &str,
+    reason: &str,
+) -> Result<Option<(SessionEnd, String, Option<String>)>> {
+    let identity: Option<(String, String, String, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT name, role, registered_at, machine_id, factory_session FROM agents WHERE id=?",
+            [id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((name, role, epoch, machine, session)) = identity else {
+        return Ok(None);
+    };
     let (pid, ppid, pid_starttime, metadata): (Option<u32>, Option<u32>, Option<i64>, String) =
         conn.query_row(
             "SELECT pid,ppid,pid_starttime,metadata FROM agents WHERE id=?",
@@ -231,11 +252,11 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         handoff.pending = rows(
             conn,
             "prompt_queue",
-            "SELECT id,source,target,prompt FROM prompt_queue WHERE processed_at IS NULL AND (target=?1 OR source=?1 OR target=?2 OR source=?2) ORDER BY id",
+            "SELECT id,source,target,prompt,kind,created_at FROM prompt_queue WHERE processed_at IS NULL AND (target=?1 OR source=?1 OR target=?2 OR source=?2) ORDER BY id",
             &[&name, &id],
         )?;
-        handoff.pending.extend(rows(conn, "supervisor_queue", "SELECT id,event_type,payload FROM supervisor_queue WHERE supervisor_id=? AND processed_at IS NULL ORDER BY id", &[&id])?);
-        handoff.pending.extend(rows(conn, "reminders", "SELECT id,message,trigger_type,trigger_at,trigger_event,trigger_filter FROM reminders WHERE supervisor_id=? AND status IN ('pending','suspended') ORDER BY id", &[&id])?);
+        handoff.pending.extend(rows(conn, "supervisor_queue", "SELECT id,event_type,payload,created_at FROM supervisor_queue WHERE supervisor_id=? AND processed_at IS NULL ORDER BY id", &[&id])?);
+        handoff.pending.extend(rows(conn, "reminders", "SELECT id,message,trigger_type,trigger_at,trigger_event,trigger_filter,created_at,task_id FROM reminders WHERE supervisor_id=? AND status IN ('pending','suspended') ORDER BY id", &[&id])?);
         // A delivered Commander ask is still open while its deadline reminder
         // is pending. Include its original body even after transport processed it.
         let mut asks = Vec::new();
@@ -247,7 +268,7 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
                 asks.extend(rows(
                     conn,
                     "prompt_queue",
-                    "SELECT id,source,target,prompt FROM prompt_queue WHERE id=?",
+                    "SELECT id,source,target,prompt,kind,created_at FROM prompt_queue WHERE id=?",
                     &[&ask_id],
                 )?);
             }
@@ -255,9 +276,7 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         handoff.pending.extend(asks);
         handoff.pending.extend(inherited_receipts);
     }
-    let encoded = serde_json::to_string(&handoff).map_err(|e| StoreError::Other(e.to_string()))?;
-    conn.execute("INSERT INTO agent_session_ends (id,agent_id,registered_at,machine_id,role,reason,payload,ended_at) VALUES (?,?,?,?,?,?,?,?)", params![handoff.id,id,epoch,machine,role,reason,encoded,Utc::now().to_rfc3339()])?;
-    Ok(())
+    Ok(Some((handoff, role, machine)))
 }
 
 pub(super) fn end_reason(conn: &Connection, id: &str) -> Result<String> {
@@ -289,6 +308,15 @@ impl SqliteAgentStore {
             tx.commit()?;
             Ok(())
         })
+    }
+
+    /// A live supervisor's lane facts in the session-end receipt shape, with
+    /// nothing recorded: its identity, leases and workers stay as they are.
+    pub fn supervisor_lane_snapshot(&self, id: &str, reason: &str) -> Result<Option<SessionEnd>> {
+        let conn = self.lock_conn()?;
+        Ok(snapshot(&conn, id, reason)?
+            .filter(|(_, role, _)| role == "supervisor")
+            .map(|(handoff, _, _)| handoff))
     }
 
     /// One winner per predecessor, even with concurrent successor startups.
@@ -374,6 +402,24 @@ impl SqliteAgentStore {
             .into_iter()
             .map(|(payload, reason)| decode(payload, reason))
             .collect()
+    }
+
+    /// The harness session a retired agent row was last bound to. An MCP
+    /// reconnect deletes the row at the old process's end, so the new process
+    /// would otherwise fall back to the launch session and lose a `/clear`
+    /// rebind (GH #1829).
+    pub fn retired_cc_session_id(&self, agent_id: &str) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT json_extract(metadata, '$.retired_agent.cc_session_id') FROM events
+                 WHERE event_type = 'agent_shutdown' AND entity_id = ?
+                 ORDER BY id DESC LIMIT 1",
+                [agent_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     /// Whether the agent row's current incarnation already recorded a session

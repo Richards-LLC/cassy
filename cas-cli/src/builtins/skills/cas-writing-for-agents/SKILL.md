@@ -11,6 +11,8 @@ metadata:
 
 # Writing for agents
 
+Tests assert behavior or stable machine identifiers such as error codes and rule IDs. Never require human-readable wording, word lists, canonical sentences or phrase presence; changing prose alone must not fail a test. Exact caller payloads and machine protocol bytes remain data-integrity checks. Fixed safety text needs a named consumer that requires those bytes; a writing preference is insufficient.
+
 Write agent-facing documents as instructions for a repeated process, not prose for a one-time reader.
 
 ## Context pointers

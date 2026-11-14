@@ -12,7 +12,7 @@ use crate::types::{GitContext, Worktree};
 use crate::worktree::git::{GitError, GitOperations};
 
 /// Configuration for worktree management
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeConfig {
     /// Whether worktree creation is enabled
     pub enabled: bool,
@@ -184,6 +184,8 @@ pub(crate) fn residue_overlapping_merge(
 }
 
 impl WorktreeManager {
+    pub(crate) fn handoff_config(&self) -> WorktreeConfig { self.config.clone() }
+
     fn worker_ref(&self, worker_name: &str) -> WorktreeResult<&Worktree> {
         self.workers
             .get(worker_name)
@@ -218,6 +220,8 @@ impl WorktreeManager {
     /// the worktree directory (merge_and_cleanup with cleanup=true,
     /// abandon, remove_worker); pass `false` only when the worktree is
     /// merged but preserved (cleanup=false).
+    // gate[G-138 worktree]: Dirty source worktree preservation
+    // gate-audit[will_remove]: selector Selects which dirty-file classes the requested operation affects; force remains the actual G-138 bypass.
     fn reject_or_warn_on_dirty(
         &self,
         git: &GitOperations,
@@ -232,11 +236,11 @@ impl WorktreeManager {
                 message.push_str(", ");
             }
             message.push_str(&dirty.describe_warnings());
-            return Err(WorktreeError::UncommittedChanges(message));
+            return Err(WorktreeError::UncommittedChanges(crate::gates::tag("G-138",message)));
         }
 
         if dirty.is_blocked() {
-            return Err(WorktreeError::UncommittedChanges(dirty.describe_blocking()));
+            return Err(WorktreeError::UncommittedChanges(crate::gates::tag("G-138",dirty.describe_blocking())));
         }
 
         if !dirty.warnings.is_empty() {
@@ -404,6 +408,7 @@ impl WorktreeManager {
     ///
     /// # Returns
     /// The merge commit hash if successful, or None if merge was skipped
+    // gate-audit[cleanup]: selector Chooses post-merge worktree removal; dirty preservation is separately enforced.
     pub fn merge_and_cleanup(
         &self,
         worktree: &mut Worktree,
@@ -443,6 +448,19 @@ impl WorktreeManager {
         force: bool,
         will_cleanup: bool,
         source_sha: &str,
+    ) -> WorktreeResult<Option<String>> {
+        self.merge_preserving_worktree_at_with_publication(worktree, force, will_cleanup, source_sha, None)
+    }
+
+    // gate-audit[force]: bypass G-138 Caller-visible operation supplies the explicit successful dirty-source waiver tag.
+    // gate-audit[accepted_by]: worktree_merge_attempt
+    pub(crate) fn merge_preserving_worktree_at_with_publication(
+        &self,
+        worktree: &mut Worktree,
+        force: bool,
+        will_cleanup: bool,
+        source_sha: &str,
+        publication: Option<&mut crate::worktree::git::MergePublication<'_>>,
     ) -> WorktreeResult<Option<String>> {
         let source = if self.config.auto_merge {
             self.git.resolve_commit(source_sha).ok_or_else(|| {
@@ -505,13 +523,16 @@ impl WorktreeManager {
                 };
 
                 if !conflicting.is_empty() {
-                    return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(
-                        crate::worktree::git::DirtyClassification {
-                            blocking: conflicting,
-                            warnings: Vec::new(),
-                        }
-                        .describe_blocking(),
-                    )));
+                    let mut details = crate::worktree::git::DirtyClassification {
+                        blocking: conflicting,
+                        warnings: Vec::new(),
+                    }.describe_blocking();
+                    if target_dirty.blocking.iter().all(|entry| entry.status.ends_with(' '))
+                        && crate::cli::project_files::staged_sync_only(&self.repo_root).unwrap_or(false)
+                    {
+                        details.push_str("\nCassy-managed sync changes are staged. Run `cas update --sync` in the shared target checkout to commit them, then retry worktree_merge.");
+                    }
+                    return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(details)));
                 }
 
                 tracing::warn!(
@@ -554,16 +575,20 @@ impl WorktreeManager {
             // sync); otherwise it runs in an ephemeral detached worktree and
             // the branch ref is advanced by compare-and-swap, so the
             // supervisor's next commit still lands where they were.
-            let merge_result = match self.merge_venue(&worktree.parent_branch) {
-                MergeVenue::SharedCheckout => {
-                    self.git
-                        .merge_branch(&worktree.parent_branch, &source, true)
-                }
-                MergeVenue::TempWorktree => self.git.merge_branch_via_temp_worktree(
-                    &worktree.parent_branch,
-                    &source,
-                    true,
+            let merge_result = match publication {
+                Some(publish) => self.git.merge_branch_with_publication(
+                    &worktree.parent_branch, &source, publish,
                 ),
+                None => match self.merge_venue(&worktree.parent_branch) {
+                    MergeVenue::SharedCheckout => {
+                        self.git.merge_branch(&worktree.parent_branch, &source, true)
+                    }
+                    MergeVenue::TempWorktree => self.git.merge_branch_via_temp_worktree(
+                        &worktree.parent_branch,
+                        &source,
+                        true,
+                    ),
+                },
             };
 
             // The pre-flight above should make the conflicting case
@@ -608,6 +633,7 @@ impl WorktreeManager {
         &self,
         worktree: &mut Worktree,
         anchor: &str,
+        publication: Option<&mut crate::worktree::git::MergePublication<'_>>,
     ) -> WorktreeResult<Option<String>> {
         let refuse = |detail: String| WorktreeError::UncommittedChanges(format!(
             "dirty source checkout retained: pushed delivery proof required; {detail}. No merge was attempted"
@@ -626,6 +652,9 @@ impl WorktreeManager {
             || self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str())
         {
             return Err(refuse("pushed ref or local source tip does not match the parked anchor".into()));
+        }
+        if publication.is_some() {
+            return self.merge_preserving_worktree_at_with_publication(worktree, true, false, &anchor, publication);
         }
         match self.git.merge_branch_via_temp_worktree(&worktree.parent_branch, &anchor, true) {
             Ok(commit) => {
@@ -660,6 +689,8 @@ impl WorktreeManager {
     }
 
     /// Abandon a worktree without merging
+    // gate-audit[force]: bypass G-138 Caller-visible operation tags a successful dirty removal; shared helper owns its refusal code.
+    // gate-audit[accepted_by]: worktree_cleanup,worktree_cleanup_target
     pub fn abandon(&self, worktree: &mut Worktree, force: bool) -> WorktreeResult<()> {
         // Check for uncommitted changes (cas-006c: same named-path
         // classification as merge_and_cleanup). will_remove=true always —

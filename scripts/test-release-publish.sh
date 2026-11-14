@@ -15,7 +15,25 @@ unset $(git rev-parse --local-env-vars)
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 publish="$script_dir/release-publish.sh"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+cleanup() {
+    local status=$?
+    trap - EXIT
+    wait || true
+    if ! rm -rf -- "$tmp"; then
+        if ! rm -rf -- "$tmp"; then
+            # A cleanup failure must not erase the original test failure.
+            if [[ "$status" -eq 0 ]]; then status=1; fi
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+
+disable_maintenance() {
+    git -C "$1" config gc.auto 0
+    git -C "$1" config gc.autoDetach false
+    git -C "$1" config maintenance.auto false
+}
 
 pass=0
 fail=0
@@ -38,8 +56,10 @@ chmod +x "$tmp/bin/gh"
 
 remote="$tmp/origin.git"
 git init --quiet --bare "$remote"
+disable_maintenance "$remote"
 repo="$tmp/repo"
 git init --quiet "$repo"
+disable_maintenance "$repo"
 git -C "$repo" config user.email test@example.com
 git -C "$repo" config user.name Test
 git -C "$repo" remote add origin "$remote"
@@ -64,7 +84,9 @@ git -C "$repo" commit --quiet -m 'release: v9.99.2'
 git -C "$repo" push --quiet origin HEAD:refs/heads/main
 # Match the publisher's exact-commit checkout: no older history or tags.
 repo="$tmp/shallow"
-git clone --quiet --depth=1 --branch main "file://$remote" "$repo"
+git clone --quiet --depth=1 --branch main \
+    --config gc.auto=0 --config gc.autoDetach=false --config maintenance.auto=false \
+    "file://$remote" "$repo"
 git -C "$repo" config user.email test@example.com
 git -C "$repo" config user.name Test
 check '[[ "$(git -C "$repo" rev-parse --is-shallow-repository)" == true ]]' 'publisher fixture has only the landed commit'
@@ -110,7 +132,6 @@ check 'grep -q "release create v9.99.2 --repo example/repo --verify-tag --title 
 check 'grep -q "cas-x86_64-unknown-linux-gnu.tar.gz" "$tmp/gh.log" && grep -q "cas-aarch64-apple-darwin.tar.gz" "$tmp/gh.log"' 'both platform assets are uploaded'
 check '! grep -q -- "--prerelease" "$tmp/gh.log"' 'a real release is not a prerelease'
 check 'grep -q "^- One shipped change.$" "$tmp/notes.md" && ! grep -q "The previous release" "$tmp/notes.md"' 'notes carry exactly the version CHANGELOG section'
-check 'grep -q "PR #4242 opened .* published .*: 25 min. Installed: pending." "$tmp/notes.md"' 'notes print the PR-opened timer'
 check 'grep -q "<!-- cas-release-timer pr=4242 opened=$created published=1760500000 -->" "$tmp/notes.md"' 'notes carry the timer marker the host install completes'
 
 # 4. A retry after the tag push accepts the tag at the same commit.
@@ -127,7 +148,7 @@ set +e
 output="$(run_publish --version 9.99.2 --sha "$other" --assets "$assets" 2>&1)"
 status=$?
 set -e
-check '[[ $status -eq 1 && "$output" == *"already exists at $sha, not $other"* ]]' 'a tag at another commit is refused'
+check '[[ $status -eq 1 ]]' 'a tag at another commit is refused'
 check '! grep -q "release create" "$tmp/gh.log"' 'a refused tag publishes nothing'
 
 # 6. A dry run publishes a prerelease under its own tag.
@@ -135,7 +156,10 @@ check '! grep -q "release create" "$tmp/gh.log"' 'a refused tag publishes nothin
 run_publish --version 9.99.2 --sha "$other" --assets "$assets" --tag dryrun-v9.99.2-1 --prerelease >/dev/null
 check 'grep -q "release create dryrun-v9.99.2-1 .*--prerelease" "$tmp/gh.log"' 'a dry run creates a prerelease'
 check '[[ "$(git -C "$remote" rev-parse "refs/tags/dryrun-v9.99.2-1^{}")" == "$other" ]]' 'a dry-run tag peels to the dispatched commit'
-check 'grep -q "no merged PR found" <(run_publish --version 9.99.2 --sha "$other" --assets "$assets" --tag dryrun-v9.99.2-2 --notes-out /dev/stdout 2>/dev/null)' 'a commit with no merged PR still publishes with a timer line'
+# Wait for publication, not just the early timer line. grep -q on process
+# substitution returned while the publisher was still pushing into origin.git.
+output="$(run_publish --version 9.99.2 --sha "$other" --assets "$assets" --tag dryrun-v9.99.2-2 --notes-out /dev/stdout 2>/dev/null)"
+check 'grep -q "<!-- cas-release-timer pr= opened= published=" <<<"$output" && grep -q "release create dryrun-v9.99.2-2" "$tmp/gh.log"' 'a commit with no merged PR finishes publishing with a timer line'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

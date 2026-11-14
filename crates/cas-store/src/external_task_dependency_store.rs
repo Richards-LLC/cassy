@@ -391,7 +391,7 @@ mod tests {
         let error = store
             .upsert(&contradictory)
             .expect_err("contradictory rows must never reach SQLite");
-        assert!(error.to_string().contains("state matrix"), "{error}");
+
         assert!(
             store
                 .list_blocking_for_task("cas-origin")

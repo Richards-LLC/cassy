@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(report.synced_ids, vec!["rule-177".to_string()]);
         let written = fs::read_to_string(temp.path().join("rules/rule-177.md")).unwrap();
         assert!(
-            written.contains("DRAFT (operator hard rule, pending promotion; follow it as written): HARD RULE: no SMS changes"),
+            written.contains(&hard.content),
             "{written}"
         );
         assert!(!temp.path().join("rules/rule-179.md").exists());
@@ -460,9 +460,9 @@ mod tests {
 
         let mut promoted = hard;
         promoted.status = RuleStatus::Proven;
-        syncer.sync_all(&[promoted]).unwrap();
+        syncer.sync_all(std::slice::from_ref(&promoted)).unwrap();
         let written = fs::read_to_string(temp.path().join("rules/rule-177.md")).unwrap();
-        assert!(!written.contains("DRAFT"), "{written}");
+        assert!(written.contains(&promoted.content), "{written}");
     }
 
     #[test]

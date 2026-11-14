@@ -1,54 +1,27 @@
 ---
 name: cas-test-audit
-description: Use when asked to audit a project's tests for dead, duplicate, style-pinning, slow or flaky tests, or to cut test cost; not for writing one new test (cas-tdd).
+description: Use when auditing a project's tests for flake risk, historical flakes, dead or duplicate coverage, wording/style pins and cost; not for writing one new test.
 metadata:
   managed_by: cas
 ---
 
 # Test value audit
 
-Produce a read-only ledger of which tests protect nothing, which cost too much, and what a cut would save. Change no test while auditing.
+One read-only pass inventories test value, nondeterminism and the project's own failure history. It changes no audited test and never runs the full local suite.
 
-**The rule:** audit first, cut only after operator approval, every cut names its covering test (or says `none needed: dead` / `none needed: superseded`). Cuts ship as a separate approved task per batch, each with a before/after suite-time check.
+1. **Scope.** Name the project, source revision, runners and task artifact directory. Read its DESIGN.md before producing a human-facing report.
+2. **Mine history, then scan once.** Run the shipped portable script (Python standard library; `gh` for history):
 
-## What the measurements say
+   ```bash
+   python3 <skill-dir>/scripts/audit.py --root <project> --history --output <task-artifacts>/audit
+   ```
 
-Read this before promising speed. In cas-src (the reference audit, 10 green merge-queue runs):
+   It writes `audit.json` and `REPORT.md`, including file, line, pattern, evidence, confidence and a fix for each candidate. Read [detectors](references/detectors.md) for scope and limits. No project-local copy or extra audit skill.
+3. **Complete the bounded history evidence.** Cover about thirty days: CI attempts/reruns, same-SHA or same-tree flips, queue ejections and green requeues, flaky/quarantine issues, skip lists and Cassy notes. The script reads at most five hundred CI runs and one hundred issues per query; report truncation, unavailable sources and the dates actually covered. Read-only fan-out may review separate buckets. Search Cassy for this project's flake/queue incidents and read relevant notes; inspect current runner skip/exclusion configuration. Inspect native receipts for named failures and executed passes on identical source. Feed those observations into the **same invocation** with `--history-evidence <json>`; its shape is `{ "findings": [...], "coverage": {...} }`, with the same finding fields as `audit.json`. Keep original receipts, run/issue URLs and note citations beside the report. Historical findings stay in the report even when source was subsequently fixed/deleted.
+4. **Calibrate.** Hand-check up to ten rows per detector, recording held/sample and false positives. Under fifty percent means `noisy, not proposed`. Low-confidence rows remain inventory, never deletion proposals. A gate needs ninety percent precision and explicit operator approval; this audit is never a gate.
+5. **Classify and measure.** Review dead/disabled, superseded, duplicate, restated implementation, style/wording pins, slow and flake-prone tests together. Quote both assertion paths for duplicates; cite the retiring commit for superseded tests. Prove dead code with runner inventory/compiler/caller evidence, not test-only references. Follow [ci-timing](references/ci-timing.md) when making a cost claim; otherwise say cost and flake rate are unmeasured. Keep build time separate from test time. Measure flake rate with [cas-playwright-debug](../cas-playwright-debug/SKILL.md#measure-a-flake); CI retry outcomes alone are not a diagnosis. Compare spec titles with their final independent assertions using [cas-playwright-tests](../cas-playwright-tests/SKILL.md), flagging missing outcomes, sabotage evidence or required coverage.
+6. **Deliver and stop.** Publish the report, raw JSON and historical evidence as artifacts, with counts per class, precision, unmeasured inputs and decisions from [ledger](references/ledger.md). Link flake-prone findings to the assigned fix-or-delete batch. No cuts during the audit: a separate approved batch names surviving coverage or `none needed: dead/superseded` and measures any promised saving.
 
-- Every approved delete and merge removed about 13 test-seconds from a run of 2,906. Deleting tests is about correctness, not speed.
-- The slowest 5% of Rust tests held 68% of test time, and runner config was the biggest win in a second project (Jest 2 workers: 7.4 to 3.6 min). Fixing a few slow tests and runner levers beats deleting many.
-- In 12 later queue runs the median was 20.3 min wall. The critical path was the Rust archive build (about 14 min, not a test), then the Rust shards (about 6 min). Halving the slowest 137 tests saved about 44 s per shard. A test cost list is not the route to queue speed; report the build as the largest block and send speed work to the CI owner.
+A workflow turning green, a green requeue on another SHA or a retry label alone is not proof that a named test flaked. Match native test identity, executed failure and executed pass, plus identical SHA/tree and comparable selection. Preserve first failure evidence; never retry a suite to discover history or turn this audit green.
 
-## Steps
-
-1. **Scope.** Name the project, the code revision and the runners. Done when the ledger header states them. Work one project at a time; use read-only fan-out, one agent per bucket, never a full local suite.
-2. **Baseline cost.** Follow [ci-timing](references/ci-timing.md) for each runner. Done when a table lists tests, test-seconds, shard wall and thread use per layer, and the CI run ids used. If a project keeps no CI artifacts, write `not measurable`; never estimate.
-3. **Run the detectors** in [detectors](references/detectors.md) for the languages present. Each detector reports flagged and, after a 10-row hand check, held. Done when every detector row has `held / flagged`.
-4. **Apply the precision floor.** A detector under 50% on its sample goes in the ledger as `noisy, not proposed`. Its rows are never proposed for deletion. Low-confidence rows are listed, never proposed for deletion.
-5. **Classify** every proposal into one bucket from the table below, with a confidence (`high` tool-authoritative or both sides quoted, `medium`, `low`).
-6. **Write the ledger** in [ledger](references/ledger.md). Keep measured time removed and projected saving in separate columns; a saving is a projection until a before/after run proves it.
-7. **Stop.** Hand the ledger to the operator with the decisions list. Done when no test file differs from the audited revision.
-
-## Buckets
-
-| bucket | meaning |
-|---|---|
-| dead | tests of code production never calls |
-| superseded | tests of a retired behaviour or alias, with the retiring commit cited |
-| restates-implementation | the test copies the logic it checks, or pins a constant, snapshot or source text |
-| duplicate | another test asserts the same behaviour; quote both assertions |
-| slow | a real sleep, per-test rebuilt setup or serial loop; fix the cause, delete only if another bucket also flags it |
-
-Style pinning (CSS or source-text assertions) is deleted, not updated: Visual QA and behavioural tests own appearance. Keep the DOM or behaviour assertions beside it.
-
-## Two lists, not one score
-
-- **Value list** (cut or merge): highest-confidence flag first.
-- **Cost list** (speed): `runtime x runs + flake_rate x rerun_cost`, divided by unique coverage; a test with no unique coverage ranks as pure cost. Flake rate and unique coverage are measured inputs: flake from CI retry data, unique coverage from assertion-to-assertion mapping in the same module. Line-coverage diffing only where the project already produces reports.
-- **Runner levers:** measured thread use, worker count, shard imbalance. One A/B run proves a change.
-
-## Hard limits
-
-- No gate on a detector until its precision is measured high (at least 90% on its sample) and the operator approves. A noisy check that blocks correct work is worse than none.
-- A cut test file that another module imports is not a cut candidate; check imports before proposing.
-- Do not recount a test as dead because only test code calls it; wrappers used only by tests stay, move them under the test cfg.
+For timing guesses, fix by waiting on the event, completion or owned resource; use a controlled clock for a timing contract. Repair isolation or delete useless coverage. Remove implementation/style pins; preserve behavioral assertions and named accessibility-property contracts from [cas-playwright-tests](../cas-playwright-tests/references/locators-and-accessibility.md). Computed style alone is not an accessibility outcome. Exact caller payloads and machine protocol identifiers remain data-integrity checks. Never prescribe retry wrapping, quarantine or a guessed longer sleep.

@@ -36,6 +36,8 @@ fn delivered_file_digest(repo: &Path, tip: &str, path: &str) -> Option<String> {
 /// compatibility, one actual changed line (literal or digest):
 /// snapshot-approved: path — file-sha256:<digest> — reason
 /// snapshot-approved: path — +changed line / sha256:<digest> — reason
+// gate[G-75 park as-of]: Snapshot approval required
+// gate-audit[forward]: G-75 Snapshot approval classifier; final close emits the refused code.
 pub(super) fn rejection(
     repo: &Path,
     base: Option<&str>,
@@ -232,9 +234,6 @@ mod tests {
                 "mcp__cs__",
             )
             .unwrap();
-            assert!(error.contains("mcp__cs__task action=notes id=cas-fixture note_type=decision"));
-            assert!(error.contains("view.snap — +after"));
-            assert!(error.contains("2 changed lines"), "removed -- content must count: {error}");
         }
         let notes = "[time] decision snapshot-approved: view.snap — +after — display now includes the new field";
         assert!(

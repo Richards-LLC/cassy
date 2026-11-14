@@ -131,3 +131,132 @@ async fn a_capped_worker_ask_wakes_the_idle_supervisor_at_once_cas_922d() {
         .expect("the ask is queued");
     assert_eq!(wake_attempt(&mut daemon, id).await, cas_store::WakeAttempt::Fired);
 }
+
+/// GH #1780 part 1: answering a supervisor's ask must not require the worker
+/// to repeat kind=answer. Unsolicited status from that same worker stays capped.
+#[tokio::test(flavor = "current_thread")]
+async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for kind in [None, Some("status")] {
+        let (_root, mut daemon) = super::peer_mailbox_wake_tests::peer_fixture().await;
+        worker_with_landed_park(&daemon);
+        let cas_dir = daemon.app.cas_dir().to_path_buf();
+        let spent = chrono::Utc::now() - chrono::Duration::minutes(10);
+        for lead in 0..6 {
+            crate::supervisor_message_wakes::record(
+                &cas_dir, 900_000 + lead, daemon.app.supervisor_name(),
+                &["worker-id".to_string()], spent, spent,
+            ).unwrap();
+        }
+        let service = |agent: &str| {
+            let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+            core.set_agent_id_for_testing(agent.into());
+            #[cfg(feature = "mcp-proxy")]
+            let service = crate::mcp::tools::CasService::new(core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let service = crate::mcp::tools::CasService::new(core);
+            service
+        };
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let session = daemon.session_name.clone();
+        let supervisor = daemon.app.supervisor_name().to_string();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap().list(None).unwrap();
+        let held_by_policy = |id| {
+            let mut rows = vec![queue.queued_prompt(id).unwrap().unwrap()];
+            let mut facts = std::collections::HashMap::from([(id, super::queue_and_events::RowFacts::default())]);
+            crate::supervisor_message_wakes::schedule(
+                &cas_dir, &session, &supervisor, &agents, &mut rows, &mut facts,
+                chrono::Utc::now() + chrono::Duration::seconds(21),
+            ).unwrap();
+            rows.is_empty()
+        };
+        let last_row = |body: &str| conn.query_row(
+            "SELECT MAX(id) FROM prompt_queue WHERE instr(prompt, ?1) > 0", [body], |row| row.get::<_, i64>(0),
+        ).unwrap();
+        let evidence = "The updated evidence is art-a757ae0e.";
+        let worker = service("worker-id");
+        let request = |reply_to: Option<i64>| {
+            serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "supervisor", "kind": kind,
+                "in_reply_to": reply_to, "summary": "Updated evidence",
+                "message": evidence,
+            })).unwrap()
+        };
+        worker.coordination(Parameters(request(None))).await.unwrap();
+        let unsolicited = last_row(evidence);
+        assert!(held_by_policy(unsolicited), "unsolicited {kind:?} traffic stays capped");
+        worker.coordination(Parameters(request(Some(unsolicited)))).await.unwrap();
+        let thread_reference = last_row(evidence);
+        assert!(held_by_policy(thread_reference),
+            "citing the worker's own {kind:?} message grants no answer authority");
+
+        let instruction = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": WORKER,
+            "summary": "Continue work", "message": "Continue the assigned implementation.",
+        })).unwrap();
+        service("local-sup").coordination(Parameters(instruction)).await.unwrap();
+        let instructed = last_row("Continue the assigned implementation.");
+        for attempt in 0..2 {
+            let mut status: cas_mcp::types::CoordinationRequest = request(Some(instructed));
+            if attempt == 1 {
+                status.kind = Some("answer".into());
+            }
+            let body = format!("{evidence} Instruction update {attempt}.");
+            status.message = Some(body.clone());
+            worker.coordination(Parameters(status)).await.unwrap();
+            let update = last_row(&body);
+            assert!(held_by_policy(update),
+                "repeated {kind:?} replies to non-ask instructions stay capped");
+        }
+        let ask_request = |body: &str| serde_json::from_value(serde_json::json!({
+            "action": "message", "target": WORKER, "kind": "ask",
+            "summary": "Evidence needed", "message": body,
+        })).unwrap();
+        // Answer authority must not override an explicit delivery opt-out.
+        for receipt in [false, true] {
+            let body = format!("Which evidence for quiet reply {receipt}?");
+            service("local-sup").coordination(Parameters(ask_request(&body))).await.unwrap();
+            let asked = last_row(&body);
+            let mut quiet: cas_mcp::types::CoordinationRequest = request(Some(asked));
+            if receipt {
+                quiet.kind = Some("receipt".into());
+            } else {
+                quiet.wake = Some(false);
+            }
+            worker.coordination(Parameters(quiet)).await.unwrap();
+            let quiet_answer = last_row(evidence);
+            assert!(held_by_policy(quiet_answer),
+                "linked {kind:?} reply stays quiet with receipt={receipt}");
+        }
+        let body = "Which artifact contains the updated evidence?";
+        service("local-sup").coordination(Parameters(ask_request(body))).await.unwrap();
+        let asked = last_row(body);
+        worker.coordination(Parameters(request(Some(asked)))).await.unwrap();
+        let answer = last_row(evidence);
+        let mut attempt = wake_attempt(&mut daemon, answer).await;
+        let report = queue.message_delivery_report(answer).unwrap().unwrap();
+        // Selection and the durable transport claim can land on successive
+        // daemon passes. A policy hold must still fail the first-answer check.
+        if attempt == cas_store::WakeAttempt::NotAttempted
+            && report.stage == cas_store::DeliveryStage::Selected
+            && report.retry.next_attempt_at.is_none()
+        {
+            attempt = wake_attempt(&mut daemon, answer).await;
+        }
+        assert_eq!(attempt, cas_store::WakeAttempt::Fired,
+            "linked {kind:?} answer must bypass the cap and burst debounce: {:?}",
+            queue.message_delivery_report(answer).unwrap());
+        for attempt in 0..2 {
+            let mut repeated: cas_mcp::types::CoordinationRequest = request(Some(asked));
+            if attempt == 1 {
+                repeated.kind = Some("answer".into());
+            }
+            let body = format!("{evidence} Repeated answer {attempt}.");
+            repeated.message = Some(body.clone());
+            worker.coordination(Parameters(repeated)).await.unwrap();
+            let id = last_row(&body);
+            assert!(held_by_policy(id), "only the first {kind:?} answer to an ask gets a cap exemption");
+        }
+    }
+}

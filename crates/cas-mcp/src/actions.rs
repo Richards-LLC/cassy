@@ -55,6 +55,7 @@ pub const TASK_ACTIONS: &[&str] = &[
     "reset",
     "transfer",
     "rebind_branch",
+    "recover_delivery",
     "available",
     "mine",
 ];
@@ -107,6 +108,7 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
     "my_context",
     // cas-e477: live supervisors of this repo on any machine.
     "peers",
+    "peer_transcript",
 ];
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,
@@ -152,6 +154,8 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "worktree_show",
     "worktree_cleanup",
     "worktree_merge",
+    "train_merge",
+    "train_freeze",
     "worktree_status",
     // Loops and queues
     "loop_start",
@@ -214,6 +218,7 @@ pub const SEARCH_ACTIONS: &[&str] = &[
 ];
 
 pub const SYSTEM_ACTIONS: &[&str] = &[
+    "estimate",
     "version",
     "preflight",
     "doctor",
@@ -248,7 +253,7 @@ pub const VERIFICATION_ACTIONS: &[&str] = &[
 /// Verification actions dispatched only in builds with the `mcp-proxy` feature.
 pub const VERIFICATION_PROXY_ACTIONS: &[&str] = &["external_verify"];
 
-pub const ARTIFACT_ACTIONS: &[&str] = &["publish", "show", "list", "fetch", "post"];
+pub const ARTIFACT_ACTIONS: &[&str] = &["publish", "show", "list", "fetch", "post", "revoke"];
 
 pub const KNOWLEDGE_ACTIONS: &[&str] = &["search", "read", "write", "list", "status"];
 

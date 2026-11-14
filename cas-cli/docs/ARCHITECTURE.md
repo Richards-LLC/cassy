@@ -6,10 +6,19 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 
 **Core data flow**: CLI commands and MCP tool calls both go through the store trait abstractions in `cas-cli/src/store/`, which wraps `cas-store` (SQLite) with notification and sync layers.
 
+On Unix, `cas serve` owns a stable, bounded JSON-line front in `mcp/server/front.rs` and a private backend child in `mcp/server/backend.rs`. Standby backends negotiate initialize and the complete paginated tool catalog without starting the active runtime. A private, parent-validated control socket authorizes activation, idle acknowledgements and retirement. Replacement waits for both request directions and partial frames, confirms the new backend before retiring the old child, and never replays client calls. The front owns real session shutdown and records separate front/serving versions under `.cas/mcp-fronts/`; `factory_binary_skew.rs` accepts only live fingerprinted serving receipts. The existing factory identity guard and daemon SessionStart/startup/heartbeat adoption validate the original harness rather than treating the front as the harness. Startup and compatibility deferrals wait for a later installed identity; a drain timeout retries the same image at a later idle boundary. Schema mismatch diagnostics name the changed tool.
+
 Automatic project-store discovery requires `.cas/cas.db` or `.cas/config.toml`
 as a file, or the legacy `.cas/entries/` directory. `~/.cas/` also holds factory
 IPC sockets; a socket-only directory is skipped during ancestor and worktree
 discovery. An explicit `CAS_ROOT` still selects any existing directory.
+
+Embedded daemon sockets retain `.cas/daemon.sock` for short canonical store
+paths. Longer roots use `/tmp/cas-mcp-<uid>/daemon-<canonical-store-hash>.sock`,
+with an owner-validated 0700 directory and a 0600 socket. Hooks, caller discovery
+and hub idle-sync resolve the same canonical identity; the election lock remains
+in the project store and cleanup removes only the pathname held by its lease.
+The runtime socket location does not change `serve --sandbox` store fencing.
 
 ### cas-cli (main crate) — `cas-cli/src/`
 
@@ -149,6 +158,14 @@ errors and leaves the pull successful (cas-963f).
 
 **`cas serve` project-root resolution** (`cas-cli/src/mcp/server/runtime.rs::resolve_mcp_serve_root`): Priority order: (1) `CLAUDE_PROJECT_DIR` env var — Claude Code 2.1.139+ sets this when spawning a stdio MCP server, eliminating cwd-mismatch failures; (2) `CAS_ROOT` env var (explicit override); (3) git-worktree detection; (4) directory walk from cwd. Falls back silently to (2)–(4) when `CLAUDE_PROJECT_DIR` is unset or points at a non-existent path.
 
+**Mutation responses**: Request-scoped receipts carry the actual merge SHA and
+publication or task disposition. Synchronous merge and close handlers execute on
+the blocking pool so their commit watcher remains runnable. Published merges and
+checked parks/closes can answer immediately while the same handler completes
+follow-up; its result is retained as a task note. Intermediate audit writes never
+authorize a completed close. Inclusive phase timings distinguish gate work from
+post-commit continuation without adding a gate.
+
 **CasContext**: In `cas-cli/src/store/mod.rs`. Resolves the `.cas/` directory once at CLI entry points and passes it through — enables deterministic test behavior.
 
 **Hook scoring**: `cas-cli/src/hooks/scorer.rs` ranks context items (memories, tasks, rules, skills) by relevance for injection into SessionStart context, staying within a token budget.
@@ -271,13 +288,25 @@ the Cassy authoring checkout retains its tracked rendered fixtures.
 | Project tracked, project customizable | `.env.worktree.template`, `scripts/worktree-boot.sh` | Only exact generated templates are eligible for the initial automatic commit. Subsequent customization belongs to the project. |
 
 Before writing, update checks for unmerged paths, symlinks, malformed documents,
-namespace conflicts and local edits to managed content. A conflict is reported
-and leaves that project's files and index untouched. Ordinary project edits
+namespace conflicts and local edits to managed content. Each conflicting path
+is reported and preserved in both the worktree and index while unrelated files
+continue to sync. The same exclusion reaches configuration writers, store
+projections, builtin installation/pruning and index reconciliation. Symlink
+ancestors exclude their entire subtree; an ignore-policy conflict also defers
+untracking rather than overriding the project's exception.
+
+Successful writes record hashes of Cassy's owned fragments under
+`.cas/cache/managed-project-writes.json`, so a later renderer change recognizes
+its own prior output even when that output was only staged. Pre-receipt Claude
+settings can combine committed owned fields with the current generated fields,
+including the known statusline migration, without inventing a user conflict. Ordinary project edits
 outside the owned portions remain in the worktree; selective index blobs are
 rendered from index-side project content so those edits never enter Cassy's
-commit. Existing staged work is preserved: update stages the repair and reports
-that a commit is pending. Conflicts and pending commits remain warnings in the
-compact multi-project summary, rather than becoming successful skills phases.
+commit. Existing staged project work is preserved: update stages the repair and reports
+that a commit is pending. A previous sync’s staged changes are eligible for commit
+only when their content and modes contain exclusively managed changes relative to HEAD. Partial-sync conflicts and pending commits remain explicit warnings in the
+compact multi-project summary. SessionStart lists the preserved paths without
+claiming that all skills stopped syncing.
 Git index lock failures name the resolved lock path (relative to the project
 when possible), its age and a busy, stale or unknown ownership finding. Only a
 lock at least one hour old, with no Git process or open holder observed by
@@ -286,21 +315,19 @@ probes remain unknown; unrelated Git processes conservatively count as busy.
 Update never removes a lock. Recheck writers before manually removing the exact
 stale lock and retrying; recent/live locks require waiting, unknown ownership
 requires inspection.
-With no other staged work on a work branch, it makes one dedicated
-`chore(cassy): reconcile managed project files` commit, using a command-scoped
-Cassy author identity. It never auto-commits on `main`, `master`, `staging`,
-`develop`, `trunk`, the detected repository default, the configured
-`factory.epic_base_branch`, or an `epic/*` branch. Detached or unreadable HEAD
-also leaves the repair staged. The guard reads configuration from the CAS root
-passed to sync, including
-shared stores outside a worktree. If that configuration cannot be loaded, the
-repair stays staged with `commit_warning` and update succeeds. Fix the config
-before retrying. If default-branch detection has no origin HEAD, configured
-initial branch or common trunk, it falls back to the current branch; this also
-keeps the repair staged rather than granting permission to create history.
-These safe refusals report `outcome: "staged"` with no commit; review with
-`git diff --cached` and move the repair to a dedicated work
-branch before committing through the project's normal review process. It never
+With only managed changes staged on a named branch (including the default and
+integration branches), sync owns one `chore(cas): sync managed files to vX.Y.Z`
+commit with a command-scoped Cassy author identity. The same check compares
+project content inside mixed instruction/configuration files, not just their
+paths, so staged project edits are never included. A rerun commits pure managed
+staging left by an earlier sync even when no renderer changes remain.
+Detached or unreadable HEAD leaves the repair staged. The guard reads
+configuration from the CAS root passed to sync, including shared stores outside
+a worktree. Unreadable configuration leaves a `commit_warning` and staged repair;
+fix it before retrying. Existing merge/rebase state also defers the commit.
+When staged sync changes block `worktree_merge`, the refusal names
+`cas update --sync` in the shared target checkout as the clearing command.
+Mixed project staging retains the ordinary residue refusal. It never
 pushes. A committed repair prints a local-only next step: push it to origin and
 open a normal PR. Doctor checks the default branch against its configured
 upstream and warns about unpublished Cassy-authored reconcile commits, including

@@ -34,9 +34,42 @@ esac
 EOF
 cat >"$tmp/bin/cas" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$1" == --version ]]; then echo "cas $(cat "$FAKE_INSTALLED") (abc 2026-10-15)"; exit 0; fi
+if [[ "$1" == --version ]]; then
+    version="$(cat "$FAKE_INSTALLED")"
+    printf 'version=%s\n' "$version" >>"$FAKE_LOG"
+    echo "cas $version (abc 2026-10-15)"
+    exit 0
+fi
 printf 'cas %s\n' "$*" >>"$FAKE_LOG"
+if [[ "$1 $2" == "release published" ]]; then
+    publication_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
+    printf 'publish=%s@%s\n' "$publication_tag" "$(cat "$FAKE_INSTALLED")" >>"$FAKE_LOG"
+    [[ "${FAKE_PUBLISH_FAIL_TAG:-}" == "$publication_tag" ]] && exit 1
+    exit 0
+fi
 if [[ "$1 $2" == "release installed" ]]; then
+    notice_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
+    if [[ "${6:-}" == example/repo && "${7:-}" == --failed-attempts ]]; then
+        [[ "${FAKE_FAILURE_REPORT_FAILS:-}" == 1 ]] && exit 1
+        printf 'failed-notice=%s:%s\n' "$notice_tag" "$8" >>"$FAKE_LOG"
+        exit 0
+    fi
+    printf 'notice=%s\n' "$notice_tag" >>"$FAKE_LOG"
+    if [[ "${FAKE_NOTICE_HANGS:-}" == "$notice_tag" ]]; then
+        exec perl -MPOSIX=setpgid -e '
+            my $parent = $$;
+            my $child = fork(); defined $child or die $!;
+            if (!$child) {
+                setpgid(0, 0) == 0 or die $!;
+                $SIG{TERM} = "IGNORE";
+                open my $f, ">", $ENV{FAKE_NOTICE_PID} or die $!;
+                print $f "$parent $$\n"; close $f;
+                select undef, undef, undef, 60; exit 1;
+            }
+            waitpid($child, 0); exit 1;
+        '
+    fi
+    [[ "${FAKE_NOTICE_FAIL_TAG:-}" == "$notice_tag" ]] && exit 1
     [[ "${FAKE_NOTICE_FAILS:-}" == 1 ]] && exit 1
     exit 0
 fi
@@ -93,29 +126,158 @@ EOF
 echo 9.99.1 >"$FAKE_INSTALLED"
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.2 FAKE_REFRESH_FAILS=1 RELEASE_INSTALL_NOW="$installed" "$installer" --once >"$tmp/out" 2>&1
-check 'grep -q "cas update exited 1 after installing v9.99.2" "$tmp/out"' 'a failed project refresh is logged, not treated as a failed install'
 check 'grep -q "^cas update --yes --version 9.99.2$" "$FAKE_LOG"' 'a newer release runs cas update for that version'
 check '[[ "$(cat "$FAKE_INSTALLED")" == 9.99.2 ]]' 'the host converges on the published version'
-check 'grep -q "Installed on testhost 2025-10-15T04:10:40Z.*PR #4242 opened → installed: 24 min" "$FAKE_BODY"' 'the release notes print the PR-opened -> installed timer'
 check 'grep -q "<!-- cas-release-timer pr=4242 opened=$opened published=$published installed=$installed -->" "$FAKE_BODY"' 'the timer marker records the install time'
 check '! grep -q "Installed: pending" "$FAKE_BODY"' 'the pending timer is replaced'
 
 check '[[ "$(grep -c "^cas release installed --receipt " "$FAKE_LOG")" == 1 ]]' 'cas-61e0: fake publication and verified install notify the owning supervisor once'
+if python3 - "$FAKE_LOG" <<'PY_INSTALL_ORDER'
+import pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert lines.count("publish=v9.99.2@9.99.2") == 1
+assert lines.index("cas update --yes --version 9.99.2") < lines.index("version=9.99.2") < lines.index("publish=v9.99.2@9.99.2")
+PY_INSTALL_ORDER
+then ok 'the installed version is verified before its publication reconciles'; else bad 'the installed version is verified before its publication reconciles'; fi
 
 # 2. An installed release is a no-op: no update, no notes edit.
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
 check 'grep -q "^api repos/example/repo/releases/latest$" "$FAKE_LOG" && ! grep -q "update\|release edit" "$FAKE_LOG"' 'an installed release does nothing'
+check '! grep -q "release published" "$FAKE_LOG"' 'cas-6429: a reconciled publication is not triggered again'
 
 # Failed notice delivery is retried on the current-version path, without reinstall.
 FAKE_LATEST=v9.99.2 FAKE_NOTICE_FAILS=1 "$installer" --once >/dev/null
 # Force a new publication episode by clearing only the fixture notification receipt.
 rm -f "$XDG_STATE_HOME/cassy/install-on-publish.notified"
+rm -f "$XDG_STATE_HOME/cassy/install-on-publish.notified.d/v9.99.2"
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.2 FAKE_NOTICE_FAILS=1 "$installer" --once >/dev/null
 FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
 FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
 check '[[ "$(grep -c "^cas release installed --receipt " "$FAKE_LOG")" == 2 ]] && ! grep -q "cas update" "$FAKE_LOG"' 'cas-61e0: a pending notice retries once successfully without reinstalling'
+
+# cas-a00be: a pending older notice survives a newer installation, and is
+# attempted only after the update. All calls use the fixture binary.
+(
+    export XDG_STATE_HOME="$tmp/ordering-state"
+    mkdir -p "$XDG_STATE_HOME/cassy"
+    printf '{"tag_name":"v9.99.2","published_at":"2026-11-05T23:00:00Z","draft":false}\n' >"$XDG_STATE_HOME/cassy/install-on-publish.pending.json"
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.3 FAKE_NOTICE_FAIL_TAG=v9.99.2 "$installer" --once >/dev/null
+    python3 - "$FAKE_LOG" "$FAKE_INSTALLED" "$XDG_STATE_HOME/cassy" <<'PY_ORDER'
+import json
+import pathlib
+import sys
+log = pathlib.Path(sys.argv[1]).read_text().splitlines()
+state = pathlib.Path(sys.argv[3])
+assert pathlib.Path(sys.argv[2]).read_text().strip() == "9.99.3"
+assert log.index("cas update --yes --version 9.99.3") < log.index("notice=v9.99.2")
+assert json.loads((state / "install-on-publish.pending.d/v9.99.2.json").read_text())["tag_name"] == "v9.99.2"
+PY_ORDER
+    [[ $? == 0 ]] || exit 1
+) && ok 'a newer install precedes retries and retains the older pending notice' || bad 'a newer install precedes retries and retains the older pending notice'
+
+# An always-failing older notice retires once, including when the legacy
+# receipt keeps rediscovering it. Subsequent ticks must not recreate it.
+(
+    export XDG_STATE_HOME="$tmp/exhausted-state" RELEASE_NOTICE_MAX_ATTEMPTS=3
+    echo 9.99.3 >"$FAKE_INSTALLED"
+    mkdir -p "$XDG_STATE_HOME/cassy"
+    printf '{"tag_name":"v9.99.2","published_at":"2026-11-05T23:00:00Z","draft":false}\n' >"$XDG_STATE_HOME/cassy/install-on-publish.pending.json"
+    cp "$XDG_STATE_HOME/cassy/install-on-publish.pending.json" "$tmp/legacy-publication.json"
+    : >"$FAKE_LOG"
+    for tick in 1 2 3 4 5; do
+        # Replay legacy discovery across timer restarts as well as ordinary retries.
+        cp "$tmp/legacy-publication.json" "$XDG_STATE_HOME/cassy/install-on-publish.pending.json"
+        FAKE_LATEST=v9.99.3 FAKE_NOTICE_FAIL_TAG=v9.99.2 FAKE_FAILURE_REPORT_FAILS=$((tick == 3)) "$installer" --once >/dev/null
+    done
+    python3 - "$FAKE_LOG" "$XDG_STATE_HOME/cassy" <<'PY_EXHAUSTED'
+import json, pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+state = pathlib.Path(sys.argv[2])
+assert lines.count("notice=v9.99.2") == 3, lines
+assert lines.count("failed-notice=v9.99.2:3") == 1, lines
+assert not (state / "install-on-publish.pending.d/v9.99.2.json").exists()
+failed = list((state / "install-on-publish.failed.d").glob("*.json"))
+assert len(failed) == 1, failed
+assert json.loads(failed[0].read_text())["tag_name"] == "v9.99.2"
+assert json.loads(failed[0].read_text())["installer_notice_attempts"] == 3
+PY_EXHAUSTED
+) && ok 'an exhausted older notice stops at the cap with one failure report' || bad 'an exhausted older notice stops at the cap with one failure report'
+
+# A failed older publication stays pending even if its install notice succeeds.
+# A newer install must happen before either publication is reconciled again.
+(
+    export XDG_STATE_HOME="$tmp/published-order-state"
+    echo 9.99.2 >"$FAKE_INSTALLED"
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.2 FAKE_PUBLISH_FAIL_TAG=v9.99.2 "$installer" --once >/dev/null
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.3 "$installer" --once >/dev/null
+    python3 - "$FAKE_LOG" <<'PY_PUBLICATION_ORDER'
+import pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+installed = lines.index("cas update --yes --version 9.99.3")
+verified = lines.index("version=9.99.3")
+for tag in ["v9.99.2", "v9.99.3"]:
+    assert lines.count(f"publish={tag}@9.99.3") == 1
+    assert installed < verified < lines.index(f"publish={tag}@9.99.3")
+PY_PUBLICATION_ORDER
+    [[ $? == 0 ]] || exit 1
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.3 "$installer" --once >/dev/null
+    ! grep -q '^publish=' "$FAKE_LOG"
+) && ok 'a newer install precedes both pending publications and successful replays stay deduped' || bad 'a newer install precedes both pending publications and successful replays stay deduped'
+
+# Exercise a hung notice with a TERM-ignoring child in its own process group.
+# A separate test deadline
+# bounds the red run too; kill only the process group this fixture started.
+(
+    export XDG_STATE_HOME="$tmp/timeout-state" FAKE_NOTICE_PID="$tmp/notice.pid"
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.4 FAKE_NOTICE_HANGS=v9.99.4 RELEASE_NOTICE_TIMEOUT_SECONDS=1 python3 - "$installer" <<'PY_TIMEOUT'
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+process = subprocess.Popen([sys.argv[1], "--once"], start_new_session=True, stdout=subprocess.DEVNULL)
+try:
+    assert process.wait(timeout=6) == 0
+except BaseException:
+    pid_file = pathlib.Path(os.environ["FAKE_NOTICE_PID"])
+    if pid_file.exists():
+        for owned in map(int, pid_file.read_text().split()):
+            try:
+                os.kill(owned, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+    raise
+pid, child = map(int, pathlib.Path(os.environ["FAKE_NOTICE_PID"]).read_text().split())
+try:
+    os.kill(pid, 0)
+except ProcessLookupError:
+    pass
+else:
+    raise AssertionError("timed-out notice survived")
+# An orphaned child may await init reaping; it must already be terminated.
+state = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(child)], capture_output=True, text=True).stdout.strip()
+assert not state or state.startswith("Z"), state
+state = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "cassy"
+assert (state / "install-on-publish.pending.d/v9.99.4.json").exists()
+assert not (state / "install-on-publish.notified.d/v9.99.4").exists()
+PY_TIMEOUT
+    [[ $? == 0 ]] || exit 1
+    FAKE_LATEST=v9.99.4 "$installer" --once >/dev/null
+    FAKE_LATEST=v9.99.4 "$installer" --once >/dev/null
+    [[ "$(grep -c '^notice=v9.99.4$' "$FAKE_LOG")" == 2 ]]
+    [[ "$(grep -c '^cas update ' "$FAKE_LOG")" == 1 ]]
+    [[ ! -e "$XDG_STATE_HOME/cassy/install-on-publish.pending.d/v9.99.4.json" ]]
+) && ok 'a hung notice releases the lock, stays pending and retries once successfully' || bad 'a hung notice releases the lock, stays pending and retries once successfully'
+echo 9.99.2 >"$FAKE_INSTALLED"
 
 # 3. A second host leaves the completed timer alone.
 echo 9.99.1 >"$FAKE_INSTALLED"
@@ -133,6 +295,7 @@ FAKE_LATEST=v9.99.3 FAKE_UPDATE_FAILS=1 RELEASE_INSTALL_NOW=2000 "$installer" --
 status=$?
 set -e
 check '[[ $status -ne 0 ]] && grep -q "^cas update --yes --version 9.99.3$" "$FAKE_LOG"' 'a failed install exits non-zero'
+check '! grep -q "^publish=" "$FAKE_LOG" && [[ -r "$XDG_STATE_HOME/cassy/install-on-publish.published.pending.d/v9.99.3.json" ]]' 'an unverified install keeps its publication pending without reconciling'
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.3 FAKE_UPDATE_FAILS=1 RELEASE_INSTALL_NOW=2100 "$installer" --once >/dev/null || true
 check '! grep -q "update" "$FAKE_LOG"' 'a failed version is not retried inside the back-off'
@@ -154,7 +317,7 @@ else
     flock -n 8
 fi
 FAKE_LATEST=v9.99.4 "$installer" --once >"$tmp/locked-out"
-check '[[ ! -s "$FAKE_LOG" ]] && grep -q "another install check is running" "$tmp/locked-out"' 'a concurrent check exits before querying or updating a release'
+check '[[ ! -s "$FAKE_LOG" ]]' 'a concurrent check exits before querying or updating a release'
 if [[ "$(uname -s)" == Darwin ]]; then
     rm "$XDG_STATE_HOME/cassy/install-on-publish.lock"
 else

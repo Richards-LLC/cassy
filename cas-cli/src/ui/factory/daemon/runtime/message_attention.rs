@@ -26,6 +26,7 @@ fn close_instruction_tasks(prompt: &str) -> Vec<String> {
 pub(crate) struct AttentionInputs {
     pub(crate) cas_dir: std::path::PathBuf,
     pub(crate) session_name: String,
+    project_path: std::path::PathBuf,
     dead_workers: HashSet<String>,
     workers: Vec<String>,
     replacement_workers: HashSet<String>,
@@ -35,6 +36,7 @@ impl AttentionInputs {
         Self {
             cas_dir: daemon.app.cas_dir().to_path_buf(),
             session_name: daemon.session_name.clone(),
+            project_path: daemon.app.project_path().to_path_buf(),
             dead_workers: daemon.dead_workers.clone(),
             workers: daemon.app.worker_names().to_vec(),
             replacement_workers: daemon.pending_worker_replacements(),
@@ -183,6 +185,20 @@ impl AttentionInputs {
                     }
                     let cli =
                         crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&recipient);
+                    // cas-c1598: an eagerly registered Codex supervisor has a
+                    // synthetic id until its rollout binds. Find that rollout
+                    // the way the Commander mirror does, so a natively answered
+                    // message is not reported as never read.
+                    let session_id = recipient.cc_session_id.as_deref().unwrap_or(&recipient.id);
+                    if recipient.role == cas_types::AgentRole::Supervisor
+                        && cli == cas_mux::SupervisorCli::Codex
+                        && session_id.starts_with("codex-")
+                    {
+                        let path = super::super::commander_mirror::unbound_codex_supervisor_rollout(
+                            &self.project_path, queue, &self.session_name, &recipient,
+                        )?;
+                        return Some((path, cli));
+                    }
                     let path =
                         crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
                             &self.cas_dir,

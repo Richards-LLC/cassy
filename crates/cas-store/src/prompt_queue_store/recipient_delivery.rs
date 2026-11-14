@@ -102,6 +102,7 @@ impl SqlitePromptQueueStore {
         prompt_id: i64,
         recipients: &[String],
         reply_prompt_id: Option<i64>,
+        reply_wake_suffix: Option<&str>,
     ) -> Result<()> {
         if recipients.is_empty() {
             return Err(StoreError::Other(
@@ -125,6 +126,23 @@ impl SqlitePromptQueueStore {
                     return Err(StoreError::Other(
                         "reply endpoints do not match message".into(),
                     ));
+                }
+            }
+            if let (Some(reply_id), Some(suffix)) = (reply_prompt_id, reply_wake_suffix) {
+                let mut first_reply = true;
+                for recipient in recipients {
+                    let answered: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM prompt_queue_recipient_ack
+                         WHERE prompt_id=?1 AND recipient=?2 AND reply_prompt_id IS NOT NULL)",
+                        params![prompt_id, recipient], |row| row.get(0),
+                    )?;
+                    first_reply &= !answered;
+                }
+                if first_reply {
+                    tx.execute(
+                        "UPDATE prompt_queue SET prompt=prompt || ?2, next_attempt_at=NULL WHERE id=?1",
+                        params![reply_id, suffix],
+                    )?;
                 }
             }
             let now = Utc::now().to_rfc3339();
@@ -165,6 +183,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_reply_wake_is_atomic_and_survives_restart_cas_6c32() {
+        use std::sync::{Arc, Barrier};
+        for already_answered in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = Arc::new(SqlitePromptQueueStore::open(temp.path()).unwrap());
+            store.init().unwrap();
+            let ask = store.enqueue("supervisor", "worker-a", "Evidence?").unwrap();
+            if already_answered {
+                let quiet = store.enqueue("worker-a", "supervisor", "Quiet answer").unwrap();
+                store.acknowledge_for_recipients(ask, &["worker-a".into()], Some(quiet)).unwrap();
+            }
+            let replies: Vec<_> = (0..2).map(|n| {
+                store.enqueue("worker-a", "supervisor", &format!("Answer {n}")).unwrap()
+            }).collect();
+            let barrier = Arc::new(Barrier::new(2));
+            std::thread::scope(|scope| {
+                for &reply in &replies {
+                    let store = Arc::clone(&store);
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        store.acknowledge_reply_with_wake(
+                            ask, &["worker-a".into()], reply, "\n<first-answer/>",
+                        ).unwrap();
+                    });
+                }
+            });
+            let granted = replies.iter().filter(|&&id| {
+                store.queued_prompt(id).unwrap().unwrap().prompt.ends_with("<first-answer/>")
+            }).count();
+            assert_eq!(granted, usize::from(!already_answered));
+            drop(store);
+            let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+            store.init().unwrap();
+            let later = store.enqueue("worker-a", "supervisor", "Later answer").unwrap();
+            store.acknowledge_reply_with_wake(
+                ask, &["worker-a".into()], later, "\n<first-answer/>",
+            ).unwrap();
+            assert!(!store.queued_prompt(later).unwrap().unwrap().prompt.ends_with("<first-answer/>"));
+        }
+    }
+
+    #[test]
     fn recipient_state_survives_restart_without_inventing_body_observations() {
         let temp = tempfile::tempdir().unwrap();
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
@@ -203,8 +264,8 @@ mod tests {
             "budget the notice, not the old body"
         );
         assert!(!reference.rows[0].prompt.contains(body.trim()));
-        // pin: a delivery reference must distinguish surfacing from acknowledgement.
-        assert!(reference.rows[0].prompt.contains("not acknowledged"));
+
+        assert!(matches!(store.recipient_delivery(id, "worker-a").unwrap().unwrap(), RecipientDelivery::Reference(_)));
         assert_eq!(
             store.recipient_receipt(id, "worker-a").unwrap(),
             Some(SurfacingSource::InboxPoll)
@@ -254,7 +315,7 @@ mod tests {
             .poll_named_for_recipient("worker-a", None, &[id])
             .unwrap();
         assert!(!named[0].prompt.contains(body.trim()));
-        assert!(named[0].prompt.contains("acknowledged"));
+        assert!(matches!(store.recipient_delivery(id, "worker-a").unwrap().unwrap(), RecipientDelivery::Settled(_)));
         assert!(
             store
                 .poll_unseen_for_recipient("worker-a", None, 10)
@@ -265,14 +326,7 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         assert!(
-            store
-                .recipient_delivery(id, "worker-a")
-                .unwrap()
-                .unwrap()
-                .into_prompt()
-                .prompt
-                .contains("acknowledged")
-        );
+            matches!(store.recipient_delivery(id, "worker-a").unwrap().unwrap(), RecipientDelivery::Settled(_)));
         store
             .conn
             .lock()
@@ -351,20 +405,15 @@ mod tests {
                 .unwrap();
             let delivery = store.recipient_delivery(id, "worker-a").unwrap().unwrap();
             assert!(!delivery.is_full());
-            assert!(delivery.into_prompt().prompt.contains("answered"));
+            assert!(matches!(delivery, RecipientDelivery::Settled(_)));
             store
                 .acknowledge_for_recipients(id, &["worker-a".into()], None)
                 .unwrap();
-            assert!(
-                store
-                    .recipient_delivery(id, "worker-a")
-                    .unwrap()
-                    .unwrap()
-                    .into_prompt()
-                    .prompt
-                    .contains("answered"),
-                "a later ACK must preserve the stronger actual answer"
-            );
+            let intent: (String, Option<i64>) = store.conn.lock().unwrap().query_row(
+                "SELECT disposition, reply_prompt_id FROM prompt_queue_recipient_ack WHERE prompt_id=?1 AND recipient='worker-a'",
+                [id], |row| Ok((row.get(0)?, row.get(1)?))
+            ).unwrap();
+            assert_eq!(intent, ("answered".to_string(), Some(reply)));
             let named = store
                 .poll_named_for_recipient("worker-a", None, &[id])
                 .unwrap();

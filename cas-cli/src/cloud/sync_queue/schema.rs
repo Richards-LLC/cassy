@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS sync_conflicts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_conflicts_resolved_at ON sync_conflicts(resolved_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_conflicts_entity ON sync_conflicts(entity_type, entity_id);
 "#;
 
 impl SyncQueue {

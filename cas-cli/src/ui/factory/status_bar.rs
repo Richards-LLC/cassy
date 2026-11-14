@@ -888,7 +888,7 @@ impl StatusBar {
     ) -> Option<String> {
         if let Some(installed) = installed.filter(|v| Self::is_newer_version(v, running)) {
             return Some(format!(
-                "installed v{} · restart factory to load",
+                "installed v{} · cas factory reexec to load",
                 installed.trim_start_matches('v')
             ));
         }
@@ -1182,7 +1182,7 @@ mod tests {
     /// the restart; a release is offered only beyond what is installed.
     #[test]
     fn version_badge_names_an_installed_binary_the_daemon_has_not_loaded() {
-        const STALE: &str = "installed v9.99.2 · restart factory to load";
+        const STALE: &str = "installed v9.99.2 · cas factory reexec to load";
         const NEXT: &str = "⬆ v9.99.3 available";
         for (running, installed, latest, badge) in [
             ("9.99.0", Some("9.99.2"), Some("9.99.2"), Some(STALE)),

@@ -89,7 +89,9 @@ pub struct Diagnostic {
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
     pub ok: bool,
+    pub schema_version: u32,
     pub rows: Vec<Row>,
+    pub covers: Option<Vec<String>>,
     pub counts: BTreeMap<String, usize>,
     pub labels: BTreeMap<String, usize>,
     pub diagnostics: Vec<Diagnostic>,
@@ -112,6 +114,18 @@ impl Report {
             message: message.into(),
             remedy: remedy.into(),
         });
+    }
+    /// An explicit expected set makes missing metadata a pre-publish error.
+    pub fn require_coverage(&mut self, expected: &[String]) {
+        for id in expected {
+            if !self.covers.as_ref().is_some_and(|ids| ids.contains(id)) {
+                self.error(1, None, "covers", "coverage_missing",
+                    format!("ledger coverage does not include {id}"),
+                    "set covers: to every delivery ID in the intended receipt; check with --covers <ids>");
+            }
+        }
+        self.diagnostics.sort_by_key(|d| d.line);
+        self.ok = self.diagnostics.is_empty();
     }
     pub fn refusal(&self) -> String {
         self.diagnostics
@@ -152,9 +166,74 @@ fn cells(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Task IDs are protocol data shared by CLI flags and ledger metadata.
+pub fn covered_task_id(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.starts_with("cas-") && value.len() > 4
+        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("covered delivery must be a cas-* task ID".into())
+    }
+}
+
+/// Read coverage alone so free-form release reports share the ledger contract.
+/// Missing headers remain compatible with historical receipts; callers that
+/// know the intended batch use require_coverage before publishing.
+pub fn coverage(body: &str) -> Report {
+    let mut report = Report { schema_version: 1, ..Report::default() };
+    let mut fence = None;
+    let mut matrix = false;
+    let expected_header = cells(HEADER);
+    for (index, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let marker = line.chars().next().unwrap();
+            if fence == Some(marker) { fence = None; }
+            else if fence.is_none() { fence = Some(marker); }
+            continue;
+        }
+        if fence.is_some() { continue; }
+        if line.contains('|') && cells(line) == expected_header { matrix = true; }
+        let Some(value) = line.strip_prefix("covers:") else { continue; };
+        if matrix || report.covers.is_some() {
+            report.error(index + 1, None, "covers", "coverage_header",
+                "coverage is duplicated or appears after the evidence matrix",
+                "keep one covers: header before the matrix");
+        }
+        let mut ids = BTreeSet::new();
+        for token in value.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()) {
+            match covered_task_id(token) {
+                Ok(id) if !ids.contains(&id) => { ids.insert(id); }
+                _ => report.error(index + 1, None, "covers", "coverage_id",
+                    format!("invalid or duplicate covered task ID {token:?}"),
+                    "list distinct cas-* task IDs separated by commas or spaces"),
+            }
+        }
+        if ids.is_empty() {
+            report.error(index + 1, None, "covers", "coverage_id", "coverage is empty",
+                "list every delivery ID in the intended receipt");
+        }
+        report.covers = Some(ids.into_iter().collect());
+    }
+    report.ok = report.diagnostics.is_empty();
+    report
+}
+
 /// Parse without filesystem I/O. Journey coverage consumes these same typed rows.
 pub fn parse(body: &str, min_rows: usize) -> Report {
-    let mut report = Report::default();
+    let mut report = coverage(body);
+    let mut declared_schema = false;
+    // Match complete path:line tokens, including extensionless sources,
+    // without accepting a URL suffix or a clock time as a citation.
+    let cited = regex::Regex::new(r#"(?x)
+        (?:^|[\s(\[`"'])
+        /?(?:[A-Za-z0-9_.-]+/)*
+        [A-Za-z0-9_.-]*[A-Za-z_][A-Za-z0-9_.-]*:[1-9][0-9]*
+        (?:$|[\s)\]`"',.;])
+    "#).unwrap();
+    let user_outcome = regex::Regex::new(r"(?:^|;\s*)(?:visible|terminal|http):\s*[^;\s]").unwrap();
     let mut header = false;
     let mut matrix = false;
     let mut fence: Option<char> = None;
@@ -177,12 +256,27 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
         if fence.is_some() {
             continue;
         }
+        if header && line.starts_with("schema:") {
+            report.error(n, None, "schema", "ledger_schema", "schema header appears after the matrix", "put schema: 2 before the evidence matrix");
+        }
         if !header {
+            if let Some(version) = line.strip_prefix("schema:") {
+                if declared_schema || !matches!(version.trim(), "1" | "2") {
+                    report.error(n, None, "schema", "ledger_schema", "duplicate or unsupported ledger schema", "use one schema: 2 header for new walks; retain schema 1 for existing receipts");
+                } else {
+                    report.schema_version = version.trim().parse().unwrap();
+                }
+                declared_schema = true;
+            }
             if let Some(labels) = line.strip_prefix("labels:") {
                 label_header = Some((n, labels.into()));
             }
-            metadata.push_str(line);
-            metadata.push('\n');
+            // cas-f0c5: scope, surface and the title copy free text (often a
+            // task title quoting "FAIL: 0"); only the other fields hold counts.
+            if !["#", "scope:", "surface:"].iter().any(|prefix| line.starts_with(prefix)) {
+                metadata.push_str(line);
+                metadata.push('\n');
+            }
         }
         if !line.contains('|') {
             if matrix && line.starts_with('#') {
@@ -289,6 +383,16 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
                 "source-inferred cannot prove PASS",
                 "capture the real outcome or mark NOT EXERCISED",
             );
+        }
+        // Schema 1 receipts stay valid during an in-flight release. Fixtures
+        // remain weaker evidence, never a substitute for a live user-path walk.
+        if report.schema_version == 2 && c[5] != "fixture" {
+            if matches!(verdict, Verdict::Pass | Verdict::Fail) && !cited.is_match(&c[2]) {
+                report.error(n, Some(id), "expected", "expectation_source", "graded expectation has no cited source line", "cite a spec path:line in expected; an uncited expectation is a spec question, not FAIL");
+            }
+            if verdict == Verdict::Pass && !user_outcome.is_match(&c[3]) {
+                report.error(n, Some(id), "observed", "visible_outcome", "PASS has no user-observable outcome; database-only evidence cannot prove a user path", "record visible:, terminal: or http: output backed by the capture; put database read-back after it");
+            }
         }
         if verdict == Verdict::Fail
             && !(c[7].starts_with("cas-")
@@ -478,6 +582,39 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
     report
 }
 
+/// The task a canonical ledger was written for: the id in its
+/// `# QA evidence: <id>` title, unless its `covers:` header names `task_id`.
+/// `None` when the ledger does not name another task.
+pub fn foreign_owner(body: &str, task_id: &str) -> Option<String> {
+    let owner = body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# QA evidence:"))?
+        .trim();
+    let covered = coverage(body).covers.is_some_and(|ids| ids.iter().any(|id| id == task_id));
+    (!owner.is_empty() && owner != task_id && !covered).then(|| owner.to_string())
+}
+
+/// True when `body` declares itself a canonical QA evidence ledger: the
+/// scaffold's `# QA evidence:` title, a `schema:` header or the matrix header.
+/// Any other `LEDGER.md` (a no-code audit report) is ordinary prose and tables.
+pub fn declares_canonical(body: &str) -> bool {
+    let expected = cells(HEADER);
+    let mut fence = false;
+    body.lines().map(str::trim).any(|line| {
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fence = !fence;
+            return false;
+        }
+        !fence
+            && (DECLARATION_MARKERS.iter().any(|marker| line.starts_with(marker))
+                || (line.contains('|') && cells(line) == expected))
+    })
+}
+
+/// Line prefixes that declare a canonical QA ledger. Task start announces
+/// these same markers, so start and close classify a `LEDGER.md` alike.
+pub const DECLARATION_MARKERS: [&str; 2] = ["# QA evidence:", "schema:"];
+
 pub fn minimum_rows(task: &cas_types::Task) -> usize {
     if task.execution_note.as_deref() != Some("no-code") && !task.demo_statement.trim().is_empty() {
         4
@@ -488,6 +625,15 @@ pub fn minimum_rows(task: &cas_types::Task) -> usize {
 
 /// Honest starting point. Predicted journeys retain their IDs for G8 coverage.
 pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision: &str) -> String {
+    scaffold_with_coverage(task, journeys, revision, &[])
+}
+
+pub fn scaffold_with_coverage(
+    task: &cas_types::Task,
+    journeys: &[(String, String)],
+    revision: &str,
+    covers: &[String],
+) -> String {
     let no_code = task.execution_note.as_deref() == Some("no-code");
     let mut rows: Vec<_> = journeys
         .iter()
@@ -519,8 +665,10 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
         "NOT EXERCISED: not run against the named build"
     };
     let clean = |s: &str| s.replace(['\n', '\r'], " ").replace('|', "\\|");
+    let coverage = if covers.is_empty() { String::new() }
+        else { format!("covers: {}\n", covers.join(", ")) };
     let mut out = format!(
-        "# QA evidence: {}\n\nbuild: {}\nscope: {}\nsurface: {}\nbudget: 30 minutes\ncells={}; PASS=0; FAIL=0; NOT EXERCISED={}; NOT A ROUTE={}\nlabels: source-inferred={}\nsweep: not configured\n\n{}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "# QA evidence: {}\n\nschema: 2\n{coverage}build: {}\nscope: {}\nsurface: {}\nbudget: 30 minutes\ncells={}; PASS=0; FAIL=0; NOT EXERCISED={}; NOT A ROUTE={}\nlabels: source-inferred={}\nsweep: not configured\n\n{}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
         task.id,
         clean(revision),
         clean(&task.title),
@@ -536,7 +684,7 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
         HEADER
     );
     for (id, name) in rows {
-        out.push_str(&format!("| {} | {} | Describe the expected outcome | {} | {verdict} | source-inferred | - | - |\n", clean(&id), clean(&name), if no_code { "No runtime route; review the delivery artifact" } else { "Not run; capture against the named build" }));
+        out.push_str(&format!("| {} | {} | Describe the expected outcome [source: path:line] | {} | {verdict} | source-inferred | - | - |\n", clean(&id), clean(&name), if no_code { "No runtime route; review the delivery artifact" } else { "Not run; capture against the named build" }));
     }
     out.push_str("\n## Constants vs expectation\n\n| constant | location | visible contract | predictable? | defect task |\n| --- | --- | --- | --- | --- |\n\n## Contradictions\n\n| terminal state | surface | visible claim | conflicting surface | defect task |\n| --- | --- | --- | --- | --- |\n\n## Honesty\n\nRecord unavailable devices, automation artifacts and unrun conditions here.\n");
     out
@@ -545,6 +693,39 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_verdicts_require_cited_visible_evidence_cas_3d6d() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("LEDGER.md");
+        std::fs::write(dir.path().join("capture.txt"), "captured user result").unwrap();
+        for (schema, expected, observed, verdict, diagnostic) in [
+            ("schema: 2", "Revised hook [source: docs/guide.md:17]", "database: row saved; credits charged", "PASS", Some("visible_outcome")),
+            ("schema: 2", "Invented Make It Mine offer", "visible: offer shown", "FAIL", Some("expectation_source")),
+            ("schema: 2", "Revised hook", "visible: revised card", "PASS", Some("expectation_source")),
+            ("schema: 2", "Revised hook [source: docs/guide.md:17]", "visible: revised card; readback: row saved", "PASS", None),
+            ("schema: 2", "Created [source: docs/api.md:9]", "http: 201 created", "PASS", None),
+            ("schema: 2", "Usage [source: docs/cli.md:3]", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage (skills/local-image/scripts/gen:213)", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage [source: README:3]", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage (skills/local-image/scripts/gen:0)", "terminal: Usage: app", "PASS", Some("expectation_source")),
+            ("schema: 2", "Usage at 12:30", "terminal: Usage: app", "PASS", Some("expectation_source")),
+            ("schema: 2", "Usage https://example.com/scripts/gen.py:213", "terminal: Usage: app", "PASS", Some("expectation_source")),
+            ("schema: 2", "Hook [source: docs/guide.md:0]", "visible: revised card", "PASS", Some("expectation_source")),
+            ("schema: 3", "Hook", "database: row saved", "PASS", Some("ledger_schema")),
+            ("schema: 1", "Legacy expectation", "database: row saved", "PASS", None),
+            ("", "Legacy expectation", "database: row saved", "PASS", None),
+        ] {
+            let pass = usize::from(verdict == "PASS");
+            let body = format!("{schema}\ncells=1; PASS={pass}; FAIL={}; NOT EXERCISED=0\nlabels: real-build=1\n{HEADER}\n| M01 | revise | {expected} | {observed} | {verdict} | real-build | capture.txt | cas-fixture |\n", 1 - pass);
+            std::fs::write(&path, body).unwrap();
+            let report = crate::cli::qa_ledger::check(&path, None);
+            match diagnostic {
+                Some(code) => assert!(report.diagnostics.iter().any(|d| d.code == code), "{observed}: {}", report.refusal()),
+                None => assert!(report.ok, "{}", report.refusal()),
+            }
+        }
+    }
 
     #[test]
     fn scaffold_round_trip_preserves_honest_rows_and_task_policy() {
@@ -582,6 +763,11 @@ mod tests {
         std::fs::write(dir.path().join("capture.txt"), "usage").unwrap();
         std::fs::write(&path, &base).unwrap();
         assert!(check(&path, 1).ok);
+        // cas-f0c5: init copies the task title into scope; quoted verdict text is not a count.
+        let quoted = "# QA evidence: cas-c6e3\nscope: CI flake gate prints 'FAIL: 0 flaky test(s)' on a real failure\nsurface: PASS: 3 rows\n";
+        std::fs::write(&path, format!("{quoted}{base}")).unwrap();
+        let report = check(&path, 1);
+        assert!(report.ok, "scope text is not a headline count: {}", report.refusal());
         std::fs::write(
             &path,
             base.replace(
@@ -606,6 +792,7 @@ mod tests {
             ),
             (base.replace("capture.txt", "../outside.txt"), "capture"),
             (base.replace("capture.txt", "missing.txt"), "capture"),
+            (format!("{base}schema: 2\n"), "ledger_schema"),
         ] {
             std::fs::write(&path, body).unwrap();
             let report = check(&path, 1);

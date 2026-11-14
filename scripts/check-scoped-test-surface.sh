@@ -503,22 +503,18 @@ while IFS= read -r path; do
     esac
 done < <(printf '%s\n' "${changed_paths[@]}")
 
-# Builtin skills and agents are embedded into all harness flavors, so their
-# source paths can be covered by tests that are not themselves changed. Always
-# require the cross-flavor and agent contracts, then discover any additional
-# guardrail binaries that name the changed builtin path literally. This keeps
-# size/phrase tests coupled to the files they read without maintaining a
-# hand-written path-to-test table. Search both source-shaped and installed
-# catalog-shaped spellings because tests use both forms.
+# Builtin skills and agents ship through every harness catalog. Require the
+# catalog projection, tool-call compatibility and packaging tests, then discover
+# additional tests bound to a changed builtin asset. Search source and installed
+# catalog paths because packaging tests read both forms.
 builtin_search_literals=()
 while IFS= read -r path; do
     is_builtin_skill_or_agent_path "$path" || continue
     add_required_test_target builtin_flavor_drift_test
     add_required_test_target agent_definition_contract_test
     add_required_test_target factory_codex_skill_guardrails
-    # Every builtin_* binary is a guardrail for one of the embedded catalogs;
-    # requiring the complete family keeps a newly-added size/phrase contract
-    # from becoming invisible to --proof.
+    # The builtin_* family covers embedded catalog installation and packaging.
+    # Retain the complete affected family when a shared builtin asset changes.
     case "$path" in
         */skills/*|*.md)
             for candidate in cas-cli/tests/builtin_*.rs; do

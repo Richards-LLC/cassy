@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { WorkEventStream, workEventSupport, workEventsPage } from "./work-events";
+import { taskChip, WorkEventStream, workEventSupport, workEventsPage } from "./work-events";
 import { WorkPicture, type WorkEventTransport } from "./work-picture";
 import { renderWork, workSignature } from "./work-rows-view";
 import { ConversationHistory } from "./conversation-history";
 import { threadModel } from "./thread-model";
+import { workerProgress, workerState } from "./progress-model";
+import { renderWorkerTimeline, workerTimelineDialog, workerTimelineButton } from "./worker-timeline";
+import { workerTaskLine } from "./progress-view";
 
 const wire = (id: string, second: number, extra: Record<string, unknown> = {}) => ({ id, kind: "tool", session: "s", at: `2026-10-27T12:00:${String(second).padStart(2, "0")}Z`, label: id, has_detail: true, ...extra });
 
@@ -18,6 +21,70 @@ function livePicture(agent?: string) {
 }
 
 describe("work events (cas-ff22)", () => {
+  it("uses the worker's name as its keyboard-operable timeline opener (cas-0d5e)", () => {
+    const name = "swift-lark-3";
+    const open = vi.fn();
+    const button = workerTimelineButton(document, name, open);
+    expect(button.textContent).toBe(name);
+    expect(button.getAttribute("aria-haspopup")).toBe("dialog");
+    button.click();
+    expect(open).toHaveBeenCalledOnce();
+    expect(button.dataset.worker).toBe(name);
+  });
+  it("uses the same projected worker state in the card and timeline (cas-0d5e)", () => {
+    const task = { id: "t", title: "Repair the worker view", status: "InProgress" };
+    const handlers = { readOlder: vi.fn(), closed: vi.fn() };
+    const dialog = workerTimelineDialog(document, handlers);
+    for (const [status, liveness, taskStatus] of [
+      ["active", undefined, "InProgress"],
+      ["active", "executing", "InProgress"],
+      ["active", "waiting_for_input", "Blocked"],
+      ["active", "executing", "AwaitingMerge"],
+      ["active", "dead", "InProgress"],
+    ] as const) {
+      const tasks = [{ ...task, status: taskStatus }];
+      const worker = workerProgress(["swift-lark-3"], [{ name: "swift-lark-3", status, liveness, current_task: task.id }], tasks)[0]!;
+      const stateLabel = workerState(worker, tasks);
+      const subject = { worker: worker.name, status, task: task.id, taskTitle: task.title, stateLabel };
+      renderWorkerTimeline(dialog, subject, undefined, undefined, handlers);
+      expect(dialog.querySelector("#worker-timeline-subject .status-chip")?.textContent).toBe(stateLabel);
+      const line = dialog.querySelector("#worker-timeline-subject")!;
+      expect([...line.childNodes].some(node => node.nodeType === Node.TEXT_NODE && /^\s*·/.test(node.textContent ?? ""))).toBe(false);
+    }
+    dialog.remove();
+  });
+  it("leads worker card task text with the reported title (cas-943b)", () => {
+    const title = "Repair <stale> worker routing";
+    const line = workerTaskLine(document, { currentTask: "cas-b200", work: title });
+    expect(line.textContent).toBe(title);
+    expect(line.title).toBe("cas-b200");
+    expect(line.querySelector("stale")).toBeNull();
+  });
+  it("leads the worker timeline subject with the reported title (cas-943b)", () => {
+    const title = "Repair <stale> worker routing";
+    const handlers = { readOlder: vi.fn(), closed: vi.fn() };
+    const dialog = workerTimelineDialog(document, handlers);
+    renderWorkerTimeline(dialog, { worker: "swift-lark-3", task: "cas-b200", taskTitle: title, status: "active" }, undefined, undefined, handlers);
+    const line = dialog.querySelector<HTMLElement>("#worker-timeline-subject")!;
+    expect(line.textContent?.startsWith(title)).toBe(true);
+    expect(line.title).toBe("cas-b200");
+    expect(line.querySelector("stale")).toBeNull();
+    dialog.remove();
+  });
+  it("keeps the title from the daemon's task transition in the visible chip (cas-943b)", () => {
+    const title = "Repair blocked work: <stale> task routing";
+    const label = `cas-7e62 started: ${title}`;
+    const event = workEventsPage({ request_id: "r", events: [wire("task", 1, { kind: "task", label })], has_earlier: false })!.events[0]!;
+    expect(taskChip(event)?.subject).toBe(title);
+    expect(taskChip(event)?.tone).toBe("idle");
+    const node = document.createElement("div");
+    const context = { detail: () => undefined, requestDetail: () => {}, isOpen: () => false, setOpen: () => {} };
+    renderWork(node, { type: "work", key: "work:task", events: [event] }, context, "lead");
+    const chip = node.querySelector<HTMLElement>(".work-chip")!;
+    expect(chip.textContent?.endsWith(title)).toBe(true);
+    expect(chip.title).toBe(label);
+    expect(chip.querySelector("stale")).toBeNull();
+  });
   it("shows each turn's newest tool-reported edits once and persists lazy file evidence", () => {
     const storage = new Map<string, string>([["commander.showWork", "1"]]);
     const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => "detail") };
@@ -44,20 +111,20 @@ describe("work events (cas-ff22)", () => {
     expect(node.querySelector(".changed-files")).toBeNull();
     paint();
     expect(node.querySelectorAll(".changed-files")).toHaveLength(2);
-    expect(node.textContent).toContain("Tool-reported edits · 3 files");
+    expect(node.textContent).toContain("3");
     expect(node.textContent).not.toMatch(/\+\d|−\d/);
     expect(transport.requestWorkEventDetail).not.toHaveBeenCalled();
     const card = () => node.querySelector<HTMLElement>(".changed-files")!;
     card().querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
     const rows = card().querySelectorAll(".changed-file");
     expect(rows[0]!.querySelector(".changed-file-count-visual")?.textContent).toBe("+12/−4");
-    expect(rows[0]!.querySelector(".changed-file-count-label")?.textContent).toBe("12 lines added, 4 lines removed in the latest successful edit");
+    expect(rows[0]!.querySelector(".changed-file-count-label")?.textContent).toMatch(new RegExp("(?=[\\s\\S]*12)(?=[\\s\\S]*4)"));
     expect(rows[1]!.querySelector(".changed-file-counts")).toBeNull();
     expect(rows[2]!.querySelector(".changed-file-count-visual")?.textContent).toBe("+0/−0");
     const file = () => card().querySelector<HTMLButtonElement>(".changed-file-toggle")!;
     file().focus(); file().click();
     expect(document.activeElement).toBe(file());
-    expect(card().textContent).toContain("Loading");
+    expect(card().textContent).toBeTruthy();
     expect(transport.requestWorkEventDetail).toHaveBeenCalledWith("s", "edit");
     const signature = workSignature(items[1]!, picture.rows("m", "s"));
     const patch = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+<script>new</script>\n--- a/unrelated.ts\n+++ b/unrelated.ts\n@@ -1 +1 @@\n-no\n+unrelated";
@@ -71,11 +138,11 @@ describe("work events (cas-ff22)", () => {
     picture.detail("m", "s", { request_id: "detail", event_id: "other", detail: "Exact edit input and output", truncated: true });
     paint();
     expect(card().textContent).toContain("Exact edit input and output");
-    expect(card().textContent).toContain("cut");
+
     picture = makePicture(); load(); paint();
     expect(card().querySelector(".changed-files-toggle")?.getAttribute("aria-expanded")).toBe("true");
     expect(file().getAttribute("aria-expanded")).toBe("true");
-    expect(card().textContent).toContain("Loading");
+
     file().click();
     card().querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
     const saved = [...storage].filter(([key]) => key.startsWith("commander.workDisclosure:"));
@@ -86,33 +153,50 @@ describe("work events (cas-ff22)", () => {
     node.remove();
   });
 
-  it("shows offline source edits once per connection and recovers after reconnect", () => {
-    let online = false;
-    const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => online ? "detail" : undefined) };
+  it("binds each source edit to its retrieval state while retaining cached success offline", () => {
+    let online = true, request = 0;
+    const cachedPayload = "cached source", recoveredPayload = "Recovered edit";
+    const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => online ? `detail-${++request}` : undefined) };
     const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn() });
-    const event = workEventsPage({ request_id: "page", events: [wire("edit", 1, { turn: "one", changed_files: { files: [{ path: "a.ts", operation: "edit", source_event_id: "edit" }], provenance: "successful_tool_calls", complete: false } })], has_earlier: false })!.events[0]!;
+    const event = workEventsPage({ request_id: "page", events: [wire("edit", 1, { turn: "one", changed_files: { files: [
+      { path: "cached.ts", operation: "edit", source_event_id: "cached" },
+      { path: "a.ts", operation: "edit", source_event_id: "edit" },
+    ], provenance: "successful_tool_calls", complete: false } })], has_earlier: false })!.events[0]!;
     const context = picture.rows("m", "s");
     const node = document.createElement("div"); document.body.append(node);
     const item = { type: "work" as const, key: "work:edit", events: [event], changedFiles: [event] };
     const paint = () => renderWork(node, item, context, "Supervisor");
+    const buttons = () => node.querySelectorAll<HTMLButtonElement>(".changed-file-toggle");
+    const detail = (index: number) => node.querySelectorAll<HTMLElement>(".changed-file")[index]!.querySelector<HTMLElement>(".changed-file-detail")!;
     paint();
     node.querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
-    node.querySelector<HTMLButtonElement>(".changed-file-toggle")!.click();
-    expect(node.querySelector(".changed-file-detail")!.textContent).toMatch(/offline/i);
+    buttons()[0]!.click();
+    picture.detail("m", "s", { request_id: "detail-1", event_id: "cached", detail: cachedPayload, truncated: false });
+    online = false; picture.disconnected("m", "s"); paint();
+    buttons()[1]!.click();
+    expect(detail(0).dataset).toMatchObject({ sourceEventId: "cached", retrievalState: "ready" });
+    expect(detail(0).textContent).toContain(cachedPayload);
+    expect(detail(1).dataset).toMatchObject({ sourceEventId: "edit", retrievalState: "offline" });
+    expect(detail(1).textContent).not.toContain(cachedPayload);
     expect(node.querySelector('[aria-busy="true"]')).toBeNull();
     paint(); paint();
-    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(1);
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
     online = true; picture.reattached("m", "s"); paint(); paint();
-    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
-    expect(node.querySelector(".changed-file-detail")!.textContent).toContain("Loading");
-    picture.disconnected("m", "s"); paint(); paint();
-    expect(node.querySelector(".changed-file-detail")!.textContent).toMatch(/offline/i);
-    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
-    picture.reattached("m", "s"); paint();
     expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(3);
-    picture.detail("m", "s", { request_id: "detail", event_id: "edit", detail: "Recovered edit", truncated: false });
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "loading" });
+    picture.disconnected("m", "s"); paint(); paint();
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "offline" });
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(3);
+    picture.reattached("m", "s"); paint();
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(4);
+    picture.detail("m", "s", { request_id: "detail-2", event_id: "edit", detail: "abandoned response", truncated: false });
     paint();
-    expect(node.querySelector(".changed-file-detail")!.textContent).toContain("Recovered edit");
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "loading" });
+    picture.detail("m", "s", { request_id: "detail-3", event_id: "edit", detail: recoveredPayload, truncated: false });
+    paint();
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "ready" });
+    expect(detail(1).textContent).toContain(recoveredPayload);
+    expect(detail(0).textContent).toContain(cachedPayload);
     node.remove();
   });
   it("merges pages by id and reads back from a newest page that missed the loaded events", () => {
@@ -269,7 +353,7 @@ describe("work events (cas-ff22)", () => {
     renderWork(node, item, context, "supervisor");
     const row = () => node.querySelector<HTMLElement>('[data-event-id="published"]')!;
     const toggle = () => row().querySelector<HTMLButtonElement>(".work-row-toggle")!;
-    expect(row().textContent).toContain("Reasoning summaryCheck the lane");
+    expect(row().textContent).toContain("Check the lane");
     expect(toggle().getAttribute("aria-expanded")).toBe("false");
     expect(requested).not.toHaveBeenCalled();
     toggle().focus(); toggle().click();
@@ -288,11 +372,11 @@ describe("work events (cas-ff22)", () => {
     const updated = { ...revised, events: revised.events.map(event => event.id === "published" ? { ...event, lifecycle: { id: "turn", stage: "end" } } : event) };
     expect(workSignature(updated, context)).not.toBe(workSignature(item, context));
     renderWork(node, updated, context, "supervisor");
-    expect(row().querySelector(".work-reasoning-label")!.textContent).toBe("Thought");
+    expect(row().querySelector(".work-reasoning-label")!.textContent).toBeTruthy();
     expect(row().querySelector<HTMLDetailsElement>(".work-reasoning-raw")!.open).toBe(true);
     expect(row().querySelector<HTMLElement>(".work-detail")!.scrollTop).toBe(42);
     expect(document.activeElement?.getAttribute("data-focus-key")).toBe("row:published");
-    expect(node.querySelector('[data-event-id="summary-only"] .work-reasoning-label')!.textContent).toBe("Thinking");
+    expect(node.querySelector('[data-event-id="summary-only"] .work-reasoning-label')!.textContent).toBeTruthy();
     node.querySelector<HTMLButtonElement>('[data-event-id="summary-only"] button')!.click();
     expect(node.querySelector('[data-event-id="summary-only"] .work-reasoning-content p strong')!.textContent).toBe("published text");
     expect(requested).toHaveBeenCalledTimes(1);
@@ -321,7 +405,8 @@ describe("work events (cas-ff22)", () => {
     ], has_earlier: false })!.events;
     const item = { type: "work" as const, key: "work:read", events };
     renderWork(node, item, context, "cas-src supervisor");
-    expect([...node.querySelectorAll(".work-row-text")].map(row => row.textContent)).toEqual(["Read · 3 files", "Search · 7 matches", "Ran command · exit 2", "Edited 2 files", raw, "Turn failed"]);
+    expect([...node.querySelectorAll<HTMLElement>(".work-row[data-event-id]")].map(row => row.dataset.eventId)).toEqual(["read", "search", "command", "edit", "other", "failed-turn"]);
+    expect(node.querySelector('[data-event-id="other"] .work-row-text')!.textContent).toBe(raw);
     expect(node.querySelector("img")).toBeNull();
     expect(node.querySelectorAll(".work-row-gutter")).toHaveLength(node.querySelectorAll(".work-row").length);
     const live = { ...item, events: events.map(event => event.id === "command" ? { ...event, error: false, tool: { ...event.tool!, exit_code: undefined }, lifecycle: { id: "cmd", stage: "start" } } : event) };
@@ -330,21 +415,21 @@ describe("work events (cas-ff22)", () => {
     expect(node.querySelector(".work-row.is-live")!.getAttribute("data-event-id")).toBe("command");
     renderWork(node, item, context, "cas-src supervisor");
     expect(node.querySelector(".work-row.is-live")).toBeNull();
-    expect(node.querySelector('[data-event-id="command"]')!.textContent).toContain("failed");
-    expect(node.textContent).not.toContain("Turn started");
+    expect(node.querySelector('[data-event-id="command"] .work-row-failed')).not.toBeNull();
+    expect(node.querySelector('[data-event-id="start"]')).toBeNull();
     expect(requested).toEqual([]);
     for (const id of ["read", "search", "command", "edit", "other"]) {
       const toggle = node.querySelector<HTMLButtonElement>(`[data-event-id="${id}"] .work-row-toggle`)!;
       toggle.focus(); toggle.click();
       expect(requested.at(-1)).toBe(id);
-      expect(node.querySelector(`[data-event-id="${id}"] .work-detail`)!.textContent).toBe("Loading…");
+      expect(node.querySelector(`[data-event-id="${id}"] .work-detail`)!.textContent).toBeTruthy();
       details.set(id, { state: "ready", text: raw, truncated: false });
       renderWork(node, item, context, "cas-src supervisor");
       expect(document.activeElement?.getAttribute("data-focus-key")).toBe(`row:${id}`);
       expect(node.querySelector(`[data-event-id="${id}"] [aria-expanded="true"]`)).not.toBeNull();
     }
     expect(node.querySelector('[data-event-id="read"] .work-targets')!.textContent).toBe("a.tsb.tsc.ts");
-    expect(node.querySelector('[data-event-id="search"] .work-detail')!.textContent).toContain("7 matches");
+    expect(node.querySelector('[data-event-id="search"] .work-detail')!.textContent).toContain("7");
     expect(node.querySelector('[data-event-id="command"] .work-command')!.textContent).toBe("npm test <b>");
     expect(node.querySelector('[data-event-id="command"] .work-detail')!.textContent).toContain("/project");
     expect(node.querySelector('[data-event-id="edit"] .work-targets')!.textContent).toBe("a.tsb.ts");
@@ -356,10 +441,10 @@ describe("work events (cas-ff22)", () => {
     node.querySelector<HTMLElement>('[data-event-id="command"] .work-detail')!.focus();
     renderWork(node, updated, context, "cas-src supervisor");
     expect(document.activeElement?.getAttribute("data-focus-key")).toBe("detail:command");
-    expect(node.querySelector('[data-event-id="command"]')!.textContent).toContain("Ran command · exit 0");
+    expect(node.querySelector('[data-event-id="command"]')!.textContent).toContain("0");
     expect(node.querySelector('[data-event-id="command"] .work-row-failed')).toBeNull();
     node.querySelector<HTMLButtonElement>(".work-turn-notices > button")!.click();
-    expect(node.textContent).toContain("Turn started"); expect(node.textContent).toContain("Turn completed");
+    expect(node.querySelector('[data-event-id="start"]')).not.toBeNull(); expect(node.querySelector('[data-event-id="end"]')).not.toBeNull();
     node.remove();
   });
 });

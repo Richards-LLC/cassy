@@ -1,7 +1,7 @@
 //! Resolve recognized shell filesystem effects before applying the workspace
 //! policy. This is deliberately a bounded recognizer, never a shell evaluator.
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Default)]
@@ -91,6 +91,25 @@ fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
         Ok(())
     } else {
         Err("an unresolved arithmetic operand")
+    }
+}
+
+/// `test` receives expanded arguments as data; a captured shell exit status is
+/// a known integer even though the token is a variable reference. Keep other
+/// unknown operands conservative so `[[ ]]` and arithmetic evaluation still
+/// fail closed.
+fn numeric_test_operand(
+    operand: &str,
+    captured_status: &HashSet<String>,
+) -> Result<(), &'static str> {
+    if operand == "$?"
+        || operand
+            .strip_prefix('$')
+            .is_some_and(|name| captured_status.contains(name))
+    {
+        Ok(())
+    } else {
+        numeric_arithmetic(operand)
     }
 }
 
@@ -881,6 +900,16 @@ fn collect_script(
     arithmetic_commands(&projected, &mut lexed)?;
     let case_tokens = case_syntax(&projected, &lexed)?;
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);
+    let captured_status: HashSet<String> = tokens
+        .iter()
+        .filter_map(|token| match token {
+            ShellToken::Word(word) => {
+                let (name, value) = word.split_once('=')?;
+                (value == "$?" && is_shell_variable_name(name)).then(|| name.to_string())
+            }
+            _ => None,
+        })
+        .collect();
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
     // Directory operands use only bindings visible before that cd. The
@@ -1032,9 +1061,12 @@ fn collect_script(
                     if at + 2 < args.len()
                         && matches!(binary, Some("-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge"))
                     {
-                        numeric_arithmetic(&args[at])?;
-                        numeric_arithmetic(args.get(at + 2)
-                            .ok_or("an unresolved conditional operand")?)?;
+                        numeric_test_operand(&args[at], &captured_status)?;
+                        numeric_test_operand(
+                            args.get(at + 2)
+                                .ok_or("an unresolved conditional operand")?,
+                            &captured_status,
+                        )?;
                         at += 3;
                     } else if matches!(binary, Some("=" | "==" | "!=" | "-nt" | "-ot" | "-ef")) {
                         at += 3;

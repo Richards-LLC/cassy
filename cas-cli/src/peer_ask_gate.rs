@@ -3,10 +3,10 @@
 //!
 //! The gabber supervisor asked prowl to review PR #4249, then merged the PR
 //! to staging without the answer; the review later found two money P1s. The
-//! ask is already recorded in the peer outbox and any reply carries its id, so
+//! ask is already recorded in the peer outbox and answers are matched there, so
 //! no new gate object is needed: `worktree_merge` and a supervisor's raw
 //! `gh pr merge` are refused while the merging supervisor has an unanswered
-//! ask (or blocker) to a peer that names the task or PR being merged.
+//! explicit ask with structured hold metadata for the task or PR being merged.
 //!
 //! Override: a task note `PEER ASK OVERRIDE <ask id>: <reason>`. The merge
 //! then proceeds and the operator receives one line, once per ask; the
@@ -25,53 +25,39 @@ pub(crate) const OVERRIDE_MARKER: &str = "PEER ASK OVERRIDE";
 pub(crate) struct MergeSubject {
     pub(crate) task_id: Option<String>,
     pub(crate) pr: Option<u64>,
-    /// A PR merge whose number could not be resolved: every open ask holds
-    /// it (fail closed).
+    /// A PR merge whose number could not be resolved: every explicitly scoped
+    /// hold applies (fail closed).
     pub(crate) any_pr: bool,
 }
 
-fn names_word(body: &str, word: &str) -> bool {
-    body.match_indices(word).any(|(at, _)| {
-        let before = body[..at].chars().next_back();
-        let after = body[at + word.len()..].chars().next();
-        !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
-            && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
-    })
+/// Only this first content line grants hold authority; prose never does.
+const HOLD_PREFIX: &str = "CAS_MERGE_HOLD ";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergeHold {
+    task_id: Option<String>,
+    pr: Option<u64>,
 }
 
-/// True when `body` contains `number` with no digit on either side. Any
-/// phrasing names the PR ("PRs 4249 and 4250", "PR (4249)"); a false hold is
-/// safe because the override exists.
-fn names_number(body: &str, number: u64) -> bool {
-    let needle = number.to_string();
-    body.match_indices(&needle).any(|(at, _)| {
-        let digit_before = body[..at].chars().next_back().is_some_and(|c| c.is_ascii_digit());
-        let digit_after = body[at + needle.len()..].chars().next().is_some_and(|c| c.is_ascii_digit());
-        !digit_before && !digit_after
-    })
+fn merge_hold(body: &str) -> Option<MergeHold> {
+    let content = body.strip_prefix("<cas-peer-intent kind=\"ask\"/>\n")?;
+    let hold: MergeHold = serde_json::from_str(content.lines().next()?.strip_prefix(HOLD_PREFIX)?).ok()?;
+    (hold.task_id.as_ref().is_some_and(|id| !id.trim().is_empty())
+        || hold.pr.is_some_and(|pr| pr > 0)).then_some(hold)
 }
 
-fn names_subject(body: &str, subject: &MergeSubject) -> bool {
-    // An unresolvable PR merge is held by every open ask (fail closed).
+fn holds_subject(body: &str, subject: &MergeSubject) -> bool {
+    let Some(hold) = merge_hold(body) else { return false; };
     subject.any_pr
-        || subject.task_id.as_deref().is_some_and(|id| names_word(body, id))
-        || subject.pr.is_some_and(|pr| names_number(body, pr))
+        || subject.task_id.as_ref().is_some_and(|id| hold.task_id.as_ref() == Some(id))
+        || subject.pr.is_some_and(|pr| hold.pr == Some(pr))
 }
 
-/// The task an ask names, for the override note; else the merged task.
-fn task_for_override(cas_root: &Path, ask: &OpenPeerAsk, subject: &MergeSubject) -> String {
-    if let Some(task_id) = &subject.task_id {
-        return task_id.clone();
-    }
-    crate::store::open_task_store(cas_root)
-        .ok()
-        .and_then(|store| store.list(None).ok())
-        .and_then(|tasks| {
-            tasks
-                .into_iter()
-                .map(|task| task.id)
-                .find(|id| names_word(&ask.body, id))
-        })
+/// Prefer the merged task, then the task explicitly held by the ask.
+fn task_for_override(ask: &OpenPeerAsk, subject: &MergeSubject) -> String {
+    subject.task_id.clone()
+        .or_else(|| merge_hold(&ask.body).and_then(|hold| hold.task_id))
         .unwrap_or_else(|| "<any task id>".to_string())
 }
 
@@ -96,7 +82,7 @@ fn override_reason(cas_root: &Path, ask: &OpenPeerAsk) -> Option<(String, String
 fn summary(body: &str) -> String {
     let text = body
         .lines()
-        .filter(|line| !line.starts_with("<cas-peer-intent"))
+        .filter(|line| !line.starts_with("<cas-peer-intent") && !line.starts_with(HOLD_PREFIX))
         .collect::<Vec<_>>()
         .join(" ");
     cas_core::hooks::truncate(text.trim(), 120)
@@ -104,6 +90,7 @@ fn summary(body: &str) -> String {
 
 /// The refusal for merging `subject` while `supervisor_agent_id` waits on a
 /// peer. An overridden ask lets the merge through and tells the operator.
+#[cfg(test)]
 pub(crate) fn merge_refusal(
     cas_root: &Path,
     supervisor_agent_id: &str,
@@ -111,19 +98,36 @@ pub(crate) fn merge_refusal(
     operator_session: Option<&str>,
     subject: &MergeSubject,
 ) -> Option<String> {
+    merge_refusal_with_overrides(cas_root, supervisor_agent_id, supervisor_name, operator_session, subject, &mut Vec::new())
+}
+
+// gate-audit[override_reason]: bypass G-95 An operator note authorizes merging despite an unresolved ask.
+pub(crate) fn merge_refusal_with_overrides(
+    cas_root: &Path,
+    supervisor_agent_id: &str,
+    supervisor_name: &str,
+    operator_session: Option<&str>,
+    subject: &MergeSubject,
+    accepted_override_codes: &mut Vec<&'static str>,
+) -> Option<String> {
     if subject.task_id.is_none() && subject.pr.is_none() && !subject.any_pr {
         return None;
     }
     let asks = crate::cloud::peer_mailbox::open_asks(cas_root, supervisor_agent_id, ASK_WINDOW_SECS);
-    for ask in asks.iter().filter(|ask| names_subject(&ask.body, subject)) {
+    for ask in asks.iter().filter(|ask| holds_subject(&ask.body, subject)) {
         if let Some((task_id, reason)) = override_reason(cas_root, ask) {
             announce_override(cas_root, supervisor_name, operator_session, ask, &task_id, &reason);
+            accepted_override_codes.push("G-95");
             continue;
         }
-        let note_task = task_for_override(cas_root, ask, subject);
+        let note_task = task_for_override(ask, subject);
+        let answer_state = match ask.unlinked_answer.as_deref() {
+            Some(id) => format!("peer answer {id} arrived but is not linked to this ask"),
+            None => "no answer is linked to this ask".to_string(),
+        };
         return Some(format!(
-            "🚫 UNANSWERED PEER ASK: you asked {} \"{}\" (ask {}) and no reply has arrived. \
-             Wait for the answer, or override visibly: \
+            "🚫 UNANSWERED PEER ASK: you asked {} \"{}\" (ask {}) and {answer_state}. \
+             Wait for an answer that identifies this ask, or override visibly: \
              `task action=notes id={note_task} note_type=decision notes=\"{OVERRIDE_MARKER} {}: <reason>\"`, \
              then retry the merge (the operator is told).",
             ask.recipient,
@@ -137,7 +141,8 @@ pub(crate) fn merge_refusal(
 
 /// A supervisor's raw `gh pr merge`: every merge in `command` resolves to
 /// its PR the way the QA merge guard does; an unresolvable merge is held by
-/// every open ask.
+/// every explicitly scoped hold.
+#[cfg(test)]
 pub(crate) fn github_merge_refusal(
     cas_root: &Path,
     cwd: &Path,
@@ -145,6 +150,18 @@ pub(crate) fn github_merge_refusal(
     supervisor_agent_id: &str,
     supervisor_name: &str,
     operator_session: Option<&str>,
+) -> Option<String> {
+    github_merge_refusal_with_overrides(cas_root, cwd, command, supervisor_agent_id, supervisor_name, operator_session, &mut Vec::new())
+}
+
+pub(crate) fn github_merge_refusal_with_overrides(
+    cas_root: &Path,
+    cwd: &Path,
+    command: &str,
+    supervisor_agent_id: &str,
+    supervisor_name: &str,
+    operator_session: Option<&str>,
+    accepted_override_codes: &mut Vec<&'static str>,
 ) -> Option<String> {
     let merges = crate::qa_pass::github_gate::github_merges_in(command);
     if merges.is_empty()
@@ -159,7 +176,10 @@ pub(crate) fn github_merge_refusal(
                 Ok(pr) => MergeSubject { task_id: None, pr: Some(pr), any_pr: false },
                 Err(_) => MergeSubject { task_id: None, pr: None, any_pr: true },
             };
-            merge_refusal(cas_root, supervisor_agent_id, supervisor_name, operator_session, &subject)
+            let mut accepted = Vec::new();
+            let refusal = merge_refusal_with_overrides(cas_root, supervisor_agent_id, supervisor_name, operator_session, &subject, &mut accepted);
+            if !accepted.is_empty() { accepted_override_codes.push("H-26"); }
+            refusal
         })
 }
 
@@ -172,10 +192,8 @@ fn announce_override(
     reason: &str,
 ) {
     let id = ask_id(ask);
-    let line = format!(
-        "⚠️ {supervisor_name} overrode an unanswered ask to {} on {task_id} (ask {id}) to merge: {reason}",
-        ask.recipient
-    );
+    let summary = format!("{supervisor_name} is merging without an answer from {}.", ask.recipient);
+    let line = format!("{summary}\nTask: {task_id}\nReason: {reason}");
     crate::quality_ledger::intervention(
         cas_root,
         cas_store::InterventionKind::OverrideMerge,
@@ -184,12 +202,13 @@ fn announce_override(
         Some(supervisor_name),
         Some(reason),
     );
-    let _ = crate::supervisor_notices::enqueue(
+    let _ = crate::supervisor_notices::enqueue_with_summary(
         cas_root,
         &crate::supervisor_notices::Recipient::operator(operator_session.unwrap_or("supervisor-recovery")),
         "peer_ask_override",
         &line,
         id,
+        &summary,
     );
 }
 
@@ -203,12 +222,17 @@ mod tests {
     }
 
     fn sent_ask_from(conn: &rusqlite::Connection, sender: &str, cloud_id: &str, body: &str) {
+        sent_message_from(conn, sender, cloud_id, body, Some("ask"));
+    }
+
+    fn sent_message_from(conn: &rusqlite::Connection, sender: &str, cloud_id: &str, body: &str, kind: Option<&str>) {
         let payload = serde_json::json!({
-            "body": format!("<cas-peer-intent kind=\"ask\"/>\n{body}"),
+            "body": crate::cloud::peer_mailbox::attach_message_intent(body, kind, false).unwrap(),
+            "recipient_agent_id": "p",
         });
         conn.execute(
             "INSERT INTO peer_message_outbox (sender_agent_id, sender_name, recipient, payload, state, created_at, next_attempt_at, cloud_id)
-             VALUES (?3, 'cosmic-shark-29', 'lively-cheetah-57@prowl', ?1, 'sent', strftime('%s','now'), 0, ?2)",
+             VALUES (?3, 'cosmic-shark-29', 'lively-cheetah-57@prowl', ?1, 'sent', strftime('%s','now') - 60, 0, ?2)",
             rusqlite::params![payload.to_string(), cloud_id, sender],
         )
         .unwrap();
@@ -229,28 +253,20 @@ mod tests {
             .add(&cas_types::Task::new("cas-0c7f".into(), "Final review of batch 22".into()))
             .unwrap();
         let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-        sent_ask(&conn, "ask-4249", "Batch 22 is FROZEN: PR #4249. Please run tender-finch-34's final review (cas-0c7f).");
-        sent_ask(&conn, "ask-4251", "Can you review PR #4251?");
+        sent_ask(&conn, "ask-4249", "CAS_MERGE_HOLD {\"task_id\":\"cas-0c7f\",\"pr\":4249}\nBatch 22 is FROZEN: PR #4249. Please run tender-finch-34's final review (cas-0c7f).");
+        sent_ask(&conn, "ask-4251", "CAS_MERGE_HOLD {\"pr\":4251}\nCan you review PR #4251?");
         let merge = |pr| {
             merge_refusal(&root, "sup-soundwave", "cosmic-shark-29", Some("gabber-factory"),
                 &MergeSubject { task_id: None, pr: Some(pr), any_pr: false })
         };
 
         let refused = merge(4249).expect("open ask holds its PR");
-        assert!(refused.contains("UNANSWERED PEER ASK") && refused.contains("ask-4249"), "{refused}");
+        assert!(refused.contains("ask-4249"), "{refused}");
         assert!(merge(4250).is_none(), "an ask about another PR holds nothing");
         assert!(
             merge_refusal(&root, "sup-other", "other", None, &MergeSubject { task_id: None, pr: Some(4249), any_pr: false }).is_none(),
             "only the merging supervisor's own asks hold its merge"
         );
-
-        conn.execute(
-            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
-             '<cas-peer-message v=\"1\" id=\"r1\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"ask-4251\" kind=\"answer\"/>')",
-            [],
-        )
-        .unwrap();
-        assert!(merge(4251).is_none(), "a peer reply answers the ask");
 
         crate::store::open_task_store(&root)
             .unwrap()
@@ -261,13 +277,26 @@ mod tests {
             .unwrap()
             .list_pending("operator")
             .unwrap();
-        assert!(
-            notices.iter().any(|notice| notice.payload.contains("overrode an unanswered ask")
-                && notice.payload.contains("prowl silent 7h")),
-            "{notices:?}"
-        );
+        assert!(notices.iter().any(|notice| notice.payload.contains("prowl silent 7h")), "{notices:?}");
+        crate::supervisor_notices::adopt_operator_notices(&root, "gabber-factory").unwrap();
+        let operator = crate::store::open_prompt_queue_store(&root).unwrap()
+            .peek_all(10).unwrap().into_iter().find(|row| row.target == "operator").unwrap();
+        let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&operator.prompt).unwrap();
+        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+        assert!(!regex::Regex::new(r"^[a-z0-9_]+$").unwrap().is_match(&payload.summary), "{:?}", payload.summary);
+        assert!(!payload.message.contains("ask-4249"), "ask identity stays in machine metadata");
+        let notice: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
+        assert_eq!(notice["kind"], "peer_ask_override");
+        assert_eq!(notice["summary"], payload.summary);
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
         assert!(events.iter().any(|event| event.task_id.as_deref() == Some("cas-0c7f")), "{events:?}");
+        conn.execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
+             '<cas-peer-message v=\"1\" id=\"r1\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"ask-4251\" kind=\"answer\"/>')",
+            [],
+        )
+        .unwrap();
+        assert!(merge(4251).is_none(), "a peer reply answers the ask");
     }
 
     fn fixture() -> (crate::test_support::TestEnvGuard, tempfile::TempDir, std::path::PathBuf, rusqlite::Connection) {
@@ -283,58 +312,203 @@ mod tests {
         merge_refusal(root, sender, "cosmic-shark-29", None, &MergeSubject { pr: Some(pr), ..Default::default() })
     }
 
-    /// Verifiers ver-37f17bf1f171 and ver-aaa79541a589: any way an ask writes
-    /// the PR number holds that PR; a different number does not.
-    #[test]
-    fn every_pr_reference_form_in_an_ask_holds_its_merge_cas_bddf9() {
+    #[tokio::test]
+    async fn unlinked_peer_answer_releases_the_worktree_merge_gate_cas_7435() {
         let (_env, _temp, root, conn) = fixture();
-        let cases = [
-            ("PR#4249", true),
-            ("gabber-studio#4249", true),
-            ("Richards-LLC/gabber-studio#4249", true),
-            ("pull request 4249", true),
-            ("PR-4249", true),
-            ("PRs 4249 and 4250", true),
-            ("PR 4250 and 4249", true),
-            ("PR number 4249", true),
-            ("pull requests 4249", true),
-            ("pull-request 4249", true),
-            ("PR (4249)", true),
-            ("PR #42490", false),
-        ];
-        for (index, (form, holds)) in cases.iter().enumerate() {
-            let sender = format!("sup-{index}");
-            sent_ask_from(&conn, &sender, &format!("ask-{index}"), &format!("Please review {form} tonight."));
-            assert_eq!(pr_merge(&root, &sender, 4249).is_some(), *holds, "{form}");
+        crate::store::open_task_store(&root).unwrap()
+            .add(&cas_types::Task::new("cas-7435".into(), "peer boundary".into())).unwrap();
+        let supervisor = cas_types::Agent::new_with_role(
+            "sup-soundwave".into(), "cosmic-shark-29".into(), cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        sent_ask(&conn, "ask-7435", "CAS_MERGE_HOLD {\"task_id\":\"cas-7435\"}\nPlease relay the file boundary for cas-7435 before merging.");
+        let before = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
+            .await.expect_err("the unanswered ask must hold the real MCP merge path");
+
+        conn.execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["peer:lively-cheetah-57@prowl", "cosmic-shark-29",
+                "<cas-peer-message v=\"1\" id=\"answer-7435\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"cassy\" kind=\"answer\"/>\nRelayed the file boundary."],
+        ).unwrap();
+        let after = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
+            .await.expect_err("the missing source remains subject to normal merge guards");
+    }
+
+    #[test]
+    fn peer_answers_match_only_their_unambiguous_question_cas_7435() {
+        use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
+        for case in ["single", "named", "explicit", "linked-successor", "ambiguous", "wrong-peer", "wrong-target",
+            "wrong-reference", "stale", "receipt", "status", "untyped", "prefix",
+            "ambiguous-then-explicit", "duplicate", "queued", "wrong-source"]
+        {
+            let (_env, _temp, root, conn) = fixture();
+            sent_ask(&conn, "ask-7435", "CAS_MERGE_HOLD {\"pr\":4249}\nPlease review PR #4249.");
+            let two_asks = matches!(case, "named" | "explicit" | "linked-successor" | "ambiguous" | "prefix" | "ambiguous-then-explicit" | "duplicate");
+            if two_asks {
+                sent_ask(&conn, "ask-74350", "CAS_MERGE_HOLD {\"pr\":4250}\nPlease review PR #4250.");
+            }
+            conn.execute("UPDATE peer_message_outbox SET payload=json_set(payload, '$.recipient_agent_id', 'peer-agent'), created_at=strftime('%s','now')-10", []).unwrap();
+            if case == "queued" {
+                conn.execute("UPDATE peer_message_outbox SET cloud_id=NULL, state='pending'", []).unwrap();
+            }
+            let mut reply = PeerEnvelope {
+                id: "reply-7435".into(), sender_name: "lively-cheetah-57".into(),
+                sender_agent_id: "peer-agent".into(), machine: "prowl".into(),
+                session: None, repo: "cassy".into(), in_reply_to: None,
+                kind: Some(PeerMessageKind::Answer), scope: PeerScope::Project,
+            };
+            match case {
+                "explicit" => reply.in_reply_to = Some("ask-7435".into()),
+                "linked-successor" => {
+                    // Explicit Cloud reply links survive supervisor succession.
+                    reply.in_reply_to = Some("ask-7435".into());
+                    reply.sender_agent_id = "successor-peer".into();
+                    reply.sender_name = "successor-supervisor".into();
+                }
+                "wrong-reference" => reply.in_reply_to = Some("unrelated-ask".into()),
+                "wrong-peer" => reply.sender_agent_id = "different-peer".into(),
+                "receipt" => reply.kind = Some(PeerMessageKind::Receipt),
+                "status" => reply.kind = Some(PeerMessageKind::Status),
+                "untyped" => reply.kind = None,
+                _ => {}
+            }
+            let insert = |reply: &PeerEnvelope, body: &str| {
+                // pin: The peer queue source is a protocol identity; a conflicting source cannot authorize an answer.
+                let source = if case == "wrong-source" { "peer:someone-else@prowl".into() }
+                    else { format!("peer:{}@{}", reply.sender_name, reply.machine) };
+                let target = if case == "wrong-target" { "another-supervisor" } else { "cosmic-shark-29" };
+                conn.execute("INSERT INTO prompt_queue (source, target, prompt) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![source, target, format!("{}\n{body}", render_envelope(reply))]).unwrap();
+            };
+            insert(&reply, match case {
+                "named" => "Reviewed ask-7435; approved.",
+                "prefix" | "duplicate" => "Reviewed ask-74350; approved.",
+                _ => "Relayed the boundary; approved.",
+            });
+            if case == "stale" {
+                conn.execute("UPDATE prompt_queue SET created_at=datetime('now','-60 seconds')", []).unwrap();
+            }
+            if case == "ambiguous-then-explicit" {
+                reply.id = "explicit-second-answer".into();
+                reply.in_reply_to = Some("ask-74350".into());
+                insert(&reply, "Second question approved.");
+            } else if case == "duplicate" {
+                insert(&reply, "A duplicate delivery cannot answer the remaining question.");
+            }
+            let refusal = pr_merge(&root, "sup-soundwave", 4249);
+            assert_eq!(refusal.is_none(), matches!(case, "single" | "named" | "explicit" | "linked-successor"), "{case}: {refusal:?}");
+            if matches!(case, "ambiguous" | "ambiguous-then-explicit" | "wrong-reference" | "queued") {
+                assert!(refusal.as_deref().unwrap().contains("reply-7435"), "{case}: {refusal:?}");
+            }
+            if two_asks {
+                let other_answered = matches!(case, "prefix" | "ambiguous-then-explicit" | "duplicate");
+                assert_eq!(pr_merge(&root, "sup-soundwave", 4250).is_none(), other_answered, "other ask in {case}");
+            }
         }
     }
 
-    /// Verifier ver-37f17bf1f171 (3) and cas-5c23: an acknowledgement or a
-    /// progress status ("reviewing, ETA 1h") leaves the ask open; an answer
-    /// or an untyped reply releases it.
     #[test]
-    fn only_an_answer_reply_releases_an_ask_cas_bddf9() {
+    fn only_explicit_asks_hold_a_merge_cas_5ec1() {
+        let (_env, _temp, root, conn) = fixture();
+        for (index, kind) in [None, Some("blocker"), Some("status"), Some("ask")].into_iter().enumerate() {
+            let sender = format!("sup-kind-{index}");
+            sent_message_from(&conn, &sender, &format!("message-{index}"), "CAS_MERGE_HOLD {\"pr\":4249}\nContext for PR #4249", kind);
+            assert_eq!(pr_merge(&root, &sender, 4249).is_some(), kind == Some("ask"), "kind={kind:?}");
+        }
+    }
+
+    /// A typed answer can resolve the sole open question without a reply link;
+    /// untyped follow-ups, status, receipts and split decisions keep its hold.
+    #[test]
+    fn only_a_correlated_answer_from_the_same_peer_clears_an_ask_cas_5ec1() {
+        use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
+        let cases = [
+            (None, "p", "cosmic-shark-29", "now", true),
+            (Some(PeerMessageKind::Answer), "p", "cosmic-shark-29", "now", false),
+            (Some(PeerMessageKind::Status), "p", "cosmic-shark-29", "now", true),
+            (Some(PeerMessageKind::Receipt), "p", "cosmic-shark-29", "now", true),
+            (Some(PeerMessageKind::EpicSplitDecided), "p", "cosmic-shark-29", "now", true),
+            (None, "other-peer", "cosmic-shark-29", "now", true),
+            (None, "p", "other-supervisor", "now", true),
+            (None, "p", "cosmic-shark-29", "-2 minutes", true),
+        ];
+        for (kind, peer, target, time, holds) in cases {
+            let (_env, _temp, root, conn) = fixture();
+            sent_ask(&conn, "ask-review", "CAS_MERGE_HOLD {\"pr\":4249}\nCan you review PR #4249?");
+            assert!(pr_merge(&root, "sup-soundwave", 4249).is_some());
+            let envelope = PeerEnvelope {
+                id: "new-message".into(),
+                sender_name: "lively-cheetah-57".into(),
+                sender_agent_id: peer.into(),
+                machine: "prowl".into(),
+                session: None,
+                repo: "gabber-studio".into(),
+                in_reply_to: None,
+                kind,
+                scope: PeerScope::Project,
+            };
+            conn.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at) VALUES (?1, ?2, ?3, datetime('now', ?4))",
+                rusqlite::params![format!("peer:{}@prowl", envelope.sender_name), target,
+                    format!("{}\nThe review or split is decided", render_envelope(&envelope)),
+                    if time == "now" { "+0 seconds" } else { time }],
+            ).unwrap();
+            assert_eq!(pr_merge(&root, "sup-soundwave", 4249).is_some(), holds,
+                "kind={kind:?}, peer={peer}, target={target}, time={time}");
+        }
+    }
+
+    #[test]
+    fn only_structured_peer_holds_block_merges_cas_5d65() {
         let (_env, _temp, root, conn) = fixture();
         let cases = [
-            (" kind=\"receipt\"", "ok", true),
-            (" kind=\"status\"", "reviewing, ETA 1h", true),
-            (" kind=\"answer\"", "approved", false),
-            ("", "approved", false),
+            ("Not yours: cas-dc36", None, false, false),
+            ("Publish cas-325c evidence. cas-dc36 is in my merge now.", None, false, false),
+            ("Please review cas-dc36 and PR #4249 before merging.", None, false, false),
+            ("CAS_MERGE_HOLD {\"task_id\":\"cas-dc36\"}\nPlease review the delivery.", None, false, true),
+            ("CAS_MERGE_HOLD {\"task_id\":\"cas-dc360\"}\nContext: cas-dc36", None, false, false),
+            ("CAS_MERGE_HOLD {\"pr\":4249}\nReview requested.", Some(4249), false, true),
+            ("CAS_MERGE_HOLD {\"pr\":4250}\nContext: PR #4249", Some(4249), false, false),
+            ("Example only:\nCAS_MERGE_HOLD {\"task_id\":\"cas-dc36\"}", None, false, false),
+            ("Not yours: cas-dc36", None, true, false),
+            ("CAS_MERGE_HOLD {\"pr\":4249}", None, true, true),
+            ("CAS_MERGE_HOLD {\"task_id\":17}", None, false, false),
+            ("CAS_MERGE_HOLD {}", None, false, false),
+            ("CAS_MERGE_HOLD {\"task_id\":\"cas-dc36\",\"hold\":true}", None, false, false),
         ];
-        for (index, (kind, text, holds)) in cases.iter().enumerate() {
-            let sender = format!("sup-reply-{index}");
-            let ask = format!("ask-reply-{index}");
-            sent_ask_from(&conn, &sender, &ask, "Can you review PR #4249?");
-            conn.execute(
-                &format!(
-                    "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
-                     '<cas-peer-message v=\"1\" id=\"r-{index}\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"gabber-studio\" in_reply_to=\"{ask}\"{kind}/>' || char(10) || '{text}')"
-                ),
-                [],
-            )
-            .unwrap();
-            assert_eq!(pr_merge(&root, &sender, 4249).is_some(), *holds, "reply{kind}: {text}");
+        for (index, (body, pr, any_pr, holds)) in cases.into_iter().enumerate() {
+            let sender = format!("scope-supervisor-{index}");
+            sent_ask_from(&conn, &sender, &format!("scope-ask-{index}"), body);
+            let refusal = merge_refusal(&root, &sender, "cosmic-shark-29", None,
+                &MergeSubject { task_id: Some("cas-dc36".into()), pr, any_pr });
+            assert_eq!(refusal.is_some(), holds, "case={index}, refusal={refusal:?}");
         }
+    }
+
+    /// cas-6b42 (GH #1634): prowl answered several asks about cas-aa10 in one
+    /// reply linked to a sibling ask. That answer clears every earlier open
+    /// ask to the same peer about the same tasks; an ask about another task
+    /// stays open.
+    #[test]
+    fn a_linked_answer_clears_sibling_asks_about_the_same_tasks_cas_6b42() {
+        let (_env, _temp, root, conn) = fixture();
+        sent_ask(&conn, "ask-handover", "CAS_MERGE_HOLD {\"task_id\":\"cas-aa10\"}\nIs cas-aa10 yours to merge as train owner?");
+        sent_ask(&conn, "ask-other", "CAS_MERGE_HOLD {\"task_id\":\"cas-bb20\"}\nStatus of cas-bb20?");
+        sent_ask(&conn, "ask-queues", "CAS_MERGE_HOLD {\"task_id\":\"cas-aa10\"}\nWhich worker re-parks cas-aa10?");
+        conn.execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
+             '<cas-peer-message v=\"1\" id=\"r1\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"cassy\" in_reply_to=\"ask-queues\" kind=\"answer\"/>
+lively-eagle-82 re-parked cas-aa10; yours to merge.')",
+            [],
+        )
+        .unwrap();
+        let merge = |task: &str| merge_refusal(&root, "sup-soundwave", "cosmic-shark-29", None,
+            &MergeSubject { task_id: Some(task.into()), ..Default::default() });
+        assert!(merge("cas-aa10").is_none(), "{:?}", merge("cas-aa10"));
+        let refused = merge("cas-bb20").expect("an ask about another task still holds its merge");
+        assert!(refused.contains("ask-other"), "{refused}");
     }
 
     /// Verifier ver-37f17bf1f171 (2): `gh pr merge` with a branch or with no
@@ -342,7 +516,7 @@ mod tests {
     #[test]
     fn a_branch_or_bare_pr_merge_is_held_by_its_ask_cas_bddf9() {
         let (mut env, temp, root, conn) = fixture();
-        sent_ask(&conn, "ask-branch", "Please review PR #4249 before staging.");
+        sent_ask(&conn, "ask-branch", "CAS_MERGE_HOLD {\"pr\":4249}\nPlease review PR #4249 before staging.");
         let gh = temp.path().join("fake-gh");
         crate::test_paths::warm_stub(&gh, "#!/bin/sh\nprintf '%s' '{\"number\":4249}'\n");
         env.set(crate::qa_pass::github_gate::GH_BIN_ENV, &gh);

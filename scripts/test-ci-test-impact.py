@@ -76,6 +76,30 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("opaque_test", command["stems"])
         self.assertNotIn("gamma_test", command["stems"])
 
+    def test_binary_source_selects_subprocess_helpers_beyond_linked_imports(self):
+        # cas-778c: the CLI can change even when the suite imports only an
+        # unrelated library module. Follow helpers, not a list of suite names.
+        self.put("cas-cli/tests/gamma_test.rs", '''use cas::gamma::other;
+#[path = "support/runner.rs"] mod runner;
+#[test] fn cli_contract() { runner::run(); }
+''')
+        self.put("cas-cli/tests/support/runner.rs", '''mod nested;
+pub fn run() { nested::launch(); }
+''')
+        self.put("cas-cli/tests/support/nested.rs", 'pub fn launch() { assert_cmd::cargo::cargo_bin("cas"); }\n')
+        self.put("cas-cli/tests/beta_test.rs", 'use cas::gamma::other; fn cli_contract() { command().assert(); }\n')
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        plan = self.select()
+        command = plan["commands"][0]
+        self.assertTrue({"beta_test", "gamma_test"} <= set(command["stems"]))
+        self.assertTrue({"beta_test", "gamma_test", "opaque_test"} <= set(plan["subprocess_stems"]))
+        self.assertNotIn("alpha_test", plan["subprocess_stems"])
+        # The expansion belongs only to binary-source changes.
+        self.base = self.git("rev-parse", "HEAD")
+        command = self.select("cas-cli/tests/alpha_test.rs")["commands"][0]
+        self.assertEqual(command["stems"], ["alpha_test", "builtin_archive_portability_test"])
+
     def test_merge_commit_selects_source_already_present_in_first_parent(self):
         self.put("cas-cli/src/lib.rs", 'pub mod alpha; pub mod beta; pub mod gamma; pub mod cli;\n')
         self.put("cas-cli/src/cli/mod.rs", "pub mod update;\n")
@@ -131,13 +155,61 @@ class ImpactTests(unittest.TestCase):
         self.select()
         self.assertEqual(impact.plan(self.root, "0" * 40, self.base, None)["mode"], "scoped")
 
-    def test_unmapped_input_runs_workspace(self):
-        # cas-eac2: Commander package scripts are not compiled input.
-        self.put("hub-web/package.json", '{}\n')
-        self.assertEqual(self.select()["mode"], "scoped")
-        self.put("unknown.bin", 'new input\n')
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+    def test_non_code_roots_skip_rust_but_unknown_code_stays_conservative(self):
+        for path in [".claude/settings.json", ".codex/config.toml", ".grok/config.json", "docs/policy.yaml", "changelog.d/entry.md"]:
+            with self.subTest(path=path):
+                self.put(path, "fixture\n")
+                self.commit()
+                selection = impact.plan(self.root, self.base, "", None)
+                self.assertEqual((selection["mode"], selection["commands"]), ("scoped", []))
+                self.base = self.git("rev-parse", "HEAD")
+        split = impact.lane_split(self.root, selection)
+        state = self.root / "output/non-rust.json"
+        impact.write(state, {"plan": selection, "split": split})
+        from argparse import Namespace
+        with patch.object(impact.subprocess, "check_output", side_effect=AssertionError("Cargo must not run")):
+            self.assertEqual(impact.lane(self.root, Namespace(out=str(state), phase="own", github_output="")), 0)
+        self.assertEqual((split["build"], split["ring"]), ([], ""))
+        for path in ["unknown.rs", "Cargo.lock", ".config/nextest.toml", ".cargo/config.toml", "vendor/fixture.rs"]:
+            with self.subTest(path=path):
+                self.put(path, "fixture\n")
+                self.commit()
+                self.assertEqual(impact.plan(self.root, self.base, "", None)["mode"], "workspace")
+                self.base = self.git("rev-parse", "HEAD")
+
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+    def test_script_paths_select_only_referencing_rust_contracts(self):
+        self.put("scripts/tool.py", "fixture\n")
+        self.put(".github/workflows/tool.yml", "fixture\n")
+        self.put("cas-cli/src/alpha.rs", 'const SCRIPT: &str = include_str!("../../scripts/tool.py");\nfn contents(_: fn()) { let _ = SCRIPT; }\n#[test] fn reads_script() { contents(|| {}); }\n#[test] fn unrelated_unit() {}\n')
+        self.put("cas-cli/tests/alpha_test.rs", '''
+#[test] fn reads_workflow() { std::fs::read_to_string(".github/workflows/tool.yml"); }
+#[tokio::test]
+// cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+async fn annotated_script_reader() { std::fs::read_to_string("scripts/tool.py"); }
+#[tokio::test(flavor = "multi_thread")]
+/* outer comment /* #[test] fn decoy() {} */ still a comment */
+#[serial]
+/* fn and { } here are not tokens */
+async fn block_annotated_script_reader() { std::fs::read_to_string("scripts/tool.py"); }
+#[test] fn unrelated_integration() {}
+''')
         self.commit()
-        self.assertEqual(impact.plan(self.root, self.base, "", None)["mode"], "workspace")
+        self.base = self.git("rev-parse", "HEAD")
+        self.put("scripts/tool.py", "changed\n")
+        self.put(".github/workflows/tool.yml", "changed\n")
+        self.commit()
+        selection = impact.plan(self.root, self.base, "", None)
+        self.assertEqual(selection["mode"], "scoped")
+        split = impact.lane_split(self.root, selection)
+        self.assertIn("reads_script", split["own"])
+        self.assertIn("reads_workflow", split["own"])
+        self.assertIn("annotated_script_reader", split["own"])
+        self.assertIn("block_annotated_script_reader", split["own"])
+        self.assertNotIn("decoy", split["selected"])
+        self.assertNotIn("unrelated", split["selected"])
+        self.assertNotIn("all()", split["selected"])
 
     def test_bad_history_widens_scope(self):
         self.history.write_text('{broken')
@@ -338,6 +410,158 @@ path="tests/builtin_archive_portability_test.rs"
         result = subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(json.loads(destination.read_text())["uncertain"])
+
+    def test_lane_runs_own_module_tests_before_the_ring_that_selects_them(self):
+        """cas-08c8 shape: a module edit breaks a consumer suite outside it."""
+        self.select("cas-cli/src/alpha.rs")
+        fake = self.root / "fake-cargo"
+        calls = self.root / "output/cargo.calls"
+        fake.write_text('#!/bin/sh\nmkdir -p "$(dirname "$CALLS")"; printf "%s\\n" "$*" >> "$CALLS"\n'
+                        'case "$*" in *" list "*|"nextest list"*) echo \'{"rust-suites":{"cas":{"testcases":{"alpha::t":{"ignored":false,"filter-match":{"status":"matches"}}}}}}\' ;;\n'
+                        '*binary_id*) if [ -n "$BASE_FAILS" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100; fi; echo "        PASS [   0.01s] cas::beta_test beta_test::breaks" ;;\n'
+                        '*"binary(beta_test)"*) echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; if [ -n "$RING_TIMEOUT" ]; then echo "     TIMEOUT [  60.00s] cas::beta_test beta_test::hangs"; echo "Summary [ 60.01s] 2 tests run: 0 passed, 1 failed, 1 timed out"; exit 100; fi;'
+                        ' if [ -n "$RING_UNPARSED" ]; then echo "Summary [ 0.01s] 2 tests run: 0 passed, 2 failed"; exit 100; fi; echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100 ;;\n'
+                        '*) echo "Summary [ 0.01s] 1 test run: 1 passed" ;; esac\n')
+        fake.chmod(0o755)
+        env = dict(os.environ, CARGO=str(fake), CALLS=str(calls))
+        state, outputs = self.root / "output/lane.json", self.root / "output/github"
+        def phase(name, *extra):
+            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", name, "--base-sha", self.base, "--history", str(self.history),
+                       "--out", str(state), "--github-output", str(outputs), *extra]
+            return subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(phase("plan").returncode, 0)
+        self.assertEqual(phase("own").returncode, 0)
+        values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+        self.assertEqual((values["mode"], values["ring-shards"]), ("scoped", "[1]"))
+        own_run = next(line for line in calls.read_text().splitlines() if "nextest run" in line)
+        self.assertIn("test(/^alpha::/)", own_run)
+        self.assertNotIn("binary(beta_test)", own_run)
+        self.assertEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0)
+        values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+        self.assertEqual(values["failed"], "true", "a parsed failure waits for base attribution")
+        ring_run = calls.read_text().splitlines()[-1]
+        self.assertIn("--archive-file suite.tar.zst", ring_run)
+        own = json.loads(state.read_text())["split"]["own"]
+        self.assertIn(f"-E {own} ", own_run)
+        self.assertIn(f"and not ({own})", ring_run)
+        self.assertIn("binary(beta_test)", ring_run)
+        self.assertIn("--partition count:1/1", ring_run)
+        self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "passes at the base: this delivery broke it")
+        env["BASE_FAILS"] = "1"
+        self.assertEqual(phase("attribute", "--receipt", "ring").returncode, 0, "fails at the base too: inherited")
+        # Verifier repro: an inherited FAIL beside a new TIMEOUT stays red.
+        env["RING_TIMEOUT"] = "1"
+        self.assertEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0)
+        self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "the new timeout is not inherited")
+        caused = json.loads(state.with_name("ring-attribution.json").read_text())["caused"]
+        self.assertEqual([f["test"] for f in caused], ["beta_test::hangs"])
+        del env["RING_TIMEOUT"]
+        env["RING_UNPARSED"] = "1"
+        self.assertNotEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0,
+                            "an unsuccessful outcome with no parsed test line stays red")
+        del env["RING_UNPARSED"], env["BASE_FAILS"]
+        self.put("Cargo.lock", "# shared build input\n")
+        self.select("Cargo.lock")
+        self.assertEqual(phase("plan").returncode, 0)
+        split = json.loads(state.read_text())["split"]
+        self.assertEqual((split["build"], split["ring"]), (["--workspace"], f"(all()) and not ({own})"), "a workspace plan runs whole, own first")
+
+    # cas-rule: rule-176 scope: "(2) Each check runs once per change, at the cheapest point that catches its defect. Running the same check in more places is a defect."
+    def test_lane_attribution_reuses_only_exact_base_configuration_and_test_proof(self):
+        failure = self.NEXTEST_FAILURE
+        config = {"platform": "linux-x86_64", "rustc": "1.99.0", "profile": "test"}
+        destination = self.root / "output/attribution.json"
+        for mismatch in [None, "replayed", "head", "configuration", "missing-config", "package", "binary", "test", "uncertain", "expired"]:
+            with self.subTest(mismatch=mismatch):
+                receipt = {"head": self.base, "configuration": config,
+                           "failures": [failure], "uncertain": False}
+                if mismatch == "head":
+                    receipt["head"] = "0" * 40
+                elif mismatch == "configuration":
+                    receipt["configuration"] = dict(config, rustc="other")
+                elif mismatch == "missing-config":
+                    del receipt["configuration"]
+                elif mismatch in {"package", "binary", "test"}:
+                    receipt["failures"] = [dict(failure, **{mismatch: "other"})]
+                elif mismatch == "uncertain":
+                    receipt["uncertain"] = True
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w") as zipped:
+                    zipped.writestr("base-receipt.json" if mismatch == "replayed" else "ring-receipt.json", json.dumps(receipt))
+                payloads = [json.dumps({"workflow_runs": [{"id": 11, "head_sha": self.base,
+                    "head_repository": {"full_name": "fixture/repo"}, "path": ".github/workflows/lane.yml"}]}).encode(),
+                    json.dumps({"artifacts": [{"id": 7, "name": "lane-impact-11-ring-1", "expired": mismatch == "expired"}]}).encode()]
+                recent = {"artifacts": []}
+                if mismatch == "replayed":
+                    payloads = [json.dumps({"workflow_runs": []}).encode()]
+                    recent = {"artifacts": [{"id": 7, "name": "lane-impact-12-ring-1", "expired": False,
+                        "workflow_run": {"id": 12, "repository_id": 1, "head_repository_id": 1}}]}
+                payloads.append(json.dumps(recent).encode())
+                if mismatch != "expired":
+                    payloads.append(archive.getvalue())
+                class Opener:
+                    def open(self, request, timeout):
+                        return io.BytesIO(payloads.pop(0))
+                with patch.dict(os.environ, {"GITHUB_REPOSITORY": "fixture/repo", "GH_TOKEN": "fixture-token"}), \
+                        patch.object(impact.urllib.request, "build_opener", lambda handler: Opener()):
+                    proof = impact.base_failure_proof(self.base, config, [failure])
+                self.assertEqual([row["failure"] for row in proof], [failure] if mismatch in (None, "replayed") else [])
+                if mismatch in (None, "replayed"):
+                    with patch.object(impact, "base_failure_proof", return_value=proof), \
+                            patch.object(impact.subprocess, "run", side_effect=AssertionError("base rebuilt")):
+                        self.assertEqual(impact.lane_attribute(self.root, self.base, [failure, failure], destination, config), 0)
+                    result = json.loads(destination.read_text())
+                    self.assertEqual((result["inherited"], result["caused"], result["unresolved"]), ([failure], [], []))
+                    self.assertEqual(result["reused"][0]["artifact_id"], 7)
+                    self.assertEqual(result["timings"]["build_seconds"], 0)
+                    carried = json.loads(destination.with_name("base-receipt.json").read_text())
+                    self.assertEqual((carried["head"], carried["failures"]), (self.base, [failure]))
+
+    # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
+    def test_lane_attribution_timeout_keeps_early_receipt_and_fails_closed(self):
+        failure = self.NEXTEST_FAILURE
+        destination = self.root / "output/attribution.json"
+        def expired(*args, **kwargs):
+            self.assertEqual(json.loads(destination.read_text())["unresolved"], [failure])
+            raise subprocess.TimeoutExpired(args[0], 1)
+        with patch.object(impact, "base_failure_proof", return_value=[]), \
+                patch.object(impact.subprocess, "check_call", side_effect=expired), \
+                patch.object(impact.subprocess, "run"):
+            self.assertNotEqual(impact.lane_attribute(self.root, self.base, [failure], destination, {}), 0)
+        receipt = json.loads(destination.read_text())
+        self.assertEqual((receipt["inherited"], receipt["caused"], receipt["unresolved"]), ([], [], [failure]))
+        self.assertEqual(receipt["status"], "unresolved")
+
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+    def test_lane_uses_live_target_range_and_recorded_base_only_for_attribution(self):
+        self.git("checkout", "-qb", "delivery")
+        self.select("cas-cli/src/alpha.rs")
+        state = self.root / "output/lane.json"
+        ref = "refs/cas/delivery-base/lane"
+        self.git("update-ref", ref, self.base)
+        def plan_with(target):
+            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", "plan", "--base-sha", target, "--history", str(self.history), "--out", str(state), "--recorded-base-ref", ref]
+            self.assertEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
+            return json.loads(state.read_text())
+        before = plan_with(self.base)
+        self.git("checkout", "-qb", "train", self.base)
+        self.put("cas-cli/src/gamma.rs", "// train-owned change\n")
+        self.put(".claude/settings.json", "{}\n")
+        self.commit()
+        target = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "delivery")
+        self.git("merge", "--no-edit", "train")
+        after = plan_with(target)
+        self.assertEqual(after["plan"]["paths"], ["cas-cli/src/alpha.rs"])
+        self.assertEqual(after["plan"]["commands"], before["plan"]["commands"])
+        self.assertEqual(after["plan"]["base"], target)
+        self.assertEqual(after["plan"]["attribution_base"], self.base)
+        receipt = state.with_name("own-receipt.json")
+        receipt.write_text(json.dumps({"failures": [], "configuration": {}}))
+        from argparse import Namespace
+        with patch.object(impact, "lane_attribute", return_value=0) as attribute:
+            self.assertEqual(impact.lane(self.root, Namespace(out=str(state), phase="attribute", receipt="own")), 0)
+        self.assertEqual(attribute.call_args.args[1], self.base)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
+// gate-audit[input]: Registers configuration documentation containing refusal examples; it makes no request decision.
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
     // Runtime FactoryConfig fields must also be discoverable and settable.
     for (key, name, description, value_type, default, constraint) in [
@@ -11,8 +12,11 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
          "Rolling window in hours, measured from report task creation. Only Bug tasks labelled stakeholder-reported with P0/P1 count, including closed reports.",
          ConfigType::Int, "48", Constraint::Range(1, 8760)),
         ("factory.release_train_max_age_hours", "Release Train Max Age",
-         "Hours after a release train's first child merge before the supervisor gets one \"train ready to cut\" notice, even with children still in progress. Never cuts automatically.",
+         "Hours after a release train's first child merge before the supervisor gets one \"train ready to cut\" notice, even with children still in progress. The notice never cuts; release.auto_cut_max_per_day governs automatic cuts.",
          ConfigType::Int, "3", Constraint::Range(1, 168)),
+        ("factory.focus_mode", "Operator Focus",
+         "Operator intent inherited by every worker and reviewer brief, for example visible chunks first.",
+         ConfigType::String, "", Constraint::None),
         ("factory.slot_id", "Cloud Supervisor Slot",
          "Stable Cloud reader slot override. Empty derives the slot from machine id, canonical project id, supervisor role and factory session. Use an override to retain a slot across different factory sessions or machines; sharing an override intentionally supersedes the earlier registration.",
          ConfigType::String, "", Constraint::None),
@@ -47,8 +51,8 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
          "Refuse fallback to another harness when the requested Codex CLI is unavailable; also enabled by --strict-cli.",
          ConfigType::Bool, "false", Constraint::None),
         ("factory.release_train", "Release Train",
-         "One integration per release: a task created with no epic and no target joins the open release-train epic cut from the integration branch; false targets each task to the integration branch.",
-         ConfigType::Bool, "true", Constraint::None),
+         "One integration per release: a task created with no epic and no target joins the open release-train epic cut from the integration branch; off (default) targets each task to the integration branch.",
+         ConfigType::Bool, "false", Constraint::None),
         ("factory.target_cache_high_watermark_percent", "Cargo Cache High Watermark",
          "Filesystem usage percentage that signals factory Cargo cache pressure.",
          ConfigType::Int, "85", Constraint::Range(0, 100)),
@@ -194,6 +198,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.codex_home",
+        section: "factory",
+        name: "Worker Codex Account",
+        description: "Default Codex account directory for spawn_workers on this project and machine. Explicit batch or per-worker config_dir wins; otherwise this preference overrides inherited accounts and quota recommendations, including lane requests. Existing account paths, ~/ paths and aliases are supported. Empty uses the account recommender.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "worker", "codex", "account", "home", "preference"],
+        use_cases: &["Pin workers to the operator's chosen Codex account"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.scratch_root",
         section: "factory",
         name: "Worker Build Scratch Root",
@@ -261,6 +279,14 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.supervisor_wake_input_budget", section: "factory", name: "Supervisor Latest-call Input Cap",
+        description: "Latest-call input cap for idle-boundary supervisor clearing, also capped at 80% of the harness-reported model window when available. 0 disables.", value_type: ConfigType::Int, default: "1000000",
+        constraint: Constraint::Range(0, 100_000_000), advanced: false, requires_feature: None,
+        keywords: &["factory", "supervisor", "context", "handoff", "clear", "cost"],
+        use_cases: &["Clear supervisor context under measured prompt pressure without counting repeated cache reads"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.message_max_chars",
         section: "factory",
         name: "Agent Message Character Cap",
@@ -300,6 +326,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         requires_feature: None,
         keywords: &["factory", "task", "notes", "cap", "characters", "traffic"],
         use_cases: &["Keep task timelines readable", "Use supervisor review overrides for durable discovery or decision evidence"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.max_workers",
+        section: "factory",
+        name: "Maximum Workers",
+        description: "Machine-wide live worker cap for spawn admission and advertised peer capacity. Counts current heartbeats and live harness processes across local factory sessions.",
+        value_type: ConfigType::Int,
+        default: "8",
+        constraint: Constraint::Range(1, 256),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "workers", "routing", "capacity"],
+        use_cases: &["Keep task placement within the host's worker capacity"],
     });
 
     registry.register(ConfigMeta {

@@ -14,7 +14,20 @@ pub(crate) fn record_blocker_ask(
     { return Ok(()); }
     use sha2::{Digest, Sha256};
     let fingerprint = format!("{:x}", Sha256::digest(ask.as_bytes()));
-    tasks.patch_execution_state(task_id, &serde_json::json!({"blocker_ask": fingerprint}))
+    let state = tasks.get_execution_state(task_id).map_err(|e| e.to_string())?.unwrap_or_default();
+    let previous = state.get("blocker_ask").and_then(serde_json::Value::as_str);
+    let mut patch = serde_json::json!({"blocker_ask": fingerprint});
+    if task.status == cas_types::TaskStatus::Blocked
+        && previous != Some(fingerprint.as_str())
+        && (previous.is_some() || state.get("answered_blocker").is_some())
+        && let Some(mut hold) = read(tasks.as_ref(), task_id)?
+    {
+        // A changed question starts its own five-minute deadline; repeating
+        // the same question keeps the durable episode and its answer intact.
+        hold.when = chrono::Utc::now();
+        patch["blocked_hold"] = serde_json::to_value(hold).map_err(|e| e.to_string())?;
+    }
+    tasks.patch_execution_state(task_id, &patch)
         .map(|_| ()).map_err(|e| e.to_string())
 }
 
@@ -23,6 +36,25 @@ pub(crate) fn record_blocker_ask(
 pub(crate) fn record_supervisor_answer(
     cas_dir: &std::path::Path, supervisor: &cas_types::Agent, worker: &cas_types::Agent,
     task_id: Option<&str>, message_id: i64,
+) -> Result<(), String> {
+    record_supervisor_answer_evidence(cas_dir, supervisor, worker, task_id, message_id, None)
+}
+
+/// Bind an authenticated decision note to this task's current blocker only.
+pub(crate) fn record_supervisor_decision(
+    cas_dir: &std::path::Path, supervisor: &cas_types::Agent, task_id: &str, event_id: i64,
+) -> Result<(), String> {
+    let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
+    let task = tasks.get(task_id).map_err(|e| e.to_string())?;
+    let Some(assignee) = task.assignee.as_deref() else { return Ok(()); };
+    let agents = crate::store::open_agent_store(cas_dir).map_err(|e| e.to_string())?;
+    let Some(worker) = super::resolve_agent_identity(agents.as_ref(), assignee) else { return Ok(()); };
+    record_supervisor_answer_evidence(cas_dir, supervisor, &worker, Some(task_id), 0, Some(event_id))
+}
+
+fn record_supervisor_answer_evidence(
+    cas_dir: &std::path::Path, supervisor: &cas_types::Agent, worker: &cas_types::Agent,
+    task_id: Option<&str>, message_id: i64, decision_event_id: Option<i64>,
 ) -> Result<(), String> {
     if supervisor.role != cas_types::AgentRole::Supervisor || worker.role != cas_types::AgentRole::Worker
         || supervisor.factory_session != worker.factory_session
@@ -39,16 +71,29 @@ pub(crate) fn record_supervisor_answer(
     let receipt = AnsweredBlocker {
         worker: worker.id.clone(), supervisor: supervisor.id.clone(), reason: hold.reason,
         ask: state.get("blocker_ask").and_then(serde_json::Value::as_str).map(str::to_owned), message_id,
+        decision_event_id,
     };
     tasks.patch_execution_state(&task.id, &serde_json::json!({"answered_blocker": receipt}))
         .map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// A dependency recorded during this hold owns its next wake. Older edges
+/// alone cannot turn a new manual hold into a dependency wait. Unknown targets
+/// retain the ordinary blocker alert rather than claiming completion.
+pub(crate) fn recorded_dependency_wait(
+    tasks: &dyn TaskStore, task_id: &str, start: chrono::DateTime<chrono::Utc>,
+) -> Option<Vec<Task>> {
+    let edges: Vec<_> = tasks.get_dependencies(task_id).ok()?.into_iter()
+        .filter(|edge| edge.is_blocking()).collect();
+    if !edges.iter().any(|edge| edge.created_at >= start) { return None; }
+    edges.iter().map(|edge| tasks.get(&edge.to_id)).collect::<Result<Vec<_>, _>>().ok()
 }
 
 /// Positive, durable evidence only. New questions/holds, dependencies, changed
 /// owners and non-blocked task states retain their normal wake policy.
 pub(crate) fn answered_blocker_wait(
     cas_dir: &std::path::Path, task_id: &str, recipient: &str,
-) -> Option<i64> {
+) -> Option<()> {
     let tasks = crate::store::open_task_store_local(cas_dir).ok()?;
     let task = tasks.get(task_id).ok()?;
     if task.status != cas_types::TaskStatus::Blocked || !tasks.get_blockers(task_id).ok()?.is_empty()
@@ -56,6 +101,10 @@ pub(crate) fn answered_blocker_wait(
             .list_blocking_for_task(task_id).ok()?.is_empty()
     { return None; }
     let state = tasks.get_execution_state(task_id).ok()??;
+    let hold = read(tasks.as_ref(), task_id).ok()??;
+    // A linked answer cannot swallow the dependency-completed wake after the
+    // reconciler observes that the recorded wait has cleared.
+    if recorded_dependency_wait(tasks.as_ref(), task_id, hold.when).is_some() { return None; }
     let receipt: AnsweredBlocker = serde_json::from_value(state.get("answered_blocker")?.clone()).ok()?;
     let agents = crate::store::open_agent_store(cas_dir).ok()?;
     let supervisor = agents.get(&receipt.supervisor).ok()?;
@@ -64,10 +113,10 @@ pub(crate) fn answered_blocker_wait(
         || ![supervisor.name.as_str(), supervisor.id.as_str(), "supervisor"].contains(&recipient)
         || supervisor.factory_session != worker.factory_session
         || ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref())
-        || read(tasks.as_ref(), task_id).ok()??.reason != receipt.reason
+        || hold.reason != receipt.reason
         || state.get("blocker_ask").and_then(serde_json::Value::as_str) != receipt.ask.as_deref()
     { return None; }
-    Some(receipt.message_id)
+    Some(())
 }
 
 pub(crate) fn worker_has_answered_blocker(
@@ -251,6 +300,45 @@ fn is_any_verification_wait_note(reason: &str) -> bool {
         .strip_prefix("Verification required: exact dispatch ")
         .and_then(|rest| rest.strip_suffix(" must record a verdict before close."))
         .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace))
+}
+
+/// The current blocker reason, excluding progress notes and older blockers.
+pub(crate) fn latest_blocker_reason(notes: &str) -> Option<String> {
+    blocker_note_entries(notes).pop().map(|(_, reason)| reason)
+}
+
+/// Whether a blocker reason is currently gated on an operator decision.
+/// Keep the explicit `owner:` marker authoritative, matching the progress
+/// watchdog's cas-e239 exclusion; older notes without it retain the operator
+/// mention fallback.
+pub(crate) fn reason_is_operator_owned(reason: &str) -> bool {
+    let words: Vec<_> = reason
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words
+        .windows(2)
+        .find(|pair| pair[0] == "owner")
+        .map_or_else(
+            || words.iter().any(|word| word == "operator"),
+            |pair| pair[1] == "operator",
+        )
+}
+
+/// Whether the current blocker names an owner. The operator mention fallback
+/// is shared with the progress watchdog; explicit owners include the
+/// supervisor, who may still be waiting on an open operator ask.
+pub(crate) fn reason_has_named_owner(reason: &str) -> bool {
+    if reason_is_operator_owned(reason) {
+        return true;
+    }
+    let words: Vec<_> = reason
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words.windows(2).any(|pair| pair[0] == "owner")
 }
 
 /// The full text of every blocker note, across all of its lines. A note

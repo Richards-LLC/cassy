@@ -22,23 +22,6 @@ impl From<String> for SourceAdmission {
     }
 }
 
-/// The existing split gates decide delegation and reasoned takeover. Source
-/// preflight must not replace that decision with the parent ask's claim.
-pub(crate) fn source_split(root: &std::path::Path, id: &str) -> Option<String> {
-    crate::cloud::epic_split::current_epic_splits(root)
-        .ok()?
-        .into_iter()
-        .find(|split| {
-            split.is_binding(chrono::Utc::now())
-                && split
-                    .mine
-                    .iter()
-                    .chain(&split.theirs)
-                    .any(|child| child == id)
-        })
-        .map(|split| split.id)
-}
-
 pub(crate) fn is_slack_source(source: &str) -> bool {
     url::Url::parse(source.trim()).is_ok_and(|url| {
         url.scheme() == "https"
@@ -50,6 +33,31 @@ pub(crate) fn is_slack_source(source: &str) -> bool {
 }
 
 impl CasCore {
+    /// An accepted owner-issued share grants work to its local supervisor
+    /// and workers. Keep the task's source link intact; this grants no reply.
+    pub(crate) fn source_split(&self, id: &str, source: Option<&str>) -> Option<String> {
+        let task = self.open_task_store().ok()?.get(id).ok()?;
+        if task.external_ref.as_deref() != source { return None; }
+        crate::cloud::epic_split::current_epic_splits(&self.cas_root).ok()?
+            .into_iter().find(|split| {
+                split.state == cas_store::SplitState::Accepted
+                    && split.mine.iter().any(|child| child == id)
+                    && crate::cloud::epic_split::validate_slack_share_issuer(
+                        &self.cas_root,
+                        &task,
+                        match split.direction {
+                            cas_store::SplitDirection::Incoming => &split.peer_agent_id,
+                            cas_store::SplitDirection::Outgoing => &split.local_agent_id,
+                        },
+                    ).is_ok()
+                    // Resolving the actor may register it. A task without a
+                    // matching split must leave the caller's identity alone.
+                    && self.source_claim_actor()
+                        .is_some_and(|actor| split.local_agent_id == actor.id)
+            }).map(|split| split.id)
+    }
+
+    // gate-audit[source_claim_override]: selector Replays task-bound source approval already issued by G-133; immutable source identity is rechecked.
     pub(crate) async fn task_source_admission_for(
         &self,
         task: &crate::types::Task,
@@ -58,7 +66,7 @@ impl CasCore {
         if task.execution_note.as_deref() == Some("no-code") {
             return Ok(SourceAdmission::default());
         }
-        if let Some(split) = source_split(&self.cas_root, &task.id) {
+        if let Some(split) = self.source_split(&task.id, task.external_ref.as_deref()) {
             return Ok(format!(
                 "\nSource ownership: task {} is governed by epic split {split}; its delegation and takeover gates apply.",
                 task.id
@@ -114,6 +122,8 @@ impl CasCore {
 
     /// Refuse a known competing owner before local task or staffing writes.
     /// Missing advisory infrastructure is visible, and never grants Slack authority.
+    // gate-audit[override_reason]: bypass G-133 Live supervisor accepts an actual peer-owned source claim.
+    // gate-audit[accepted_by]: cas_task_create_with_delivery_mode,cas_task_update_with_delivery_mode
     pub(crate) async fn task_source_admission(
         &self,
         source: Option<&str>,
@@ -153,7 +163,7 @@ impl CasCore {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     format!(
-                        "SOURCE HELD BY A PEER — {source} is owned by {label}. Coordinate with that owner or use the existing claim handoff before creating or staffing this ask."
+                        "SOURCE HELD BY A PEER — {source} is owned by {label}. Ask the owner to offer this task via factory action=epic_split id=<epic-or-standalone-task> target=<your-supervisor> theirs={task_id}, then accept it before staffing. Thread reply authority stays with the owner."
                     ),
                 ));
             }
@@ -191,6 +201,15 @@ impl CasCore {
                 {
                     answer = Acquire::PeerHolds(hold);
                 }
+                if actor.role == AgentRole::Supervisor && actor.is_alive()
+                    && let Acquire::PeerHolds(hold) = &answer
+                {
+                    answer = claims.take_source_for_task(
+                        &key, &task_name, hold, &actor.id,
+                        &format!("{} (task {task_name})", actor.name),
+                        crate::cloud::peer_claims::lease_duration_secs(&root),
+                    );
+                }
                 if answer == Acquire::Claimed {
                     // Existing agent metadata projects these claims into the usual
                     // heartbeat; no independent source lease table or protocol.
@@ -214,6 +233,7 @@ impl CasCore {
                 _fence: fence,
                 ..Default::default()
             }),
+            // gate[G-133 create]: Source claim held by a peer
             Acquire::PeerHolds(hold) => {
                 let conflict = format!(
                     "SOURCE HELD BY A PEER — {source} is owned by {} until {}",
@@ -241,7 +261,7 @@ impl CasCore {
                         supervisor.id
                     );
                     return Ok(SourceAdmission {
-                        notice,
+                        notice: crate::gates::override_tag("G-133", notice),
                         override_grant: Some(cas_types::SourceClaimOverride {
                             source_key,
                             supervisor_id: supervisor.id,
@@ -252,9 +272,9 @@ impl CasCore {
                 }
                 Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
-                    format!(
-                        "{conflict}. Coordinate with that owner. A deliberate second task requires task create/update supervisor_override=true reason=<agreement>; the decision is recorded on that task."
-                    ),
+                    crate::gates::tag("G-133", format!(
+                        "{conflict}. Ask the owner to hand off using factory action=release_claim resource_id=<GitHub URL>. A deliberate second task requires task create/update supervisor_override=true reason=<agreement>; the decision is recorded on that task."
+                    )),
                 ))
             }
             Acquire::StalePeer(hold) => Ok(unchecked(&format!(

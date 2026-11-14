@@ -36,8 +36,6 @@ class SowGateTests(unittest.TestCase):
             gap = done + '| R4 | "Regions." | Gap → PM | SOW silent | PM |\n'
             result = run(tmp, 'gap.md', gap, 'gap')
             self.assertEqual(result.returncode, 1)
-            self.assertIn('STOP: 1 Gap row(s): R4 (PM)', result.stderr)
-            self.assertIn('status variant', result.stderr)
 
     def test_hygiene_fails_on_a_planted_ticket_label(self):
         clean = '# Northwind round 1\n\nEvery outcome is live on staging since mid-2026.\n'

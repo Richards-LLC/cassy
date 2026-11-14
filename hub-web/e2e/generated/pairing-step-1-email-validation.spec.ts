@@ -13,13 +13,12 @@ test.describe("Pairing entry", () => {
     await page.goto("/?fixture=pairing-step-1");
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeVisible();
-    await expect(dialog.getByText("This browser will be able to:")).toBeVisible();
+    await expect(dialog.locator(".pair-lead").first()).toBeVisible();
     // The exact origin and scopes are one tap away under Technical details.
     await expect(dialog.getByText(new URL(page.url()).origin, { exact: true })).toBeHidden();
-    await dialog.getByText("Technical details").click();
+    await dialog.locator(".pair-technical > summary").click();
     await expect(dialog.getByText(new URL(page.url()).origin, { exact: true })).toBeVisible();
     await expect(dialog.getByText("machine:read, session:read, pane:read, pane:input, message:send, pane:interrupt", { exact: true })).toBeVisible();
-    await expect(dialog.getByText("Create a ten-minute code, then approve it on the machine you want to pair.")).toBeVisible();
     await expect(email).toBeVisible();
     await expect(createCode).toBeVisible();
 

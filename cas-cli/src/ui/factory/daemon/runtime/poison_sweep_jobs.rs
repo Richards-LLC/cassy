@@ -148,6 +148,7 @@ pub(crate) fn read_pointers(
             vec![]
         })
 }
+// gate[W-30 watchdog]: Teams pointer body fallback
 pub(crate) fn claim_pointer(work: &PointerWork) -> Result<bool, String> {
     if !work.live.load(Ordering::Acquire) {
         return Ok(false);
@@ -265,6 +266,7 @@ pub(crate) fn read_bounces(
             BounceCandidate { row, notice, consumed }
         }).collect()
 }
+// gate[W-31 watchdog]: Sender delivery-stalled bounce
 pub(crate) fn write_bounce(
     context: &AttentionInputs,
     candidate: BounceCandidate,
@@ -311,6 +313,7 @@ pub(crate) fn write_bounce(
 /// moment its sender does. A sender bounce is written once per recipient
 /// episode (until the recipient next reads), and the operator turn is keyed by
 /// that bounce, so each episode pages the operator exactly once.
+// gate[W-69 watchdog]: Unread-message operator alert
 pub(crate) fn page_operator_for_stalled_message(
     queue: &dyn cas_store::PromptQueueStore,
     session: &str,
@@ -323,11 +326,13 @@ pub(crate) fn page_operator_for_stalled_message(
     }
     let summary = format!("Message from {} to {} unread", row.source, row.target);
     let message = format!(
-        "{} has not started a turn with message #{} from {} (sent {}). Its sender has been told. Type in {}'s pane to wake it, or take the work over.\n\n{}",
-        row.target,
+        // cas-c1598: claim only what Cassy observed. A missing read receipt
+        // is not proof that the recipient never started a turn.
+        "Cassy has no read, acknowledgement or observed turn for message #{} from {} (sent {}) to {}. Its sender has been told. If {} has not acted on it, type in its pane to wake it, or take the work over.\n\n{}",
         row.id,
         row.source,
         row.created_at.to_rfc3339(),
+        row.target,
         row.target,
         candidate.notice
     );
@@ -342,6 +347,7 @@ pub(crate) fn page_operator_for_stalled_message(
         options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     }) {
         Ok(payload) => payload,
         Err(error) => {

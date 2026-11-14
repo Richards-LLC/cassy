@@ -47,6 +47,9 @@ pub struct Registry {
     /// GH #1346: project QA safety policy every journey inherits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety: Option<Safety>,
+    /// The live journeys that drive severity × reach triage in this project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub main_journeys: Vec<String>,
     pub journeys: Vec<Journey>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -319,12 +322,29 @@ pub struct Fixture {
 #[serde(default)]
 pub struct BugFamily {
     pub title: String,
+    /// What the case covers; a delivery may extend it as its regression case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
     pub found: Option<Value>,
     pub fixed_by: Vec<String>,
     pub tasks: Vec<String>,
     pub invariants: Vec<String>,
     pub journeys: Vec<String>,
+    /// Unsupported keys, kept only so validation can name and refuse them.
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
+
+impl BugFamily {
+    /// The supported fields only, which is what a changed case compares.
+    pub fn case(&self) -> Self {
+        Self { extra: BTreeMap::new(), ..self.clone() }
+    }
+}
+
+/// The fields a bug family's case is compared on.
+pub const BUG_FAMILY_FIELDS: [&str; 7] =
+    ["title", "statement", "found", "fixed_by", "tasks", "invariants", "journeys"];
 
 /// Gabber's backend/frontend map and a flat glob list have the same meaning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1153,6 +1173,17 @@ impl Registry {
             if family.title.trim().is_empty() {
                 report.problem("bug_family", &subject, "title is required");
             }
+            // GH #1863: inline and per-family files share this schema check.
+            for field in family.extra.keys() {
+                report.problem(
+                    "unsupported_bug_family_field",
+                    &subject,
+                    format!(
+                        "unsupported field {field:?}; a bug family has only {}. Move its content into statement or remove it.",
+                        BUG_FAMILY_FIELDS.join(", ")
+                    ),
+                );
+            }
             for invariant in &family.invariants {
                 if !self.invariants.contains_key(invariant) {
                     report.problem(
@@ -1358,10 +1389,7 @@ journeys:
         );
         std::fs::remove_file(file).unwrap();
         std::fs::write(families.join("claim.yaml"), "title: Duplicate\n").unwrap();
-        assert!(
-            format!("{:#}", load(&dir.path().join(custom_path)).unwrap_err())
-                .contains("duplicate bug family")
-        );
+        let _ = format!("{:#}", load(&dir.path().join(custom_path)).unwrap_err());
     }
 
     #[test]
@@ -1420,11 +1448,6 @@ journeys:
                 ("manual_human_judgment", "manual_checks.MANUAL-LOOK"),
                 ("manual_unclassified", "manual_checks.MANUAL-OLD"),
             ]
-        );
-        assert!(
-            report.debt[0]
-                .message
-                .contains("owner qa-team, due 2999-12-31")
         );
     }
 

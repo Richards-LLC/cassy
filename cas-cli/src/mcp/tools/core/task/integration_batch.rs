@@ -181,7 +181,7 @@ impl CasCore {
         }
         if !ancestor(&repo, head, &tip)
             || !matches!(
-                delivery_content_presence_in_parent(&repo, head, &tip),
+                delivery_content_presence_in_parent(&repo, head, &tip, &[task.id.as_str()]),
                 DeliveryContentPresence::Present { .. }
                     | DeliveryContentPresence::Superseded { .. }
             )

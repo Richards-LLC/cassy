@@ -37,6 +37,8 @@ pub struct PostOptions {
     pub reply_to: Option<String>,
     pub title: Option<String>,
     pub initial_comment: Option<String>,
+    /// Current caller's registered reply intent, resolved before posting.
+    pub reply_claim: Option<Value>,
 }
 
 /// What a successful post returns, for the release-report flow to record.
@@ -64,6 +66,7 @@ pub struct PostError {
     /// Set once `begin` allocated an upload: the post may be partly done, so
     /// the caller inspects Slack before trying again.
     pub file_id: Option<String>,
+    pub retryable: bool,
 }
 
 impl PostError {
@@ -72,6 +75,7 @@ impl PostError {
             code: code.to_string(),
             message: message.into(),
             file_id: None,
+            retryable: code == "authority_unavailable",
         }
     }
 }
@@ -119,6 +123,7 @@ pub fn fetch_verified(
 
 fn resolve_error(error: ViewError) -> PostError {
     match error {
+        ViewError::Revoked(error) => PostError::new("artifact_revoked", error.to_string()),
         ViewError::Unknown(id) => PostError::new(
             "artifact_not_found",
             format!(
@@ -168,6 +173,7 @@ pub(crate) fn safe_url(raw: &str) -> bool {
 
 pub(crate) fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
     let artifact = &view.artifact;
+    super::require_available(artifact).map_err(|error| PostError::new("artifact_revoked", error.to_string()))?;
     if artifact.size_bytes == 0 || artifact.size_bytes > ARTIFACT_MAX_BYTES {
         return Err(PostError::new(
             "artifact_size_invalid",
@@ -271,6 +277,12 @@ pub async fn post_verified(
         if let Some(value) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
             metadata[key] = json!(value);
         }
+    }
+
+    if let Some(claim) = &options.reply_claim {
+        metadata["coordination_operation_id"] = claim["coordination_operation_id"].clone();
+        metadata["expected_generation"] = claim["expected_generation"].clone();
+        metadata["request_id"] = json!(uuid::Uuid::new_v4().to_string());
     }
 
     let begin = envelope(violet.violet_post(metadata.clone()).await?)?;
@@ -419,7 +431,9 @@ pub fn envelope(result: Value) -> Result<Value, PostError> {
         .and_then(Value::as_str)
         .map(excerpt)
         .unwrap_or_else(|| "Violet refused the post".to_string()));
-    Err(PostError::new(code, message))
+    let mut error = PostError::new(code, message);
+    error.retryable |= value.pointer("/error/retryable").and_then(Value::as_bool).unwrap_or(false);
+    Err(error)
 }
 
 /// Required contact evidence must survive the generic 300-character error

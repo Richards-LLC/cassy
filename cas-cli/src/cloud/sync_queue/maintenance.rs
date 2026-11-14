@@ -357,6 +357,33 @@ impl SyncQueue {
         Ok(reset)
     }
 
+    /// Retry exact terminal queue identities, optionally intersected with a
+    /// reason. Preserve evidence and pending rows; duplicate IDs are harmless.
+    pub fn retry_failed_items(
+        &self,
+        ids: &[i64],
+        reason: Option<&str>,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        let reason = reason.map(str::trim);
+        if ids.is_empty() || reason == Some("") {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut reset = 0;
+        for id in ids {
+            reset += tx.execute(
+                "UPDATE sync_queue SET retry_count=0, auto_rearm_count=0
+                 WHERE id=?1 AND retry_count>=?2
+                   AND (?3 IS NULL OR instr(lower(COALESCE(last_error,'')), lower(?3))>0)",
+                params![id, max_retries, reason],
+            )?;
+        }
+        tx.commit()?;
+        Ok(reset)
+    }
+
     /// Re-arm exhausted transient network failures for a team after a Cloud
     /// push succeeds. Each row gets one automatic retry budget; HTTP auth
     /// responses, rejections and intentional parks remain terminal until an

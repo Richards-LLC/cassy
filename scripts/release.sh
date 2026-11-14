@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-34 release-script]: One-command release cut (scripts/release.sh)
 #
 # One-command release for CAS (cas-f95b). Run it from the epic branch (or a
 # train branch) once the work is code-done:
@@ -14,7 +15,8 @@
 #   2. computes the next version from the base branch's version;
 #   3. bumps the release crates and Cargo.lock, promotes CHANGELOG
 #      [Unreleased] and the changelog.d fragments to a dated [x.y.z]
-#      section, and names the release-notes draft
+#      section, folds the journey bug-family and product-overview
+#      fragments into their docs (scripts/doc-fragments.py), names the release-notes draft
 #      docs/release-notes/<date>-v<x.y.z>-slack.md, then rebuilds the
 #      embedded Commander bundle with the new version;
 #   4. commits "release: v<x.y.z>", pushes, opens/reuses the train PR,
@@ -24,7 +26,7 @@
 #
 # Landing on main is the release: the merge queue's run builds the archives
 # (release-prebuild.yml) and release.yml publishes them. Nothing here tags,
-# builds Rust or publishes. The local train and gate scripts are not called.
+# publishes. Cut preview reuses an exact Linux prebuild, or builds one candidate.
 #
 # The draft: write the Slack draft before running, at the path printed by
 # --next-version, or anywhere with --notes <file>; `{{VERSION}}` in it becomes
@@ -34,6 +36,22 @@
 # 3 no queue admission after the enqueue request; 4 non-release merge conflict.
 
 set -Eeuo pipefail
+
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then
+        printf '\n%s\n' "$@" >&2
+        # Reporting is best effort and must preserve the refusal's exit code.
+        local bin="${CAS_BIN:-cas}"
+        if command -v "$bin" >/dev/null 2>&1; then
+            "$bin" gates record-refusal --message "script exit $status $*" >/dev/null 2>&1 || :
+        fi
+    fi
+}
+trap 'gate_exit "$?" "[C-34]"' EXIT
+
 # prepare runs in a command substitution; keep errexit there too.
 shopt -s inherit_errexit
 # Include commands inside prepare's substitution: Git and gh can fail without
@@ -41,7 +59,7 @@ shopt -s inherit_errexit
 trap 'printf "error: command failed (exit %s) at line %s: %s\n" "$?" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 usage() {
-    sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,34p' "$0" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
 Options:
   --hotfix            bump the patch version instead of the minor version
@@ -55,6 +73,7 @@ Options:
 EOF
 }
 
+original_args=("$@")
 base="main"
 kind="minor"
 explicit_version=""
@@ -91,6 +110,7 @@ script_dir="$repo_root/scripts"
 remote="${RELEASE_REMOTE:-origin}"
 gh_bin="${GH_BIN:-gh}"
 cas_bin="${CAS_BIN:-cas}"
+release_input_report="$(git rev-parse --path-format=absolute --git-path cas/release-inputs.json)"
 release_date() { printf '%s\n' "${RELEASE_DATE:-$(date -u +%Y-%m-%d)}"; }
 
 release_manifests=(
@@ -288,6 +308,8 @@ lint_release_draft() {
     local draft="$1"
     python3 "$script_dir/release-train-announce.py" --lint "$draft" >&2 \
         || die "release-notes draft failed lint: $draft"
+    CAS_RELEASE_CONTEXT_JSON="$context" python3 "$script_dir/release_changelog.py" \
+        verify-deliveries "$remote/$base" --notes "$draft" --report "$release_input_report" >&2
 }
 
 # Steps 1-3 plus the commit. Prints the version prepared.
@@ -295,7 +317,6 @@ prepare() {
     local base_version version current prepared_commit drafts=() prepared_drafts=()
     fetch_base
     sync_with_base
-    python3 "$script_dir/release_changelog.py" verify-deliveries "$remote/$base"
     base_version="$(version_at "$remote/$base")"
     [[ "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot read $base's version"
     version="$(next_version "$base_version")"
@@ -314,7 +335,8 @@ prepare() {
         [[ -f "$notes_file" ]] || die "--notes file not found: $notes_file"
     fi
     if [[ -n "$prepared_commit" && "$current" == "$version" ]] && grep -q "^## \[$version\] - " CHANGELOG.md \
-        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]]; then
+        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]] \
+        && git diff --quiet HEAD -- .claude/CODEMAP.md; then
         mapfile -t prepared_drafts < <(git ls-files "docs/release-notes/*-v$version-slack.md")
         if ((${#prepared_drafts[@]} == 1)); then
             lint_release_draft "${prepared_drafts[0]}"
@@ -337,14 +359,30 @@ prepare() {
         || die "Commander build failed; release was not committed"
     python3 "$script_dir/release_changelog.py" promote CHANGELOG.md "$version" "$(release_date)" "$base_version" \
         || die "CHANGELOG.md promotion failed"
+    # cas-4b33: deliveries add per-task doc fragments; fold them in once here.
+    python3 "$script_dir/doc-fragments.py" compile >&2 \
+        || die "doc fragment compile failed; fix what scripts/doc-fragments.py check reports"
     place_draft "$version" "$source"
+    # A supervisor's pending /codemap refresh rides this commit, so it never
+    # moves the tested train tip or requires its own CI run.
+    if git ls-files --error-unmatch .claude/CODEMAP.md >/dev/null 2>&1; then
+        git add -- .claude/CODEMAP.md
+    fi
     git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}" hub-web/dist
+    local doc
+    for doc in docs/qa/journeys.yaml docs/qa/bug-families docs/PRODUCT_OVERVIEW.md docs/product-overview.d; do
+        if git ls-files --error-unmatch "$doc" >/dev/null 2>&1; then
+            git add -A -- "$doc"
+        fi
+    done
     # Promotion deleted the changelog.d fragments it folded in (cas-f2be).
     if git ls-files --error-unmatch changelog.d >/dev/null 2>&1; then
         git add -- changelog.d
     fi
+    local ci_trailer=()
+    [[ -z "${train_ci_start:-}" ]] || ci_trailer=(-m "Train-CI-Head: $train_ci_start")
     git -c core.hooksPath=/dev/null commit --quiet -m "release: v$version" \
-        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version."
+        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version." "${ci_trailer[@]}"
     say "committed release v$version on $branch ($(git rev-parse --short HEAD))"
     printf '%s\n' "$version"
 }
@@ -429,6 +467,64 @@ publish_branch() {
     git push --quiet "$remote" "HEAD:refs/heads/$branch"
 }
 
+# Evaluate with the release commit's code before any push, enqueue or freeze.
+# Do not wait for a queue prebuild that this cut has not admitted yet.
+preview_cut() {
+    local sha task candidate lookup run_id build_start build_seconds=0
+    sha="$(git rev-parse HEAD)"
+    task="$(jq -r '.train_id // empty' <<<"$context")"
+    if [[ -z "$task" ]]; then
+        task="$(jq -r '.included_task_ids[0] // empty' "$release_input_report")"
+    fi
+    if [[ -z "$task" ]]; then
+        say "no release members; skipping close preview and candidate"
+        return 0
+    fi
+    local candidate_dir
+    candidate_dir="$(git rev-parse --path-format=absolute --git-path "cas/cut-preview/$sha")"
+    mkdir -p "$candidate_dir"
+    lookup="$(RELEASE_PREBUILD_WAIT_SECONDS=0 RELEASE_PREBUILD_PLATFORM=linux \
+        "$script_dir/find-release-prebuild.sh" "$sha")"
+    if grep -qx 'found=true' <<<"$lookup"; then
+        run_id="$(sed -n 's/^run-id=//p' <<<"$lookup")"
+        "$gh_bin" run download "$run_id" --name cas-x86_64-unknown-linux-gnu --dir "$candidate_dir"
+        tar -xzf "$candidate_dir/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$candidate_dir" cas
+        candidate="$candidate_dir/cas"
+    else
+        build_start=$SECONDS
+        "$cas_bin" qa candidate build --task "$task" --rev "$sha" >&2 \
+            || die "cut candidate build failed; no retry, nothing pushed"
+        build_seconds=$((SECONDS - build_start))
+        candidate="$("$cas_bin" qa candidate path --task "$task")"
+    fi
+    release_candidate="$candidate"
+    local train_args=()
+    "$train_tracking" && train_args=(--train "$task")
+    release_close_preview="$("$candidate" release preview --commit "$sha" --version "$version" \
+        --inputs "$release_input_report" "${train_args[@]}")"
+    release_close_preview="$(jq --argjson seconds "$build_seconds" '. + {candidate_build_seconds:$seconds}' \
+        <<<"$release_close_preview")"
+    jq -e --arg sha "$sha" '.scope.final_release_sha == $sha and (.members|type)=="number" and (.would_close|type)=="number"' \
+        <<<"$release_close_preview" >/dev/null || die "invalid candidate preview; nothing pushed"
+    say "close preview: $(jq -c '{members,would_close,would_hold,already_closed,not_eligible,by_reason,review_missing,lane_ci_missing,candidate_build_seconds}' <<<"$release_close_preview")"
+    local unreviewed
+    unreviewed="$(jq -r --slurpfile inputs "$release_input_report" '
+        ($inputs[0].included_task_ids // []) as $included |
+        [(.review_missing // [])[] | select(. as $id | $included | index($id))] | join(", ")
+    ' <<<"$release_close_preview")"
+    [[ -z "$unreviewed" ]] \
+        || die "release cut refused: REVIEW_MISSING for $unreviewed; complete the named deliveries' pre-merge verification and retry; release review is computed from existing approvals and the green train receipt; nothing pushed or enqueued"
+    local unvalidated
+    unvalidated="$(jq -r --slurpfile inputs "$release_input_report" '
+        ($inputs[0].included_task_ids // []) as $included |
+        [(.lane_ci_missing // [])[] | select(. as $id | $included | index($id))] | join(", ")
+    ' <<<"$release_close_preview")"
+    [[ -z "$unvalidated" ]] \
+        || die "release cut refused: LANE_CI_MISSING for $unvalidated; deliberately exempt deliveries need green lane CI alongside the green frozen-train run; nothing pushed or enqueued"
+    jq -e '.members == 0 or .would_close > 0 or (.would_hold == 0 and .not_eligible == 0)' <<<"$release_close_preview" >/dev/null \
+        || die "release cut refused: zero would-close; inspect the close preview above; nothing pushed or enqueued"
+}
+
 # Advisory once per invocation, including dry-run and version preview. Never
 # include this probe in prepare/rebump loops or fail a release on provider drift.
 python3 "$script_dir/github_queue_health.py" --worktree "$repo_root" --gh "$gh_bin" \
@@ -443,7 +539,8 @@ if "$print_only"; then
     exit 0
 fi
 
-[[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "the worktree has uncommitted changes; commit or stash them first"
+[[ -z "$(git status --porcelain --untracked-files=no -- . ':(exclude).claude/CODEMAP.md')" ]] \
+    || die "the worktree has uncommitted changes; commit or stash them first"
 
 # Train membership is advisory: explicit hotfix/non-train branches retain the
 # caller's --base (main by default). The canonical CLI owns the branch check.
@@ -454,23 +551,50 @@ if context="$("$cas_bin" release context --branch "$branch" 2>&1)" &&
     train_tracking=true
 else
     say "train tracking skipped; using --base $base (no matching train context)"
+    context='{}'
 fi
 # Refresh the canonical integration before timing: a stale origin ref can
 # otherwise make already-landed main work look like the train's first child.
 fetch_base
 train_base="$(git merge-base "$remote/$base" HEAD)"
 first_child="$(git log --format=%H --no-merges "$train_base..HEAD" | tail -1)"
+# The starting train tip, before version preparation, must already have its
+# CI suite receipt. The queue alone proves the subsequent release commit.
+if [[ "$branch" == epic/release-train-* ]]; then
+    train_ci_start="$(git rev-parse HEAD)"
+    # A retry of this same prepared release reuses its original starting-tip
+    # receipt. The version-only commit is proved by the final queue, not again
+    # by the train suite. A new product commit must earn its own receipt.
+    if prior_ci_start="$(python3 "$script_dir/train-ci.py" prepared --repo "$repo_root")"; then
+        train_ci_start="$prior_ci_start"
+    fi
+    python3 "$script_dir/train-ci.py" check --repo "$repo_root" --branch "$branch" --head "$train_ci_start" --gh "$gh_bin" \
+        || die "train full-set receipt is not green; no release commit was prepared"
+else
+    say "no train receipt: the merge queue will run the full check set"
+fi
 version="$(prepare)"
 if "$dry_run"; then
     say "dry run: v$version committed locally on $branch; nothing pushed"
     exit 0
 fi
+preview_cut
+# Best-effort measured history; an older installed CLI cannot block a cut.
+for estimate_stage in train_tip_suite merge_queue release_publish; do
+    "$cas_bin" ledger estimate pipeline "$estimate_stage" --preview >&2 \
+        || say "$estimate_stage ETA unavailable; no measured range"
+done
+"$cas_bin" ledger estimate release "v$version" >&2 \
+    || say "release ETA unavailable; no estimate recorded"
 # Persist context and arm reminders before push: publication may follow quickly,
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
-    if ! "$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" --first-child "$first_child"; then
-        say "release tracking unavailable; continuing the cut without reminders"
+    if ! tracking="$("$release_candidate" release track --commit "$(git rev-parse HEAD)" --version "$version" \
+        --inputs "$release_input_report" --first-child "$first_child" <<<"$release_close_preview" 2>&1)"; then
+        retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
+        die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"
     fi
+    [[ -z "$tracking" ]] || say "$tracking"
 fi
 publish_branch
 repo_slug="$("$gh_bin" repo view --json nameWithOwner -q .nameWithOwner)"

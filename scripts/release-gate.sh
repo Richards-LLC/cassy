@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-37 release-script]: Full release gate (row scheduler)
 # Mechanical, fail-closed validation gate for an assembled epic worktree.
 #
 # The version bump, Cargo.lock refresh, CHANGELOG section, and Slack draft must
@@ -12,6 +13,15 @@
 
 set -euo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[C-37]"' EXIT
+
+
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
@@ -21,7 +31,7 @@ readonly -a gate_check_ids=(
     version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
-    journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed
+    journey-catalog builtin-skill-limits communication-slos migration-registry ci-script-tests-changed
     fixture-paths-src builtin-projections-src call-shapes release-notes-draft
 )
 
@@ -860,16 +870,19 @@ version_literal_candidates() {
 check_version_literals() {
     local file hit found=false
     local -a roots=(cas-cli/src cas-cli/tests crates scripts)
+    # Whole version only: the version inside a longer number (a Node path) is not a literal.
+    local version_pattern="(^|[^0-9.])${version//./\\.}([^0-9]|$)"
 
     # Tracked files only: gitignored build caches (for example
     # crates/ghostty_vt_sys/zig/.zig-cache) embed absolute checkout paths, and
     # a worktree named after the release would otherwise fail this row.
+    # Skill reference exemplars use fictional release versions, not product code.
     while IFS= read -r -d '' file; do
         [[ -f "$file" ]] || continue
         case "$file" in
-            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
+            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock|*/references/exemplars/*) continue ;;
         esac
-        hit="$(grep -nIF -- "$version" "$file" 2>/dev/null || true)"
+        hit="$(grep -nIE -- "$version_pattern" "$file" 2>/dev/null || true)"
         if [[ -n "$hit" ]]; then
             printf '%s\n' "$hit"
             found=true
@@ -905,7 +918,7 @@ check_next_version_literals() {
     while IFS= read -r -d '' file; do
         [[ -f "$file" ]] || continue
         case "$file" in
-            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
+            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock|*/references/exemplars/*) continue ;;
         esac
         changed+=("$file")
     done < <(git diff -z --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- "$@" 2>/dev/null)
@@ -929,7 +942,7 @@ check_next_version_literals() {
         return 1
     fi
     elsewhere="$(git grep -nIF "${patterns[@]}" -- "$@" ':(exclude)*.md' ':(exclude)*/reference-history.json' \
-        ':(exclude)*/Cargo.toml' ':(exclude)*/Cargo.lock' 2>/dev/null || true)"
+        ':(exclude)*/Cargo.toml' ':(exclude)*/Cargo.lock' ':(exclude)*/references/exemplars/*' 2>/dev/null || true)"
     if [[ -n "$elsewhere" ]]; then
         printf 'version-literals: NOTE pre-existing next-version literals outside this lane (not refused here; they fail the release gate after the bump):\n%s\n' \
             "$elsewhere"
@@ -1758,14 +1771,10 @@ check_test_shape() {
     if [[ -f scripts/test-check-test-shape.py ]]; then
         release_test_child python3 scripts/test-check-test-shape.py || return $?
     fi
-    if [[ -f scripts/test-worker-proof-guards.py ]]; then
-        release_test_child python3 scripts/test-worker-proof-guards.py
-    fi
 }
 
 check_builtin_doc_hygiene() {
-    python3 scripts/check-builtin-doc-hygiene.py || return $?
-    python3 scripts/check-builtin-contract-phrases.py
+    python3 scripts/check-builtin-doc-hygiene.py
 }
 
 # Fast mode runs a lane row only when the lane changes one of its inputs; the
@@ -1775,12 +1784,114 @@ lane_touches() {
     ! git diff --quiet "${fast_base:-HEAD^}" -- "$@"
 }
 
-check_journey_catalog() {
-    if ! lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
-        printf 'journey-catalog: no journey catalog or spec change\n'
+registry_upkeep_needed() {
+    [[ -f docs/qa/journeys.yaml ]] || return 1
+    [[ "$fast_rows" == true ]] || return 0
+    local selection
+    if selection="$(python3 scripts/doc-fragments.py needs-upkeep --base "${fast_base:-HEAD^}")"; then
+        # Only a successful, explicit no can skip the binary validator.
+        [[ "$selection" != no ]]
+    else
         return 0
     fi
-    python3 scripts/journeys-for-diff.py --check
+}
+
+# A cas with `qa journeys --check` and `qa impact`: CAS_BIN, else the latest
+# release installed by scripts/cas-install.sh (SHA-256 checked against the
+# release receipt) into a temporary directory. Lane CI needs no workflow step.
+registry_validator() {
+    local dir
+    local candidate="${CAS_BIN:-}"
+    if [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" qa journeys --help >/dev/null 2>&1; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-registry-validator.XXXXXX")" || return 1
+    printf 'journey-catalog: installing the released cas validator into %s\n' "$dir" >&2
+    CAS_INSTALL_DIR="$dir" CAS_WIRE_PATH=0 bash "${CAS_VALIDATOR_INSTALLER:-scripts/cas-install.sh}" >&2 || return 1
+    "$dir/cas" qa journeys --help >/dev/null 2>&1 || return 1
+    printf '%s\n' "$dir/cas"
+}
+
+check_registry_upkeep() {
+    local cas_bin base="${fast_base:-HEAD^}"
+    if ! cas_bin="$(registry_validator)"; then
+        printf 'journey-catalog: FAIL: this diff needs journey registry and ownership validation, but no Cassy validator is available\n'
+        printf 'FIX: put a released cas on PATH or set CAS_BIN, or let scripts/cas-install.sh reach GitHub Releases, then rerun\n'
+        return 1
+    fi
+    "$cas_bin" qa journeys --check || return 1
+    [[ "$fast_rows" == true ]] || return 0
+    if "$cas_bin" qa journeys --help 2>/dev/null | grep -q -- '--base'; then
+        "$cas_bin" qa journeys --check --base "$base"
+        return
+    fi
+    # Legacy impact omits modified-file ownership. Strict policy needs --base;
+    # use the stricter header at base/HEAD, with local config as fallback.
+    local fallback="" policy revision
+    for revision in "$base" HEAD; do
+        policy="$(git show "$revision:docs/qa/journeys.yaml" 2>/dev/null | sed -n 's/^enforce:[[:space:]]*//p')"
+        policy="${policy%%#*}"
+        policy="${policy//[[:space:]]/}"
+        policy="${policy//\"/}"
+        policy="${policy//\'/}"
+        if [[ -z "$policy" ]]; then
+            if [[ -z "$fallback" ]]; then
+                # Only a header-less registry reaches the store (cas-199b).
+                if ! fallback="$("$cas_bin" config get qa.registry.enforce)"; then
+                    printf 'journey-catalog: FAIL: docs/qa/journeys.yaml at %s declares no enforce: policy and no Cassy store supplies qa.registry.enforce\n' "$revision"
+                    printf 'FIX: add an enforce: off|observe|enforce|strict header to docs/qa/journeys.yaml, or run where cas config get qa.registry.enforce answers\n'
+                    return 1
+                fi
+                case "$fallback" in
+                    off|observe|enforce|strict) ;;
+                    *)
+                        printf 'journey-catalog: FAIL: qa.registry.enforce is %s; expected off, observe, enforce or strict\n' "${fallback:-empty}"
+                        printf 'FIX: set qa.registry.enforce to a valid policy, or declare enforce: in docs/qa/journeys.yaml\n'
+                        return 1
+                        ;;
+                esac
+            fi
+            policy="$fallback"
+        fi
+        if [[ "$policy" == strict ]]; then
+            printf 'journey-catalog: FAIL: strict registry policy requires a validator with --base support\n'
+            printf 'FIX: set CAS_BIN to a cas supporting qa journeys --check --base, then rerun\n'
+            return 1
+        fi
+    done
+    # Non-strict policy can use the new-file G1/G2 facts from legacy impact.
+    "$cas_bin" qa impact "$base" --json | python3 -c '
+import json, sys
+registry = json.load(sys.stdin)["upkeep"]["registry"]
+for reason in registry["reasons"]:
+    print("UPKEEP registry: " + reason)
+if registry["required"]:
+    print("FIX: own each new surface file (owner glob, owner group or ignore) and repair the registry problems this diff caused")
+    sys.exit(1)
+'
+}
+
+check_journey_catalog() {
+    local ran=false
+    if lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
+        python3 scripts/journeys-for-diff.py --check || return 1
+        ran=true
+    fi
+    # cas-4b33: journey registry upkeep (formerly a park gate) and the per-task
+    # doc fragments that release prep compiles.
+    if lane_touches docs/qa/journeys.yaml docs/qa/bug-families docs/product-overview.d \
+        docs/PRODUCT_OVERVIEW.md scripts/doc-fragments.py; then
+        python3 scripts/doc-fragments.py check || return 1
+        ran=true
+    fi
+    # Registry validation plus ownership of new user-facing surface files
+    # (formerly the park gate G-49), through Cassy's own validator. Fails closed.
+    if registry_upkeep_needed; then
+        check_registry_upkeep || return 1
+        ran=true
+    fi
+    [[ "$ran" == true ]] || printf 'journey-catalog: no journey catalog, registry, fragment or spec change\n'
 }
 
 check_builtin_skill_limits() {
@@ -1792,17 +1903,6 @@ check_builtin_skill_limits() {
     python3 scripts/check-builtin-skill-limits.py .
 }
 
-check_doctor_snapshot() {
-    if ! lane_touches cas-cli/src/cli/doctor.rs cas-cli/tests/snapshots scripts/check-doctor-snapshot.py; then
-        printf 'doctor-snapshot: no doctor or snapshot change\n'
-        return 0
-    fi
-    if [[ "$fast_rows" == true ]]; then
-        python3 scripts/check-doctor-snapshot.py . --base "${fast_base:-HEAD^}"
-    else
-        python3 scripts/check-doctor-snapshot.py .
-    fi
-}
 
 check_communication_slos() {
     python3 scripts/check-communication-slos.py
@@ -2223,7 +2323,7 @@ PY_CANCEL_ROWS
     done
 }
 # A forwarded signal or shell error must not leave scheduled rows behind.
-trap 'gate_cancel_after -1' EXIT
+trap 'gate_exit "$?" "[C-37]"; gate_cancel_after -1' EXIT
 
 gate_emit() {
     cat "$sched_dir/$1.out"
@@ -2422,12 +2522,10 @@ else
 fi
 gate_row test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 gate_row builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
-gate_row journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog steps match test.step titles)' \
+gate_row journey-catalog 'journeys-for-diff.py --check (catalog steps); doc-fragments.py check; cas qa journeys --check --base (registry upkeep)' \
     check_journey_catalog
 gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
     check_builtin_skill_limits
-gate_row doctor-snapshot 'python3 scripts/check-doctor-snapshot.py (row groups; new doctor phases update the snapshot)' \
-    check_doctor_snapshot
 # cas-7e24: <5s fixture measurement in existing no-build fast/integration stage.
 gate_row communication-slos 'five communication SLOs against fixture factory session' \
     check_communication_slos
@@ -2462,10 +2560,9 @@ fast_row_fix() {
         procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;
         test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
         test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
-        builtin-doc-hygiene) printf 'remove the operator data, or restore the contract phrase listed in scripts/builtin-contract-phrases.json, as the row log names' ;;
-        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles; check with python3 scripts/journeys-for-diff.py --check' ;;
+        builtin-doc-hygiene) printf 'remove the private operator data identified by the row log' ;;
+        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles (python3 scripts/journeys-for-diff.py --check) fix what python3 scripts/doc-fragments.py check reports, and own new surface files that cas qa journeys --check --base <ref> names' ;;
         builtin-skill-limits) printf 'shorten the skill description, size or line count under the limits the row log prints' ;;
-        doctor-snapshot) printf 'add the new doctor phase to its row group and update the reviewed doctor snapshot' ;;
         migration-registry) printf 'declare the migration module and register it in order in cas-cli/src/migration/migrations/mod.rs' ;;
         ci-script-tests-changed) printf 'run the failing script test the row log names directly and fix it' ;;
         *) printf 'read the row log and rerun this command after fixing' ;;

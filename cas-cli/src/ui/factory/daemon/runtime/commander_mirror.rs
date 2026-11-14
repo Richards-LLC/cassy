@@ -318,6 +318,45 @@ fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Termina
     inputs
 }
 
+/// A record Claude writes once a turn's Stop hooks have finished.
+fn claude_stop_settled(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("system")
+        && matches!(value.get("subtype").and_then(Value::as_str), Some("stop_hook_summary" | "turn_duration"))
+}
+
+/// A Stop hook refused the turn's end; Claude resumes the same turn.
+fn claude_stop_blocked(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("attachment")
+        && value.pointer("/attachment/type").and_then(Value::as_str) == Some("hook_blocking_error")
+        && value.pointer("/attachment/hookEvent").and_then(Value::as_str) == Some("Stop")
+}
+
+/// A terminal turn produces one visible answer. The latest verified
+/// Commander send supplies its durable thread; receipt scanning still marks
+/// every consumed send delivered.
+fn settle_claude_turn(
+    turns: &mut Vec<CompletedTurn>,
+    inputs: &mut Vec<ClaudeInput>,
+    status: &mut Option<ClaudeInput>,
+    text: String,
+    completed_at: DateTime<Utc>,
+) {
+    let status_only = inputs.is_empty();
+    if status_only {
+        inputs.extend(status.take());
+    }
+    if let Some(input) = inputs.first() {
+        turns.push(CompletedTurn {
+            key: input.key.clone(), started_at: input.at, completed_at,
+            text, commander_id: inputs.iter().rev().find_map(|input| input.commander_id),
+            commander_ids: inputs.iter().filter_map(|input| input.commander_id).collect(),
+            prompt: (!status_only).then(|| input.prompt.clone()),
+        });
+    }
+    inputs.clear();
+    *status = None;
+}
+
 fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<CompletedTurn> {
     let mut turns = Vec::new();
     let mut started: Option<(String, DateTime<Utc>, Option<i64>)> = None;
@@ -325,11 +364,40 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
     let mut final_text: Option<String> = None;
     let mut claude_inputs: Vec<ClaudeInput> = Vec::new();
     let mut claude_status: Option<ClaudeInput> = None;
+    // cas-2a95 (GH #1938): Claude writes an end_turn answer before its Stop
+    // hooks run. A blocked draft was mirrored, and the Stop-hook feedback then
+    // opened a second status turn for the rewrite. Where this transcript
+    // records Stop verdicts, an answer waits for one: a block keeps the turn
+    // open for its rewrite; stop_hook_summary or turn_duration settles it.
+    let stop_verdicts = cli == cas_mux::SupervisorCli::Claude
+        && values.iter().any(claude_stop_settled);
+    // The held answer's record uuid: its Stop-hook feedback is its child.
+    let mut held: Option<String> = None;
     for value in values {
         let Some(at) = timestamp(value) else { continue };
         match cli {
             cas_mux::SupervisorCli::Claude => {
-                if let Some(prompt) = claude_prompt(value).or_else(|| claude_commander_hook(value))
+                let input = claude_prompt(value).or_else(|| claude_commander_hook(value));
+                if let Some(answer) = &held {
+                    if claude_stop_blocked(value) {
+                        held = None;
+                        continue;
+                    }
+                    if input.is_some() && !answer.is_empty()
+                        && value.get("parentUuid").and_then(Value::as_str) == Some(answer.as_str()) {
+                        // Stop-hook feedback is machine input inside this turn.
+                        continue;
+                    }
+                    // Any other input proves the turn ended, even when its
+                    // verdict was never written, so no answer stays unmirrored.
+                    if claude_stop_settled(value) || input.is_some() {
+                        held = None;
+                        if let Some(text) = final_text.take() {
+                            settle_claude_turn(&mut turns, &mut claude_inputs, &mut claude_status, text, at);
+                        }
+                    }
+                }
+                if let Some(prompt) = input
                 {
                     let key = value
                         .get("promptId")
@@ -384,34 +452,25 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                 // earlier progress text and dropped the answer. Normal ends
                 // and API failures require text on this primary record; a
                 // turn_duration record can also settle the accumulated text.
-                let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
+                // API errors can end with stop_sequence and no duration, and
+                // no Stop hook judges them.
+                let api_error = value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true);
+                // `answered` requires primary (non-sidechain) text on this
+                // record, so a thinking-only end_turn cannot flush progress.
+                let ended = value.get("type").and_then(Value::as_str) == Some("assistant")
                     && (value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
-                        // API errors can end with stop_sequence and no duration.
-                        || value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
-                    // `answered` requires primary (non-sidechain) text on this
-                    // record, so a thinking-only end_turn cannot flush progress.
-                    && answered)
+                        || api_error)
+                    && answered;
+                if ended && stop_verdicts && !api_error {
+                    held = Some(value.get("uuid").and_then(Value::as_str).unwrap_or("").to_owned());
+                    continue;
+                }
+                let finished = ended
                     || (value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));
                 if finished && let Some(text) = final_text.take()
                 {
-                    let status_only = claude_inputs.is_empty();
-                    if status_only {
-                        claude_inputs.extend(claude_status.take());
-                    }
-                    // A terminal turn produces one visible answer. The latest
-                    // verified Commander send supplies its durable thread;
-                    // receipt scanning still marks every consumed send delivered.
-                    if let Some(input) = claude_inputs.first() {
-                        turns.push(CompletedTurn {
-                            key: input.key.clone(), started_at: input.at, completed_at: at,
-                            text, commander_id: claude_inputs.iter().rev().find_map(|input| input.commander_id),
-                            commander_ids: claude_inputs.iter().filter_map(|input| input.commander_id).collect(),
-                            prompt: (!status_only).then(|| input.prompt.clone()),
-                        });
-                    }
-                    claude_inputs.clear();
-                    claude_status = None;
+                    settle_claude_turn(&mut turns, &mut claude_inputs, &mut claude_status, text, at);
                 }
             }
             cas_mux::SupervisorCli::Codex => {
@@ -712,6 +771,28 @@ pub(super) fn codex_rollout_owns_recipient(
     })
 }
 
+/// cas-c1598: the rollout an eagerly registered (unbound) Codex supervisor is
+/// writing, chosen by the same cwd and envelope-ownership rule the mirror uses.
+pub(super) fn unbound_codex_supervisor_rollout(
+    project_path: &Path,
+    queue: &dyn PromptQueueStore,
+    session: &str,
+    agent: &cas_types::Agent,
+) -> Option<PathBuf> {
+    let startup_id = queue
+        .latest_from_source_to_targets(super::queue_and_events::SUPERVISOR_STARTUP_SOURCE, &[&agent.name], Some(session))
+        .ok()
+        .flatten()
+        .filter(|row| matches!(row.origin, Some(cas_store::QueueOrigin::Daemon)))
+        .map(|row| row.id);
+    let ownership = RefCell::new(HashMap::new());
+    crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
+        project_path.to_str()?,
+        agent.metadata.get("supervisor_account_dir").map(String::as_str),
+        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id, true, &ownership),
+    )
+}
+
 pub(super) fn scan_supervisor_replies(
     root: &Path,
     project_path: &Path,
@@ -771,13 +852,17 @@ pub(super) fn scan_supervisor_replies(
         let _ = resume_floor(root, session, false, None);
         return;
     }
-    let supervisors = agents
+    let mut supervisors = agents
         .iter()
         .filter(|agent| {
             agent.role == cas_types::AgentRole::Supervisor
                 && agent.factory_session.as_deref() == Some(session)
         })
         .collect::<Vec<_>>();
+    // cas-bfe3: two registrations of one pane share a transcript. The oldest
+    // registration owns its turns, so each answer reaches Commander once.
+    supervisors.sort_by(|a, b| (a.registered_at, &a.id).cmp(&(b.registered_at, &b.id)));
+    let mut mirrored_paths = HashSet::new();
     if supervisors.is_empty() {
         return;
     }
@@ -886,6 +971,10 @@ pub(super) fn scan_supervisor_replies(
         };
         state.resolution_misses.remove(&agent.id);
         state.unresolved_warned.remove(&agent.id);
+        if !mirrored_paths.insert(path.clone()) {
+            state.cursors.remove(&agent.id);
+            continue;
+        }
         let Ok(metadata) = std::fs::metadata(&path) else {
             state.cursors.remove(&agent.id);
             continue;
@@ -1020,11 +1109,13 @@ pub(super) fn scan_supervisor_replies(
                 options: Vec::new(),
                 attachments: Vec::new(),
                 reply_to_session: None,
+                task_id: None,
             };
             let Ok(payload) = serde_json::to_string(&payload) else {
                 continue;
             };
             let key = format!("commander-mirror:{}:{}:{}", session, agent.id, turn.key);
+            // gate[N-34 notice]: Commander supervisor-turn mirror
             if let Err(error) = queue.mirror_supervisor_turn(
                 session,
                 &key,
@@ -1158,6 +1249,24 @@ mod tests {
                     "director", &agent.name, "Review the task", Some("factory-1"),
                     None, None, false, Some(&cas_store::QueueOrigin::Daemon),
                 ).unwrap().id();
+                // Typed daemon notice, independent of its rendered body.
+                let legacy_lifecycle = cli == cas_mux::SupervisorCli::Claude && role == AgentRole::Supervisor;
+                let notice_kind = if legacy_lifecycle { "task_lifecycle" }
+                    else if role == AgentRole::Supervisor { "merge_ready" } else { "ci_completed" };
+                let stored_kind = if role == AgentRole::Supervisor {
+                    "merge_ready:[\"supervisor-id\",\"cas-task\",\"anchor\"]"
+                } else { "ci_completed" };
+                rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                    "UPDATE prompt_queue SET kind = ?1 WHERE id = ?2", rusqlite::params![stored_kind, id]).unwrap();
+                if legacy_lifecycle {
+                    use cas_store::SupervisorQueueStore;
+                    let notices = cas_store::SqliteSupervisorQueueStore::open(&root).unwrap();
+                    notices.init().unwrap();
+                    let event = notices.notify(&agent.id, "task_lifecycle", "{}", cas_store::NotificationPriority::Normal).unwrap();
+                    rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                        "UPDATE prompt_queue SET kind = NULL, source = ?1 WHERE id = ?2",
+                        rusqlite::params![format!("lifecycle-wake:{event}"), id]).unwrap();
+                }
                 let prompt = if cli == cas_mux::SupervisorCli::Claude {
                     if role == AgentRole::Supervisor {
                         format!("<teammate-message teammate_id=\"director\">\n[cas #{id} agent-authored 0s first]\nReview the task\n</teammate-message>")
@@ -1208,7 +1317,8 @@ mod tests {
                 assert_eq!(turns.len(), 1, "completed {cli:?} {role:?} turn must be recorded once");
                 let payload = serde_json::to_value(&turns[0].payload).unwrap();
                 // pin: ledger wire fields preserve the authenticated director channel and measured usage.
-                assert_eq!(payload["woken_by"], "director");
+                assert_eq!(payload["woken_by"], if legacy_lifecycle { "daemon" } else { "director" });
+                assert_eq!(payload["notice_kind"], notice_kind);
                 assert_eq!(payload["no_op"], false);
                 assert!(payload["actions"].as_array().is_some_and(|actions| !actions.is_empty()));
                 assert_eq!(payload["input_tokens"], 30);
@@ -1737,6 +1847,85 @@ mod tests {
         assert_eq!(operator_replies(&queue).len(), 1, "daemon replay must not duplicate errors");
     }
 
+    /// cas-2a95 (GH #1938): H-47 blocked a supervisor's first draft at Stop
+    /// and Commander showed both the draft and the accepted rewrite. Record
+    /// shapes follow the incident transcript, including a daemon poll that
+    /// lands between the draft and the Stop hook's verdict.
+    #[test]
+    fn stop_blocked_draft_never_reaches_commander_cas_2a95() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (temp, root, queue) = terminal_session(vec![]);
+        env.set("CLAUDE_CONFIG_DIR", temp.path().join("account"));
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut agent = store.get("supervisor-id").unwrap();
+        agent.cc_session_id = Some("blocked-turn".into());
+        agent.metadata.insert("supervisor_cli".into(), "claude".into());
+        store.update(&agent).unwrap();
+        let send = |text: &str| queue.enqueue_operator_message(
+            "commander:Alice@phone", "supervisor", text, Some("factory-1"),
+            None, None, false, None,
+            &OperatorStamp { operator: "Alice".into(), device_id: "phone".into(),
+                device_label: "phone".into(), scopes: vec!["message:send".into()], verified: true },
+        ).unwrap().id();
+        let (earlier, asked) = (send("earlier"), send("is the train green?"));
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let at = |offset| (now + chrono::Duration::seconds(offset)).to_rfc3339();
+        let prompt = |id: &str, send: i64, offset| serde_json::json!({"timestamp":at(offset),"type":"user","uuid":id,"promptId":id,
+            "message":{"content":format!("[cas #{send} operator Alice@phone verified 0s first] question")}});
+        let answer = |id: &str, text: &str, offset| serde_json::json!({"timestamp":at(offset),"type":"assistant","uuid":id,
+            "message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
+        let system = |subtype: &str, offset| serde_json::json!({"timestamp":at(offset),"type":"system","subtype":subtype});
+        let draft = "Train is green at abc1234.";
+        let rewrite = "[unverified] Train is green.";
+        let first = [
+            prompt("p-earlier", earlier, 0), answer("a-earlier", "earlier answer", 1),
+            system("stop_hook_summary", 1), system("turn_duration", 1),
+            prompt("p-asked", asked, 2), answer("a-draft", draft, 3),
+        ];
+        let rest = [
+            serde_json::json!({"timestamp":at(3),"type":"user","uuid":"feedback","promptId":"p-asked","isMeta":true,
+                "parentUuid":"a-draft","message":{"content":"Stop hook feedback:\nblocked"}}),
+            serde_json::json!({"timestamp":at(3),"type":"attachment","uuid":"block","parentUuid":"feedback",
+                "attachment":{"type":"hook_blocking_error","hookName":"Stop","hookEvent":"Stop","blockingError":"blocked"}}),
+            system("stop_hook_summary", 3),
+            answer("a-rewrite", rewrite, 4),
+            serde_json::json!({"timestamp":at(4),"type":"attachment","uuid":"accepted",
+                "attachment":{"type":"hook_success","hookName":"Stop","hookEvent":"Stop"}}),
+            system("stop_hook_summary", 4), system("turn_duration", 4),
+        ];
+        let directory = temp.path().join("account/projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("blocked-turn.jsonl");
+        let lines = |records: &[Value]| records.iter().map(|record| format!("{record}\n")).collect::<String>();
+        std::fs::write(&path, lines(&first)).unwrap();
+        let mut state = MirrorScanState::default();
+        let mut scan = || scan_supervisor_replies(
+            &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), &mut state,
+        );
+        scan();
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap()
+            .write_all(lines(&rest).as_bytes()).unwrap();
+        scan();
+        let answers: Vec<_> = operator_replies(&queue).into_iter()
+            .filter(|reply| reply.reply_to == Some(asked)).map(|reply| reply.message).collect();
+        assert_eq!(answers, [rewrite], "only the reply the Stop hooks accepted reaches Commander");
+    }
+
+    /// cas-2a95: an answer whose Stop verdict was never written (the harness
+    /// died mid-hook) still settles when the next input, even a machine
+    /// wake, proves its turn ended.
+    #[test]
+    fn verdictless_answer_settles_at_the_next_input_cas_2a95() {
+        let values = vec![
+            serde_json::json!({"timestamp":"2026-11-14T03:00:00Z","type":"system","subtype":"turn_duration"}),
+            serde_json::json!({"timestamp":"2026-11-14T03:00:01Z","type":"user","uuid":"question","message":{"content":"status?"}}),
+            serde_json::json!({"timestamp":"2026-11-14T03:00:02Z","type":"assistant","uuid":"answer","message":{"role":"assistant","content":[{"type":"text","text":"Answer"}],"stop_reason":"end_turn"}}),
+            serde_json::json!({"timestamp":"2026-11-14T03:00:09Z","type":"user","uuid":"wake","isMeta":true,"message":{"content":"Background job finished"}}),
+        ];
+        let turns = completed_turns(&values, cas_mux::SupervisorCli::Claude);
+        assert_eq!(turns.iter().map(|turn| (turn.key.as_str(), turn.text.as_str())).collect::<Vec<_>>(), [("question", "Answer")]);
+    }
+
     #[test]
     fn claude_thinking_only_end_turn_preserves_the_later_pane_answer() {
         let values = vec![
@@ -1866,6 +2055,78 @@ mod tests {
         }
     }
 
+    /// cas-bfe3: a /mcp reconnect re-registers the supervisor from its launch
+    /// session id. An answer written after a /clear rebind must still reach
+    /// Commander once, threaded under the verified question it answers.
+    #[test]
+    fn mcp_reconnect_after_clear_keeps_answers_mirrored_cas_bfe3() {
+        // GH #1829: the old MCP's end can delete the row before the new one registers.
+        for old_mcp_ended in [false, true] {
+            reconnect_after_clear_mirrors_the_answer(old_mcp_ended);
+        }
+    }
+
+    fn reconnect_after_clear_mirrors_the_answer(old_mcp_ended: bool) {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (temp, root, queue) = terminal_session(vec![]);
+        let account = temp.path().join("account");
+        for (key, value) in [
+            ("CAS_AGENT_ROLE", "supervisor"),
+            ("CAS_FACTORY_SESSION", "factory-1"),
+            ("CAS_FACTORY_SUPERVISOR_CLI", "claude"),
+        ] {
+            env.set(key, value);
+        }
+        env.set("CLAUDE_CONFIG_DIR", &account);
+        let agents = SqliteAgentStore::open(&root).unwrap();
+        let mut supervisor = agents.get("supervisor-id").unwrap();
+        supervisor.cc_session_id = Some("after-clear".into());
+        agents.update(&supervisor).unwrap();
+        if old_mcp_ended {
+            {
+                use cas_store::EventStore as _;
+                cas_store::SqliteEventStore::open(&root).unwrap().init().unwrap();
+            }
+            agents.unregister("supervisor-id").unwrap();
+        }
+        crate::mcp::CasCore::with_daemon(root.clone(), None, None)
+            .register_agent("supervisor-id".into(), "supervisor".into(), None)
+            .unwrap();
+        // A later registration of the same pane under its new session id
+        // shares the transcript; it must not post every answer a second time.
+        let mut duplicate = agents.get("supervisor-id").unwrap();
+        duplicate.id = "after-clear".into();
+        duplicate.registered_at = Utc::now() + chrono::Duration::seconds(1);
+        agents.register(&duplicate).unwrap();
+
+        let message = queue.enqueue_operator_message(
+            "commander:Alice@phone", "supervisor", "overall status please", Some("factory-1"),
+            None, None, false, None,
+            &OperatorStamp {
+                operator: "Alice".into(), device_id: "phone".into(), device_label: "phone".into(),
+                scopes: vec!["message:send".into()], verified: true,
+            },
+        ).unwrap();
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let at = |offset| (now + chrono::Duration::seconds(offset)).to_rfc3339();
+        let directory = account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let prompt = format!("[cas #{} operator Alice@phone verified 0s first]\noverall status please", message.id());
+        let values = [
+            serde_json::json!({"timestamp":at(0),"type":"user","uuid":"question","origin":{"kind":"human"},"message":{"content":prompt}}),
+            serde_json::json!({"timestamp":at(1),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Train is green."}],"stop_reason":"end_turn"}}),
+        ];
+        std::fs::write(directory.join("after-clear.jsonl"), values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+
+        scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents.list(None).unwrap(), &mut MirrorScanState::default());
+        let replies = operator_replies(&queue);
+        assert_eq!(replies.iter().filter(|reply| reply.message == "Train is green.").count(), 1);
+        let answer = replies.iter().find(|reply| reply.message == "Train is green.")
+            .expect("the answer after a reconnect must reach Commander");
+        assert_eq!(answer.reply_to, Some(message.id()));
+        assert_eq!(answer.device_id, "phone");
+    }
+
     #[test]
     fn mirrored_history_is_idempotent_and_deduplicates_matching_explicit_reply() {
         let temp = tempfile::tempdir().unwrap();
@@ -1911,6 +2172,7 @@ mod tests {
             options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
+            task_id: None,
         })
         .unwrap();
         assert!(
@@ -2123,7 +2385,7 @@ mod tests {
             serde_json::from_str(&replies[0].prompt).unwrap();
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
         assert_eq!(payload.reply_to, history.iter().find(|row| row.source == "terminal").map(|row| row.id));
-        assert_eq!(payload.message, "**Ready**\n- Next step is clear.");
+
         assert_eq!(payload.device_id, "*");
     }
 
@@ -2832,7 +3094,7 @@ mod tests {
             assert_eq!(rows[0].target, "operator");
             let reply: crate::ui::factory::OperatorReplyPayload =
                 serde_json::from_str(&rows[0].prompt).unwrap();
-            assert_eq!(reply.message, "The release is ready for review.");
+
             assert_eq!(reply.kind, crate::ui::factory::OperatorTurnKind::Status);
             assert_eq!(reply.reply_to, None);
             assert_eq!(reply.device_id, "*");

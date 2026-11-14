@@ -1,4 +1,5 @@
 use crate::mcp::tools::core::imports::*;
+use crate::mcp::tools::service::mutation_receipt;
 use chrono::Utc;
 use serde::Serialize;
 
@@ -133,8 +134,6 @@ impl CasCore {
         let include_provenance = provenance_version.is_some();
         let query_family = query_family(&req.query, req.doc_type.as_deref());
 
-        let search = self.open_search_index()?;
-
         let doc_types = req
             .doc_type
             .as_ref()
@@ -150,6 +149,34 @@ impl CasCore {
                 _ => None,
             })
             .unwrap_or_default();
+
+        let search = {
+            let _phase = mutation_receipt::phase("search_index_open");
+            self.open_search_index()?
+        };
+        let task_store = if doc_types.is_empty() || doc_types.contains(&DocType::Task) {
+            let (store, tasks) = {
+                let _phase = mutation_receipt::phase("search_task_load");
+                let store = self.open_task_store()?;
+                let tasks = store.list(None).map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to refresh task search index: {error}")),
+                    data: None,
+                })?;
+                (store, tasks)
+            };
+            {
+                let _phase = mutation_receipt::phase("search_task_refresh");
+                search.refresh_tasks(&tasks).map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to refresh task search index: {error}")),
+                    data: None,
+                })?;
+            }
+            Some(store)
+        } else {
+            None
+        };
 
         // Parse scope filter
         let scope_filter: ScopeFilter = match req.scope.to_lowercase().as_str() {
@@ -188,18 +215,20 @@ impl CasCore {
             ..Default::default()
         };
 
-        let results = search.search_unified(&opts).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Search failed: {e}")),
-            data: None,
-        })?;
+        let results = {
+            let _phase = mutation_receipt::phase("search_lookup");
+            search.search_unified(&opts).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Search failed: {e}")),
+                data: None,
+            })?
+        };
 
         if results.is_empty() && !include_provenance {
             return Ok(Self::success("No results found"));
         }
 
         let store = self.open_store().ok();
-        let task_store = self.open_task_store().ok();
         let rule_store = self.open_rule_store().ok();
         let skill_store = self.open_skill_store().ok();
         let code_store = crate::store::open_code_store(&self.cas_root).ok();
@@ -337,7 +366,7 @@ impl CasCore {
                         } else {
                             (
                                 format!("[Task] {}", result.id),
-                                scope_ok && tags_ok,
+                                false,
                                 HitMetadata {
                                     scope: "project".to_string(),
                                     ..Default::default()
@@ -347,7 +376,7 @@ impl CasCore {
                     } else {
                         (
                             format!("[Task] {}", result.id),
-                            scope_ok && tags_ok,
+                            false,
                             HitMetadata {
                                 scope: "project".to_string(),
                                 ..Default::default()

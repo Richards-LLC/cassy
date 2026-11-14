@@ -874,6 +874,7 @@ fn handle_cloud_message(
 ///
 /// Commands arrive from the web UI via Phoenix channel broadcast.
 /// The daemon's main loop picks up queued items on its next tick.
+// gate-audit[force]: selector Forwards the typed command parameter to its operation; this transport does not override factory policy.
 fn handle_cloud_command(
     cas_dir: &std::path::Path,
     command_type: &str,

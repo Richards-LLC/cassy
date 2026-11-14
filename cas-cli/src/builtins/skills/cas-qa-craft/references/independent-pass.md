@@ -20,6 +20,13 @@ incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED: <reason>`.
 reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
 For batch work, capture before/after evidence during implementation. The supervisor
 builds one candidate per release at the exact frozen tip and walks one combined matrix.
+Initialize the batch ledger with `cas qa ledger init --task <qa-task>
+--covers <delivery-a>,<delivery-b>` using every intended receipt task ID.
+Keep those IDs in its `covers:` header and run `cas qa ledger check <path>
+--task <qa-task> --covers <delivery-a>,<delivery-b>` before publishing; the
+checker rejects missing or incomplete coverage. Init defaults to its owner
+when `--covers` is omitted. A mention elsewhere in the report does not extend
+declared coverage.
 Publish the PASS ledger, then record `verification action=batch_receipt` with
 `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author`
 (a non-implementer). Every listed
@@ -69,7 +76,7 @@ lockfile and execution environment. Cite the original receipt/log paths in the
 round bundle and ledger; preserve their producer and timestamps. Reuse matching
 unit/typecheck receipts as well. Run independent adjacent/demo/visual cells in
 steps 3–4; the automated selection is the worker's responsibility. Read the
-tests the delivery adds against [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
+tests the delivery adds against [Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests):
 bloat, restated implementation, sleeps and retry-wrapped flakes are Normal findings.
 Rate a delivery test that steps around its asserted invariant at least Normal.
 For example, re-picking the sender after a 409 masks whether the chosen sender
@@ -77,7 +84,7 @@ survived the conflict; judge the masked failure under §3.
 
 Where the project has a journey registry, the QA task's journey table is the
 park-time impact for the reviewed head: every live journey in it needs its own
-ledger row ([journey rows](journeys.md#journey-rows)), and each upkeep escape
+ledger row ([journey rows](journeys.md#journey-rows)), and each escape
 the task lists is a claim to check against the diff. A reason that does not
 hold is a Normal finding.
 
@@ -216,10 +223,11 @@ matching local run (see step 4). The files, all listed in `bundle.json`:
   `showRecordingChapter(page, 'F01 …', { duration: 1000 })` per finding. For
   other projects, copy the self-contained constructed-stylesheet helper from
   the [worked example](evidence-bundle.md#worked-example) into the evidence spec.
-  Commander-only, in the Cassy source checkout: import that helper from
-  `hub-web/e2e/journeys/receipt-directory.mjs`, adjusting the spec's relative
-  path. That repository file is not installed in other projects. Both routes
-  preserve `style-src 'self'`. Omit screencast and chapter calls for non-visual
+  <!-- cas-src:begin -->
+  In Cassy's source checkout, import
+  `hub-web/e2e/journeys/receipt-directory.mjs` instead, adjusting the relative path.
+  <!-- cas-src:end -->
+  The helper preserves `style-src 'self'`. Omit screencast and chapter calls for non-visual
   changes
 - `final.aria.yml` and `final.aria.json`
 - `F01.png`, `F02.png`, …: one capture per finding, listed in `files.cells`

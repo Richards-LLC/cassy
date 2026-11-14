@@ -174,7 +174,7 @@ impl CloudActivityRelay {
         body: serde_json::Value,
     ) -> Result<R, RelayError> {
         let url = format!("{}{path}", self.endpoint);
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(RELAY_TIMEOUT)
             .send_json(body)
@@ -1625,6 +1625,7 @@ impl VioletWatchStatus {
     }
 
     /// Doctor's verdict on the claim loop and its watches.
+    // gate[W-57 watchdog]: Violet watch health
     pub(crate) fn doctor(&self, now: DateTime<Utc>) -> (WatchHealth, String) {
         if let Some(path) = self.quarantined_book.as_ref().filter(|path| path.exists()) {
             return (
@@ -1837,6 +1838,7 @@ pub(crate) fn parse_violet_activity_envelope(prompt: &str) -> Option<VioletActiv
     })
 }
 
+// gate[W-54 watchdog]: Violet v1 claim and ack poll wake
 fn enqueue_wake(
     queue: &dyn PromptQueueStore,
     factory_session: &str,
@@ -2059,6 +2061,25 @@ impl ProxyChannelReader {
             .await.map_err(|_| "Violet target read failed".to_string())
     }
 
+    /// Fixed reaction-only port; source status never gains message/reply access.
+    pub(crate) async fn source_status(&self, tool: &str, args: serde_json::Value) -> Result<serde_json::Value, crate::cli::violet_hub::VioletError> {
+        use crate::cli::violet_hub::VioletError;
+        if tool != "violet_read" && (tool != "violet_post" || args["kind"] != "reaction") {
+            return Err(VioletError::local("invalid_status_call", "Source status permits only reads and reactions"));
+        }
+        self.engine.call_tool(&self.caller, cmcp_core::config::VIOLET_SERVER, tool, args.as_object().cloned())
+            .await.map_err(|error| {
+                let description = cmcp_core::describe_upstream_call_error(&error);
+                if description.contains("proxy policy denied") {
+                    VioletError::local("denied_by_policy", "Violet source status is denied by proxy policy")
+                } else {
+                    let mut error = VioletError::local("violet_unavailable", "Violet source status call failed");
+                    error.retryable = true;
+                    error
+                }
+            })
+    }
+
     pub(crate) async fn read(&self, request: &SweepRequest) -> Result<SweepRead, String> {
         let mut slices = Vec::new();
         let mut cursor: Option<String> = None;
@@ -2218,12 +2239,12 @@ impl VioletWakeRuntime {
         let legacy_channel = |channel: &str| {
             intake.as_ref().is_ok_and(|intake| intake.channel_legacy_allowed(channel))
         };
+        let presence = supervisor_presence(&self.cas_dir, &self.supervisor_name);
         let cloud = crate::cloud::CloudConfig::load_effective();
         let Some(relay) = CloudActivityRelay::from_cloud_config(&cloud) else {
             return (PollReport::default(), Vec::new(), None);
         };
         let now = Utc::now();
-        let presence = supervisor_presence(&self.cas_dir, &self.supervisor_name);
         let Ok(queue) = crate::store::open_prompt_queue_store(&self.cas_dir) else {
             let report = PollReport {
                 errors: vec!["could not open the prompt queue".into()],
@@ -2279,6 +2300,14 @@ impl VioletWakeRuntime {
         (report, sweeps, presence)
     }
 
+    // Called from the owned sweep job after admission output has already
+    // woken the supervisor and due channel sweeps have been applied.
+    pub(crate) fn reconcile_reactions(&self, registration: &str) {
+        if !self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            super::violet_reactions::reconcile(&self.cas_dir, registration, &self.factory_session);
+        }
+    }
+
     pub(crate) fn stop_blocking(&self) -> Result<usize, String> {
         self.stopping
             .store(true, std::sync::atomic::Ordering::Release);
@@ -2291,6 +2320,7 @@ impl VioletWakeRuntime {
         state.end_session(Utc::now())
     }
 
+    // gate[W-56 watchdog]: Violet channel watch sweep and idle stop
     /// Run the due sweeps: read through Violet, then apply the results.
     /// Returns how many sweeps queued a wake.
     #[cfg(feature = "mcp-proxy")]

@@ -199,6 +199,7 @@ pub(super) fn render(path: &Path, args: &UpdateArgs, cli: &Cli) -> anyhow::Resul
                     user_documents: Vec::new(),
                     user_retired_toml: Vec::new(),
                     skipped_unregistered,
+                    daemon_outcomes: Vec::new(),
                 },
                 error,
                 Some(hub_restart),

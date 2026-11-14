@@ -11,8 +11,13 @@ export function presentFleetSheet(container: HTMLElement, dismiss: () => void): 
   // cas-68d0 F01: a panel named by its visible heading lends that heading to
   // the dialog and drops its own name, so the name is announced once.
   const labelledBy = content.getAttribute("aria-labelledby");
+  // cas-5d53: a menu's sheet shows the name it acts on ("Actions for swift-lark-3") as its title.
+  const title = content.matches(".fleet-ops-menu") ? document.createElement("h2") : undefined;
   if (labelledBy) { sheet.setAttribute("aria-labelledby", labelledBy); content.removeAttribute("aria-labelledby"); }
-  else sheet.setAttribute("aria-label", content.getAttribute("aria-label") ?? "Fleet actions");
+  else if (title) {
+    title.id = "fleet-sheet-title"; title.className = "fleet-sheet-title"; title.textContent = content.getAttribute("aria-label") ?? "Fleet actions";
+    sheet.setAttribute("aria-labelledby", title.id);
+  } else sheet.setAttribute("aria-label", content.getAttribute("aria-label") ?? "Fleet actions");
   const close = document.createElement("button");
   close.type = "button"; close.className = "fleet-sheet-close";
   // cas-4cf2: a panel may name its own close ("Close write access").
@@ -25,6 +30,6 @@ export function presentFleetSheet(container: HTMLElement, dismiss: () => void): 
     if (event.key === "Tab" && sheetKeydown(event, sheet, document.activeElement, dismiss)) event.preventDefault();
   };
   content.before(sheet);
-  sheet.append(close, content);
+  sheet.append(close, ...(title ? [title] : []), content);
   sheet.showModal();
 }

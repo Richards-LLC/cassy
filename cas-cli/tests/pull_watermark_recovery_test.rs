@@ -36,9 +36,7 @@ fn cloud_sync_help_exposes_full_repull_escape_hatch() {
         .args(["cloud", "sync", "--help"])
         .assert()
         .success()
-        .stdout(predicates::str::contains(
-            "Ignore pull watermarks and re-pull all data",
-        ));
+        .stdout(predicates::str::contains("--full"));
 }
 
 #[tokio::test]

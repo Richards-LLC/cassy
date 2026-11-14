@@ -1,4 +1,5 @@
 pub(crate) mod ci_watch;
+mod violet_reactions;
 pub(crate) mod external_wake;
 pub(crate) mod merge_queue_ejection;
 #[cfg(test)]
@@ -7,6 +8,7 @@ mod client_input;
 mod cloud;
 mod commander_mirror;
 mod quality_turns;
+pub(crate) use quality_turns::backfill_quality_turns;
 pub(crate) use commander_mirror::MirrorScanState;
 pub(crate) mod delivery;
 pub(crate) mod director_refresh;
@@ -42,6 +44,8 @@ pub(crate) mod render_scheduler;
 pub(crate) mod send_dedupe;
 #[cfg(test)]
 mod shutdown_tests;
+#[cfg(test)]
+mod supervisor_auto_clear_tests;
 pub(super) mod session_summarizer;
 pub(crate) mod store_worker;
 pub(crate) mod jobs;
@@ -76,3 +80,6 @@ pub(crate) mod progress_watchdog;
 mod supervisor_single_turn_tests;
 
 pub(crate) mod supervisor_commands;
+
+#[cfg(test)]
+pub(super) mod reexec_tests;

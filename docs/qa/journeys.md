@@ -158,6 +158,7 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 #### Expected experience
 
 - Recent turns appear without any action, grouped by speaker and day.
+- A reader parked above the tail keeps their top line across a connection drop and reconnect; a reader following the latest turn stays at the tail when a file's connection note wraps onto another line.
 - Loading earlier keeps the reading position; scrolling up to the button survives an intervening render even while a tail pin is pending, and the button shows progress.
 - A short status with a callout, heading or list renders it as a full message, and inline Markdown renders in the quiet status box, so no marker shows at any length. Short status tables retain native headers, cells and both copy controls while adjacent plain progress remains quiet (cas-2656). Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting, prefixing formula-leading cells with an apostrophe. Success feedback clears after two seconds; clipboard refusal offers a persistent visible retry. Long paths wrap at phone width without widening the page (cas-4800).
 - The end of history is stated, not implied.
@@ -903,7 +904,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 2. Read the observed native result without resending the command
 3. Send pasted paths and unknown slash text as messages (cas-62ea)
 4. Submit an exact Usage token from the composer (cas-62ea)
-5. Finish waits for the active turn, then its reply reaches the conversation
+5. Finish keeps polling after a refused Cancel, then its reply reaches the conversation (cas-5b23)
 6. Cancel Clear, then confirm Exit for the named supervisor
 7. Remove the stopped session after Exit without claiming an unobserved command result
 8. Open the quick controls and read the permission explanation
@@ -911,7 +912,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 #### Expected experience
 
-- Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer.
+- Slash and quick controls stay within the conversation at desktop and 390 px; focus returns to the composer. Autocomplete choices consume the typed prefix, close the palette and use the same compact receipt as the header menu. A Finish outcome that exceeds the short confirmation window remains unconfirmed while bounded read-only status checks continue; its own late native completion resolves the receipt without resending (cas-5b8a).
 - Only an exact supported first token reserves a command. Paths such as `/home/pippenz/notes.md`, unknown slash text and `//usage` send as ordinary messages; prefix suggestions still require an explicit choice (cas-62ea). A leading space also sends a supported command as ordinary text.
 - Submission never says execution; opening a chooser never says the model changed. Exit uses the authenticated ended receipt; Finish names only its completed harness turn and points to the actual reply.
 - Finish queues during a native turn and keeps its receipt pending beyond the outcome window until submission. An empty prompt after native completion accepts Finish despite background shell footer repaint; its actual reply appears in the conversation (cas-88ca).

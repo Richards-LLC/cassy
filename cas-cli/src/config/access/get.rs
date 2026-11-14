@@ -35,9 +35,14 @@ impl Config {
                 self.hub.as_ref().cloned().unwrap_or_default().transport_mode().as_str().into(),
             ),
             "hub.tailscale_serve" => Some(
-                self.hub.as_ref().cloned().unwrap_or_default().transport_mode().publishes().to_string(),
+                self.hub
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_default()
+                    .transport_mode()
+                    .publishes()
+                    .to_string(),
             ),
-            "viktor.enabled" => Some(self.viktor_enabled().to_string()),
             key if key.starts_with("fast_lane.") => {
                 let lane = self.fast_lane.clone().unwrap_or_default();
                 match key {
@@ -80,6 +85,7 @@ impl Config {
                     .map(|slack| slack.violet_bot_user_ids().join(","))
                     .unwrap_or_default(),
             ),
+            "rules.draft_ttl_days" => Some(self.rules().draft_ttl_days.to_string()),
             // Sync section
             "sync.enabled" => Some(self.sync.enabled.to_string()),
             "sync.target" => Some(self.sync.target.clone()),
@@ -142,6 +148,7 @@ impl Config {
             // Factory section (cas-1a05): every key `set` accepts is readable.
             // An unset optional key reads as its registry default, so
             // `config list --modified` shows only what was changed.
+            "factory.focus_mode" => Some(factory.focus_mode.clone().unwrap_or_default()),
             "factory.slot_id" => Some(factory.slot_id.clone().unwrap_or_default()),
             "factory.artifacts_root" => Some(
                 factory
@@ -149,6 +156,7 @@ impl Config {
                     .clone()
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
+            "factory.codex_home" => Some(factory.codex_home.clone().unwrap_or_default()),
             "factory.scratch_root" => Some(factory.scratch_root.clone().unwrap_or_default()),
             "factory.worker_local_gate" => Some(factory.worker_local_gate.clone().unwrap_or_default()),
             "factory.release_command" => Some(factory.release_command.clone().unwrap_or_default()),
@@ -157,6 +165,7 @@ impl Config {
             "factory.release_train_max_age_hours" => Some(factory.release_train_max_age_hours.to_string()),
             "factory.supervisor_message_debounce_secs" => Some(factory.supervisor_message_debounce_secs.to_string()),
             "factory.supervisor_message_wakes_per_hour" => Some(factory.supervisor_message_wakes_per_hour.to_string()),
+            "factory.supervisor_wake_input_budget" => Some(factory.supervisor_wake_input_budget.to_string()),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
             "factory.write_roots" => Some(factory.write_roots.join(",")),
             "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),
@@ -172,6 +181,7 @@ impl Config {
             "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
             "factory.commander_mirror_enabled" => Some(factory.commander_mirror_enabled.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
+            "factory.max_workers" => Some(factory.max_workers.to_string()),
             "factory.auto_route_builds" => Some(factory.auto_route_builds.to_string()),
             "factory.build_guard.max_load_ratio" => Some(format!("{:?}", factory.build_guard.max_load_ratio)),
             "factory.build_guard.max_cpu_pressure_percent" => Some(format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),
@@ -339,6 +349,8 @@ impl Config {
             "history.github_repo" => Some(history.github_repo.unwrap_or_default()),
             // Release section
             "release.claude_account_allowlist" => Some(release.claude_account_allowlist.join(",")),
+            "release.auto_cut_max_per_day" => Some(release.auto_cut_max_per_day.to_string()),
+            "release.auto_cut_min_interval_hours" => Some(release.auto_cut_min_interval_hours.to_string()),
             // Notifications section
             "notifications.enabled" => Some(notifications.enabled.to_string()),
             "notifications.on_permission_prompt" => {

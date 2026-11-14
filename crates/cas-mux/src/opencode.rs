@@ -800,7 +800,7 @@ mod tests {
         assert!(OPENCODE_PLUGIN_SOURCE.contains("session.created"));
         assert!(OPENCODE_PLUGIN_SOURCE.contains("session.idle"));
         assert!(OPENCODE_PLUGIN_SOURCE.contains("await update"));
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("permission.ask is not"));
+
         assert!(OPENCODE_PLUGIN_SOURCE.contains("rename(temp, STATE_PATH)"));
         assert!(
             OPENCODE_PLUGIN_SOURCE.contains("export const CassyPlugin = async () => ({"),

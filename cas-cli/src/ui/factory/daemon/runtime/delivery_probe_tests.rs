@@ -60,6 +60,7 @@ fn fixture(
     daemon.normal_delivery_probes.insert(
         row,
         NormalDeliveryProbe {
+            source: "supervisor".into(),
             pane: "worker-a".into(),
             target: "worker-a".into(),
             bytes_at_delivery: 0,
@@ -69,6 +70,7 @@ fn fixture(
             nudge_sent_at: None,
             nudges: 0,
             next_check_at: None,
+            startup_pane: None,
         },
     );
     (temp, daemon, queue, row)

@@ -1,0 +1,1323 @@
+//! Daemon-owned transport for the existing task verifier. Only the final
+//! verdict arguments cross the harness boundary; authority stays server-side.
+use super::*;
+use std::process::Stdio;
+
+const OWNER_KEY: &str = "automatic_premerge_dispatch";
+
+pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
+    dispatch.verifier_agent_id.as_deref().is_some_and(|id| {
+        crate::store::open_agent_store(root)
+            .ok()
+            .and_then(|store| store.get(id).ok())
+            .is_some_and(|agent| agent.metadata.get(OWNER_KEY) == Some(&dispatch.id))
+    })
+}
+
+fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
+    let store = core.open_task_store().map_err(|e| e.to_string())?;
+    let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
+    let inherited = candidate_for_dispatch(&core.cas_root, dispatch)?
+        .and_then(|candidate| candidate.inherited_supervisor_call)
+        .map(|call| serde_json::to_string(&call).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_else(|| "none".into());
+    let supervisor_calls = core.open_verification_store().map_err(|e| e.to_string())?
+        .get_for_task(&task.id).map_err(|e| e.to_string())?.into_iter()
+        .filter(|call| call.dispatch_id.as_deref() == Some(dispatch.id.as_str())
+            && call.status == VerificationStatus::SupervisorCall)
+        .collect::<Vec<_>>();
+    let body = format!(
+        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Use qa.mode in the structured review context below. In batch mode, approve when the only open evidence is a NOT EXERCISED journey assigned solely to release batch QA and every other criterion is VERIFIED; record each deferred row and its owner. Other missing evidence, per_task unexercised journeys and any question beyond that policy still require supervisor_call. Never waive rejection conditions or treat a deferred walk as PASS.\nAn inherited supervisor call is present only when the value below is not `none`. It carries a prior answer for an unchanged delivery and must be applied only to that exact NOT EXERCISED row/question. Cite that inherited answer in your verdict; if the current question is different, make a new supervisor_call.\nInherited supervisor call: {}\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\nReview context:\n{}\n",
+        include_str!("../../../../../builtins/agents/task-verifier.body.md"),
+        include_str!(
+            "../../../../../builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"
+        ),
+        inherited,
+        crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+            &core.cas_root,
+            task,
+        )?
+        .display(),
+        serde_json::to_string(task).map_err(|e| e.to_string())?,
+        serde_json::to_string(&parent).map_err(|e| e.to_string())?,
+        serde_json::to_string(dispatch).map_err(|e| e.to_string())?,
+        serde_json::json!({"qa": {"mode": core.load_config().qa().mode},
+            "supervisor_calls": supervisor_calls}),
+    );
+    Ok(format!("{body}\nThe supervisor_calls array is this dispatch's persisted questions and answers. Apply supervisor_direct answers as scope context, then independently review and return the final verdict; an answer is not an approval.\n"))
+}
+
+/// The account spawn_workers would launch (cas-c386). With no eligible home,
+/// refuse with each home's state rather than blame the default home.
+fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<String>, String> {
+    let provider = match cli {
+        cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
+        cas_mux::SupervisorCli::Codex => crate::accounts::Provider::Codex,
+        _ => return Ok(None),
+    };
+    let Some(accounts) = dirs::home_dir()
+        .and_then(|home| crate::account_registry::collect_for(provider, &home, false).ok())
+    else {
+        return Ok(None);
+    };
+    let policy = crate::account_selection::load_policy(Some(root));
+    let selection =
+        crate::account_selection::launch_choice(&accounts, provider, chrono::Utc::now(), &policy);
+    if let Some(choice) = selection.recommended {
+        return Ok(Some(choice.account.name.clone()));
+    }
+    let homes = selection
+        .excluded
+        .iter()
+        .map(|(account, why)| format!("{}: {why}", account.folder.display()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!(
+        "no eligible {} account ({})",
+        provider.name(),
+        if homes.is_empty() { "no accounts found" } else { &homes }
+    ))
+}
+
+/// The verifier command, plus a notice when it fell back to Claude.
+fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), String> {
+    let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
+        .map_err(|e| e.to_string())?;
+    let mut cli = route.spec.cli;
+    let mut model = route.spec.model.ok_or("verifier route has no model")?;
+    let mut effort = route.spec.effort.ok_or("verifier route has no effort")?;
+    // A daemon may have no provider account selector, even when the host has
+    // authenticated named accounts. Choose the account spawn_workers would
+    // (cas-c386), then use the checked launch environment supervisors use,
+    // rather than inheriting the daemon's default home. With no eligible
+    // Codex home, the same verifier runs on an eligible Claude account
+    // (cas-bdde); only when neither has one is the supervisor asked.
+    let mut notice = None;
+    let account = match launch_account(cli, root) {
+        Ok(account) => account,
+        Err(codex) if cli == cas_mux::SupervisorCli::Codex => {
+            match launch_account(cas_mux::SupervisorCli::Claude, root) {
+                Ok(Some(account)) => {
+                    let recipe = cas_factory::routing::registry()
+                        .map_err(|e| e.to_string())?
+                        .recipes
+                        .get("claude_opus_5_5")
+                        .ok_or("verifier Claude recipe missing")?;
+                    cli = cas_mux::SupervisorCli::Claude;
+                    model = recipe.model.clone();
+                    effort = recipe.default_effort;
+                    notice = Some(format!(
+                        "Automatic verifier started on Claude account {account} ({model}, {}): {codex}.",
+                        effort.as_str()
+                    ));
+                    Some(account)
+                }
+                Ok(None) => {
+                    return Err(format!(
+                        "{codex}; Claude accounts could not be read"
+                    ));
+                }
+                Err(claude) => {
+                    return Err(format!("{codex}; {claude}"));
+                }
+            }
+        }
+        Err(_) => None,
+    };
+    let environment =
+        crate::hub::launch_env::resolve_for_project(cli, account.as_deref(), Some(root))
+            .map_err(|e| e.to_string())?;
+    let mut command = Command::new(environment.executable);
+    for key in environment.remove {
+        command.env_remove(key);
+    }
+    command.envs(environment.set);
+    match cli {
+        cas_mux::SupervisorCli::Codex => {
+            sandbox_preflight()?;
+            command
+                .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"])
+                .arg("--model")
+                .arg(model)
+                .arg("-c")
+                .arg(format!("model_reasoning_effort=\"{}\"", effort.as_str()))
+                .args(["-c", "project_doc_max_bytes=0", "--output-last-message"])
+                .arg(output)
+                .arg("-");
+        }
+        cas_mux::SupervisorCli::Claude => {
+            command.args(["-p", "--model"]).arg(model).args([
+                "--effort",
+                effort.as_str(),
+                "--allowedTools",
+                "Read,Grep,Glob,Bash",
+                "--strict-mcp-config",
+                "--mcp-config",
+                "{\"mcpServers\":{}}",
+            ]);
+        }
+        other => return Err(format!("unsupported verifier harness: {other:?}")),
+    }
+    crate::internal_llm::isolate_command(&mut command);
+    for key in ["CAS_AGENT_ID", "CLAUDECODE", "CODEX_THREAD_ID"] {
+        command.env_remove(key);
+    }
+    Ok((command, notice))
+}
+
+/// Probe the same namespace primitive before paying for a model that cannot read.
+fn sandbox_preflight() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::bounded_process::{Deadline, run_command};
+        let output = run_command(
+            Command::new("bwrap").args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--", "/bin/true"]),
+            Deadline::after(std::time::Duration::from_secs(5)), std::time::Duration::from_secs(5),
+        ).map_err(|e| format!("verifier_bwrap_preflight: probe_start_failed: {e:?}; install bubblewrap and inspect the launch context"))?;
+        if !output.status.success() {
+            let read = |path| std::fs::read_to_string(path).ok().map(|s| s.trim().to_string());
+            let uid_map = read("/proc/self/uid_map");
+            let initial = uid_map.as_deref().is_some_and(|map| {
+                map.split_whitespace().eq(["0", "0", "4294967295"])
+            });
+            let status = read("/proc/self/status").unwrap_or_default().lines()
+                .filter(|line| line.starts_with("NoNewPrivs:") || line.starts_with("Seccomp:") || line.starts_with("CapBnd:"))
+                .map(str::to_string).collect::<Vec<_>>();
+            return Err(format!("verifier_bwrap_preflight: {}", serde_json::json!({
+                "cause": if initial { "host_namespace_policy" } else { "nested_user_namespace_context" },
+                "pid": std::process::id(), "status": status, "uid_map": uid_map,
+                "user_namespace": std::fs::read_link("/proc/self/ns/user").ok(),
+                "apparmor_profile": read("/proc/self/attr/current"),
+                "max_user_namespaces": read("/proc/sys/user/max_user_namespaces"),
+                "kernel.unprivileged_userns_clone": read("/proc/sys/kernel/unprivileged_userns_clone"),
+                "kernel.apparmor_restrict_unprivileged_userns": read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"),
+                "stderr": tail(&output.stderr),
+                "remedy": if initial {
+                    "Inspect the named host user-namespace limits and AppArmor policy; keep the read-only sandbox enabled"
+                } else {
+                    "Launch the verifier from the factory daemon outside worker store isolation; do not disable either sandbox or change host policy"
+                }
+            })));
+        }
+    }
+    Ok(())
+}
+
+/// Claim synchronously, then do provider work off the MCP/control loop. The
+/// existing dispatch claim prevents a second launch, including manual races.
+pub(super) fn launch(
+    core: &CasCore, task: &Task, dispatch: &VerificationDispatch,
+) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    #[cfg(unix)]
+    if let Some(session) = core.open_agent_store().map_err(|e| e.to_string())?
+        .get(&dispatch.owner_agent_id).map_err(|e| e.to_string())?.factory_session
+    {
+        // The MCP backend may inherit the worker's userns. Only the factory
+        // daemon owns the context from which the harness sandbox can start.
+        let worker = core.clone();
+        let dispatch = dispatch.clone();
+        return std::thread::Builder::new().name(format!("verifier-request-{}", task.id))
+            .spawn(move || {
+                if let Err(error) = super::factory_launch::request(&session, &dispatch.id) {
+                    let _ = attention(&worker, &dispatch, &error);
+                }
+            }).map(Some).map_err(|e| e.to_string());
+    }
+    launch_local(core, task, dispatch)
+}
+
+pub(super) fn launch_local(
+    core: &CasCore,
+    task: &Task,
+    dispatch: &VerificationDispatch,
+) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    if cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
+        .map_err(|e| e.to_string())?.state != cas_types::VerificationDispatchState::Pending {
+        return Ok(None);
+    }
+    // A candidate review reads its disposable candidate; a no-code close
+    // dispatch has no repository proof and reviews from the project checkout.
+    let worktree = match dispatch.repository.as_ref() {
+        Some(proof) => PathBuf::from(&proof.worktree_root),
+        None => core.cas_root.parent().unwrap_or(&core.cas_root).to_path_buf(),
+    };
+    // A replacement must not read an earlier attempt's verdict or overwrite
+    // its stderr. The exact dispatch and candidate remain unchanged.
+    let directory = core.cas_root.join("verification-runs").join(&dispatch.id)
+        .join(format!("attempt-{:032x}", rand::random::<u128>()));
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let output = directory.join("verdict.json");
+    let root = core.cas_root.clone();
+    launch_with_preparation(core, task, dispatch, output, move |output| {
+        let (mut command, notice) = command(&root, output)?;
+        command.current_dir(worktree);
+        Ok((command, notice))
+    })
+}
+
+fn launch_with_preparation(
+    core: &CasCore,
+    task: &Task,
+    dispatch: &VerificationDispatch,
+    output: PathBuf,
+    prepare: impl FnOnce(&Path) -> Result<(Command, Option<String>), String> + Send + 'static,
+) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
+        .map_err(|e| e.to_string())?;
+    if live.state != cas_types::VerificationDispatchState::Pending {
+        return Ok(None);
+    }
+    let mut child = cas_types::Agent::new_sub_agent(
+        format!("task-verifier-{:032x}", rand::random::<u128>()),
+        "task-verifier".into(),
+        live.owner_agent_id.clone(),
+    );
+    // The daemon owns this identity and submits the harness's structured
+    // verdict. The subprocess never receives a credential or this identity.
+    child.pid = Some(std::process::id());
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut child, std::process::id());
+    child.metadata.insert(OWNER_KEY.into(), live.id.clone());
+    child.factory_session = core
+        .open_agent_store()
+        .map_err(|e| e.to_string())?
+        .get(&live.owner_agent_id)
+        .map_err(|e| e.to_string())?
+        .factory_session;
+    cas_store::issue_server_verifier_handoff(
+        &core.cas_root,
+        &task.id,
+        &live.id,
+        &live.owner_agent_id,
+        &format!("daemon:{}", live.id),
+    )
+    .map_err(|e| e.to_string())?;
+    cas_store::bind_server_verifier_handoff_and_register_child(
+        &core.cas_root,
+        &live.owner_agent_id,
+        &child,
+    )
+    .map_err(|e| e.to_string())?;
+    let worker = core.clone();
+    let task = task.clone();
+    let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
+        // Account/login probes, review context and notices may block. The
+        // exact dispatch is already claimed, so the merge can return its hold
+        // while startup continues; retries cannot launch another verifier.
+        let result = (|| {
+            let body = prompt(&worker, &task, &live)?;
+            let input = output.with_file_name("prompt.txt");
+            std::fs::write(&input, body).map_err(|e| e.to_string())?;
+            let (mut command, notice) = prepare(&output)?;
+            if let Some(notice) = notice
+                && let Err(error) = attention(&worker, &live, &notice)
+            {
+                tracing::warn!(dispatch_id = %live.id, %error, "Verifier startup notice failed");
+            }
+            review(&worker, &live, &child.id, &mut command, &input, &output)
+        })();
+        // The existing daemon expiry sweep owns timeout escalation and its
+        // durable dedupe key; do not emit a second timeout wake here.
+        if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
+            let error = crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(&error);
+            match cas_store::release_failed_verifier_dispatch(&worker.cas_root, &live.id, &child.id, &error) {
+                Ok(true) => {
+                    let retry = recovery(&worker.cas_root, &live);
+                    let _ = attention(&worker, &live, &format!(
+                        "Automatic verifier stopped: {error}. Its claim was released and audited. {retry}"
+                    ));
+                }
+                Ok(false) => {} // A verdict, timeout or replacement already owns recovery.
+                Err(recovery) => {
+                    let _ = attention(&worker, &live, &format!("Automatic verifier stopped: {error}. Claim recovery failed: {recovery}. Inspect this exact dispatch before retrying."));
+                }
+            }
+        }
+        if let Ok(agents) = worker.open_agent_store() {
+            let _ = agents.graceful_shutdown(&child.id);
+        }
+    }).map_err(|e| e.to_string())?;
+    Ok(Some(handle))
+}
+
+/// The executable recovery after an automatic verifier could not finish: the
+/// call that opened this exact dispatch starts one replacement on it.
+pub(crate) fn recovery(root: &Path, dispatch: &VerificationDispatch) -> String {
+    let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+    let retry = match candidate_for_dispatch(root, dispatch).ok().flatten() {
+        Some(candidate) => format!(
+            "{prefix}factory action=worktree_merge id={} task_id={}",
+            candidate.source_branch, dispatch.task_id
+        ),
+        None => format!("{prefix}task action=close id={}", dispatch.task_id),
+    };
+    format!(
+        "Retry {retry}; one replacement will claim this exact dispatch. {}",
+        direct_verdict(dispatch)
+    )
+}
+
+/// The other supported route. A native Task/Agent child on the supervisor's
+/// MCP connection shares its caller and cannot record this verdict.
+pub(crate) fn direct_verdict(dispatch: &VerificationDispatch) -> String {
+    format!(
+        "For mechanical evidence only, the registered supervisor may record it directly: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<review and verdict>\". Do not spawn a native Task/Agent verifier; it shares your MCP caller and cannot record.",
+        crate::mcp::tools::core::guidance::supervisor_prefix(),
+        dispatch.task_id,
+        dispatch.id,
+    )
+}
+
+/// A dispatch that already holds a verdict, or whose task is terminal, needs no
+/// supervisor notice when a second verifier finds it settled.
+fn resolved(core: &CasCore, dispatch: &VerificationDispatch) -> bool {
+    cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).is_ok_and(|v| v.is_some_and(|v| !matches!(v.status, VerificationStatus::Error | VerificationStatus::Pending))) || core
+        .open_task_store()
+        .ok()
+        .and_then(|s| s.get(&dispatch.task_id).ok())
+        .is_some_and(|t| t.is_terminal())
+}
+
+fn review(
+    core: &CasCore,
+    dispatch: &VerificationDispatch,
+    child: &str,
+    command: &mut Command,
+    input: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    let remaining = (dispatch.deadline_at - chrono::Utc::now())
+        .to_std()
+        .map_err(|_| "dispatch expired")?;
+    let stdin = std::fs::File::open(input).map_err(|e| e.to_string())?;
+    let result = crate::bounded_process::run_command_with_stdin(
+        command,
+        crate::bounded_process::Deadline::after(remaining),
+        remaining,
+        Stdio::from(stdin),
+    )
+    .map_err(|e| format!("harness failed or timed out: {e:?}"))?;
+    let stderr_log = output.with_file_name("harness.log");
+    let stdout_log = output.with_file_name("harness.stdout");
+    std::fs::write(&stderr_log, &result.stderr).map_err(|e| e.to_string())?;
+    // cas-2b80b: keep what the harness printed, so a refused response can be
+    // diagnosed from the dispatch audit instead of rerunning the review.
+    std::fs::write(&stdout_log, &result.stdout).map_err(|e| e.to_string())?;
+    if !result.status.success() {
+        return Err(format!(
+            "harness exited {}; stderr tail ({}):\n{}",
+            result.status,
+            stderr_log.display(),
+            tail(&result.stderr),
+        ));
+    }
+    let bytes = if output.exists() {
+        std::fs::read(output).map_err(|e| e.to_string())?
+    } else {
+        result.stdout
+    };
+    let mut arguments = final_json_object(&bytes).ok_or_else(|| {
+        format!(
+            "invalid verifier response: no JSON object in {} bytes; stdout tail ({}):\n{}\nstderr tail ({}):\n{}",
+            bytes.len(),
+            stdout_log.display(),
+            tail(&bytes),
+            stderr_log.display(),
+            tail(&result.stderr),
+        )
+    })?;
+    arguments.insert("task_id".into(), serde_json::json!(dispatch.task_id));
+    arguments.insert("dispatch_id".into(), serde_json::json!(dispatch.id));
+    arguments.insert("verifier_capability".into(), serde_json::Value::Null);
+    arguments.insert("duration_ms".into(), serde_json::Value::Null);
+    arguments.insert("verification_type".into(), serde_json::json!("task"));
+    let request: crate::mcp::tools::VerificationAddRequest =
+        serde_json::from_value(arguments.into())
+            .map_err(|e| format!("invalid verifier response: {e}"))?;
+    if !matches!(
+        request.status.as_str(),
+        "approved" | "rejected" | "supervisor_call" | "error"
+    ) {
+        return Err("invalid terminal verifier status".into());
+    }
+    std::fs::write(output, &bytes).map_err(|e| e.to_string())?;
+    let held = (request.status != "approved").then(|| format!(
+        "Automatic verifier recorded {}: {}. Findings: {}. The close stays held; answer or resolve this exact verdict on dispatch {}.",
+        request.status, request.summary, request.issues.as_deref().unwrap_or("[]"), dispatch.id,
+    ));
+    let verifier = CasCore::with_daemon(core.cas_root.clone(), None, core.daemon.clone());
+    verifier
+        .bind_agent_identity(
+            child.into(),
+            crate::mcp::AgentIdentitySource::ServerInternal,
+        )
+        .map_err(|e| e.to_string())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let verdict = runtime
+        .block_on(crate::async_runtime::heap_future(|| {
+            verifier.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))
+        }))
+        .map_err(|e| e.to_string())?;
+    if verdict.is_error == Some(true) {
+        return Err(format!("verdict refused: {verdict:?}"));
+    }
+    // A candidate verdict continues or holds its merge and notifies there.
+    // A close dispatch's approval resumes its close; anything else needs
+    // the owner, who would otherwise never see this daemon-recorded verdict.
+    if let Some(held) = held
+        && candidate_for_dispatch(&core.cas_root, dispatch)?.is_none()
+    {
+        attention(core, dispatch, &held)?;
+    }
+    Ok(())
+}
+
+/// The final eight lines within a 2 KiB window, redacted. The full output
+/// stays on disk, so an echoed prompt cannot flood the owner's notice.
+fn tail(bytes: &[u8]) -> String {
+    let window = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2048)..]);
+    let mut lines = window.lines().rev().take(8).collect::<Vec<_>>();
+    lines.reverse();
+    let tail = crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(
+        &lines.join("\n"),
+    );
+    if tail.trim().is_empty() { "(empty)".into() } else { tail }
+}
+
+/// The last top-level JSON object a harness printed. `claude -p` returns the
+/// model's final text, which may put prose or a Markdown fence around it.
+fn final_json_object(bytes: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut found = None;
+    let mut start = 0;
+    while let Some(offset) = bytes[start..].iter().position(|byte| *byte == b'{') {
+        let at = start + offset;
+        let mut stream = serde_json::Deserializer::from_slice(&bytes[at..])
+            .into_iter::<serde_json::Map<String, serde_json::Value>>();
+        match stream.next() {
+            Some(Ok(object)) => {
+                found = Some(object);
+                start = at + stream.byte_offset();
+            }
+            _ => start = at + 1,
+        }
+    }
+    found
+}
+
+// gate[N-16 notice]: Automatic verifier could not start
+pub(super) fn attention(
+    core: &CasCore,
+    dispatch: &VerificationDispatch,
+    detail: &str,
+) -> Result<(), String> {
+    let rows = core
+        .open_agent_store()
+        .map_err(|e| e.to_string())?
+        .list(None)
+        .map_err(|e| e.to_string())?;
+    let recipient = crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
+    crate::supervisor_notices::enqueue(
+        &core.cas_root,
+        &recipient,
+        "premerge_verification",
+        &format!(
+            "Task {} dispatch {}: {detail}",
+            dispatch.task_id, dispatch.id
+        ),
+        &format!("{}:{detail}", dispatch.id),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub(super) async fn approved(
+    core: &CasCore,
+    dispatch: &VerificationDispatch,
+) -> Result<String, McpError> {
+    let candidate = candidate_for_dispatch(&core.cas_root, dispatch)
+        .map_err(fail)?
+        .ok_or_else(|| fail("approved candidate missing"))?;
+    let owner = CasCore::with_daemon(core.cas_root.clone(), None, core.daemon.clone());
+    owner.bind_agent_identity(
+        dispatch.owner_agent_id.clone(),
+        crate::mcp::AgentIdentitySource::ServerInternal,
+    )?;
+    let _phase = crate::mcp::tools::service::mutation_receipt::phase("verification_auto_merge");
+    let result = crate::async_runtime::heap_future(|| {
+        owner.worktree_merge(
+            &candidate.source_branch,
+            false,
+            Some(&dispatch.task_id),
+            false,
+            Some(false),
+            false,
+            None,
+        )
+    })
+    .await;
+    let detail = match result {
+        Ok(result) if result.is_error != Some(true) => {
+            "Approved; the merge continued automatically.".to_string()
+        }
+        Err(error) if error.message.contains("TRAIN MERGE ACTIVE") => {
+            "Approved; the train queue continues this merge.".to_string()
+        }
+        other => {
+            let detail = format!("Approved; automatic merge held: {other:?}");
+            attention(core, dispatch, &detail).map_err(fail)?;
+            return Ok(detail);
+        }
+    };
+    // A readable receipt without a prompt: approval must not start another
+    // supervisor turn merely to acknowledge an automatic continuation.
+    let queue = crate::store::open_supervisor_queue_store(&core.cas_root).map_err(fail)?;
+    let notification = queue.notify_idempotent(&dispatch.owner_agent_id, "verification_approved",
+        &serde_json::json!({"task_id":dispatch.task_id,"dispatch_id":dispatch.id,"detail":detail}).to_string(),
+        cas_store::NotificationPriority::Normal, &format!("automatic-verifier-approved:{}", dispatch.id)).map_err(fail)?;
+    let id = match notification {
+        cas_store::NotifyIdempotentResult::Created(id)
+        | cas_store::NotifyIdempotentResult::AlreadyExists { id, .. } => id,
+    };
+    queue.mark_prompt_delivered(id).map_err(fail)?;
+    Ok(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_context_carries_configured_qa_mode_cas_8f8b() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let task = Task::new("cas-8f8b-context".into(), "Review context".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, "owner", "owner",
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        for mode in [crate::config::QaMode::Batch, crate::config::QaMode::PerTask] {
+            std::fs::write(root.join("config.toml"), format!("[qa]\nmode = '{mode}'\n")).unwrap();
+            // Each configured server loads its mode once; this is not a
+            // hot-reload contract for an already-running server.
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let input = prompt(&core, &task, &dispatch).unwrap();
+            let context = input.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|value| value.get("qa").is_some())
+                .unwrap_or(serde_json::Value::Null);
+            assert_eq!(context["qa"]["mode"], serde_json::to_value(mode).unwrap());
+        }
+    }
+
+    #[test]
+    fn slow_dispatch_preparation_returns_claim_before_provider_ready_cas_2efe() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-2efe".into(), "Slow verifier preparation".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let caller = core.clone();
+        let review_task = task.clone();
+        let review_dispatch = dispatch.clone();
+        // Gate the external provider preparation, not the verifier/store logic.
+        let request = std::thread::spawn(move || {
+            let result = launch_with_preparation(
+                &caller, &review_task, &review_dispatch,
+                caller.cas_root.join("verdict.json"), move |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Err("injected provider startup failure".into())
+                },
+            );
+            returned_tx.send(result).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let returned = returned_rx.recv_timeout(Duration::from_secs(5));
+        let live = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        let duplicate = if returned.is_ok() {
+            Some(launch_with_preparation(
+                &core, &task, &dispatch, root.join("duplicate.json"),
+                |_| panic!("a claimed dispatch must not probe another provider"),
+            ).unwrap())
+        } else { None };
+        release_tx.send(()).unwrap();
+        request.join().unwrap();
+        let handle = returned.expect("merge must return while provider preparation is gated")
+            .unwrap().unwrap();
+        assert_eq!(live.id, dispatch.id);
+        assert_eq!(live.state, cas_types::VerificationDispatchState::Claimed);
+        assert!(owns(&root, &live));
+        assert!(duplicate.unwrap().is_none());
+        handle.join().unwrap();
+        let recovered = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
+        assert!(!owns(&root, &recovered));
+    }
+
+    #[test]
+    fn cas_ce3e_launched_verifier_survives_attention_failure() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-ce3e-launch".into(), "Launch notification failure".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        crate::store::open_supervisor_queue_store(&root).unwrap();
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+            "CREATE TRIGGER fail_notice BEFORE INSERT ON supervisor_queue
+             BEGIN SELECT RAISE(FAIL, 'injected notification failure'); END;",
+        ).unwrap();
+        assert!(attention(&core, &dispatch, "fallback").is_err());
+        let directory = root.join("verification-runs").join(&dispatch.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        // The provider boundary exits immediately; the real launch, dispatch
+        // claim, notice and child cleanup still run against the actual store.
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 1"]);
+        let result = launch_with_preparation(
+            &core, &task, &dispatch, directory.join("verdict.json"),
+            move |_| Ok((command, Some("fallback".into()))),
+        );
+        let handle = result.expect("a notice failure must not report a failed launch")
+            .expect("the verifier was launched");
+        handle.join().unwrap();
+        let recovered = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert!(!owns(&root, &recovered));
+        assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
+    }
+
+    #[test]
+    fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
+        let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        env.set("CAS_TEST_HUB_PATH", &bin);
+        env.remove("CODEX_HOME");
+        // cas-c386: the default home is logged out and the logged-in account
+        // has no usage yet, so no account is recommended on capacity alone.
+        std::fs::create_dir_all(env.home().join(".codex")).unwrap();
+        let account = env.home().join(".codex-review");
+        std::fs::create_dir_all(account.join("sessions")).unwrap();
+        std::fs::write(account.join("auth.json"), "{}").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let script = bin.join("codex");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+if [ "$1" = login ]; then
+    [ -f "$CODEX_HOME/auth.json" ] || exit 1
+    echo 'Logged in using ChatGPT'
+    exit 0
+fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ] || [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ] || [ "$CAS_TEST_VERIFIER_STATUS" = malformed ] || [ "$CAS_TEST_VERIFIER_STATUS" = target_move ] || [ "$CAS_TEST_VERIFIER_STATUS" = no_code ]; then
+    while [ ! -f "$CAS_TEST_VERIFIER_GATE" ]; do sleep 0.05; done
+fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = target_move ] && ! mkdir "$CAS_TEST_VERIFIER_GATE-reviewed" 2>/dev/null; then
+    echo '{"status":"supervisor_call","summary":"Review the new target before publication","confidence":0.95,"files_reviewed":"README.md","issues":"[]"}'
+    exit 0
+fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ]; then
+    echo 'Task is already Closed' >&2
+    exit 1
+fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ]; then
+    echo 'old diagnostic excluded from bounded tail' >&2
+    i=0; while [ "$i" -lt 12 ]; do echo 'retrying transport' >&2; i=$((i+1)); done
+    echo '401 Unauthorized: Missing bearer or basic authentication in header' >&2
+    exit 1
+fi
+[ -f "$CODEX_HOME/auth.json" ] || { echo '401 Unauthorized: Missing bearer' >&2; exit 1; }
+[ "$CAS_INTERNAL_LLM" = 1 ] && [ -z "$CAS_AGENT_ROLE$CAS_AGENT_ID$CAS_SESSION_ID" ] || exit 2
+cat "$CAS_TEST_VERIFIER_RESPONSE"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // cas-bdde: a logged-in Claude CLI, written before any child runs.
+        let claude = bin.join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\n[ \"$1\" = --version ] && { echo '9.9.9 (Claude Code)'; exit 0; }\necho '{\"loggedIn\":true}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Registry login probes use the CLI on PATH. Isolate that PATH in a
+        // child test process, never mutate the library test process's PATH.
+        if !child {
+            let path =
+                std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap();
+            let module = module_path!().split_once("::").unwrap().1;
+            let result = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &format!("{module}::automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f"), "--nocapture"])
+                .env("PATH", path)
+                .env("CAS_TEST_PREMERGE_ACCOUNT_CHILD", "1")
+                .output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            eprintln!("{}", String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+        for status in [
+            "harness_failed",
+            "approved",
+            "rejected",
+            "supervisor_call",
+            "malformed",
+            "late_error",
+            "target_move",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let run = |args: &[&str]| super::super::tests::run(repo, args);
+            run(&["init", "-q", "-b", "epic/train"]);
+            run(&["config", "user.name", "Test"]);
+            run(&["config", "user.email", "test@example.invalid"]);
+            let root = crate::store::init_cas_dir(repo).unwrap();
+            std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
+            std::fs::write(root.join("config.toml"), "[worktrees]\nenabled = true\n[qa]\nmode = 'batch'\n[verification]\nenabled = true\n[code_review]\nowner = 'worker'\n").unwrap();
+            super::super::tests::commit_file(repo, "README.md", "heading\n\nbase\n\nfooter\n", "base");
+            let lane = root.join("worktrees/worker");
+            run(&[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "factory/worker",
+                lane.to_str().unwrap(),
+            ]);
+            let source =
+                super::super::tests::commit_file(&lane, "README.md", "heading\n\ndelivery\n\nfooter\n", "delivery");
+            env.set("CAS_ROOT", &root);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let daemon =
+                crate::mcp::daemon::EmbeddedDaemon::new(crate::mcp::daemon::EmbeddedDaemonConfig {
+                    cas_root: root.clone(),
+                    ..Default::default()
+                });
+            let core = CasCore::with_daemon(root.clone(), None, Some(std::sync::Arc::new(daemon)));
+            let owner = cas_types::Agent::new_with_role(
+                "owner".into(),
+                "supervisor".into(),
+                cas_types::AgentRole::Supervisor,
+            );
+            core.open_agent_store().unwrap().register(&owner).unwrap();
+            core.bind_agent_identity(
+                owner.id.clone(),
+                crate::mcp::AgentIdentitySource::ServerInternal,
+            )
+            .unwrap();
+            let mut task = Task::new("cas-381f-auto".into(), "Automatic verifier fixture".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.depth = cas_types::TaskDepth::Deep;
+            task.assignee = Some("worker".into());
+            task.acceptance_criteria = "Preserve the delivery".into();
+            task.notes =
+                "Supervisor adversarial note: preserve drafts. Receipt: scoped worker proof."
+                    .into();
+            task.deliverables.factory_branch_anchor = Some(source.clone());
+            task.deliverables.parked_branch = Some("factory/worker".into());
+            task.deliverables.parked_close_reason = Some("PASS fixture".into());
+            // The delivery lane the approved merge lands on is the parent epic's.
+            let mut epic = Task::new("cas-381f-epic".into(), "Train".into());
+            epic.task_type = cas_types::TaskType::Epic;
+            epic.branch = Some("epic/train".into());
+            let tasks = core.open_task_store().unwrap();
+            tasks.add(&epic).unwrap();
+            tasks.add(&task).unwrap();
+            tasks
+                .add_dependency(&cas_types::Dependency::new(
+                    task.id.clone(),
+                    epic.id.clone(),
+                    cas_types::DependencyType::ParentChild,
+                ))
+                .unwrap();
+            core.open_worktree_store()
+                .unwrap()
+                .add(&cas_types::Worktree::new(
+                    "factory/worker".into(),
+                    "factory/worker".into(),
+                    "epic/train".into(),
+                    lane,
+                ))
+                .unwrap();
+            let response = if status == "malformed" {
+                "not a verdict".into()
+            } else {
+                let verdict_status = if status == "target_move" { "approved" } else { status };
+                let verdict = serde_json::json!({"status": verdict_status, "summary": format!("{status}: operator draft probe"),
+                    "confidence":0.95,"files_reviewed":"README.md","issues":"[]",
+                    "task_id":"cas-other","dispatch_id":"vdispatch-other", "verifier_capability":"forged",
+                    "verification_type":"epic", "duration_ms":0}).to_string();
+                // cas-2b80b: `claude -p` prints the model's final text, which
+                // can lead with prose and fence the object (serde: "expected
+                // value at line 1 column 1"). The verdict is the last object.
+                if verdict_status == "approved" {
+                    format!("Review complete; {{draft}} preserved.\n\n```json\n{verdict}\n```\n")
+                } else {
+                    verdict
+                }
+            };
+            let response_path = root.join("provider-response.json");
+            std::fs::write(&response_path, response).unwrap();
+            let gate = root.join("verifier-gate");
+            env.set("CAS_TEST_VERIFIER_GATE", &gate);
+            env.set("CAS_TEST_VERIFIER_RESPONSE", &response_path);
+            env.set("CAS_TEST_VERIFIER_STATUS", status);
+            // cas-f2dc: drive the real merge refusal with automatic review on;
+            // the refusal leaves the one running verifier's dispatch in place.
+            assert!(
+                core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err(),
+                "{status}: an unreviewed delivery cannot merge"
+            );
+            let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id)
+                .unwrap()
+                .unwrap();
+            let candidate = candidate_for_dispatch(&root, &dispatch).unwrap().unwrap();
+            let directory = std::fs::read_dir(root.join("verification-runs").join(&dispatch.id))
+                .unwrap().next().unwrap().unwrap().path();
+            let output = directory.join("verdict.json");
+            assert!(
+                core.emit_premerge_review_handoff(&task, &dispatch)
+                    .unwrap()
+                    .is_none(),
+                "a retried merge cannot launch a second reviewer"
+            );
+            if status == "late_error" {
+                // The dispatch settles while the verifier is still in flight.
+                let tasks = core.open_task_store().unwrap();
+                let mut settled = tasks.get(&task.id).unwrap();
+                settled.status = cas_types::TaskStatus::Closed;
+                tasks.update(&settled).unwrap();
+            }
+            if status == "target_move" {
+                // GH #1837: the approved review is about to finish against an
+                // old target. The adjacent edit touches the delivered path,
+                // so the stale result cannot approve or publish a new candidate.
+                super::super::tests::commit_file(repo, "README.md",
+                    "new heading\n\nbase\n\nfooter\n", "target moved during review");
+            }
+            std::fs::write(&gate, "go").unwrap();
+            let child_done = || {
+                !core.open_agent_store().unwrap().list(None).unwrap().iter().any(|agent| {
+                    agent.metadata.contains_key(OWNER_KEY)
+                        && agent.status == cas_types::AgentStatus::Active
+                })
+            };
+            // The verdict paths finish their merge or notice around the child's
+            // exit, so also wait for each status's own end state.
+            let settled = || {
+                child_done()
+                    && match status {
+                        "approved" => Command::new("git")
+                            .current_dir(repo)
+                            .args(["merge-base", "--is-ancestor", &source, "epic/train"])
+                            .status()
+                            .is_ok_and(|s| s.success()),
+                        "target_move" => cas_store::get_latest_verification_dispatch(&root, &task.id)
+                            .unwrap().is_some_and(|latest| latest.id != dispatch.id
+                                && cas_store::get_verification_for_dispatch(&root, &latest.id).unwrap()
+                                    .is_some_and(|verdict| verdict.status == VerificationStatus::SupervisorCall)),
+                        "rejected" | "supervisor_call" => !crate::store::open_prompt_queue_store(&root)
+                            .unwrap()
+                            .peek_all(10)
+                            .unwrap()
+                            .is_empty(),
+                        _ => true,
+                    }
+            };
+            for _ in 0..600 {
+                if settled() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(
+                settled(),
+                "{status}: verifier never finished; child_done={} dispatch={:?} prompts={:?}",
+                child_done(),
+                cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
+                crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
+            );
+            let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            if status == "target_move" {
+                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Invalidated);
+                let latest = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+                assert_ne!(latest.id, dispatch.id);
+                assert_ne!(latest.verifier_agent_id, claimed.verifier_agent_id);
+                let verdict = cas_store::get_verification_for_dispatch(&root, &latest.id).unwrap().unwrap();
+                assert_eq!(verdict.status, VerificationStatus::SupervisorCall);
+                assert_eq!(verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
+                assert!(!Command::new("git").current_dir(repo)
+                    .args(["merge-base", "--is-ancestor", &source, "epic/train"])
+                    .status().unwrap().success());
+                continue;
+            }
+            if matches!(status, "harness_failed" | "malformed") {
+                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Pending);
+                assert!(!owns(&root, &claimed));
+            } else {
+                assert!(owns(&root, &claimed));
+            }
+            let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
+            if matches!(status, "malformed" | "harness_failed" | "late_error") {
+                assert!(verdict.is_none(), "failed transport cannot approve");
+            } else {
+                let verdict = verdict.unwrap_or_else(|| {
+                    panic!(
+                        "{status}: no verdict; output {:?}",
+                        crate::store::open_prompt_queue_store(&root)
+                            .unwrap()
+                            .peek_all(10)
+                            .unwrap()
+                    )
+                });
+                assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+                assert_eq!(
+                    verdict.provenance,
+                    cas_types::VerificationProvenance::TaskVerifier
+                );
+                assert_eq!(verdict.agent_id, claimed.verifier_agent_id);
+            }
+            let body = std::fs::read_to_string(output.with_file_name("prompt.txt")).unwrap();
+            assert!(body.contains(&candidate.proof.worktree_root));
+            assert!(body.contains("preserve drafts"));
+            assert!(body.contains("scoped worker proof"));
+            // cas-e17a: the verifier reads the evidence where park wrote it.
+            let base = crate::config::resolved_factory_artifacts_root(None);
+            let [evidence, _] = crate::config::factory_task_artifact_dirs(&root, &base, &task.id);
+            assert!(body.contains(&evidence.display().to_string()), "{status}: {}", evidence.display());
+            let prompts = crate::store::open_prompt_queue_store(&root)
+                .unwrap()
+                .peek_all(20)
+                .unwrap();
+            if status == "approved" {
+                assert!(
+                    super::super::tests::run(
+                        repo,
+                        &["merge-base", "--is-ancestor", &source, "epic/train"]
+                    )
+                    .is_empty()
+                );
+                if status == "approved" {
+                    assert!(
+                        prompts.is_empty(),
+                        "approval must not wake the supervisor: {prompts:?}"
+                    );
+                }
+            } else if status == "late_error" {
+                // A late verifier error on a settled dispatch stays silent.
+                assert!(prompts.is_empty(), "no recovery notice: {prompts:?}");
+            } else {
+                assert_eq!(
+                    prompts.len(),
+                    1,
+                    "{status}: exactly one actionable notice: {prompts:?}"
+                );
+                assert!(
+                    prompts[0].prompt.contains(match status {
+                        // The refused output itself, not just the parse error.
+                        "malformed" => "not a verdict",
+                        "harness_failed" =>
+                            "401 Unauthorized: Missing bearer or basic authentication in header",
+                        _ => "operator draft probe",
+                    }),
+                    "{status}: {:?}",
+                    prompts[0]
+                );
+                if status == "harness_failed" {
+                    let diagnostics =
+                        std::fs::read_to_string(output.with_file_name("harness.log")).unwrap();
+                    assert!(
+                        !prompts[0]
+                            .prompt
+                            .contains(diagnostics.lines().next().unwrap())
+                    );
+                }
+            }
+            if status == "supervisor_call" {
+                // cas-d5bb / cas-44eb: an answer is context for the verifier,
+                // not a supervisor-authored final approval.
+                let question = cas_store::get_verification_for_dispatch(&root, &dispatch.id)
+                    .unwrap().unwrap().summary;
+                let answer = "Scope reviewed: preserve drafts and use the existing scoped receipt.";
+                std::fs::write(&response_path, serde_json::json!({
+                    "status":"approved", "summary":"Independent verdict after scope answer",
+                    "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
+                }).to_string()).unwrap();
+                env.set("CAS_TEST_VERIFIER_STATUS", "approved");
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let request = serde_json::from_value(serde_json::json!({
+                    "task_id":task.id, "dispatch_id":dispatch.id,
+                    "status":"supervisor_call", "summary":answer,
+                })).unwrap();
+                runtime.block_on(core.cas_verification_add(
+                    rmcp::handler::server::wrapper::Parameters(request),
+                )).unwrap();
+                let resumed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+                assert_eq!(resumed.id, dispatch.id);
+                assert_ne!(resumed.verifier_agent_id, claimed.verifier_agent_id);
+                for _ in 0..600 {
+                    if settled() { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                assert!(settled());
+                let final_dispatch = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+                let final_verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+                assert_eq!(final_dispatch.state, cas_types::VerificationDispatchState::Resolved);
+                assert_eq!(final_verdict.status, VerificationStatus::Approved);
+                assert_eq!(final_verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
+                assert_eq!(final_verdict.agent_id, resumed.verifier_agent_id);
+                let conversation = std::fs::read_dir(root.join("verification-runs").join(&dispatch.id))
+                    .unwrap().map(|entry| entry.unwrap().path().join("prompt.txt"))
+                    .filter(|path| path != &output.with_file_name("prompt.txt"))
+                    .map(|path| std::fs::read_to_string(path).unwrap())
+                    .find_map(|body| body.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                        .find_map(|value| value.get("supervisor_calls").cloned()))
+                    .unwrap();
+                let summaries = conversation.as_array().unwrap().iter()
+                    .map(|call| call["summary"].as_str().unwrap()).collect::<Vec<_>>();
+                assert!(summaries.contains(&question.as_str()));
+                assert!(summaries.contains(&answer));
+                assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().is_some());
+            }
+            if status == "harness_failed" {
+                let old_child = dispatch.verifier_agent_id.as_deref().unwrap();
+                let old_stderr = std::fs::read(output.with_file_name("harness.log")).unwrap();
+                std::fs::write(&response_path, serde_json::json!({
+                    "status":"approved", "summary":"replacement reviewed the candidate",
+                    "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
+                }).to_string()).unwrap();
+                env.set("CAS_TEST_VERIFIER_STATUS", "approved");
+                // Retry the merge's automatic handoff once, retaining its join
+                // handle so completion needs no new timer or polling loop.
+                let handle = core.emit_premerge_review_handoff(&task, &claimed).unwrap().unwrap();
+                let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+                assert_eq!(replacement.id, dispatch.id);
+                assert_ne!(replacement.verifier_agent_id.as_deref(), Some(old_child));
+                assert!(core.emit_premerge_review_handoff(&task, &replacement).unwrap().is_none());
+                let stale = CasCore::with_daemon(root.clone(), None, core.daemon.clone());
+                stale.bind_agent_identity(old_child.into(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+                let request = serde_json::from_value(serde_json::json!({
+                    "task_id":task.id, "dispatch_id":dispatch.id, "status":"rejected",
+                    "summary":"stale child's competing verdict", "issues":"[]",
+                })).unwrap();
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                assert!(runtime.block_on(stale.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))).is_err());
+                handle.join().unwrap();
+                let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+                assert_eq!(verdict.status, VerificationStatus::Approved);
+                assert_eq!(verdict.agent_id, replacement.verifier_agent_id);
+                assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().is_some());
+                assert_eq!(std::fs::read(output.with_file_name("harness.log")).unwrap(), old_stderr);
+            }
+            eprintln!(
+                "AUTOMATIC_VERIFIER row={status} hand_launches=0 dispatch={} candidate={}",
+                dispatch.id, candidate.proof.head_commit
+            );
+        }
+        // GH #1867: a no-code close dispatch has no candidate proof. The same
+        // daemon-owned verifier reviews it and records the exact verdict, and
+        // the owner hears about either outcome.
+        for status in ["approved", "rejected"] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            super::super::tests::run(repo, &["init", "-q", "-b", "main"]);
+            let root = crate::store::init_cas_dir(dir.path()).unwrap();
+            std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
+            super::super::tests::commit_file(repo, "README.md", "base\n", "base");
+            std::fs::write(root.join("config.toml"), "[verification]\nenabled = true\n[worktrees]\nenabled = false\n[qa]\nmode = 'batch'\nevidence_gate = false\nindependent_pass = false\n").unwrap();
+            env.set("CAS_ROOT", &root);
+            env.set("CAS_AGENT_ROLE", "worker");
+            env.set("CAS_FACTORY_MODE", "1");
+            env.set("CAS_TEST_VERIFIER_STATUS", "no_code");
+            let gate = root.join("verifier-gate");
+            env.set("CAS_TEST_VERIFIER_GATE", &gate);
+            let response = root.join("provider-response.json");
+            std::fs::write(&response, serde_json::json!({"status": status,
+                "summary": "no-code proof reviewed", "confidence": 0.9,
+                "files_reviewed": "", "issues": "[]"}).to_string()).unwrap();
+            env.set("CAS_TEST_VERIFIER_RESPONSE", &response);
+            let daemon = crate::mcp::daemon::EmbeddedDaemon::new(
+                crate::mcp::daemon::EmbeddedDaemonConfig { cas_root: root.clone(), ..Default::default() },
+            );
+            let core = CasCore::with_daemon(root.clone(), None, Some(std::sync::Arc::new(daemon)));
+            let mut owner = cas_types::Agent::new_with_role(
+                "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+            );
+            owner.factory_session = Some("no-code-session".into());
+            core.open_agent_store().unwrap().register(&owner).unwrap();
+            let mut worker = cas_types::Agent::new_with_role(
+                "worker".into(), "worker".into(), cas_types::AgentRole::Worker,
+            );
+            worker.factory_session = owner.factory_session.clone();
+            core.open_agent_store().unwrap().register(&worker).unwrap();
+            core.bind_agent_identity(worker.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+            // Factory reviews cross the real local control boundary. A session
+            // name alone cannot stand in for the daemon that claims the review.
+            use crate::ui::factory::{ClientMessage, DaemonMessage, SessionState,
+                FRAME_HEADER_SIZE, PROTOCOL_VERSION, decode_length, encode_message,
+                gui_socket_path, local_gui_capabilities};
+            use std::io::{Read, Write};
+            use std::os::fd::AsRawFd;
+            let session = owner.factory_session.clone().unwrap();
+            let socket = gui_socket_path(&session);
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let broker_root = root.clone();
+            let (claimed, claim) = std::sync::mpsc::channel();
+            let broker = std::thread::spawn(move || {
+                let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                assert!(unsafe { libc::poll(&mut ready, 1, 10000) } > 0);
+                let (mut client, _) = listener.accept().unwrap();
+                client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                client.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                client.write_all(&encode_message(&DaemonMessage::Welcome {
+                    session_name: session.clone(),
+                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                        epic_title: None, cols: 80, rows: 24 },
+                    scrollback: None, protocol_version: PROTOCOL_VERSION,
+                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+                }).unwrap()).unwrap();
+                let mut header = [0; FRAME_HEADER_SIZE];
+                client.read_exact(&mut header).unwrap();
+                let mut body = vec![0; decode_length(&header)];
+                client.read_exact(&mut body).unwrap();
+                let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+                    else { panic!("unexpected factory control"); };
+                let review = super::super::factory_launch::launch(&broker_root, &session, &dispatch_id)
+                    .unwrap().unwrap();
+                client.write_all(&encode_message(&DaemonMessage::VerifierLaunched {
+                    dispatch_id: dispatch_id.clone(),
+                }).unwrap()).unwrap();
+                claimed.send(dispatch_id).unwrap();
+                review.join().unwrap();
+                std::fs::remove_file(socket).unwrap();
+            });
+            let mut task = Task::new("cas-e50f-no-code".into(), "No-code close".into());
+            task.status = cas_types::TaskStatus::InProgress;
+            task.task_type = cas_types::TaskType::Chore;
+            task.assignee = Some(worker.name.clone());
+            task.risk = vec![cas_types::TaskRisk::None];
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some("artifact:cas-e50f/report".into());
+            core.open_task_store().unwrap().add(&task).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id, "reason": "External artifact published; no source changes",
+            })).unwrap();
+            let close = runtime.block_on(crate::async_runtime::heap_future(|| {
+                core.cas_task_close(rmcp::handler::server::wrapper::Parameters(request))
+            })).unwrap();
+            assert_eq!(close.is_error, Some(true), "initial close must await review: {close:?}");
+            let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
+                .unwrap_or_else(|| panic!("real close did not dispatch: {close:?}"));
+            assert_eq!(claim.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), dispatch.id);
+            let dispatch = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+            assert_eq!(dispatch.requester_agent_id, worker.id);
+            assert_eq!(dispatch.owner_agent_id, owner.id);
+            assert!(core.open_task_store().unwrap().get(&task.id).unwrap().pending_verification);
+            assert!(owns(&root, &dispatch));
+            assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(worker.id.as_str()));
+            assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(owner.id.as_str()));
+            std::fs::write(&gate, "go").unwrap();
+            broker.join().unwrap();
+            let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+            let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap()
+                .unwrap_or_else(|| panic!("{status}: no verdict; notices {prompts:?}"));
+            assert_eq!(verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
+            assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+            assert_eq!(verdict.status.to_string(), status);
+            assert_eq!(verdict.agent_id,
+                cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().verifier_agent_id);
+            // Approval queues the ordinary close recovery; a held verdict
+            // queues its own notice. Either way the owner sees one row.
+            assert_eq!(
+                prompts.iter().filter(|row| row.prompt.contains(&dispatch.id)).count(),
+                1,
+                "{status}: {prompts:?}"
+            );
+            eprintln!("NO_CODE_CLOSE status={status} dispatch={} verifier={:?} verdict={}",
+                dispatch.id, verdict.agent_id, verdict.id);
+        }
+        // With no eligible home left, the refusal names each home's state
+        // instead of blaming only the logged-out default home.
+        std::fs::write(
+            account.join("sessions/usage.jsonl"),
+            serde_json::json!({
+                "timestamp": chrono::Utc::now(), "payload": {"rate_limits": {
+                    "primary": {"used_percent": 100.0, "window_minutes": 10080,
+                        "resets_at": (chrono::Utc::now() + chrono::Duration::days(2)).timestamp()}
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let refused = command(env.home(), &env.home().join("verdict.json")).unwrap_err();
+        for needle in [".codex-review", "100%", " ET", "not logged in"] {
+            assert!(refused.contains(needle), "{needle}: {refused}");
+        }
+        // cas-bdde: with every Codex home ineligible, an eligible Claude home
+        // runs the same verifier, and the notice names harness and account.
+        let claude_home = env.home().join(".claude-review");
+        std::fs::create_dir_all(&claude_home).unwrap();
+        let reset = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+        std::fs::write(
+            claude_home.join(".cas-claude-usage.json"),
+            serde_json::json!({"identity": null, "observed_at": chrono::Utc::now(), "windows": [
+                {"name": "5h", "used_percent": 10.0, "reset_at": reset, "spend_dollars": null},
+                {"name": "weekly", "used_percent": 20.0, "reset_at": reset, "spend_dollars": null},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let (fallback, notice) = command(env.home(), &env.home().join("verdict.json")).unwrap();
+        assert!(fallback.get_args().any(|arg| arg == "-p"), "{fallback:?}");
+        assert!(
+            fallback.get_envs().any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
+                && value.is_some_and(|dir| std::path::Path::new(dir) == claude_home)),
+            "{fallback:?}"
+        );
+        let notice = notice.expect("fallback notice");
+        assert!(notice.contains("Claude") && notice.contains("review"), "{notice}");
+    }
+}

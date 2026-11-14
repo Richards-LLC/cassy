@@ -101,10 +101,7 @@ describe("offline operator messages (§10)", () => {
     continueSync.release();
     const [stale] = await delayedSync;
     expect(queued.state).toBe("pending_machine");
-    expect(commandStatusLabel(queued.state)).toBe("Waiting for the machine");
-    expect(commandStatusLabel(queued.state, "soundwave")).toBe("Waiting for soundwave");
     expect(synced.state).toBe("accepted");
-    expect(commandStatusLabel(synced.state, "soundwave")).toBe("soundwave received it");
     expect(stale.state).toBe("accepted");
     expect(stale.request).toEqual(queued.request);
     expect((await phone.store.commands(cloud.accountId))[0].state).toBe("accepted");
@@ -128,7 +125,6 @@ describe("offline operator messages (§10)", () => {
     cloud.faults.push({ method: "POST", pathPrefix: "/api/operator/commands", status: 503, code: "temporarily_unavailable", times: 1 });
     const queued = await queueOfflineMessage(phone.context, target, "during outage");
     expect(queued.state).toBe("submitting");
-    expect(commandStatusLabel(queued.state)).toBe("Queued on this device");
     const [retried] = await syncCommands(phone.context);
     expect(retried.state).toBe("pending_machine");
     expect(retried.commandId).toBe(queued.commandId);

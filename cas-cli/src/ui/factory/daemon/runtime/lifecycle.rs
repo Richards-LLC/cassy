@@ -60,6 +60,7 @@ fn enqueue_worker_attention_relay(
 /// activity), so the stored row is the "already paged" mark (cas-b080).
 ///
 /// [`SUPERVISOR_IDLE_OPERATOR_PAGE_SECS`]: crate::ui::factory::director::SUPERVISOR_IDLE_OPERATOR_PAGE_SECS
+// gate[W-04 watchdog]: Supervisor-idle operator page
 fn page_operator_for_idle_supervisor(
     cas_dir: &std::path::Path,
     next_step: &crate::ui::factory::director::SupervisorActionableState,
@@ -118,6 +119,7 @@ pub(super) fn record_operator_page(
         options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     }) {
         Ok(payload) => payload,
         Err(error) => {
@@ -153,6 +155,7 @@ pub(super) fn record_operator_page(
 /// Known cost: a verifier that dies just after an extension is reported up
 /// to about twelve minutes late (the ten-minute extension plus the two-minute
 /// lead), never later than the hour cap.
+// gate[W-38 watchdog]: Verification dispatch deadline extension
 fn extend_progressing_verification_dispatches(
     cas_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
@@ -219,6 +222,7 @@ fn extend_progressing_verification_dispatches(
 /// skipped before the per-sweep cap, so a burst of expiries cannot keep the
 /// same oldest rows in front of newer ones. Returns how many expired
 /// dispatches have a persisted relay after this sweep.
+// gate[W-39 watchdog]: Expired verification dispatch relay (verification_dispatch_expired)
 pub(super) fn escalate_expired_verification_dispatches(
     cas_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
@@ -262,7 +266,7 @@ pub(super) fn escalate_expired_verification_dispatches(
         .take(RELAYS_PER_SWEEP)
         .filter(|dispatch| {
             let detail = format!(
-                "Verification dispatch {} for {} passed its deadline {} with no verdict. Re-dispatch the verifier (or verify directly), then finish the close.",
+                "Verification dispatch {} for {} passed its deadline {} with no verdict. Retry the close or merge that opened it to start Cassy's daemon-owned verifier, or record the verdict directly on mechanical evidence, then finish the close.",
                 dispatch.id,
                 dispatch.task_id,
                 dispatch.deadline_at.to_rfc3339()
@@ -302,6 +306,7 @@ fn enqueue_worker_attention_relay_for_episode(
         if let Some(episode) = operator_page_episode {
             page_operator_for_idle_supervisor(cas_dir, next_step, *episode);
         }
+        // gate[W-47 watchdog]: Merged-close-blocked relay (merged_close_blocked)
         if next_step.merged_close_blocked_relay_key().is_some() {
             // Each delivery owns one durable notice, even when the mixed queue
             // gains another task or the supervisor/daemon starts a new turn.
@@ -462,27 +467,6 @@ pub(super) fn enqueue_usage_limit_relay(
         |_| detail.to_owned(), occurrence, None, &[], true).0
 }
 
-/// Surface a terminal harness-side refusal even when its MCP child continues
-/// heartbeating. The evidence is collected from the harness artifact, not
-/// inferred from heartbeat age.
-pub(super) fn enqueue_worker_unavailable_relay(
-    cas_dir: &std::path::Path,
-    worker: &str,
-    occurrence: &str,
-) -> WorkerAttentionRelayOutcome {
-    let detail = format!(
-        "Worker {worker}'s harness reported a terminal unavailable state while its process may still heartbeat."
-    );
-    enqueue_worker_attention_relay_detail(
-        cas_dir,
-        "worker_unavailable",
-        worker,
-        None,
-        None,
-        &detail,
-        occurrence,
-    )
-}
 
 /// cas-2ffe (GH #915): several workers' harnesses exited within the
 /// correlation window. One wake names every worker and its exit status, keyed
@@ -714,6 +698,32 @@ pub(super) fn enqueue_worker_approval_pending_relay(
     )
 }
 
+/// Tasks replicate between machines; worker registrations do not. Delivery
+/// relays belong to the registered worker's factory, never an ambient watcher.
+/// Retired registrations still support successor/operator recovery. An empty
+/// worker is a supervisor-owned epic PR and retains ambient session routing.
+fn delivery_relay_factory_session(
+    agents: &dyn cas_store::AgentStore,
+    worker: &str,
+) -> Result<Option<String>, WorkerAttentionRelayOutcome> {
+    if worker.is_empty() {
+        return Ok(std::env::var("CAS_FACTORY_SESSION").ok());
+    }
+    agents
+        .list(None)
+        .map_err(|_| WorkerAttentionRelayOutcome::Pending)?
+        .into_iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Worker
+                && (agent.id == worker || agent.name == worker)
+        })
+        .max_by_key(|agent| (agent.id == worker, agent.registered_at))
+        .and_then(|agent| agent.factory_session)
+        .filter(|session| !session.trim().is_empty())
+        .map(Some)
+        .ok_or(WorkerAttentionRelayOutcome::Pending)
+}
+
 /// A parked delivery whose PR was ejected must wake the supervisor *and* put
 /// a durable instruction in the delivering worker's inbox. The occurrence is
 /// a failed merge-group run ID when available, so a requeue naturally arms a
@@ -742,29 +752,9 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let factory_session = if worker.is_empty() {
-        std::env::var("CAS_FACTORY_SESSION").ok()
-    } else {
-        // Tasks replicate between machines; agent registrations do not. A
-        // foreign worker missing here belongs to its own daemon, never the
-        // watcher process's ambient supervisor. Retain retired registrations
-        // so the existing dead-owner successor/operator recovery still works.
-        let Ok(agents) = agent_store.list(None) else {
-            return WorkerAttentionRelayOutcome::Pending;
-        };
-        let session = agents
-            .into_iter()
-            .filter(|agent| {
-                agent.role == cas_types::AgentRole::Worker
-                    && (agent.id == worker || agent.name == worker)
-            })
-            .max_by_key(|agent| (agent.id == worker, agent.registered_at))
-            .and_then(|agent| agent.factory_session)
-            .filter(|session| !session.trim().is_empty());
-        let Some(session) = session else {
-            return WorkerAttentionRelayOutcome::Pending;
-        };
-        Some(session)
+    let factory_session = match delivery_relay_factory_session(agent_store.as_ref(), worker) {
+        Ok(session) => session,
+        Err(outcome) => return outcome,
     };
     crate::quality_ledger::queue_ejected(cas_dir, &crate::quality_ledger::QueueEjection {
         task_id: task_id.into(), pr_number, failed_run_id,
@@ -829,6 +819,14 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
             id,
             prompt_delivered: true,
         }) if supervisor.id != "operator" => {
+            // A run can be listed after the run-less exit was relayed. The
+            // notice is already delivered, but its repair may still be new.
+            let Ok(task) = task_store.get(task_id) else {
+                return WorkerAttentionRelayOutcome::Pending;
+            };
+            if !repair.apply(cas_dir, &task, &supervisor.id, &detail) {
+                return WorkerAttentionRelayOutcome::Pending;
+            }
             return WorkerAttentionRelayOutcome::Persisted {
                 notification_id: id,
             };
@@ -1038,10 +1036,15 @@ impl MergeQueueRepair {
                     "merge_queue_ejected: {detail}\nMerge-queue repair cycle 1 of 1 (rule-176(5)) {}: run every remaining queue check locally in the runner's environment and in parallel, fix all failures in one batch, then re-deliver. A second ejection pages the operator.",
                     Self::marker(*run, head),
                 );
-                cas_store::request_changes_for_parked_delivery(cas_dir, &task.id, actor, &reason)
+                let returned = cas_store::request_changes_for_parked_delivery(cas_dir, &task.id, actor, &reason)
                     .map_err(|error| tracing::warn!(task_id = %task.id, %error, "cas-25ce: ejected delivery not returned"))
-                    .is_ok()
+                    .is_ok();
+                if returned {
+                    let _ = crate::store::publish_direct_task_write(cas_dir, &task.id);
+                }
+                returned
             }
+            // gate[N-28 notice]: Second merge-queue ejection operator page
             Self::PageOperator { run, head } => {
                 let paged = record_operator_page(
                     cas_dir,
@@ -1118,6 +1121,10 @@ fn enqueue_delivery_pr_merged_wake(
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
     use cas_store::NotificationPriority;
 
+    let agents = crate::store::open_agent_store(cas_dir)
+        .map_err(|error| format!("could not open agent store: {error}"))?;
+    let factory_session = delivery_relay_factory_session(agents.as_ref(), worker)
+        .map_err(|_| format!("could not resolve a local delivery owner for worker {worker}"))?;
     crate::quality_ledger::check_run(cas_dir, crate::quality_ledger::Check {
         natural_key: format!("merge_queue|{task_id}|{pr_number}|{merge_commit}"),
         check_id: crate::quality_ledger::MERGE_QUEUE_CHECK,
@@ -1130,9 +1137,54 @@ fn enqueue_delivery_pr_merged_wake(
         actor: None,
     });
 
+    // cas-ffd5: a merged receipt is not a reusable pre-merge approval. Use
+    // close's exact-cycle selection before issuing its worker instruction.
+    if !release_wait {
+        use crate::mcp::tools::core::task::lifecycle::close_ops::{
+            close_cycle_verdict, required_verification_type,
+        };
+        let task = crate::store::open_task_store_cached(cas_dir)
+            .map_err(|error| format!("could not open merged task store: {error}"))?
+            .get(task_id)
+            .map_err(|error| format!("could not read merged task: {error}"))?;
+        let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, task_id)
+            .map_err(|error| format!("could not read merged delivery proof cycle: {error}"))?;
+        let verifications = crate::store::open_verification_store(cas_dir)
+            .map_err(|error| format!("could not open verification store: {error}"))?;
+        let legacy = if task.task_type == cas_types::TaskType::Epic {
+            verifications.get_latest_for_task_by_type(task_id, cas_types::VerificationType::Epic)
+        } else {
+            verifications.get_latest_for_task(task_id)
+        }.map_err(|error| format!("could not read merged delivery verdict: {error}"))?;
+        let verdict = close_cycle_verdict(cas_dir, dispatch.as_ref(), legacy.as_ref())
+            .map_err(|error| format!("could not resolve merged delivery verdict: {error}"))?;
+        let approved = verdict.is_some_and(|verdict| {
+            verdict.verification_type == required_verification_type(task.task_type)
+                && matches!(verdict.status,
+                    cas_types::VerificationStatus::Approved | cas_types::VerificationStatus::Skipped)
+        });
+        if !approved {
+            let branch = task.deliverables.parked_branch.as_deref()
+                .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))
+                .unwrap_or(worker);
+            let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+            let detail = format!(
+                "PR #{pr_number} for {task_id} merged at {merge_commit}, but no reusable pre-merge verdict is recorded. Supervisor recovery: {prefix}factory action=worktree_merge id={branch} task_id={task_id} to reconcile its existing candidate and promotion. If no pre-merge dispatch exists, use {prefix}task action=request_changes id={task_id} reason=\"Prepare a reviewable correction before publication\" and review that fresh delivery before merging it. Do not ask the worker to repeat close; close cannot create approval."
+            );
+            let key = format!("delivery-pr-merged:{task_id}:{pr_number}:{merge_commit}");
+            // Use the existing typed delivery-stall lane: an unknown kind
+            // would persist an inbox row without authorizing a supervisor wake.
+            return match enqueue_worker_attention_relay_detail_with_key(
+                cas_dir, "worker_delivery_stalled", worker, Some(task_id), None,
+                |_| detail.clone(), &key, Some(&key),
+            ) {
+                WorkerAttentionRelayOutcome::Persisted { .. } => Ok(()),
+                _ => Err("could not persist merged delivery approval recovery".into()),
+            };
+        }
+    }
     let queue = crate::store::open_prompt_queue_store(cas_dir)
         .map_err(|error| format!("could not open prompt queue: {error}"))?;
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let key = format!("delivery-pr-merged:{task_id}:{pr_number}:{merge_commit}");
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}{key}");
     let prompt = crate::prompt_revalidation::delivery_pr_merged_envelope(
@@ -1160,6 +1212,7 @@ fn enqueue_delivery_pr_merged_wake(
 
 /// Drain the durable lifecycle outbox once (cas-ecff). Runs on the daemon's
 /// store worker (GH #1165).
+// gate[W-37 watchdog]: Lifecycle outbox drain
 fn drain_lifecycle_outbox_once(cas_dir: &std::path::Path) {
     let Ok(sq) = crate::store::open_supervisor_queue_store(cas_dir) else {
         return;
@@ -1310,6 +1363,7 @@ fn persist_ci_watch_results(
 /// Persist the PR identity as soon as it is discovered, then persist the merge
 /// receipt only after the worker wake is durable. A failed prompt write leaves
 /// the merge unrecorded so the next GitHub poll retries the complete handoff.
+// gate[W-45 watchdog]: Delivery PR merged observation and wake
 fn apply_delivery_pr_observation(
     cas_dir: &std::path::Path,
     observation: &super::ci_watch::DeliveryPrObservation,
@@ -1343,7 +1397,7 @@ fn apply_delivery_pr_observation(
                 &observation.worker,
                 observation.pr_number,
                 merge_commit,
-                crate::qa_batch::awaits_release_verdict(cas_dir, &task),
+                false,
             )?;
         }
         task.deliverables.delivery_pr_merge_commit = Some(merge_commit.to_string());
@@ -1362,6 +1416,7 @@ fn apply_delivery_pr_observation(
 /// remains open, the existing durable supervisor attention lane tells the
 /// supervisor exactly which PR/receipt needs recovery. Its stable key makes
 /// this a single escalation for the merge episode.
+// gate[W-46 watchdog]: Delivery PR merge timeout (delivery_pr_merge_timeout)
 fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
     let Ok(store) = crate::store::open_task_store_cached(cas_dir) else {
         return;
@@ -1382,15 +1437,12 @@ fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
         let Ok(age) = (now - merged_at).to_std() else {
             continue;
         };
-        // cas-d511 (cas-6c03): a close waiting on the release verdict is the
-        // designed batch state, not a stuck merge.
         if task.is_terminal() || age < super::ci_watch::DELIVERY_MERGE_CLOSE_GRACE
-            || crate::qa_batch::awaits_release_verdict(cas_dir, &task)
         {
             continue;
         }
         let detail = format!(
-            "Delivery PR #{pr_number} for {} merged at {merge_commit}, but task remains {} after {}m. The worker was already told to close; inspect or recover the task.",
+            "Delivery PR #{pr_number} for {} merged at {merge_commit}, but task remains {} after {}m. Inspect its pre-merge approval and reconcile the existing candidate and promotion before requesting another close.",
             task.id,
             task.status,
             age.as_secs() / 60,
@@ -1527,8 +1579,10 @@ pub(super) fn enqueue_worker_attention_relay_detail_with_key(
     occurrence: &str,
     stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
+    // Held close/freeze notices name a gate action, not a worker to recover.
+    let needs_recovery = !matches!(kind, "progress_operator_held" | "progress_close_refused");
     enqueue_worker_attention_relay_inner(
-        cas_dir, kind, worker, task_id, elapsed_secs, detail, occurrence, stable_key, &[], true,
+        cas_dir, kind, worker, task_id, elapsed_secs, detail, occurrence, stable_key, &[], needs_recovery,
     )
     .0
 }
@@ -1584,10 +1638,21 @@ fn enqueue_worker_attention_relay_inner(
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         tracing::warn!("worker attention relay skipped: agent store unavailable");
         return (WorkerAttentionRelayOutcome::Pending, false, false, None);
+    };
+    // Merged approval recovery reuses the typed delivery-stall lane, but
+    // belongs to the delivering worker's factory just like other PR relays.
+    let delivery_recovery = kind == "worker_delivery_stalled"
+        && stable_key.is_some_and(|key| key.starts_with("delivery-pr-merged:"));
+    let factory_session = if delivery_recovery || matches!(kind, "pr_lane_failed" | "delivery_pr_merge_timeout") {
+        match delivery_relay_factory_session(agent_store.as_ref(), worker) {
+            Ok(session) => session,
+            Err(outcome) => return (outcome, false, false, None),
+        }
+    } else {
+        std::env::var("CAS_FACTORY_SESSION").ok()
     };
     let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
@@ -2320,12 +2385,8 @@ mod worker_attention_tests {
             },
         );
         let _ = enqueue_worker_delivery_stalled_relay(&cas_dir, "silent-codex", 42, chrono::Utc::now());
-        let _ = enqueue_worker_unavailable_relay(&cas_dir, "limited-codex", "episode-1");
-        let replay = enqueue_worker_unavailable_relay(&cas_dir, "limited-codex", "episode-1");
-        assert!(matches!(
-            replay,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
+        let _ = enqueue_usage_limit_relay(&cas_dir, "limited", "episode-2",
+            "Worker limited, task cas-held: usage limit; waiting for reset. No restart queued.");
         let _ = enqueue_worker_attention_relay(
             &cas_dir,
             &crate::ui::factory::director::DirectorEvent::WorkerStalled {
@@ -2340,7 +2401,7 @@ mod worker_attention_tests {
             "Worker limited, task cas-held: usage limit; waiting for reset. No restart queued.");
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 5, "a persisted occurrence replays idempotently");
+        assert_eq!(rows.len(), 4, "a persisted occurrence replays idempotently");
         // pin: find the limit notice by its worker subject before checking recovery guidance.
         let limited = rows.iter().find(|row| row.prompt.contains("Worker limited,")).unwrap();
         // pin: a stopped worker must retain supervisor recovery guidance.
@@ -2361,11 +2422,6 @@ mod worker_attention_tests {
             row.prompt.contains("kind=\"worker_delivery_stalled\"")
                 && row.prompt.contains("silent-codex")
                 && row.prompt.contains("normal message 42")
-        }));
-        assert!(rows.iter().any(|row| {
-            row.prompt.contains("kind=\"worker_unavailable\"")
-                && row.prompt.contains("limited-codex")
-                && row.prompt.contains("terminal unavailable state")
         }));
         // Only the escalated stall is an intervention, and replays are one row.
         let alerts = cas_store::quality_interventions_since(
@@ -3308,6 +3364,39 @@ mod worker_attention_tests {
     }
 
     #[test]
+    fn late_listed_merge_queue_run_still_returns_task_for_repair_cas_738f() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "late-queue-run");
+        let cas_dir = crate::store::init_cas_dir(env.home()).unwrap();
+        register_supervisor(&cas_dir, "late-queue-run");
+        let mut worker = Agent::new_with_role("worker-id".into(), "late-worker".into(), AgentRole::Worker);
+        worker.factory_session = Some("late-queue-run".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-late-run".into(), "parked delivery".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("late-worker".into());
+        task.deliverables.factory_branch_anchor = Some("1111aaaa".into());
+        task_store.add(&task).unwrap();
+        let eject = |run| enqueue_merge_queue_ejection_relay(
+            &cas_dir, "cas-late-run", "late-worker", 556, run,
+            "queue-exit:2026-11-05T23:30:00Z", Some("Fast Validation"),
+            MergeQueueExit { head_sha: "1111aaaa", group_mate_failed: false },
+        );
+        assert!(matches!(eject(None), WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(task_store.get("cas-late-run").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        for _ in 0..2 {
+            assert!(matches!(eject(Some(601)), WorkerAttentionRelayOutcome::Persisted { .. }));
+            let repaired = task_store.get("cas-late-run").unwrap();
+            assert_eq!(repaired.status, cas_types::TaskStatus::Open);
+            // pin: repair markers account for exactly one cycle per failed run.
+            assert_eq!(repaired.notes.matches("merge-queue-repair run=601 head=1111aaaa").count(), 1);
+        }
+        assert_eq!(crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap().len(), 2,
+            "late run evidence must not duplicate the already delivered relay");
+    }
+
+    #[test]
     fn merge_queue_ejection_relays_to_supervisor_and_worker_once_and_notes_task() {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[(
             "CAS_FACTORY_SESSION",
@@ -3508,162 +3597,171 @@ mod worker_attention_tests {
         }
     }
 
-    #[test]
-    fn pr_lane_failure_relay_names_pr_check_and_run_and_replays_once() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
-            "CAS_FACTORY_SESSION",
-            "pr-lane-failure-test",
-        )]);
+    fn delivery_relay_fixture(local_worker: bool) -> (tempfile::TempDir, std::path::PathBuf) {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        register_supervisor(&cas_dir, "pr-lane-failure-test");
-        let failure = crate::ui::factory::daemon::runtime::ci_watch::PrLaneFailure {
-            task_id: "cas-pr-lane".to_string(),
-            worker: "bright-otter".to_string(),
-            pr_number: 659,
-            head_sha: "current-head".to_string(),
-            run_id: 33436155392,
-            run_url: "https://github.test/runs/33436155392".to_string(),
-            check_name: crate::ui::factory::daemon::runtime::ci_watch::REQUIRED_PR_LANE_CHECK
-                .to_string(),
-        };
-
-        let first = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
-        let replay = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
-        assert!(matches!(
-            first,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
-        assert!(matches!(
-            replay,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
-        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "replayed PR/head failure stays idempotent");
-        assert!(rows[0].prompt.contains("kind=\"pr_lane_failed\""));
-        assert!(rows[0].prompt.contains("PR #659"));
-        assert!(rows[0].prompt.contains("cas-pr-lane"));
-        assert!(rows[0].prompt.contains("Scoped Validation (factory/PR)"));
-        assert!(rows[0].prompt.contains("33436155392"));
-        assert_recovery_class_requires_daemon(&rows[0]);
+        register_supervisor(&cas_dir, "delivery-owner");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut watcher = Agent::new_with_role("watcher-id".into(), "watcher".into(), AgentRole::Supervisor);
+        watcher.factory_session = Some("relay-watcher".into());
+        agents.register(&watcher).unwrap();
+        if local_worker {
+            let mut worker = Agent::new_with_role("worker-id".into(), "delivery-worker".into(), AgentRole::Worker);
+            worker.factory_session = Some("delivery-owner".into());
+            agents.register(&worker).unwrap();
+        }
+        (temp, cas_dir)
     }
 
     #[test]
-    fn merged_delivery_records_receipt_wakes_worker_and_escalates_once() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
-            "CAS_FACTORY_SESSION",
-            "delivery-pr-merged-test",
-        )]);
-        let temp = tempfile::TempDir::new().unwrap();
-        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        register_supervisor(&cas_dir, "delivery-pr-merged-test");
-        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-        let mut task = cas_types::Task::new("cas-7ea6".to_string(), "delivery".to_string());
-        task.status = cas_types::TaskStatus::AwaitingMerge;
-        task.assignee = Some("calm-octopus-51".to_string());
-        task_store.add(&task).unwrap();
-        let observation = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
-            task_id: "cas-7ea6".to_string(),
-            worker: "calm-octopus-51".to_string(),
-            branch: "factory/calm-octopus-51".to_string(),
-            pr_number: 932,
-            head_sha: "worker-tip".to_string(),
-            merge_commit: Some("merge-tip".to_string()),
-        };
-
-        apply_delivery_pr_observation(&cas_dir, &observation).unwrap();
-        apply_delivery_pr_observation(&cas_dir, &observation).unwrap();
-        let persisted = task_store.get("cas-7ea6").unwrap();
-        assert_eq!(persisted.deliverables.delivery_pr_number, Some(932));
-        assert_eq!(
-            persisted.deliverables.delivery_pr_merge_commit.as_deref(),
-            Some("merge-tip")
-        );
-        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].target, "calm-octopus-51");
-        assert!(rows[0].prompt.contains("PR #932 merged at merge-tip"));
-        assert!(rows[0].prompt.contains("close cas-7ea6 with commit_receipt=merge-tip"));
-        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
-
-        let mut aged = persisted;
-        aged.deliverables.delivery_pr_merged_at =
-            Some(chrono::Utc::now() - chrono::Duration::minutes(10));
-        task_store.update(&aged).unwrap();
-        relay_delivery_pr_merge_timeouts(&cas_dir);
-        relay_delivery_pr_merge_timeouts(&cas_dir);
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 2);
-        let supervisor_row = rows.iter().find(|row| row.target == "supervisor").unwrap();
-        assert!(supervisor_row.prompt.contains("kind=\"delivery_pr_merge_timeout\""));
-        assert!(supervisor_row.prompt.contains("PR #932"));
-        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
-            &supervisor_row.prompt
-        ));
+    fn pr_lane_failure_only_wakes_the_local_worker_owner_cas_6aa7() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-watcher")]);
+        for local_worker in [false, true] {
+            let (_temp, cas_dir) = delivery_relay_fixture(local_worker);
+            let failure = crate::ui::factory::daemon::runtime::ci_watch::PrLaneFailure {
+                task_id: "cas-pr-lane".into(), worker: "delivery-worker".into(),
+                pr_number: 659, head_sha: "current-head".into(), run_id: 33436155392,
+                run_url: "https://github.test/runs/33436155392".into(),
+                check_name: crate::ui::factory::daemon::runtime::ci_watch::REQUIRED_PR_LANE_CHECK.into(),
+            };
+            let first = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
+            let replay = enqueue_pr_lane_failure_relay(&cas_dir, &failure);
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            assert!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().peek("watcher-id", 10).unwrap().is_empty(),
+                "the watcher must never receive another factory's delivery alert");
+            if !local_worker {
+                assert!(rows.is_empty(), "foreign delivery must not wake locally: {rows:?}");
+                continue;
+            }
+            assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
+            assert!(matches!(replay, WorkerAttentionRelayOutcome::Persisted { .. }));
+            assert_eq!(rows.len(), 1, "replayed PR/head failure stays idempotent");
+            assert_eq!(rows[0].target, "supervisor");
+            assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+            // pin: this typed envelope kind selects the PR-lane recovery route.
+            assert!(rows[0].prompt.contains("kind=\"pr_lane_failed\""));
+            assert!(rows[0].prompt.contains("PR #659"));
+            assert!(rows[0].prompt.contains("cas-pr-lane"));
+            assert!(rows[0].prompt.contains(&failure.check_name));
+            assert!(rows[0].prompt.contains("33436155392"));
+            assert_recovery_class_requires_daemon(&rows[0]);
+        }
     }
 
-    /// cas-d511 (cas-6c03): a merged Tier 1 delivery waiting on the release
-    /// verdict is the designed batch state. The worker's merge notice asks for
-    /// nothing and the supervisor gets no "inspect or recover" timeout.
     #[test]
-    fn release_verdict_wait_sends_no_merge_wake_or_timeout_cas_d511() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "release-wait")]);
-        let temp = tempfile::TempDir::new().unwrap();
-        let repo = temp.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").current_dir(repo)
-                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"]).args(args)
-                .output().unwrap();
-            assert!(out.status.success(), "git {args:?}");
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
-        };
-        git(&["init", "-q", "-b", "main"]);
-        std::fs::create_dir(repo.join("src")).unwrap();
-        std::fs::write(repo.join("src/lib.rs"), "// base\n").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-qm", "base"]);
-        let base = git(&["rev-parse", "HEAD"]);
-        std::fs::write(repo.join("src/lib.rs"), "// delivered\n").unwrap();
-        git(&["commit", "-qam", "cas-7eb1: delivery"]);
-        let anchor = git(&["rev-parse", "HEAD"]);
-        git(&["branch", "factory/calm-octopus-51"]);
-        let cas_dir = crate::store::init_cas_dir(repo).unwrap();
-        std::fs::write(cas_dir.join("config.toml"),
-            "[project]\ncanonical_id='release-wait'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
-        register_supervisor(&cas_dir, "release-wait");
-        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-        let mut task = cas_types::Task::new("cas-7eb1".to_string(), "delivery".to_string());
-        task.status = cas_types::TaskStatus::AwaitingMerge;
-        task.assignee = Some("calm-octopus-51".to_string());
-        task.deliverables.factory_branch_anchor = Some(anchor.clone());
-        task.deliverables.parked_branch = Some("factory/calm-octopus-51".into());
-        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-            work_target: cas_types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
-            assignee: "calm-octopus-51".into(),
-            branch: "factory/calm-octopus-51".into(),
-            base_sha: base,
-        });
-        task_store.add(&task).unwrap();
-        git(&["merge", "-q", "--ff-only", "factory/calm-octopus-51"]);
-        assert!(crate::qa_batch::awaits_release_verdict(&cas_dir, &task), "fixture is the release-verdict wait");
+    fn merged_delivery_only_wakes_the_local_worker_and_records_once_cas_6aa7() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-watcher")]);
+        for local_worker in [false, true] {
+            let (_temp, cas_dir) = delivery_relay_fixture(local_worker);
+            let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+            let mut task = cas_types::Task::new("cas-7ea6".into(), "delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some("delivery-worker".into());
+            task_store.add(&task).unwrap();
+            let verifications = crate::store::open_verification_store(&cas_dir).unwrap();
+            verifications.add(&cas_types::Verification::approved(
+                "ver-merged".into(), task.id.clone(), "Existing pre-merge approval".into(),
+            )).unwrap();
+            let observation = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
+                task_id: task.id.clone(), worker: "delivery-worker".into(),
+                branch: "factory/delivery-worker".into(), pr_number: 932,
+                head_sha: "worker-tip".into(), merge_commit: Some("merge-tip".into()),
+            };
+            let first = apply_delivery_pr_observation(&cas_dir, &observation);
+            let replay = apply_delivery_pr_observation(&cas_dir, &observation);
+            let persisted = task_store.get(&task.id).unwrap();
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            if !local_worker {
+                assert!(first.is_err() && replay.is_err(), "unowned delivery stays retryable");
+                assert!(rows.is_empty(), "foreign worker must not receive a local wake: {rows:?}");
+                assert!(persisted.deliverables.delivery_pr_merge_commit.is_none(),
+                    "a foreign daemon must not stamp the receipt before the owner's wake");
+                assert!(cas_store::quality_events_for_task(&cas_dir, &task.id).unwrap().is_empty());
+                continue;
+            }
+            first.unwrap();
+            replay.unwrap();
+            assert_eq!(persisted.deliverables.delivery_pr_number, Some(932));
+            assert_eq!(persisted.deliverables.delivery_pr_merge_commit.as_deref(), Some("merge-tip"));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].target, "delivery-worker");
+            assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+            assert!(rows[0].prompt.contains(&task.id));
+            assert!(rows[0].prompt.contains(&format!("commit_receipt={}", observation.merge_commit.as_deref().unwrap())));
+            assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
 
-        apply_delivery_pr_observation(&cas_dir, &crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
-            task_id: "cas-7eb1".to_string(), worker: "calm-octopus-51".to_string(),
-            branch: "factory/calm-octopus-51".to_string(), pr_number: 933,
-            head_sha: anchor.clone(), merge_commit: Some(anchor),
-        }).unwrap();
-        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt), "{}", rows[0].prompt);
-        let mut aged = task_store.get("cas-7eb1").unwrap();
-        aged.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now() - chrono::Duration::minutes(10));
-        task_store.update(&aged).unwrap();
-        relay_delivery_pr_merge_timeouts(&cas_dir);
-        assert_eq!(queue.peek_all(10).unwrap().len(), 1, "no timeout relay while the release verdict owns the close");
+            // cas-ffd5: an absent verdict, or a new pending cycle after an older
+            // approval, cannot ask the worker for a close that the guard refuses.
+            for (id, old_approval) in [("cas-unreviewed", false), ("cas-new-cycle", true)] {
+                let mut missing = cas_types::Task::new(id.into(), "Merged without reusable approval".into());
+                missing.status = cas_types::TaskStatus::AwaitingMerge;
+                missing.assignee = task.assignee.clone();
+                missing.deliverables.factory_branch_anchor = Some("worker-tip".into());
+                missing.deliverables.parked_branch = Some(observation.branch.clone());
+                task_store.add(&missing).unwrap();
+                if old_approval {
+                    verifications.add(&cas_types::Verification::approved(
+                        "ver-old".into(), id.into(), "Older cycle".into(),
+                    )).unwrap();
+                    cas_store::create_verification_dispatch(
+                        &cas_dir, id, "worker-id", "supervisor-id",
+                        chrono::Utc::now() + chrono::Duration::minutes(10),
+                    ).unwrap();
+                }
+                let observed = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
+                    task_id: id.into(), pr_number: 933, ..observation.clone()
+                };
+                apply_delivery_pr_observation(&cas_dir, &observed).unwrap();
+                apply_delivery_pr_observation(&cas_dir, &observed).unwrap();
+                let rows: Vec<_> = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(20).unwrap().into_iter()
+                    .filter(|row| row.prompt.contains(id)).collect();
+                assert_eq!(rows.len(), 1, "one recovery per immutable merge");
+                assert_eq!(rows[0].target, "supervisor", "missing approval belongs to supervisor recovery");
+                assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+                assert!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().peek("watcher-id", 10).unwrap().is_empty(),
+                    "approval recovery must not wake the watcher supervisor");
+                // pin: executable supervisor recovery must bind the exact delivery branch and task.
+                assert!(rows[0].prompt.contains(&format!("factory action=worktree_merge id={} task_id={id}", observation.branch)));
+                // pin: the incident was an impossible executable worker close instruction.
+                assert!(!rows[0].prompt.contains(&format!("close {id} with commit_receipt=")));
+                assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&rows[0].prompt));
+                assert_eq!(task_store.get(id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+            }
+        }
     }
+
+    #[test]
+    fn delivery_merge_timeout_only_wakes_the_local_worker_owner_cas_6aa7() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "relay-watcher")]);
+        for local_worker in [false, true] {
+            let (_temp, cas_dir) = delivery_relay_fixture(local_worker);
+            let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+            let mut task = cas_types::Task::new("cas-7ea6".into(), "delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some("delivery-worker".into());
+            task.deliverables.delivery_pr_number = Some(932);
+            task.deliverables.delivery_pr_merge_commit = Some("merge-tip".into());
+            task.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now() - chrono::Duration::minutes(10));
+            task_store.add(&task).unwrap();
+            relay_delivery_pr_merge_timeouts(&cas_dir);
+            relay_delivery_pr_merge_timeouts(&cas_dir);
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            assert!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().peek("watcher-id", 10).unwrap().is_empty(),
+                "a replicated task must not wake the watcher supervisor");
+            if !local_worker {
+                assert!(rows.is_empty(), "foreign merge timeout must not wake locally: {rows:?}");
+                continue;
+            }
+            assert_eq!(rows.len(), 1, "one escalation per owned merge receipt");
+            assert_eq!(rows[0].target, "supervisor");
+            assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+            // pin: this typed envelope kind selects merged-delivery recovery.
+            assert!(rows[0].prompt.contains("kind=\"delivery_pr_merge_timeout\""));
+            assert!(rows[0].prompt.contains("PR #932"));
+            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&rows[0].prompt));
+        }
+    }
+
 }
 
 impl FactoryDaemon {
@@ -3672,6 +3770,8 @@ impl FactoryDaemon {
             &config.session_name,
             &config.factory_config.cwd,
         )?;
+        #[cfg(not(target_os = "linux"))]
+        super::super::reexec::pin_startup_image(&config.session_name)?;
         // Get initial terminal size (default for daemon without terminal)
         let (cols, rows) = (120, 40);
 
@@ -4168,7 +4268,7 @@ impl FactoryDaemon {
             drop(enforced_input);
             drop(store_free_input);
 
-            self.advance_queued_finish();
+            self.advance_queued_command();
 
             let summary_metadata = format!(
                 "session={} role=supervisor task={}",
@@ -4305,6 +4405,17 @@ impl FactoryDaemon {
                     }
                     let retry_runtime = tokio::runtime::Handle::current();
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
+                        // Consume CI before resuming the queue, so a known red
+                        // cannot admit another delivery in this pass.
+                        // gate[W-53 watchdog]: Train CI observe, merge resume and CI merge retry
+                        if let Err(error) = crate::train_ci::observe(&watch_cas_dir, &session_name) {
+                            tracing::warn!(%error, "train CI scan deferred");
+                        }
+                        if let Err(error) = retry_runtime.block_on(
+                            crate::mcp::tools::core::workflow::train_merge::resume_pending(&watch_cas_dir, &session_name)
+                        ) {
+                            tracing::warn!(%error, "train merge scan deferred");
+                        }
                         // Durable merge intents are independent of reminders and
                         // model turns. Run normal admission on the blocking pool.
                         if let Err(error) = retry_runtime.block_on(
@@ -4433,15 +4544,17 @@ impl FactoryDaemon {
                                     violet_error_reported = true;
                                 }
                                 if let Some(presence) = presence
-                                    && !sweeps.is_empty()
                                     && self.binding_intake.sweep.is_none()
                                 {
                                     let violet = std::sync::Arc::clone(violet);
                                     let cas_dir = self.app.cas_dir().to_path_buf();
                                     self.binding_intake.sweep = Some(tokio::spawn(async move {
+                                        let registration = presence.agent_id.clone();
                                         if violet.sweep(sweeps, presence).await? > 0 {
                                             super::delivery::wake_daemon_after_enqueue(&cas_dir);
                                         }
+                                        tokio::task::spawn_blocking(move || violet.reconcile_reactions(&registration))
+                                            .await.map_err(|error| format!("source status pass did not finish: {error}"))?;
                                         Ok(())
                                     }));
                                 }
@@ -4966,9 +5079,24 @@ impl FactoryDaemon {
             .unwrap_or_default().into_iter()
             .filter(|record| record.factory_session == self.session_name)
             .collect::<Vec<_>>();
+        let mut names = worker_names;
+        names.extend(ownership.iter().map(|record| record.worker_name.clone()));
+        names.sort(); names.dedup();
+        // Measure while registrations and worktrees still identify the work.
+        let agents = open_agent_store(self.app.cas_dir()).and_then(|store| Ok(store.list(None)?))
+            .unwrap_or_default();
+        let worker_states: Vec<_> = names.iter().map(|name| {
+            let rows: Vec<_> = agents.iter().filter(|agent| agent.name == *name
+                && agent.factory_session.as_deref() == Some(self.session_name.as_str())).collect();
+            let state = rows.iter().max_by_key(|agent| agent.last_heartbeat)
+                .map(|agent| crate::mcp::tools::service::factory_ops::worker_shutdown_state(self.app.cas_dir(), agent))
+                .unwrap_or_else(|| format!("{name}: tasks=unknown; dirty_files=unknown; unpushed_commits=unknown (registration unavailable)"));
+            (name.clone(), state, rows.iter().map(|agent| agent.id.clone()).collect::<Vec<_>>())
+        }).collect();
         let mut ended = crate::ui::factory::session::SessionEndOutcome {
             at: String::new(), reason: "unknown".into(),
             workers_stopped: Vec::new(), orphans: Vec::new(), unverified: Vec::new(),
+            worker_states: Vec::new(),
         };
         // Hooks may already have unregistered the supervisor; retain their original reason.
         if let Ok(store) = cas_store::SqliteAgentStore::open(self.app.cas_dir())
@@ -4987,21 +5115,30 @@ impl FactoryDaemon {
         for record in &ownership {
             self.app.untrack_worker_process_group_if_gone(record.pgid).await;
         }
-        let mut names = worker_names;
-        names.extend(ownership.iter().map(|record| record.worker_name.clone()));
-        names.sort(); names.dedup();
-        for name in names {
+        for (name, state, agent_ids) in worker_states {
             let records: Vec<_> = ownership.iter().filter(|record| record.worker_name == name).collect();
             use crate::ui::factory::process_groups::{ProcessGroupStatus, status};
-            if records.iter().any(|record| status(record) == ProcessGroupStatus::Live) {
-                ended.orphans.push(name);
+            let outcome = if records.iter().any(|record| status(record) == ProcessGroupStatus::Live) {
+                ended.orphans.push(name.clone());
+                "still running; tasks retained".to_string()
             } else if !records.is_empty() && records.iter().all(|record| status(record) == ProcessGroupStatus::Gone) {
-                ended.workers_stopped.push(name);
+                ended.workers_stopped.push(name.clone());
+                let release = |holder: &str| crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(self.app.cas_dir(), holder);
+                let released = release(&name) + agent_ids.iter().filter(|id| **id != name)
+                    .map(|id| release(id)).sum::<usize>();
+                format!("stopped; recovered_tasks={released}")
             } else {
-                ended.unverified.push(name);
-            }
+                ended.unverified.push(name.clone());
+                "stop unverified; tasks retained for recovery".to_string()
+            };
+            ended.worker_states.push(format!("{state}; {outcome}"));
         }
         ended.at = chrono::Utc::now().to_rfc3339();
+        let retained_workers: std::collections::HashSet<_> = ended.orphans.iter()
+            .chain(&ended.unverified).cloned().collect();
+        let shutdown_report = if ended.worker_states.is_empty() { String::new() } else {
+            format!("\r\nFactory session ended ({}).\r\n{}\r\n", ended.reason, ended.worker_states.join("\r\n"))
+        };
         if let Err(error) = self.session_manager.record_ended(&self.session_name, ended) {
             tracing::warn!(%error, "could not retain Commander session-end receipt");
         }
@@ -5020,6 +5157,9 @@ impl FactoryDaemon {
             // to ensure we find all agents, including those registered after cache refresh
             if let Ok(all_agents) = agent_store.list(None) {
                 for name in &names_to_unregister {
+                    if retained_workers.contains(name) {
+                        continue; // Their task owner remains available for recovery.
+                    }
                     for agent in all_agents.iter().filter(|a| {
                         a.name == *name
                             && a.factory_session.as_deref() == Some(self.session_name.as_str())
@@ -5044,6 +5184,7 @@ impl FactoryDaemon {
         let cleanup = b"\x1b[?25h\x1b[?1049l";
         for client in self.clients.values_mut() {
             let _ = client.stream.write_all(cleanup);
+            let _ = client.stream.write_all(shutdown_report.as_bytes());
         }
 
         Ok(())
@@ -5864,6 +6005,118 @@ async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, sess
 
 #[cfg(test)]
 mod communication_summary_tests {
+    #[tokio::test]
+    async fn supervisor_exit_reports_and_releases_unfinished_worker_cas_affc() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        for owned in [true, false] {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join("work.txt"), "parked\n").unwrap();
+        git(&["add", "work.txt"]);
+        git(&["commit", "-m", "parked"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["remote", "add", "origin", "https://example.invalid/fixture.git"]);
+        std::fs::write(repo.join("work.txt"), "unfinished\n").unwrap();
+        git(&["commit", "-am", "local only"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(repo.join("dirty.txt"), "keep this\n").unwrap();
+        // Ignore the store so the only dirty input is the operator's file.
+        std::fs::write(repo.join(".git/info/exclude"), ".cas/\n").unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let supervisor = daemon.app.supervisor_name().to_string();
+        let session = daemon.session_name.clone();
+        let metadata = crate::ui::factory::session::create_metadata(
+            &session, std::process::id(), &supervisor, &[], None, None, None,
+        );
+        daemon.session_manager.save_daemon_metadata(metadata, &root).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut lead = cas_types::Agent::new("lead-affc".into(), supervisor.clone());
+        lead.role = cas_types::AgentRole::Supervisor;
+        lead.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        lead.factory_session = Some(session.clone());
+        agents.register(&lead).unwrap();
+        crate::supervisor_continuity::record_end(&root, &lead.id, Some("prompt_input_exit")).unwrap();
+        let worker = "unfinished-worker";
+        let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
+            command: "/bin/sleep".into(), args: vec!["300".into()], cwd: Some(repo.to_path_buf()),
+            env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let worker_pid = pty.process_group_id().unwrap();
+        if owned {
+            crate::ui::factory::process_groups::track(&root, worker, &session, worker_pid).unwrap();
+        }
+        daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
+        ).unwrap());
+        let mut agent = cas_types::Agent::new("worker-affc".into(), worker.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.factory_session = Some(session.clone());
+        agent.pid = Some(worker_pid);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, worker_pid);
+        agent.metadata.insert("clone_path".into(), repo.display().to_string());
+        agents.register(&agent).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-unfinished".into(), "Unfinished work".into());
+        task.assignee = Some(worker.into());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, &agent.id, 1800, None).unwrap();
+        daemon.listener.set_nonblocking(true).unwrap();
+        let mut client = UnixStream::connect(root.join("test.sock")).unwrap();
+        daemon.accept_clients().unwrap();
+        daemon.handle_mux_event(cas_mux::MuxEvent::PaneExited {
+            pane_id: supervisor, exit_code: Some(0), exit_signal: None,
+        }).await;
+        assert!(daemon.shutdown.load(std::sync::atomic::Ordering::Relaxed));
+        daemon.cleanup().await.unwrap();
+        let receipt = daemon.session_manager.ended_sessions().unwrap().remove(0);
+        drop(daemon);
+        let mut output = String::new();
+        client.read_to_string(&mut output).unwrap();
+        let recovered = tasks.get(&task.id).unwrap();
+        let outcome = if owned { "stopped; recovered_tasks=1" }
+            else { "stop unverified; tasks retained for recovery" };
+        let mut failures = Vec::new();
+        if !(output.contains(worker) && output.contains(&task.id)
+            && output.contains("dirty_files=1") && output.contains("unpushed_commits=1")
+            && output.contains(outcome)) {
+            failures.push(format!("missing terminal teardown evidence: {output:?}"));
+        }
+        if owned && (recovered.status != cas_types::TaskStatus::Open || recovered.assignee.is_some()) {
+            failures.push(format!("task stranded: {:?} {:?}", recovered.status, recovered.assignee));
+        }
+        if owned {
+            assert!(agents.get_lease(&task.id).unwrap().is_none(), "stopped worker's lease is released");
+        } else {
+            assert!(agents.get(&agent.id).is_ok(), "unverified stop retains its registered owner");
+            assert_eq!(recovered.assignee.as_deref(), Some(worker));
+        }
+        if receipt.ended.reason != "prompt_input_exit" {
+            failures.push(format!("wrong exit reason: {}", receipt.ended.reason));
+        }
+        let durable = serde_json::to_value(&receipt).unwrap();
+        if !durable["ended"]["worker_states"].as_array().is_some_and(|rows| rows.iter().any(|row| {
+            row.as_str().is_some_and(|line| line.contains(worker) && line.contains(&task.id)
+                && line.contains("dirty_files=1") && line.contains("unpushed_commits=1")
+                && line.contains(outcome))
+        })) {
+            failures.push(format!("missing durable worker state: {durable}"));
+        }
+        assert_eq!(std::fs::read_to_string(repo.join("dirty.txt")).unwrap(), "keep this\n");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }
+    }
+
     #[tokio::test]
     async fn idle_control_ticks_adopt_staged_cleanup_cas_70a2() {
         let _env = crate::test_support::TestEnvGuard::temp_home();

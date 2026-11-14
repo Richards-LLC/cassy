@@ -235,36 +235,94 @@ fn is_verifier_drive_letter(chars: &[char], index: usize) -> bool {
         && matches!(chars.get(index + 2), Some('/') | Some('\\'))
 }
 
-fn verifier_text_contains_absolute_path(value: &str) -> bool {
+fn is_verifier_absolute_path_start(chars: &[char], index: usize) -> bool {
+    let ch = chars[index];
+    let prev = index.checked_sub(1).map(|prev_index| chars[prev_index]);
+
+    if ch == '/'
+        && is_verifier_unix_root_boundary(prev)
+        && chars
+            .get(index + 1)
+            .copied()
+            .is_some_and(is_verifier_path_body_char)
+    {
+        return true;
+    }
+
+    if ch == '~' && chars.get(index + 1) == Some(&'/') && at_verifier_token_boundary(chars, index) {
+        return true;
+    }
+
+    if is_verifier_unc_share(chars, index) || is_verifier_drive_letter(chars, index) {
+        return true;
+    }
+
+    at_verifier_token_boundary(chars, index) && verifier_matches_at(chars, index, "file:/")
+}
+
+/// Replace host path spans while retaining the caller's surrounding question.
+/// Quoted paths may contain spaces; unquoted paths stop at prose/Markdown
+/// delimiters. Scan normalized characters but slice the original UTF-8 bytes.
+fn redact_verifier_paths(value: &str) -> String {
     let chars = verifier_scan_chars(value);
-
-    (0..chars.len()).any(|index| {
-        let ch = chars[index];
-        let prev = index.checked_sub(1).map(|prev_index| chars[prev_index]);
-
-        if ch == '/'
-            && is_verifier_unix_root_boundary(prev)
-            && chars
-                .get(index + 1)
-                .copied()
-                .is_some_and(is_verifier_path_body_char)
-        {
-            return true;
+    let offsets: Vec<usize> = value
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(value.len()))
+        .collect();
+    let mut redacted = String::new();
+    let mut copied = 0;
+    let mut index = 0;
+    while index < chars.len() {
+        if !is_verifier_absolute_path_start(&chars, index) {
+            index += 1;
+            continue;
         }
-
-        if ch == '~'
-            && chars.get(index + 1) == Some(&'/')
-            && at_verifier_token_boundary(&chars, index)
-        {
-            return true;
+        let quote = index
+            .checked_sub(1)
+            .map(|prev| chars[prev])
+            .filter(|ch| matches!(ch, '\'' | '"' | '`'));
+        let mut end = index + 1;
+        while end < chars.len() {
+            let ch = chars[end];
+            let boundary = match quote {
+                Some(quote) => ch == quote,
+                None => {
+                    ch.is_whitespace()
+                        || matches!(
+                            ch,
+                            '\'' | '"'
+                                | '`'
+                                | '<'
+                                | '>'
+                                | '('
+                                | ')'
+                                | '['
+                                | ']'
+                                | '{'
+                                | '}'
+                                | ','
+                                | ';'
+                        )
+                }
+            };
+            if boundary {
+                break;
+            }
+            end += 1;
         }
-
-        if is_verifier_unc_share(&chars, index) || is_verifier_drive_letter(&chars, index) {
-            return true;
+        if quote.is_none() {
+            while end > index + 1 && matches!(chars[end - 1], '.' | ':' | '!' | '?') {
+                end -= 1;
+            }
         }
-
-        at_verifier_token_boundary(&chars, index) && verifier_matches_at(&chars, index, "file:/")
-    })
+        redacted.push_str(&value[copied..offsets[index]]);
+        redacted.push_str(REDACTED_VERIFIER_PATH);
+        copied = offsets[end];
+        index = end;
+    }
+    redacted.push_str(&value[copied..]);
+    redacted
 }
 
 fn verifier_text_contains_unsafe_control(value: &str) -> bool {
@@ -298,12 +356,10 @@ fn truncate_verifier_text(value: &str, max_bytes: usize) -> String {
 fn sanitize_verifier_text(value: &str, max_bytes: usize) -> String {
     if verifier_text_contains_secret(value) {
         REDACTED_VERIFIER_SECRET.to_string()
-    } else if verifier_text_contains_absolute_path(value) {
-        REDACTED_VERIFIER_PATH.to_string()
     } else if verifier_text_contains_unsafe_control(value) {
         REDACTED_VERIFIER_CONTROL.to_string()
     } else {
-        truncate_verifier_text(value, max_bytes)
+        truncate_verifier_text(&redact_verifier_paths(value), max_bytes)
     }
 }
 
@@ -499,6 +555,10 @@ impl FromStr for VerificationRecoveryAction {
 /// verifier capabilities deliberately never cross the mailbox boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerPremergeReceipt {
+    /// Portable serde RegistryVersion, owned and validated by the gate registry.
+    /// Old peers have no stamp; receiving one must never invent today's version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_version: Option<serde_json::Value>,
     /// Explicit verdict; missing and unknown status must never grant authority.
     pub status: VerificationStatus,
     pub project_id: String,
@@ -559,10 +619,55 @@ pub struct RepositoryProofBoundary {
     pub anchor_commits: Vec<String>,
 }
 
+/// The existing receipt field names either a delivery cycle or a transaction's
+/// immutable worker receipt. Unknown namespaces never become legacy authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationReceipt<'a> {
+    DeliveryCycle(&'a str),
+    TransactionReceipt {
+        receipt_id: &'a str,
+        transaction_id: &'a str,
+    },
+    None,
+}
+
+impl<'a> VerificationReceipt<'a> {
+    /// Parse the complete boundary once; a cycle has no worker transaction.
+    /// Partial or mixed namespaces never become task-only authority.
+    pub fn parse(receipt: Option<&'a str>, transaction: Option<&'a str>) -> Result<Self, String> {
+        match (receipt, transaction) {
+            (None, None) => Ok(Self::None),
+            (Some(id), None) if id.strip_prefix("dc-").is_some_and(|s| !s.is_empty()) => {
+                Ok(Self::DeliveryCycle(id))
+            }
+            (Some(id), Some(transaction_id))
+                if id.strip_prefix("wcr-").is_some_and(|s| !s.is_empty())
+                    && !transaction_id.is_empty() =>
+            {
+                Ok(Self::TransactionReceipt {
+                    receipt_id: id,
+                    transaction_id,
+                })
+            }
+            _ => Err("INCONSISTENT_VERIFICATION_RECEIPT".into()),
+        }
+    }
+
+    pub fn transaction(self) -> Option<(&'a str, &'a str)> {
+        match self {
+            Self::TransactionReceipt {
+                receipt_id,
+                transaction_id,
+            } => Some((receipt_id, transaction_id)),
+            _ => None,
+        }
+    }
+}
+
 /// Immutable external identity attached to a verification proof cycle.
 ///
-/// A task-only close has neither delivery field; the dispatch ID itself is
-/// still the exact proof boundary. Delivery verification binds both IDs.
+/// Nontransactional review carries a delivery-cycle receipt or no receipt.
+/// Worker delivery verification binds a WCR receipt and its transaction together.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationProofBoundary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -574,6 +679,13 @@ pub struct VerificationProofBoundary {
 }
 
 impl VerificationProofBoundary {
+    pub fn receipt(&self) -> Result<VerificationReceipt<'_>, String> {
+        VerificationReceipt::parse(
+            self.receipt_id.as_deref(),
+            self.delivery_transaction_id.as_deref(),
+        )
+    }
+
     pub fn task() -> Self {
         Self::default()
     }
@@ -602,7 +714,7 @@ impl VerificationProofBoundary {
 pub struct VerificationDispatch {
     pub id: String,
     pub task_id: String,
-    /// Exact immutable delivery receipt, when this dispatch verifies delivery.
+    /// Delivery cycle (`dc-`) or immutable transactional worker receipt (`wcr-`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_id: Option<String>,
     /// Exact delivery transaction advanced by this dispatch's verdict.
@@ -625,6 +737,15 @@ pub struct VerificationDispatch {
     pub resolved_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub recovery_action: VerificationRecoveryAction,
+}
+
+impl VerificationDispatch {
+    pub fn receipt(&self) -> Result<VerificationReceipt<'_>, String> {
+        VerificationReceipt::parse(
+            self.receipt_id.as_deref(),
+            self.delivery_transaction_id.as_deref(),
+        )
+    }
 }
 
 /// Status of a verification
@@ -785,9 +906,70 @@ impl FromStr for IssueSeverity {
     }
 }
 
+/// User impact is separate from whether a review issue blocks its delivery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Money,
+    DataLoss,
+    #[default]
+    Broken,
+    Awkward,
+    Cosmetic,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingReach {
+    Main,
+    Secondary,
+    #[default]
+    Theoretical,
+}
+
+/// A missing runtime reproduction is theoretical, including old verdicts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FindingTriage {
+    pub severity: FindingSeverity,
+    pub reach: FindingReach,
+    pub journey: Option<String>,
+    pub repro: Option<String>,
+}
+
+impl FindingTriage {
+    pub fn normalize(&mut self, declared_main: bool) {
+        if !self.repro.as_deref().is_some_and(|s| !s.trim().is_empty())
+            || (self.reach == FindingReach::Main && !declared_main)
+        {
+            self.reach = FindingReach::Theoretical;
+        }
+    }
+
+    /// P4 is backlog. Only money/data loss on a declared main journey gets
+    /// a theoretical exception (P2), below a reproduced broken main flow.
+    pub fn priority(&self, declared_main: bool) -> crate::task::Priority {
+        use FindingReach::*;
+        use FindingSeverity::*;
+        let mut normalized = self.clone();
+        normalized.normalize(declared_main);
+        crate::task::Priority(match (normalized.reach, self.severity) {
+            (Main, Money | DataLoss) => 0,
+            (Main, Broken) | (Secondary, Money | DataLoss) => 1,
+            (Main, Awkward) | (Secondary, Broken) => 2,
+            (Main, Cosmetic) | (Secondary, Awkward) => 3,
+            (Theoretical, Money | DataLoss) if declared_main => 2,
+            _ => 4,
+        })
+    }
+}
+
 /// An issue found during verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationIssue {
+    #[serde(default)]
+    pub triage: FindingTriage,
+
     /// File where the issue was found
     pub file: String,
 
@@ -818,6 +1000,7 @@ impl VerificationIssue {
     /// Create a new verification issue
     pub fn new(file: String, category: String, problem: String) -> Self {
         Self {
+            triage: FindingTriage::default(),
             file,
             line: None,
             severity: IssueSeverity::Blocking,
@@ -838,6 +1021,7 @@ impl VerificationIssue {
         suggestion: Option<String>,
     ) -> Self {
         Self {
+            triage: FindingTriage::default(),
             file,
             line,
             severity: IssueSeverity::Blocking,
@@ -851,6 +1035,7 @@ impl VerificationIssue {
     /// Create a warning issue
     pub fn warning(file: String, category: String, problem: String) -> Self {
         Self {
+            triage: FindingTriage::default(),
             file,
             line: None,
             severity: IssueSeverity::Warning,
@@ -1111,6 +1296,10 @@ impl Verification {
 
         self.issues.truncate(VERIFIER_ISSUES_MAX);
         for issue in &mut self.issues {
+            issue.triage.repro = issue.triage.repro.as_deref()
+                .map(|value| sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES));
+            issue.triage.journey = issue.triage.journey.as_deref()
+                .map(|value| sanitize_verifier_text(value, VERIFIER_ISSUE_CATEGORY_MAX_BYTES));
             issue.file = sanitize_verifier_text(&issue.file, VERIFIER_ISSUE_FILE_MAX_BYTES);
             issue.category =
                 sanitize_verifier_text(&issue.category, VERIFIER_ISSUE_CATEGORY_MAX_BYTES);
@@ -1155,6 +1344,65 @@ impl Default for Verification {
 #[cfg(test)]
 mod tests {
     use crate::verification::*;
+
+    #[test]
+    fn verification_receipt_identity_cas_e01f() {
+        for ((receipt, transaction), expected) in [
+            ((None, None), VerificationReceipt::None),
+            (
+                (Some("dc-cycle"), None),
+                VerificationReceipt::DeliveryCycle("dc-cycle"),
+            ),
+            (
+                (Some("wcr-receipt"), Some("wdt-receipt")),
+                VerificationReceipt::TransactionReceipt {
+                    receipt_id: "wcr-receipt",
+                    transaction_id: "wdt-receipt",
+                },
+            ),
+        ] {
+            assert_eq!(
+                VerificationReceipt::parse(receipt, transaction).unwrap(),
+                expected
+            );
+        }
+        for (receipt, transaction) in [
+            (Some("unknown"), None),
+            (Some("dc-"), None),
+            (Some("wcr-"), Some("wdt")),
+            (Some("wcr-receipt"), None),
+            (Some("dc-cycle"), Some("wdt")),
+            (None, Some("wdt")),
+            (Some("wcr-receipt"), Some("")),
+        ] {
+            assert!(VerificationReceipt::parse(receipt, transaction).is_err());
+        }
+    }
+
+    #[test]
+    fn finding_triage_defaults_to_theoretical_and_is_persisted() {
+        let issue = VerificationIssue::new("src/save.rs".into(), "correctness".into(), "Code-read finding".into());
+        let value = serde_json::to_value(&issue).unwrap();
+        assert_eq!(value["triage"]["reach"], "theoretical");
+        let mut wire = value;
+        wire["triage"] = serde_json::json!({"severity":"money", "reach":"main", "journey":"save", "repro":"save charged twice"});
+        let restored: VerificationIssue = serde_json::from_value(wire).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap()["triage"]["journey"], "save");
+        for (severity, main, secondary) in [
+            ("money", 0, 1), ("data_loss", 0, 1), ("broken", 1, 2),
+            ("awkward", 2, 3), ("cosmetic", 3, 4),
+        ] {
+            let mut triage: FindingTriage = serde_json::from_value(serde_json::json!({
+                "severity":severity, "reach":"main", "journey":"save", "repro":"runtime failure",
+            })).unwrap();
+            assert_eq!(triage.priority(true).0, main, "{severity}: main");
+            triage.reach = FindingReach::Secondary;
+            assert_eq!(triage.priority(true).0, secondary, "{severity}: secondary");
+            triage.repro = None;
+            assert_eq!(triage.priority(false).0, 4, "unproved/undeclared findings stay backlog");
+        }
+
+    }
 
     #[test]
     fn test_verification_status_from_str() {
@@ -1331,8 +1579,12 @@ mod tests {
             r"C:\Users\operator\private.rs".to_string(),
             "src/lib.rs".to_string(),
         ];
+        verification.issues[0].triage.repro = Some(raw_capability.to_string());
+        verification.issues[0].triage.journey = Some("/home/operator/private-flow".into());
         verification.sanitize_verifier_authored_content();
 
+        assert_eq!(verification.issues[0].triage.repro.as_deref(), Some(REDACTED_VERIFIER_SECRET));
+        assert_eq!(verification.issues[0].triage.journey.as_deref(), Some(REDACTED_VERIFIER_PATH));
         assert_eq!(verification.summary, REDACTED_VERIFIER_SECRET);
         assert_eq!(verification.issues[0].file, REDACTED_VERIFIER_PATH);
         assert_eq!(verification.issues[0].code, REDACTED_VERIFIER_SECRET);
@@ -1367,7 +1619,7 @@ mod tests {
         let mut verification = Verification::approved(
             "ver-bounded".to_string(),
             "cas-bounded".to_string(),
-            "é".repeat(VERIFIER_SUMMARY_MAX_BYTES),
+            format!("/private/proof {}", "é".repeat(VERIFIER_SUMMARY_MAX_BYTES)),
         );
         verification.issues = (0..VERIFIER_ISSUES_MAX + 10)
             .map(|index| {
@@ -1408,27 +1660,64 @@ mod tests {
     /// only when they begin a whitespace-delimited token.
     #[test]
     fn verifier_embedded_absolute_paths_are_redacted() {
-        for value in [
-            "at=/home/operator/private.rs",
-            "proof at=/home/operator/private.rs line 12",
-            "see [proof](/home/operator/private.rs) for detail",
-            "<file:///etc/shadow>",
-            "evidence=file:///etc/shadow",
-            "FILE:///etc/shadow",
-            r"at=C:\Users\operator\private.rs",
-            r"[proof](C:/Users/operator/private.rs)",
-            r"share=\\build-host\proofs\private.rs",
-            "home=~/private/proof.json",
-            "path:/etc/passwd",
-            "\"/home/operator/private.rs\"",
-            "{'file': '/home/operator/private.rs'}",
+        for (value, path) in [
+            ("at=/home/operator/private.rs", "/home/operator/private.rs"),
+            (
+                "proof at=/home/operator/private.rs line 12",
+                "/home/operator/private.rs",
+            ),
+            (
+                "see [proof](/home/operator/private.rs) for detail",
+                "/home/operator/private.rs",
+            ),
+            ("<file:///etc/shadow>", "file:///etc/shadow"),
+            ("evidence=file:///etc/shadow", "file:///etc/shadow"),
+            ("FILE:///etc/shadow", "FILE:///etc/shadow"),
+            (
+                r"at=C:\Users\operator\private.rs",
+                r"C:\Users\operator\private.rs",
+            ),
+            (
+                r"[proof](C:/Users/operator/private.rs)",
+                "C:/Users/operator/private.rs",
+            ),
+            (
+                r"share=\\build-host\proofs\private.rs",
+                r"\\build-host\proofs\private.rs",
+            ),
+            ("home=~/private/proof.json", "~/private/proof.json"),
+            ("path:/etc/passwd", "/etc/passwd"),
+            ("\"/home/operator/private.rs\"", "/home/operator/private.rs"),
+            (
+                "{'file': '/home/operator/private.rs'}",
+                "/home/operator/private.rs",
+            ),
+            (
+                "Révision `/Users/operator/mes preuves/épreuve (1).json`: suite?",
+                "/Users/operator/mes preuves/épreuve (1).json",
+            ),
+            ("/tmp/proof; puis /tmp/proof?", "/tmp/proof"),
         ] {
+            let sanitized = sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES);
             assert_eq!(
-                sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES),
-                REDACTED_VERIFIER_PATH,
+                sanitized,
+                value.replace(path, REDACTED_VERIFIER_PATH),
                 "embedded absolute path was not redacted: {value:?}"
             );
+            assert_eq!(
+                sanitize_verifier_text(&sanitized, VERIFIER_ISSUE_TEXT_MAX_BYTES),
+                sanitized
+            );
         }
+        // cas-ef5e8: preserve caller-authored question bytes around a private
+        // path, rather than replacing the entire supervisor_call summary.
+        let path = "/Users/operator/private-proof.json";
+        let question = "Can this exception be accepted, or is another run required?";
+        let summary = format!("Révision `{path}`: {question}");
+        assert_eq!(
+            sanitize_verifier_text(&summary, VERIFIER_SUMMARY_MAX_BYTES),
+            summary.replace(path, REDACTED_VERIFIER_PATH),
+        );
     }
 
     /// cas-da92: auth markers must survive separator obfuscation across every
@@ -1513,24 +1802,25 @@ mod tests {
             "src/lib.rs".to_string(),
         ];
 
+        let expected_summary = verification.summary.replace("/home/operator/private.rs", REDACTED_VERIFIER_PATH);
+        let expected_file = verification.issues[0].file.replace("/home/operator/private.rs", REDACTED_VERIFIER_PATH);
+        let expected_suggestion = verification.issues[0].suggestion.as_ref().unwrap().replace(r"\\build-host\proofs\private.rs", REDACTED_VERIFIER_PATH);
+        let expected_files = vec![
+            verification.files_reviewed[0].replace("file:///etc/shadow", REDACTED_VERIFIER_PATH),
+            verification.files_reviewed[1].replace(r"C:\Users\operator\private.rs", REDACTED_VERIFIER_PATH),
+            verification.files_reviewed[2].clone(),
+        ];
         verification.sanitize_verifier_authored_content();
 
-        assert_eq!(verification.summary, REDACTED_VERIFIER_PATH);
-        assert_eq!(verification.issues[0].file, REDACTED_VERIFIER_PATH);
+        assert_eq!(verification.summary, expected_summary);
+        assert_eq!(verification.issues[0].file, expected_file);
         assert_eq!(verification.issues[0].code, REDACTED_VERIFIER_SECRET);
         assert_eq!(verification.issues[0].problem, REDACTED_VERIFIER_SECRET);
         assert_eq!(
             verification.issues[0].suggestion.as_deref(),
-            Some(REDACTED_VERIFIER_PATH)
+            Some(expected_suggestion.as_str())
         );
-        assert_eq!(
-            verification.files_reviewed,
-            vec![
-                REDACTED_VERIFIER_PATH.to_string(),
-                REDACTED_VERIFIER_PATH.to_string(),
-                "src/lib.rs".to_string(),
-            ]
-        );
+        assert_eq!(verification.files_reviewed, expected_files);
 
         let serialized = serde_json::to_string(&verification).expect("serialize");
         for unsafe_value in [

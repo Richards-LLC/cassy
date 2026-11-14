@@ -46,7 +46,9 @@ pub(super) fn linux_evidence_many(
                 opaque = Some(pid);
             }
             Ok(Evidence::Idle) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound && vanished(&process) => {}
+            // A PID can exit after stat is opened: Linux then returns ESRCH,
+            // not NotFound. Its vanished directory proves it cannot use output.
+            Err(_) if vanished(&process) => {}
             Err(_) => unavailable = true,
         }
     }
@@ -333,6 +335,27 @@ mod tests {
         fs::remove_dir(process.join("maps")).unwrap();
         assert!(linux_uses(&root, &cache, &cache, None));
         assert!(linux_uses(&root.join("unavailable"), &cache, &cache, None));
+    }
+
+    #[test]
+    fn exited_process_read_error_does_not_block_reclaim_cas_61ab() {
+        use std::io::Write;
+        let (_temp, root, process, cache) = fixture();
+        let stat = process.join("stat");
+        fs::remove_file(&stat).unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(&stat).status().unwrap().success());
+        let exited = process.clone();
+        let writer = std::thread::spawn(move || {
+            // Opening the FIFO waits until the probe opens stat. Remove the
+            // PID before completing that read with an error, without sleeps.
+            let mut stat = fs::OpenOptions::new().write(true).open(stat).unwrap();
+            fs::remove_dir_all(exited).unwrap();
+            stat.write_all(&[0xff]).unwrap();
+        });
+        let evidence = linux_evidence_many(&root, &cache, &cache, &[]);
+        writer.join().unwrap();
+        assert_eq!(evidence, Evidence::Idle,
+            "an errored read of an exited process cannot keep unrelated review trash live");
     }
 
     #[test]

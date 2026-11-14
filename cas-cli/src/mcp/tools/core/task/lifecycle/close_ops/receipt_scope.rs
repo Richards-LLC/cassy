@@ -123,17 +123,33 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
+    // Inspect the immutable delivery tree: a retained handoff may be absent
+    // from the latest diff, and the checkout can already have removed it.
+    if std::process::Command::new("git")
+        .args(["ls-tree", "--name-only", head, "--", "HANDOFF.md"])
+        .current_dir(proof_repo)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| !output.stdout.is_empty())
+    {
+        refusals.push(format!(
+            "ROOT_HANDOFF_COMMITTED: task {} delivers repo-root HANDOFF.md at {short}. Move checkpoint notes to this task's artifacts directory (HANDOFF.md) or task notes, remove the root file from the delivery, commit and push the correction, then retry park.",
+            task.id,
+        ));
+    }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
     let tested = crate::factory_worker_check::passing_test_packages_against(cas_root, proof_repo, head, target);
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
     // The module check below reads these receipts, so a crate that still owes
     // one cannot be judged yet; running its tests may already cover the module.
+    // gate[G-61 park as-of]: Focused proof: crate test receipts at exact tip and blast-radius scope
     if !untested.is_empty() {
-        refusals.push(format!(
-            "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours. At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
+        refusals.push(crate::gates::tag("G-61", format!(
+            "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours.\n\nNext: At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
             id = task.id,
             crates = untested.join(", "),
-        ));
+        )));
         return refusals;
     }
     // cas-d6eb: a blast-radius module neither declared nor covered by a
@@ -153,14 +169,15 @@ pub(super) fn park_refusals(
             widened.push(module.clone());
         }
     }
-    refusals.push(format!(
+    refusals.push(crate::gates::tag("G-61", format!(
         "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
         id = task.id,
         modules = uncovered.join(", "),
         targets = widened.join(","),
-    ));
+    )));
     refusals
 }
+
 
 fn product_source_path(path: &str) -> bool {
     if path.starts_with("cas-cli/src/builtins/skills/") {
@@ -204,7 +221,8 @@ fn changelog_refusal(
     let changelog_changed = changed_paths
         .iter()
         .any(|path| if fragments { is_changelog_fragment(path) } else { path == "CHANGELOG.md" });
-    if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges) {
+    // gate[G-62 park as-of]: CHANGELOG [Unreleased] entry or fragment required
+    if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges, &task.id) {
         return None;
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -216,10 +234,13 @@ fn changelog_refusal(
     } else {
         "Add a per-delivery line such as `- **Title** — What changed.` under a `### Added — <area>` or `### Fixed — <area>` heading.".to_string()
     };
-    Some(format!(
-        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
+    let inspected_ranges = delivery_ranges
+        .map(|ranges| format!("{ranges:?}"))
+        .unwrap_or_else(|| format!("first-parent history relative to {target}"));
+    Some(crate::gates::tag("G-62", format!(
+        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Inspected commit {head}; target {target}; delivery ranges {inspected_ranges}.\n\nNext: {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
         task.id, task.id, task.id,
-    ))
+    )))
 }
 
 /// cas-f2be: per-delivery changelog fragments. GitHub's mergeability check
@@ -238,8 +259,13 @@ fn is_changelog_fragment(path: &str) -> bool {
 /// Whether `commit` tracks a `changelog.d/` directory, which switches the
 /// changelog gate from `CHANGELOG.md` edits to fragment files.
 pub(super) fn has_changelog_fragments_at(repo: &Path, commit: &str) -> bool {
+    has_fragment_dir_at(repo, commit, CHANGELOG_FRAGMENT_DIR)
+}
+
+/// Whether `dir` holds any tracked file at `commit`.
+pub(super) fn has_fragment_dir_at(repo: &Path, commit: &str, dir: &str) -> bool {
     std::process::Command::new("git")
-        .args(["ls-tree", "--name-only", commit, "--", &format!("{CHANGELOG_FRAGMENT_DIR}/")])
+        .args(["ls-tree", "--name-only", commit, "--", &format!("{dir}/")])
         .current_dir(repo)
         .output()
         .ok()
@@ -285,13 +311,17 @@ pub(super) fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
 /// only fragment files count (cas-f2be). `delivery_ranges` are the close's
 /// task-attributed (base, tip) segments, which keep a same-task predecessor
 /// merge and drop target-sync and other tasks' merges (cas-2a65). Without
-/// them, only single-parent first-parent commits since the merge-base count,
-/// so a merge can never credit entries another branch wrote.
+/// them, first-parent commits since the merge-base count. A merge can credit
+/// only this task's fragment newly authored in its result, absent from every
+/// parent, so entries imported from another branch cannot count. A fragment
+/// already changed by this task's segments retains that provenance when a
+/// target-sync merge revises it; validate its current entry against that base.
 fn has_titled_unreleased_delta(
     repo: &Path,
     head: &str,
     target: &str,
     delivery_ranges: Option<&[(String, String)]>,
+    task_id: &str,
 ) -> bool {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
@@ -317,8 +347,8 @@ fn has_titled_unreleased_delta(
         Some(entries)
     };
     let changelog = vec!["CHANGELOG.md".to_string()];
-    let ranges = match delivery_ranges {
-        Some(ranges) => ranges.to_vec(),
+    let ranges: Vec<(Vec<String>, String)> = match delivery_ranges {
+        Some(ranges) => ranges.iter().map(|(base, tip)| (vec![base.clone()], tip.clone())).collect(),
         None => {
             let Some(base) = git(&["merge-base", head, target]) else {
                 return false;
@@ -330,14 +360,26 @@ fn has_titled_unreleased_delta(
             commits
                 .lines()
                 .filter_map(|line| match line.split_whitespace().collect::<Vec<_>>()[..] {
-                    [commit, parent] => Some((parent.to_string(), commit.to_string())),
+                    [commit, ref parents @ ..] if !parents.is_empty() => {
+                        Some((parents.iter().map(|parent| parent.to_string()).collect(), commit.to_string()))
+                    }
                     _ => None,
                 })
                 .collect()
         }
     };
-    ranges.iter().any(|(base, tip)| {
-        let paths = if fragments {
+    ranges.iter().any(|(parents, tip)| {
+        let base = &parents[0];
+        let paths = if parents.len() > 1 {
+            let path = format!("{CHANGELOG_FRAGMENT_DIR}/{task_id}.md");
+            if !fragments || parents.iter().any(|parent| {
+                git(&["ls-tree", "--name-only", parent, "--", &path])
+                    .is_none_or(|tracked| !tracked.trim().is_empty())
+            }) {
+                return false;
+            }
+            vec![path]
+        } else if fragments {
             let Some(changed) = git(&["diff", "--no-renames", "--name-only", base, tip, "--", CHANGELOG_FRAGMENT_DIR])
             else {
                 return false;
@@ -346,6 +388,19 @@ fn has_titled_unreleased_delta(
         } else {
             changelog.clone()
         };
+        // A returned delivery's target-sync merge is deliberately outside
+        // its attributed segments. Credit the tip's own fragment when a
+        // segment changed that file, even if the merge replaced its entry.
+        // Imported fragments without that provenance cannot use this path.
+        let own_fragment = format!("{CHANGELOG_FRAGMENT_DIR}/{task_id}.md");
+        if fragments && paths.contains(&own_fragment) {
+            let owned = [own_fragment];
+            if let (Some(before), Some(final_entries)) = (entries_at(base, &owned), entries_at(head, &owned))
+                && final_entries.iter().any(|(key, entry)| before.get(key) != Some(entry))
+            {
+                return true;
+            }
+        }
         let (Some(after), Some(final_entries)) = (entries_at(tip, &paths), entries_at(head, &paths)) else {
             return false;
         };
@@ -900,6 +955,8 @@ mod tests {
         git(&["rev-parse", "HEAD"])
     }
 
+
+
     #[test]
     fn product_source_delivery_requires_a_titled_unreleased_change() {
         let repo = changelog_fixture();
@@ -944,7 +1001,7 @@ mod tests {
         let titled = commit_changelog_fixture(repo.path(), "add release note");
         let text = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();
         assert_eq!(titled_unreleased_entries(&text).unwrap().len(), 1);
-        assert!(has_titled_unreleased_delta(repo.path(), &titled, "main", None));
+        assert!(has_titled_unreleased_delta(repo.path(), &titled, "main", None, &task.id));
         let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main", None);
         assert!(accepted.is_none(), "{accepted:?}");
 
@@ -991,6 +1048,195 @@ mod tests {
         assert!(accepted.is_none(), "{accepted:?}");
     }
 
+    #[test]
+    fn corrected_fragment_counts_at_final_delivery_tip_gh1690() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = changelog_fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["branch", "-m", "factory/worker"]);
+        let mut task = Task::new("cas-8c58".into(), "worker account preference".into());
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "Per-task release notes.\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "enable fragments");
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let fragment = "changelog.d/cas-8c58.md";
+        std::fs::write(repo.path().join(fragment),
+            "### Honor the configured Codex worker account\n\nUse the configured account before recommendations.\n").unwrap();
+        let original = commit_changelog_fixture(repo.path(),
+            "fix: honor configured Codex worker account before recommendations");
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        let target = cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "main".into(),
+        };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target, assignee: "worker".into(), branch: "factory/worker".into(),
+            base_sha: base.clone(),
+        });
+        task.deliverables.factory_branch_anchor = Some(original.clone());
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
+                approved_merge_parents: Vec::new(),
+                start_base: Some(base.clone()), task_id: Some(task.id.clone()),
+                known_commits: vec![original.clone()],
+            },
+        };
+        let refusal = |head: &str| {
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(head)).unwrap();
+            let paths = task_attribution::paths(repo.path(), "main", &window, Some(head)).unwrap();
+            assert!(paths.iter().any(|path| path == fragment));
+            changelog_refusal(repo.path(), &task, &paths, head, "main", Some(&ranges))
+        };
+        assert!(refusal(&original).is_some());
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Worker accounts\n\n- **Honor the configured Codex worker account** — Use the configured account before recommendations.\n").unwrap();
+        let corrected = commit_changelog_fixture(repo.path(),
+            "docs: use the required worker account changelog fragment format");
+        let origin = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"]).current_dir(origin.path()).output().unwrap();
+        assert!(output.status.success());
+        git(&["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(&["push", "-q", "origin", "main", "factory/worker"]);
+        let root = repo.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let store = cas_store::SqliteTaskStore::open(&root).unwrap();
+        store.init().unwrap();
+        store.add(&task).unwrap();
+        let parking = core.advance_commit_time_anchor_before_park(
+            &store, &task, repo.path(), "main", Some("factory/worker"), Some(&corrected),
+        );
+        let inspected = parking.deliverables.factory_branch_anchor.unwrap();
+        assert_eq!(inspected, corrected);
+        assert!(refusal(&inspected).is_none());
+        assert_eq!(store.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(original.as_str()));
+
+        // A stale caller can still inspect the old malformed snapshot. Its
+        // diagnostic must identify the inspected commit and attributed bounds.
+        let stale = refusal(&original).unwrap();
+        assert!(stale.contains(&original));
+        assert!(stale.contains(&base));
+    }
+
+    #[test]
+    fn returned_delivery_merge_resolution_fragment_counts_cas_3623() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        let repo = changelog_fixture();
+        let task = Task::new("cas-c568".into(), "returned delivery".into());
+        let fragment = "changelog.d/cas-c568.md";
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "Per-task release notes.\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "enable fragments");
+        git(&["branch", "-f", "main", &base]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Factory\n\n- **Quiet expiry of old transcript mirrors** — Previous sessions expire quietly.\n").unwrap();
+        let parked = commit_changelog_fixture(repo.path(), "fix: quiet old mirrors (cas-c568)");
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(repo.path().join("changelog.d/cas-beef.md"),
+            "### Fixed — Factory\n\n- **Foreign release note** — Another task's delivery.\n").unwrap();
+        commit_changelog_fixture(repo.path(), "fix: target work (cas-beef)");
+        git(&["checkout", "-q", "delivery"]);
+        git(&["merge", "-q", "--no-ff", "--no-commit", "main"]);
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Factory\n\n- **Preserve current-session delivery warnings** — Current mirrors still warn.\n").unwrap();
+        let merge = commit_changelog_fixture(repo.path(), "merge: preserve current-session warnings");
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 3;\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "fix: retain decision warnings (cas-c568)");
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
+                approved_merge_parents: Vec::new(),
+                start_base: Some(base.clone()), task_id: Some(task.id.clone()),
+                known_commits: vec![parked.clone()],
+            },
+        };
+        let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(&head)).unwrap();
+        assert_eq!(ranges, vec![(base, parked), (merge, head.clone())]);
+        let paths = task_attribution::paths(repo.path(), "main", &window, Some(&head)).unwrap();
+        assert!(!paths.iter().any(|path| path == "changelog.d/cas-beef.md"));
+        let imported = Task::new("cas-beef".into(), "imported fragment without delivery provenance".into());
+        assert!(changelog_refusal(repo.path(), &imported, &paths, &head, "main", Some(&ranges)).is_some());
+        assert!(changelog_refusal(repo.path(), &task, &paths, &head, "main", Some(&ranges)).is_none());
+
+        // The imported note cannot replace missing or malformed task evidence.
+        for contents in [None, Some("### Fixed — Factory\n\n- Untitled change.\n")] {
+            if let Some(contents) = contents {
+                std::fs::write(repo.path().join(fragment), contents).unwrap();
+            } else {
+                std::fs::remove_file(repo.path().join(fragment)).unwrap();
+            }
+            let invalid = commit_changelog_fixture(repo.path(), "invalid fragment control (cas-c568)");
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(&invalid)).unwrap();
+            let paths = task_attribution::paths(repo.path(), "main", &window, Some(&invalid)).unwrap();
+            assert!(changelog_refusal(repo.path(), &task, &paths, &invalid, "main", Some(&ranges)).is_some());
+        }
+    }
+
+    #[test]
+    fn merge_authored_task_fragment_counts_without_crediting_imports_cas_28f8() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let task = Task::new("cas-28f8".into(), "integration delivery".into());
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "Per-task release notes.\n").unwrap();
+        commit_changelog_fixture(repo.path(), "enable fragments");
+        git(&["branch", "foreign"]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        commit_changelog_fixture(repo.path(), "integration source change");
+        git(&["checkout", "-q", "foreign"]);
+        std::fs::write(
+            repo.path().join("changelog.d/cas-beef.md"),
+            "### Fixed — Factory\n\n- **Foreign delivery** — Another task's entry.\n",
+        ).unwrap();
+        commit_changelog_fixture(repo.path(), "foreign release note");
+        git(&["checkout", "-q", "delivery"]);
+        git(&["merge", "-q", "--no-ff", "--no-edit", "foreign"]);
+        let imported = commit_changelog_fixture(repo.path(), "generated continuation");
+        let mut changed = vec!["hub-web/src/app.ts".into(), "changelog.d/cas-beef.md".into()];
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &imported, "main", None).is_some(),
+            "an imported foreign fragment cannot satisfy the integration task's changelog");
+
+        // Return to the merge and author the task's fragment in its result,
+        // preserving both parents; neither parent contains this fragment.
+        git(&["checkout", "-q", "-b", "authored", "HEAD~1"]);
+        std::fs::write(
+            repo.path().join("changelog.d/cas-28f8.md"),
+            "### Fixed — Factory\n\n- **Integration release note** — The integration task records its own change.\n",
+        ).unwrap();
+        git(&["add", "changelog.d/cas-28f8.md"]);
+        git(&["commit", "-q", "--amend", "--no-edit"]);
+        std::fs::write(repo.path().join("generated.txt"), "refreshed history\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "generated continuation");
+        changed.push("changelog.d/cas-28f8.md".into());
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main", None);
+        assert!(refusal.is_none(), "a fragment authored by the merge survives continuation: {refusal:?}");
+    }
+
     /// cas-2a65: through the close's task-attributed ranges, an entry a lane
     /// receives by merging its predecessor's same-task branch counts. Another
     /// task's merged entry beside the lane's own untitled bullet, and the
@@ -1005,7 +1251,7 @@ mod tests {
             not_before: chrono::DateTime::UNIX_EPOCH,
             task_floor: chrono::DateTime::UNIX_EPOCH,
             basis: "fixture",
-            identity: TaskCommitIdentity { start_base: None, task_id: Some(task.id.clone()), known_commits: vec![] },
+            identity: TaskCommitIdentity { superseded_commits: Vec::new(), approved_merge_parents: Vec::new(), start_base: None, task_id: Some(task.id.clone()), known_commits: vec![] },
         };
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
@@ -1142,6 +1388,27 @@ mod tests {
             placeholder_reason.is_some() && placeholder_entries_refused,
             "the literal templates must be refused: reason={placeholder_reason:?}; entries_refused={placeholder_entries_refused}"
         );
+    }
+
+    #[test]
+    fn park_refuses_committed_root_handoff_cas_c55fa() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let task = Task::new("cas-c55fa".into(), "checkpoint delivery".into());
+        std::fs::write(repo.path().join("HANDOFF.md"), "Resume the worker.\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "checkpoint");
+        // Inspect the delivered commit, including a handoff retained from an
+        // earlier push, rather than trusting the changed-path list or checkout.
+        std::fs::remove_file(repo.path().join("HANDOFF.md")).unwrap();
+        for changed in [vec!["HANDOFF.md".into()], vec!["docs/guide.md".into()]] {
+            let refusals = park_refusals(cas_root.path(), repo.path(), &task, &changed, &head, "main", None);
+            assert!(refusals.iter().any(|r| r.starts_with("ROOT_HANDOFF_COMMITTED:")), "{refusals:?}");
+        }
+        std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+        std::fs::write(repo.path().join("docs/HANDOFF.md"), "Project documentation.\n").unwrap();
+        let clean = commit_changelog_fixture(repo.path(), "remove worker scratch notes");
+        assert!(park_refusals(cas_root.path(), repo.path(), &task,
+            &["HANDOFF.md".into(), "docs/HANDOFF.md".into()], &clean, "main", None).is_empty());
     }
 
     #[test]

@@ -1776,6 +1776,10 @@ fn refresh_all_projects_with_user_refresh(
     // including every project and every channel. Dry-run never reaps records.
     let runtime_inventory = crate::coordination::binding_repair::RuntimeSnapshot::capture(!args.dry_run);
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
+    // cas-e1e9: each running session re-execs right after its own project
+    // refreshes; the rest (failed or unmatched projects) re-exec at the end.
+    let mut live_daemons = (hub_restart.is_some() && !args.dry_run && args.render_fixture.is_none())
+        .then(super::factory::reexec::LiveDaemonUpdate::new);
     for (index, project) in discovery.projects.iter().enumerate() {
         live::set_activity(format!(
             "{} of {} · {}",
@@ -1910,7 +1914,7 @@ fn refresh_all_projects_with_user_refresh(
             }
         }
 
-        receipts.push(ProjectRefreshReceipt {
+        let receipt = ProjectRefreshReceipt {
             project,
             unregistered,
             retired_toml: Some(retired_toml),
@@ -1922,7 +1926,13 @@ fn refresh_all_projects_with_user_refresh(
             details,
             phase_details,
             documents,
-        });
+        };
+        if let Some(live) = &mut live_daemons
+            && !receipt.failed()
+        {
+            live.after_project(&cas_root);
+        }
+        receipts.push(receipt);
     }
 
     finish_project_refresh(
@@ -1935,6 +1945,7 @@ fn refresh_all_projects_with_user_refresh(
             user_documents,
             user_retired_toml,
             skipped_unregistered: discovery.skipped_unregistered,
+            daemon_outcomes: live_daemons.map(|live| live.finish()).unwrap_or_default(),
         },
         hub_transport_error,
         hub_restart,
@@ -2006,6 +2017,8 @@ struct RefreshResults {
     user_documents: Vec<serde_json::Value>,
     user_retired_toml: Vec<crate::config::ConfigRetirement>,
     skipped_unregistered: Vec<SkippedProject>,
+    /// Factory session re-execs, one per running session (cas-e1e9).
+    daemon_outcomes: Vec<super::factory::reexec::UpdateOutcome>,
 }
 
 /// Report a finished sweep: the summary (or the JSON receipt), the receipt
@@ -2026,7 +2039,15 @@ fn finish_project_refresh(
         user_documents,
         user_retired_toml,
         skipped_unregistered,
+        daemon_outcomes,
     } = results;
+
+    if !cli.json {
+        for outcome in &daemon_outcomes {
+            println!("Factory {}: {}{}", outcome.session, outcome.status,
+                outcome.error.as_ref().map(|error| format!(" — {error}")).unwrap_or_default());
+        }
+    }
 
     let mut config_cleanup = findings::ConfigCleanup::default();
     for maintenance in receipts
@@ -2049,6 +2070,8 @@ fn finish_project_refresh(
         ),
         first_launch_ms,
     );
+    receipt["daemon_reexec"] = serde_json::to_value(&daemon_outcomes)?;
+    receipt["daemon_reexec_status"] = serde_json::json!(if daemon_outcomes.iter().any(|outcome| outcome.error.is_some()) { "partial" } else { "complete" });
     // cas-be05: what the user-level phase printed, by kind.
     if !user_documents.is_empty() {
         let (migration, builtins): (Vec<_>, Vec<_>) = user_documents
@@ -2510,10 +2533,8 @@ fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPh
         Ok(report) if report.commit_error.is_some() => {
             ProjectPhase::Failed(report.commit_error.unwrap())
         }
-        // cas-3199: a conflict skips the whole skill sync, so it is a failure,
-        // not a warning that lets the summary count the project as refreshed.
-        Ok(report) if !report.conflicts.is_empty() => ProjectPhase::Failed(format!(
-            "skills not synced: {} managed file conflict(s) ({}); run `cas update --sync --json`",
+        Ok(report) if !report.conflicts.is_empty() => ProjectPhase::Warning(format!(
+            "skills synced; {} conflicting managed file(s) preserved ({}); run `cas update --sync --json`",
             report.conflicts.len(),
             report.conflicts.join(", ")
         )),
@@ -3181,13 +3202,8 @@ fn sync_claude_files_into(
         let conflicts = reconciliation.as_ref().map(|plan| plan.report.conflicts.as_slice());
         crate::cli::project_files::record_conflicts(&cas_root, conflicts.unwrap_or_default())?;
     }
-    let reconciliation = match reconciliation {
-        Some(plan) if plan.blocked() => {
-            report_managed_files(cli, &plan.report)?;
-            return Ok(plan.report);
-        }
-        plan => plan,
-    };
+    let excluded = reconciliation.as_ref().map(|plan| plan.exclusions()).unwrap_or_default();
+    let allowed = |path: &str| !excluded.iter().any(|conflict| project_root.join(path).starts_with(conflict));
     // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
     #[cfg(feature = "mcp-proxy")]
     if _refresh_host_integration {
@@ -3198,7 +3214,7 @@ fn sync_claude_files_into(
             &cas_root.join("proxy.toml"),
         ));
     }
-    let mut builtin_gitignore = ensure_builtin_gitignore(project_root, &builtin_harnesses)?;
+    let mut builtin_gitignore = if allowed(".gitignore") { ensure_builtin_gitignore(project_root, &builtin_harnesses)? } else { Default::default() };
 
     if !cli.json {
         let mut out = io::stdout();
@@ -3216,7 +3232,7 @@ fn sync_claude_files_into(
 
     // Update configuration files
     // 1. Claude Code hooks (.claude/settings.json)
-    match configure_claude_hooks(project_root, false) {
+    match if allowed(".claude/settings.json") { configure_claude_hooks(project_root, false) } else { Ok(false) } {
         Ok(true) => {
             config_updated.push("settings.json");
             if !cli.json {
@@ -3238,7 +3254,7 @@ fn sync_claude_files_into(
     }
 
     // 2. MCP server configuration (.mcp.json)
-    match configure_mcp_server(project_root) {
+    match if allowed(".mcp.json") { configure_mcp_server(project_root) } else { Ok(false) } {
         Ok(true) => {
             config_updated.push(".mcp.json");
             if !cli.json {
@@ -3260,7 +3276,7 @@ fn sync_claude_files_into(
     }
 
     // 3. CLAUDE.md directive
-    match update_claude_md(project_root) {
+    match if allowed("CLAUDE.md") { update_claude_md(project_root) } else { Ok(false) } {
         Ok(true) => {
             config_updated.push("CLAUDE.md");
             if !cli.json {
@@ -3283,7 +3299,7 @@ fn sync_claude_files_into(
 
     // 3b. AGENTS.md directive: the harness-neutral block CLAUDE.md imports
     // and Codex/Grok read directly (audit D3, M66).
-    match update_agents_md(project_root) {
+    match if allowed("AGENTS.md") { update_agents_md(project_root) } else { Ok(false) } {
         Ok(true) => {
             config_updated.push("AGENTS.md");
             if !cli.json {
@@ -3305,7 +3321,7 @@ fn sync_claude_files_into(
     }
 
     // 4. Main Cassy skill (.claude/skills/cas/SKILL.md)
-    match generate_cas_skill(project_root) {
+    match if allowed(".claude/skills/cas/SKILL.md") { generate_cas_skill(project_root) } else { Ok(false) } {
         Ok(true) => {
             config_updated.push("skills/cas/SKILL.md");
             if !cli.json {
@@ -3334,7 +3350,15 @@ fn sync_claude_files_into(
     crate::store::foreign_project_guard::ForeignProjectGuard::for_project_root(project_root)
         .retain_syncable_rules(&mut rules);
     let rule_syncer = Syncer::with_defaults(project_root);
-    let rule_report = rule_syncer.sync_all(&rules)?;
+    let mut excluded_rules = std::collections::HashSet::new();
+    if allowed(".claude/rules/cas") {
+        for id in rule_syncer.list_synced()?.into_iter().chain(rules.iter().map(|rule| rule.id.clone())) {
+            if !allowed(&format!(".claude/rules/cas/{id}.md")) { excluded_rules.insert(id); }
+        }
+    }
+    let rule_report = if allowed(".claude/rules/cas") {
+        rule_syncer.sync_all_excluding(&rules, &excluded_rules)?
+    } else { Default::default() };
 
     // Capture explicit reference deletions before database skill sync can
     // rehydrate an older stored copy. Builtin sync consumes these one-shot
@@ -3360,13 +3384,17 @@ fn sync_claude_files_into(
     // Preserve project-authored cas-* siblings; builtin pruning already
     // belongs to its own writer. Explicit disabled database
     // skills are still handled by sync_skill inside this operation.
-    let retained = skill_syncer.list_synced()?.into_iter().collect();
-    let skill_report = skill_syncer.sync_all_preserving(&skills, &retained)?;
+    let retained = if allowed(".claude/skills") { skill_syncer.list_synced()?.into_iter().collect() } else { Default::default() };
+    let excluded_skills = skills.iter().map(|skill| crate::sync::skills::skill_dir_name(&skill.name))
+        .filter(|name| !allowed(&format!(".claude/skills/{name}/SKILL.md"))).collect();
+    let skill_report = if allowed(".claude/skills") {
+        skill_syncer.sync_all_preserving_excluding(&skills, &retained, &excluded_skills)?
+    } else { Default::default() };
 
     // Sync built-in agents, skills, and commands AFTER database sync
     // (so they don't get removed as "stale" by the skill syncer)
     let builtin_result =
-        sync_all_builtins_for_project(cas_mux::SupervisorCli::Claude, project_root)?;
+        crate::builtins::sync_all_builtins_for_project_excluding(cas_mux::SupervisorCli::Claude, project_root, &excluded)?;
     if !cli.json {
         report_builtin_sync(&builtin_result, ".claude", &theme)?;
     }
@@ -3378,7 +3406,7 @@ fn sync_claude_files_into(
     write_skill_sync_sentinel(&cas_root);
 
     // Sync factory tooling helper templates.
-    let factory_tooling_result = match factory_tooling::setup_factory_tooling(project_root) {
+    let factory_tooling_result = match factory_tooling::setup_factory_tooling_excluding(project_root, &excluded) {
         Ok(summary) => {
             if !cli.json && !summary.is_empty() {
                 let mut out = io::stdout();
@@ -3408,7 +3436,7 @@ fn sync_claude_files_into(
             fmt.subheading("Syncing .codex files")?;
         }
 
-        match provision_codex_project(project_root) {
+        match crate::cli::hook::config_gen::provision_codex_project_excluding(project_root, !allowed(".codex/config.toml"), !allowed(".codex/hooks.json")) {
             Ok(true) => {
                 codex_config_updated.push("config.toml");
                 codex_config_updated.push("hooks.json");
@@ -3433,7 +3461,7 @@ fn sync_claude_files_into(
         }
 
         let codex_result =
-            sync_all_builtins_for_project(cas_mux::SupervisorCli::Codex, project_root)?;
+            crate::builtins::sync_all_builtins_for_project_excluding(cas_mux::SupervisorCli::Codex, project_root, &excluded)?;
         codex_modified_references = codex_result.modified_reference_files.len();
         if !cli.json {
             report_builtin_sync(&codex_result, ".codex", &theme)?;
@@ -3455,7 +3483,7 @@ fn sync_claude_files_into(
         }
 
         let grok_result =
-            sync_all_builtins_for_project(cas_mux::SupervisorCli::Grok, project_root)?;
+            crate::builtins::sync_all_builtins_for_project_excluding(cas_mux::SupervisorCli::Grok, project_root, &excluded)?;
         grok_modified_references = grok_result.modified_reference_files.len();
         if !cli.json {
             report_builtin_sync(&grok_result, ".grok", &theme)?;
@@ -3472,7 +3500,7 @@ fn sync_claude_files_into(
             fmt.subheading("Syncing .opencode files")?;
         }
         let opencode_result =
-            sync_all_builtins_for_project(cas_mux::SupervisorCli::OpenCode, project_root)?;
+            crate::builtins::sync_all_builtins_for_project_excluding(cas_mux::SupervisorCli::OpenCode, project_root, &excluded)?;
         if !cli.json {
             report_builtin_sync(&opencode_result, ".opencode", &theme)?;
         }
@@ -3538,6 +3566,14 @@ fn sync_claude_files_into(
         } else {
             fmt.write_raw("  ")?;
             fmt.success("Database rules up to date")?;
+        }
+
+        for name in &skill_report.shadowed_names {
+            fmt.write_raw("  ")?;
+            fmt.warning(&format!(
+                "Database skill '{name}' not synced: a built-in skill owns that directory. \
+                 Archive the database skill to silence this."
+            ))?;
         }
 
         // Report database skill sync
@@ -4383,39 +4419,11 @@ fn running_factory_sessions() -> Vec<(String, bool)> {
         .collect()
 }
 
-/// cas-cef2: what a binary update means for factory sessions already running.
-/// A daemon keeps its own build until relaunched; one that pinned its
-/// executable keeps spawning workers with it, and an older one cannot spawn.
+/// Say how already running factories pick up the installed build.
 fn running_factory_update_notice(sessions: &[(String, bool)], version: &str) -> Option<String> {
-    if sessions.is_empty() {
-        return None;
-    }
-    let names = |pinned: bool| {
-        sessions
-            .iter()
-            .filter(|(_, is_pinned)| *is_pinned == pinned)
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let mut notice = format!(
-        "{} running factory session(s) keep their current build until relaunched.",
-        sessions.len()
-    );
-    let pinned = names(true);
-    if !pinned.is_empty() {
-        notice.push_str(&format!(" {pinned} keep spawning workers with that build."));
-    }
-    let unpinned = names(false);
-    if !unpinned.is_empty() {
-        notice.push_str(&format!(
-            " {unpinned} started before build pinning and cannot spawn new workers until relaunched."
-        ));
-    }
-    notice.push_str(&format!(
-        " To move a session to {version}, run `cas factory kill <session>` and relaunch `cas factory`; this stops its workers."
-    ));
-    Some(notice)
+    if sessions.is_empty() { return None; }
+    Some(format!("{} running factory session(s): {}. After the hub step, cas update requests an in-place daemon update to {version} for each session. To retry one, run `cas factory reexec --session <session>`; panes and the daemon PID survive when handoff is supported. Older daemons may ignore the request; after a bounded wait they are reported as relaunch required, while their existing panes keep running.",
+        sessions.len(), sessions.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ")))
 }
 
 /// Pre-swap failures have no refresh receipt. Preserve their original error
@@ -4773,6 +4781,7 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
     remove_quarantine_if_present(&std::env::current_exe()?)?;
+    super::install_on_publish::refresh_installed();
     // The hub goes first so it picks up the new binary immediately rather than
     // waiting behind a full refresh. Its verification is drawn from data in
     // the findings; anything else it printed still reaches the operator.

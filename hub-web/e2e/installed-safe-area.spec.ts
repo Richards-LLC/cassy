@@ -79,3 +79,43 @@ test("in a browser tab (no inset) the headers keep their geometry", async ({ pag
   const top = await page.locator(".conversation-heading #conversation-back").evaluate((node) => node.getBoundingClientRect().top);
   expect(top).toBeLessThan(STATUS_BAR);
 });
+
+test("conversation header shares one row with reachable actions (cas-bcf0)", async ({ page }, testInfo) => {
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await page.emulateMedia({ colorScheme });
+    await page.goto("/?fixture=conversation");
+    await page.locator(".conversation-shell").evaluate(node => node.classList.add("context-open"));
+    const header = page.locator(".conversation-heading");
+    await expect(header).toBeVisible();
+    await header.screenshot({ path: testInfo.outputPath(`header-${width}-${colorScheme}.png`) });
+    const boxes = await header.evaluate(node => {
+      const rect = (selector: string) => {
+        const box = node.querySelector(selector)!.getBoundingClientRect();
+        return { x: box.x, right: box.right, y: box.y, width: box.width, height: box.height, middle: box.y + box.height / 2 };
+      };
+      return { header: node.getBoundingClientRect().height, identity: rect(".conversation-identity"), raw: rect("#conversation-raw-output"), interrupt: rect("#conversation-interrupt"), title: rect("h1 b") };
+    });
+    expect(Math.abs(boxes.identity.middle - boxes.raw.middle)).toBeLessThanOrEqual(4);
+    expect(Math.abs(boxes.identity.middle - boxes.interrupt.middle)).toBeLessThanOrEqual(4);
+    expect(boxes.raw.x).toBeGreaterThanOrEqual(boxes.identity.right - 1);
+    expect(boxes.title.width).toBeGreaterThan(16);
+    expect(boxes.title.right).toBeLessThanOrEqual(boxes.raw.x);
+    if (width === 390) {
+      expect(boxes.header).toBeLessThanOrEqual(64);
+      const more = page.locator("#conversation-more");
+      await more.click();
+      await expect(page.locator("#conversation-commands")).toBeVisible();
+      await expect(page.locator("#conversation-show-work")).toBeVisible();
+      await expect(page.locator("#conversation-fleet")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(more).toBeFocused();
+    } else {
+      await expect(page.getByRole("button", { name: "Show work", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Supervisor commands", exact: true })).toBeVisible();
+    }
+    await expect(page.locator(".conversation-title-line > #conversation-connection.status-chip")).toBeVisible();
+    await expect(page.locator("#conversation-raw-output")).toBeVisible();
+    await expect(page.locator("#conversation-interrupt")).toBeVisible();
+  }
+});

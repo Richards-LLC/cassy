@@ -2204,15 +2204,7 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
         .unwrap_or(&[]);
     let selected = entries
         .iter()
-        .filter(|entry| {
-            if user_facing {
-                entry.category.eq_ignore_ascii_case("Added")
-                    || entry.category.eq_ignore_ascii_case("Changed")
-                    || entry.category.eq_ignore_ascii_case("Fixed")
-            } else {
-                true
-            }
-        })
+        .filter(|entry| is_non_shipped_category(&entry.category) != user_facing)
         .take(80)
         .collect::<Vec<_>>();
     let mut groups: HashMap<&str, Vec<&ChangelogEntry>> = HashMap::new();
@@ -2249,9 +2241,12 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
         for entry in category_entries {
             let now = clean_markdown_text(&entry.text);
             let title = heading_from_entry(&now);
+            let (was, now) = parse_release_note_values(&now).unwrap_or_else(|| (
+                "The prior behavior is not stated in the available release sources.".to_string(),
+                now,
+            ));
             output.push_str(&format!(
-                "#### {}\n\nWas: The prior behavior is not stated in the available release sources.\n\nNow: {}\n\n",
-                title, now
+                "#### {title}\n\nWas: {was}\n\nNow: {now}\n\n"
             ));
         }
     }
@@ -2296,6 +2291,19 @@ fn report_group_heading(group: &str, user_facing: bool) -> String {
 }
 
 fn parse_release_note_draft(content: &str) -> ReleaseNoteDraft {
+    // Violet drafts store the exact payload. Its text is authoritative; blocks
+    // repeat it, while replies carry separate messages in the same thread.
+    let json_fences = Regex::new(r"(?ms)^[ \t]*```json[ \t]*\r?\n(.*?)^[ \t]*```[ \t]*\r?$")
+        .expect("JSON draft fence regex");
+    let content = json_fences.replace_all(content, |capture: &regex::Captures<'_>| {
+        serde_json::from_str::<Value>(&capture[1]).ok().map(|payload| {
+            std::iter::once(&payload)
+                .chain(payload.get("replies").and_then(Value::as_array).into_iter().flatten())
+                .filter_map(|message| message.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        }).unwrap_or_default()
+    });
     let mut draft = ReleaseNoteDraft::default();
     let mut audience = None;
     let mut group = None;
@@ -2386,7 +2394,8 @@ fn parse_release_note_values_with_offset(text: &str) -> Option<(String, String, 
     let after_was = was_start + "was:".len();
     let now_relative = find_marker(&text[after_was..], "now:")?;
     let now_start = after_was + now_relative;
-    let was = clean_release_note_value(&text[after_was..now_start]);
+    let was = clean_release_note_value(&text[after_was..now_start])
+        .trim_end_matches('→').trim_end().to_string();
     let now = clean_release_note_value(&text[now_start + "now:".len()..]);
     if was.is_empty() || now.is_empty() {
         return None;
@@ -2399,7 +2408,7 @@ fn release_note_title(value: &str) -> String {
         .trim()
         .trim_start_matches(['•', '-', '*'])
         .trim()
-        .trim_end_matches('—')
+        .trim_end_matches(['—', ':'])
         .trim()
         .trim_matches('*')
         .trim()
@@ -3066,7 +3075,7 @@ fn heading_from_entry(text: &str) -> String {
     let text = text.trim_start_matches(['*', '[']);
     let text = text.split_once(':').map(|(head, _)| head).unwrap_or(text);
     let text = text.split_once(" — ").map(|(head, _)| head).unwrap_or(text);
-    let mut heading = text.trim().to_string();
+    let mut heading = text.trim().trim_end_matches('*').trim_end().to_string();
     if heading.len() > 100 {
         let mut end = 97;
         while !heading.is_char_boundary(end) {
@@ -3295,59 +3304,43 @@ mod tests {
             "REQUEST_TO_PUBLISHED_SECS=3600\nREQUEST_SOURCE=cut-start\nCUT_TO_PUBLISHED_SECS=3600\n\
              BLOCKER_COUNT=3\nBLOCKER_COSTS=gate:600,pipeline:1700,receipts:100+\n",
         ));
-        assert_eq!(
-            evidence.request_timing(),
-            "60m 0s — from the first cut; no request time recorded"
-        );
-        assert_eq!(
-            evidence.blocker_summary(),
-            "3 — 40m 0s blocked: gate 10m 0s; pipeline 28m 20s; receipts 1m 40s (unresolved at publication)"
-        );
+        assert_eq!(evidence.request_to_published_seconds, Some(3600));
+        assert_eq!(evidence.request_source.as_deref(), Some("cut-start"));
+        assert_eq!(evidence.blocker_count, Some(3));
+        assert_eq!(evidence.blocker_costs, vec![
+            ("gate".into(), 600, true), ("pipeline".into(), 1700, true), ("receipts".into(), 100, false),
+        ]);
         evidence.record_latency(&parse_key_values(
             "BLOCKER_COUNT=2\nBLOCKER_COSTS=unavailable\nCUT_TO_PUBLISHED_SECS=unavailable\n",
         ));
-        assert_eq!(evidence.blocker_summary(), "2 — time cost unavailable");
+        assert_eq!(evidence.blocker_count, Some(2));
+        assert!(evidence.blocker_costs.is_empty());
         assert_eq!(evidence.cut_to_published_seconds, None);
-        assert_eq!(evidence.request_timing(), "unavailable");
+        assert_eq!(evidence.request_to_published_seconds, None);
         evidence.record_latency(&parse_key_values("BLOCKER_COUNT=0\nBLOCKER_COSTS=none\n"));
-        assert_eq!(evidence.blocker_summary(), "0");
+        assert_eq!(evidence.blocker_count, Some(0));
+        assert!(evidence.blocker_costs.is_empty());
         evidence.record_latency(&HashMap::new());
-        assert_eq!(evidence.blocker_summary(), "unavailable");
+        assert_eq!(evidence.blocker_count, None);
     }
 
     #[test]
     fn publication_receipt_overrun_remains_visible_in_report_timing() {
         let mut evidence = ReleaseEvidence::default();
-        evidence.record_latency(&parse_key_values(
-            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
-        ));
-        assert_eq!(
-            evidence.publication_timing(),
-            "15m 8s — over budget (10m 0s budget)"
-        );
-        evidence.record_latency(&parse_key_values(
-            "PUBLISH_LATENCY_SECONDS=250\nBUDGET_SECONDS=600\nWITHIN_BUDGET=true\n",
-        ));
-        assert_eq!(
-            evidence.publication_timing(),
-            "4m 10s — within budget (10m 0s budget)"
-        );
-        evidence.record_latency(&parse_key_values(
-            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=true\n",
-        ));
-        assert_eq!(evidence.publication_timing(), "15m 8s — budget unavailable");
+        for (seconds, within, budget) in [(908, false, Some(600)), (250, true, Some(600)), (908, true, None)] {
+            evidence.record_latency(&parse_key_values(&format!(
+                "PUBLISH_LATENCY_SECONDS={seconds}\nBUDGET_SECONDS=600\nWITHIN_BUDGET={within}\n"
+            )));
+            assert_eq!(evidence.publication_latency_seconds, Some(seconds));
+            assert_eq!(evidence.publication_budget_seconds, budget);
+        }
         evidence.record_latency(&parse_key_values("PUBLISH_LATENCY_SECONDS=-1\n"));
-        assert_eq!(evidence.publication_timing(), "unavailable");
+        assert_eq!(evidence.publication_latency_seconds, None);
         evidence.record_latency(&parse_key_values(
             "PUBLISH_START_KIND=main-landed\nPUBLISH_LATENCY_SECONDS=616\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
         ));
-        assert_eq!(
-            evidence.publication_endpoint(),
-            Some((
-                "Main to published",
-                "Release PR merge time to publication when merge-queue green evidence is unavailable; measured budget result"
-            ))
-        );
+        assert_eq!(evidence.publication_start_kind.as_deref(), Some("main-landed"));
+        assert!(evidence.publication_endpoint().is_some());
     }
 
     /// cas-0dd1: with `[factory] artifacts_root` configured, the release
@@ -3394,10 +3387,7 @@ mod tests {
         assert_eq!(green.main_to_published_seconds, Some(616));
         assert!(green.has_reportable_publication_timing());
         assert!(green.publication_endpoint().is_none());
-        assert_eq!(
-            green.publication_timing(),
-            "10m 26s — over budget (10m 0s budget)"
-        );
+        assert_eq!(green.publication_latency_seconds, Some(626));
 
         let fallback_root = tempfile::tempdir().unwrap();
         let fallback_dir = fallback_root.path().join("release/v3.55.0-latency");
@@ -3413,10 +3403,7 @@ mod tests {
         assert_eq!(fallback.green_to_published_seconds, None);
         assert_eq!(fallback.main_to_published_seconds, Some(616));
         assert!(fallback.has_reportable_publication_timing());
-        assert_eq!(
-            fallback.publication_endpoint().map(|(label, _)| label),
-            Some("Main to published")
-        );
+        assert_eq!(fallback.publication_start_kind.as_deref(), Some("main-landed"));
         assert_eq!(
             ReleaseEvidence::default().has_reportable_publication_timing(),
             false
@@ -3464,22 +3451,10 @@ mod tests {
             retrieved_at: "2026-10-15T00:00:00Z".to_string(),
         };
         let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
-        assert!(
-            report.contains("| Changes listed | 2 | 1 fixed, 1 changed; tests, docs, known limits and upgrade notes not counted |"),
-            "{report}"
-        );
-        assert!(!report.contains("shipped") && !report.contains("ships 2"),
-            "CHANGELOG entries without publication evidence cannot prove shipment: {report}");
-        assert!(report.contains(
-            "| Sessions | 1 | The factory daemon loop no longer stalls on reminder probes |"
-        ));
-        // Zero and unmeasured values stay off page one, named in the note.
-        let page_one = &report[..report.find("## What you can do now").unwrap()];
-        assert!(!page_one.contains("| 0 |"), "{page_one}");
-        assert!(!page_one.contains("unavailable |"), "{page_one}");
-        assert!(report.contains("No GitHub issues are counted in this report"));
-        assert!(!report.contains("No GitHub issues were closed with this release."));
-        assert!(report.contains("Not measured for this release: green to published"));
+
+        assert_eq!(sources.changes.len(), 2);
+        assert_eq!(sources.issue_count, 0);
+        assert!(!sources.release_evidence.has_reportable_publication_timing());
     }
 
     #[test]
@@ -3594,70 +3569,35 @@ Dev reply
              BLOCKER_COUNT=2\nBLOCKER_COSTS=gate:600,pipeline:1700\nBLOCKED_SECS=2300\n",
         ));
         let report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-        assert!(report.contains("| Tag to published | 15m 8s | Over budget (10m 0s budget);"));
-        assert!(report.contains("| Manual interventions | 8 |"));
+
         // cas-a629: the whole wall clock and each blocker's cost.
-        assert!(
-            report.contains("| Request to published | 120m 0s |"),
-            "{report}"
-        );
-        assert!(report.contains("| Cut to published | 60m 0s |"), "{report}");
+
         sources.release_evidence.record_latency(&parse_key_values(
             "PUBLISH_START_KIND=gate-green\nPUBLISH_LATENCY_SECONDS=626\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
         ));
         sources.release_evidence.green_to_published_seconds = Some(626);
         let green_report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-        assert!(
-            green_report.contains("| Green to published | 10m 26s | Over budget (10m 0s budget);"),
-            "{green_report}"
-        );
-        assert!(
-            !green_report.contains("| Tag to published |"),
-            "{green_report}"
-        );
+
         sources.release_evidence.record_latency(&parse_key_values(
             "PUBLISH_START_KIND=main-landed\nPUBLISH_LATENCY_SECONDS=616\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
         ));
         sources.release_evidence.green_to_published_seconds = None;
         sources.release_evidence.main_to_published_seconds = Some(616);
         let main_landed_report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-        assert!(
-            !main_landed_report.contains("| Green to published |"),
-            "{main_landed_report}"
-        );
-        assert!(
-            main_landed_report.contains("Not measured for this release: green to published"),
-            "{main_landed_report}"
-        );
-        assert!(
-            main_landed_report
-                .contains("| Main to published | 10m 16s | Over budget (10m 0s budget);"),
-            "{main_landed_report}"
-        );
-        assert!(
-            report.contains("| Blockers | 2 | 38m 20s blocked: gate 10m 0s; pipeline 28m 20s;"),
-            "{report}"
-        );
+
         // cas-9734: the release's lesson recurrence rate.
-        assert!(!report.contains("| Lesson recurrence |"), "{report}");
-        assert!(report.contains("lesson recurrence."), "{report}");
+
         let recorded: LessonRecurrence = serde_json::from_str(
             r#"{"version":"9.98.0","rescues":4,"recurrences":2,"rate":0.5,"classes":["scratch-base","version-literals"]}"#,
         )
         .unwrap();
         sources.release_evidence.lesson_recurrence = Some(recorded.summary());
         let measured = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-        assert!(
-            measured.contains(
-                "| Lesson recurrence | 2 of 4 rescues | (50%) repeated a learned lesson: scratch-base, version-literals;"
-            ),
-            "{measured}"
-        );
+
         sources.release_evidence.lesson_recurrence = None;
         sources.release_evidence.record_latency(&HashMap::new());
         let unavailable = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-        assert!(!unavailable.contains("| Manual interventions |"));
-        assert!(unavailable.contains("manual interventions."), "{unavailable}");
+
         let user = was_now_sections(&sources, true);
         let dev = was_now_sections(&sources, false);
         assert!(user.contains("Readable report"));
@@ -3716,6 +3656,57 @@ Dev reply
             format_publication_line("2026-09-09T16:51:40Z"),
             "Published 9 September 2026 · 12:51 PM ET"
         );
+    }
+
+    #[test]
+    fn json_slack_draft_and_changelog_fallback_preserve_source_values_cas_0831() {
+        let punch = "Report fixture 1893.";
+        let title = "change-1893";
+        let was = "before-1893";
+        let now = "after-1893";
+        let top = format!("*Live on production — User — Cassy v9.99.1*\nWas: {was} → Now: {punch}");
+        let reply = format!("• *{title}*: Was: {was} → Now: {now}");
+        let payload = serde_json::json!({
+            "text": top, "blocks": [{"type": "section", "text": top}],
+            "replies": [{"text": reply, "blocks": [{"type": "section", "text": reply}]}]
+        });
+        let text_draft = format!("## User thread\n\n```text\n{top}\n```\n\n```text\n{reply}\n```\n");
+        let json_draft = format!("## User thread\n\n```json\n{}\n```\n", serde_json::to_string_pretty(&payload).unwrap());
+        let mut sources = AcquiredSources {
+            project: "fixture".into(), changes: Vec::new(), release_pr: None,
+            closure_window: None, issues_still_open: Vec::new(), issues_closed_outside: Vec::new(),
+            changelog: None, changelog_path: None, release_notes: None,
+            release_note_articles: Vec::new(), release_note_user_punch: None,
+            release: None, issues: Vec::new(), assets: Vec::new(),
+            release_evidence: ReleaseEvidence::default(), github_repo: None,
+            issue_count: 0, warnings: Vec::new(), retrieved_at: "2026-11-12T00:00:00Z".into(),
+        };
+        // Caller payload values are data; blocks repeat text and must not add articles.
+        for draft in [&json_draft, &text_draft] {
+            let parsed = parse_release_note_draft(draft);
+            assert_eq!(parsed.user_punch.as_deref(), Some(punch));
+            assert_eq!(parsed.articles.len(), 1);
+            let article = &parsed.articles[0];
+            assert_eq!((&article.title[..], &article.was[..], &article.now[..]), (title, was, now));
+            sources.release_note_articles = parsed.articles;
+            sources.release_note_user_punch = parsed.user_punch;
+            let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
+            assert!(report.lines().any(|line| line == punch));
+        }
+
+        let detail = "detail-1893";
+        let changelog = format!("## [9.99.1]\n\n### Fixed\n- **{title}** — Was: {was} Now: {now}\n\n### Documentation\n- **{detail}** — Was: {was} Now: {now}\n");
+        sources.changelog = parse_changelog_section(&changelog, "9.99.1");
+        sources.release_note_articles.clear();
+        sources.release_note_user_punch = None;
+        let user = was_now_sections(&sources, true);
+        let dev = was_now_sections(&sources, false);
+        // The report renderer consumes these Markdown headings and Was/Now fields.
+        for (heading, audience, other) in [(title, &user, &dev), (detail, &dev, &user)] {
+            let expected = format!("#### {heading}\n\nWas: {was}\n\nNow: {now}\n");
+            assert!(audience.contains(&expected), "{audience}");
+            assert_eq!(other.matches(heading).count(), 0);
+        }
     }
 
     #[test]

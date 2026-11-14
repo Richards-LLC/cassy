@@ -1,5 +1,101 @@
 //! Supervisor approval of an existing replacement delivery lane. Git is read-only.
 
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn live_rebind_and_retained_aliases_count_once_after_backfill() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("rebind-ledger");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-c921".into(), "Rebind ledger fixture".into());
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: "main".into(),
+            },
+            assignee: "worker".into(), branch: "factory/worker".into(), base_sha: "a".repeat(40),
+        });
+        tasks.add(&task).unwrap();
+        let since = Utc::now() - ChronoDuration::days(1);
+        let count = || {
+            let report = crate::cli::ledger::quality_reports(&root, 0).unwrap();
+            report["releases"][0]["interventions"]["rebind"].as_u64().unwrap()
+        };
+        let rows = || cas_store::quality_events_for_task(&root, &task.id).unwrap().into_iter()
+            .filter(|event| matches!(event.payload, cas_store::QualityPayload::Intervention {
+                intervention: cas_store::InterventionKind::Rebind, ..
+            })).collect::<Vec<_>>();
+        let mut historical = Vec::new();
+        for (index, tip) in ["b", "c"].into_iter().enumerate() {
+            let expected = tasks.get(&task.id).unwrap();
+            let mut rebound = expected.clone();
+            rebound.deliverables.factory_branch_start.as_mut().unwrap().branch = format!("factory/worker-{index}");
+            BranchRebindAudit {
+                actor: "supervisor".into(), reason: "approved replacement".into(),
+                previous_tip: None, tip: tip.repeat(40), target_tip: "a".repeat(40),
+            }.persist(&root, tasks.as_ref(), &expected, &mut rebound).unwrap();
+            assert_eq!(count(), index as u64 + 1);
+
+            for _ in 0..2 {
+                crate::quality_ledger::backfill(&root, since).unwrap();
+                assert_eq!(rows().len(), index * 2 + 1);
+                assert_eq!(count(), index as u64 + 1);
+            }
+
+            // Replay an immutable alias produced by the released backfill writer.
+            let line = rebound.notes.lines().last().unwrap();
+            let mut digest = std::collections::hash_map::DefaultHasher::new();
+            line.hash(&mut digest);
+            let mut alias = cas_store::NewQualityEvent::new(
+                format!("backfill|rebind|{}|{:016x}", task.id, digest.finish()),
+                cas_store::QualityPayload::Intervention {
+                    intervention: cas_store::InterventionKind::Rebind, minutes: None,
+                },
+            );
+            alias.task_id = Some(task.id.clone());
+            // Retained audit notes have minute precision, unlike the live row.
+            alias.occurred_at = chrono::DateTime::from_timestamp(rebound.updated_at.timestamp() / 60 * 60, 0).unwrap();
+            assert!(crate::quality_ledger::emit(&root, &alias));
+            historical = rows();
+            assert_eq!(count(), index as u64 + 1);
+        }
+        for _ in 0..2 {
+            crate::quality_ledger::backfill(&root, since).unwrap();
+            assert_eq!(rows(), historical);
+            assert_eq!(count(), 2);
+        }
+
+        // Recovery also recognizes a legacy-only identity, or creates the live
+        // identity when only the audit survived. Repeated identical notes are
+        // the same fact, while each task remains a separate intervention.
+        let retained = tasks.get(&task.id).unwrap();
+        let line = retained.notes.lines().last().unwrap();
+        for (index, legacy) in [true, false].into_iter().enumerate() {
+            let mut recovered = cas_types::Task::new(format!("cas-history-{index}"), "Retained rebind".into());
+            recovered.notes = format!("{line}\n{line}");
+            tasks.add(&recovered).unwrap();
+            if legacy {
+                let mut digest = std::collections::hash_map::DefaultHasher::new();
+                line.hash(&mut digest);
+                crate::quality_ledger::intervention(&root, cas_store::InterventionKind::Rebind,
+                    format!("backfill|rebind|{}|{:016x}", recovered.id, digest.finish()),
+                    Some(&recovered.id), None, None);
+            }
+            for _ in 0..2 {
+                crate::quality_ledger::backfill(&root, since).unwrap();
+                assert_eq!(cas_store::quality_events_for_task(&root, &recovered.id).unwrap().len(), 1);
+                assert_eq!(count(), 3 + index as u64);
+            }
+        }
+    }
+}
+
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -13,10 +109,11 @@ use crate::mcp::CasCore;
 
 use super::{lifecycle::close_ops, repo_context, resolve_agent_identity};
 
+// gate[G-152 rebind]: Delivery branch rebinding authority and evidence
 fn refused(reason: impl Into<String>) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
-        format!("DELIVERY BRANCH REBIND REFUSED: {}", reason.into()),
+        crate::gates::tag("G-152",format!("DELIVERY BRANCH REBIND REFUSED: {}", reason.into())),
     )
 }
 
@@ -58,6 +155,158 @@ impl Git<'_> {
             &format!("{branch}^{{commit}}"),
         ])
     }
+}
+
+/// The durable audit and ledger write shared by approved and safe automatic rebinds.
+pub(super) struct BranchRebindAudit {
+    actor: String,
+    reason: String,
+    previous_tip: Option<String>,
+    tip: String,
+    target_tip: String,
+}
+
+impl BranchRebindAudit {
+    pub(super) fn persist(
+        &self,
+        cas_root: &Path,
+        tasks: &dyn cas_store::TaskStore,
+        expected: &cas_types::Task,
+        rebound: &mut cas_types::Task,
+    ) -> cas_store::Result<chrono::DateTime<chrono::Utc>> {
+        let previous = expected
+            .deliverables
+            .factory_branch_start
+            .as_ref()
+            .expect("rebind has a previous start");
+        let start = rebound
+            .deliverables
+            .factory_branch_start
+            .as_ref()
+            .expect("rebind has a replacement start");
+        let branch = start.branch.clone();
+        let audit = serde_json::json!({
+            "actor": self.actor, "reason": self.reason, "previous_start": previous,
+            "previous_tip": self.previous_tip,
+            "previous_anchor": expected.deliverables.factory_branch_anchor,
+            "start": start, "tip": self.tip, "target_tip": self.target_tip,
+        });
+        rebound
+            .deliverables
+            .retain_factory_branch_anchor_as_history();
+        rebound.deliverables.parked_branch = None;
+        rebound.deliverables.record_handoff_branch(&previous.branch);
+        rebound.deliverables.green_merge_commit = None;
+        rebound.deliverables.parked_close_reason = None;
+        rebound.deliverables.merge_conflicted = false;
+        rebound.updated_at = chrono::Utc::now();
+        rebound.notes.push_str(&format!(
+            "\n\n[{}] DELIVERY BRANCH REBOUND: {audit}",
+            rebound.updated_at.format("%Y-%m-%d %H:%M")
+        ));
+        // Use the guarded entry implemented by SyncingTaskStore, too.
+        let updated_at = tasks.update_if_current(rebound, expected)?;
+        crate::quality_ledger::intervention(
+            cas_root,
+            cas_store::InterventionKind::Rebind,
+            crate::quality_ledger::rebind_key(&rebound.id, &branch, &self.tip),
+            Some(&rebound.id),
+            Some(&self.actor),
+            Some(&self.reason),
+        );
+        Ok(updated_at)
+    }
+}
+
+/// Missing or unreadable refs cannot prove safe succession. Leave the recorded
+/// start intact so task start reports the existing supervisor recovery action.
+pub(super) fn reassigned_branch_start(
+    cas_root: &Path,
+    checkout: &Path,
+    task: &cas_types::Task,
+    worker: &cas_types::Agent,
+    branch: &str,
+    queued_start: bool,
+) -> Option<(FactoryBranchStart, BranchRebindAudit)> {
+    let previous = task.deliverables.factory_branch_start.as_ref()?;
+    let target = task.deliverables.work_target.as_ref()?;
+    if previous.work_target.repo_selector != target.repo_selector {
+        return None;
+    }
+    let git = Git {
+        root: checkout,
+        deadline: Deadline::after(Duration::from_secs(20)),
+    };
+    if git.text(&["symbolic-ref", "--short", "HEAD"]).ok()? != branch {
+        return None;
+    }
+    let tip = git.tip("HEAD").ok()?;
+    let mut previous_tips = Vec::new();
+    for namespace in ["refs/heads", "refs/remotes/origin"] {
+        let reference = format!("{namespace}/{}", previous.branch);
+        let exists = git
+            .output(&["show-ref", "--verify", "--quiet", &reference])
+            .ok()?;
+        match exists.status.code() {
+            Some(0) => previous_tips.push(git.tip(&reference).ok()?),
+            Some(1) => {}
+            _ => return None,
+        }
+    }
+    let previous_tip = previous_tips.first()?.clone();
+    let target_ref = close_ops::preferred_diff_target_ref_for_delivery(
+        checkout,
+        &target.target_branch,
+        task.delivery_mode,
+    );
+    let target_tip = git.tip(&target_ref).ok()?;
+    // GH #1760: a queued task may have waited through a retarget without
+    // delivering anything. Its old lane can contain an unrelated inherited
+    // base; preserve that ref and bind the untouched successor at the target.
+    // Missing refs or delivery evidence never establish an empty old lane.
+    let empty_successor = queued_start
+        && branch == crate::factory_isolation::worker_task_branch(&worker.name, &task.id)
+        && tip == target_tip
+        && task.deliverables.parked_branch.is_none()
+        && task.deliverables.factory_branch_anchor.is_none()
+        && task.deliverables.historical_factory_branch_anchors.is_empty()
+        && cas_store::get_latest_worker_delivery(cas_root, &task.id)
+            .is_ok_and(|delivery| delivery.is_none())
+        && git.text(&["status", "--porcelain"]).ok()?.is_empty();
+    for old_tip in &previous_tips {
+        if !(empty_successor && *old_tip == previous.base_sha)
+            && !git.output(&["merge-base", "--is-ancestor", old_tip, &tip])
+                .ok()?.status.success()
+        {
+            return None;
+        }
+    }
+    if (queued_start || previous.work_target != *target) && !empty_successor {
+        return None;
+    }
+    let base_sha = git.text(&["merge-base", "--all", &tip, &target_tip]).ok()?;
+    if base_sha.lines().count() != 1 {
+        return None;
+    }
+    Some((
+        FactoryBranchStart {
+            work_target: target.clone(),
+            assignee: task.assignee.clone().unwrap_or_else(|| worker.name.clone()),
+            branch: branch.to_string(),
+            base_sha,
+        },
+        BranchRebindAudit {
+            actor: worker.id.clone(),
+            reason: if empty_successor {
+                "Automatic queued reassignment before first delivery: prior tips are untouched or inherited".into()
+            } else {
+                "Automatic reassignment: every previous branch tip is inherited".into()
+            },
+            previous_tip: Some(previous_tip),
+            tip,
+            target_tip,
+        },
+    ))
 }
 
 impl CasCore {
@@ -111,10 +360,9 @@ impl CasCore {
                 "repository differs from the recorded start; restore the original repository before rebinding",
             ));
         }
-        let assignee = expected
-            .assignee
-            .as_deref()
-            .ok_or_else(|| refused("assign the task to a live registered worker before rebinding"))?;
+        let assignee = expected.assignee.as_deref().ok_or_else(|| {
+            refused("assign the task to a live registered worker before rebinding")
+        })?;
         let worker = resolve_agent_identity(agents.as_ref(), assignee)
             .filter(|worker| worker.role == AgentRole::Worker && worker.is_alive())
             .ok_or_else(|| refused("the assignee must be a live registered worker"))?;
@@ -231,11 +479,23 @@ impl CasCore {
         });
         // The common root was validated above. A linked checkout need not
         // duplicate its project configuration, and shares these same refs.
-        let delivery = close_ops::task_attribution::started_delivery(&context.repo_root, &rebound)
-            .map_err(refused)?
-            .ok_or_else(|| refused("replacement has no unmerged task delivery"))?;
-        if delivery.commits.is_empty() {
-            return Err(refused("replacement has no attributable commits"));
+        // GH #1673: after a reviewed retarget, an untouched lane has no
+        // delivery to attribute yet. Approve its replacement at the new
+        // target without requiring the worker to commit on an unbound ref.
+        let empty_retarget = previous.work_target != *target
+            && previous.assignee == assignee
+            && previous_tip.as_deref() == Some(previous.base_sha.as_str())
+            && tip == target_tip
+            && expected.deliverables.parked_branch.is_none()
+            && expected.deliverables.factory_branch_anchor.is_none()
+            && expected.deliverables.historical_factory_branch_anchors.is_empty();
+        if !empty_retarget {
+            let delivery = close_ops::task_attribution::started_delivery(&context.repo_root, &rebound)
+                .map_err(refused)?
+                .ok_or_else(|| refused("replacement has no unmerged task delivery"))?;
+            if delivery.commits.is_empty() {
+                return Err(refused("replacement has no attributable commits"));
+            }
         }
         let anchor_still_reachable = match expected.deliverables.factory_branch_anchor.as_deref() {
             Some(anchor) => git
@@ -257,6 +517,10 @@ impl CasCore {
         }
         if git.tip(&format!("refs/heads/{branch}")).map_err(refused)? != tip
             || git.tip(&target_ref).map_err(refused)? != target_tip
+            || (empty_retarget
+                && git.tip(&format!("refs/heads/{}", previous.branch))
+                    .or_else(|_| git.tip(&format!("refs/remotes/origin/{}", previous.branch)))
+                    .ok() != previous_tip)
             || git
                 .text(&["symbolic-ref", "--short", "HEAD"])
                 .map_err(refused)?
@@ -270,36 +534,16 @@ impl CasCore {
                 "Git refs or worktree changed during approval; inspect the replacement and retry",
             ));
         }
-        let audit = serde_json::json!({
-            "actor": supervisor.id, "reason": reason, "previous_start": previous,
-            "previous_tip": previous_tip, "previous_anchor": expected.deliverables.factory_branch_anchor,
-            "start": rebound.deliverables.factory_branch_start, "tip": tip, "target_tip": target_tip,
-        });
-        rebound.deliverables.record_handoff_branch(&previous.branch);
-        rebound.deliverables.green_merge_commit = None;
-        rebound.deliverables.parked_close_reason = None;
-        rebound.deliverables.merge_conflicted = false;
-        rebound.updated_at = chrono::Utc::now();
-        rebound.notes.push_str(&format!(
-            "\n\n[{}] DELIVERY BRANCH REBOUND: {audit}",
-            rebound.updated_at.format("%Y-%m-%d %H:%M")
-        ));
-        // cas-b403: the guarded write every caller uses. A logged-in store
-        // (SyncingTaskStore) implements only this entry: it stages the sync
-        // intent and binds it as the receipt of the inner store's guarded
-        // write. The receipt variant is the inner store's API, and reached
-        // through the wrapper it failed closed.
-        tasks
-            .update_if_current(&rebound, &expected)
+        let audit = BranchRebindAudit {
+            actor: supervisor.id.clone(),
+            reason: reason.to_string(),
+            previous_tip: previous_tip.clone(),
+            tip: tip.clone(),
+            target_tip,
+        };
+        audit
+            .persist(&self.cas_root, tasks.as_ref(), &expected, &mut rebound)
             .map_err(|error| refused(error.to_string()))?;
-        crate::quality_ledger::intervention(
-            &self.cas_root,
-            cas_store::InterventionKind::Rebind,
-            format!("rebind|{id}|{branch}|{tip}"),
-            Some(id),
-            Some(&supervisor.id),
-            Some(reason),
-        );
         Ok(Self::success(format!(
             "Task {id} delivery branch rebound to {branch} at {tip}.\nPrevious branch {} at {} is retained in the audit.\nAssignment, target, leases and normal close gates are unchanged.",
             previous.branch,

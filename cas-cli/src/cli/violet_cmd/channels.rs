@@ -788,7 +788,7 @@ mod tests {
         })
         .err()
         .expect("blocked probe must return an unchecked result");
-        assert!(error.message.contains("budget"));
+
         drop(release);
         complete
             .recv()

@@ -12,6 +12,7 @@ pub mod brand;
 pub mod capture;
 pub mod finalize;
 pub mod pairs;
+pub mod report_quality;
 
 use serde::{Deserialize, Serialize};
 

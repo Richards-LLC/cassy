@@ -1,3 +1,4 @@
+import { operatorActions } from "./progress-model";
 import { appendEmojiText } from "./emoji-text";
 import { syncContextResize } from "./context-resize";
 import { plainTextMarkdown } from "./markdown-renderer";
@@ -70,8 +71,7 @@ export const BLOCKER_HINT = "Reply to unblock";
  * 2026-10-29): it shows in its bubble and the banner only, never a third time.
  */
 export function railWaiting(history: ConversationHistory | undefined): OperatorReply[] {
-  const pinned = history?.pinnedAsk()?.notification_id;
-  return (history?.waiting() ?? []).filter((reply) => reply.notification_id !== pinned);
+  return operatorActions(history).map(action => action.request);
 }
 
 /** The open question the bookmark above the composer points at. */
@@ -94,7 +94,7 @@ export function waitingOnOperator(history: ConversationHistory | undefined): num
 export function contextSections(input: ContextRailInput): ContextSection[] {
   const sections: ContextSection[] = [];
   if (railWaiting(input.history).length > 0) sections.push("waiting");
-  if (input.progress) sections.push("progress");
+  if (input.progress || sections.includes("waiting")) sections.push("progress");
   if (threadAttachments(input.history).length > 0) sections.push("attachments");
   if (input.attention > 0) sections.push("attention");
   return sections;
@@ -134,6 +134,9 @@ function renderWaiting(document: Document, list: HTMLElement, waiting: readonly 
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "context-jump";
     jump.dataset.kind = reply.kind ?? "ask";
     jump.dataset.replyTo = String(reply.notification_id);
+    jump.dataset.owner = "operator";
+    jump.dataset.requestId = String(reply.notification_id);
+    if (reply.task_id) jump.dataset.taskId = reply.task_id;
     const kind = document.createElement("span"); kind.className = "context-kind"; kind.textContent = reply.kind === "blocker" ? "Blocker" : reply.kind === "secret" ? "Secret" : "Question";
     const text = document.createElement("span"); text.className = "context-text"; appendEmojiText(document, text, entryText(reply.message));
     jump.append(kind, text);
@@ -180,7 +183,7 @@ export function syncContextRail(root: ParentNode, input: ContextRailInput): bool
   const attachments = threadAttachments(input.history);
   const waitingList = rail.querySelector<HTMLElement>(".context-waiting");
   const pinned = input.history?.pinnedAsk()?.notification_id;
-  const waitingSignature = JSON.stringify([pinned, waiting.map((reply) => [reply.notification_id, reply.kind, reply.message])]);
+  const waitingSignature = JSON.stringify([pinned, waiting.map((reply) => [reply.notification_id, reply.kind, reply.message, reply.task_id])]);
   if (waitingList && (waitingList.dataset.signature !== waitingSignature || waitingHistories.get(waitingList) !== input.history)) {
     waitingList.dataset.signature = waitingSignature;
     waitingHistories.set(waitingList, input.history);

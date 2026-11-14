@@ -8,6 +8,18 @@ use std::process::ExitCode;
 use cas::{cli, config, duplicate_check, error, logging, sentry, store};
 
 fn main() -> ExitCode {
+    // Preflight has no configuration, telemetry or store side effects.
+    let preflight_args: Vec<_> = std::env::args_os().collect();
+    if preflight_args.len() == 5 && preflight_args[1] == "factory"
+        && preflight_args[2] == "handoff-check" && preflight_args[3] == "--schema" {
+        return match preflight_args[4].to_str().and_then(|value| value.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid handoff schema"))
+            .and_then(cas::ui::factory::daemon_handoff_check) {
+                Ok(reply) => { println!("{reply}"); ExitCode::SUCCESS }
+                Err(error) => { eprintln!("{error:#}"); ExitCode::FAILURE }
+            };
+    }
+
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--internal-factory-build-id"))
     {
@@ -89,11 +101,9 @@ fn main() -> ExitCode {
     if cli::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {
         return match cli::execute_native_pre_tool_use() {
             Ok(()) => ExitCode::SUCCESS,
-            Err(_) => {
-                let output = cas::hooks::HookOutput::with_pre_tool_permission("deny", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive.");
-                println!("{}", serde_json::to_string(&output).unwrap());
-                ExitCode::SUCCESS
-            }
+            // Read/validation failures are converted to the observed H-01
+            // denial by the shared hook entry; only output serialization can fail here.
+            Err(_) => ExitCode::FAILURE
         };
     }
 
@@ -111,6 +121,19 @@ fn main() -> ExitCode {
     // the factory daemon after it has already bound its unix socket — leaving
     // clients with a confusing "Connection refused" error.
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    if let Ok(fd) = std::env::var("CAS_DAEMON_HANDOFF_FD") {
+        let fallback = std::env::var("CAS_DAEMON_HANDOFF_FALLBACK").ok().as_deref() == Some("1");
+        let rollback = std::env::var_os("CAS_DAEMON_ROLLBACK_BINARY").map(std::path::PathBuf::from);
+        // SAFETY: main has not started threads. Remove process-only markers
+        // here, before the shared adoption code creates runtime workers.
+        unsafe {
+            std::env::remove_var("CAS_DAEMON_HANDOFF_FD");
+            std::env::remove_var("CAS_DAEMON_HANDOFF_FALLBACK");
+            std::env::remove_var("CAS_DAEMON_ROLLBACK_BINARY");
+        }
+        return cas::ui::factory::resume_inherited_daemon(fd, fallback, rollback);
+    }
 
     let raw_args: Vec<String> = std::env::args().collect();
     let parse_args = maybe_rewrite_factory_args(raw_args);
@@ -137,6 +160,14 @@ fn main() -> ExitCode {
         }
     };
 
+    // Preview must leave no logging, telemetry or command-trace writes, even on failure.
+    if matches!(cli.command.as_ref(), Some(cli::Commands::Release(cli::ReleaseCommands::Preview(_)))) {
+        return match cli::run(cli) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => { eprintln!("{error:#}"); ExitCode::FAILURE }
+        };
+    }
+
     // The updater owns retired-setting guidance through its maintenance
     // receipts. Establish that scope before the earliest config read.
     let startup = cli::validate_process_startup(&cli);
@@ -146,21 +177,31 @@ fn main() -> ExitCode {
     if startup.is_ok() {
         // A refused daemon must leave no startup log or telemetry state.
         init_logging(&cli);
-        let args = redact_viktor_key_args(std::env::args().skip(1).collect());
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
         sentry::add_command_breadcrumb(&args.join(" "));
     }
 
-    // Config and hub refusals are returned through the shared error path. Keep
+    // Config, hub and report refusals use the shared error path. Keep
     // those failures machine-readable on stdout when their caller requested
     // JSON; stderr keeps the human diagnostic either way.
     let json_refusal = cli.json
         && (startup.is_err()
             || matches!(
                 cli.command.as_ref(),
-                Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
+                Some(
+                    cas::cli::Commands::Config(_)
+                        | cas::cli::Commands::Hub(_)
+                        | cas::cli::Commands::ReleaseReport(_)
+                        | cas::cli::Commands::Release(cas::cli::ReleaseCommands::Report(_))
+                        | cas::cli::Commands::Deliverable(_)
+                )
             ));
     let init_command = matches!(cli.command.as_ref(), Some(cli::Commands::Init(_)));
     let outcome = startup.and_then(|()| cli::run(cli));
+    if let Err(error) = &outcome
+        && !cas::gates::codes_in(&format!("{error:#}")).is_empty()
+        && let Ok(root) = store::find_cas_root()
+    { cas::gates::facts::observe_refusal(&root, None, &format!("{error:#}")); }
     // Unresolved/failed paths replay before the final exit-reason line.
     drop(config_notices);
     // The shared SQLite pool owns every close; checkpoint and close its idle
@@ -442,7 +483,7 @@ fn record_arg_error(err: &clap::Error) {
                     let timer = TraceTimer::new();
 
                     // Extract the raw args that were passed
-                    let args = redact_viktor_key_args(std::env::args().skip(1).collect());
+                    let args = std::env::args().skip(1).collect::<Vec<_>>();
 
                     // Determine error kind for categorization
                     let error_kind = match err.kind() {
@@ -466,36 +507,5 @@ fn record_arg_error(err: &clap::Error) {
                 }
             }
         }
-    }
-}
-
-/// Keep the only supported operator key-entry command out of crash and
-/// development telemetry, including parse-error diagnostics.
-fn redact_viktor_key_args(mut args: Vec<String>) -> Vec<String> {
-    if let Some(index) = args
-        .windows(2)
-        .position(|window| window[0] == "viktor" && window[1] == "key")
-        && let Some(key) = args.get_mut(index + 2)
-    {
-        *key = "[REDACTED]".to_string();
-    }
-    args
-}
-
-#[cfg(test)]
-mod tests {
-    use super::redact_viktor_key_args;
-
-    #[test]
-    fn viktor_key_is_redacted_from_telemetry_arguments() {
-        assert_eq!(
-            redact_viktor_key_args(vec![
-                "--json".to_string(),
-                "viktor".to_string(),
-                "key".to_string(),
-                "operator-issued-secret".to_string(),
-            ]),
-            vec!["--json", "viktor", "key", "[REDACTED]"]
-        );
     }
 }

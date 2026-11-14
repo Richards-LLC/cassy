@@ -1,6 +1,7 @@
 use crate::config::meta::registry::ConfigRegistry;
 
 pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
+    registry.section_descriptions.insert("rules", "Rule lifecycle and draft expiry");
     registry.section_descriptions.insert("accounts", "Claude and Codex account recommendations");
     registry
         .section_descriptions
@@ -88,9 +89,6 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         "skills",
         "Optional stack-specific builtin skills for this project",
     );
-    registry
-        .section_descriptions
-        .insert("viktor", "Machine-wide managed Viktor upstream");
     registry.section_descriptions.insert(
         "fast_lane",
         "Hotfix fast lane: merge on unit tests, post-merge receipt",

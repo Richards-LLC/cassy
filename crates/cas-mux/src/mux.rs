@@ -2,6 +2,11 @@
 //!
 //! Manages multiple panes, handles input routing, and coordinates rendering.
 
+#[cfg(unix)]
+mod handoff;
+#[cfg(unix)]
+pub use handoff::MuxHandoff;
+
 use crate::error::{Error, Result};
 use crate::harness::SupervisorCli;
 use crate::pane::{Pane, PaneId, PaneKind, push_factory_session_env};
@@ -271,7 +276,7 @@ pub enum MuxEvent {
 
 /// What the factory launches its supervisor pane from. Kept so a deliberate
 /// `factory action=restart_supervisor` relaunches the boot recipe.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SupervisorLaunch {
     pub name: String,
     pub cwd: PathBuf,

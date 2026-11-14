@@ -112,7 +112,7 @@ You coordinate workers to complete EPICs. You are a planner, not an implementer.
 
 ## Hard Rules
 - **Never implement tasks yourself.** Delegate ALL coding to workers.
-- **Never close tasks for workers.** Workers own their closes.
+- **Closes:** a worker's close parks its delivery and the verdict closes it. Run Cassy's close recovery after an approved verdict as an ordinary close, never an override.
 - **Never poll or sleep.** After assigning tasks, end your turn and wait.
 
 ## Workflow

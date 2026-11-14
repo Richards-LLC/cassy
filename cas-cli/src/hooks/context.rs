@@ -369,6 +369,7 @@ fn render_host_constraint_line(entry: &Entry) -> String {
     )
 }
 
+// gate[N-49 notice]: Host Constraints context section
 fn build_host_constraints_section(cas_root: &Path) -> String {
     let Some(host_tag) = current_hostname_tag() else {
         return String::new();
@@ -461,6 +462,7 @@ fn build_host_constraints_section_for_tag(
 /// Build context with AI-powered prioritization
 ///
 /// Uses Claude CLI to select the most relevant context items.
+// gate[N-53 notice]: AI-selected context
 pub fn build_context_ai(
     input: &HookInput,
     limit: usize,
@@ -903,6 +905,7 @@ fn call_claude_for_selection(prompt: &str, model: &str) -> Result<String, MemErr
 ///
 /// Returns empty string if not logged in, no patterns, or on any error.
 /// Failures are silent — personal patterns are optional enhancement.
+// gate[N-51 notice]: Personal Patterns from Cloud
 fn fetch_personal_patterns_for_context(cas_root: &Path) -> Result<String, MemError> {
     use crate::cloud::CloudConfig;
 
@@ -997,6 +1000,7 @@ fn fetch_personal_patterns_for_context(cas_root: &Path) -> Result<String, MemErr
 /// Only shows pending (not yet adopted/dismissed) suggestions.
 /// Returns empty string if not in a team, no suggestions, or on any error.
 /// Failures are silent — team suggestions are optional enhancement.
+// gate[N-52 notice]: Team Suggestions from Cloud
 fn fetch_team_suggestions_for_context(cas_root: &Path) -> Result<String, MemError> {
     use crate::cloud::CloudConfig;
 
@@ -1101,6 +1105,7 @@ fn fetch_team_suggestions_for_context(cas_root: &Path) -> Result<String, MemErro
 /// The snapshot reader validates generation, freshness, and merged-config
 /// identity before returning its catalog. Invalid or stale evidence produces no
 /// SessionStart tool advertisement.
+// gate[N-50 notice]: Connected MCP Tools context section
 fn build_mcp_tools_section(cas_root: &Path) -> String {
     #[cfg(feature = "mcp-proxy")]
     let loaded = crate::mcp::read_proxy_catalog_cache(cas_root);

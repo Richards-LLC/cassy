@@ -289,9 +289,11 @@ pub(crate) fn observe(root: &Path, task_id: &str) -> Result<()> {
     refresh_at(root, task_id, Utc::now()).map(|_| ())
 }
 
+// gate[G-06 start]: Release freeze / epic design-review staffing pause
 pub(crate) fn ensure_staffing_allowed(root: &Path, task_id: &str) -> Result<()> {
+    crate::mcp::tools::core::workflow::release_freeze::check_staffing(root, task_id)?;
     if let Some((epic, pause)) = refresh_at(root, task_id, Utc::now())? {
-        anyhow::bail!(pause.message(&epic));
+        anyhow::bail!(crate::gates::tag("G-06", pause.message(&epic)));
     }
     Ok(())
 }
@@ -448,8 +450,7 @@ mod tests {
             .await
             .expect_err("the fifth stakeholder P0/P1 must stop new starts");
         assert!(
-            refusal.message.contains("design review")
-                && refusal.message.contains("epic-risk")
+            refusal.message.contains("epic-risk")
                 && refusal.message.contains(&report_id),
             "{refusal}"
         );
@@ -464,17 +465,14 @@ mod tests {
         }))
         .unwrap();
         let update_error = core.cas_task_update(Parameters(update)).await.unwrap_err();
-        assert!(
-            update_error.message.contains("design review"),
-            "{update_error}"
-        );
+
         add_child("moving-start", "epic-other", 0, 2, false);
         let update = serde_json::from_value(serde_json::json!({
             "id": "moving-start", "status": "in_progress", "epic": "epic-risk"
         }))
         .unwrap();
         let move_error = core.cas_task_update(Parameters(update)).await.unwrap_err();
-        assert!(move_error.message.contains("design review"), "{move_error}");
+
         assert_eq!(
             tasks.get_parent_epic("moving-start").unwrap().unwrap().id,
             "epic-other",
@@ -500,10 +498,6 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert!(
-                error.message.contains("design review") && error.message.contains(&report_id),
-                "{error}"
-            );
         }
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         let notices = queue

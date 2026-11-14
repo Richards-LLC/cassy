@@ -17,6 +17,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// hang on a configured-but-unreachable remote. Slightly larger than the fetch
 /// bound because a push uploads objects.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEMAP_PATH: &str = ".claude/CODEMAP.md";
 
 /// What happened when a merge target ref was published to its remote
 /// (cas-5ee0 / GH #137).
@@ -229,34 +230,51 @@ impl GitOperations {
         timeout: Duration,
     ) -> std::io::Result<Output> {
         use std::io::Read;
+        use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+
+        fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<std::io::Result<Vec<u8>>> {
+            let (send, receive) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let result = pipe.read_to_end(&mut bytes).map(|_| bytes);
+                let _ = send.send(result);
+            });
+            receive
+        }
 
         let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let deadline = Instant::now() + timeout;
+        // Drain both pipes before waiting: either full pipe can prevent exit.
+        let stdout = drain(child.stdout.take().expect("stdout is piped"));
+        let stderr = drain(child.stderr.take().expect("stderr is piped"));
+        let timed_out = || std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("command timed out after {timeout:?}"),
+        );
 
         loop {
             if let Some(status) = child.try_wait()? {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_end(&mut stdout);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_end(&mut stderr);
-                }
+                // A descendant may still hold a pipe after the child exits.
+                // Keep output collection under the same deadline; never join
+                // a reader that might still be waiting for EOF.
+                let collect = |receiver: Receiver<std::io::Result<Vec<u8>>>| {
+                    receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .map_err(|error| match error {
+                            RecvTimeoutError::Timeout => timed_out(),
+                            RecvTimeoutError::Disconnected => std::io::Error::other("command output reader stopped"),
+                        })?
+                };
                 return Ok(Output {
                     status,
-                    stdout,
-                    stderr,
+                    stdout: collect(stdout)?,
+                    stderr: collect(stderr)?,
                 });
             }
 
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("command timed out after {timeout:?}"),
-                ));
+                return Err(timed_out());
             }
 
             std::thread::sleep(Duration::from_millis(20));
@@ -330,7 +348,8 @@ impl GitOperations {
         Ok(true)
     }
 
-    /// Fetch a single branch from `origin`, bounded by [`FETCH_TIMEOUT`].
+    /// Fetch a branch into its origin tracking ref, or an explicit refspec,
+    /// bounded by [`FETCH_TIMEOUT`]. Git validates the refspec before writing.
     ///
     /// Best-effort by design: callers should treat an `Err` as "could not
     /// verify freshness" (offline, no remote configured, remote branch
@@ -346,8 +365,17 @@ impl GitOperations {
     /// seam that lets tests prove the bound actually fires without waiting
     /// out the default 10s.
     pub(crate) fn fetch_branch_bounded(&self, branch: &str, timeout: Duration) -> Result<()> {
+        // A source-only fetch updates FETCH_HEAD but may leave origin/<branch>
+        // stale when remote.origin.fetch tracks only another branch (cas-307e).
+        // Preserve callers that already supply their exact destination.
+        let refspec = if branch.contains(':') {
+            branch.to_string()
+        } else {
+            let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+            format!("+refs/heads/{branch}:refs/remotes/origin/{branch}")
+        };
         let mut cmd = Command::new("git");
-        cmd.args(["fetch", "origin", branch])
+        cmd.args(["fetch", "origin", &refspec])
             // Never block on an interactive credential prompt — fail fast
             // instead of hanging (mirrors cas-38e2's fetch_parent_branch_best_effort).
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -757,6 +785,18 @@ impl GitOperations {
         }
     }
 
+    /// The tip of `target` (local branch, then `origin/<target>`) that already
+    /// contains every one of `commits`, or `None` when no tip contains them all.
+    ///
+    /// cas-06f53: a delivery the pre-merge path already merged is answered as
+    /// merged, not as a branch to restore.
+    pub fn target_tip_containing(&self, target: &str, commits: &[&str]) -> Option<String> {
+        [format!("refs/heads/{target}"), format!("refs/remotes/origin/{target}")]
+            .iter()
+            .filter_map(|refname| self.resolve_commit(refname))
+            .find(|tip| commits.iter().all(|commit| self.is_ancestor(commit, tip)))
+    }
+
     /// Resolve the full SHA of a ref (branch name, "HEAD", etc.).
     ///
     /// Returns a 40-character hex SHA, or a GitError if the ref doesn't exist.
@@ -852,7 +892,12 @@ impl GitOperations {
                 reason: first_line(&error.to_string()),
             };
         }
+        self.reconcile_target_with_fetched_origin(target)
+    }
 
+    /// The reconcile above, against an `origin/<target>` the caller already
+    /// fetched under the same target lock: merge admission's one origin read.
+    pub(crate) fn reconcile_target_with_fetched_origin(&self, target: &str) -> TargetReconcile {
         let remote_ref = format!("origin/{target}");
         let Some(remote) = self.resolve_commit(&remote_ref) else {
             return TargetReconcile::NoRemote;
@@ -1063,6 +1108,55 @@ impl GitOperations {
         self.publish_branch_to_origin(branch)
     }
 
+    /// Publish a detached merge against the observed origin tip. Peer
+    /// reconciliation stays detached too, and gets at most one retry.
+    pub(crate) fn publish_merge_candidate(
+        &self,
+        branch: &str,
+        head: &str,
+        reconcile_peer: bool,
+    ) -> TargetPushOutcome {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("push");
+        if !self.has_origin_remote() {
+            return TargetPushOutcome::NoRemote;
+        }
+        let remote_ref = format!("origin/{branch}");
+        let expected = match self.resolve_commit(&remote_ref) {
+            Some(tip) => tip,
+            None if self.origin_lacks_branch(branch, FETCH_TIMEOUT) => return TargetPushOutcome::RemoteBranchAbsent,
+            None => match self.fetch_merge_target_bounded(branch, FETCH_TIMEOUT) {
+                Ok(tip) => tip,
+                Err(error) => return TargetPushOutcome::NotPushed {
+                    sha: Some(head.into()), remote_sha: None, reason: error.to_string(),
+                },
+            },
+        };
+        let publish = |head: &str, expected: &str| {
+            if !self.is_ancestor(expected, head) {
+                return TargetPushOutcome::NonFastForward {
+                    sha: head.into(), remote_sha: Some(expected.into()),
+                    reason: "the merge does not contain the observed origin tip".into(),
+                };
+            }
+            self.publish_pinned_source_with_lease(branch, head, Some(expected), true, PUSH_TIMEOUT)
+        };
+        let first = publish(head, &expected);
+        if !reconcile_peer || !matches!(first, TargetPushOutcome::NonFastForward { .. }) {
+            return first;
+        }
+        let retry = (|| -> Result<TargetPushOutcome> {
+            let remote = self.fetch_merge_target_bounded(branch, FETCH_TIMEOUT)?;
+            let checkout = self.add_temp_worktree(head)?;
+            let merged = self.merge_branch_in_dir(checkout.path(), None, &remote, true)?
+                .unwrap_or_else(|| head.to_string());
+            Ok(publish(&merged, &remote))
+        })();
+        retry.unwrap_or_else(|error| TargetPushOutcome::NotPushed {
+            sha: Some(head.into()), remote_sha: self.resolve_commit(&remote_ref),
+            reason: format!("peer publication retry refused: {error}"),
+        })
+    }
+
     /// Whether the repository root currently has `branch` checked out.
     fn branch_is_checked_out_here(&self, branch: &str) -> bool {
         Command::new("git")
@@ -1085,6 +1179,7 @@ impl GitOperations {
     }
 
     pub fn publish_branch_to_origin(&self, branch: &str) -> TargetPushOutcome {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("push");
         self.publish_branch_to_origin_bounded(branch, PUSH_TIMEOUT)
     }
 
@@ -1157,6 +1252,17 @@ impl GitOperations {
         head: &str,
         timeout: Duration,
     ) -> TargetPushOutcome {
+        self.publish_pinned_source_with_lease(branch, head, None, false, timeout)
+    }
+
+    fn publish_pinned_source_with_lease(
+        &self,
+        branch: &str,
+        head: &str,
+        expected: Option<&str>,
+        proven_merge: bool,
+        timeout: Duration,
+    ) -> TargetPushOutcome {
         let remote_ref = format!("origin/{branch}");
         let Some(local_sha) = self.resolve_commit(head) else {
             return TargetPushOutcome::NotPushed {
@@ -1196,8 +1302,11 @@ impl GitOperations {
                 }
             }
         }
+        cmd.arg("push");
+        if let Some(expected) = expected {
+            cmd.arg(format!("--force-with-lease=refs/heads/{branch}:{expected}"));
+        }
         cmd.args([
-            "push",
             "origin",
             // Pin the source to the validated commit even if the local ref
             // moves while a hook runs; fully qualify the destination so
@@ -1206,7 +1315,15 @@ impl GitOperations {
         ])
         // Never block on an interactive credential prompt (mirrors fetch).
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("CAS_PROVEN_MERGE_HEAD")
+        .env_remove("CAS_PROVEN_MERGE_BASE")
         .current_dir(checkout.path());
+        // Only publish_merge_candidate reaches this with checked lane content;
+        // generic supervisor publications must retain their pre-push checks.
+        if proven_merge && let Some(base) = expected {
+            cmd.env("CAS_PROVEN_MERGE_HEAD", &local_sha)
+                .env("CAS_PROVEN_MERGE_BASE", base);
+        }
 
         match Self::run_command_bounded(cmd, timeout.saturating_sub(started.elapsed())) {
             Ok(output) if output.status.success() => TargetPushOutcome::Pushed { sha: local_sha },
@@ -1249,12 +1366,44 @@ impl GitOperations {
         }
     }
 
-    /// Mark .claude/, CLAUDE.md, and .mcp.json as skip-worktree in a worktree
+    /// Clear the legacy CODEMAP flag only when the worktree bytes and index
+    /// still match the commit. Git status cannot see changes hidden by this flag.
+    pub(super) fn clear_clean_codemap_skip_worktree(&self, worktree_path: &Path) -> Result<()> {
+        let git = |args: &[&str]| Command::new("git").args(args).current_dir(worktree_path).output();
+        let flags = git(&["ls-files", "-v", "--", CODEMAP_PATH])?;
+        if !flags.status.success() || !matches!(flags.stdout.first(), Some(b'S' | b's')) {
+            return Ok(());
+        }
+
+        let path = worktree_path.join(CODEMAP_PATH);
+        if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            return Ok(());
+        }
+        let Ok(bytes) = std::fs::read(path) else { return Ok(()) };
+        let index = git(&["show", &format!(":{CODEMAP_PATH}")])?;
+        if !index.status.success() || index.stdout != bytes {
+            return Ok(());
+        }
+        let staged = git(&["diff", "--cached", "--quiet", "HEAD", "--", CODEMAP_PATH])?;
+        if !staged.status.success() {
+            return Ok(());
+        }
+
+        let cleared = git(&["update-index", "--no-skip-worktree", "--", CODEMAP_PATH])?;
+        if !cleared.status.success() {
+            return Err(GitError::CommandFailed(String::from_utf8_lossy(&cleared.stderr).into_owned()));
+        }
+        Ok(())
+    }
+
+    /// Mark projected configuration files as skip-worktree in a worktree.
     ///
     /// This prevents workers from accidentally staging and committing Cassy-synced
     /// changes to these tracked config files. The files remain in the worktree
     /// (Claude Code works normally) but git ignores local modifications.
+    /// CODEMAP is tracked documentation that must follow branch switches.
     pub fn mark_config_skip_worktree(&self, worktree_path: &Path) -> Result<()> {
+        self.clear_clean_codemap_skip_worktree(worktree_path)?;
         let output = Command::new("git")
             .args(["ls-files", ".claude/", "CLAUDE.md", ".mcp.json"])
             .current_dir(worktree_path)
@@ -1265,7 +1414,9 @@ impl GitOperations {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let files: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+        let files: Vec<&str> = stdout.lines()
+            .filter(|line| !line.is_empty() && *line != CODEMAP_PATH)
+            .collect();
 
         if files.is_empty() {
             return Ok(());

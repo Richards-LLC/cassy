@@ -4,6 +4,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -149,20 +150,68 @@ class Announce(unittest.TestCase):
         for name, body in zip(announce.BODY_NAMES, BODIES):
             self.assertEqual((self.body_dir / f"{name}.txt").read_text(), body + "\n")
 
-    def test_validate_checks_forbidden_word_in_user_reply_only(self):
+    def test_validate_checks_whole_user_words_only(self):
         bodies = list(BODIES)
-        bodies[1] += " A worker can use it."
+        bodies[1] += " Management and plane choices are clearer."
+        self.write_draft(bodies)
+        result = self.validate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        bodies[1] = BODIES[1] + " An agent uses this lane."
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("body user-reply", result.stderr)
-        self.assertIn("forbidden user wording: worker", result.stderr)
+        self.assertEqual(result.stderr.count("[rule: user_word]"), 2, result.stderr)
+        self.assertEqual([word for word, _ in announce.user_word_hits(bodies[1])], ["agent", "lane"])
+
+        bodies[1] = BODIES[1] + " Agents use these lanes."
+        self.write_draft(bodies)
+        result = self.validate()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.count("[rule: user_word]"), 2, result.stderr)
+        self.assertEqual([word for word, _ in announce.user_word_hits(bodies[1])], ["Agents", "lanes"])
 
         bodies[1] = BODIES[1]
         bodies[3] += " A worker can use it."
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_validate_reports_all_three_violations_across_bodies(self):
+        bodies = list(BODIES)
+        bodies[0] += " epic"
+        bodies[1] = (
+            "• *Startup* — Was: daemon startup was unclear. → Now: status is readable.\n\n"
+            "• *Settings* — Was: harness settings were hard to find. → Now: choices are clear."
+        )
+        self.write_draft(bodies)
+        result = self.validate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stderr.count("[rule: user_word]"), 3, result.stderr)
+        for line, hits in (
+            (bodies[0].splitlines()[1], [("epic", "workstream")]),
+            (bodies[1].splitlines()[0], [("daemon", "background service")]),
+            (bodies[1].splitlines()[2], [("harness", "coding tool")]),
+        ):
+            self.assertEqual(announce.user_word_hits(line), hits)
+        self.assertFalse(self.body_dir.exists(), "invalid drafts must not export partial bodies")
+
+    def test_writing_rules_match_lint(self):
+        root = SCRIPT.parent.parent
+        self.assertEqual(set(announce.USER_SWAPS), set(announce.USER_FORBIDDEN))
+        for relative in ("cas-cli/src/builtins/skills/cas-release-notes/SKILL.md",
+                         "docs/RELEASE_SLACK_RUBRIC.md"):
+            with self.subTest(document=relative):
+                text = (root / relative).read_text()
+                match = re.search(r"<!-- release-lint:begin -->\n(.*?)\n<!-- release-lint:end -->", text, re.S)
+                self.assertIsNotNone(match, "lint rules must be visible before drafting")
+                rules = match.group(1)
+                self.assertEqual(re.findall(r"`([^`]+)`", rules.split("\n\n")[0]),
+                                 list(announce.USER_FORBIDDEN))
+                self.assertEqual(int(re.search(r"Top-level punch: at most (\d+) words", rules)[1]),
+                                 announce.TOP_LEVEL_WORD_LIMIT)
+                self.assertEqual(int(re.search(r"Visible line: at most (\d+) characters", rules)[1]),
+                                 announce.HUB_LINE_LIMIT)
 
     def test_bullet_span_ends_at_a_section_heading(self):
         two_lines = "• *Checks* — Was: checks took longer.\n→ Now: they finish sooner."
@@ -176,7 +225,7 @@ class Announce(unittest.TestCase):
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("bullet spans more than two lines", result.stderr)
+        self.assertIn("[rule: bullet_span]", result.stderr)
 
     def test_line_limit_matches_the_hub_counting_links_by_label(self):
         bodies = list(BODIES)
@@ -190,7 +239,24 @@ class Announce(unittest.TestCase):
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("body user-reply line 1 is 301 characters; the Violet hub refuses lines over 300", result.stderr)
+        self.assertIn("[rule: long_line]", result.stderr)
+
+    def test_lint_refuses_what_the_hub_refuses_as_unreadable(self):
+        # cas-a72d: a plain file name the post does not attach, or a UTC time, is
+        # refused by Violet as format_unreadable, so the pre-cut lint must refuse it.
+        for text, rule in (("See DESIGN.md for the layout.", "unattached_file"),
+                           ("Shipped at 14:05 UTC today.", "utc_time")):
+            with self.subTest(rule=rule):
+                bodies = list(BODIES)
+                bodies[3] = BODIES[3] + "\n\n" + text
+                self.write_draft(bodies)
+                result = self.validate()
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(re.findall(r"\[rule: (\w+)\]", result.stderr), [rule])
+        bodies = list(BODIES)
+        bodies[3] = BODIES[3] + "\n\nSee <https://example.com/docs/DESIGN.md|the guide> and ```DESIGN.md``` in code."
+        self.write_draft(bodies)
+        self.assertEqual(self.validate().returncode, 0)
 
     def test_validate_rejects_a_multiline_token(self):
         bodies = list(BODIES)
@@ -198,8 +264,7 @@ class Announce(unittest.TestCase):
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("line 3", result.stderr)
-        self.assertIn("{{UNKNOWN\nVALUE}}", result.stderr)
+        self.assertIn("[rule: unresolved_token]", result.stderr)
 
     def test_non_message_template_notes_do_not_block_validation(self):
         with self.draft.open("a") as draft:
@@ -239,7 +304,7 @@ class Announce(unittest.TestCase):
             (self.body_dir / "dev-reply.txt").write_text(BODIES[3] + " Extra wording.\n")
 
         adapter, writes = self.adapter(change_body)
-        with self.assertRaisesRegex(ValueError, "validated body.*changed"):
+        with self.assertRaises(ValueError):
             self.post(adapter)
         self.assertFalse(writes)
         self.assertFalse(self.receipt.exists())
@@ -255,7 +320,7 @@ class Announce(unittest.TestCase):
                 }
                 if file_block is not None:
                     envelope["file"] = file_block
-                with self.assertRaisesRegex(report.AdapterError, "file id"):
+                with self.assertRaises(report.AdapterError):
                     report.file_receipt(envelope)
         for split_replies in (
             {},

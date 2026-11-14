@@ -213,6 +213,8 @@ test-scoped-selftest:
 # exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
 	cd .. && python3 scripts/test-model-boundary.py
+	cd .. && python3 scripts/test-test-audit.py
+	cd .. && node --test scripts/test-walk-kit.mjs
 	cd .. && bash scripts/test-cas-image-generate.sh
 	cd .. && bash scripts/test-check-changelog-lint.sh
 	cd .. && python3 scripts/test-codex-cargo-admission.py -v
@@ -232,10 +234,10 @@ test-ci-tiers:
 	cd .. && node --test scripts/visual-qa-secrets.test.mjs
 	cd .. && python3 scripts/test-qa-candidate-build.py
 	cd .. && python3 scripts/test-ci-queue-flakes.py
+	cd .. && python3 scripts/test-train-ci.py
 	cd .. && python3 scripts/test-sow-delivery-report.py
 	cd .. && python3 scripts/test-regenerate-generated-artifacts.py
 	cd .. && python3 scripts/test-check-communication-slos.py
-	cd .. && python3 scripts/test-violet-reference-guard.py
 	cd .. && python3 scripts/test-assembly-proof.py
 	cd .. && python3 scripts/test-proof-target.py
 	cd .. && python3 scripts/test-assembly-memory.py
@@ -246,9 +248,9 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-release-env.py
 	cd .. && python3 scripts/test-release-test-env.py
 	cd .. && python3 scripts/test-review-pr-body.py
-	cd .. && python3 scripts/test-builtin-contract-phrases.py
 	cd .. && bash scripts/test-hitl-loop-template.sh
 	cd .. && python3 scripts/test-fast-release-rows.py
+	cd .. && python3 scripts/test-doc-fragments.py
 	cd .. && python3 scripts/test-check-call-shapes.py
 	cd .. && python3 scripts/test-live-check-peer-collab.py
 	cd .. && python3 scripts/test-hub-web-gate.py
@@ -282,7 +284,6 @@ test-ci-tiers:
 	cd .. && ./scripts/test-check-release-host.sh
 	cd .. && ./scripts/test-cas-install.sh
 	cd .. && ./scripts/test-check-release-migration-snapshots.sh
-	cd .. && ./scripts/test-check-scoped-snapshot-tests.sh
 	cd .. && ./scripts/test-check-scoped-test-surface.sh
 
 # Type check

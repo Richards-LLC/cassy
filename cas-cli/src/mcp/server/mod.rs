@@ -56,6 +56,9 @@ pub struct CasCore {
     pub(crate) agent_id: OnceLock<Option<String>>,
     /// Server-side provenance for `agent_id`; absent is always non-authoritative.
     pub(crate) agent_identity_source: OnceLock<AgentIdentitySource>,
+    /// OS-derived nearest harness for a CLI core; never request/env authority.
+    /// MCP cores retain their private front-harness binding instead.
+    pub(crate) cli_harness: Option<u32>,
     /// One immutable caller per core; clones share its activity rate limit.
     pub(crate) worker_mcp_activity: Arc<Mutex<WorkerMcpActivityState>>,
     /// Peer reference for sending MCP notifications (Claude Code 2.1.0+)
@@ -90,6 +93,12 @@ pub(crate) struct WorkerMcpActivityState {
 }
 
 impl CasCore {
+    pub(crate) fn for_cli(cas_root: PathBuf) -> Self {
+        let mut core = Self::with_daemon(cas_root, None, None);
+        core.cli_harness = Some(crate::agent_id::get_harness_pid_for_cli());
+        core
+    }
+
     pub(crate) fn bind_agent_identity(
         &self,
         agent_id: String,
@@ -137,6 +146,48 @@ impl CasCore {
             });
         }
         Ok(())
+    }
+
+    /// Native children can share their parent's MCP connection. Announcing a
+    /// child row there cannot change its immutable caller or authenticate a review.
+    pub(crate) fn ensure_public_child_identity(
+        &self,
+        session_id: &str,
+        parent_id: Option<&str>,
+        agent_type: Option<crate::types::AgentType>,
+    ) -> Result<(), McpError> {
+        if parent_id.is_none() && agent_type != Some(crate::types::AgentType::SubAgent) {
+            return Ok(());
+        }
+        if self.agent_id.get().is_none()
+            && std::env::var("CAS_SESSION_ID").is_ok_and(|id| !id.trim().is_empty())
+        {
+            // Registration can be the first native-child tool call. Establish
+            // the launch identity before considering its requested child row.
+            self.get_agent_id()?;
+        }
+        let Some(Some(bound_id)) = self.agent_id.get() else {
+            return Ok(());
+        };
+        let current = self.open_agent_store()?.get(bound_id).ok();
+        if session_id == bound_id && current.is_some_and(|agent| {
+            agent.agent_type == crate::types::AgentType::SubAgent
+                && agent.role == crate::types::AgentRole::Standard
+                && agent.parent_id.as_deref() == parent_id
+                && parent_id.is_some_and(|parent| parent != bound_id)
+        }) {
+            return Ok(()); // A separately authenticated child can refresh itself.
+        }
+        Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "Child registration rejected: this MCP connection already belongs to another caller. Native Task/Agent subagents and Codex children share the parent's caller and cannot authenticate an independent review by registering. Cassy's daemon-owned verifier reviews close and candidate dispatches; retry the close or merge that opened the dispatch to start it. The existing caller is unchanged.",
+            ),
+            data: Some(serde_json::json!({
+                "rule_id": "shared_mcp_child_identity",
+                "caller_id": bound_id,
+            })),
+        })
     }
 
     /// Helper: get cached store or initialize it.
@@ -522,6 +573,14 @@ impl CasCore {
     /// it. Security-sensitive proof submission uses this read-only variant so
     /// a dead or unknown caller can be rejected before any durable mutation.
     pub(crate) fn get_registered_agent_id_read_only(&self) -> Result<String, McpError> {
+        let id = self.resolve_registered_agent_id_read_only()?;
+        let _ = self.agent_id.set(Some(id.clone()));
+        Ok(id)
+    }
+
+    /// The uncached half of [`Self::get_registered_agent_id_read_only`].
+    fn resolve_registered_agent_id_read_only(&self) -> Result<String, McpError> {
+        let harness = self.cli_harness.unwrap_or_else(crate::agent_id::get_cc_pid_for_mcp);
         let candidate = self.agent_id.get().and_then(Clone::clone).or_else(|| {
             std::env::var("CAS_SESSION_ID").ok()
                 .map(|id| id.trim().to_string())
@@ -543,9 +602,8 @@ impl CasCore {
             })?;
             id
         } else {
-            let cc_pid = crate::agent_id::get_cc_pid_for_mcp();
             agent_store
-                .get_by_cc_pid(cc_pid)
+                .get_by_cc_pid(harness)
                 .map_err(|error| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
@@ -566,13 +624,12 @@ impl CasCore {
         // CAS_SESSION_ID. Validate before caching, without registering/reviving.
         crate::mcp::daemon::ensure_factory_process_owner(
             agent_store.as_ref(), &id, Some(std::process::id()),
-            Some(crate::agent_id::get_cc_pid_for_mcp()),
+            Some(harness),
         ).map_err(|error| McpError {
             code: ErrorCode::INVALID_REQUEST,
             message: Cow::from(error.to_string()),
             data: None,
         })?;
-        let _ = self.agent_id.set(Some(id.clone()));
         Ok(id)
     }
 
@@ -603,7 +660,7 @@ impl CasCore {
                     crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
                     #[cfg(unix)]
                     {
-                        let ppid = std::os::unix::process::parent_id();
+                        let ppid = crate::agent_id::get_cc_pid_for_mcp();
                         agent.ppid = Some(ppid);
                         crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
                     }
@@ -648,7 +705,7 @@ impl CasCore {
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, our_pid);
                 #[cfg(unix)]
                 {
-                    let ppid = std::os::unix::process::parent_id();
+                    let ppid = crate::agent_id::get_cc_pid_for_mcp();
                     agent.ppid = Some(ppid);
                     crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
                 }
@@ -731,6 +788,7 @@ impl CasCore {
         let agent_store = self.open_agent_store()?;
         if source == AgentIdentitySource::PublicRegistration {
             self.ensure_public_registration_target(&session_id)?;
+            self.ensure_public_child_identity(&session_id, parent_id.as_deref(), agent_type_hint)?;
         }
 
         let environment_role = crate::mcp::daemon::parse_agent_role_hint(
@@ -742,6 +800,54 @@ impl CasCore {
             // role is only a bootstrap fallback when no role was requested.
             AgentIdentitySource::PublicRegistration => role_hint.or(environment_role),
         };
+
+        // A new transcript does not create a new supervisor in the same pane.
+        // Only the authenticated caller's live, same-name process can rebind;
+        // unrelated registrations and retired predecessors keep their identity.
+        let rebound_supervisor = if source == AgentIdentitySource::PublicRegistration
+            && configured_role == Some(crate::types::AgentRole::Supervisor)
+            && parent_id.is_none()
+        {
+            let inspect_error = |error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Could not inspect existing registration: {error}")),
+                data: None,
+            };
+            // Registration can be the first tool call after reconnect. Only a
+            // server-internal identity, or the harness's own CAS_SESSION_ID
+            // authenticated read-only and uncached, may name the predecessor.
+            // A row a public registration created (its session file or PID
+            // mapping) never becomes server-internal (cas-e1db), and a
+            // caller-supplied name alone never selects an identity.
+            let caller = match self.agent_id.get() {
+                Some(Some(id)) => self.has_server_internal_identity(id).then(|| id.clone()),
+                Some(None) => None,
+                None => std::env::var("CAS_SESSION_ID").ok()
+                    .filter(|id| !id.trim().is_empty())
+                    .and_then(|_| self.resolve_registered_agent_id_read_only().ok()),
+            };
+            let existing = caller.as_deref()
+                .map(|id| agent_store.get(id)).transpose().map_err(inspect_error)?;
+            let harness = crate::agent_id::get_cc_pid_for_mcp();
+            match existing.filter(|agent| {
+                // The row this call itself registered (session_start writes
+                // it first) is not a predecessor to rebind.
+                agent.id != session_id
+                    && agent.name == name && agent.role == crate::types::AgentRole::Supervisor
+                    && agent.is_alive()
+                    && (agent.pid == Some(pid) || agent.pid == Some(harness) || agent.ppid == Some(harness))
+                    && matches!(crate::mcp::daemon::evaluate_liveness(agent,
+                        crate::mcp::daemon::pid_alive, crate::mcp::daemon::pid_matches_fingerprint),
+                        crate::mcp::daemon::LivenessOutcome::Alive { .. })
+            }) {
+                Some(agent) => {
+                    let ended = cas_store::SqliteAgentStore::open(&self.cas_root)
+                        .and_then(|store| store.session_end_recorded(&agent.id)).map_err(inspect_error)?;
+                    (!ended).then_some(agent)
+                }
+                None => None,
+            }
+        } else { None };
 
         // clear_context stores the new harness session id on the existing
         // worker row. Rebind to that row before constructing a new one so its
@@ -755,14 +861,20 @@ impl CasCore {
                     .filter(|agent| agent.role == crate::types::AgentRole::Worker)
             })
             .flatten();
-        let canonical_id = rebound_worker
+        let bind_source = if rebound_supervisor.is_some() {
+            AgentIdentitySource::ServerInternal
+        } else {
+            source
+        };
+        let rebound = rebound_supervisor.or(rebound_worker);
+        let canonical_id = rebound
             .as_ref()
             .map(|agent| agent.id.clone())
             .unwrap_or_else(|| session_id.clone());
 
         // Create and register the agent, or refresh the durable worker row
         // matched by the post-reset session id.
-        let mut agent = rebound_worker.unwrap_or_else(|| {
+        let mut agent = rebound.unwrap_or_else(|| {
             if let Some(parent) = parent_id.clone() {
                 crate::types::Agent::new_sub_agent(session_id.clone(), name.clone(), parent)
             } else {
@@ -779,7 +891,7 @@ impl CasCore {
         crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
         #[cfg(unix)]
         {
-            let ppid = std::os::unix::process::parent_id();
+            let ppid = crate::agent_id::get_cc_pid_for_mcp();
             agent.ppid = Some(ppid);
             crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut agent, ppid);
         }
@@ -811,7 +923,22 @@ impl CasCore {
         }
 
         crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
-        agent.cc_session_id = Some(session_id.clone());
+        // cas-bfe3: server bootstrap reads CAS_SESSION_ID, the pane's launch
+        // session. A SessionStart rebind after /clear is newer, so an MCP
+        // reconnect keeps it instead of pointing the row (and the Commander
+        // mirror) back at the pre-clear transcript.
+        // The previous MCP's end deletes the row, so a reconnect that finds
+        // none resumes the session that row had been rebound to (GH #1829).
+        agent.cc_session_id = (source == AgentIdentitySource::ServerInternal)
+            .then(|| match agent_store.get(&canonical_id) {
+                Ok(prior) => prior.cc_session_id,
+                Err(_) => cas_store::SqliteAgentStore::open(&self.cas_root)
+                    .and_then(|store| store.retired_cc_session_id(&canonical_id))
+                    .ok()
+                    .flatten(),
+            })
+            .flatten()
+            .or_else(|| Some(session_id.clone()));
 
         crate::mcp::daemon::register_with_role_reconciliation(
             agent_store.as_ref(),
@@ -824,7 +951,8 @@ impl CasCore {
             data: None,
         })?;
 
-        self.bind_agent_identity(canonical_id.clone(), source)?;
+        crate::mcp::tools::service::mutation_receipt::registration_committed(&canonical_id, &session_id);
+        self.bind_agent_identity(canonical_id.clone(), bind_source)?;
         if let Ok(registered) = agent_store.get(&canonical_id)
             && let Err(error) = crate::supervisor_continuity::resume(&self.cas_root, &registered)
         {
@@ -996,10 +1124,17 @@ mod pre_initialize_guard;
 mod prompts;
 mod resources;
 mod runtime;
+mod front;
+#[cfg(unix)]
+mod backend;
+#[cfg(unix)]
+pub(crate) use backend::run as run_backend;
+pub(crate) use front::serving_state;
 
 #[cfg(feature = "mcp-proxy")]
 pub(crate) use runtime::{install_proxy_policy, load_proxy_config_for_process, worker_proxy_policy};
 pub use runtime::run_server;
+pub(crate) use runtime::QA_SANDBOX_ENV;
 #[cfg(feature = "mcp-proxy")]
 pub use runtime::{
     ProxySnapshotCache, ProxySnapshotFailure, ProxySnapshotReadError, ProxySnapshotReadErrorKind,

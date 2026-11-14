@@ -39,8 +39,8 @@ pub enum AccountsCommand {
     Enable { account: String },
     /// Link every account's shared items (commands, skills, settings, project
     /// memory, ...) to one base folder; logins stay per account. Retires
-    /// ~/.claude, ~/.claude-alt and ~/.codex as accounts. Everything replaced
-    /// is backed up first, with a restore script.
+    /// unused legacy folders; macOS Claude logins keep their authentication
+    /// scope. Everything replaced is backed up first, with a restore script.
     Link {
         /// Print the plan without changing anything
         #[arg(long)]

@@ -10,11 +10,14 @@ pub(crate) mod claude;
 mod claude_md;
 pub(crate) mod codex;
 mod codemap_cmd;
+pub(crate) mod gates_cmd;
 mod history_cmd;
+mod install_on_publish;
 mod artifact_cmd;
 pub use artifact_cmd::render_artifact_line;
 pub(crate) mod hub;
 mod hub_operator;
+mod hub_preview;
 mod hub_reverse_pairing;
 mod hub_service;
 mod index_cmd;
@@ -39,9 +42,11 @@ mod qa_polish;
 pub(crate) mod qa_post_release;
 pub(crate) mod qa_rapid_response;
 mod provider_default;
-mod release_report;
+pub(crate) mod release_report;
 mod release_precheck;
+pub(crate) mod release_adapters;
 mod release_automation;
+mod release_notice_failure;
 pub mod deliverable;
 mod sweep;
 mod worktree;
@@ -86,9 +91,7 @@ pub mod store_choice;
 mod sync;
 mod update;
 pub mod update_transaction;
-pub(crate) mod viktor;
 mod violet_cmd;
-#[cfg(feature = "mcp-proxy")]
 pub(crate) use violet_cmd::hub as violet_hub;
 pub(crate) use violet_cmd::channels::session_start_summary as session_start_channels;
 
@@ -121,7 +124,6 @@ pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
 pub use sync::SyncCommands;
 pub use update::{UpdateArgs, startup_config_notices};
-pub use viktor::ViktorArgs;
 
 /// Build version string including git hash and date
 fn build_version() -> String {
@@ -304,13 +306,10 @@ pub enum Commands {
     Hub(HubArgs),
 
     /// Run the CAS MCP server
-    Serve,
+    Serve(ServeArgs),
 
     /// Run diagnostics
     Doctor(DoctorArgs),
-
-    /// Show credential-safe provisioning status for the managed Viktor gateway
-    Viktor(ViktorArgs),
 
     /// Inspect channel bindings, or read and post Slack through the Violet hub
     Violet(violet_cmd::VioletArgs),
@@ -408,6 +407,10 @@ pub enum Commands {
     #[command(subcommand)]
     Codemap(codemap_cmd::CodemapCommands),
 
+    /// Factory check registry: stable codes and per-code refusal facts
+    #[command(subcommand)]
+    Gates(gates_cmd::GatesCommands),
+
     /// Project QA registry and checks
     #[command(subcommand)]
     Qa(qa::QaCommand),
@@ -471,8 +474,18 @@ pub enum ReleaseCommands {
     Context(release_automation::ContextArgs),
     /// Arm durable release landing and publication reminders
     Track(release_automation::TrackArgs),
+    /// Resolve shipped deliveries and portable proof references at an exact SHA
+    Inventory(release_automation::InventoryArgs),
+    /// Preview per-member close decisions without changing the release store
+    Preview(release_automation::PreviewArgs),
+    /// Reconcile a published release once, from the host's publication read
+    Published(release_adapters::PublishedArgs),
+    /// Reconcile a merged staging-to-main promotion PR once
+    Promoted(release_adapters::PromotedArgs),
     /// Notify the owning supervisor after a published release is installed
     Installed(release_automation::InstalledArgs),
+    /// Backfill shipped release trains from their published tags
+    Backfill(release_automation::BackfillArgs),
     /// Validate any commit with the merge queue job set on hosted CI
     Precheck(release_precheck::ReleasePrecheckArgs),
     /// Assemble a Markdown, standalone HTML, and optional PDF release report
@@ -504,7 +517,6 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Setup(_)
         | Commands::Open(_)
         | Commands::Doctor(_)
-        | Commands::Viktor(_)
         | Commands::Violet(_)
         | Commands::Update(_)
         | Commands::Changelog(_)
@@ -537,6 +549,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::ClaudeMd(_)
         | Commands::Qa(_)
         | Commands::Codemap(_)
+        | Commands::Gates(_)
         | Commands::History(_)
         | Commands::Index(_)
         | Commands::Artifact(_)
@@ -552,7 +565,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Sync(_)
         | Commands::RetrievalParity(_) => AuthRequirement::NotRequired,
 
-        Commands::Serve => AuthRequirement::NotRequired,
+        Commands::Serve(_) => AuthRequirement::NotRequired,
 
         // Local unlink only removes the project link file and is useful when
         // taking a project offline; remote purge remains auth-gated.
@@ -708,6 +721,9 @@ pub fn validate_process_startup(cli: &Cli) -> anyhow::Result<()> {
 /// Run the CLI with the given arguments.
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     validate_process_startup(&cli)?;
+    if let Some(Commands::Release(ReleaseCommands::Preview(args))) = &cli.command {
+        return release_automation::preview(args, &find_cas_root()?);
+    }
     let tracer_timer = std::time::Instant::now();
     let dev_tracing_enabled = initialize_dev_tracer();
     let command_name = get_command_name(&cli.command);
@@ -859,9 +875,8 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Default(_) => "default".to_string(),
         Commands::Bridge(_) => "bridge".to_string(),
         Commands::Hub(_) => "hub".to_string(),
-        Commands::Serve => "serve".to_string(),
+        Commands::Serve(_) => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
-        Commands::Viktor(_) => "viktor".to_string(),
         Commands::Violet(_) => "violet".to_string(),
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
@@ -890,6 +905,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::ClaudeMd(_) => "claude-md".to_string(),
         Commands::Qa(_) => "qa".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
+        Commands::Gates(_) => "gates".to_string(),
         Commands::History(_) => "history".to_string(),
         Commands::Index(_) => "index".to_string(),
         Commands::Artifact(_) => "artifact".to_string(),
@@ -1002,9 +1018,8 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Default(args) => provider_default::execute(args),
         Commands::Bridge(args) => bridge::execute(args, cli),
         Commands::Hub(args) => hub::execute(args, cli),
-        Commands::Serve => serve_execute(),
+        Commands::Serve(args) => serve_execute(args),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
-        Commands::Viktor(args) => viktor::execute(args, cli, cas_root),
         Commands::Violet(args) => violet_cmd::execute(args, cli, cas_root),
         Commands::Config(cmd) => {
             let root = guarded_write_root(config_store_guard(cmd), require_cas_root(cas_root)?)?;
@@ -1029,8 +1044,13 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Update(args) => update::execute(args, cli, cas_root),
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Inventory(args)) => release_automation::inventory(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Preview(args)) => release_automation::preview(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Track(args)) => release_automation::track(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Published(args)) => release_adapters::published(args, cas_root),
+        Commands::Release(ReleaseCommands::Promoted(args)) => release_adapters::promoted(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Installed(args)) => release_automation::installed(args, cas_root),
+        Commands::Release(ReleaseCommands::Backfill(args)) => release_automation::backfill(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Precheck(args)) => release_precheck::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
@@ -1047,6 +1067,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
         Commands::Qa(cmd) => qa::execute(cmd, cli, cas_root),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
+        Commands::Gates(cmd) => gates_cmd::execute(cmd, cli, cas_root),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Index(cmd) => index_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Artifact(cmd) => artifact_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
@@ -1067,32 +1088,51 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     }
 }
 
-fn serve_execute() -> anyhow::Result<()> {
+#[derive(Debug, clap::Args, Default)]
+pub struct ServeArgs {
+    #[arg(long, hide = true)]
+    backend: bool,
+    #[arg(long, hide = true, requires = "backend")]
+    control_fd: Option<i32>,
+    #[arg(long, hide = true, requires = "backend")]
+    standby: bool,
+    /// QA sandbox: serve only a store under this scratch directory, with cloud sync off
+    #[arg(long, value_name = "DIR", conflicts_with = "backend")]
+    sandbox: Option<std::path::PathBuf>,
+}
+
+fn serve_execute(args: &ServeArgs) -> anyhow::Result<()> {
+    use anyhow::Context as _;
     // Long-lived: a proxy client that vanishes mid-write on the MCP socket
     // must not kill the server every harness session depends on (cas-5918).
     // Without the harness, stdout writes now fail with EPIPE and the service
     // ends through its normal shutdown path.
     crate::server_signals::ignore_sigpipe_for_server();
+    if let Some(dir) = &args.sandbox {
+        let dir = dir.canonicalize().with_context(|| format!("sandbox directory {} must exist", dir.display()))?;
+        // Single-threaded here: before the runtime starts. The backends inherit it.
+        unsafe { std::env::set_var(crate::mcp::QA_SANDBOX_ENV, dir) };
+    }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     crate::mcp::configure_serve_allocator();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(crate::mcp::run_server());
-    if result.is_err() {
-        // cas-1895: the pre-initialize guard (cas-2a49) reads stdin from the
-        // first moment of startup. Tokio's stdin is a blocking read that
-        // cannot be cancelled, and dropping the runtime waits for it, so a
-        // failed startup hung until the client wrote or closed stdin instead
-        // of exiting with its diagnostic (cas-5c05). Give other blocking work
-        // a short grace, then abandon the read.
-        runtime.shutdown_timeout(SERVE_FAILED_STARTUP_GRACE);
-    }
+    let result = if args.backend {
+        #[cfg(unix)]
+        { runtime.block_on(crate::mcp::run_backend(args.control_fd.context("private backend requires --control-fd")?, args.standby)) }
+        #[cfg(not(unix))]
+        { anyhow::bail!("private MCP backends require Unix control sockets") }
+    } else { runtime.block_on(crate::mcp::run_server()) };
+    // Tokio's stdin read cannot be cancelled. Both startup refusal and the
+    // parent watchdog must exit even while another process holds stdin open.
+    // Give other blocking work a short grace, then abandon that read.
+    runtime.shutdown_timeout(SERVE_SHUTDOWN_GRACE);
     result
 }
 
-/// How long a failed `cas serve` startup waits for blocking tasks before exit.
-const SERVE_FAILED_STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long `cas serve` waits for blocking tasks after its transport ends.
+const SERVE_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(test)]
 mod tests {

@@ -37,6 +37,7 @@ pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod lane_guard;
 pub mod project_hold;
+pub mod release_reconcile_store;
 pub mod shared_db;
 pub mod task_note_markers;
 pub mod wait_budget;
@@ -51,6 +52,7 @@ mod code_vector_store;
 mod commit_link_store;
 pub mod communication_slo;
 mod delegation_receipt_store;
+mod delivery_cycle;
 mod delivery_store;
 mod entity_store;
 mod epic_split_store;
@@ -88,8 +90,6 @@ pub mod trace_archive;
 pub mod tracing;
 mod verification_store;
 mod version_store;
-mod viktor_inbound_store;
-mod viktor_watch_store;
 mod worktree_store;
 
 // Mock stores for testing
@@ -113,6 +113,7 @@ pub use trace_archive::{
 // Agent store for multi-agent coordination
 pub use agent_store::{
     AGENT_SCHEMA, AGENT_SESSION_END_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore,
+    continuity::SessionEnd as SupervisorLaneSnapshot,
 };
 
 // Event store for activity tracking (sidecar)
@@ -127,7 +128,8 @@ pub use accepted_proposal_store::{
     record_accepted_proposal_target,
 };
 pub use artifact_store::{
-    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
+    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, ARTIFACT_REVOCATION_SCHEMA_STATEMENTS,
+    ArtifactRevocation, NewArtifact, PublishedArtifact,
     SqliteArtifactStore, looks_like_signed_upload_url,
 };
 pub use code_index_purge::{
@@ -145,12 +147,17 @@ pub use delegation_receipt_store::{
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
 };
+pub use delivery_cycle::{
+    DELIVERY_CYCLE_SCHEMA, DeliveryCycle, current_delivery_cycle, current_delivery_cycle_with_conn,
+    delivery_cycle_id, delivery_cycles, backfill_delivery_cycles,
+};
 pub use delivery_store::{
-    DELIVERY_SCHEMA, build_worker_completion_receipt, clear_pending_observed_delivery_merge,
+    DELIVERY_SCHEMA, build_worker_completion_receipt, build_worker_completion_receipt_in_cycle,
+    clear_pending_observed_delivery_merge,
     create_worker_delivery, create_worker_delivery_with_dispatch,
     create_worker_delivery_with_dispatch_for_lease, create_worker_delivery_with_dispatch_for_lease_at_repository, get_latest_worker_delivery,
     get_worker_delivery_by_receipt, has_pending_observed_delivery_merge,
-    list_worker_delivery_events, observed_delivery_merges_into, record_observed_delivery_merge,
+    list_worker_delivery_events, observed_delivery_merges, observed_delivery_merges_into, record_observed_delivery_merge,
     ObservedDeliveryMerge,
     record_pending_observed_delivery_merge, transition_worker_delivery,
     transition_worker_delivery_verification_with_conn, worker_delivery_transaction_id,
@@ -168,7 +175,8 @@ pub use external_verification_gate::{
     assessment_for_outcome, authorize_request, record_assessment,
 };
 pub use qa_batch_store::{
-    QA_BATCH_RECEIPT_SCHEMA, QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, RELEASE_VERDICT_SCHEMA,
+    QA_BATCH_RECEIPT_SCHEMA, QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt,
+    RELEASE_TAG_VERDICT_SCHEMA, RELEASE_VERDICT_SCHEMA,
     defer_qa_batch_evidence, get_qa_batch_receipt,
     has_qa_batch_deferral, import_qa_batch_receipt,
     list_qa_batch_receipts, pending_qa_batch_deferrals, qa_batch_receipts_for_task,
@@ -186,9 +194,9 @@ pub use qa_pass_store::{
 pub use quality_event_store::{
     CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
     QUALITY_EVENT_BATCH_LIMIT, QUALITY_EVENT_SCHEMA_STATEMENTS, QualityEvent, QualityEventWire,
-    QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
-    normalize_release_version, quality_events_after, quality_events_between,
-    quality_events_for_task, quality_interventions_since, quality_release_events,
+    EstimateReference, ReviewEvidence, QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
+    normalize_release_version, quality_event_by_id, quality_events_after, quality_events_between,
+    quality_open_estimates, quality_check_samples, quality_events_for_task, quality_interventions_since, quality_release_events,
     record_quality_event, quality_event_recorded, sanitize_quality_link, sanitize_quality_title,
 };
 pub use rule_candidate_store::{
@@ -247,7 +255,7 @@ pub use verification_store::{
     REQUEST_CHANGES_AUDIT_PREFIX, RequestChangesBoundary, RequestChangesOutcome,
     SqliteVerificationStore, TaskReopenLifecycleOutbox,
     VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT, VERIFICATION_DURATION_SOURCE_STATEMENT,
-    VERIFICATION_SCHEMA,
+    VERIFICATION_SCHEMA, VERIFICATION_ISSUE_TRIAGE_STATEMENT,
     VERIFICATION_STATUS_DETAIL_STATEMENT, VERIFICATION_STATUS_NORMALIZE_STATEMENT,
     VerificationStore, add_system_verification, add_verification_with_conn,
     adopt_orphaned_verification_dispatches, bind_server_verifier_handoff,
@@ -258,24 +266,20 @@ pub use verification_store::{
     correct_parked_delivery_proof_scope, correct_parked_delivery_proof_targets,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
-    extend_verification_dispatch_deadline, rebind_approved_verification_dispatch,
+    extend_verification_dispatch_deadline,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
     has_active_verification_dispatch, import_peer_premerge_verification, inspect_bound_server_verifier_handoff,
     inspect_verifier_capability, invalidate_verification_dispatch_and_reopen_task_exact,
-    invalidate_verification_dispatch_for_new_cycle,
+    invalidate_verification_dispatch_for_new_cycle, release_failed_verifier_dispatch,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     reopen_closed_task_atomic, reopen_terminal_task_atomic, request_changes_audit_note,
-    request_changes_for_parked_delivery, resolve_verification_dispatch_for_add,
+    request_changes_for_parked_delivery, request_changes_for_parked_delivery_with_merge_sources,
+    resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
+    retry_verification_dispatch_after_error_with_conn, recover_errored_verification_dispatch_with_conn,
     save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
-};
-
-// Durable Viktor thread watches used by the embedded daemon's inbound bridge.
-pub use viktor_inbound_store::{SqliteViktorInboundStore, ViktorInboundMessage};
-pub use viktor_watch_store::{
-    DEFAULT_VIKTOR_WATCH_TTL_SECS, SqliteViktorWatchStore, ViktorThreadWatch, ViktorWatchStatus,
 };
 
 // Worktree store for git worktree tracking
@@ -565,6 +569,14 @@ pub trait RuleStore: Send + Sync {
         self.update(&rule)
     }
 
+    /// Retire only drafts created on/before the cutoff, atomically retaining history.
+    /// Unversioned stores refuse rather than discard lifecycle evidence.
+    fn retire_expired_drafts(
+        &self, _cutoff: chrono::DateTime<chrono::Utc>, _change_note: &str,
+    ) -> Result<Vec<Rule>> {
+        Err(StoreError::Parse("draft rule retirement requires a versioned store".into()))
+    }
+
     /// Delete a rule
     fn delete(&self, id: &str) -> Result<()>;
 
@@ -631,6 +643,22 @@ pub trait TaskStore: Send + Sync {
         Err(StoreError::Other(
             "atomic task mutation receipts are unsupported by this store".to_string(),
         ))
+    }
+
+    /// Bind a mutation receipt to the row's current revision. A syncing
+    /// wrapper uses it to publish a lifecycle write that another store module
+    /// committed directly (cas-a836).
+    fn record_mutation_receipt(&self, _task_id: &str, _receipt_id: &str) -> Result<()> {
+        Err(StoreError::Other(
+            "task mutation receipts are unsupported by this store".to_string(),
+        ))
+    }
+
+    /// Queue the row's current state for cloud sync after a write that
+    /// bypassed this store, such as `request_changes` (cas-a836). Stores
+    /// without cloud sync have nothing to publish.
+    fn publish_current_row(&self, _task_id: &str) -> Result<()> {
+        Ok(())
     }
 
     /// Canonical project identity attached to this store, when available.
@@ -724,6 +752,10 @@ pub trait TaskStore: Send + Sync {
     /// and the caller's `task.updated_at` is ignored on this path. The stamp
     /// that was actually persisted is returned so callers never have to guess
     /// it with a second clock read.
+    /// Unconditional local writes with a different clock preserve stored note
+    /// blocks and append missing incoming blocks. Read the current row before
+    /// intentionally replacing notes; guarded and replicated writes use their
+    /// existing compare-and-swap contract.
     ///
     /// cas-ec74: deriving a lifecycle-notification occurrence from
     /// `task.updated_at` after calling `update()` compares two different clock

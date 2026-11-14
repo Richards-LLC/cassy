@@ -181,7 +181,7 @@ const FORCED_EXIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// `deadline`. Linux waits on a pidfd, which becomes readable exactly when the
 /// process terminates; elsewhere, or without pidfd support, it polls.
 #[cfg(unix)]
-fn wait_for_hub_exit(pid: u32, deadline: std::time::Duration) -> bool {
+pub fn wait_for_hub_exit(pid: u32, deadline: std::time::Duration) -> bool {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.

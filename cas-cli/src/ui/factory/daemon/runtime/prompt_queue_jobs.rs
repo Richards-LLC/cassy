@@ -81,6 +81,8 @@ pub(crate) enum QueueStamp {
         reason: cas_store::PendingReason,
         detail: Option<String>,
     },
+    /// Retry an operator reply, counting only actual transport handoffs.
+    OperatorReplyRetry { retry_at: chrono::DateTime<chrono::Utc>, attempted: bool },
     /// Terminal: dropped (cas-4272).
     Dropped { detail: Option<String> },
     /// Terminal: superseded by a newer premise (cas-4272).
@@ -153,6 +155,7 @@ impl QueueStamp {
             Self::DirectedWake { .. } => "directed_wake",
             Self::WakeAttempt { .. } => "wake_attempt",
             Self::Retry { .. } => "retry",
+            Self::OperatorReplyRetry { .. } => "operator_reply_retry",
             Self::Dropped { .. } => "dropped",
             Self::Superseded { .. } => "superseded",
             Self::Suppressed { .. } => "suppressed",
@@ -189,6 +192,7 @@ impl QueueStamp {
             Self::Retry { reason, detail } => queue
                 .record_retry(row, *reason, detail.as_deref())
                 .map(drop),
+            Self::OperatorReplyRetry { retry_at, attempted } => queue.retry_operator_reply(row, *retry_at, *attempted),
             Self::Dropped { detail } => queue.mark_dropped(row, detail.as_deref()),
             Self::Superseded { detail } => queue.mark_superseded(row, detail),
             Self::Suppressed { detail } => queue.mark_suppressed(row, detail.as_deref()),
@@ -251,9 +255,26 @@ impl QueueStamp {
             Self::ParkBusy { detail, recheck_at } => {
                 queue.park_for_busy_recipient(row, Some(detail), *recheck_at).map(drop)
             }
-            Self::UndeliveredRelay { notice } => queue
-                .mark_undelivered_lifecycle_relay(row, Some(notice))
-                .map(drop),
+            Self::UndeliveredRelay { notice } => {
+                let Some(original) = queue.queued_prompt(row)? else { return Ok(()); };
+                // Lifecycle sources are synthetic, so a sender abandonment
+                // notice cannot tell the supervisor. Persist its action first;
+                // a failed write leaves the original pending, and replay after
+                // either write reuses this alert instead of duplicating it.
+                // No task binding: this reports a failed delivery even after
+                // the task has moved on from the obsolete lifecycle premise.
+                queue.enqueue_idempotent(
+                    "delivery-watchdog",
+                    recipient,
+                    &crate::prompt_revalidation::attach_blocker_envelope(notice, "daemon", None),
+                    original.factory_session.as_deref(),
+                    Some("Lifecycle relay undelivered"),
+                    Some(cas_store::NotificationPriority::High),
+                    &format!("undelivered-lifecycle-relay:{row}"),
+                    Some(&cas_store::QueueOrigin::Daemon),
+                )?;
+                queue.mark_undelivered_lifecycle_relay(row, Some(notice))
+            }
             Self::SupersedeWithGuidance {
                 source,
                 session,
@@ -435,6 +456,9 @@ pub(crate) fn run_claim_for_inject(
             return Ok((ClaimOutcome::Stale, retargeted));
         };
         if fresh.processed_at.is_some() || fresh.target != target {
+            return Ok((ClaimOutcome::Stale, retargeted));
+        }
+        if !crate::qa_post_release::batch_notice_deliverable(cas_dir, queue.as_ref(), &fresh)? {
             return Ok((ClaimOutcome::Stale, retargeted));
         }
         let outcome = match queue.claim_recipient_transport_token(row, recipient)? {
@@ -1870,6 +1894,27 @@ impl QueueJobs {
             .partition(|result| owns(result.kind));
         self.external = kept;
         taken
+    }
+
+    /// Stop submitting from control, finish every already queued write, and
+    /// retain the original runtime so a refused exec can resume it unchanged.
+    pub(crate) async fn flush_for_reexec(&mut self, cas_dir: &Path, timeout: Duration) -> anyhow::Result<()> {
+        self.settle_injects(cas_dir);
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.apply_completions();
+            let idle = match &self.exec {
+                Exec::Inline(done) => done.is_empty(),
+                Exec::Lanes(runtime) => [Lane::Read, Lane::Write, Lane::Blocking, Lane::External]
+                    .into_iter().all(|lane| {
+                        let stats = runtime.lane_stats(lane);
+                        stats.running.is_none() && stats.queued == 0
+                    }),
+            };
+            if idle { return Ok(()); }
+            anyhow::ensure!(Instant::now() < deadline, "Durable daemon jobs did not flush before reexec");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Close the lanes and wait up to `timeout` for queued critical work

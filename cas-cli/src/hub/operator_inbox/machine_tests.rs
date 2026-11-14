@@ -25,6 +25,7 @@ struct CloudState {
     skew_seconds: i64,
     approvals: Vec<Value>,
     log: Vec<(String, String, u16)>,
+    attempts: Vec<(String, Option<String>)>,
 }
 
 struct FakeCloud {
@@ -287,6 +288,10 @@ impl FakeCloud {
         state
             .log
             .push((method.to_owned(), path.to_owned(), response.status));
+        state.attempts.push((
+            path.to_owned(),
+            header(headers, "X-Cassy-Attempt-Id").map(str::to_owned),
+        ));
         response
     }
 }
@@ -470,6 +475,27 @@ async fn relay_append_signs_each_request_and_resyncs_a_stale_generation() {
         .map(|(_, _, status)| *status)
         .collect();
     assert_eq!(statuses, vec![200, 401, 200, 200]);
+    let attempts: Vec<_> = cloud
+        .state
+        .lock()
+        .unwrap()
+        .attempts
+        .iter()
+        .filter(|(path, _)| path.starts_with("/api/operator/feed") || path.ends_with("grants/me"))
+        .map(|(_, attempt)| attempt.clone())
+        .collect();
+    assert_eq!(attempts.len(), 4);
+    for index in [0, 1, 3] {
+        assert_eq!(
+            uuid::Uuid::parse_str(attempts[index].as_deref().unwrap())
+                .unwrap()
+                .get_version_num(),
+            4
+        );
+    }
+    assert_ne!(attempts[0], attempts[1]);
+    assert_eq!(attempts[1], attempts[3]);
+    assert!(attempts[2].is_none(), "grant resync remains a read");
     assert_eq!(cloud.state.lock().unwrap().appended.len(), 2);
 }
 

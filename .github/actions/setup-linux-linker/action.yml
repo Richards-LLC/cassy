@@ -1,0 +1,38 @@
+name: Setup Linux linker
+description: Use existing gcc and mold, bootstrapping pinned mold without Ubuntu mirrors.
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
+        if ! command -v gcc >/dev/null; then
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y gcc
+        fi
+        if ! command -v mold >/dev/null; then
+          # Hosted images have gcc, but not mold. Avoid Ubuntu mirror outages.
+          version=2.40.4
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) checksum=4c999e19ffa31afa5aa429c679b665d5e2ca5a6b6832ad4b79668e8dcf3d8ec1 ;;
+            aarch64) checksum=c799b9ccae8728793da2186718fbe53b76400a9da396184fac0c64aa3298ec37 ;;
+            *) checksum= ;;
+          esac
+          if [[ -n "$checksum" ]]; then
+            archive="mold-$version-$arch-linux"
+            install_dir="$(mktemp -d "$RUNNER_TEMP/mold.XXXXXX")"
+            curl -fLsS --retry 3 "https://github.com/rui314/mold/releases/download/v$version/$archive.tar.gz" -o "$install_dir/mold.tar.gz"
+            echo "$checksum  $install_dir/mold.tar.gz" | sha256sum --check
+            tar -xzf "$install_dir/mold.tar.gz" -C "$install_dir"
+            export PATH="$install_dir/$archive/bin:$PATH"
+            echo "$install_dir/$archive/bin" >> "$GITHUB_PATH"
+          else
+            sudo apt-get -o Acquire::Retries=3 update
+            sudo apt-get -o Acquire::Retries=3 install -y mold
+          fi
+        fi
+        echo "gcc and mold available; no further apt packages needed"
+        gcc --version
+        mold --version

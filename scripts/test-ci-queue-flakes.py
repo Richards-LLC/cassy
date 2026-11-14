@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise queue recovery through its CLI with native-report runner fixtures."""
+"""Exercise first-failure reporting through its CLI with native-report runner fixtures."""
 import json
 import os
+import runpy
+from datetime import date, datetime, timezone
 from pathlib import Path
 import shutil
 import subprocess
@@ -23,14 +25,8 @@ args = sys.argv[1:]
 with state.open('a') as log: log.write(json.dumps(args)+'\n')
 attempt = len(state.read_text().splitlines())
 name = os.environ.get('FIXTURE_TEST', 'sometimes')
-excluded = ('-E' in args and 'not (' in args[args.index('-E')+1] and name in args[args.index('-E')+1])
-if '--test-list-invert' in args:
-    excluded = name in pathlib.Path(args[args.index('--test-list-invert')+1]).read_text()
-failed = not excluded and (attempt == 1 or name == 'always-fail')
-if excluded: name = 'healthy-control'
-if attempt > 1 and os.environ.get('FIXTURE_MISSING_RERUN_REPORT'):
-    print('fixture stopped before writing the rerun report')
-    sys.exit(1)
+failed = not os.environ.get('FIXTURE_PASS') and (attempt == 1 or name == 'always-fail')
+if os.environ.get('FIXTURE_MISSING_REPORT'): sys.exit(2)
 if pathlib.Path(sys.argv[0]).name == 'cargo':
     report = root/'target/nextest/queue/junit.xml'
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -44,7 +40,7 @@ else:
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({'errors':[], 'suites':[{'title':'fixture.journey.ts','file':'fixture.journey.ts','specs':[{
         'title':name,'file':'fixture.journey.ts','line':1,'tests':[{'projectName':'journeys','expectedStatus':'passed','status':'unexpected' if failed else 'expected','results':[{'status':'failed' if failed else 'passed','retry':0,'errors':[{'message':'fixture assertion failed'}] if failed else []}]}]}]}]}))
-sys.exit(1 if failed else 0)
+sys.exit(int(os.environ.get('FIXTURE_EXIT',1 if failed else 0)))
 '''
 
 
@@ -54,8 +50,6 @@ class QueueRecovery(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name)
         (self.repo/"hub-web").mkdir()
-        (self.repo/".config").mkdir()
-        (self.repo/".config/flaky-quarantine.json").write_text('{"schema":1,"tests":[]}')
         self.bin = self.repo/"bin"
         self.bin.mkdir()
         for name in ("cargo", "npm"):
@@ -65,12 +59,12 @@ class QueueRecovery(unittest.TestCase):
         self.git("init", "-q", "-b", "fixture/queue-recovery")
         self.git("config", "user.name", "Queue fixture")
         self.git("config", "user.email", "fixture@example.test")
-        self.git("add", ".config")
-        self.git("commit", "-qm", "fixture tree")
+        self.git("commit", "--allow-empty", "-qm", "fixture tree")
         self.env = {**os.environ, "PATH":str(self.bin)+os.pathsep+os.environ['PATH'],
                     "CARGO":str(self.bin/'cargo'), "GITHUB_EVENT_NAME":"merge_group",
                     "GITHUB_RUN_ID":"101", "GITHUB_REPOSITORY":"fixture/repo"}
         self.issues = []
+        self.issue_read_failure = False
         self.refs = {}
         self.lose_create_response = False
         owner = self
@@ -105,6 +99,7 @@ class QueueRecovery(unittest.TestCase):
                     # expose the current record (live acceptance regression).
                     result = owner.issues if query.get('state')==['all'] and not query.get('labels') else []
                     if query.get('page',['1'])[0] != '1': result = []
+                    if owner.issue_read_failure: code, result = 503, {'message':'fixture issue read unavailable'}
                 elif path == '/issues' and method == 'POST':
                     result = {**data,'number':len(owner.issues)+1,'state':'open',
                               'html_url':f'https://github.com/fixture/repo/issues/{len(owner.issues)+1}',
@@ -142,87 +137,81 @@ class QueueRecovery(unittest.TestCase):
                               env={**self.env,"FIXTURE_TEST":test,"GITHUB_EVENT_NAME":event},
                               capture_output=True,text=True)
 
-    def test_failed_selection_runs_once_more_on_the_same_tree(self):
+    def test_first_failure_runs_once_and_preserves_the_tree(self):
         for engine in ('rust','playwright'):
-            for name, outcome, code in [('sometimes','FLAKY',0),('always-fail','FAIL',1)]:
-                with self.subTest(engine=engine,name=name):
-                    (self.repo/'attempts.jsonl').unlink(missing_ok=True)
-                    before = self.git('rev-parse','HEAD^{tree}')
-                    result = self.run_queue(engine,name)
-                    self.assertEqual(result.returncode,code,result.stdout+result.stderr)
-                    receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
-                    self.assertEqual(receipt['outcome'],outcome)
-                    self.assertEqual(receipt['initial_status'],1)
-                    self.assertEqual(receipt['tree'],before)
-                    calls = self.calls()
-                    self.assertEqual(len(calls),2)
-                    self.assertNotIn('--partition',calls[1])
-                    self.assertFalse(any(a.startswith('--shard') for a in calls[1]))
-                    self.assertLess(receipt['rerun_seconds'],30)
-                    self.assertEqual(self.git('rev-parse','HEAD^{tree}'),before)
-
-    def test_non_queue_events_never_rerun(self):
-        for engine in ('rust','playwright'):
-            with self.subTest(engine=engine):
-                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
-                result = self.run_queue(engine,event='workflow_dispatch')
-                self.assertNotEqual(result.returncode,0)
-                self.assertEqual(len(self.calls()),1)
-
-    def test_missing_rerun_report_preserves_the_initial_failure(self):
-        self.env['FIXTURE_MISSING_RERUN_REPORT'] = '1'
-        for engine in ('rust','playwright'):
-            with self.subTest(engine=engine):
-                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
-                result = self.run_queue(engine,'always-fail')
-                self.assertEqual(result.returncode,1,result.stdout+result.stderr)
-                self.assertIn('always-fail',result.stderr)
-                receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
-                self.assertEqual(receipt['outcome'],'FAIL')
-                self.assertEqual(receipt['flaky'],[])
-                self.assertIn('fixture assertion failed',receipt['attempts'][0]['tests'][0]['output'])
-                self.assertEqual(receipt['attempts'][1]['tests'],[])
-                self.assertEqual(len(self.calls()),2)
+            for event in ('merge_group','push','workflow_dispatch'):
+                for case in ({}, {'FIXTURE_PASS':'1','FIXTURE_EXIT':'2'}, {'FIXTURE_MISSING_REPORT':'1'}, {'FIXTURE_PASS':'1'}):
+                    with self.subTest(engine=engine,event=event,case=case):
+                        (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                        before = self.git('rev-parse','HEAD^{tree}')
+                        self.env.update(case)
+                        result = self.run_queue(engine,event=event)
+                        receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                        passed = case=={'FIXTURE_PASS':'1'}
+                        self.assertEqual(result.returncode,0 if passed else int(case.get('FIXTURE_EXIT',2 if 'FIXTURE_MISSING_REPORT' in case else 1)),result.stdout+result.stderr)
+                        self.assertEqual(receipt['outcome'],'PASS' if passed else 'FAIL')
+                        self.assertEqual(receipt['tree'],before)
+                        self.assertEqual(len(self.calls()),1)
+                        self.assertEqual(self.git('rev-parse','HEAD^{tree}'),before)
+                        self.assertEqual(self.git('status','--porcelain','--untracked-files=no'),'')
+                        for key in case: self.env.pop(key)
 
     def reconcile(self):
         return subprocess.run([sys.executable,str(SCRIPT),'reconcile','--issues-repo','fixture/repo',
                                '--receipts',str(self.repo/'receipts')],env=self.env,capture_output=True,text=True)
 
-    def test_publication_deduplicates_runs_and_second_flake_quarantines_until_fixed(self):
-        self.assertEqual(self.run_queue('rust').returncode,0)
-        self.lose_create_response = True
-        first = self.reconcile()
-        self.assertEqual(first.returncode,0,first.stdout+first.stderr)
-        self.assertEqual(len(self.issues),1)
-        self.assertIn('priority:p1',[l['name'] for l in self.issues[0]['labels']])
-        self.assertNotIn('flaky-quarantine',[l['name'] for l in self.issues[0]['labels']])
-        again = self.reconcile()
-        self.assertEqual(again.returncode,0,again.stderr)
-        self.assertEqual(len(self.issues),1)
-        self.assertNotIn('flaky-quarantine',[l['name'] for l in self.issues[0]['labels']])
-        self.env['GITHUB_RUN_ID'] = '102'
-        (self.repo/'attempts.jsonl').unlink()
-        self.assertEqual(self.run_queue('rust').returncode,0)
-        second = self.reconcile()
-        self.assertEqual(second.returncode,0,second.stdout+second.stderr)
-        self.assertEqual(len(self.issues),1)
-        self.assertIn('flaky-quarantine',[l['name'] for l in self.issues[0]['labels']])
-        (self.repo/'attempts.jsonl').unlink()
-        excluded = self.run_queue('rust')
-        self.assertEqual(excluded.returncode,0,excluded.stdout+excluded.stderr)
-        self.assertEqual(len(self.calls()),1)
-        self.assertIn(self.issues[0]['html_url'],excluded.stdout)
-        self.issues[0]['state'] = 'closed'
-        (self.repo/'attempts.jsonl').unlink()
-        self.assertEqual(self.run_queue('rust').returncode,0)
-        self.assertEqual(len(self.calls()),2)
-        fixed = self.reconcile()
-        self.assertEqual(fixed.returncode,0,fixed.stdout+fixed.stderr)
-        self.assertEqual(len(self.issues),2)
-        self.assertNotIn('flaky-quarantine',[l['name'] for l in self.issues[1]['labels']])
+    def workflow_reconcile(self):
+        policy = runpy.run_path(str(SCRIPT.parent/'ci_tiers/policy.py'))
+        job = policy['load'](SCRIPT.parent.parent/'.github/workflows/ci.yml')['jobs']['queue-flake-publication']
+        download = next(step for step in job['steps'] if step.get('uses')=='actions/download-artifact@v4')
+        self.assertEqual(download['with']['pattern'],'queue-flakes-*')
+        destination = self.repo/download['with']['path']
+        shutil.rmtree(destination,ignore_errors=True)
+        # Successful reused siblings produce no native artifact. Publish the
+        # observed failure even when only this shard actually executed.
+        shutil.copytree(self.repo/'receipts',destination/'queue-flakes-fixture')
+        (self.repo/'scripts').mkdir(exist_ok=True)
+        (self.repo/'scripts/ci-queue-flakes.py').unlink(missing_ok=True)
+        (self.repo/'scripts/ci-queue-flakes.py').symlink_to(SCRIPT)
+        body = next(step['run'] for step in job['steps'] if 'reconcile --issues-repo' in step.get('run',''))
+        return subprocess.run(['bash','-e','-o','pipefail','-c',body.replace('Richards-LLC/cassy','fixture/repo')],
+                              cwd=self.repo,env=self.env,capture_output=True,text=True)
+
+    def test_first_failure_publication_deduplicates_and_keeps_the_owner_deadline(self):
+        scope = runpy.run_path(str(SCRIPT))
+        for today,deadline in [('2026-11-12','2026-11-13'),('2026-11-13','2026-11-16'),('2026-11-14','2026-11-16')]:
+            self.assertEqual(scope['next_working_day'](date.fromisoformat(today)),deadline)
+        for engine in ('rust','playwright'):
+            with self.subTest(engine=engine):
+                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                self.assertEqual(self.run_queue(engine).returncode,1)
+                self.lose_create_response = True
+                first = self.workflow_reconcile()
+                self.assertEqual(first.returncode,0,first.stdout+first.stderr)
+                count = len(self.issues)
+                issue = self.issues[-1]
+                self.assertIn('priority:p0',[l['name'] for l in issue['labels']])
+                state = scope['issue_state'](issue)
+                self.assertEqual(state['repair_deadline'],scope['next_working_day'](datetime.now(timezone.utc).date()))
+                # An overdue issue stays overdue when another run observes it.
+                state['repair_deadline'] = '2026-01-01'
+                issue['body'] = '<!-- cas-queue-flake: '+json.dumps(state)+' -->'
+                again = self.reconcile()
+                self.assertEqual(again.returncode,0,again.stdout+again.stderr)
+                self.env['GITHUB_RUN_ID'] = str(int(self.env['GITHUB_RUN_ID'])+1)
+                (self.repo/'attempts.jsonl').unlink()
+                self.assertEqual(self.run_queue(engine).returncode,1)
+                second = self.reconcile()
+                self.assertEqual(second.returncode,0,second.stdout+second.stderr)
+                self.assertEqual(len(self.issues),count)
+                saved = scope['issue_state'](issue)
+                self.assertEqual(saved['repair_deadline'],'2026-01-01')
+                self.assertEqual(len(saved['runs']),2)
+                self.assertEqual(saved['test']['runner'],engine)
+                self.assertEqual(len(self.calls()),1)
 
     def test_publication_refuses_incomplete_evidence_or_a_competing_writer(self):
-        self.assertEqual(self.run_queue('rust').returncode,0)
+        self.assertEqual(self.run_queue('rust').returncode,1)
         path = self.repo/'receipts/receipt.json'
         receipt = json.loads(path.read_text())
         for problem in ('wrong run','foreign lock','missing receipt'):
@@ -240,102 +229,6 @@ class QueueRecovery(unittest.TestCase):
                 if problem == 'foreign lock':
                     self.assertEqual(self.refs['refs/heads/cas-queue-flake-publication-lock'],'another-writer')
 
-    def test_open_issue_quarantine_excludes_only_the_named_test(self):
-        for engine in ('rust','playwright'):
-            with self.subTest(engine=engine):
-                self.issues.clear()
-                test = {'runner':engine,'binary':'fixture::lib','name':'sometimes',
-                        'project':'journeys','file':'fixture.journey.ts','titles':['sometimes']}
-                state = {'schema':1,'test':test,'runs':['100','101']}
-                self.issues.append({'number':1,'state':'open','html_url':'https://github.com/fixture/repo/issues/1',
-                                    'labels':[{'name':'flaky-quarantine'}],
-                                    'body':'<!-- cas-queue-flake: '+json.dumps(state)+' -->'})
-                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
-                result = self.run_queue(engine)
-                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-                receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
-                self.assertEqual(receipt['outcome'],'PASS')
-                self.assertEqual(receipt['quarantine'][0]['runner'],engine)
-                self.assertEqual(len(self.calls()),1)
-                self.assertIn(self.issues[0]['html_url'],result.stdout)
-
-
-def live_acceptance(out):
-    """Explicit manual proof: native runner fixtures, real routed GitHub issues.
-
-    Normal test runs always use the local HTTP fixture. This mode is dispatched
-    only on a throwaway branch; its issue is closed after proving quarantine.
-    """
-    out.mkdir(parents=True,exist_ok=True)
-    run_id = os.environ['GITHUB_RUN_ID']
-    route = os.environ['GITHUB_REPOSITORY']
-    proof = {'run_id':run_id,'checks':[]}
-    fixture = out/'fixture'
-    fixture.mkdir()
-    (fixture/'hub-web').mkdir()
-    bin_dir = fixture/'bin'
-    bin_dir.mkdir()
-    for name in ('cargo','npm'):
-        p = bin_dir/name
-        p.write_text(FIXTURE)
-        p.chmod(0o755)
-    for args in [('init','-q','-b','fixture/queue-flake-acceptance'),('config','user.name','Queue acceptance'),
-                 ('config','user.email','queue-acceptance@example.test'),('commit','--allow-empty','-qm','Acceptance fixture tree')]:
-        subprocess.run(['git',*args],cwd=fixture,check=True)
-    env = {**os.environ,'GITHUB_EVENT_NAME':'merge_group','CASSY_ISSUES_REPO':route,
-           'PATH':str(bin_dir)+os.pathsep+os.environ['PATH'],'CARGO':str(bin_dir/'cargo')}
-    # The throwaway native fixture has its own commit; publication verifies it.
-    env['GITHUB_SHA'] = subprocess.check_output(['git','rev-parse','HEAD'],cwd=fixture,text=True).strip()
-    name = 'queue_acceptance_'+run_id
-    issue = None
-    def command(args, code=0):
-        result = subprocess.run([sys.executable,str(SCRIPT),*args],env=env,capture_output=True,text=True)
-        print(result.stdout+result.stderr,flush=True)
-        if result.returncode != code: raise RuntimeError(f'acceptance expected exit {code}, got {result.returncode}')
-    def queue(label,test,code):
-        (fixture/'attempts.jsonl').unlink(missing_ok=True)
-        env['FIXTURE_TEST'] = test
-        command(['run','rust','--repo',str(fixture),'--shard','1/3','--out',str(out/label)],code)
-        receipt = json.loads((out/label/'receipt.json').read_text())
-        calls = [json.loads(line) for line in (fixture/'attempts.jsonl').read_text().splitlines()]
-        return receipt,calls
-    def patch_issue(payload):
-        subprocess.run(['gh','api','--method','PATCH',f'repos/{route}/issues/{issue.rsplit("/",1)[1]}','--input','-'],
-                       input=json.dumps(payload),env=env,capture_output=True,text=True,check=True)
-    try:
-        receipt,calls = queue('recovered',name,0)
-        if receipt['outcome']!='FLAKY' or len(calls)!=2 or receipt['rerun_seconds']>=30:
-            raise RuntimeError('fail-then-pass did not recover within the Rust budget')
-        command(['reconcile','--issues-repo',route,'--receipts',str(out/'recovered'),'--expect','rust:1/3'])
-        publication = json.loads((out/'recovered/publication.json').read_text())
-        issue = publication['published'][0]['issue']
-        if publication['published'][0]['quarantined']: raise RuntimeError('first flake quarantined prematurely')
-        proof['checks'].append({'case':'fail-then-pass','outcome':receipt['outcome'],'eject':False,
-                                'issue':issue,'rerun_seconds':receipt['rerun_seconds']})
-        receipt,calls = queue('always-fail','always-fail',1)
-        if receipt['outcome']!='FAIL' or len(calls)!=2: raise RuntimeError('persistent failure did not eject')
-        proof['checks'].append({'case':'always-fail','outcome':'FAIL','eject':True,'rerun_seconds':receipt['rerun_seconds']})
-        # Second-distinct-run labeling is covered by the deterministic HTTP
-        # test. Here prove the authoritative live label/read path explicitly.
-        patch_issue({'labels':['flaky','priority:p1','flaky-quarantine']})
-        receipt,calls = queue('quarantined',name,0)
-        if receipt['outcome']!='PASS' or len(calls)!=1 or not any(t['issue']==issue for t in receipt['quarantine']):
-            raise RuntimeError('live labeled issue did not exclude its test')
-        proof['checks'].append({'case':'open-labeled-issue','outcome':'PASS','excluded':True,'issue':issue})
-        patch_issue({'state':'closed','state_reason':'completed'})
-        receipt,calls = queue('fixed',name,0)
-        if len(calls)!=2 or any(t['issue']==issue for t in receipt['quarantine']):
-            raise RuntimeError('closing the fix issue did not remove quarantine')
-        proof['checks'].append({'case':'closed-issue','excluded':False})
-        proof['result'] = 'PASS'
-    finally:
-        if issue: patch_issue({'state':'closed','state_reason':'completed'})
-        (out/'acceptance.json').write_text(json.dumps(proof,indent=2)+'\n')
-    print(json.dumps(proof,indent=2),flush=True)
-
 
 if __name__ == '__main__':
-    if len(sys.argv)>1 and sys.argv[1]=='--live-acceptance':
-        live_acceptance(Path(sys.argv[2]).resolve())
-    else:
-        unittest.main()
+    unittest.main()

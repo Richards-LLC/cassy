@@ -191,9 +191,10 @@ mod tests {
     }
 
     /// cas-4b22: a parked delivery already on origin/<target> gets one
-    /// supervisor notice per release SHA naming the exact batch_receipt call.
-    #[test]
-    fn batch_receipt_offer_names_live_parked_deliveries_once_per_sha() {
+    /// supervisor notice per uncovered set naming the exact batch_receipt call.
+    #[tokio::test]
+    async fn batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let git = |args: &[&str]| {
@@ -204,7 +205,7 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "qa@example.test"]);
         git(&["config", "user.name", "QA"]);
-        fs::write(project.join(".gitignore"), ".cas/\n").unwrap();
+        fs::write(project.join(".gitignore"), ".cas/\nartifacts/\nLEDGER.md\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "base"]);
         let base = git(&["rev-parse", "HEAD"]);
@@ -214,42 +215,274 @@ mod tests {
             git(&["commit", "-qm", name]);
             git(&["rev-parse", "HEAD"])
         };
-        let live = anchor("live.md");
+        let live = anchor("live.css");
         git(&["update-ref", "refs/remotes/origin/main", &live]);
         let unpushed = anchor("unpushed.md");
         let cas = crate::store::init_cas_dir(project).unwrap();
-        let supervisor = cas_types::Agent::new_with_role("sup-4b22".into(), "release-sup".into(), cas_types::AgentRole::Supervisor);
+        env.set("CAS_ROOT", cas.to_str().unwrap());
+        env.set("CAS_CLONE_PATH", project.to_str().unwrap());
+        fs::write(cas.join("config.toml"), "[project]\ncanonical_id='batch-offer-fixture'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role("sup-4b22".into(), "release-sup".into(), cas_types::AgentRole::Supervisor);
+        supervisor.factory_session = Some("old-session".into());
         crate::store::open_agent_store(&cas).unwrap().register(&supervisor).unwrap();
+        let mut unrelated = cas_types::Agent::new_with_role("unrelated".into(), "other-supervisor".into(), cas_types::AgentRole::Supervisor);
+        unrelated.registered_at = supervisor.registered_at + chrono::Duration::seconds(1);
+        unrelated.factory_session = Some("new-session".into());
+        crate::store::open_agent_store(&cas).unwrap().register(&unrelated).unwrap();
+        let worker = cas_types::Agent::new_with_role("delivery-worker".into(), "delivery-worker".into(), cas_types::AgentRole::Worker);
+        crate::store::open_agent_store(&cas).unwrap().register(&worker).unwrap();
+        git(&["branch", "factory/delivery-worker", &live]);
         let tasks = crate::store::open_task_store(&cas).unwrap();
-        for (id, head) in [("cas-live", &live), ("cas-unpushed", &unpushed)] {
+        let mut epic = Task::new("cas-offer-epic".into(), "Offer owner".into());
+        epic.task_type = TaskType::Epic;
+        epic.epic_verification_owner = Some(supervisor.id.clone());
+        tasks.add(&epic).unwrap();
+        let unavailable_anchor = "0".repeat(40);
+        for (id, head) in [("cas-live", &live), ("cas-unpushed", &unpushed), ("cas-unavailable", &unavailable_anchor)] {
             let mut task = Task::new(id.into(), id.into());
             task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some(worker.id.clone());
+            task.risk = vec![cas_types::TaskRisk::None];
             task.deliverables.factory_branch_anchor = Some(head.clone());
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: cas_types::WorkTarget { repo_selector: "project:batch-offer-fixture".into(), target_branch: "main".into() },
+                assignee: worker.id.clone(), branch: "factory/delivery-worker".into(), base_sha: base.clone(),
+            });
             tasks.add(&task).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(id.into(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
             cas_store::defer_qa_batch_evidence(&cas, id, head).unwrap();
         }
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
-        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "one notice per release SHA");
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
+        // cas-8863: unrelated integrations move the target, not its live task set.
+        let mut target_tip = live.clone();
+        for name in ["unrelated-one", "unrelated-two"] {
+            git(&["checkout", "-qb", name, &target_tip]);
+            anchor(&format!("{name}.md"));
+            git(&["checkout", "-q", "--detach", &target_tip]);
+            git(&["merge", "--no-ff", "-qm", name, name]);
+            target_tip = git(&["rev-parse", "HEAD"]);
+            git(&["update-ref", "refs/remotes/origin/main", &target_tip]);
+            assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
+        }
         // A delivery parked later at the already-noticed tip still gets its own offer.
         let mut late = Task::new("cas-late".into(), "late".into());
         late.status = cas_types::TaskStatus::AwaitingMerge;
         late.deliverables.factory_branch_anchor = Some(base.clone());
         tasks.add(&late).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(late.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
         cas_store::defer_qa_batch_evidence(&cas, "cas-late", &base).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
         let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(
-            rows.iter().any(|row| row.payload.contains(&format!("task_ids=[cas-late] staging_sha={live}"))),
+            rows.iter().any(|row| row.payload.contains(&format!("task_ids=[cas-late,cas-live] staging_sha={target_tip}"))),
             "{:?}",
             rows.iter().map(|row| &row.payload).collect::<Vec<_>>()
         );
-        let payload = &rows.iter().find(|row| row.payload.contains("cas-live")).unwrap().payload;
+        let payload = &rows.iter().find(|row| row.payload.contains(&format!("task_ids=[cas-live] staging_sha={live}"))).unwrap().payload;
         assert!(
             payload.contains(&format!("verification action=batch_receipt task_ids=[cas-live] staging_sha={live}")),
             "{payload}"
         );
-        assert!(!payload.contains("cas-unpushed"), "{payload}");
+        assert!(rows.iter().all(|row| !row.payload.contains("cas-unpushed")), "{rows:?}");
+
+        // cas-0f7b: an ownership transfer after queue selection invalidates
+        // the old recipient at the actual transport claim, not just emission.
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let old = queue.peek_all(10).unwrap();
+        assert!(old.iter().all(|row| row.target == supervisor.name && row.factory_session == supervisor.factory_session));
+        epic.epic_verification_owner = Some("remote-owner-not-registered-here".into());
+        tasks.update(&epic).unwrap();
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
+        use crate::ui::factory::daemon::runtime::prompt_queue_jobs::{run_claim_for_inject, ClaimOutcome};
+        for row in &old {
+            assert_eq!(run_claim_for_inject(&cas, "old-session", row.id, &supervisor.name, &supervisor.name, 1).outcome, ClaimOutcome::Stale);
+            assert!(queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_some());
+        }
+        assert!(crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap().is_empty());
+        epic.epic_verification_owner = Some(unrelated.id.clone());
+        tasks.update(&epic).unwrap();
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
+        let mut transferred = queue.peek_all(10).unwrap();
+        assert_eq!(transferred.len(), 1);
+        assert_eq!(transferred[0].target, unrelated.name);
+        assert_eq!(transferred[0].factory_session, unrelated.factory_session);
+        assert!(batch_notice_deliverable(&cas, queue.as_ref(), &transferred[0]).unwrap());
+
+        // cas-b26e: a superseded episode can return to the same owner/session.
+        for owner in [&supervisor, &unrelated] {
+            epic.epic_verification_owner = Some(owner.id.clone());
+            tasks.update(&epic).unwrap();
+            let prior = transferred[0].id;
+            for row in &transferred {
+                assert!(!batch_notice_deliverable(&cas, queue.as_ref(), row).unwrap());
+            }
+            assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
+            assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
+            transferred = queue.peek_all(10).unwrap();
+            assert_eq!(transferred.len(), 1);
+            assert_ne!(transferred[0].id, prior);
+            assert_eq!(transferred[0].target, owner.name);
+            assert_eq!(transferred[0].factory_session, owner.factory_session);
+            assert!(batch_notice_deliverable(&cas, queue.as_ref(), &transferred[0]).unwrap());
+        }
+
+        // GH #1656: both delivered tasks remain covered after their worker retires.
+        let mut retired = tasks.get("cas-live").unwrap();
+        retired.id = "cas-retired".into();
+        tasks.add(&retired).unwrap();
+        // cas-d31ab: two members share one hold kind, alongside review holds.
+        for id in ["cas-held-a", "cas-held-b"] {
+            let mut held = retired.clone();
+            held.id = id.into();
+            held.status = cas_types::TaskStatus::Blocked;
+            tasks.add(&held).unwrap();
+        }
+        crate::store::open_agent_store(&cas).unwrap().unregister(&worker.id).unwrap();
+        let ledger = project.join("LEDGER.md");
+        fs::write(&ledger, crate::qa_ledger::scaffold(&tasks.get("cas-live").unwrap(), &[], "rev") + "\ncas-live PASS\ncas-retired PASS\ncas-held-a PASS\ncas-held-b PASS\n").unwrap();
+        let store = cas_store::SqliteArtifactStore::open(&cas).unwrap();
+        let context = crate::artifacts::PublishContext {
+            store: &store,
+            roots: crate::artifacts::paths::PublishRoots::new(&cas, &project.join("artifacts"), "cas-live"),
+            task_id: "cas-live".into(), cloud: None,
+        };
+        let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact.id;
+        let core = crate::mcp::CasCore::with_daemon(cas.clone(), None, None);
+        core.set_agent_id_for_testing(unrelated.id.clone());
+        let service = crate::mcp::CasService::new(core, None);
+        let request = |kind: &str| serde_json::from_value(serde_json::json!({
+            "action": "batch_receipt", "verification_type": kind,
+            "task_ids": ["cas-live", "cas-retired", "cas-held-a", "cas-held-b"], "staging_sha": target_tip,
+            "ledger_artifact_id": artifact, "ledger_path": ledger, "ledger_author": "external-qa",
+        })).unwrap();
+        let text = |response: rmcp::model::CallToolResult| response.content.iter()
+            .filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(t) => Some(t.text.as_str()), _ => None })
+            .collect::<Vec<_>>().join("\n");
+        let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
+        let pending_holds = || crate::store::open_supervisor_queue_store(&cas).unwrap()
+            .list_pending(&unrelated.id).unwrap().into_iter().filter(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.payload).unwrap()["kind"] == "batch_close_hold"
+            }).collect::<Vec<_>>();
+        assert_eq!(pending_holds().len(), 1, "{qa}");
+        let prompts = crate::store::open_prompt_queue_store(&cas).unwrap().peek_all(100).unwrap();
+        let holds: Vec<_> = prompts.iter().filter(|row| row.summary.as_deref() == Some("batch_close_hold")).collect();
+        assert_eq!(holds.len(), 1);
+        assert!(holds.iter().all(|row| crate::supervisor_notices::is_action_envelope(&row.prompt)));
+        let receipt = cas_store::list_qa_batch_receipts(&cas, "batch-offer-fixture").unwrap().remove(0);
+        let payload: serde_json::Value = serde_json::from_str(&pending_holds()[0].payload).unwrap();
+        let context = &payload["context"];
+        assert_eq!(context["receipt_id"], receipt.id);
+        assert_eq!(context["closed_count"], 0);
+        let groups = context["held_by_kind"].as_object().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups["RELEASE_MEMBER_HELD"].as_array().unwrap().len(), 2);
+        let mut member_ids = std::collections::BTreeSet::new();
+        for member in groups.values().flat_map(|group| group.as_array().unwrap()) {
+            let id = member["task_id"].as_str().unwrap();
+            member_ids.insert(id.to_string());
+            // Complete caller payloads are data, independent of notice prose.
+            assert_eq!(member["next_action"], format!(
+                "task action=close id={id} commit_receipt={} reason=\"<gate proof>\"", receipt.task_heads[id]));
+            assert!(!member["reason"].as_str().unwrap().is_empty());
+        }
+        assert_eq!(member_ids, ["cas-live", "cas-retired", "cas-held-a", "cas-held-b"].map(String::from).into());
+        for id in ["cas-live", "cas-retired", "cas-held-a", "cas-held-b"] {
+            let task = tasks.get(id).unwrap();
+            assert_eq!(task.status, if id.starts_with("cas-held-") { cas_types::TaskStatus::Blocked } else { cas_types::TaskStatus::AwaitingMerge });
+            assert_eq!(task.notes.matches(&format!("BATCH_CLOSE_OUTCOME {}:", receipt.id)).count(), 1);
+            assert!(pending_holds().iter().any(|row| row.payload.contains(id)));
+        }
+        // A continuation replay retries ordinary gates without duplicating its notice or outcome.
+        service.inner.close_release_covered_deliveries(&receipt).await;
+        assert_eq!(pending_holds().len(), 1);
+        for id in ["cas-live", "cas-retired"] {
+            assert_eq!(tasks.get(id).unwrap().notes.matches(&format!("BATCH_CLOSE_OUTCOME {}:", receipt.id)).count(), 1);
+        }
+        // A new receipt gets one grouped notice; replay of that receipt stays quiet.
+        let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
+        assert_eq!(pending_holds().len(), 2);
+        // cas-809a: an epic takes no receipt of its own, so its status names the child receipts covering it.
+        let mut train = Task::new("cas-train".into(), "train".into());
+        train.task_type = cas_types::TaskType::Epic;
+        tasks.add(&train).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new("cas-live".into(), "cas-train".into(), cas_types::DependencyType::ParentChild)).unwrap();
+        // cas-c041: once a post-merge reopen retires the active anchor, close reads the same receipt qa_status does.
+        let mut reopened = tasks.get("cas-live").unwrap();
+        let retired = reopened.deliverables.factory_branch_anchor.take().unwrap();
+        reopened.deliverables.historical_factory_branch_anchors.push(retired);
+        crate::qa_batch::ensure_deferred_close(&cas, &reopened, None, None).unwrap();
+        let receipt_id = qa.split("qab-").nth(1).map(|rest| format!("qab-{}", rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>())).unwrap();
+        let status = text(service.verification(rmcp::handler::server::wrapper::Parameters(serde_json::from_value(serde_json::json!({
+            "action": "qa_status", "task_id": "cas-train",
+        })).unwrap())).await.unwrap());
+        assert!(status.contains("cas-live") && status.contains(&receipt_id), "{status}");
+        // pin: a QA walk must name the remaining delivery-approval gate.
+
+        assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        // The notice is obsolete once QA is covered, even though a different
+        // close gate still holds this shipped task open.
+        assert!(!batch_notice_deliverable(&cas, queue.as_ref(), &transferred[0]).unwrap());
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 1, "only the uncovered late delivery needs a receipt");
+        let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&unrelated.id).unwrap();
+        let latest = rows.iter().filter(|row| row.payload.contains("batch_receipt_offer"))
+            .max_by_key(|row| row.id).unwrap();
+        assert!(!latest.payload.contains("cas-live"), "covered anchor cannot be re-offered: {latest:?}");
+        let refused = service.verification(rmcp::handler::server::wrapper::Parameters(request("release"))).await.unwrap_err();
+        assert!(refused.message.contains("RELEASE_REVIEW_COMPUTED"));
+        assert!(cas_store::release_verdicts_for_task(&cas, "batch-offer-fixture", "cas-live").unwrap().is_empty());
+        for id in ["cas-live", "cas-retired"] {
+            assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        }
+
+    }
+
+    #[tokio::test]
+    async fn legacy_batch_overdue_is_withheld_at_inbox_boundaries_cas_0f7b() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "batch-owner");
+        env.set("CAS_FACTORY_SESSION", "batch-session");
+        for hook in [false, true] {
+            for delivered in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let root = crate::store::init_cas_dir(dir.path()).unwrap();
+                env.set("CAS_ROOT", root.to_str().unwrap());
+                let mut owner = cas_types::Agent::new_with_role("batch-owner-id".into(), "batch-owner".into(), cas_types::AgentRole::Supervisor);
+                owner.factory_session = Some("batch-session".into());
+                crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+                let body = format!("obsolete-batch-{}", uuid::Uuid::new_v4());
+                crate::supervisor_notices::enqueue(&root, &crate::supervisor_notices::Recipient::agent(&owner), "qa_batch_overdue", &body, "legacy").unwrap();
+                let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+                let row = queue.peek_all(10).unwrap().remove(0);
+                if delivered { queue.mark_transport_delivered(row.id).unwrap(); }
+                if hook {
+                    let input = cas_core::hooks::types::HookInput {
+                        agent_role: Some("supervisor".into()),
+                        hook_event_name: "UserPromptSubmit".into(),
+                        user_prompt: Some(format!("CAS wake: message {} from supervisor", row.id)),
+                        ..Default::default()
+                    };
+                    let output = crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(&root), &input);
+                    assert!(!output.is_some_and(|output| output.contains(&body)));
+                } else {
+                    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+                    core.set_agent_id_for_testing(owner.id.clone());
+                    let service = crate::mcp::CasService::new(core, None);
+                    let result = service.coordination(rmcp::handler::server::wrapper::Parameters(serde_json::from_value(json!({"action":"inbox_poll", "notification_id":row.id})).unwrap())).await.unwrap();
+                    assert!(result.content.iter().all(|content| match &content.raw {
+                        rmcp::model::RawContent::Text(text) => !text.text.contains(&body),
+                        _ => true,
+                    }));
+                }
+                assert!(queue.queued_prompt(row.id).unwrap().is_some());
+                let pending = crate::store::open_supervisor_queue_store(&root).unwrap().list_pending(&owner.id).unwrap();
+                assert!(pending.is_empty(), "hook={hook} delivered={delivered}: {pending:?}");
+            }
+        }
     }
 
     #[test]
@@ -581,7 +814,15 @@ fn recent_override(notes: &str, now: DateTime<Utc>) -> Option<&str> {
     })
 }
 /// Shared by Violet hook/CLI and epic close. Publish/deploy/merge never call it.
-pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
+// gate[G-120 epic-close as-of]: Post-release watch before epic close or release notes
+#[cfg(test)]
+pub(crate) fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
+    gate_with_overrides(cas_root, epic, release_notes, &mut Vec::new())
+}
+
+// gate-audit[recent_override]: bypass G-120 A recent operator note authorizes release publication/close despite an incomplete watch.
+// gate-audit[release_notes]: selector Selects publication vs epic-close diagnostic; both evaluate the same watch.
+pub fn gate_with_overrides(cas_root: &Path, epic: &Task, release_notes: bool, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
     configured(cas_root)?;
     let now = Utc::now();
     let waiting = fs::read(
@@ -619,7 +860,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
     }
     if let Some(reason) = recent_override(&epic.notes, now) {
         if let Ok(store) = crate::store::open_task_store(cas_root) {
-            if store.append_note(&epic.id,&format!("[{}] DECISION: post-release gate overridden for {} by recorded operator reason: {reason}",now.format("%Y-%m-%d %H:%M"),if release_notes {"release notes"} else {"epic close"})).is_ok() { return None; }
+            if store.append_note(&epic.id,&format!("[{}] DECISION: post-release gate overridden for {} by recorded operator reason: {reason}",now.format("%Y-%m-%d %H:%M"),if release_notes {"release notes"} else {"epic close"})).is_ok() { accepted_override_codes.push("G-120"); return None; }
         }
     }
     let state = if verdict == Verdict::Pending {
@@ -633,7 +874,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
         .and_then(|receipt| watch_first_line(&receipt.watch_first))
         .map(|line| format!(" {line}."))
         .unwrap_or_default();
-    Some(format!(
+    Some(crate::gates::tag("G-120", format!(
         "{}: epic {} check {progress}. Run `cas qa post-release start --epic {} --sha <release-sha>` and wait for clean, or record an operator decision note `{OVERRIDE_MARKER} <operator's words>` (valid 6 hours).{watch}",
         if release_notes {
             format!("RELEASE NOTES BLOCKED (post_release_{state})")
@@ -642,7 +883,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
         },
         epic.id,
         epic.id
-    ))
+    )))
 }
 fn run_summary(run: &Run) -> String {
     if let Some(error) = &run.error {
@@ -870,58 +1111,172 @@ fn batch_offers_pending(cas_root: &Path) -> bool {
         && cas_store::pending_qa_batch_deferrals(cas_root).is_ok_and(|ids| !ids.is_empty())
 }
 
+/// Explicit verification ownership never falls back to an unrelated local
+/// supervisor when that owner is on another machine or no longer live.
+fn batch_owner(root: &Path, task: &Task, agents: &[cas_types::Agent]) -> Result<Option<crate::supervisor_notices::Recipient>> {
+    let tasks = crate::store::open_task_store_local(root)?;
+    let epic = tasks.get_parent_epic(&task.id)?;
+    let live = || agents.iter().filter(|agent| crate::supervisor_notices::is_live(agent));
+    let candidates: Vec<_> = if let Some(owner) = epic.as_ref().and_then(|epic| epic.epic_verification_owner.as_deref()) {
+        live().filter(|agent| agent.id == owner || agent.name == owner || agent.factory_session.as_deref() == Some(owner)).collect()
+    } else {
+        // Legacy ownerless deliveries may use their lane's supervisor. With
+        // no lane association, only a sole local supervisor is unambiguous.
+        let worker = task.assignee.as_deref().or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.assignee.as_str()));
+        let session = agents.iter().find(|agent| worker.is_some_and(|worker| agent.id == worker || agent.name == worker))
+            .and_then(|agent| agent.factory_session.as_deref());
+        live().filter(|agent| session.is_none() || agent.factory_session.as_deref() == session).collect()
+    };
+    Ok((candidates.len() == 1).then(|| crate::supervisor_notices::Recipient::agent(candidates[0])))
+}
+
+/// A shipped anchor alone is not missing QA. A valid QA receipt suppresses
+/// the offer even while a release-verdict or another close gate holds the task.
+fn batch_offer_evidence(root: &Path, task: &Task) -> Result<Option<(String, String)>> {
+    use crate::qa_batch::{ancestor, commit, resolved_delivery_anchor, task_context};
+    if task.status != cas_types::TaskStatus::AwaitingMerge { return Ok(None); }
+    let (repo, target) = task_context(root, task).map_err(anyhow::Error::msg)?;
+    let anchor = resolved_delivery_anchor(&repo, task, &target).context("batch delivery anchor unavailable")?;
+    let tip = commit(&repo, &format!("origin/{target}")).context("batch target unavailable")?;
+    if crate::qa_batch::satisfying_receipt(root, task, &repo, &target, &anchor)
+        .map_err(anyhow::Error::msg)?.is_some() { return Ok(None); }
+    match ancestor(&repo, &anchor, &tip) {
+        Some(true) => Ok(Some((target, tip))),
+        Some(false) => Ok(None),
+        None => anyhow::bail!("batch delivery integration unreadable"),
+    }
+}
+
+/// Recheck CAS-authored batch notices at each read/transport boundary. Old
+/// hourly overdue notices are obsolete; current offers need both current
+/// ownership and outstanding evidence. Unknown state holds rather than routes.
+pub(crate) fn batch_notice_deliverable(root: &Path, queue: &dyn cas_store::PromptQueueStore, row: &cas_store::QueuedPrompt) -> Result<bool> {
+    if row.origin != Some(cas_store::QueueOrigin::Daemon)
+        || !row.source.starts_with("supervisor-notice:")
+    { return Ok(true); }
+    let id = row.source.strip_prefix("supervisor-notice:").and_then(|id| id.parse::<i64>().ok())
+        .context("batch notice identity unavailable")?;
+    let notices = crate::store::open_supervisor_queue_store(root)?;
+    let notice = notices.get(id)?.context("batch notice unavailable")?;
+    let payload: serde_json::Value = serde_json::from_str(&notice.payload)?;
+    let current = if payload["kind"] == "qa_batch_overdue" {
+        false
+    } else if payload["kind"] == "batch_receipt_offer" {
+        if let Some(ids) = payload.get("context").and_then(|context| context.get("task_ids")).and_then(|ids| ids.as_array()) {
+            let pending = cas_store::pending_qa_batch_deferrals(root)?;
+            let tasks = crate::store::open_task_store_local(root)?;
+            let agents = crate::store::open_agent_store(root)?.list(None)?;
+            let mut current = !ids.is_empty();
+            for id in ids {
+                let id = id.as_str().context("invalid batch task identity")?;
+                if !pending.iter().any(|pending| pending == id) { current = false; break; }
+                let task = tasks.get(id)?;
+                let owner = batch_owner(root, &task, &agents)?;
+                if !owner.is_some_and(|owner| owner.id == notice.supervisor_id && owner.name == row.target && owner.session == row.factory_session)
+                    || batch_offer_evidence(root, &task)?.is_none()
+                { current = false; break; }
+            }
+            current
+        } else {
+            false // Pre-upgrade offers have no verifiable task scope.
+        }
+    } else { return Ok(true); };
+    if !current {
+        // A transported row retains its transport history; skipping its body
+        // must not manufacture acknowledgement or rewrite delivered evidence.
+        if queue.queued_prompt(row.id)?.is_some_and(|fresh| fresh.processed_at.is_none()) {
+            queue.mark_superseded(row.id, "Batch notice superseded by current ownership or evidence")?;
+        }
+        notices.ack(id)?;
+    }
+    Ok(current)
+}
+
+/// Inbox drains stamp receipt/transport evidence before returning rows. Retire
+/// obsolete notices before that transaction, not only before rendering bodies.
+/// The supervisor outbox scopes this scan to this recipient's own notices.
+pub(crate) fn refresh_batch_notices(root: &Path, queue: &dyn cas_store::PromptQueueStore, recipient: &str, session: Option<&str>) -> Result<()> {
+    let agents = crate::store::open_agent_store(root)?.list(None)?;
+    let notices = crate::store::open_supervisor_queue_store(root)?;
+    for agent in agents.iter().filter(|agent| agent.role == cas_types::AgentRole::Supervisor && (agent.name == recipient || agent.id == recipient)) {
+        for notice in notices.list_pending(&agent.id)? {
+            if notice.event_type != "supervisor_notice" { continue; }
+            let payload: serde_json::Value = serde_json::from_str(&notice.payload)?;
+            if payload["kind"] != "qa_batch_overdue" && payload["kind"] != "batch_receipt_offer" { continue; }
+            if let Some(row) = queue.latest_from_source_to_targets(&format!("supervisor-notice:{}", notice.id), &[&agent.name], session)? {
+                batch_notice_deliverable(root, queue, &row)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// cas-4b22: offer, never record, the batch QA receipt for parked deliveries
 /// whose anchor is already on origin/<target>. A receipt needs a supervisor
 /// recorder and an independent ledger author, so Cassy sends the supervisor
-/// one notice per release SHA naming the exact call, plus one more for tasks
-/// that later go live at that SHA. Returns notices sent.
+/// one notice per distinct uncovered delivery set naming the exact call with
+/// the current target tip. Advancing the tip alone stays quiet. Returns notices sent.
 pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
-    use crate::qa_batch::{ancestor, commit, delivery_anchor, task_context};
+    use sha2::{Digest, Sha256};
     let pending = cas_store::pending_qa_batch_deferrals(cas_root)?;
     if pending.is_empty() {
         return Ok(0);
     }
     let tasks = crate::store::open_task_store(cas_root)?;
-    let mut live: std::collections::BTreeMap<(String, String), Vec<String>> = Default::default();
+    let agents = crate::store::open_agent_store(cas_root)?.list(None)?;
+    let mut live: std::collections::BTreeMap<(String, String, String, String, Option<String>), Vec<String>> = Default::default();
     for id in pending {
         let Ok(task) = tasks.get(&id) else { continue };
-        if task.status != cas_types::TaskStatus::AwaitingMerge {
-            continue;
-        }
-        let Ok((repo, target)) = task_context(cas_root, &task) else { continue };
-        let (Some(anchor), Some(tip)) = (delivery_anchor(&repo, &task), commit(&repo, &format!("origin/{target}"))) else {
-            continue;
+        let Some(recipient) = batch_owner(cas_root, &task, &agents)? else { continue };
+        let (target, tip) = match batch_offer_evidence(cas_root, &task) {
+            Ok(Some(evidence)) => evidence,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(task_id = id, %error, "batch offer evidence unavailable");
+                continue;
+            }
         };
-        if ancestor(&repo, &anchor, &tip) == Some(true) {
-            live.entry((target, tip)).or_default().push(id);
-        }
+        live.entry((target, tip, recipient.id, recipient.name, recipient.session)).or_default().push(id);
     }
-    let offered = cas_root.join("post-release").join("batch-offers");
+    let notices = crate::store::open_supervisor_queue_store(cas_root)?;
+    let queue = crate::store::open_prompt_queue_store(cas_root)?;
     let mut sent = 0;
-    for ((target, tip), ids) in live {
-        // A task that goes live at an already-noticed tip still gets its offer.
-        let marker = offered.join(&tip);
-        let noticed = fs::read_to_string(&marker).unwrap_or_default();
-        let ids: Vec<_> = ids.into_iter().filter(|id| !noticed.lines().any(|seen| seen == id)).collect();
-        if ids.is_empty() {
-            continue;
+    'offers: for ((target, tip, id, name, session), mut ids) in live {
+        ids.sort_unstable();
+        ids.dedup();
+        // cas-8863: the target tip is payload evidence, not offer identity.
+        let identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&("owner-v1", &target, &id, &name, &session, &ids))?));
+        let mut occurrence = identity.clone();
+        loop {
+            let key = format!("supervisor-notice:batch_receipt_offer:{occurrence}:{id}");
+            let Some(notice) = notices.get_by_transition_key(&key)? else { break; };
+            let source = format!("supervisor-notice:{}", notice.id);
+            let Some(row) = queue.latest_from_source_to_targets(&source, &[&name], session.as_deref())? else {
+                if notice.prompt_delivered_at.is_some() { continue 'offers; }
+                break; // Repair a committed outbox row's missing prompt with the same key.
+            };
+            if !queue.message_delivery_report(row.id)?.is_some_and(|status| {
+                status.pending_reason == Some(cas_store::PendingReason::SupersededStale)
+            }) {
+                continue 'offers;
+            }
+            // cas-b26e: a retired notice starts a new ownership episode. Its
+            // durable ID keeps concurrent producers and crash retries idempotent.
+            occurrence = format!("{identity}:after:{}", notice.id);
         }
         let detail = format!(
-            "{} parked deliver{} already live on origin/{target} at {tip}: {}. They stay AwaitingMerge until their batch QA receipt is recorded. \
-             Walk and publish the ledger, then record: verification action=batch_receipt task_ids=[{}] staging_sha={tip} ledger_artifact_id=<id> ledger_path=<path> ledger_author=<walker>. \
+            "{} parked deliver{} already live on origin/{target} at {tip}: {}. {batch_close} \
+             Initialize with cas qa ledger init --task <qa-task> --covers {covered}; keep every delivery ID in its covers: header. Before publishing, run cas qa ledger check <path> --task <qa-task> --covers {covered}. Walk and publish the ledger, then record: verification action=batch_receipt task_ids=[{}] staging_sha={tip} ledger_artifact_id=<id> ledger_path=<path> ledger_author=<walker>. \
              Cassy did not record it: a receipt needs a supervisor recorder and an independent ledger author.",
             ids.len(),
             if ids.len() == 1 { "y is" } else { "ies are" },
             ids.join(", "),
             ids.join(","),
+            covered = ids.join(","),
+            batch_close = crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::BATCH_CLOSE_RULE,
         );
-        let agents = crate::store::open_agent_store(cas_root)?.list(None)?;
-        let recipient = crate::supervisor_notices::resolve(&agents, None, None);
-        let occurrence = format!("{tip}:{}", ids.join(","));
-        crate::supervisor_notices::enqueue(cas_root, &recipient, "batch_receipt_offer", &detail, &occurrence)?;
-        fs::create_dir_all(&offered)?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&marker)?;
-        std::io::Write::write_all(&mut file, format!("{}\n", ids.join("\n")).as_bytes())?;
+        let recipient = crate::supervisor_notices::Recipient { id, name, session };
+        crate::supervisor_notices::enqueue_with_context(cas_root, &recipient, "batch_receipt_offer", &detail, &occurrence, Some(serde_json::json!({"task_ids": ids})))?;
         sent += 1;
     }
     Ok(sent)

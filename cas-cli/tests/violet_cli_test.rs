@@ -97,6 +97,18 @@ fn json_failure_is_one_error_document_and_a_non_zero_exit() {
     assert_eq!(report["ok"], false);
     assert_eq!(report["error"]["code"], "not_configured");
     assert_eq!(report["error"]["retryable"], false);
+
+    // GH #1779: exercise the real thread dispatch and outer binary error path.
+    let temp = TempDir::new().unwrap();
+    let output = violet(temp.path())
+        .args(["thread", "--channel", "fixture", "--text", "Release is live.",
+            "--reply", "At 14:42Z.", "--idempotency-key", "c962", "--json"])
+        .assert().failure().get_output().clone();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("thread stdout must be one complete JSON document");
+    assert_eq!(report["error"]["code"], "format_unreadable");
+    assert_eq!(report["failed_index"], 1);
+    assert_eq!(report["posted"], serde_json::json!([]));
 }
 
 #[test]

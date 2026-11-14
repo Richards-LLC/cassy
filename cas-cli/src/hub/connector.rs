@@ -253,6 +253,41 @@ impl DaemonConnector {
     }
 }
 
+type UpstreamSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect_upstream(session: &str, port: u16, hub_root: Option<&std::path::Path>) -> Result<UpstreamSocket> {
+    // cas-ca22: present the daemon's relay token, so this connection alone
+    // may carry the operator_verified attribution the hub sets.
+    let mut token = hub_root.and_then(|root| crate::ui::factory::relay_token::read(root, session));
+    if token.is_none() {
+        tracing::warn!(session, "cas-ca22: no relay token for this daemon; its Commander messages will be stored unverified");
+    }
+    for retry in [false, true] {
+        let request = crate::ui::factory::relay_token::upstream_request(port, token.as_deref())?;
+        let config = WebSocketConfig {
+            max_message_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
+            max_frame_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
+            ..WebSocketConfig::default()
+        };
+        match connect_async_with_config(request, Some(config), false).await {
+            Ok((socket, _)) => return Ok(socket),
+            Err(error) => {
+                if !retry && matches!(&error, tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 401) {
+                    let current = hub_root.and_then(|root| crate::ui::factory::relay_token::read(root, session));
+                    if current.is_some() && current != token {
+                        // Reexec can rotate between our read and its accept.
+                        // Keep this upstream's queued controls while retrying.
+                        token = current;
+                        continue;
+                    }
+                }
+                return Err(error).with_context(|| format!("connect to daemon for session '{session}'"));
+            }
+        }
+    }
+    unreachable!("a second handshake always returns its result")
+}
+
 async fn run_upstream(
     session: &str,
     port: u16,
@@ -260,26 +295,8 @@ async fn run_upstream(
     events: &MachineEventBus,
     mut controls: mpsc::Receiver<ClientMessage>,
 ) -> Result<()> {
-    // cas-ca22: present the daemon's relay token, so this connection alone
-    // may carry the operator_verified attribution the hub sets.
-    let token = crate::hub::HubRuntimePaths::default_for_user()
-        .ok()
-        .and_then(|paths| crate::ui::factory::relay_token::read(paths.root(), session));
-    if token.is_none() {
-        tracing::warn!(
-            session,
-            "cas-ca22: no relay token for this daemon; its Commander messages will be stored unverified"
-        );
-    }
-    let request = crate::ui::factory::relay_token::upstream_request(port, token.as_deref())?;
-    let config = WebSocketConfig {
-        max_message_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
-        max_frame_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
-        ..WebSocketConfig::default()
-    };
-    let (mut socket, _) = connect_async_with_config(request, Some(config), false)
-        .await
-        .with_context(|| format!("connect to daemon for session '{session}'"))?;
+    let paths = crate::hub::HubRuntimePaths::default_for_user().ok();
+    let mut socket = connect_upstream(session, port, paths.as_ref().map(|paths| paths.root())).await?;
     let mut supervisor_pane_id: Option<String> = None;
     let mut pre_supervisor_bytes = 0usize;
     let mut supervisor_ready = false;
@@ -451,6 +468,43 @@ mod tests {
     use super::*;
     use crate::ui::factory::{PaneInfo, PaneKind, SessionState};
 
+    /// Reexec can rotate the daemon token after the hub reads it but before
+    /// the inherited listener accepts the handshake (cas-ef33).
+    #[tokio::test]
+    async fn relay_rotation_during_connect_retries_without_losing_operator_trust_cas_ef33() {
+        use crate::ui::factory::relay_token;
+        use tokio_tungstenite::tungstenite::Error;
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("hub");
+        let old = relay_token::mint(&root, "rotation").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = async {
+            let (tcp, _) = listener.accept().await.unwrap();
+            // TCP acceptance proves the hub already read the previous token.
+            let current = relay_token::mint(&root, "rotation").unwrap();
+            assert_ne!(old, current);
+            let stale = relay_token::accept(tcp, Some(&current)).await;
+            assert!(matches!(stale, Err(Error::Http(ref response)) if response.status() == 401));
+            let (tcp, _) = listener.accept().await.unwrap();
+            let (mut socket, trusted) = relay_token::accept(tcp, Some(&current)).await.unwrap();
+            assert!(trusted);
+            let frame = socket.next().await.unwrap().unwrap();
+            assert!(matches!(serde_json::from_slice::<ClientMessage>(&frame.into_data()).unwrap(), ClientMessage::Ping));
+            // Tokenless local viewers still connect without gaining trust.
+            let (tcp, _) = listener.accept().await.unwrap();
+            let (_, trusted) = relay_token::accept(tcp, Some(&current)).await.unwrap();
+            assert!(!trusted);
+        };
+        let client = async {
+            let mut socket = connect_upstream("rotation", port, Some(&root)).await.unwrap();
+            socket.send(Message::Binary(serde_json::to_vec(&ClientMessage::Ping).unwrap())).await.unwrap();
+            let request = relay_token::upstream_request(port, None).unwrap();
+            tokio_tungstenite::connect_async(request).await.unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(server, client); }).await.unwrap();
+    }
+
     /// cas-a0e2: an upstream that ends drops its sender, and every send
     /// failure is the retryable [`UpstreamUnavailable`], never a refusal.
     #[tokio::test]
@@ -535,6 +589,8 @@ mod tests {
                             focused: true,
                             title: title.into(),
                             exited: false,
+                            input_bytes_received: 0,
+                            input_bytes_written: 0,
                         }],
                         epic_id: None,
                         epic_title: None,
@@ -642,6 +698,8 @@ mod tests {
                     focused: true,
                     title: "active".into(),
                     exited: false,
+                    input_bytes_received: 0,
+                    input_bytes_written: 0,
                 }],
                 epic_id: None,
                 epic_title: None,
@@ -699,6 +757,8 @@ mod tests {
                     focused: true,
                     title: "Supervisor".into(),
                     exited: false,
+                    input_bytes_received: 0,
+                    input_bytes_written: 0,
                 }],
                 epic_id: None,
                 epic_title: None,

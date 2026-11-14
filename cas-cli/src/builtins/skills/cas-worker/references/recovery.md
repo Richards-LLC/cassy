@@ -31,8 +31,13 @@ task or reopens it with findings. Every poll spends your context.
 
 Cassy may already have started a queued successor on its task branch; continue
 it. Checkpoint dirty work before changing history. Merge the target
-into a branch with a recorded parked delivery anchor; never rebase it. Elsewhere,
-checkpoint before an allowed `git rebase <target>`. A fresh task whose checkout
+into a parked delivery or a branch with an active completion receipt or review;
+never rebase those reviewed tips. A pushed checkpoint on an owned InProgress
+task is not a park, even when commit-time branch/anchor capture exists. After an
+explicit supervisor sync request, checkpoint first, rebase onto its named target,
+and push with `--force-with-lease=refs/heads/<branch>:<observed-checkpoint-sha>`.
+H-40 checks task ownership, recorded start ancestry and delivery/review state;
+unknown state refuses. A stale lease refuses rather than replacing a peer push. A fresh task whose checkout
 still holds an earlier PR starts on `factory/<name>-<task>` from the target and
 leaves the earlier branch alone.
 
@@ -62,8 +67,11 @@ When required supervisor review, approval or another decision blocks work:
 
 ## Verification-required close
 
-When close returns VERIFICATION REQUIRED naming a dispatch, that dispatch's
-verdict closes the task; never re-close. Send only the blocker the refusal
+When close returns VERIFICATION REQUIRED naming a dispatch:
+Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
+On older runtimes that queue a worker retry, the supervisor reads the exact
+dispatch and retries ordinary close through the existing gates.
+Send only the blocker the refusal
 names, if any, set `status=blocked` and record exactly this one-line blocker note:
 `Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
 Any other text wakes the supervisor as a real blocker. Start no other task
@@ -88,7 +96,7 @@ fails, report the error.
 
 - Reassignment or stand-down: checkpoint authorized work, push unless
   local_merge, note done and remaining work with the SHA, and stop editing.
-- Low context: At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `kind=status` with `need: respawn`.
+- Low context: At 80% or at the harness compaction warning: commit, push, write `HANDOFF.md` under the task artifacts directory printed in the assignment brief (never the repo root), send one `coordination action=message target=supervisor kind=respawn summary=Checkpoint message="<return contract>" task_id=<task>`. Cassy queues the existing recycle path with the same recipe and task bindings; the supervisor receives a quiet receipt. Repeated requests within ten minutes are held, including after replacement or daemon restart. A recycle safety refusal still requires a checkpoint; never force it.
   Read 80% from Cassy's `context used: N%` notice (`context used: unknown` is
   not exhaustion). `HANDOFF.md` goes in the task artifact directory (SHAs,
   remaining steps, next command, open questions); the respawned worker resumes from it.

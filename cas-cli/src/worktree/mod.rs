@@ -30,6 +30,7 @@ pub mod discovery;
 pub mod external_symlinks;
 pub mod git;
 mod manager;
+pub(crate) mod retained;
 pub mod salvage;
 pub mod sweep;
 pub mod target_lock;

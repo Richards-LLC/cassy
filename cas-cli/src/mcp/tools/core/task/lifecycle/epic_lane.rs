@@ -242,6 +242,7 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
 /// `branch` lacks, and whether merging it in is clean or would conflict.
 /// Read-only: nothing is merged here, and a conflict is refused with the
 /// files it would touch. Empty when the successor already has every commit.
+// gate-audit[input]: Renders an advisory freshness note for the assigned branch; does not admit or refuse a request.
 pub(crate) fn stale_base_note(
     repo: &Path,
     branch: &str,
@@ -329,9 +330,8 @@ pub(crate) fn stale_base_note(
     }
 }
 
-/// cas-1630: a follow-up created in `epic` that cites a commit its branch
-/// lacks cannot start until that code reaches the branch. Name each such
-/// commit, and the open epic that has it, so the base is fixed at create.
+/// cas-1630: warn about explicitly required code missing from this epic.
+/// Repro/evidence citations and dangling candidates do not declare a base.
 pub(crate) fn cited_commit_warning(
     repo: &Path,
     store: &dyn cas_store::TaskStore,
@@ -341,14 +341,21 @@ pub(crate) fn cited_commit_warning(
     let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) else {
         return String::new();
     };
-    let Ok(pattern) = regex::Regex::new(r"\b[0-9a-f]{7,40}\b") else {
+    let Ok(pattern) = regex::Regex::new(
+        r"(?i)(?:\b(?:depends?\s+on|requires?|needs?|based\s+on|builds?\s+on)\s+|\b(?:base(?:\s+commit)?|dependenc(?:y|ies))\s*[:=]\s*)(?:(?:the|code|fix|commit|in|from|at)\s+)*`?([0-9a-f]{7,40})\b",
+    ) else {
         return String::new();
     };
-    // Most tasks cite no commit; skip the task scan for them.
-    if !pattern
-        .find_iter(text)
-        .any(|m| m.as_str().bytes().any(|byte| byte.is_ascii_alphabetic()))
-    {
+    let Ok(negated) = regex::Regex::new(r"(?i)\b(?:not|never|without|no|doesn't|don't)\s*$") else {
+        return String::new();
+    };
+    let required: Vec<_> = pattern.captures_iter(text)
+        .filter(|capture| !negated.is_match(&text[..capture.get(0).unwrap().start()]))
+        .filter_map(|capture| capture.get(1).map(|sha| sha.as_str()))
+        .filter(|sha| sha.bytes().any(|byte| byte.is_ascii_alphabetic()))
+        .collect();
+    // Most tasks declare no code dependency; skip the task scan for them.
+    if required.is_empty() {
         return String::new();
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -362,12 +369,14 @@ pub(crate) fn cited_commit_warning(
         .filter_map(|task| task.branch.clone().map(|branch| (task.id, branch)))
         .collect();
     let mut lines = Vec::new();
-    for found in pattern.find_iter(text).map(|m| m.as_str()) {
-        if !found.bytes().any(|byte| byte.is_ascii_alphabetic()) || !seen.insert(found) || seen.len() > 10 {
+    for found in required {
+        if !seen.insert(found) || seen.len() > 10 {
             continue;
         }
         if !git_ok(repo, &["rev-parse", "--verify", "--quiet", &format!("{found}^{{commit}}")])
             || on_branch(repo, found, branch)
+            || git_stdout(repo, &["for-each-ref", "--count=1", "--format=%(refname)", "--contains", found])
+                .is_none_or(|refs| refs.is_empty())
         {
             continue;
         }
@@ -382,7 +391,82 @@ pub(crate) fn cited_commit_warning(
         return String::new();
     }
     format!(
-        "\n\n⚠️ CITED CODE NOT ON THIS EPIC (cas-1630): {}. The task cannot start until that code reaches {branch}: merge the epic that has it into {branch}, or file the task under that epic.",
+        "\n\n⚠️ CITED CODE NOT ON THIS EPIC [CITED_CODE_NOT_ON_EPIC] (cas-1630): {}. The task cannot start until that code reaches {branch}: merge the epic that has it into {branch}, or file the task under that epic.",
         lines.join("; ")
     )
+}
+
+/// First assignment/start must publish the parent's lane even when workers
+/// were spawned without a task. Explicit child targets remain authoritative.
+pub(crate) fn assignment_branch_note(
+    root: &Path,
+    store: &dyn cas_store::TaskStore,
+    subject: &cas_types::Task,
+) -> String {
+    let Some(epic) = store.get_parent_epic(&subject.id).ok().flatten() else {
+        return String::new();
+    };
+    if let Some(target) = super::super::repo_context::effective_task_work_target(subject, Some(&epic))
+        && (Some(target.target_branch.strip_prefix("origin/").unwrap_or(&target.target_branch))
+            != super::super::repo_context::effective_epic_branch(&epic)
+            || epic.deliverables.work_target.as_ref()
+                .is_some_and(|parent| parent.repo_selector != target.repo_selector))
+    {
+        return String::new();
+    }
+    crate::ops::fleet::epic_branch_readiness(root, &epic).unwrap_or_default()
+}
+
+/// Staffing is still admitted when an epic lacks published release history.
+/// Use publication receipts, not arbitrary tags, and the subject's own repo.
+pub(crate) fn published_release_note(
+    root: &Path,
+    store: &dyn cas_store::TaskStore,
+    subject: &cas_types::Task,
+) -> String {
+    let inspect = || -> Option<String> {
+        let epic = if subject.task_type == cas_types::TaskType::Epic {
+            subject.clone()
+        } else {
+            store.get_parent_epic(&subject.id).ok()??
+        };
+        let branch = super::super::repo_context::effective_epic_branch(&epic)?;
+        let repo = crate::train_guardrails::train_repo_root(root, &epic).ok()?;
+        if subject.task_type != cas_types::TaskType::Epic
+            && let Some(target) = super::super::repo_context::effective_task_work_target(subject, Some(&epic))
+            && (target.target_branch.strip_prefix("origin/").unwrap_or(&target.target_branch) != branch
+                || !super::super::repo_context::repo_answers_to(&repo, &target.repo_selector))
+        {
+            return None;
+        }
+        let release_root = crate::store::find_cas_root_ignoring_env(&repo).ok()?;
+        let version = cas_store::quality_release_events(&release_root).ok()?
+            .into_iter().find_map(|event| event.release_version)?;
+        let mut tag = version.trim().to_string();
+        if !git_ok(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")]) {
+            tag = format!("v{}", tag.trim_start_matches('v'));
+        }
+        let release = git_stdout(&repo, &["rev-parse", "--verify", &format!("refs/tags/{tag}^{{commit}}")])?;
+        // Match spawning's fresher-origin choice without fetching or moving refs.
+        let resolve = |reference: &str| git_stdout(&repo, &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")]);
+        let tip = match (resolve(branch), resolve(&format!("origin/{branch}"))) {
+            (Some(local), Some(remote)) => {
+                if git_ok(&repo, &["merge-base", "--is-ancestor", &local, &remote]) { remote } else { local }
+            }
+            (Some(tip), None) | (None, Some(tip)) => tip,
+            (None, None) => return None,
+        };
+        let missing: usize = git_stdout(&repo, &["rev-list", "--count", &format!("{tip}..{release}"), "--"])?
+            .parse().ok()?;
+        if missing == 0 { return None; }
+        let target = epic.deliverables.work_target.as_ref()
+            .map(|target| target.target_branch.clone())
+            .filter(|target| target != branch)
+            .unwrap_or_else(|| GitOperations::new(repo).detect_default_branch());
+        Some(format!(
+            "\n⚠️ [EPIC_BEHIND_RELEASE] epic={} branch={branch} tag={tag} missing_commits={missing}. Sync {target} into {branch} before staffing more workers.",
+            epic.id,
+        ))
+    };
+    inspect().unwrap_or_default()
 }

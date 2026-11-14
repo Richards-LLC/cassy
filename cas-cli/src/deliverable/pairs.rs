@@ -221,7 +221,7 @@ pub fn pairs(request: &PairsRequest) -> anyhow::Result<PairsReceipt> {
         };
         let path = dir.join("pairs.json");
         let manifest = match read_manifest(&path) {
-            Ok(manifest) if manifest.schema == 1 && manifest.task_id == task => manifest,
+            Ok(manifest) if matches!(manifest.schema, 1 | 2) && manifest.task_id == task => manifest,
             Ok(_) => {
                 receipt.findings.push(finding(
                     "pairs-identity",

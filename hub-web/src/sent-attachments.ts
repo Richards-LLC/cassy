@@ -46,6 +46,26 @@ export function sentAttachmentFiles(message: string): { text: string; files: { r
 
 /** Compact copy for previews and quotes; transport text stays untouched. */
 export function sentMessageLabel(message: string): string {
+  const command = nativeCommandReceipt(message);
+  if (command) return command.text;
   const { text, attachments } = sentAttachments(message);
   return [text, ...attachments.map(file => file.name)].filter(Boolean).join(" · ");
+}
+
+/** Claude's local command transcript is a receipt, not an operator message. */
+export function nativeCommandReceipt(message: string): { label: string; text: string } | undefined {
+  const text = message.trim();
+  const local = /^<(local-command-stdout|local-command-caveat)>([\s\S]*)<\/\1>$/.exec(text);
+  if (local) return local[1] === "local-command-caveat"
+    ? { label: "Terminal command", text: "Run directly in Claude Code" }
+    : { label: "Terminal result", text: local[2]!.trim() };
+  const fields = new Map<string, string>();
+  let end = 0;
+  for (const part of text.matchAll(/<(command-name|command-message|command-args)>([^<>]*)<\/\1>/g)) {
+    if (text.slice(end, part.index).trim() || fields.has(part[1]!)) return undefined;
+    fields.set(part[1]!, part[2]!.trim()); end = part.index + part[0].length;
+  }
+  const name = fields.get("command-name");
+  if (!name || !/^\/[a-z][\w:-]*$/i.test(name) || text.slice(end).trim()) return undefined;
+  return { label: "Terminal command", text: [name, fields.get("command-args")].filter(Boolean).join(" ") };
 }

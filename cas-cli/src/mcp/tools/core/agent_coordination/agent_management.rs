@@ -28,6 +28,7 @@ impl CasCore {
             "Agent: {}\n\
              Name: {}\n\
              Type: {}\n\
+             Role: {}\n\
              Status: {}\n\
              Active Tasks: {}\n\
              Registered: {}\n\
@@ -35,11 +36,19 @@ impl CasCore {
             agent.id,
             agent.name,
             agent.agent_type,
+            agent.role,
             agent.status,
             agent.active_tasks,
             agent.registered_at.format("%Y-%m-%d %H:%M:%S"),
             agent.last_heartbeat.format("%Y-%m-%d %H:%M:%S"),
         );
+
+        if let Some(parent) = &agent.parent_id {
+            output.push_str(&format!("\nParent: {parent}"));
+        }
+        if self.agent_id.get().and_then(Option::as_deref) == Some(req.id.as_str()) {
+            output.push_str("\n\nCaller scope: this MCP connection. Native Codex children share its caller; a native role does not grant independent verifier authority. A verifier must have its own registered sub_agent identity and exact dispatch handoff. Otherwise return review evidence to the supervisor without submitting a verdict, including status=error.");
+        }
 
         if !leases.is_empty() {
             output.push_str("\n\nClaimed Tasks:\n");

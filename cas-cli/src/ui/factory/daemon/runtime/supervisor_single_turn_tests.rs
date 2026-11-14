@@ -3,6 +3,155 @@ use crate::ui::factory::daemon::FactoryDaemon;
 use cas_store::SurfacingSource;
 use std::time::{Duration, Instant};
 
+/// The real hub must reach the live composer while its local viewer reads history.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_reply() {
+    use crate::hub::*;
+    use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution};
+    use crate::ui::factory::supervisor_commands::{SupervisorCommand, SupervisorCommandPhase};
+    use cas_store::HistoryStore;
+    use chrono::Utc;
+    use futures_util::{SinkExt, StreamExt};
+    use std::io::Write;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    if !fixture_child("cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_reply") { return; }
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    daemon.teams = None;
+    let name = daemon.app.supervisor_name().to_owned();
+    let session = daemon.session_name.clone();
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let agents = crate::store::open_agent_store(&cas).unwrap();
+    let mut agent = agents.get("single-sup").unwrap();
+    agent.cc_session_id = Some("idle-hub".into());
+    agent.pid = Some(std::process::id());
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
+    agents.update(&agent).unwrap();
+    let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
+    epoch.pid = Some(std::process::id().into());
+    cas_store::SqliteHistoryStore::open(&cas).unwrap().record_epoch(&epoch).unwrap();
+    let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+    std::fs::create_dir_all(&projects).unwrap();
+    let transcript = projects.join("idle-hub.jsonl");
+    let now = Utc::now();
+    std::fs::write(&transcript, format!("{}\n{}\n",
+        serde_json::json!({"type":"user","version":"2.1.318","timestamp":now-chrono::Duration::seconds(2),"message":{"role":"user","content":"Prior turn"}}),
+        serde_json::json!({"type":"system","subtype":"turn_duration","timestamp":now-chrono::Duration::seconds(1)}),
+    )).unwrap();
+    let pane = daemon.app.mux.get_mut(&name).unwrap();
+    pane.feed(format!("{}\x1b[2J\x1b[19;1H────────────────────\r\n❯\r\n────────────────────", "historical output\r\n".repeat(60)).as_bytes()).unwrap();
+    pane.scroll(-40).unwrap();
+    let offset = pane.scroll_offset();
+    assert!(offset > 0);
+
+    let daemon_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let daemon_port = daemon_listener.local_addr().unwrap().port();
+    daemon.ws_listener = Some(daemon_listener);
+    let hub_root = HubRuntimePaths::default_for_user().unwrap();
+    daemon.relay_token = Some(crate::ui::factory::relay_token::mint(hub_root.root(), &session).unwrap());
+    let auth = AuthStore::open(hub_root.root(), "idle-hub").unwrap();
+    let origin = "https://controller.example";
+    let scopes = [Scope::PaneRead, Scope::PaneInput, Scope::MessageSend].into_iter().collect();
+    let invite = auth.mint_pairing(origin, scopes, now).unwrap();
+    let credential = auth.exchange_pairing(PairingExchange::test_fixture(invite.token, "idle-hub", origin,
+        [Scope::PaneRead, Scope::PaneInput, Scope::MessageSend].into_iter().collect()), now).unwrap();
+    let mut context = AuthContext::test_fixture(&credential.device_id, origin, credential.scopes.clone());
+    context.credential_id = credential.credential_id.clone();
+    auth.acquire_lease(&context, &session, now).unwrap();
+    let endpoint = format!("/v1/sessions/{session}/attach");
+    let ticket = auth.issue_ws_ticket(&context, &session, &endpoint, now).unwrap();
+    let mut projected = fixture_session(&session);
+    projected.supervisor = name.clone();
+    projected.project_dir = Some(root.path().to_string_lossy().into_owned());
+    projected.ws_port = Some(daemon_port);
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(SessionCatalog::new(RecordingReadModel::with_sessions(vec![projected])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "idle-hub".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events)
+        .with_auth(auth).with_effective_origin(origin));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub_address = listener.local_addr().unwrap();
+    let hub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let stopped = Arc::new(AtomicBool::new(false));
+    let driver_stop = Arc::clone(&stopped);
+    let driver = async {
+        while !driver_stop.load(Ordering::Acquire) {
+            daemon.accept_ws_clients().await;
+            daemon.process_ws_client_input().await;
+            daemon.last_commander_mirror_scan = None;
+            daemon.process_prompt_queue().await.unwrap();
+            daemon.serve_ws_clients().await;
+            tokio::task::yield_now().await;
+        }
+    };
+    let client = async {
+        async fn next(socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> DaemonMessage {
+            loop {
+                let frame = tokio::time::timeout(Duration::from_secs(10), socket.next()).await.unwrap().unwrap().unwrap();
+                if frame.is_text() || frame.is_binary() {
+                    return serde_json::from_slice(&frame.into_data()).unwrap();
+                }
+            }
+        }
+        let mut request = format!("ws://{hub_address}{endpoint}?ticket={}", ticket.ticket).into_client_request().unwrap();
+        request.headers_mut().insert("origin", origin.parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        while !matches!(next(&mut socket).await, DaemonMessage::Welcome { .. }) {}
+        socket.send(Message::Text(serde_json::to_string(&ClientMessage::SupervisorCommand {
+            command: SupervisorCommand::ReloadCassy, client_ref: "idle-command".into(), confirmed: false,
+            attribution: MessageAttribution::default(),
+        }).unwrap().into())).await.unwrap();
+        let command_accepted = loop {
+            match next(&mut socket).await {
+                DaemonMessage::SupervisorCommandReceipt { receipt } => break receipt.phase == SupervisorCommandPhase::Submitted,
+                DaemonMessage::Error { message, .. } => { eprintln!("command_refusal={message}"); break false; }
+                _ => {}
+            }
+        };
+        let sent = Instant::now();
+        socket.send(Message::Text(serde_json::to_string(&ClientMessage::SendMessage {
+            target: name.clone(), text: "idle-hub-probe".into(), summary: None, urgent: false,
+            client_ref: Some("idle-message".into()), in_reply_to: None, attribution: MessageAttribution::default(),
+        }).unwrap().into())).await.unwrap();
+        while !matches!(next(&mut socket).await, DaemonMessage::MessageQueued { .. }) {}
+        let reached_pane = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if std::fs::read(root.path().join("input")).unwrap().windows(b"idle-hub-probe".len()).any(|part| part == b"idle-hub-probe") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.is_ok();
+        let elapsed = sent.elapsed();
+        let at = Utc::now();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+        // Real Claude settles every answer with Stop-hook verdict records.
+        writeln!(file, "{}\n{}\n{}", serde_json::json!({"type":"user","uuid":"terminal-checkpoint","timestamp":at,"message":{"role":"user","content":"Terminal checkpoint"}}),
+            serde_json::json!({"type":"assistant","timestamp":at+chrono::Duration::milliseconds(1),"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Fixture supervisor answer"}]}}),
+            serde_json::json!({"type":"system","subtype":"turn_duration","timestamp":at+chrono::Duration::milliseconds(2)})).unwrap();
+        let reply = loop {
+            if let DaemonMessage::OperatorReply { notification_id, device_id, message, .. } = next(&mut socket).await {
+                assert_eq!(device_id, "*");
+                assert_eq!(message, "Fixture supervisor answer");
+                break notification_id;
+            }
+        };
+        socket.send(Message::Text(serde_json::json!({"OperatorReplyPersisted":{"notification_id":reply,"device_id":""}}).to_string().into())).await.unwrap();
+        // Wildcard receipt settlement is owned by cas-c271 on the train.
+        stopped.store(true, Ordering::Release);
+        (command_accepted, reached_pane, elapsed)
+    };
+    let (_, (command_accepted, reached_pane, elapsed)) = tokio::join!(driver, client);
+    hub.abort();
+    assert_eq!(daemon.app.mux.get(&name).unwrap().scroll_offset(), offset);
+    eprintln!("command_accepted={command_accepted}; reached_pane={reached_pane}; message_elapsed={elapsed:?}");
+    assert!(command_accepted, "command admission must use the live input screen");
+    assert!(reached_pane && elapsed < Duration::from_secs(10), "operator message must reach the live composer within 10 seconds");
+    let input = std::fs::read_to_string(root.path().join("input")).unwrap();
+    assert_eq!(input.matches("/mcp reconnect cas").count(), 1);
+    assert_eq!(input.matches("idle-hub-probe").count(), 1);
+}
+
 // PTY preflight reads ambient PATH. Re-exec with a private harmless cas;
 // changing PATH globally would race other tests and depend on the host runtime.
 pub(super) fn fixture_child(test: &str) -> bool {
@@ -174,8 +323,18 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
         "UPDATE prompt_queue SET created_at=?1, first_attempt_at=?1, delivery_attempts=119 WHERE id=?2",
         rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(16)).to_rfc3339(), id],
     ).unwrap();
-    daemon.process_prompt_queue().await.unwrap();
-    settle_injected_writes(&mut daemon).await;
+    // Selection and its admission probe finish on different daemon turns.
+    // Wait for the durable safety hold, then inspect its outcome once.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            settle_injected_writes(&mut daemon).await;
+            if queue.message_delivery_report(id).unwrap().unwrap().stage == cas_store::DeliveryStage::Gated {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("the protected draft reaches its durable hold");
     let report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(report.stage, cas_store::DeliveryStage::Gated, "protected draft must not abandon a relay: {report:?}");
     assert!(report.delivered_at.is_none() && report.confirmed_at.is_none());
@@ -201,7 +360,7 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
         "protected composer holds must never spend the re-nudge budget");
     let held_report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(held_report.stage, cas_store::DeliveryStage::Gated, "{held_report:?}");
-    assert!(held_report.pending_detail.as_deref().unwrap().contains("operator draft"));
+    let _ = held_report.pending_detail.as_deref().unwrap();
     super::queue_and_events::escalate_undelivered_supervisor_relays(
         &cas, queue.as_ref(), &daemon.session_name, &name, "Codex", chrono::Utc::now(),
     );
@@ -213,7 +372,7 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     assert_eq!(held.operator_alert_id, Some(alerts[0].id));
     let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&alerts[0].prompt).unwrap();
     assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
-    assert!(payload.message.contains("operator draft"), "alert must name the blocker: {}", payload.message);
+
     assert!(super::queue_and_events::escalate_undelivered_supervisor_relays(
         &cas, queue.as_ref(), &daemon.session_name, &name, "Codex", chrono::Utc::now(),
     ).is_empty(), "escalation survives repeated sweeps without duplicates");
@@ -401,6 +560,8 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
         "startup-handoff".into(), cas_mux::claude_supervisor_contract("(none)"),
     );
     handoff.tags = vec!["handoff".into(), "role:supervisor".into()];
+    let author = cas_types::Agent::new_with_role(name.clone(), name.clone(), cas_types::AgentRole::Supervisor);
+    cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut handoff);
     crate::store::open_store(&cas).unwrap().add(&handoff).unwrap();
     crate::ui::factory::queue_supervisor_intro_prompt(
         &cas, &name, cas_mux::SupervisorCli::Claude, &[], None, None,
@@ -452,6 +613,126 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
     assert_eq!(typed.matches('\r').count(), 1, "exactly one submitted wake");
     assert!(typed.contains(&format!("inbox_poll notification_id={}", row.id)), "wake identifies its startup body: {typed:?}");
     assert!(teams_messages(&daemon).is_empty(), "retry must not append another Teams body after ingestion");
+}
+
+/// cas-aa10: replay first boot with a swallowed submit. The real queue and
+/// PTY capture run normally; native transcript records are supplied only after
+/// the fixture observes the recovery CR, never from PTY echo or dispatch.
+#[tokio::test(flavor = "current_thread")]
+async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10() {
+    if !fixture_child("claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10") {
+        return;
+    }
+    for native_after_retry in [true, false] {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let name = daemon.app.supervisor_name().to_string();
+        let agents = crate::store::open_agent_store(&cas).unwrap();
+        let mut supervisor = agents.get("single-sup").unwrap();
+        supervisor.status = cas_types::AgentStatus::Active;
+        // Production supervisor registration carries its own account and native
+        // session id. It has no worker account or worktree metadata.
+        supervisor.cc_session_id = Some("first-boot-native-session".into());
+        supervisor.metadata.insert("supervisor_cli".into(), "claude".into());
+        let account = root.path().join("claude-account");
+        supervisor.metadata.insert("supervisor_account_dir".into(), account.display().to_string());
+        supervisor.metadata.insert("supervisor_account_harness".into(), "claude".into());
+        assert!(!supervisor.metadata.contains_key("worker_account_dir"));
+        assert!(!supervisor.metadata.contains_key("clone_path"));
+        agents.register(&supervisor).unwrap();
+        daemon.app.refresh_data().unwrap();
+        crate::ui::factory::queue_supervisor_intro_prompt(
+            &cas, &name, cas_mux::SupervisorCli::Claude, &[], None, None,
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let row = queue.peek_for_targets(&[&name], None, 10).unwrap().remove(0);
+        let statuses = || crate::store::open_event_store(&cas).unwrap()
+            .list_by_type(cas_types::EventType::SupervisorInjected, 100).unwrap()
+            .into_iter().filter_map(|event| event.metadata)
+            .filter(|meta| meta["prompt_id"] == row.id)
+            .map(|meta| meta["status"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                daemon.app.mux.flush_deferred_injections().await;
+                daemon.process_prompt_queue().await.unwrap();
+                if std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r")
+                    && !statuses().is_empty() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("first-boot prompt must reach the real PTY");
+        assert!(!statuses().iter().any(|s| s == "ok"),
+            "a physical submit and echo are not an observed Claude turn: {:?}", statuses());
+        let original = std::fs::read_to_string(root.path().join("input")).unwrap();
+        assert_eq!(original.matches('\r').count(), 1);
+        // Replay the incident's native composer, with the startup frame still at
+        // the input marker. No transcript exists, so echo cannot count as a turn.
+        daemon.app.mux.get_mut(&name).unwrap().feed("startup history\r\n".repeat(40).as_bytes()).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed(
+            format!("\x1b[2J\x1b[H────────────────────\r\n❯ [cas #{} agent-authored 5s first] startup draft\r\n────────────────────", row.id).as_bytes(),
+        ).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().scroll(-10).unwrap();
+        let offset = daemon.app.mux.get(&name).unwrap().scroll_offset();
+        assert!(offset > 0);
+        daemon.normal_delivery_probes.get_mut(&row.id).expect("startup observation remains owned")
+            .next_check_at = Some(Instant::now());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r\r") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the unsent first-boot draft receives one bare submit retry");
+        assert_eq!(daemon.app.mux.get(&name).unwrap().scroll_offset(), offset);
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes(),
+            "retry never repeats the startup body or appends a nudge");
+        // No native evidence even after recovery: remain unconfirmed, never keep
+        // typing CRs. Advance the evidence clock explicitly.
+        daemon.normal_delivery_probes.get_mut(&row.id).unwrap().next_check_at = Some(Instant::now());
+        for _ in 0..20 { daemon.process_prompt_queue().await.unwrap(); tokio::task::yield_now().await; }
+        assert!(!statuses().iter().any(|s| s == "ok"));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes());
+        if !native_after_retry {
+            let probe = daemon.normal_delivery_probes.get_mut(&row.id).unwrap();
+            probe.delivered_at = Instant::now() - super::queue_and_events::CLAUDE_STARTUP_TURN_TIMEOUT - Duration::from_secs(1);
+            probe.next_check_at = Some(Instant::now());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    daemon.process_prompt_queue().await.unwrap();
+                    if !daemon.normal_delivery_probes.contains_key(&row.id)
+                        && statuses().iter().any(|s| s == "unconfirmed") { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("final unconfirmed startup releases observation ownership");
+            for _ in 0..20 { daemon.process_prompt_queue().await.unwrap(); tokio::task::yield_now().await; }
+            assert!(!daemon.normal_delivery_probes.contains_key(&row.id), "final results never restart the probe");
+            assert!(!statuses().iter().any(|s| s == "ok"));
+            assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes());
+            continue;
+        }
+        // The authoritative native user record is the turn start. Its appearance,
+        // rather than the submitted CR, releases the success receipt.
+        let slug: String = root.path().to_str().unwrap().chars()
+            .map(|c| if matches!(c, '/' | '.') { '-' } else { c }).collect();
+        let path = account.join("projects").join(slug).join("first-boot-native-session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{}\n", serde_json::json!({
+            "type":"user", "timestamp":chrono::Utc::now().to_rfc3339(),
+            "message":{"role":"user", "content":row.prompt}
+        }))).unwrap();
+        assert_eq!(super::supervisor_commands::supervisor_transcript(
+            &cas, &daemon.session_name, &name, cas_mux::SupervisorCli::Claude,
+        ), Some(path), "registered supervisor account and native session select the transcript");
+        daemon.normal_delivery_probes.get_mut(&row.id).unwrap().next_check_at = Some(Instant::now());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if statuses().iter().any(|s| s == "ok") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("only the native turn start confirms startup");
+        assert!(!daemon.normal_delivery_probes.contains_key(&row.id));
+    }
 }
 
 /// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a
@@ -889,7 +1170,7 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 let mut supervisor = agents.get("single-sup").unwrap();
                 // Native observation selects live Active/Stale registrations.
                 supervisor.status = cas_types::AgentStatus::Active;
-                let account = root.path().join("codex-account");
+                let account = root.path().canonicalize().unwrap().join("codex-account");
                 supervisor.metadata.insert("worker_cli".into(), "codex".into());
                 supervisor.metadata.insert("worker_account_dir".into(), account.display().to_string());
                 supervisor.metadata.insert("clone_path".into(), root.path().display().to_string());
@@ -980,6 +1261,8 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                     assert_eq!(readable.len(), 1, "{context}: explicit inbox read stays available");
                     assert_eq!(readable[0].prompt, body, "{context}");
                 }
+                // Reap each fixture before the next row; live cats retain PTY readers/fds.
+                daemon.app.mux.get_mut(&name).unwrap().kill_tree(true).await;
             }
         }
     }

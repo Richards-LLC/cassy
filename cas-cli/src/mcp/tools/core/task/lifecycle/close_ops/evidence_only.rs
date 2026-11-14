@@ -148,7 +148,7 @@ fn measure_workflow_proof(repo: &Path, task: &Task, target: &str, branch: &str) 
             }
         }
     }
-    let identity = super::TaskCommitIdentity { start_base: None, task_id: Some(task.id.clone()), known_commits: Vec::new() };
+    let identity = super::TaskCommitIdentity { superseded_commits: Vec::new(), approved_merge_parents: Vec::new(), start_base: None, task_id: Some(task.id.clone()), known_commits: Vec::new() };
     let commits: Vec<String> = unmerged_commits(repo, &tips, target)?.into_iter()
         .filter(|commit| required.contains(commit)
             || !super::task_attribution::commit_claims_another_task(repo, commit, &identity))
@@ -181,7 +181,7 @@ fn workflow_path(path: &str) -> bool {
         && matches!(Path::new(path).extension().and_then(|ext| ext.to_str()), Some("yml" | "yaml"))
 }
 
-fn measure_paths(repo: &Path, comparisons: &[(String, String)], workflow_only: bool) -> Result<Vec<String>, String> {
+pub(super) fn measure_paths(repo: &Path, comparisons: &[(String, String)], workflow_only: bool) -> Result<Vec<String>, String> {
     let mut paths = BTreeSet::new();
     for (base, tip) in comparisons {
         // Disabling rename detection measures both original and destination

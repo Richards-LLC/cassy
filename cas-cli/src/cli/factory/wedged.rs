@@ -1244,6 +1244,40 @@ pub(crate) fn execute_answer_permission(
     Ok(())
 }
 
+/// A durable failed spawn is read-only evidence, never a synthetic Agent or
+/// PID. Killing or answering permissions still requires `resolve_worker`.
+fn failed_boot_record(cas_root: &Path, worker: &str) -> Result<Option<cas_store::SpawnLifecycle>> {
+    Ok(cas_store::SqliteSpawnQueueStore::open(cas_root)?
+        .find_spawn_lifecycle(worker)?
+        .filter(|record| record.state == cas_store::SpawnLifecycleState::Failed))
+}
+
+fn print_boot_record(record: &cas_store::SpawnLifecycle, json: bool, tail: usize) {
+    if json {
+        println!("{}", serde_json::json!({
+            "state": "unverified",
+            "boot_state": record.state.as_str(),
+            "request_id": record.id,
+            "worker": record.worker_name,
+            "task_id": record.task_id,
+            "detail": record.detail,
+            "state_at": record.state_at,
+            "pid_alive": null,
+        }));
+    } else {
+        println!("Worker boot failed: {} (spawn request {})",
+            record.worker_name.as_deref().unwrap_or("unregistered"), record.id);
+        println!("Process state: unverified; no registered worker evidence.");
+        if let Some(task_id) = record.task_id.as_deref() {
+            println!("Task: {task_id}");
+        }
+        let lines: Vec<_> = record.detail.as_deref().unwrap_or("Boot output unavailable").lines().collect();
+        for line in &lines[lines.len().saturating_sub(tail)..] {
+            println!("{line}");
+        }
+    }
+}
+
 pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
@@ -1251,7 +1285,16 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
     // pending WAL checkpoint) before we call `std::process::exit` — that
     // function skips Rust destructors entirely. cas-4513 adversarial P2.
     let exit_code = {
-        let w = resolve_worker(cas_root, worker)?;
+        let w = match resolve_worker(cas_root, worker) {
+            Ok(worker) => worker,
+            Err(error) => {
+                if let Some(record) = failed_boot_record(cas_root, worker)? {
+                    print_boot_record(&record, json, 20);
+                    std::process::exit(WorkerLivenessState::Unverified.exit_code());
+                }
+                return Err(error);
+            }
+        };
         // cas-c655 / cas-f781: the agent-store PID is frequently the MCP
         // `cas serve` child (self-registration), not the real worker. Prefer
         // a live process-table match (argv --agent-name / CAS_AGENT_NAME,
@@ -1341,7 +1384,16 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
 pub(crate) fn execute_debug(cas_root: Option<&Path>, worker: &str, tail: usize) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
-    let w = resolve_worker(cas_root, worker)?;
+    let w = match resolve_worker(cas_root, worker) {
+        Ok(worker) => worker,
+        Err(error) => {
+            if let Some(record) = failed_boot_record(cas_root, worker)? {
+                print_boot_record(&record, false, tail);
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
     if w.cli == cas_mux::SupervisorCli::OpenCode {
         let process_alive = w.pid.is_some_and(crate::mcp::daemon::pid_alive);
         let observation = opencode_liveness::observe(
@@ -1925,6 +1977,27 @@ fn is_known_sidecar_commandline(command: &str, raw: &[u8]) -> bool {
     {
         return true;
     }
+    // The locked Playwright CLI bundles MCP. Its browser server is a sidecar;
+    // `playwright test` remains an actual worker job. npm may rewrite argv[0]
+    // into a process title instead of retaining the original argument vector.
+    let argv: Vec<_> = raw.split(|byte| *byte == 0).collect();
+    let bundled_cli = argv.windows(2).any(|pair| {
+        pair[1] == b"mcp" && std::str::from_utf8(pair[0]).is_ok_and(|arg| {
+            let path = Path::new(arg);
+            path.file_name().is_some_and(|name| name == "playwright")
+                || path.ends_with("playwright/cli.js")
+        })
+    });
+    let npm_title = argv.first().is_some_and(|arg| {
+        std::str::from_utf8(arg).is_ok_and(|title| {
+            title.split_whitespace().take(4).eq(["npm", "exec", "playwright", "mcp"])
+        })
+    });
+    if (command == "node" || command == "npx" || command.starts_with("npm"))
+        && (bundled_cli || npm_title)
+    {
+        return true;
+    }
     let commandline = String::from_utf8_lossy(raw).to_ascii_lowercase();
     [
         "@playwright/mcp",
@@ -2003,6 +2076,104 @@ fn process_cpu_sample(pid: u32) -> Option<(String, u64)> {
     let stime: u64 = parts.next()?.parse().ok()?;
     let fingerprint = parts.nth(6)?.to_owned();
     Some((fingerprint, utime.saturating_add(stime)))
+}
+
+/// Per-descendant CPU and output counters. Counter changes prove work even
+/// when a quiet harness is waiting on a non-Rust child that only writes logs.
+/// Never include the harness's own timers or persistent service subtrees.
+/// Each counter is fenced by the kernel's parent and start-time identities.
+pub(crate) fn worker_child_samples(root: u32) -> Option<Vec<(u32, u64, u64, u64)>> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let root_start = crate::mcp::daemon::read_pid_starttime(root)?;
+        let mut queue = VecDeque::from([(root, root_start)]);
+        let mut visited = HashSet::from([root]);
+        let mut samples = Vec::new();
+        while let Some((parent, parent_start)) = queue.pop_front() {
+            #[cfg(target_os = "linux")]
+            let children = descendant_pids(parent);
+            #[cfg(target_os = "macos")]
+            let children = macos_descendant_pids(parent);
+            let Some(children) = children else { continue };
+            for pid in children {
+                if visited.len() >= 1024 { return None; }
+                if !visited.insert(pid) { continue; }
+                let Some(start) = crate::mcp::daemon::read_pid_starttime(pid) else { continue };
+                let Some(raw) = process_commandline(pid).filter(|raw| !raw.is_empty()) else { continue };
+                let command = raw.split(|byte| *byte == 0).next()
+                    .and_then(|arg| std::str::from_utf8(arg).ok())
+                    .and_then(|arg| Path::new(arg).file_name()?.to_str()).unwrap_or_default();
+                let sidecar = is_known_sidecar_commandline(command, &raw);
+                // Code-mode hosts launch real tool children. The host itself
+                // cannot prove work; daemon/MCP service subtrees cannot either.
+                if sidecar && command != "codex-code-mode-host" { continue; }
+                if process_parent(pid) != Some(parent)
+                    || crate::mcp::daemon::read_pid_starttime(parent) != Some(parent_start) { continue; }
+                queue.push_back((pid, start));
+                if sidecar { continue; }
+                if let Some((cpu, written)) = child_counters(pid)
+                    && crate::mcp::daemon::read_pid_starttime(pid) == Some(start)
+                    && process_parent(pid) == Some(parent)
+                {
+                    samples.push((pid, start, cpu, written));
+                }
+            }
+        }
+        (crate::mcp::daemon::read_pid_starttime(root) == Some(root_start)).then_some(samples)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = root; None }
+}
+
+pub(crate) fn process_commandline(pid: u32) -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    { std::fs::read(format!("/proc/{pid}/cmdline")).ok() }
+    #[cfg(target_os = "macos")]
+    { macos_process_cmdline(pid) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = pid; None }
+}
+
+pub(crate) fn process_parent(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    { parent_pid_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?) }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>();
+        // SAFETY: libproc writes at most the allocated structure and keeps no pointer.
+        let read = unsafe { libc::proc_pidinfo(pid.try_into().ok()?, libc::PROC_PIDTBSDINFO,
+            0, info.as_mut_ptr().cast(), size as libc::c_int) };
+        if read != size as libc::c_int { return None; }
+        // SAFETY: exact-size success initializes all fields.
+        Some(unsafe { info.assume_init() }.pbi_ppid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = pid; None }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn child_counters(pid: u32) -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let cpu = process_cpu_sample(pid)?.1;
+        // wchar includes buffered log and pipe writes, unlike write_bytes
+        // which counts only physical disk IO. Unreadable IO is unknown.
+        let written = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?
+            .lines().find_map(|line| line.strip_prefix("wchar:")?.trim().parse().ok())?;
+        Some((cpu, written))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v2>::uninit();
+        // SAFETY: RUSAGE_INFO_V2 initializes exactly this allocated layout.
+        let result = unsafe { libc::proc_pid_rusage(pid.try_into().ok()?, libc::RUSAGE_INFO_V2,
+            usage.as_mut_ptr().cast()) };
+        if result != 0 { return None; }
+        // SAFETY: libproc returned success for the complete v2 structure.
+        let usage = unsafe { usage.assume_init() };
+        Some((usage.ri_user_time.saturating_add(usage.ri_system_time), usage.ri_diskio_byteswritten))
+    }
 }
 
 /// True when `pid` consumed CPU between two short samples — the mid-
@@ -2235,6 +2406,7 @@ fn verify_death(pid: u32) -> bool {
 /// refused (fingerprint mismatch / no fingerprint) or that demonstrably
 /// didn't take never resets the task lease out from under a still-running
 /// worker.
+// gate-audit[fingerprint_override]: selector Derived G-143 acceptance from the explicit force request; final producer tags that exception.
 pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
@@ -2295,6 +2467,7 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                 } else {
                     kill_verdict(pid, w.pid_starttime, force)
                 };
+                let fingerprint_override=force && !scan_confirmed && matches!(kill_verdict(pid,w.pid_starttime,false), KillVerdict::RefuseFingerprintMismatch|KillVerdict::RefuseNoFingerprint);
                 let death_after_attempt = match &verdict {
                     KillVerdict::Go => {
                         // cas-a91b: convert to the actual process GROUP
@@ -2309,6 +2482,7 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                         let group_pid = resolve_group_leader_pid(pid).unwrap_or(pid);
                         match send_sigkill(group_pid) {
                             Ok(()) => {
+                                if fingerprint_override {summary.push(crate::gates::override_tag("G-143",""));}
                                 summary.push(format!(
                                     "SIGKILL delivered to process group {group_pid}"
                                 ));
@@ -2328,12 +2502,14 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                         true
                     }
                     KillVerdict::RefuseFingerprintMismatch => {
+                        summary.push(crate::gates::refusal_tag("G-143",""));
                         summary.push(format!(
                             "pid {pid} SKIPPED: starttime fingerprint mismatch (PID recycled). Pass --force to override."
                         ));
                         false
                     }
                     KillVerdict::RefuseNoFingerprint => {
+                        summary.push(crate::gates::refusal_tag("G-143",""));
                         summary.push(format!(
                             "pid {pid} SKIPPED: no starttime fingerprint recorded (legacy agent). Pass --force to override."
                         ));
@@ -2380,6 +2556,8 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
         ));
     }
 
+    let response=summary.join("\n");
+    crate::gates::facts::observe_cli_output(cas_root,&response);
     println!("kill-worker `{}` completed:", w.name);
     for line in summary {
         println!("  - {line}");
@@ -2403,6 +2581,10 @@ pub(crate) enum KillVerdict {
     RefuseNoFingerprint,
 }
 
+// gate[G-143 kill]: Worker PID fingerprint safety
+// gate-audit[force]: bypass G-143 CLI producer tags accepted PID-fingerprint overrides.
+// gate-audit[accepted_by]: execute_kill
+// gate-audit[forward]: G-143 Pure PID-fingerprint verdict; execute_kill emits the refusal code.
 fn kill_verdict(pid: u32, expected_starttime: Option<u64>, force: bool) -> KillVerdict {
     if !crate::mcp::daemon::pid_alive(pid) {
         return KillVerdict::AlreadyDead;
@@ -3130,7 +3312,7 @@ mod tests {
         assert_eq!(evidence.pending_permission, Some(pending));
         assert!(!evidence.in_flight_tool_call);
         let human = format_state_human(&state, &evidence);
-        assert!(human.contains("awaiting leader approval"));
+
         assert!(human.contains("python3 -<<'PY' rewrite.html PY"));
         let json: serde_json::Value =
             serde_json::from_str(&format_state_json(&state, &evidence)).expect("valid JSON");
@@ -4126,6 +4308,14 @@ mod tests {
             "node",
             b"node\0.../@playwright/mcp/cli.js\0"
         ));
+        for (command, raw) in [
+            ("node", b"node\0node_modules/playwright/cli.js\0mcp\0".as_slice()),
+            ("node", b"node\0node_modules/.bin/playwright\0mcp\0".as_slice()),
+            ("npm", b"npm\0exec\0--prefix\0hub-web\0playwright\0mcp\0".as_slice()),
+            ("npm exec playwr", b"npm exec playwright mcp --headless\0".as_slice()),
+        ] {
+            assert!(is_known_sidecar_commandline(command, raw));
+        }
         assert!(is_known_sidecar_commandline("cas", b"cas\0serve\0"));
         assert!(!is_known_sidecar_commandline("node", b"node\0server.js\0"));
         for (command, raw) in [

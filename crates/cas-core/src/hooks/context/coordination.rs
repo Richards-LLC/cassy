@@ -356,68 +356,29 @@ mod tests {
     use super::*;
     use crate::hooks::config::DefaultHooksConfig;
 
+    /// The Codex worker note reaches supervisors only, and only when
+    /// CAS_FACTORY_WORKER_CLI names Codex in any letter case.
     #[test]
-    fn codex_worker_coordination_entry_preserves_worker_close() {
-        const CHILD: &str = "CAS_TEST_COORDINATION_CLOSE_ENTRY";
-        // Exercise the real environment-gated entry without mutating the test
-        // runner's environment or adding a production-only-for-tests seam.
-        if std::env::var_os(CHILD).is_none() {
-            for worker_cli in ["codex", "CoDeX", "claude"] {
-                let output = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "hooks::context::coordination::tests::codex_worker_coordination_entry_preserves_worker_close",
-                        "--nocapture",
-                    ])
-                    .env(CHILD, "1")
-                    .env("CAS_FACTORY_WORKER_CLI", worker_cli)
-                    .output()
-                    .unwrap();
-                assert!(
-                    output.status.success(),
-                    "worker_cli={worker_cli}: {}\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                crate::test_child::assert_passed(
-                    &String::from_utf8_lossy(&output.stdout),
-                    "hooks::context::coordination::tests::codex_worker_coordination_entry_preserves_worker_close",
-                );
-            }
-            return;
-        }
-
+    fn codex_worker_note_is_supervisor_only_and_case_insensitive() {
         let config = DefaultHooksConfig::default();
-        for role in [AgentRole::Supervisor, AgentRole::Worker] {
-            let mut parts = Vec::new();
-            let mut tokens = 0;
-            inject_role_guidance(&mut parts, &mut tokens, role, &config);
-            let emitted = parts.join("\n");
-            let expects_note = role == AgentRole::Supervisor
-                && crate::env_overlay::var("CAS_FACTORY_WORKER_CLI")
-                    .unwrap()
-                    .eq_ignore_ascii_case("codex");
-            assert_eq!(
-                emitted.contains("Codex Worker Coordination Note"),
-                expects_note
+        for worker_cli in ["codex", "CoDeX", "claude"] {
+            let env = std::sync::Arc::new(
+                crate::env_overlay::HookEnvironment::new()
+                    .with_var("CAS_FACTORY_WORKER_CLI", worker_cli),
             );
-            assert!(!emitted.contains("ask you to verify and close on their behalf"));
-            if expects_note {
-                for required in [
-                    "authoritative assignment acceptance",
-                    "no prose ACK is required",
-                    "inbox on the next turn",
-                    "Directed messages wake",
-                    "workers must attempt task action=close first",
-                    "returned verification-required or MERGE REQUIRED workflow",
-                    "mcp__cas__verification",
-                    "merge verdict closes the task or reopens it with findings",
-                    "do not re-close after a merge",
-                ] {
-                    assert!(emitted.contains(required), "missing {required}: {emitted}");
-                }
+            let _scope = env.scope();
+            for role in [AgentRole::Supervisor, AgentRole::Worker] {
+                let mut parts = Vec::new();
+                let mut tokens = 0;
+                inject_role_guidance(&mut parts, &mut tokens, role, &config);
+                let expects_note = role == AgentRole::Supervisor && worker_cli != "claude";
+                assert_eq!(
+                    parts.join("\n").contains(CODEX_WORKER_COORDINATION_NOTE),
+                    expects_note,
+                    "worker_cli={worker_cli} role={role:?}"
+                );
+                assert!(tokens > 0);
             }
-            assert!(tokens > 0);
         }
     }
 }

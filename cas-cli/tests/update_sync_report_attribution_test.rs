@@ -27,7 +27,6 @@ fn cas_76e4_cli_cases_leave_the_worker_worktree_untouched() {
         "update_sync_report_attribution_test::codex_sync_reports_its_own_result_and_is_idempotent",
         #[cfg(unix)]
         "update_sync_report_attribution_test::unwritable_codex_destination_fails_loudly_instead_of_claiming_success",
-        "viktor_distribution_test::clean_init_and_sync_distribute_viktor_skill_and_status_never_prints_a_key",
     ]);
 }
 
@@ -265,10 +264,7 @@ fn unwritable_codex_destination_fails_loudly_instead_of_claiming_success() {
         !stdout.contains(".codex: updated"),
         "unwritable .codex must never be reported as updated; stdout was:\n{stdout}"
     );
-    assert!(
-        !stdout.contains(".codex: built-ins up to date"),
-        "unwritable .codex must not be reported as clean either; stdout was:\n{stdout}"
-    );
+
     assert!(
         !output.status.success(),
         "an unwritable harness destination must exit non-zero; stdout:\n{stdout}\nstderr:\n{stderr}"

@@ -1144,9 +1144,9 @@ mod tests {
         let reminder = store.list_pending("supervisor-1").unwrap().pop().unwrap();
         assert_eq!(reminder.id, id);
         let delivery = format_cross_session_reminder_delivery(&reminder, None, None);
-        assert!(delivery.contains("Cross-session reminder"));
-        assert!(delivery.contains("Origin session: origin-session"));
-        assert!(delivery.contains("Created at:"));
+
+        assert!(delivery.contains("origin-session"));
+        assert!(delivery.contains(&reminder.created_at.to_rfc3339()));
         assert_eq!(parse_reminder_delivery_id(&delivery), Some(id));
     }
 
@@ -1217,7 +1217,7 @@ mod tests {
 
         let delivery = format_reminder_delivery_with_provenance(&pending[0], None, Some("closed"));
         assert!(
-            delivery.contains("issued 0 min ago under task cas-issue-276 (closed)"),
+            delivery.contains("cas-issue-276") && delivery.contains("closed"),
             "delivery must make closed task staleness visible: {delivery}"
         );
     }

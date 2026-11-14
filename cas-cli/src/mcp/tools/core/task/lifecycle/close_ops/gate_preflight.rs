@@ -2,12 +2,27 @@
 //! refusal in one reply. Most close bounces were computable before close, and a
 //! gate that stops at its first failure costs one attempt per failure.
 use super::*;
-use crate::config::{QaMode, RegistryEnforcement, UpkeepStage};
+use crate::config::{QaMode, RegistryEnforcement};
+
+/// Per-task PRODUCT_OVERVIEW fragments that release prep compiles (cas-4b33).
+const OVERVIEW_FRAGMENT_DIR: &str = "docs/product-overview.d";
 
 /// One reply for every refusal of a park attempt. A lone refusal keeps its own
 /// text, which workers and the classifiers that count bounces already read.
-pub(super) fn park_reply(mut refusals: Vec<String>) -> String {
+// gate-audit[forward]: G-55 Renders already-tagged policy refusals; no independent check or acceptor.
+pub(crate) fn park_reply(mut refusals: Vec<String>) -> String {
     refusals.dedup();
+    if let Some(receipt) = crate::mcp::tools::service::mutation_receipt::current()
+        .filter(|receipt| receipt.tool() == "task" && receipt.action() == "close")
+    {
+        let mut summary = String::from("refused:");
+        // Upkeep may group multiple headings in one collected refusal.
+        for gate in refusals.iter().flat_map(|refusal| refusal.split("\n\n⚠️ ")) {
+            summary.push_str("\n- ");
+            summary.push_str(&compact_gate(gate));
+        }
+        let _ = receipt.park_refusal_summary.set(summary);
+    }
     if refusals.len() == 1 {
         return refusals.remove(0);
     }
@@ -17,6 +32,30 @@ pub(super) fn park_reply(mut refusals: Vec<String>) -> String {
     )
 }
 
+fn compact_gate(mut gate: &str) -> String {
+    // Trailing `[CODE]` gate tokens are not the remedy paragraph.
+    while let Some((body, last)) = gate.trim_end().rsplit_once("\n\n")
+        && last.starts_with('[')
+        && last.ends_with(']')
+        && crate::gates::find(&last[1..last.len() - 1]).is_some()
+    {
+        gate = body;
+    }
+    let heading = gate.trim_start_matches("⚠️ ").lines().next().unwrap_or_default();
+    let (code, inline) = heading.split_once(": ").unwrap_or((heading, ""));
+    // Prefer an explicit remedy over measured facts, which can be much longer.
+    let action = gate.split_once("\n\nNext: ")
+        .map(|(_, next)| next.split("\n\n").next().unwrap_or_default())
+        .or_else(|| gate.rsplit_once("\n\n").map(|(_, last)| last))
+        .unwrap_or(inline);
+    let code = crate::mcp::tools::truncate_str(code, 96);
+    if action.is_empty() {
+        return code;
+    }
+    let action = action.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{code}: {}", crate::mcp::tools::truncate_str(&action, 320))
+}
+
 /// A prerequisite failure stops dependent checks, retaining every refusal
 /// already measured. With no earlier failure the existing message is unchanged.
 pub(super) fn refusal_reply(mut refusals: Vec<String>, refusal: impl Into<String>) -> String {
@@ -24,7 +63,7 @@ pub(super) fn refusal_reply(mut refusals: Vec<String>, refusal: impl Into<String
     park_reply(refusals)
 }
 
-pub(super) fn is_merge_handoff(refusal: &str) -> bool {
+pub(crate) fn is_merge_handoff(refusal: &str) -> bool {
     refusal.trim_start_matches("⚠️").trim_start().starts_with("MERGE REQUIRED")
 }
 
@@ -32,6 +71,7 @@ impl CasCore {
     /// The close requirements knowable at task start, for the start context.
     /// Each line is conditional on the same inputs its gate reads, so a project
     /// or task the gate would skip does not list it.
+    // gate[N-36 notice]: Task-note context blocks (start close checks, test principle, QA impact)
     pub(crate) fn close_requirements(&self, task: &Task) -> String {
         if std::env::var_os("CAS_FACTORY_MODE").is_none()
             || matches!(task.task_type, TaskType::Epic | TaskType::Gate)
@@ -54,7 +94,6 @@ impl CasCore {
             return String::new();
         };
         let qa = config.qa();
-        let upkeep = config.upkeep();
         let parent_epic = self
             .open_task_store()
             .ok()
@@ -112,21 +151,19 @@ impl CasCore {
         }
         let registry_on = qa.registry.enforce != RegistryEnforcement::Off
             || crate::qa_impact::io::git(&repo, &["cat-file", "-e", &format!("HEAD:{}", qa.registry.path)]).is_ok();
-        if registry_on && task.task_type == TaskType::Bug {
-            lines.push(format!(
-                "Bug case: a live journey this fix touches needs a bug family naming {id}, or the refusal's `no case:` decision."
-            ));
-        }
-        let tracked: Vec<&str> = [
-            registry_on.then_some(qa.registry.path.as_str()),
-            (upkeep.codemap() != UpkeepStage::Off).then_some(".claude/CODEMAP.md"),
-            (upkeep.product_overview() != UpkeepStage::Off).then_some("docs/PRODUCT_OVERVIEW.md"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        if !tracked.is_empty() {
-            lines.push(format!("Upkeep: keep {} true for changed paths.", tracked.join(", ")));
+        // cas-4b33: shared docs are generated at release prep from per-task
+        // fragments, so a delivery writes only its own fragment files.
+        let overview_fragments = receipt_scope::has_fragment_dir_at(&repo, "HEAD", OVERVIEW_FRAGMENT_DIR);
+        if registry_on || overview_fragments {
+            let mut docs = Vec::new();
+            if registry_on && task.task_type == TaskType::Bug {
+                docs.push(format!("a fix touching a live journey adds `docs/qa/bug-families/<slug>.yaml` naming {id}"));
+            }
+            if overview_fragments {
+                docs.push(format!("product changes go in `{OVERVIEW_FRAGMENT_DIR}/{id}.md`"));
+            }
+            docs.push("never edit .claude/CODEMAP.md or docs/PRODUCT_OVERVIEW.md; release prep regenerates them".into());
+            lines.push(format!("Docs: {}.", docs.join("; ")));
         }
         if !task.proof_targets.is_empty() || task.risk.contains(&TaskRisk::BlastRadius) {
             lines.push(format!(

@@ -30,7 +30,7 @@ fn paired() -> Paired {
         operator_label: "test operator".into(),
         controller_origin: ORIGIN.into(),
         scopes: credential.scopes.clone(),
-        request_id: "test".into(),
+        request_id: "test".into(), preview: false,
     };
     let jkt = store.list_devices().unwrap()[0].key_fingerprint.clone();
     Paired {

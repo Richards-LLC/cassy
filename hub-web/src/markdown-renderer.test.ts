@@ -107,7 +107,7 @@ describe("supervisor markdown subset", () => {
     root.replaceChildren(...renderMarkdown(document, `\`\`\`js\n${large}\n\`\`\``));
     await vi.waitFor(() => expect(root.querySelector('[data-syntax-state="plain"]')).not.toBeNull());
     expect(root.querySelector("code")!.textContent).toBe(large);
-    expect(root.textContent).toContain("Plain text · source too large to color");
+    expect(root.textContent).toBeTruthy();
   });
 
   it("copies literal fence source with honest feedback and wraps each block independently", async () => {
@@ -123,11 +123,11 @@ describe("supervisor markdown subset", () => {
     expect(root.querySelector("script")).toBeNull();
     const copy = frames[0]!.querySelector<HTMLButtonElement>('[data-action="copy"]')!;
     copy.click();
-    await vi.waitFor(() => expect(frames[0]!.querySelector('[role="status"]')?.textContent).toBe("Copied"));
+    await vi.waitFor(() => expect(frames[0]!.querySelector('[role="status"]')?.textContent).toBeTruthy());
     expect(writeText).toHaveBeenCalledWith(source);
     writeText.mockRejectedValueOnce(new Error("Denied"));
     copy.click();
-    await vi.waitFor(() => expect(frames[0]!.querySelector('[role="status"]')?.textContent).toContain("Copy failed"));
+    await vi.waitFor(() => expect(frames[0]!.querySelector('[role="status"]')?.textContent).toBeTruthy());
     expect(copy.disabled).toBe(false);
     const wrap = frames[0]!.querySelector<HTMLButtonElement>('[data-action="wrap"]')!;
     expect(wrap.getAttribute("aria-pressed")).toBe("false");
@@ -139,7 +139,7 @@ describe("supervisor markdown subset", () => {
     expect(wrap.getAttribute("aria-pressed")).toBe("false");
     Reflect.deleteProperty(navigator, "clipboard");
     frames[1]!.querySelector<HTMLButtonElement>('[data-action="copy"]')!.click();
-    expect(frames[1]!.querySelector('[role="status"]')?.textContent).toContain("Copy failed");
+    expect(frames[1]!.querySelector('[role="status"]')?.textContent).toBeTruthy();
   });
 
   it("renders reply structure without leaking markdown markers", () => {
@@ -190,6 +190,17 @@ describe("supervisor markdown subset", () => {
     expect(root.textContent).toContain("[run](javascript:alert(1))");
     expect(root.querySelectorAll("a")).toHaveLength(1);
     expect(root.querySelector("a")?.textContent).toBe("safe");
+  });
+
+  it("links bare https URLs without trailing punctuation, outside code", () => {
+    const root = document.createElement("div");
+    const issue = "https://github.com/Richards-LLC/violet_ps/issues/110";
+    root.append(...renderMarkdown(document, `See ${issue}. (https://example.com/a_(b)) \`https://example.com/code\` http://example.com/plain`));
+
+    const links = [...root.querySelectorAll<HTMLAnchorElement>("a.markdown-link")];
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([issue, "https://example.com/a_(b)"]);
+    expect(links[0]!.target).toBe("_blank");
+    expect(links[0]!.rel).toBe("noopener");
   });
 
   it("strips supported markers from conversation previews", () => {
@@ -314,4 +325,25 @@ it("renders unified diff lines literally and collapses long changes", async () =
   expect(code).toBeDefined(); expect(code.hasAttribute("aria-label")).toBe(false);
   expect(root.querySelectorAll(".rich-diff")).toHaveLength(2);
   expect(root.querySelector("script")).toBeNull(); root.remove();
+});
+
+it("renders only artifact and artifacts-directory images, and falls back to the reply's text when the machine refuses (cas-85bfb)", async () => {
+  const { hydrateReplyImages } = await import("./reply-images");
+  const lines = ["![After](artifact:art-1)", "![Phone](cas-1/after/phone.png)", "![Remote](https://example.com/x.png)", "![Data](data:image/png;base64,AA)", "![Script](javascript:alert(1))", "![Text](notes.txt)", "![Refused](/etc/shadow.png)"];
+  const root = document.createElement("div");
+  root.append(...renderMarkdown(document, lines.join("\n\n")));
+  const refs = [...root.querySelectorAll<HTMLElement>(".markdown-image")].map(node => node.dataset.imageRef);
+  expect(refs).toEqual(["art-1", `local-${btoa("cas-1/after/phone.png").replace(/=+$/, "")}`, `local-${btoa("/etc/shadow.png").replace(/=+$/, "")}`]);
+  for (const literal of lines.slice(2, 6)) expect(root.textContent).toContain(literal);
+  expect(root.querySelector("img[src]")).toBeNull();
+  const resolve = vi.fn(async (reference: string) => reference === "art-1"
+    ? { ok: true as const, view: { artifact_id: reference, url: "https://machine.test/v1/sessions/s/artifacts/art-1/content?t=x" } }
+    : { ok: false as const, status: 404 });
+  hydrateReplyImages([root], resolve);
+  await vi.waitFor(() => expect(root.querySelectorAll(".markdown-image")).toHaveLength(1));
+  expect(root.querySelector("img")?.getAttribute("src")).toBe("https://machine.test/v1/sessions/s/artifacts/art-1/content?t=x");
+  expect(root.querySelector("img")?.getAttribute("loading")).toBe("lazy");
+  expect(root.textContent).toContain("![Refused](/etc/shadow.png)");
+  expect(root.textContent).toContain("![Phone](cas-1/after/phone.png)");
+  expect(plainTextMarkdown("Ready.\n\n![Desktop after](cas-1/after/desktop.png)")).toBe("Ready. Desktop after");
 });

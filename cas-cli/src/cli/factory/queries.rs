@@ -501,11 +501,14 @@ pub(super) fn execute_status(
         &session.metadata,
         session.is_running,
     );
+    let pipeline_estimates:Vec<_>=crate::quality_ledger::estimates::PIPELINES.iter().filter_map(|stage|
+        crate::quality_ledger::estimates::estimate(&cas_root,"pipeline",stage,None,"operator",20,false).ok()).collect();
     if cli.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&StatusJson {
                 schema_version: 1,
+                pipeline_estimates,
                 violet: violet_status.clone(),
                 violet_consumer: violet_consumer.clone(),
                 session: SessionJson::from_session_info(&session, cli.full),
@@ -547,6 +550,7 @@ pub(super) fn execute_status(
         chrono::Utc::now(),
     )?;
     fmt.flush()?;
+    for estimate in pipeline_estimates { println!("{}",estimate.render()); }
     Ok(())
 }
 
@@ -840,8 +844,10 @@ pub(super) fn execute_message(
             options,
             attachments: Vec::new(),
             reply_to_session: None,
+            task_id: None,
         })?;
         let queue = crate::store::open_prompt_queue_store(&cas_root)?;
+        // gate[N-32 notice]: CLI factory message to the operator
         queue.record_operator_turn(&cas_store::OperatorTurn {
             source: from,
             target: "operator",
@@ -931,6 +937,7 @@ pub(super) fn execute_message(
     Ok(())
 }
 
+// gate-audit[cas_root_override]: selector Chooses the explicitly addressed Cassy store; never overrides message authority.
 fn message_root_for_session(
     session: &SessionInfo,
     project_dir: Option<&std::path::Path>,
@@ -1154,6 +1161,7 @@ struct TargetsJson {
 #[serde(rename_all = "snake_case")]
 struct StatusJson {
     schema_version: u32,
+    pipeline_estimates: Vec<crate::quality_ledger::estimates::Estimate>,
     /// cas-a897: the Violet push-wake watch book, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     violet: Option<crate::ui::factory::daemon::runtime::violet_activity::VioletWatchStatus>,

@@ -41,11 +41,13 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         "Supervisor reports journeys passed; run id pending",
         "Supervisor reports journeys passed; GitHub issue #1235",
         "QA says the tests passed",
+        "QA verified 12 tests",
         "QA reports the tests succeeded",
         "Supervisor reports tests passed, build not verified",
         "The merge queue will run the journeys after close",
     ];
     let accepted = [
+        "Only journeys.yaml manually resolved: supervisor-handoff-machine-lineage, both complete blocks verbatim.",
         "Implementation complete; merge-queue journeys deferred to merge queue",
         "Supervisor reports the journeys passed; run id 123456789",
         "Supervisor reports journeys passed (artifact://art-1234abcd)",

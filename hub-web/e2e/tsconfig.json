@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["journeys/**/*.ts", "journey-settle.spec.ts", "../playwright.config.ts", "../playwright.real-hub.config.ts", "../playwright.responsive.config.ts"]
+  "include": ["../src/build.d.ts", "journeys/**/*.ts", "journey-settle.spec.ts", "../playwright.config.ts", "../playwright.real-hub.config.ts", "../playwright.responsive.config.ts"]
 }

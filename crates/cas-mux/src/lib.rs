@@ -61,7 +61,7 @@ pub use opencode::{
 pub use pane::TerminalSnapshot;
 pub use pane::{Pane, PaneBackend, PaneId, PaneKind, UserInputKind};
 pub use pty::{
-    ContractRole, claude_supervisor_contract, claude_worker_contract, missing_contract_elements,
+    ContractRole, claude_supervisor_contract, claude_worker_contract,
     rendered_contract_surface,
 };
 pub use pty::{Pty, PtyConfig, PtyEvent, TeamsSpawnConfig};
@@ -71,3 +71,9 @@ pub use spec::{Effort, WorkerSpec};
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]
 mod test_env_guard;
+
+#[cfg(unix)]
+pub use pane::{PaneHandoff, PtyHandoff};
+
+#[cfg(unix)]
+pub use mux::MuxHandoff;

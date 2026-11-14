@@ -7,7 +7,7 @@
 //!
 //! The daemon sends the supervisor one "train ready to cut" notice when the
 //! train holds reviewed fixes and nothing is in flight, and one when the train
-//! reaches its max age. Cassy never cuts a release on its own.
+//! reaches its max age, for trains auto-cut declines (cas-e060).
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,6 +27,20 @@ pub(crate) fn train_lane(epic: &Task) -> Option<&str> {
     crate::mcp::tools::core::task::release_train::is_release_train(epic)
         .then(|| epic.effective_epic_branch())
         .flatten()
+}
+
+/// cas-5f67: a drop re-enqueued this open train and a dropped child has not
+/// closed again, so its one repair cycle is still under way.
+pub(crate) fn repair_cycle_open(train: &Task, tasks: &[Task]) -> bool {
+    train_lane(train).is_some()
+        && !train.is_terminal()
+        && train.notes.lines().any(|line| {
+            let Some(rest) = line.split_once(DROP_NOTE).map(|(_, rest)| rest) else { return false };
+            line.contains(REENQUEUED)
+                && rest.split(" reverted up to").next().unwrap_or_default().split(',').any(|id| {
+                    tasks.iter().any(|task| task.id == id.trim() && !task.is_terminal())
+                })
+        })
 }
 
 /// The train's pull request in the merge queue.
@@ -132,7 +146,7 @@ fn introducing_merge(root: &Path, recorded: &str, source: &str) -> Result<String
 }
 
 /// The checkout holding a train's repository.
-fn train_repo_root(cas_root: &Path, epic: &Task) -> Result<PathBuf> {
+pub(crate) fn train_repo_root(cas_root: &Path, epic: &Task) -> Result<PathBuf> {
     Ok(match &epic.deliverables.work_target {
         Some(target) => {
             crate::mcp::tools::core::task::repo_context::resolve_repo_context(cas_root, target)
@@ -320,8 +334,22 @@ fn cut_command(configured: Option<&str>, repo_root: Option<&Path>, train: &str) 
     }
 }
 
+/// The current tip, and whether it holds the verdict `scripts/release.sh`
+/// demands before it cuts: the train-tip full-set receipt `train_ci::observe`
+/// records must be green at it. Missing, red, stale or unreadable all mean not green.
+fn tip_verdict(cas_dir: &Path, epic: &Task, train: &str) -> Option<(String, bool)> {
+    let state = crate::train_ci::directory(cas_dir, &epic.id)
+        .ok()
+        .and_then(|dir| std::fs::read(dir.join("state.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let tip = train_repo_root(cas_dir, epic).ok().and_then(|root| git(&root, &["rev-parse", train]).ok())?;
+    let green = state.is_some_and(|state| state["outcome"] == "PASS" && state["head"].as_str() == Some(tip.as_str()));
+    Some((tip, green))
+}
+
 /// Send each due "train ready to cut" notice once. `queued` holds branches
 /// whose PR is in the merge queue now; a train in the queue is being cut.
+// gate[W-52 watchdog]: Release-train cut notice
 pub(crate) fn notify_train_cuts(
     cas_dir: &Path,
     queued: &BTreeSet<String>,
@@ -333,9 +361,25 @@ pub(crate) fn notify_train_cuts(
     let mut sent = 0;
     for epic in tasks.list(None)?.into_iter().filter(|task| !task.is_terminal()) {
         let Some(train) = train_lane(&epic).map(str::to_string) else { continue };
-        if queued.contains(&train) {
+        if queued.contains(&train) || crate::mcp::tools::core::task::release_train::is_cut_train(&epic) {
             continue;
         }
+        let Some((tip, green)) = tip_verdict(cas_dir, &epic, &train) else { continue };
+        // cas-0fc56: an unfrozen train has no train suite; its freeze starts
+        // the one run. A frozen train cuts only on that run's green at its
+        // tip; a red is the train_ci_red notice's.
+        let frozen = crate::mcp::tools::core::workflow::release_freeze::active(cas_dir, &epic).is_some();
+        if frozen && !green {
+            continue;
+        }
+        // cas-e060: a train with changelog fragments is frozen and cut by
+        // Cassy; the notice below only covers trains auto-cut declines.
+        use crate::mcp::tools::core::workflow::release_auto_cut::{self, Outcome};
+        let auto_cut = match release_auto_cut::attempt(cas_dir, &epic, &train, &tip, green, !queued.is_empty(), now) {
+            Ok(Outcome::Handled) => continue,
+            Ok(Outcome::Declined(reason)) => crate::gates::tag("G-122", format!("Auto-cut: {reason}.")),
+            Err(error) => format!("Auto-cut failed: {error:#}."),
+        };
         let merged: Vec<_> = cas_store::observed_delivery_merges_into(cas_dir, &train)?
             .into_iter()
             .filter(|merge| tasks.get(&merge.task_id).is_ok_and(|t| t.status == TaskStatus::Closed))
@@ -352,23 +396,28 @@ pub(crate) fn notify_train_cuts(
             train_repo_root(cas_dir, &epic).ok().as_deref(),
             &train,
         );
+        let cut = if frozen {
+            format!("Cut it: {cut}")
+        } else {
+            format!("Freeze it with train_freeze to start its one train suite, then once green cut it: {cut}")
+        };
         let (occurrence, detail) = if in_flight == 0 {
             (
                 last.merge_commit_sha.clone(),
                 format!(
                     "Release train {train} ({}) is ready to cut: {} reviewed fixes merged, none in \
-                     progress, no queue run in flight. Cut it: {cut}. Cassy never cuts on its own.",
+                     progress, no queue run in flight. {cut}. {auto_cut}",
                     epic.id,
                     merged.len()
                 ),
             )
         } else if age >= chrono::Duration::hours(i64::from(max_age_hours)) {
             (
-                format!("max-age:{}", first.created_at.to_rfc3339()),
+                format!("max-age:{tip}"),
                 format!(
                     "Release train {train} ({}) reached its {max_age_hours} h max age: {} reviewed \
-                     fixes merged, first {} min ago; {in_flight} still in flight ride the next train. \
-                     Cut it: {cut}. Cassy never cuts on its own.",
+                     fixes merged, first {} min ago; {in_flight} still in flight remain assigned to this train. \
+                     {cut}; retarget unfinished deliveries to the next train before merging them. {auto_cut}",
                     epic.id,
                     merged.len(),
                     age.num_minutes()
@@ -381,7 +430,8 @@ pub(crate) fn notify_train_cuts(
             cas_dir,
             &epic,
             supervisor_notices::ReleaseNoticePhase::CutReady,
-            &occurrence,
+            // The "freeze it" notice must not suppress the later "cut it" one.
+            &if frozen { format!("frozen:{occurrence}") } else { occurrence },
             &detail,
         )?;
         sent += 1;

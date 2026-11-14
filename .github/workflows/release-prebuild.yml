@@ -15,7 +15,8 @@ name: Release Prebuild
 # never blocks a merge; release.yml then builds the same bytes itself by
 # calling this workflow (workflow_call), so the build steps exist once.
 #
-# Every lane is GitHub-hosted. workflow_dispatch builds the dispatched ref
+# Linux is GitHub-hosted; trusted macOS builds prefer the self-hosted Mac
+# release runner (macos-route). workflow_dispatch builds the dispatched ref
 # by default; seed_only skips compilation on an exact cache hit without publishing.
 on:
   merge_group:
@@ -29,9 +30,9 @@ on:
   workflow_dispatch:
     inputs:
       platform:
-        description: Platform to build (all, linux or macos)
+        description: Platform to build (all, linux or macos; mac-runner-probe only probes)
         type: choice
-        options: [all, linux, macos]
+        options: [all, linux, macos, mac-runner-probe]
         default: all
       seed_only:
         description: Check dependency caches; skip compilation on an exact hit
@@ -163,12 +164,7 @@ jobs:
 
       - name: Install Linux linker
         if: steps.compile.outputs.needed == 'true'
-        run: |
-          sudo apt-get update
-          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
-          sudo apt-get install -y binutils file gcc mold
-          gcc --version
-          mold --version
+        uses: ./.github/actions/setup-linux-linker
 
       - name: Setup sccache
         if: steps.compile.outputs.needed == 'true'
@@ -276,24 +272,99 @@ jobs:
           path: .context/zig
           key: release-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap-zig.sh') }}
 
-  # There is no Mac in the fleet, so this stays on hosted macOS. Starting it at
-  # enqueue overlaps the slowest release build with the merge-queue tests.
-  build-macos:
-    name: Prebuild macOS ARM64
+  # cas-195e: trusted macOS prebuilds run on the operator's self-hosted Apple
+  # Silicon runner (label cas-mac-release, scripts/install-mac-release-runner.sh),
+  # whose persistent CARGO_TARGET_DIR makes them incremental; hosted macOS
+  # compiles every dependency cold (Build 30.7 min, run 43486486286).
+  # GitHub never reassigns a job queued on an offline self-hosted runner, so
+  # this job first dispatches a no-op probe run on the same ref and routes to
+  # the runner only if it starts the probe in time. Every other case (an
+  # untrusted ref, release.yml's fallback call, a busy or offline runner, an
+  # API error) builds on hosted macOS. Trusted means a merge-queue ref of main
+  # or a direct push to main; this workflow has no pull_request trigger.
+  macos-route:
+    name: Route macOS prebuild
     needs: pending-release
     if: >-
       !cancelled()
       && (needs.pending-release.result == 'skipped'
       || needs.pending-release.outputs.pending == 'true')
       && (inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'macos')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    outputs:
+      runner: ${{ steps.route.outputs.runner }}
+      mode: ${{ steps.route.outputs.mode }}
+    steps:
+      - id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          route() {
+            printf 'runner=%s\nmode=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+            echo "macOS prebuild runner: $2" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 0
+          }
+          hosted='["macos-26"]'
+          case "$EVENT_NAME:$REF:$PLATFORM" in
+            merge_group:refs/heads/gh-readonly-queue/main/*: | push:refs/heads/main:) ;;
+            *) route "$hosted" hosted ;;
+          esac
+          if ! run_id="$(gh api -X POST "repos/$REPO/actions/workflows/release-prebuild.yml/dispatches" \
+              -f ref="$REF_NAME" -f 'inputs[platform]=mac-runner-probe' -F return_run_details=true \
+              --jq .workflow_run_id)" || [[ -z "$run_id" ]]; then
+            echo "::warning::Mac runner probe dispatch failed; building on hosted macOS"
+            route "$hosted" hosted
+          fi
+          deadline=$((SECONDS + ${PROBE_WAIT_SECONDS:-90}))
+          while (( SECONDS < deadline )); do
+            state="$(gh api "repos/$REPO/actions/runs/$run_id/jobs" \
+              --jq '.jobs[] | select(.name == "Mac release runner probe") | "\(.status):\(.conclusion)"' || true)"
+            case "$state" in
+              in_progress:* | completed:success)
+                route '["self-hosted","macOS","ARM64","cas-mac-release"]' self-hosted ;;
+            esac
+            sleep "${PROBE_POLL_SECONDS:-5}"
+          done
+          gh api -X POST "repos/$REPO/actions/runs/$run_id/cancel" > /dev/null || true
+          echo "::warning::No Mac release runner started the probe; building on hosted macOS"
+          route "$hosted" hosted
+
+  # Started at the self-hosted runner's assignment, a no-op proving it is online.
+  mac-runner-probe:
+    name: Mac release runner probe
+    if: inputs.platform == 'mac-runner-probe'
+    runs-on: [self-hosted, macOS, ARM64, cas-mac-release]
+    timeout-minutes: 1
+    steps:
+      - run: echo "Mac release runner is online"
+
+  # Starting it at enqueue overlaps the slowest release build with the
+  # merge-queue tests.
+  build-macos:
+    name: Prebuild macOS ARM64
+    needs: [pending-release, macos-route]
+    if: >-
+      !cancelled()
+      && needs.macos-route.result == 'success'
+      && (needs.pending-release.result == 'skipped'
+      || needs.pending-release.outputs.pending == 'true')
+      && (inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'macos')
     # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
     # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
-    runs-on: macos-26
+    runs-on: ${{ fromJSON(needs.macos-route.outputs.runner) }}
     concurrency:
       group: release-deps-macos-${{ github.event_name == 'push' && inputs.platform == '' && 'seed-main' || github.run_id }}
       cancel-in-progress: false
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      DEVELOPER_DIR: ${{ needs.macos-route.outputs.mode == 'self-hosted' && '/Applications/Xcode-26.3.0.app/Contents/Developer' || '/Applications/Xcode_26.3.app/Contents/Developer' }}
+      SELF_HOSTED: ${{ needs.macos-route.outputs.mode == 'self-hosted' }}
       # cas-d8ec: the macOS asset ships without LTO. Measured cold on macos-26
       # (run 38613693971): 1686 s thin vs 912 s off, +3% size, same startup.
       # Job-level so the rust-cache key changes with it. Linux keeps thin LTO.
@@ -304,14 +375,47 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      # The routing guard runs again after assignment, on the machine itself,
+      # so a future expression edit cannot hand the runner untrusted input.
+      - name: Verify the self-hosted Mac trust boundary
+        id: mac-trust
+        if: env.SELF_HOSTED == 'true'
+        env:
+          REF: ${{ github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          case "$GITHUB_REPOSITORY:$EVENT_NAME:$REF:$PLATFORM" in
+            Richards-LLC/cassy:merge_group:refs/heads/gh-readonly-queue/main/*: | Richards-LLC/cassy:push:refs/heads/main:) ;;
+            *) echo "self-hosted Mac route received an untrusted run: $EVENT_NAME $REF" >&2; exit 1 ;;
+          esac
+          test "$(id -u)" -ne 0
+          case "${CARGO_TARGET_DIR:-}" in
+            /*) [[ "$CARGO_TARGET_DIR" != "$GITHUB_WORKSPACE"* ]] ;;
+            *) echo "the runner must pin an absolute CARGO_TARGET_DIR outside the checkout" >&2; exit 1 ;;
+          esac
+
       - name: Identify release dependency cache
         id: cache-key
         run: python3 scripts/release-cache-key.py aarch64-apple-darwin | tee -a "$GITHUB_OUTPUT"
+
+      # The self-hosted target dir is its own cache: it records the key of the
+      # last successful build there, which a main seed treats as a cache hit.
+      - name: Look up the self-hosted target dir
+        id: target-lookup
+        if: env.SELF_HOSTED == 'true'
+        env:
+          KEY: ${{ steps.cache-key.outputs.key }}
+        run: |
+          if [[ "$(cat "$CARGO_TARGET_DIR/.cas-release-key" 2>/dev/null)" == "$KEY" ]]; then
+            echo 'cache-hit=true' >> "$GITHUB_OUTPUT"
+          fi
 
       # Scope is the run ref, not the checked-out SHA. A main push seeds only
       # after an exact-key lookup misses. Queue builds can read main's cache.
       - name: Look up release dependency cache
         id: cache-lookup
+        if: env.SELF_HOSTED != 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -327,7 +431,7 @@ jobs:
         id: compile
         env:
           SEED_ONLY: ${{ (github.event_name == 'push' && inputs.platform == '') || inputs.seed_only }}
-          CACHE_HIT: ${{ steps.cache-lookup.outputs.cache-hit }}
+          CACHE_HIT: ${{ steps.cache-lookup.outputs.cache-hit || steps.target-lookup.outputs.cache-hit }}
         run: |
           if [[ "$SEED_ONLY" == true && "$CACHE_HIT" == true ]]; then
             echo 'needed=false' >> "$GITHUB_OUTPUT"
@@ -339,7 +443,9 @@ jobs:
       # Dispatch probes also restore on a hit but never publish caches.
       # Ordinary main cache hits do not download or compile anything.
       - name: Restore release dependencies
-        if: steps.compile.outputs.needed == 'true' || github.event_name == 'workflow_dispatch'
+        if: >-
+          env.SELF_HOSTED != 'true'
+          && (steps.compile.outputs.needed == 'true' || github.event_name == 'workflow_dispatch')
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -368,13 +474,13 @@ jobs:
         run: ./scripts/bootstrap-zig.sh
 
       - name: Setup sccache
-        if: steps.compile.outputs.needed == 'true'
+        if: steps.compile.outputs.needed == 'true' && env.SELF_HOSTED != 'true'
         id: setup-sccache
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Probe sccache backend
-        if: steps.compile.outputs.needed == 'true'
+        if: steps.compile.outputs.needed == 'true' && env.SELF_HOSTED != 'true'
         env:
           SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
@@ -391,7 +497,10 @@ jobs:
         if: steps.compile.outputs.needed == 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo build -p cas --profile "$RELEASE_PROFILE" --target aarch64-apple-darwin --locked
+          KEY: ${{ steps.cache-key.outputs.key }}
+        run: |
+          cargo build -p cas --profile "$RELEASE_PROFILE" --target aarch64-apple-darwin --locked
+          if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then printf '%s' "$KEY" > "$CARGO_TARGET_DIR/.cas-release-key"; fi
 
       # The codesign gate (cas-67c1) moves with the build. Whichever path
       # produces the Darwin bytes signs and verifies them; release.yml verifies
@@ -400,7 +509,7 @@ jobs:
         if: steps.compile.outputs.needed == 'true'
         run: |
           mkdir -p package
-          cp "target/aarch64-apple-darwin/$RELEASE_DIR/cas" package/
+          cp "${CARGO_TARGET_DIR:-target}/aarch64-apple-darwin/$RELEASE_DIR/cas" package/
           strip package/cas
           # `strip` invalidates an ad-hoc Mach-O signature. Re-sign the exact
           # executable we publish, then fail before packaging if it is invalid.
@@ -420,7 +529,7 @@ jobs:
           retention-days: 14
 
       - name: Report sccache stats
-        if: always() && steps.compile.outputs.needed == 'true'
+        if: always() && steps.compile.outputs.needed == 'true' && env.SELF_HOSTED != 'true'
         run: |
           if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
             ./scripts/ci-sccache-summary.sh "Prebuild macOS ARM64"
@@ -430,7 +539,8 @@ jobs:
 
       - name: Save release dependencies
         if: >-
-          steps.compile.outputs.needed == 'true'
+          env.SELF_HOSTED != 'true'
+          && steps.compile.outputs.needed == 'true'
           && steps.cache-lookup.outputs.cache-hit != 'true'
           && github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
         uses: actions/cache/save@v4

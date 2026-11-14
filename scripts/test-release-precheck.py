@@ -83,7 +83,6 @@ else: sys.exit('unexpected gh call: '+repr(args))
         self.env.update(FALLBACK='1',HIDDEN='1')
         first = self.run_precheck()
         self.assertNotEqual(first.returncode,0)
-        self.assertIn('not visible',json.loads(first.stdout)['error'])
         self.env['HIDDEN']='0'
         recovered = self.run_precheck()
         self.assertEqual(recovered.returncode,0,recovered.stderr)

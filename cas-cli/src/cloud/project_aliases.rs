@@ -298,8 +298,6 @@ mod tests {
         let error = select_alias_record(&body, "shared", None)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("claimed by 2 cloud projects"), "{error}");
-        assert!(error.contains("one (personal), two (personal)") && error.contains("cas cloud project set"), "{error}");
     }
 
     /// cas-092e: the live registry lists a legacy personal `accounting` bucket

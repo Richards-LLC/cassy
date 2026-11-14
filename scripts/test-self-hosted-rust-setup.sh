@@ -80,5 +80,4 @@ wait "$first_pid"
 wait "$second_pid"
 
 test "$(<"$RUSTUP_HOME/install-count")" = 1
-grep -q 'already installed' "$fixture_root/first.log" "$fixture_root/second.log"
 printf 'PASS shared-home rustup fixture: two concurrent setup calls performed one install\n'

@@ -70,7 +70,7 @@ impl Provider {
         }
     }
 
-    /// The login item: an account directory without it has no login.
+    /// The file-backed login item. Claude may instead authenticate through Keychain.
     pub fn credentials(self) -> &'static str {
         match self {
             Self::Claude => ".credentials.json",
@@ -374,10 +374,37 @@ pub fn codex_homes(home: &Path, selected: Option<&Path>) -> io::Result<Vec<PathB
         .collect())
 }
 
+/// A macOS Claude login can belong to the profile path in Keychain, even
+/// when a credential file also exists. Only a confirmed logged-out status
+/// permits relocation; unavailable status must never justify retiring a login.
+/// Use Claude's supported, bounded probe rather than reading credential bytes.
+pub(crate) fn preserve_claude_auth_scope(provider: Provider, home: &Path, folder: &Path) -> bool {
+    if !cfg!(target_os = "macos") || provider != Provider::Claude {
+        return false;
+    }
+    let profile = if folder == home.join(".claude") {
+        "main"
+    } else {
+        "named"
+    };
+    crate::cli::claude::probe_login_state(profile, folder)
+        != crate::account_registry::LoginState::LoggedOut
+}
+
 /// Build the plan for `provider` under `home`. Reads only.
 pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
     let base = provider.base_dir(home);
-    let accounts = discover(provider, home).context("could not list account directories")?;
+    let mut accounts = discover(provider, home).context("could not list account directories")?;
+    let preserved_scopes: BTreeSet<_> = accounts
+        .iter_mut()
+        .filter_map(|account| {
+            preserve_claude_auth_scope(provider, home, &account.path).then(|| {
+                // This boolean is conservative when the native probe is unavailable.
+                account.has_login = true;
+                account.path.clone()
+            })
+        })
+        .collect();
     let named: BTreeSet<String> = accounts
         .iter()
         .filter(|account| !account.retiring)
@@ -390,6 +417,14 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
     // Final label of every account directory that keeps living.
     let mut keep: Vec<(String, &AccountDir)> = Vec::new();
     for account in &accounts {
+        if preserved_scopes.contains(&account.path) {
+            notes.push(format!(
+                "{} kept in place: macOS Claude authentication is active or unknown and may be tied to this path; shared items are still linked",
+                account.label
+            ));
+            keep.push((account.label.clone(), account));
+            continue;
+        }
         let name = account.label.strip_prefix(provider.prefix()).unwrap_or("");
         if account.retiring {
             match account.email.as_deref() {
@@ -1028,13 +1063,15 @@ pub fn drift(provider: Provider, home: &Path) -> Result<Vec<Drift>> {
     }
     let mut found = Vec::new();
     for account in discover(provider, home)? {
+        let retiring = account.retiring
+            && !preserve_claude_auth_scope(provider, home, &account.path);
         for item in provider.shared() {
             if !base.join(item).exists() {
                 continue;
             }
             let path = account.path.join(item);
             let linked = std::fs::read_link(&path).is_ok_and(|target| target == base.join(item));
-            if !linked || account.retiring {
+            if !linked || retiring {
                 found.push(Drift {
                     provider,
                     account: account.label.clone(),

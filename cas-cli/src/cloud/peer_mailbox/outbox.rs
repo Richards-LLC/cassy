@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 pub const OUTBOX_TTL_SECS: i64 = 15 * 60;
 const SEND_LEASE_SECS: i64 = 120;
+const BUILD_ROUTE_SEND_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerSendError {
@@ -28,10 +29,34 @@ pub(crate) fn build_route_recent_peers(root: &Path, since: i64) -> Result<std::c
     read().map_err(|error| error.to_string())
 }
 
-pub(crate) fn cancel_build_route(root: &Path, sender: &str, key: &str) -> Result<(), String> {
-    let cancel = || -> anyhow::Result<()> {
-        connection(root)?.execute("UPDATE peer_message_outbox SET state='abandoned',last_error='build route expired; local admission restored' WHERE sender_agent_id=?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key')=?2 AND cloud_id IS NULL AND state IN ('pending','retrying')", params![sender,key])?;
-        Ok(())
+/// Accepted asks and active transport leases withhold local dispatch. This is
+/// task-keyed, independent of a replacement source supervisor or peer directory.
+pub(crate) fn build_route_ownership(root: &Path, key: &str) -> Result<Option<(String, String)>, String> {
+    let read = || -> anyhow::Result<_> {
+        route_ownership(&connection(root)?, key)
+    };
+    read().map_err(|error| error.to_string())
+}
+
+fn route_ownership(conn: &Connection, key: &str) -> anyhow::Result<Option<(String, String)>> {
+    Ok(conn.query_row(
+        "SELECT recipient,COALESCE(cloud_id,'peer-outbox:' || id) FROM peer_message_outbox
+         WHERE json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?1
+         AND (cloud_id IS NOT NULL OR state='sent' OR
+              (state='retrying' AND last_error IS NULL AND next_attempt_at>?2)) LIMIT 1",
+        params![key, chrono::Utc::now().timestamp()], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?)
+}
+
+/// False means a transport lease or accepted ask won the race with cancellation.
+pub(crate) fn cancel_build_route(root: &Path, sender: &str, key: &str) -> Result<bool, String> {
+    let cancel = || -> anyhow::Result<bool> {
+        let mut conn = connection(root)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if route_ownership(&tx, key)?.is_some() { return Ok(false); }
+        tx.execute("UPDATE peer_message_outbox SET state='abandoned',last_error='build route expired; local admission restored' WHERE sender_agent_id=?1 AND json_valid(payload) AND json_extract(payload,'$.dedupe_key')=?2 AND cloud_id IS NULL AND state IN ('pending','retrying')", params![sender,key])?;
+        tx.commit()?;
+        Ok(true)
     };
     cancel().map_err(|error| error.to_string())
 }
@@ -65,20 +90,37 @@ pub(super) fn enqueue_and_send(
     message: PeerSend,
     recipient: &str,
 ) -> Result<SendReceipt, PeerSendError> {
-    enqueue_with_recovery(root, message, recipient, false)
+    enqueue_with_recovery(root, message, recipient, false, false)
+}
+
+/// Scheduler feedback uses the existing retry duty without network I/O on the
+/// queue-selection lane. Persist even if credentials need to recover first.
+pub(crate) fn enqueue_feedback(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
+    enqueue_with_recovery(root, message, recipient, false, true)
 }
 
 /// Publication may re-attempt an abandoned receipt after the peer recovers.
 /// Keep the original logical send key; ordinary messages retain their policy.
 pub(super) fn enqueue_premerge_receipt(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
-    enqueue_with_recovery(root, message, recipient, true)
+    enqueue_with_recovery(root, message, recipient, true, false)
 }
 
 fn enqueue_with_recovery(
-    root: &Path, mut message: PeerSend, recipient: &str, recover_abandoned: bool,
+    root: &Path, mut message: PeerSend, recipient: &str, recover_abandoned: bool, defer_send: bool,
 ) -> Result<SendReceipt, PeerSendError> {
     // Refuse before persisting: no login means no retry promise.
-    http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
+    if !defer_send {
+        http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
+    }
+    // Cloud refuses a longer body, so a row above the cap could only be
+    // abandoned. Deferred sends are refused here too, before persisting.
+    let chars = message.body.chars().count();
+    if chars > super::CLOUD_BODY_MAX_CHARS {
+        return Err(failed(
+            format!("message body is {chars} characters; Cassy Cloud accepts at most {}. Nothing was queued", super::CLOUD_BODY_MAX_CHARS),
+            None,
+        ));
+    }
     let sender = crate::store::open_agent_store(root)
         .and_then(|agents| {
             agents
@@ -92,10 +134,10 @@ fn enqueue_with_recovery(
         if !message.dedupe_key.is_empty() {
             let existing: Option<(i64, Option<String>, String)> = tx.query_row(
                 "SELECT id,cloud_id,state FROM peer_message_outbox
-                 WHERE sender_agent_id=?1
+                 WHERE (sender_agent_id=?1 OR ?4)
                  AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?2
-                 AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 LIMIT 1",
-                params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id],
+                 AND (json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 OR ?4) LIMIT 1",
+                params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id, message.dedupe_key.starts_with("build-route:")],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional()?;
             if let Some((id, cloud_id, state)) = existing {
@@ -144,6 +186,9 @@ fn enqueue_with_recovery(
     if let Some(id) = sent {
         return Ok(SendReceipt { id, status: "duplicate".into() });
     }
+    if defer_send {
+        return Ok(SendReceipt { id: format!("peer-outbox:{id}"), status: "queued".into() });
+    }
     retry_peer_send(root, id)
 }
 
@@ -165,11 +210,19 @@ fn attempt(
     now: i64,
 ) -> anyhow::Result<Option<Result<SendReceipt, PeerSendError>>> {
     let conn = connection(root)?;
+    let pending: Option<String> = conn.query_row(
+        "SELECT payload FROM peer_message_outbox WHERE id=?1 AND state IN ('pending','retrying')",
+        [id], |row| row.get(0),
+    ).optional()?;
+    if let Some(payload) = pending {
+        let message: PeerSend = serde_json::from_str(&payload)?;
+        if reconcile_build_route(root, &message, false)? { return Ok(None); }
+    }
     // Atomic lease prevents simultaneous MCP and daemon retries from owning a
     // row. The cloud key also protects against a crash after cloud acceptance.
     let claimed: Option<(String, u32)> = conn
         .query_row(
-            "UPDATE peer_message_outbox SET state='retrying',attempts=attempts+1,next_attempt_at=?2
+            "UPDATE peer_message_outbox SET state='retrying',attempts=attempts+1,next_attempt_at=?2,last_error=NULL
          WHERE id=?1 AND state IN ('pending','retrying') AND next_attempt_at<=?3 AND created_at>?4
          RETURNING payload,attempts",
             params![id, now + SEND_LEASE_SECS, now, now - OUTBOX_TTL_SECS],
@@ -189,13 +242,22 @@ fn attempt(
             Ok(Some(Ok(receipt)))
         }
         Err(cause) => {
-            let retryable = retryable(&cause);
+            let retryable = retryable(&cause)
+                && !(message.dedupe_key.starts_with("build-route:") && attempts >= BUILD_ROUTE_SEND_ATTEMPTS);
             let state = if retryable { "retrying" } else { "abandoned" };
             let delay = (5_i64 * (1_i64 << attempts.saturating_sub(1).min(3))).min(30);
             conn.execute("UPDATE peer_message_outbox SET state=?2,last_error=?3,next_attempt_at=?4 WHERE id=?1 AND state='retrying' AND attempts=?5", params![id,state,cause,now+delay,attempts])?;
+            if !retryable { reconcile_build_route(root, &message, true)?; }
             Ok(Some(Err(failed(cause, retryable.then_some(id)))))
         }
     }
+}
+
+fn reconcile_build_route(root: &Path, message: &PeerSend, send_failed: bool) -> anyhow::Result<bool> {
+    if !message.dedupe_key.starts_with("build-route:") { return Ok(false); }
+    crate::factory_build_routing::reconcile_retry(
+        root, &message.sender_agent_id, &message.dedupe_key, send_failed,
+    ).map_err(anyhow::Error::msg)
 }
 
 fn retryable(cause: &str) -> bool {
@@ -245,6 +307,23 @@ pub(super) fn tick(root: &Path, session: &str) -> Result<(), String> {
 fn tick_at(root: &Path, _session: &str, now: i64) -> anyhow::Result<()> {
     let conn = connection(root)?;
     conn.execute("UPDATE peer_message_outbox SET state='abandoned',last_error=COALESCE(last_error,'mailbox unavailable') || '; retry TTL expired' WHERE state IN ('pending','retrying') AND created_at<=?1 AND next_attempt_at<=?2", params![now-OUTBOX_TTL_SECS,now])?;
+    // Cancellation must not wait for next_attempt_at or another spawn. Also
+    // recover an expiry interrupted between the terminal outbox write and note.
+    let routes = {
+        let mut stmt = conn.prepare("SELECT id,payload,state='abandoned' AND attempts>0 AND COALESCE(last_error,'')!='build route expired; local admission restored' FROM peer_message_outbox WHERE cloud_id IS NULL AND (state IN ('pending','retrying') OR (state='abandoned' AND notice_sent=0)) AND json_valid(payload) AND json_extract(payload,'$.dedupe_key') LIKE 'build-route:%'")?;
+        stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut failed_routes = std::collections::HashSet::new();
+    for (id, payload, send_failed) in routes {
+        if let Err(error) = serde_json::from_str::<PeerSend>(&payload)
+            .map_err(anyhow::Error::from)
+            .and_then(|message| reconcile_build_route(root, &message, send_failed))
+        {
+            tracing::warn!(outbox_id = id, %error, "build-route revalidation failed; leaving ask pending");
+            failed_routes.insert(id);
+        }
+    }
     let notices = {
         let mut stmt = conn.prepare("SELECT id,sender_agent_id,sender_name,sender_session,recipient,last_error FROM peer_message_outbox WHERE state='abandoned' AND notice_sent=0")?;
         stmt.query_map([], |r| {
@@ -278,8 +357,10 @@ fn tick_at(root: &Path, _session: &str, now: i64) -> anyhow::Result<()> {
         }
     }
     let due = {
-        let mut stmt = conn.prepare("SELECT id FROM peer_message_outbox WHERE state IN ('pending','retrying') AND next_attempt_at<=?1 ORDER BY id LIMIT 2")?;
+        let mut stmt = conn.prepare("SELECT id FROM peer_message_outbox WHERE state IN ('pending','retrying') AND next_attempt_at<=?1 ORDER BY id")?;
         stmt.query_map(params![now], |r| r.get::<_, i64>(0))?
+            .filter(|row| match row { Ok(id) => !failed_routes.contains(id), Err(_) => true })
+            .take(2)
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for id in due {
@@ -309,44 +390,155 @@ pub struct OpenPeerAsk {
     pub cloud_id: Option<String>,
     pub recipient: String,
     pub body: String,
+    /// An arrived answer that could not safely be associated with this ask.
+    pub unlinked_answer: Option<String>,
 }
 
-/// Asks (`kind=ask`, or an ask sent with `blocker=true`) from
-/// `sender_agent_id` in the last `window_secs` that no delivered peer reply
-/// answers: a reply naming it with `in_reply_to` whose kind is not a
-/// receipt, quiet FYI or progress status (a bare "ok" or "reviewing, ETA
-/// 1h" does not answer a question; cas-5c23). Abandoned sends never reached
-/// the peer.
+struct PendingAsk {
+    ask: OpenPeerAsk,
+    sender_name: String,
+    peer_id: Option<String>,
+    created_at: i64,
+    answered: bool,
+}
+
+impl PendingAsk {
+    fn from_peer(&self, reply: &PeerEnvelope) -> bool {
+        match self.peer_id.as_deref() {
+            Some(id) => id == reply.sender_agent_id,
+            None => self.ask.recipient.eq_ignore_ascii_case(
+                &format!("{}@{}", reply.sender_name, reply.machine),
+            ),
+        }
+    }
+}
+
+fn names_ask(body: &str, id: &str) -> bool {
+    body.match_indices(id).any(|(at, _)| {
+        let part = |c: char| c.is_ascii_alphanumeric() || c == '-';
+        !body[..at].chars().next_back().is_some_and(part)
+            && !body[at + id.len()..].chars().next().is_some_and(part)
+    })
+}
+
+/// Cassy task ids (`cas-<hex>`) named in `body`.
+fn task_ids(body: &str) -> impl Iterator<Item = &str> {
+    static TASK_ID: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\bcas-[0-9a-f]{4,16}\b").expect("task id pattern"));
+    TASK_ID.find_iter(body).map(|found| found.as_str())
+}
+
+/// Open asks from `sender_agent_id` within `window_secs` (explicit `kind=ask`).
+/// Reply IDs survive succession. Unlinked typed answers need an open ask ID or
+/// exactly one open ask per peer. Replay by arrival; exclude abandoned sends.
 pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<OpenPeerAsk> {
     let Ok(conn) = connection(root) else {
         return Vec::new();
     };
     let since = chrono::Utc::now().timestamp() - window_secs;
     let Ok(mut statement) = conn.prepare(
-        "SELECT o.cloud_id, o.recipient, json_extract(o.payload, '$.body')
+        "SELECT o.cloud_id, o.recipient, json_extract(o.payload, '$.body'),
+                o.sender_name, json_extract(o.payload, '$.recipient_agent_id'), o.created_at
          FROM peer_message_outbox o
          WHERE o.sender_agent_id = ?1 AND o.created_at >= ?2 AND o.state != 'abandoned'
-           AND (json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"ask\"/>%'
-                OR json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"blocker\"/>%')
-           AND (o.cloud_id IS NULL OR NOT EXISTS (
-                SELECT 1 FROM prompt_queue q
-                WHERE q.source LIKE 'peer:%'
-                  AND instr(q.prompt, 'in_reply_to=\"' || o.cloud_id || '\"') > 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"receipt\"') = 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"quiet\"') = 0
-                  AND instr(substr(q.prompt, 1, instr(q.prompt || char(10), char(10))), ' kind=\"status\"') = 0))
+           AND json_extract(o.payload, '$.body') LIKE '<cas-peer-intent kind=\"ask\"/>%'
          ORDER BY o.id",
     ) else {
         return Vec::new();
     };
-    statement
+    let mut asks: Vec<_> = statement
         .query_map(params![sender_agent_id, since], |row| {
-            Ok(OpenPeerAsk {
-                cloud_id: row.get(0)?,
-                recipient: row.get(1)?,
-                body: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            Ok(PendingAsk {
+                ask: OpenPeerAsk {
+                    cloud_id: row.get(0)?,
+                    recipient: row.get(1)?,
+                    body: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    unlinked_answer: None,
+                },
+                sender_name: row.get(3)?,
+                peer_id: row.get(4)?,
+                created_at: row.get(5)?,
+                answered: false,
             })
         })
         .map(|rows| rows.filter_map(Result::ok).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if asks.is_empty() {
+        return Vec::new();
+    }
+    let replies = (|| -> rusqlite::Result<Vec<(String, String, String, i64)>> {
+        let mut statement = conn.prepare(
+            "SELECT source, target, prompt, CAST(strftime('%s', created_at) AS INTEGER) AS epoch
+             FROM prompt_queue WHERE source LIKE 'peer:%' AND epoch >= ?1 ORDER BY epoch, id",
+        )?;
+        Ok(statement.query_map([since], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?.filter_map(Result::ok).collect())
+    })().unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    for (source, target, prompt, arrived_at) in replies {
+        let Some(reply) = parse_envelope(&prompt) else { continue; };
+        if source != format!("peer:{}@{}", reply.sender_name, reply.machine)
+            || !seen.insert(reply.id.clone())
+        {
+            continue;
+        }
+        // Preserve the existing Cloud reply-link contract, including a live
+        // successor answering mail routed from its retired predecessor.
+        if let Some(id) = reply.in_reply_to.as_deref()
+            && let Some(linked) = asks.iter().position(|ask| ask.ask.cloud_id.as_deref() == Some(id))
+        {
+            asks[linked].answered = true;
+            // cas-6b42: one answer often covers several asks. It also clears
+            // earlier open asks to the same peer whose tasks it or its linked
+            // ask names.
+            if reply.kind == Some(PeerMessageKind::Answer) {
+                let body = prompt.split_once('\n').map(|(_, body)| body).unwrap_or("");
+                let covered: std::collections::HashSet<String> = task_ids(&asks[linked].ask.body)
+                    .chain(task_ids(body)).map(str::to_owned).collect();
+                for ask in &mut asks {
+                    let mut tasks = task_ids(&ask.ask.body).peekable();
+                    if !ask.answered && ask.ask.cloud_id.is_some() && ask.created_at <= arrived_at
+                        && ask.from_peer(&reply)
+                        && (target == ask.sender_name || target == sender_agent_id)
+                        && tasks.peek().is_some()
+                        && tasks.all(|task| covered.contains(task))
+                    {
+                        ask.answered = true;
+                    }
+                }
+            }
+            continue;
+        }
+        // Wake intent must not discard an explicit Cloud answer link. These
+        // kinds still cannot answer an ask through implicit correlation.
+        if matches!(reply.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet | PeerMessageKind::Status)) {
+            continue;
+        }
+        let candidates: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {
+            (!ask.answered && ask.created_at <= arrived_at && ask.from_peer(&reply)
+                && (target == ask.sender_name || target == sender_agent_id)).then_some(i)
+        }).collect();
+        let answer = if reply.in_reply_to.is_none() && reply.kind == Some(PeerMessageKind::Answer) {
+            let body = prompt.split_once('\n').map(|(_, body)| body).unwrap_or("");
+            let named: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {
+                ask.ask.cloud_id.as_deref().is_some_and(|id| names_ask(body, id)).then_some(i)
+            }).collect();
+            match named.as_slice() {
+                [i] if candidates.contains(i) => Some(*i),
+                [] if candidates.len() == 1 => Some(candidates[0]),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(i) = answer.filter(|&i| asks[i].ask.cloud_id.is_some()) {
+            asks[i].answered = true;
+        } else if reply.kind == Some(PeerMessageKind::Answer) {
+            for i in candidates {
+                asks[i].ask.unlinked_answer.get_or_insert_with(|| reply.id.clone());
+            }
+        }
+    }
+    asks.into_iter().filter(|ask| !ask.answered).map(|ask| ask.ask).collect()
 }

@@ -5,11 +5,30 @@ not a nitpick. Twelve sections, 0–11; section 0 gates the rest.
 
 ## The two-minute version (start here)
 
-If you check nothing else: **the hero shows the argument, the brief is committed and scores 4+, JS off
+If you check nothing else: **the verdict answers the originating goal against its stated criteria,
+extra bars are separate, the hero shows the argument, the brief is committed and scores 4+, JS off
 and nothing is lost, no external requests, print preview is clean, every number has a source, and the
 markdown says exactly what the HTML says.**
 
-## 0. Concept brief and critique
+## 0. Plan alignment, concept brief and critique
+
+Before scoring form, record `## Plan alignment` in the concept brief:
+
+- [ ] Name the originating plan or request, its revision/section, goal and success criteria.
+      Preserve the specified thresholds, population and time window. If the source is unavailable,
+      mark alignment unverified and ask the supervisor; do not invent replacement criteria.
+- [ ] Map each original criterion to the report's evidence and a met, unmet or unknown assessment.
+      State the resulting plan verdict and check that the markdown and HTML verdict agree with it.
+      For an explanatory request without success criteria, record that fact and check that the
+      takeaway answers the originating question instead of inventing a pass/fail test.
+- [ ] Label any author-added criteria or stricter statistical bar as additional analysis, with
+      their source and rationale. They cannot silently veto a verdict that meets the plan.
+      A different recommendation may follow, but must stay separate from the plan verdict.
+      Adopting a new success criterion requires an explicit plan revision and its owner's decision.
+- [ ] Reject a report whose conclusion contradicts its criterion assessments before scoring form.
+      For example, if every routing criterion is met but an added confidence threshold is unmet,
+      report that the plan criteria are met; present the extra uncertainty and any recommendation
+      separately. A missing observation on an original criterion remains unknown, never a pass.
 
 - [ ] `<basename>.brief.md` exists beside the markdown and names the single idea, the hero form with
       its reason, the emotional register, one distinctive move, and what was omitted.
@@ -26,6 +45,7 @@ markdown says exactly what the HTML says.**
       reason. Only the small `visual-qa.md` is ever committed beside the report.
 - [ ] The tokens in `:root` are the target project's `DESIGN.md`, by name; the task's `design:`
       line names that file.
+- [ ] System fonts only; nothing loads from the network, web fonts included.
 
 ## 1. Content fidelity
 
@@ -38,8 +58,11 @@ markdown says exactly what the HTML says.**
 
 ## 2. Information architecture
 
-- [ ] The hero figure is the first thing on the page, followed by the selected type's lead (conclusion
-      for evaluative reports; capability or system takeaway for explanatory reports).
+- [ ] The `data-verdict` headline states the selected type's lead in at most 40 words (conclusion for
+      evaluative reports; capability or system takeaway for explanatory reports), and the hero
+      figure follows it before any other section.
+- [ ] The page fits its height budget at 1280 px: 4,000 px for an executive or external reader,
+      8,000 px for a practitioner. Case-by-case rows are aggregated or collapsed.
 - [ ] The required sections for this report type are present, in the prescribed order.
 - [ ] An overview table appears before the detail when the selected type requires one.
 - [ ] The depth order matches the audience (executive: detail relegated, methodology last).

@@ -240,6 +240,16 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
     let scope = scope();
     let root = env.home().join("project/.cas");
     project(&root, &scope.team_id);
+    // Scratch lives under the checkout; runtime discovery needs this project's
+    // Git boundary instead of inheriting the outer repository.
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root.parent().unwrap())
+            .status()
+            .unwrap()
+            .success()
+    );
     let gui = runtime(&root, true);
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", server.server_addr());
@@ -251,16 +261,26 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
             .expect("ordinary project verification");
         assert_eq!(get.method().as_str(), "GET");
         assert_eq!(get.url(), format!("/api/teams/{}/projects", target.team_id));
+        assert!(
+            !get.headers()
+                .iter()
+                .any(|header| header.field.equiv("X-Cassy-Attempt-Id"))
+        );
         get.respond(tiny_http::Response::from_string(
             serde_json::json!({"projects":[{"id":"project-id","canonical_id":PROJECT,"name":"fixture","contributor_count":0,"memory_count":0}]})
                 .to_string(),
         ))
         .unwrap();
         let Some(mut post) = server.recv_timeout(Duration::from_secs(5)).unwrap() else {
-            return false;
+            return (false, None);
         };
         assert_eq!(post.method().as_str(), "POST");
         assert_eq!(post.url(), RECONCILE_PATH);
+        let attempt_id = post
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("X-Cassy-Attempt-Id"))
+            .map(|header| header.value.to_string());
         assert_eq!(
             post.headers()
                 .iter()
@@ -287,7 +307,7 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
                 .with_header(tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap()),
         )
         .unwrap();
-        true
+        (true, attempt_id)
     });
     let inventory = RuntimeSnapshot::capture(true);
     env.set("CAS_AGENT_ROLE", "supervisor");
@@ -319,10 +339,16 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
         "{report:?}"
     );
     gui.join().unwrap();
-    let posted = remote.join().unwrap();
+    let (posted, attempt_id) = remote.join().unwrap();
     assert!(
         posted,
         "reconciliation must reach the ordinary HTTP path after actual local drain"
+    );
+    assert_eq!(
+        Uuid::parse_str(&attempt_id.expect("Cloud mutation attempt header"))
+            .unwrap()
+            .get_version_num(),
+        4
     );
     let state = IntakeJournal::new(&root).read().unwrap();
     assert_eq!(state.pauses[0].operation_id, report.operation_id);

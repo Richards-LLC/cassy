@@ -190,7 +190,7 @@ fn generation_helper_reports_missing_key_without_network_access() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("GEMINI_API_KEY"))
-        .stderr(predicate::str::contains("Google AI Studio"));
+        ;
 }
 
 #[test]

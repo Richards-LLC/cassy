@@ -302,45 +302,7 @@ pub(super) fn open_preview(
         .join(session)
         .join(&record.id)
         .join(&record.name);
-    #[cfg(unix)]
-    let mut file = {
-        use std::ffi::CString;
-        use std::os::fd::{AsRawFd, FromRawFd};
-        use std::os::unix::ffi::OsStrExt;
-        let mut current = File::open(&base)?;
-        let components = path.strip_prefix(&base)?.components().collect::<Vec<_>>();
-        for (index, component) in components.iter().enumerate() {
-            anyhow::ensure!(
-                matches!(component, std::path::Component::Normal(_)),
-                "upload unavailable"
-            );
-            let name = CString::new(component.as_os_str().as_bytes())?;
-            let directory = if index + 1 == components.len() {
-                0
-            } else {
-                libc::O_DIRECTORY
-            };
-            // O_NONBLOCK also prevents a replaced FIFO from blocking the hub.
-            let fd = unsafe {
-                libc::openat(
-                    current.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY
-                        | libc::O_NOFOLLOW
-                        | libc::O_CLOEXEC
-                        | libc::O_NONBLOCK
-                        | directory,
-                )
-            };
-            if fd == -1 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            current = unsafe { File::from_raw_fd(fd) };
-        }
-        current
-    };
-    #[cfg(not(unix))]
-    let mut file: File = { anyhow::bail!("upload previews unavailable on this platform") };
+    let mut file = open_beneath(&base, path.strip_prefix(&base)?)?;
     let metadata = file.metadata()?;
     anyhow::ensure!(
         metadata.is_file() && metadata.len() == record.size_bytes,
@@ -370,6 +332,55 @@ pub(super) fn open_preview(
         key.remember();
     }
     Ok(file)
+}
+
+/// Open `relative` beneath the trusted directory `base`, one component at a
+/// time with O_NOFOLLOW: a symlink or `..` anywhere below `base` is refused,
+/// and the file opened is the file checked (no path re-resolution race).
+pub(super) fn open_beneath(base: &FsPath, relative: &FsPath) -> anyhow::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        let mut current = File::open(base)?;
+        let components = relative.components().collect::<Vec<_>>();
+        anyhow::ensure!(!components.is_empty(), "upload unavailable");
+        for (index, component) in components.iter().enumerate() {
+            anyhow::ensure!(
+                matches!(component, std::path::Component::Normal(_)),
+                "upload unavailable"
+            );
+            let name = CString::new(component.as_os_str().as_bytes())?;
+            let directory = if index + 1 == components.len() {
+                0
+            } else {
+                libc::O_DIRECTORY
+            };
+            // O_NONBLOCK also prevents a replaced FIFO from blocking the hub.
+            let fd = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK
+                        | directory,
+                )
+            };
+            if fd == -1 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            current = unsafe { File::from_raw_fd(fd) };
+        }
+        Ok(current)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (base, relative);
+        anyhow::bail!("upload previews unavailable on this platform")
+    }
 }
 
 #[cfg(test)]

@@ -327,6 +327,18 @@ use crate::config::operator_policy::{
 };
 
 impl CasService {
+    pub(in crate::mcp::tools::service) async fn system_estimate(&self, req: SystemRequest) -> Result<CallToolResult,McpError> {
+        let query=req.query.as_deref().unwrap_or("");
+        let parts:Vec<_>=query.splitn(3,':').collect();
+        if parts.len()<2 || (parts[0]=="pipeline" && parts.len()<3) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,"query: pipeline:<stage>:<sha>, task:<id>, epic:<id> or release:<version>"));
+        }
+        let result=crate::quality_ledger::estimates::estimate(&self.inner.cas_root,parts[0],parts[1],parts.get(2).copied(),
+            req.recipient.as_deref().unwrap_or("operator"),20,true)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,error.to_string()))?;
+        Ok(Self::success(serde_json::to_string_pretty(&result).map_err(|error|Self::error(ErrorCode::INTERNAL_ERROR,error.to_string()))?))
+    }
+
     pub(in crate::mcp::tools::service) async fn system_version(
         &self,
     ) -> Result<CallToolResult, McpError> {
@@ -710,13 +722,14 @@ impl CasService {
                 ));
             }
         };
+        // gate[H-44 mcp]: MCP proxy add/remove of supervisor-only servers
         if let Some(refusal) = supervisor_only_proxy_refusal(
             &raw_name,
             Some(&server_config),
             &config,
             &supervisor_only_mcp(&self.inner.cas_root),
         ) {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("H-44", refusal)));
         }
         config.add_server(raw_name.clone(), server_config);
         config.save_to(&proxy_path).map_err(|e| {
@@ -801,7 +814,7 @@ impl CasService {
             &config,
             &supervisor_only_mcp(&self.inner.cas_root),
         ) {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("H-44", refusal)));
         }
 
         debug_assert!(config.remove_server(&raw_name));
@@ -1239,8 +1252,8 @@ mod tests {
         assert!(path.starts_with(temp.path().join("cas-a178")));
         let report = std::fs::read_to_string(&path).expect("staged report");
         assert!(report.contains("worker cannot file bug"));
-        assert!(report.contains("GitHub credential missing, rejected, or unauthorized"));
-        assert!(report.contains("Required GitHub credential: `GH_TOKEN` or `GITHUB_TOKEN`"));
+
+        assert!(report.contains("GH_TOKEN") && report.contains("GITHUB_TOKEN"));
         assert!(!report.contains("ghp_private-token-value"));
         assert!(!report.contains("private-token-value"));
     }

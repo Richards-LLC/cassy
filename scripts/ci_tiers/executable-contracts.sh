@@ -8,8 +8,6 @@ release="$repo_root/.github/workflows/release.yml"
 setup="$repo_root/.github/actions/setup-rust-linux/action.yml"
 fallback="$repo_root/scripts/sccache-unavailable.sh"
 verified="$repo_root/scripts/run-verified-tests.sh"
-snapshot_router="$repo_root/scripts/check-scoped-snapshot-tests.sh"
-snapshot_router_test="$repo_root/scripts/test-check-scoped-snapshot-tests.sh"
 scoped_surface="$repo_root/scripts/check-scoped-test-surface.sh"
 scoped_surface_test="$repo_root/scripts/test-check-scoped-test-surface.sh"
 watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
@@ -153,20 +151,6 @@ else
 fi
 rm -f "$impact_fixture_log"
 
-if [[ -x "$snapshot_router" ]]; then
-    printf 'ok   snapshot router is executable\n'
-    pass=$((pass + 1))
-else
-    printf 'FAIL snapshot router must be executable\n'
-    fail=$((fail + 1))
-fi
-if [[ -x "$snapshot_router_test" ]]; then
-    printf 'ok   snapshot router has an executable self-test\n'
-    pass=$((pass + 1))
-else
-    printf 'FAIL snapshot router has no executable self-test\n'
-    fail=$((fail + 1))
-fi
 
 if [[ -x "$scoped_surface" ]]; then
     printf 'ok   scoped test surface checker is executable\n'
@@ -359,8 +343,12 @@ else
 fi
 rm -f "$unknown_base_output"
 
+# These fixtures exercise explicit path comparisons. A calling factory push
+# widens its own comparison to the delivery fork, so give each fixture the
+# pull-request event it is modeling instead of inheriting the outer lane.
 bridge_touched_output="$(mktemp)"
-if BASE_SHA="c070753a^" \
+if GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/fixture/merge \
+    BASE_SHA="c070753a^" \
     GITHUB_OUTPUT="$bridge_touched_output" \
     bash < <(python3 "$policy_parser" action-run .github/actions/classify-required-diff/action.yml); then
     require_text "$(<"$bridge_touched_output")" 'bridge-check-needed=true' 'a diff touching slack-bridge runs the bridge checks'
@@ -371,7 +359,8 @@ fi
 rm -f "$bridge_touched_output"
 
 bridge_untouched_output="$(mktemp)"
-if BASE_SHA="HEAD" \
+if GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/fixture/merge \
+    BASE_SHA="HEAD" \
     GITHUB_OUTPUT="$bridge_untouched_output" \
     bash < <(python3 "$policy_parser" action-run .github/actions/classify-required-diff/action.yml); then
     require_text "$(<"$bridge_untouched_output")" 'bridge-check-needed=false' 'a diff that leaves slack-bridge alone skips the bridge checks'
@@ -471,22 +460,6 @@ case "${FAKE_GH_MODE:?}:$*" in
   merge-wrong-event:*actions/artifacts*) printf '%s\n' '{"artifacts":[{"expired":false,"workflow_run":{"id":791}}]}' ;;
   merge-wrong-event:*actions/runs/791*) printf '%s\n' '{"event":"push","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/791"}' ;;
   miss:*actions/artifacts*) printf '%s\n' '{"artifacts":[]}' ;;
-  gate-*:*pulls/1134*) printf '%s\n' '{"head":{"sha":"1111111111111111111111111111111111111111"}}' ;;
-  gate-tree-mismatch:*git/commits/1111111111111111111111111111111111111111* | gate-journeys-tree-mismatch:*git/commits/1111111111111111111111111111111111111111*) printf '%s\n' '{"tree":{"sha":"2222222222222222222222222222222222222222"}}' ;;
-  gate-*:*git/commits/1111111111111111111111111111111111111111*) printf '{"tree":{"sha":"%s"}}\n' "${FAKE_TREE:?}" ;;
-  gate-hit:*statuses*) printf '[{"context":"cas/full-gate","state":"success","description":"PASS tree=%s","target_url":"https://example.test/gate"}]\n' "$FAKE_TREE" ;;
-  gate-tree-mismatch:*statuses*) printf '[{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
-  gate-status-other-tree:*statuses*) printf '%s\n' '[{"context":"cas/full-gate","state":"success","description":"PASS tree=3333333333333333333333333333333333333333"}]' ;;
-  gate-failed:*statuses*) printf '[{"context":"cas/full-gate","state":"failure","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
-  gate-superseded:*statuses*) printf '[{"context":"cas/full-gate","state":"failure","description":"FAIL tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
-  gate-other-context:*statuses*) printf '[{"context":"ci/other","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
-  gate-journeys-hit:*statuses*) printf '[{"context":"cas/full-journeys","state":"success","description":"PASS tree=%s","target_url":"https://example.test/journeys"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s","target_url":"https://example.test/gate"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
-  gate-journeys-other-tree:*statuses*) printf '[{"context":"cas/full-journeys","state":"success","description":"PASS tree=3333333333333333333333333333333333333333"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
-  gate-journeys-failed:*statuses*) printf '[{"context":"cas/full-journeys","state":"failure","description":"PASS tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
-  gate-journeys-superseded:*statuses*) printf '[{"context":"cas/full-journeys","state":"failure","description":"FAIL tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"},{"context":"cas/full-journeys","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" "$FAKE_TREE" ;;
-  gate-journeys-only:*statuses*) printf '[{"context":"cas/full-journeys","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
-  gate-journeys-tree-mismatch:*statuses*) printf '[{"context":"cas/full-journeys","state":"success","description":"PASS tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
-  gate-missing:*statuses*) printf '%s\n' '[]' ;;
   error:*) exit 1 ;;
   *) exit 2 ;;
 esac
@@ -537,57 +510,16 @@ done
 
 require_text "$merge_hit_output" 'reuse-source=merge-queue' 'main-push reuse names the merge-queue receipt'
 
-# cas-4cb8: a merge_group run reuses the release train's full-gate receipt for
-# the exact tree: the PR head carries a `cas/full-gate` success status naming
-# that tree, and the PR head's tree is the queue tree. Anything else runs the
-# full Fast Validation.
-run_queue_gate_guard() {
-    local mode="$1"
-    local output="$guard_tmp/queue-$mode.output"
-    : >"$output"
-    GITHUB_OUTPUT="$output" GITHUB_EVENT_NAME=merge_group \
-        GITHUB_REF="refs/heads/gh-readonly-queue/main/pr-1134-4444444444444444444444444444444444444444" \
-        GITHUB_REPOSITORY=example/repo FAKE_GH_MODE="$mode" FAKE_TREE="$guard_tree" \
-        FAKE_GH_LOG="$guard_tmp/gh.log" PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >"$guard_tmp/queue-$mode.notice"
-    cat "$output"
-}
-gate_hit_output="$(run_queue_gate_guard gate-hit)"
-require_absent "$(<"$guard_tmp/queue-gate-hit.notice")" 'macOS Check still runs.' 'queue reuse notice does not claim the removed macOS check ran'
-require_text "$gate_hit_output" 'run-fast-validation=false' 'a matching full-gate tree receipt skips the queue Fast Validation lanes'
-require_text "$gate_hit_output" 'reuse-source=full-gate' 'queue reuse names the full-gate receipt'
-require_text "$gate_hit_output" 'prior-run-url=https://example.test/gate' 'queue reuse exposes the gate receipt URL'
-require_text "$gate_hit_output" 'validating-run-id=full-gate:1111111111111111111111111111111111111111' 'queue reuse names the proven PR head'
-for mode in gate-tree-mismatch gate-status-other-tree gate-failed gate-superseded gate-other-context gate-missing error; do
-    output_path="$(run_queue_gate_guard "$mode")"
-    require_text "$output_path" 'run-fast-validation=true' "$mode full-gate evidence fails closed to the full queue validation"
-    require_absent "$output_path" 'run-fast-validation=false' "$mode full-gate evidence never skips the queue validation"
-done
+# Full-set artifact integrity, plumbing-only reuse, and moved-main/no-receipt
+# controls now exercise the real consumer in scripts/test-train-ci.py. A bare
+# cas/full-gate status is deliberately insufficient; retired status-only and
+# separate full-journeys fixtures no longer authorize queue shortcuts.
 non_queue_output="$guard_tmp/queue-non-pr-ref.output"
 : >"$non_queue_output"
 GITHUB_OUTPUT="$non_queue_output" GITHUB_EVENT_NAME=merge_group GITHUB_REF=refs/heads/gh-readonly-queue/main/unknown \
-    GITHUB_REPOSITORY=example/repo FAKE_GH_MODE=gate-hit FAKE_TREE="$guard_tree" \
-    FAKE_GH_LOG="$guard_tmp/gh.log" PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >/dev/null
+    GITHUB_REPOSITORY=example/repo FAKE_GH_MODE=error FAKE_GH_LOG="$guard_tmp/gh.log" \
+    PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >/dev/null
 require_absent "$(<"$non_queue_output")" 'run-fast-validation=false' 'a queue ref without a PR number never skips'
-
-# cas-9f70: the queue also skips the Commander journeys, but only when the
-# full-gate receipt matches and the latest `cas/full-journeys` status is a PASS
-# naming the same tree. Every other case runs the journeys.
-require_text "$gate_hit_output" 'journeys-reuse=false' 'a full-gate receipt alone still runs the Commander journeys'
-require_absent "$gate_hit_output" 'journeys-reuse=true' 'a full-gate receipt alone never skips the Commander journeys'
-journeys_hit_output="$(run_queue_gate_guard gate-journeys-hit)"
-require_text "$journeys_hit_output" 'run-fast-validation=false' 'the full-gate receipt is still reused alongside the journeys proof'
-require_text "$journeys_hit_output" 'journeys-reuse=true' 'a matching full-journeys proof skips the queue Commander journeys'
-require_text "$journeys_hit_output" 'journeys-prior-url=https://example.test/journeys' 'journeys reuse exposes the proof URL'
-for mode in gate-journeys-other-tree gate-journeys-failed gate-journeys-superseded; do
-    output_path="$(run_queue_gate_guard "$mode")"
-    require_text "$output_path" 'run-fast-validation=false' "$mode keeps the full-gate reuse"
-    require_absent "$output_path" 'journeys-reuse=true' "$mode full-journeys evidence fails closed to running the journeys"
-done
-for mode in gate-journeys-only gate-journeys-tree-mismatch gate-missing error; do
-    output_path="$(run_queue_gate_guard "$mode")"
-    require_text "$output_path" 'run-fast-validation=true' "$mode runs the full queue validation"
-    require_absent "$output_path" 'journeys-reuse=true' "$mode never skips the journeys without a matching full gate"
-done
 
 mutated_guard="$guard_tmp/check-ci-merge-queue-validation-mutated.sh"
 sed 's/\.event == "merge_group"/.event == "push"/' "$merge_queue_guard" >"$mutated_guard"

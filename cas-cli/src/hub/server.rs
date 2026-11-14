@@ -33,6 +33,8 @@ mod secret_request;
 mod account_routes;
 #[path = "artifact_proxy.rs"]
 pub(crate) mod artifact_proxy;
+#[path = "local_image.rs"]
+mod local_image;
 
 #[path = "dismissed_sessions.rs"]
 mod dismissed_sessions;
@@ -252,6 +254,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route(
             "/v1/sessions/{session}/status",
             get(status::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/quality",
+            get(quality::<R>).options(preflight::<R>),
         )
         .route(
             "/v1/sessions/{session}/lease",
@@ -679,6 +685,9 @@ struct MachineResponse {
     transport: super::MachineTransport,
     cloud_devices: Vec<super::CloudDeviceSuggestion>,
     default_supervisor_cli: String,
+    /// cas-93d1: running `cas hub preview` windows, for "Preview this delivery".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    previews: Vec<super::PreviewWindow>,
 }
 
 async fn machine<R: SessionReadModel>(
@@ -724,6 +733,11 @@ async fn machine<R: SessionReadModel>(
                     .map(|llm| llm.harness_for_role("supervisor").to_owned())
             })
             .unwrap_or_else(|| "claude".into()),
+            previews: state
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.live_previews(chrono::Utc::now()).ok())
+                .unwrap_or_default(),
         })
         .into_response(),
         &headers,
@@ -1258,6 +1272,12 @@ enum FleetOperation {
         #[serde(default)]
         assignee: Option<String>,
     },
+    /// Freeze a release train for its release (cas-2f4d).
+    FreezeTrain { epic_id: String },
+    /// The operator's lift of a train freeze; no supervisor action lifts it.
+    LiftTrainFreeze { epic_id: String },
+    /// The operator's pause or resume of a train's auto-cut (cas-e060).
+    SetAutoCutPaused { epic_id: String, paused: bool },
 }
 
 impl FleetOperation {
@@ -1270,19 +1290,25 @@ impl FleetOperation {
             Self::RecycleWorker { .. } => "operation:recycle_worker",
             Self::ShutdownWorkers { .. } => "operation:shutdown_workers",
             Self::AssignTask { .. } => "operation:assign_task",
+            Self::FreezeTrain { .. } => "operation:freeze_train",
+            Self::LiftTrainFreeze { .. } => "operation:lift_train_freeze",
+            Self::SetAutoCutPaused { .. } => "operation:set_auto_cut_paused",
         }
     }
 
     /// O1 is an explicit supervisor message. Reversible and additive
     /// operations need `factory:operate`; destructive ones (restart, stop)
-    /// need `factory:manage` (brief: distinct scopes for destructive actions).
+    /// need `factory:manage`. Release freeze decisions need only a verified
+    /// pairing's baseline read scope; preview mutations are still refused.
     fn scope(&self) -> Scope {
         match self {
             Self::RequestMerge { .. } => Scope::MessageSend,
+            Self::FreezeTrain { .. } | Self::LiftTrainFreeze { .. } => Scope::MachineRead,
             Self::FocusEpic { .. }
             | Self::SpawnWorkers { .. }
             | Self::SetWorkerHold { .. }
-            | Self::AssignTask { .. } => Scope::FactoryOperate,
+            | Self::AssignTask { .. }
+            | Self::SetAutoCutPaused { .. } => Scope::FactoryOperate,
             Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } => Scope::FactoryManage,
         }
     }
@@ -1308,6 +1334,8 @@ impl FleetOperation {
                 "task={task_id} assignee={}",
                 assignee.as_deref().unwrap_or("<none>")
             ),
+            Self::FreezeTrain { epic_id } | Self::LiftTrainFreeze { epic_id } => format!("epic={epic_id}"),
+            Self::SetAutoCutPaused { epic_id, paused } => format!("epic={epic_id} paused={paused}"),
         }
     }
 }
@@ -1423,7 +1451,7 @@ async fn session_operation<R: SessionReadModel>(
     let operation_session = session.clone();
     let expected = request.expected;
     let outcome =
-        run_fleet_operation(cas_dir, operation_session, operation, expected, attribution).await;
+        run_fleet_operation(cas_dir.clone(), operation_session, operation, expected, attribution).await;
 
     use crate::ops::fleet::OperationError;
     let (status, body, audit_outcome, detail) = match outcome {
@@ -1470,6 +1498,15 @@ async fn session_operation<R: SessionReadModel>(
         tracing::warn!(%error, %session, action, "cas-566b: operation outcome audit row could not be written");
     }
     if status == StatusCode::OK {
+        let kind = match action {
+            "operation:lift_train_freeze" => cas_store::InterventionKind::TrainFreezeLift,
+            "operation:set_auto_cut_paused" => cas_store::InterventionKind::AutoCutPause,
+            _ => cas_store::InterventionKind::CommanderAction,
+        };
+        crate::quality_ledger::intervention(&cas_dir, kind,
+            format!("commander|{}|{op_id}", context.device_id),
+            body["outcome"]["epic_id"].as_str().or_else(|| body["outcome"]["task_id"].as_str()),
+            Some(&context.device_id), Some(action));
         state.events.fleet_changed(&session);
     }
     replays.insert(
@@ -1812,6 +1849,24 @@ fn run_store_operation(
                 // S3 (cas-31f0): Undo sends this as a new operation.
                 "inverse": fleet::focus_epic_inverse(current.as_deref(), now.as_deref()),
             }))
+        }
+        FleetOperation::FreezeTrain { epic_id } => {
+            let actor = format!("operator {}", attribution.operator_label.as_deref().unwrap_or("via Commander"));
+            let detail = crate::mcp::tools::core::workflow::release_freeze::freeze(cas_dir, &epic_id, &actor, None)
+                .map_err(|error| OperationError::Invalid(error.to_string()))?;
+            Ok(serde_json::json!({"kind": "freeze_train", "epic_id": epic_id, "detail": detail}))
+        }
+        FleetOperation::LiftTrainFreeze { epic_id } => {
+            let actor = format!("operator {}", attribution.operator_label.as_deref().unwrap_or("via Commander"));
+            let detail = crate::mcp::tools::core::workflow::release_freeze::lift(cas_dir, &epic_id, &actor)
+                .map_err(|error| OperationError::Invalid(error.to_string()))?;
+            Ok(serde_json::json!({"kind": "lift_train_freeze", "epic_id": epic_id, "detail": detail}))
+        }
+        FleetOperation::SetAutoCutPaused { epic_id, paused } => {
+            let actor = format!("operator {}", attribution.operator_label.as_deref().unwrap_or("via Commander"));
+            let detail = crate::mcp::tools::core::workflow::release_auto_cut::set_paused(cas_dir, &epic_id, &actor, paused)
+                .map_err(|error| OperationError::Invalid(error.to_string()))?;
+            Ok(serde_json::json!({"kind": "set_auto_cut_paused", "epic_id": epic_id, "paused": paused, "detail": detail}))
         }
         worker => Err(OperationError::Failed(format!(
             "{} is a worker operation, not a store operation",
@@ -2591,6 +2646,33 @@ async fn status<R: SessionReadModel>(
     }
 }
 
+/// Commander's Quality sheet (cas-3dd7): the session project's friction ledger,
+/// per release, read-only.
+async fn quality<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}/quality");
+    if let Err(error) =
+        authorize(&state, HubAction::SessionRead, Scope::SessionRead, &headers, "GET", &uri)
+    {
+        return with_cors(unauthorized_for(&error), &headers);
+    }
+    match tokio::task::spawn_blocking(move || {
+        let session = crate::bridge::server::session::resolve_session_by_name(&session)?;
+        let root =
+            crate::bridge::server::session::cas_root_for_session_with_fallback(&session, None)?;
+        crate::cli::ledger::quality_reports(&root, 5)
+    })
+    .await
+    {
+        Ok(Ok(quality)) => with_cors(Json(quality).into_response(), &headers),
+        Ok(Err(_)) => with_cors(generic_not_found(), &headers),
+        Err(error) => with_cors(internal_error(error.into()), &headers),
+    }
+}
+
 /// A short-lived signed URL for viewing an artifact the session published
 /// (cassy#910), so a Commander report card can open the hosted copy. The
 /// machine asks Cloud with its own credentials: the browser never holds a
@@ -2772,6 +2854,11 @@ fn artifact_view_error(error: crate::artifacts::ViewError) -> Response {
     use crate::artifacts::cloud::ViewFailure;
     let (status, code, detail) = match &error {
         ViewError::Unknown(_) => return generic_not_found(),
+        ViewError::Revoked(_) | ViewError::Cloud(ViewFailure::Revoked) => (
+            StatusCode::GONE,
+            "artifact_revoked",
+            None,
+        ),
         ViewError::NotInCloud { status } => (
             StatusCode::CONFLICT,
             "artifact_not_in_cloud",
@@ -3129,6 +3216,7 @@ async fn handle_client_message(
     if let ClientMessage::SendMessage { attribution, .. }
         | ClientMessage::SupervisorCommand { attribution, .. }
         | ClientMessage::SupervisorCommandStatus { attribution, .. }
+        | ClientMessage::SupervisorCommandCancel { attribution, .. }
         | ClientMessage::SupervisorCommandStep { attribution, .. } = &mut message {
         // cas-e8df: identity comes from the authenticated device session, never
         // from what the client put in the frame. Whatever labels arrived are
@@ -3511,7 +3599,10 @@ fn authenticate_mutation<R: SessionReadModel>(
         .get("dpop")
         .and_then(|value| value.to_str().ok())
         .context("proof required")?;
-    auth.authenticate_dpop(authorization, proof, &origin, "POST", path, chrono::Utc::now())
+    let context = auth.authenticate_dpop(authorization, proof, &origin, "POST", path, chrono::Utc::now())?;
+    // cas-93d1: a preview origin never mutates.
+    if context.preview { return Err(ScopeDenied.into()); }
+    Ok(context)
 }
 
 /// cas-4634: a one-use challenge for this device's account enrollment
@@ -3770,6 +3861,7 @@ pub(crate) fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRef
         .or_else(|| match serde_json::from_slice::<ClientMessage>(bytes).ok()? {
             ClientMessage::SupervisorCommand { client_ref, .. }
             | ClientMessage::SupervisorCommandStatus { client_ref, .. }
+            | ClientMessage::SupervisorCommandCancel { client_ref, .. }
             | ClientMessage::SupervisorCommandStep { client_ref, .. } => Some((client_ref, PendingRefKind::SupervisorCommand)),
             _ => None,
         })
@@ -3897,6 +3989,7 @@ pub(crate) fn admit_correlated_daemon_frame(
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Observed => "observed",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Refused => "denied",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Unconfirmed => "unconfirmed",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Cancelled => "cancelled",
         }, "supervisor_command_receipt", Scope::PaneRead, session, Some(detail), chrono::Utc::now()).is_err() { return false; }
     }
     match correlate_daemon_frame(pending, session, bytes) {
@@ -4131,17 +4224,26 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     let (mut wire_sink, mut wire_source) = socket.split();
     let (sink, mut writes) = tokio::sync::mpsc::channel::<Message>(64);
     let (reads, mut source) = tokio::sync::mpsc::channel(64);
+    // cas-327d: why the transport ended, so a dropped Commander socket is
+    // never silent in the hub log.
+    let transport_exit = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let transport_exit_writer = transport_exit.clone();
     // The transport has no catalog, daemon attach, store or command work.
     // A subscription can wait seconds on those without preventing this
     // already-authenticated socket from answering its liveness probe.
     let transport = tokio::spawn(async move {
+        let exit = |reason: String| {
+            if let Ok(mut slot) = transport_exit_writer.lock() {
+                slot.get_or_insert(reason);
+            }
+        };
         loop {
             tokio::select! {
                 incoming = wire_source.next() => {
-                    let Some(incoming) = incoming else { break; };
+                    let Some(incoming) = incoming else { exit("client_gone".into()); break; };
                     match &incoming {
                         Ok(Message::Ping(payload)) => {
-                            if wire_sink.send(Message::Pong(payload.clone())).await.is_err() { break; }
+                            if wire_sink.send(Message::Pong(payload.clone())).await.is_err() { exit("write_failed".into()); break; }
                             continue;
                         }
                         Ok(Message::Text(text)) => {
@@ -4150,21 +4252,32 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                             {
                                 if let Some(ping) = envelope.ping {
                                     let pong = serde_json::json!({"channel":"health","pong":ping});
-                                    if wire_sink.send(Message::Text(pong.to_string().into())).await.is_err() { break; }
+                                    if wire_sink.send(Message::Text(pong.to_string().into())).await.is_err() { exit("write_failed".into()); break; }
                                 }
                                 continue;
                             }
                         }
                         _ => {}
                     }
-                    let ended = matches!(&incoming, Ok(Message::Close(_)) | Err(_));
+                    let ended = match &incoming {
+                        Ok(Message::Close(frame)) => Some(format!(
+                            "client_close code={}",
+                            frame.as_ref().map(|frame| u16::from(frame.code).to_string()).unwrap_or_else(|| "none".into())
+                        )),
+                        Err(error) => Some(format!("read_error: {error}")),
+                        _ => None,
+                    };
                     // Bound command backlog independently of health. Closing
                     // on overflow preserves command order without silent loss.
-                    if reads.try_send(incoming).is_err() || ended { break; }
+                    if reads.try_send(incoming).is_err() {
+                        exit(ended.unwrap_or_else(|| "command_backlog_full".into()));
+                        break;
+                    }
+                    if let Some(reason) = ended { exit(reason); break; }
                 }
                 outgoing = writes.recv() => {
-                    let Some(outgoing) = outgoing else { break; };
-                    if wire_sink.send(outgoing).await.is_err() { break; }
+                    let Some(outgoing) = outgoing else { exit("hub_closed".into()); break; };
+                    if wire_sink.send(outgoing).await.is_err() { exit("write_failed".into()); break; }
                 }
             }
         }
@@ -4185,6 +4298,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         revalidation_period,
     );
     revalidation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut hub_exit = "send_failed";
 
     loop {
         tokio::select! {
@@ -4208,11 +4322,11 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     let result = match machine_binary_frame(&session, &frame) {
                         Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
                         Ok(None) => {
-                            let Ok(message) = serde_json::from_slice::<serde_json::Value>(&frame.bytes) else { break };
+                            let Ok(message) = serde_json::from_slice::<serde_json::Value>(&frame.bytes) else { hub_exit = "frame_not_json"; break };
                             let envelope = serde_json::json!({"channel":format!("pty:{session}"),"message":message});
                             sink.send(Message::Text(envelope.to_string().into())).await
                         }
-                        Err(_) => break,
+                        Err(_) => { hub_exit = "frame_encode_failed"; break }
                     };
                     if result.is_err() { break; }
 
@@ -4229,14 +4343,14 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     let envelope = serde_json::json!({"channel":format!("pty:{session}"),"closed":true});
                     if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
                 }
-                None => break,
+                None => { hub_exit = "outbound_closed"; break }
             },
             incoming = source.recv() => match incoming {
                 Some(Ok(Message::Ping(payload))) => {
                     if sink.send(Message::Pong(payload)).await.is_err() { break; }
                 }
                 Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => { hub_exit = "transport_ended"; break }
                 Some(Ok(Message::Binary(_))) => {
                     let error = serde_json::json!({"error":{"code":"binary_client_frame","message":"Commander controls must be JSON"}});
                     if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
@@ -4367,6 +4481,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                 }
             } => {
                 if revoked.as_deref() == auth.as_ref().map(|(_, context)| context.device_id.as_str()) {
+                    hub_exit = "device_revoked";
                     let _ = sink.send(Message::Close(None)).await;
                     break;
                 }
@@ -4383,6 +4498,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                 }).await.unwrap_or(true)
             } => {
                 if revoked_on_disk {
+                    hub_exit = "authorization_recheck_failed";
                     let _ = sink.send(Message::Close(None)).await;
                     break;
                 }
@@ -4393,8 +4509,20 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         handle.abort();
     }
     transport.abort();
+    let transport_reason = transport_exit.lock().ok().and_then(|slot| slot.clone());
+    let reason = match (hub_exit, transport_reason) {
+        ("transport_ended", Some(transport)) => transport,
+        (hub, _) => hub.to_string(),
+    };
+    let device = auth.as_ref().map(|(_, context)| context.device_id.as_str()).unwrap_or("-");
+    if reason.starts_with("client_close") || reason == "client_gone" {
+        tracing::info!(%reason, device, "Commander machine socket closed");
+    } else {
+        tracing::warn!(%reason, device, "Commander machine socket closed");
+    }
 }
 
+// gate-audit[force]: selector Chooses the HubAdmin takeover operation with its own required scope; does not bypass authentication or that scope.
 async fn acquire_lease<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     Path(session): Path<String>,
@@ -4526,7 +4654,7 @@ async fn release_lease<R: SessionReadModel>(
 #[error("scope denied")]
 struct ScopeDenied;
 
-fn authorize<R: SessionReadModel>(
+pub(super) fn authorize<R: SessionReadModel>(
     state: &HubState<R>,
     action: HubAction,
     scope: Scope,
@@ -4553,6 +4681,10 @@ fn authorize<R: SessionReadModel>(
             chrono::Utc::now(),
         )?;
         if !context.has(scope) { return Err(ScopeDenied.into()); }
+        // cas-93d1: a preview origin shows a candidate Commander against live
+        // data. Its scopes are already read-only; no mutation route is open
+        // to it either, whatever scope that route asks for.
+        if context.preview && action == HubAction::Mutation { return Err(ScopeDenied.into()); }
         Ok(Some(context))
     } else if state
         .authorizer
@@ -4737,6 +4869,7 @@ mod artifact_view_tests {
     #[test]
     fn each_reason_an_artifact_cannot_be_viewed_has_its_own_status() {
         let cases = [
+            (ViewError::Revoked(crate::artifacts::ArtifactRevoked { artifact_id: "art-fixture".into() }), StatusCode::GONE),
             (
                 ViewError::NotInCloud {
                     status: "local".to_string(),
@@ -5014,6 +5147,7 @@ mod catalog_visibility_tests {
         ended.ended = Some(crate::ui::factory::SessionEndOutcome {
             at: "2026-11-01T10:00:00Z".into(), reason: "exit".into(),
             workers_stopped: vec![], orphans: vec![], unverified: vec![],
+            worker_states: vec![],
         });
         let all = vec![live, dead, empty, missing, crashed, ended];
         let visible = supervisor_sessions(all.clone(), false);
@@ -5050,7 +5184,7 @@ mod upstream_unavailable_tests {
                 device_id: credential.device_id, credential_id: credential.credential_id,
                 device_label: "phone".into(), operator_label: "Operator".into(),
                 controller_origin: "https://controller.example".into(), scopes: invitation.scopes,
-                request_id: "refusal-request".into(),
+                request_id: "refusal-request".into(), preview: false,
             };
             let frame = if cause == "lease" {
                 serde_json::json!({"SupervisorCommand": {"command": "compact", "confirmed": false, "client_ref": "refused-send"}})
@@ -5092,7 +5226,7 @@ mod upstream_unavailable_tests {
         let context = AuthContext {
             device_id: credential.device_id, credential_id: credential.credential_id,
             device_label: "phone".into(), operator_label: "Operator".into(),
-            controller_origin: "https://controller.example".into(), scopes, request_id: "command-request".into(),
+            controller_origin: "https://controller.example".into(), scopes, request_id: "command-request".into(), preview: false,
         };
         let trusted = Some((auth.clone(), context.clone()));
         let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
@@ -5101,7 +5235,12 @@ mod upstream_unavailable_tests {
         })).unwrap();
         let no_lease = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
         assert!(!is_upstream_unavailable(&no_lease), "a command without control reached the daemon boundary");
+        let cancel = serde_json::to_vec(&serde_json::json!({"SupervisorCommandCancel":{"client_ref":"cmd-test"}})).unwrap();
+        let no_lease = handle_client_message(&connector, "command-session", &trusted, &cancel).await.unwrap_err();
+        assert!(!is_upstream_unavailable(&no_lease));
         auth.acquire_lease(&context, "command-session", now).unwrap();
+        let allowed_cancel = handle_client_message(&connector, "command-session", &trusted, &cancel).await.unwrap_err();
+        assert!(is_upstream_unavailable(&allowed_cancel));
         let unconfirmed = handle_client_message(&connector, "command-session", &trusted, &command("clear", false)).await.unwrap_err();
         assert!(unconfirmed.to_string().contains("confirmation"));
         let arbitrary = handle_client_message(&connector, "command-session", &trusted, &command("/compact; whoami", true)).await.unwrap_err();
@@ -5155,7 +5294,7 @@ mod upstream_unavailable_tests {
             operator_label: "Daniel".into(),
             controller_origin: "https://controller.example".into(),
             scopes,
-            request_id: "request-a0e2".into(),
+            request_id: "request-a0e2".into(), preview: false,
         };
         let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
         let frame = serde_json::json!({

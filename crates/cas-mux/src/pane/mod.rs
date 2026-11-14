@@ -5,6 +5,10 @@
 //! - A ghostty_vt Terminal for state management
 //! - Metadata (agent name, role, etc.)
 
+#[cfg(unix)]
+mod handoff;
+#[cfg(unix)]
+pub use handoff::{PaneHandoff, PtyHandoff};
 mod snapshot;
 mod style;
 mod tests;
@@ -60,7 +64,7 @@ pub enum UserInputKind {
 pub type PaneId = String;
 
 /// The kind of pane
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaneKind {
     /// Worker agent (Claude/Codex CLI)
     Worker,
@@ -166,6 +170,7 @@ pub struct Pane {
     pub(crate) cols: u16,
     /// Optional recording writer for session capture
     recorder: Option<Arc<Mutex<RecordingWriter>>>,
+    handoff_recording_path: Option<PathBuf>,
     /// Whether to force all rows dirty on next take (for new client sync)
     force_all_dirty: bool,
     /// Last known total scrollback lines (for scroll detection)
@@ -291,6 +296,7 @@ impl Pane {
             rows,
             cols,
             recorder: None,
+            handoff_recording_path: None,
             force_all_dirty: true,
             last_total_scrollback: info.total_scrollback,
             seq_counter: 0,
@@ -1054,6 +1060,15 @@ impl Pane {
             .map_err(|e| Error::terminal(e.to_string()))
     }
 
+    /// Read the live screen without moving a viewer scrolled into history.
+    pub fn dump_live_row(&self, row: u16) -> Result<String> {
+        let info = self.terminal.scrollback_info();
+        let start = info.total_scrollback.saturating_sub(u32::from(info.viewport_rows));
+        self.terminal
+            .dump_screen_row(start + u32::from(row))
+            .map_err(|e| Error::terminal(e.to_string()))
+    }
+
     pub fn row_styles(&self, row: u16) -> Result<Vec<CellStyle>> {
         self.terminal
             .row_cell_styles(row)
@@ -1235,6 +1250,18 @@ impl Pane {
         (coalesced, other_events)
     }
 
+    /// Total bytes accepted by the PTY input queue and physically written.
+    /// Includes harness/control writes; panes without a PTY report zero.
+    pub fn input_byte_counts(&self) -> (u64, u64) {
+        match &self.backend {
+            PaneBackend::Pty(pty) => {
+                let input = pty.input();
+                (input.bytes_received(), input.bytes_written())
+            }
+            PaneBackend::None => (0, 0),
+        }
+    }
+
     pub async fn write(&self, data: &[u8]) -> Result<()> {
         match &self.backend {
             PaneBackend::Pty(pty) => {
@@ -1290,6 +1317,7 @@ impl Pane {
     }
 
     /// Override the harness events path (tests only).
+    // gate-audit[harness_events_path_override]: selector Test-only event input path, not factory work admission.
     pub fn set_harness_events_path_for_test(&self, path: impl Into<PathBuf>) {
         if let Ok(mut guard) = self.harness_events_path_override.lock() {
             *guard = Some(path.into());
@@ -1337,6 +1365,7 @@ impl Pane {
     /// Claude/Codex are deliberately unchanged: their tracked boolean is not a
     /// normal-completion/busy signal.
     /// Quiet PTY output alone never clears — long MCP/tool waits stay active.
+    // gate-audit[harness_events_path_override]: selector Test-only event input path; changes observed telemetry, not policy.
     pub fn refresh_harness_turn_state(&self) {
         if !self.is_turn_in_flight() {
             return;
@@ -1375,6 +1404,7 @@ impl Pane {
         }
     }
 
+    // gate-audit[harness_events_path_override]: selector Test-only event input path; fallback discovers production telemetry.
     fn resolve_harness_events_path(&self) -> Option<PathBuf> {
         if let Ok(guard) = self.harness_events_path_override.lock() {
             if let Some(ref p) = *guard {

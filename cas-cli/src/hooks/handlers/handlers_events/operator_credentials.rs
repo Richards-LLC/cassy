@@ -99,7 +99,12 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     }
     let mut cwd = initial_cwd.to_path_buf();
     let mut directory_stack = Vec::new();
-    for words in super::pre_tool::shell_statement_words(command) {
+    // Nested shells are not standalone listings, so their payloads never
+    // reach here with inert names.
+    let names_inert = depth == 0 && listed_names_stay_inert(command);
+    let statements = super::pre_tool::shell_statement_words(command);
+    let arguments = super::pre_tool::shell_statement_arguments(command);
+    for (statement_index, words) in statements.iter().enumerate() {
         let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
             continue;
         };
@@ -150,7 +155,18 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             continue;
         }
 
-        if statement_references_store(&words, &cwd, depth) {
+        // Parse actual argv, without `2>/dev/null`, but retain raw words for
+        // protected redirect targets below. Ambiguous statement alignment
+        // keeps the conservative read classification.
+        let names_only = names_inert
+            && statements.len() == arguments.len()
+            && arguments.get(statement_index).is_some_and(|argv| {
+                super::pre_tool::unwrapped_command_index(argv).is_some_and(|index| {
+                    argv[index] == words[command_index]
+                        && lists_names_only(&executable, &argv[index + 1..])
+                })
+            });
+        if statement_references_store(words, &cwd, depth, names_only) {
             return true;
         }
     }
@@ -160,7 +176,12 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
         .any(|body| script_constructs_store_path(body, &cwd))
 }
 
-fn statement_references_store(words: &[String], cwd: &Path, depth: usize) -> bool {
+fn statement_references_store(
+    words: &[String],
+    cwd: &Path,
+    depth: usize,
+    names_only: bool,
+) -> bool {
     if depth > 3 {
         return false;
     }
@@ -186,9 +207,12 @@ fn statement_references_store(words: &[String], cwd: &Path, depth: usize) -> boo
     }
     let cwd = &wrapper_cwd(&words[..command_index], cwd);
 
-    let recursive = invocation_recursively_reads_directories(&executable, args);
+    let descends = invocation_recursively_reads_directories(&executable, args);
+    // A listing descends into a store's parent but opens no file. An operand
+    // that names a store itself is still refused below.
+    let recursive = descends && !names_only;
     let recursive_operands = recursive_path_operand_indices(&executable, args);
-    let store_parent_cwd = recursive && cwd_is_store_or_parent(cwd);
+    let store_parent_cwd = descends && cwd_is_store_or_parent(cwd);
     for (index, arg) in args.iter().enumerate() {
         let explicit_path = shell_argument_is_path(&executable, arg, cwd);
         let inferred_recursive_path = store_parent_cwd
@@ -199,10 +223,23 @@ fn statement_references_store(words: &[String], cwd: &Path, depth: usize) -> boo
             return true;
         }
     }
+    // `zip -R` matches its patterns under the working directory.
     if store_parent_cwd
+        && executable == "zip"
+        && args.iter().any(|arg| {
+            arg == "--recurse-patterns"
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('R'))
+        })
+        && path_references_store(".", cwd, true)
+    {
+        return true;
+    }
+    if recursive
+        && store_parent_cwd
         && matches!(executable.as_str(), "rg" | "grep" | "egrep" | "fgrep")
         && recursive_search_defaults_to_cwd(&executable, args)
-        && recursive_path_operand_indices(&executable, args).is_empty()
+        // The first positional may be the search pattern, not a file.
+        && recursive_operands.len() <= 1
         && path_references_store(".", cwd, true)
     {
         return true;
@@ -250,6 +287,99 @@ fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
     cwd
 }
 
+/// `rg --files` and a `find` that runs no command print names without
+/// opening files (GH #1838, #1700). The argv is parsed, never searched for a
+/// token: every option must be one the listing grammar knows, so an option
+/// value (`-e --files`, `--regexp=--files`, `-name -exec`) or a word after
+/// `--` cannot stand in for the listing form. Anything else is a read.
+fn lists_names_only(name: &str, args: &[String]) -> bool {
+    match name {
+        "rg" => rg_lists_names_only(args),
+        "find" => find_lists_names_only(args),
+        _ => false,
+    }
+}
+
+fn rg_lists_names_only(args: &[String]) -> bool {
+    const FLAGS: &[&str] = &[
+        "--files", "--hidden", "-.", "--no-ignore", "--no-ignore-vcs", "--no-ignore-parent",
+        "--no-ignore-dot", "-u", "-uu", "-uuu", "--follow", "-L", "--null", "-0",
+        "--no-messages", "--one-file-system",
+    ];
+    const VALUES: &[&str] = &[
+        "-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not", "-d", "--max-depth",
+        "--sort", "--sortr", "--color",
+    ];
+    let mut files = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if VALUES.contains(&arg) {
+            index += 2;
+            continue;
+        }
+        let known_value = arg
+            .split_once('=')
+            .is_some_and(|(name, _)| name.starts_with("--") && VALUES.contains(&name));
+        if arg.starts_with('-') && !FLAGS.contains(&arg) && !known_value {
+            return false;
+        }
+        files |= arg == "--files";
+        index += 1;
+    }
+    files
+}
+
+fn find_lists_names_only(args: &[String]) -> bool {
+    const TESTS: &[&str] = &[
+        "-print", "-print0", "-prune", "-o", "-or", "-a", "-and", "-not", "!", "(", ")",
+        "-empty", "-xdev", "-mount", "-follow", "-depth", "-readable", "-writable",
+        "-executable", "-true", "-false", "-nouser", "-nogroup",
+    ];
+    const VALUED: &[&str] = &[
+        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-type", "-xtype",
+        "-maxdepth", "-mindepth", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime",
+        "-cmin", "-perm", "-regex", "-iregex", "-regextype", "-user", "-group", "-uid", "-gid",
+        "-links", "-inum", "-newer", "-samefile",
+    ];
+    let mut index = 0;
+    while args.get(index).is_some_and(|arg| matches!(arg.as_str(), "-H" | "-L" | "-P")) {
+        index += 1;
+    }
+    while args
+        .get(index)
+        .is_some_and(|arg| !arg.starts_with('-') && !matches!(arg.as_str(), "!" | "(" | ")"))
+    {
+        index += 1;
+    }
+    while let Some(arg) = args.get(index) {
+        index += if VALUED.contains(&arg.as_str()) {
+            2
+        } else if TESTS.contains(&arg.as_str()) {
+            1
+        } else {
+            return false;
+        };
+    }
+    true
+}
+
+/// Only a standalone listing (optionally redirected to a file) qualifies.
+/// A pipeline consumer can open the listed files, even when it also works
+/// as a text filter (`sort --files0-from=-`). Substitutions can likewise
+/// turn names into file operands. Leave those forms to normal inspection.
+fn listed_names_stay_inert(command: &str) -> bool {
+    if command.contains("$(") || command.contains('`') || command.contains("<(")
+        || command.contains(">(")
+    {
+        return false;
+    }
+    super::pre_tool::shell_statement_words(command).len() == 1
+}
+
 fn cwd_is_store_or_parent(cwd: &Path) -> bool {
     store_roots(cwd)
         .iter()
@@ -267,17 +397,21 @@ fn path_operand_is_bare_relative(argument: &str) -> bool {
         && !normalized.contains(['*', '?', '['])
 }
 
+/// Every non-option word after the command flag may be the command string:
+/// other options take their own values (`bash -oc pipefail '<cmd>'`).
 fn shell_command_payloads(args: &[String]) -> Vec<&str> {
-    let mut payloads = Vec::new();
-    for (index, arg) in args.iter().enumerate() {
-        let is_command_flag = arg == "--command"
+    let Some(flag) = args.iter().position(|arg| {
+        arg == "--command"
             || arg == "-c"
-            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'));
-        if is_command_flag && let Some(payload) = args.get(index + 1) {
-            payloads.push(payload.as_str());
-        }
-    }
-    payloads
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'))
+    }) else {
+        return Vec::new();
+    };
+    args[flag + 1..]
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .map(String::as_str)
+        .collect()
 }
 
 fn cd_target(args: &[String]) -> Option<&str> {
@@ -297,10 +431,19 @@ fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool
     };
     match name {
         "rg" | "find" => true,
-        "grep" | "egrep" | "fgrep" => has_flag("--recursive", &['r', 'R']),
+        "grep" | "egrep" | "fgrep" => {
+            has_flag("--recursive", &['r', 'R'])
+                || args.iter().enumerate().any(|(index, arg)| {
+                    matches!(arg.as_str(), "--directories=recurse" | "-drecurse")
+                        || (matches!(arg.as_str(), "-d" | "--directories")
+                            && args.get(index + 1).is_some_and(|value| value == "recurse"))
+                })
+        }
         "cp" => has_flag("--recursive", &['a', 'r', 'R']) || has_flag("--archive", &[]),
-        "tar" => !args.iter().any(|arg| arg == "--no-recursion"),
-        "zip" => has_flag("--recurse-paths", &['r']),
+        // `--no-recursion` can be another option's value (`--exclude
+        // --no-recursion`); tar is treated as recursive.
+        "tar" => true,
+        "zip" => has_flag("--recurse-paths", &['r', 'R']) || has_flag("--recurse-patterns", &[]),
         "rsync" => has_flag("--archive", &['a']) || has_flag("--recursive", &['r']),
         _ => false,
     }
@@ -309,18 +452,9 @@ fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool
 fn recursive_path_operand_indices(command: &str, args: &[String]) -> Vec<usize> {
     let positionals = positional_argument_indices(command, args);
     match command {
-        "rg" | "grep" | "egrep" | "fgrep" => {
-            let pattern_from_option = args.iter().any(|arg| {
-                matches!(arg.as_str(), "-e" | "--regexp" | "-f" | "--file")
-                    || arg.starts_with("--regexp=")
-                    || (arg.starts_with("-e") && arg.len() > 2)
-                    || (arg.starts_with("-f") && arg.len() > 2)
-            });
-            positionals
-                .into_iter()
-                .skip(usize::from(!pattern_from_option))
-                .collect()
-        }
+        // Whether the first positional is the pattern depends on options
+        // (`-ie token`, `--glob -e`); every positional may be an operand.
+        "rg" | "grep" | "egrep" | "fgrep" => positionals,
         "find" => args
             .iter()
             .enumerate()
@@ -523,6 +657,15 @@ fn path_operand_is_path_shaped(reference: &str) -> bool {
 }
 
 fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> bool {
+    path_references_store_with_glob(reference, cwd, include_parent, true)
+}
+
+fn path_references_store_with_glob(
+    reference: &str,
+    cwd: &Path,
+    include_parent: bool,
+    match_hidden: bool,
+) -> bool {
     let reference = normalize_path_operand(reference);
     if reference.is_empty() {
         return false;
@@ -531,10 +674,9 @@ fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> b
     if let Some(expanded) = expand_path_prefix(reference) {
         let candidate = lexical_absolute(Path::new(&expanded), cwd);
         if candidate.to_string_lossy().contains(['*', '?', '[']) {
-            if roots
-                .iter()
-                .any(|root| glob_path_may_reach_root(&candidate, root, include_parent))
-            {
+            if roots.iter().any(|root| {
+                glob_path_may_reach_root(&candidate, root, include_parent, match_hidden)
+            }) {
                 return true;
             }
         } else if roots.iter().any(|root| {
@@ -572,7 +714,12 @@ fn attached_file_value(word: &str) -> Option<&str> {
     Some(&flags[index + flag.len_utf8()..])
 }
 
-fn glob_path_may_reach_root(pattern: &Path, root: &Path, include_parent: bool) -> bool {
+fn glob_path_may_reach_root(
+    pattern: &Path,
+    root: &Path,
+    include_parent: bool,
+    match_hidden: bool,
+) -> bool {
     let pattern: Vec<String> = pattern
         .components()
         .filter_map(|component| match component {
@@ -591,7 +738,10 @@ fn glob_path_may_reach_root(pattern: &Path, root: &Path, include_parent: bool) -
     if !pattern[..shared]
         .iter()
         .zip(&root[..shared])
-        .all(|(pattern, component)| glob_component_matches(pattern, component))
+        .all(|(pattern, component)| {
+            (match_hidden || !component.starts_with('.') || pattern.starts_with('.'))
+                && glob_component_matches(pattern, component)
+        })
     {
         return false;
     }
@@ -778,11 +928,22 @@ fn alias_references_store(reference: &str, include_parent: bool) -> bool {
 }
 
 fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
+    static PYTHON_GLOB_OPERAND: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"\bglob\.(?:glob|iglob)\(\s*(?:os\.path\.expanduser\(\s*)?$")
+                .expect("static Python glob operand pattern")
+        });
     let strings = quoted_strings(script);
-    if strings
-        .iter()
-        .any(|part| path_operand_is_path_shaped(part) && path_references_store(part, cwd, false))
-    {
+    // Python glob's default '*' cannot enter .config or .local. Restrict
+    // that allowance to a literal glob operand, never another script path.
+    // Explicit or dynamically supplied keyword options stay conservative.
+    let default_glob_options = !script.contains("include_hidden") && !script.contains("**");
+    if strings.iter().any(|(offset, part)| {
+        let match_hidden =
+            !default_glob_options || !PYTHON_GLOB_OPERAND.is_match(&script[..*offset]);
+        path_operand_is_path_shaped(part)
+            && path_references_store_with_glob(part, cwd, false, match_hidden)
+    }) {
         return true;
     }
     let source = script.to_ascii_lowercase();
@@ -816,7 +977,12 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
     {
         return true;
     }
-    let components = strings.join("/").to_ascii_lowercase();
+    let components = strings
+        .iter()
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_ascii_lowercase();
     [
         ".config/neonctl/credentials.json",
         ".local/share/com.vercel.cli/auth.json",
@@ -833,24 +999,24 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
                 .any(|suffix| components.contains(suffix)))
 }
 
-fn quoted_strings(source: &str) -> Vec<String> {
+fn quoted_strings(source: &str) -> Vec<(usize, String)> {
     let mut strings = Vec::new();
-    let mut chars = source.chars().peekable();
-    while let Some(ch) = chars.next() {
+    let mut chars = source.char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
         if !matches!(ch, '\'' | '"') {
             continue;
         }
         let quote = ch;
         let mut value = String::new();
         let mut escaped = false;
-        for ch in chars.by_ref() {
+        for (_, ch) in chars.by_ref() {
             if escaped {
                 value.push(ch);
                 escaped = false;
             } else if ch == '\\' {
                 escaped = true;
             } else if ch == quote {
-                strings.push(value);
+                strings.push((offset, value));
                 break;
             } else {
                 value.push(ch);

@@ -153,6 +153,8 @@ struct CheckReport<'a> {
     #[serde(flatten)]
     validation: &'a crate::qa_registry::ValidationReport,
     debt_summary: DebtSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upkeep: Option<&'a crate::qa_upkeep::DiffUpkeep>,
 }
 
 #[derive(Subcommand)]
@@ -189,6 +191,10 @@ pub enum QaCommand {
         /// Check schema, references and globs without executing specs
         #[arg(long)]
         check: bool,
+        /// With --check: also refuse registry problems and unowned new
+        /// surface files that the diff from this ref to HEAD introduced
+        #[arg(long, requires = "check")]
+        base: Option<String>,
         /// Bootstrap from tracked routes and project context
         #[arg(long)]
         seed: bool,
@@ -295,6 +301,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
         },
         QaCommand::Journeys {
             check: _,
+            base,
             seed,
             merge,
             status,
@@ -426,6 +433,11 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                 }
                 return Ok(());
             }
+            // cas-4b33: the lane lint's diff-scoped upkeep (formerly park G-49).
+            let upkeep = base
+                .as_deref()
+                .map(|base| crate::qa_upkeep::for_diff(&project_root, &qa, base, "HEAD"))
+                .transpose()?;
             let registry_path = qa.registry.path;
             let report = crate::qa_registry::check(&project_root, Path::new(&registry_path))?;
             let debt_summary = DebtSummary::record(
@@ -440,6 +452,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                     serde_json::to_string_pretty(&CheckReport {
                         validation: &report,
                         debt_summary,
+                        upkeep: upkeep.as_ref(),
                     })?
                 );
             } else {
@@ -516,9 +529,22 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                     }
                 }
             }
+            if let Some(upkeep) = upkeep.as_ref().filter(|_| !cli.json) {
+                for warning in &upkeep.warnings {
+                    println!("{warning}");
+                }
+                for finding in &upkeep.findings {
+                    println!("UPKEEP {} {}:\n{}", finding.gate, finding.title, finding.detail);
+                }
+                if upkeep.refuses() {
+                    println!("FIX: own each new surface file (owner glob, owner group or ignore) and repair the registry problems this diff caused");
+                }
+            }
+            // gate[G-49 lane-lint]: Registry upkeep (journey registry and unowned user-facing files)
             anyhow::ensure!(
-                report.problems.is_empty(),
-                "fix the registry problems, then rerun: cas qa journeys --check"
+                report.problems.is_empty() && !upkeep.as_ref().is_some_and(|u| u.refuses()),
+                "{}",
+                crate::gates::tag("G-49", "fix the registry problems, then rerun: cas qa journeys --check")
             );
             Ok(())
         }
@@ -741,14 +767,28 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         "a worker never builds a candidate in its own process; request it with \
          `factory action=candidate_request task_id={task} revision=<sha>`"
     );
-    let script = project.join("scripts/qa-candidate-build.py");
+    let _one_build_per_machine = crate::factory_candidate_queue::hold_machine_build_lock()?;
+    // The builder imports sibling helpers whose own source-relative reads
+    // must also come from --rev. Keep the caller's checkout untouched.
+    let source = tempfile::Builder::new().prefix("cas-candidate-builder-").tempdir()?;
+    let mut archive = Command::new("git")
+        .arg("-C").arg(&project)
+        .args(["archive", "--format=tar", &revision])
+        .stdout(Stdio::piped())
+        .spawn().context("read candidate builder revision")?;
+    let mut stream = archive.stdout.take().context("candidate source stream unavailable")?;
+    let unpacked = tar::Archive::new(&mut stream).unpack(source.path());
+    // Consume trailing archive padding before waiting, including on unpack failure.
+    let drained = std::io::copy(&mut stream, &mut std::io::sink());
+    let status = archive.wait().context("wait for candidate source archive")?;
+    ensure!(status.success(), "candidate source archive exited {status}");
+    unpacked.context("unpack candidate builder revision")?;
+    drained.context("read candidate source archive")?;
+    let script = source.path().join("scripts/qa-candidate-build.py");
     ensure!(
         script.is_file(),
-        "QA candidate builder missing: scripts/qa-candidate-build.py\n\
-         Use an up-to-date Cassy source checkout, then rerun:\n\
-           cas qa candidate build --task {task} \\\n    --rev {revision}"
+        "QA candidate builder missing at {revision}: scripts/qa-candidate-build.py"
     );
-    let _one_build_per_machine = crate::factory_candidate_queue::hold_machine_build_lock()?;
     let status = Command::new("python3")
         .arg(script)
         .arg("--repo")

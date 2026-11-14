@@ -13,6 +13,32 @@ fn create_test_store() -> (TempDir, SqliteTaskStore) {
 }
 
 #[test]
+fn direct_write_receipt_binds_current_revision_cas_a836() {
+    let (temp, store) = create_test_store();
+    let mut task = Task::new("cas-a836".into(), "Peer verdict".into());
+    task.status = TaskStatus::AwaitingMerge;
+    store.add(&task).unwrap();
+    crate::request_changes_for_parked_delivery(temp.path(), &task.id, "reviewer", "retry").unwrap();
+    let returned = store.get(&task.id).unwrap();
+
+    store.record_mutation_receipt(&task.id, "peer-verdict").unwrap();
+    // SyncQueue's recovery classifier consumes this binding. Publishing must
+    // not advance the task revision or rewrite its already committed verdict.
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    let (receipt, current): (i64, i64) = conn.query_row(
+        "SELECT r.revision, t.revision FROM task_mutation_receipts r
+         JOIN task_mutation_revisions t ON t.entity_id = r.entity_id
+         WHERE r.receipt_id = ?1",
+        ["peer-verdict"], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(receipt, current);
+    assert_eq!(serde_json::to_value(store.get(&task.id).unwrap()).unwrap(), serde_json::to_value(&returned).unwrap());
+    assert_eq!(returned.status, TaskStatus::Open);
+    store.delete(&task.id).unwrap();
+    assert!(store.record_mutation_receipt(&task.id, "deleted-verdict").is_err());
+}
+
+#[test]
 fn test_task_crud() {
     let (_temp, store) = create_test_store();
 
@@ -91,8 +117,13 @@ fn test_task_crud() {
 #[test]
 fn task_note_append_preserves_concurrent_appends() {
     let (temp, store) = create_test_store();
-    let task = Task::new("task-note-contention".to_string(), "Task notes".to_string());
+    let mut task = Task::new("task-note-contention".to_string(), "Task notes".to_string());
+    let spawn_note = "[2026-11-10 12:28] 📌 SPAWN BRIEF investigate note loss";
+    task.notes = spawn_note.into();
+    task.assignee = Some("worker".into());
     store.add(&task).unwrap();
+    // Start holds this snapshot while the supervisor appends discovery notes.
+    let mut starting = store.get(&task.id).unwrap();
 
     let stores: Vec<_> = (0..8)
         .map(|_| Arc::new(SqliteTaskStore::open(temp.path()).unwrap()))
@@ -117,7 +148,16 @@ fn task_note_append_preserves_concurrent_appends() {
             .expect("concurrent note append should succeed");
     }
 
+    starting.status = TaskStatus::InProgress;
+    // The real start handler refreshes this clock before its whole-row update.
+    starting.updated_at = Utc::now();
+    let start_note = "[2026-11-10 12:33] START CONTEXT worker instructions";
+    starting.notes.push_str(&format!("\n\n{start_note}"));
+    store.update(&starting).unwrap();
     let persisted = store.get(&task.id).unwrap();
+    assert_eq!(persisted.status, TaskStatus::InProgress);
+    assert_eq!(persisted.notes.matches(spawn_note).count(), 1);
+    assert_eq!(persisted.notes.matches(start_note).count(), 1);
     for index in 0..8 {
         let note = format!("concurrent note {index}");
         assert_eq!(persisted.notes.matches(&note).count(), 1, "{note}");
@@ -306,8 +346,7 @@ fn task_note_append_reports_bounded_contention_exhaustion() {
     holder.execute_batch("COMMIT").unwrap();
 
     let message = error.to_string();
-    assert!(message.contains("database busy"), "{message}");
-    assert!(message.contains("attempt(s)"), "{message}");
+
     assert_eq!(store.get(&task.id).unwrap().notes, "");
 }
 
@@ -1200,7 +1239,8 @@ fn sync_update_preserves_live_execution_lease_cas_c4a52() {
     task.assignee = None;
     store.update(&task).unwrap();
     assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Open);
-    // Releasing the lease also allows a fresh replicated reset afterward.
+    // Lease release does not erase a status-only assigned resume. A local
+    // ownership release is still authoritative and permits replicated reset.
     task.status = TaskStatus::InProgress;
     task.assignee = Some(owner.name.clone());
     store.update(&task).unwrap();
@@ -1209,6 +1249,12 @@ fn sync_update_preserves_live_execution_lease_cas_c4a52() {
     let mut remote = expected.clone();
     remote.status = TaskStatus::Open;
     remote.assignee = None;
+    assert_eq!(store.update_from_sync(&remote, &expected).unwrap(), None);
+    task.assignee = None;
+    store.update(&task).unwrap();
+    let expected = store.get(&task.id).unwrap();
+    let mut remote = expected.clone();
+    remote.status = TaskStatus::Open;
     assert!(store.update_from_sync(&remote, &expected).unwrap().is_some());
 }
 

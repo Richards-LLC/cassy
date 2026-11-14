@@ -65,6 +65,15 @@ const history: Record<string, HistoryPage[]> = {
   ]),
 };
 
+// Each project's release train, as its status reports it (cas-da546).
+const task = (id: string, status: string, epic: string) => ({ id, title: id, status, epic_id: epic, updated_at: at(5) });
+const fleet = {
+  [CAS]: { agents: [], spawnNames: [], focused_epic: "cas-train", epics: [{ id: "cas-train", title: "Release train", counts: { open: 3, in_progress: 1, merged: 1 } }],
+    tasks: [task("t1", "open", "cas-train"), task("t2", "open", "cas-train"), task("t3", "open", "cas-train"), task("t4", "in_progress", "cas-train")] },
+  [STUDIO_S]: { agents: [], spawnNames: [], focused_epic: "studio-train", epics: [{ id: "studio-train", title: "Voice set", counts: { open: 4, in_progress: 1, merged: 4 } }],
+    tasks: [task("s1", "blocked", "studio-train"), task("s2", "open", "studio-train"), task("s3", "open", "studio-train"), task("s4", "open", "studio-train"), task("s5", "in_progress", "studio-train")] },
+};
+
 const page = new PreviewPage();
 page.installTransport();
 const hub = new HubDouble(page as never, {
@@ -72,6 +81,7 @@ const hub = new HubDouble(page as never, {
   paired: ["atlas", "studio", "workstation"],
   multiplex: true,
   history,
+  fleet,
 });
 await hub.install();
 // The exact production bundle (hub-web/dist/app.js), served beside this shim.

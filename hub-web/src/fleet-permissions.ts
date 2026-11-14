@@ -27,12 +27,18 @@ export type FleetOperation =
   | "stop-worker"
   | "end-session"
   /** cas-ab04: grant or revoke a task's write access outside its worktree. */
-  | "write-access";
+  | "write-access"
+  /** cas-2f4d: freeze the release train, or lift its freeze. */
+  | "freeze-train"
+  | "lift-freeze"
+  /** cas-e060: pause or resume the train's automatic cut. */
+  | "auto-cut";
 
 /**
  * Operator decision: Stop, Restart and End session are destructive and need
- * factory:manage; the rest need factory:operate; asking the supervisor to
- * merge is an ordinary message.
+ * factory:manage; worker/task management needs factory:operate; asking the
+ * supervisor to merge is an ordinary message. Release freeze decisions use
+ * the verified pairing's baseline machine-read permission.
  */
 const OPERATION_SCOPE: Readonly<Record<FleetOperation, Scope>> = {
   "ask-merge": "message-send",
@@ -44,6 +50,9 @@ const OPERATION_SCOPE: Readonly<Record<FleetOperation, Scope>> = {
   "stop-worker": FACTORY_MANAGE_SCOPE,
   "end-session": FACTORY_MANAGE_SCOPE,
   "write-access": FACTORY_MANAGE_SCOPE,
+  "freeze-train": "machine-read",
+  "lift-freeze": "machine-read",
+  "auto-cut": FACTORY_OPERATE_SCOPE,
 };
 
 export function fleetOperationScope(operation: FleetOperation): Scope {

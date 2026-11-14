@@ -535,6 +535,14 @@ pub struct FactoryBranchStart {
     pub base_sha: String,
 }
 
+/// Immutable upstream import approved by an authenticated request_changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorizedMergeSource {
+    pub commit: String,
+    pub supervisor_id: String,
+    pub work_target: WorkTarget,
+}
+
 /// Host where a recorded epic lane was bound to its task. Diagnostic provenance
 /// only: current publication is always observed from Git, never from this row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -612,6 +620,11 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_target: Option<WorkTarget>,
 
+    /// A supervisor explicitly corrected this target. Matching an epic's
+    /// default branch no longer makes this binding implicitly inherited.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub work_target_pinned: bool,
+
     /// cas-3b42: a live supervisor cleared this no-code task's code target
     /// (`proof_scope_fix target_repo=""`). Only then is the task's work
     /// target absent by review rather than by default, so only commits that
@@ -685,6 +698,9 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_start: Option<FactoryBranchStart>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorized_merge_sources: Vec<AuthorizedMergeSource>,
+
     /// Commit anchors from prior delivery cycles. `request_changes` clears
     /// `factory_branch_anchor` so a new cycle cannot reuse it as an active
     /// merge proof, but the declined commits remain this task's work and must
@@ -702,6 +718,12 @@ pub struct TaskDeliverables {
     /// that subsequent history has an explicit review disposition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declined_factory_branch_anchors: Option<Vec<String>>,
+
+    /// cas-50b2: the delivery cycle request-changes or a reopen last
+    /// started (0 until one does). It travels with the row, so every machine
+    /// numbers the task's `DeliveryCycle` rows the same way.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delivery_cycle: u32,
 
     /// cas-a844: the `factory/<assignee>` branch name recorded alongside
     /// `factory_branch_anchor` at commit time, with MERGE REQUIRED parking as
@@ -739,6 +761,9 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_close_reason: Option<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_delivery_close_intent: Option<NoDeliveryCloseIntent>,
+
     /// cas-eda0: target tip of the `worktree_merge` that landed this parked
     /// delivery. Admission is recorded separately; old records read as green.
     /// Its presence hands the close
@@ -748,6 +773,18 @@ pub struct TaskDeliverables {
     pub green_merge_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_ci_admission: Option<MergeCiAdmission>,
+}
+
+/// An explicit no-delivery close waiting on one exact verdict, not a sticky methodology.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoDeliveryCloseIntent {
+    pub dispatch_id: String,
+    pub reason: String,
+    pub assignee: Option<String>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// The object-shaped representation used by current task payloads.
@@ -771,6 +808,8 @@ struct TaskDeliverablesObject {
     integration_batch: Option<IntegrationBatchEvidence>,
     #[serde(default)]
     work_target: Option<WorkTarget>,
+    #[serde(default)]
+    work_target_pinned: bool,
     #[serde(default)]
     work_target_cleared: bool,
     #[serde(default)]
@@ -798,9 +837,13 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     factory_branch_start: Option<FactoryBranchStart>,
     #[serde(default)]
+    authorized_merge_sources: Vec<AuthorizedMergeSource>,
+    #[serde(default)]
     historical_factory_branch_anchors: Vec<String>,
     #[serde(default)]
     declined_factory_branch_anchors: Option<Vec<String>>,
+    #[serde(default)]
+    delivery_cycle: u32,
     #[serde(default)]
     parked_branch: Option<String>,
     #[serde(default)]
@@ -809,6 +852,8 @@ struct TaskDeliverablesObject {
     merge_conflicted: bool,
     #[serde(default)]
     parked_close_reason: Option<String>,
+    #[serde(default)]
+    no_delivery_close_intent: Option<NoDeliveryCloseIntent>,
     #[serde(default)]
     green_merge_commit: Option<String>,
     #[serde(default)]
@@ -825,6 +870,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             source_claim_override: value.source_claim_override,
             integration_batch: value.integration_batch,
             work_target: value.work_target,
+            work_target_pinned: value.work_target_pinned,
             work_target_cleared: value.work_target_cleared,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
@@ -838,12 +884,15 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             review_envelope: value.review_envelope,
             factory_branch_anchor: value.factory_branch_anchor,
             factory_branch_start: value.factory_branch_start,
+            authorized_merge_sources: value.authorized_merge_sources,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             declined_factory_branch_anchors: value.declined_factory_branch_anchors,
+            delivery_cycle: value.delivery_cycle,
             parked_branch: value.parked_branch,
             handoff_branches: value.handoff_branches,
             merge_conflicted: value.merge_conflicted,
             parked_close_reason: value.parked_close_reason,
+            no_delivery_close_intent: value.no_delivery_close_intent,
             green_merge_commit: value.green_merge_commit,
             merge_ci_admission: value.merge_ci_admission,
         }
@@ -898,7 +947,22 @@ pub struct TaskAnsweredBlocker {
     pub supervisor: String,
     pub reason: String,
     pub ask: Option<String>,
+    #[serde(default)]
     pub message_id: i64,
+    /// A supervisor task decision can own the wait without a queued message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_event_id: Option<i64>,
+}
+
+/// Latest close gate, with a specific identity or the close_gate fallback,
+/// bound to the task inputs it refused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCloseRefusal {
+    pub code: String,
+    pub next_action: String,
+    pub operator_action_required: bool,
+    pub input_digest: String,
 }
 
 const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
@@ -911,6 +975,7 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "answered_blocker",
     "blocker_ask",
     "qa_impact",
+    "close_refusal",
 ];
 
 /// Apply and validate one structured task execution-state merge patch.
@@ -1064,11 +1129,29 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
             }
             Ok(())
         }
+        "close_refusal" => {
+            let refusal: TaskCloseRefusal = serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid close_refusal: {error}"))?;
+            if refusal.input_digest.len() != 64
+                || !refusal.input_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("close_refusal requires a full input_digest".into());
+            }
+            for (field, text) in [("code", refusal.code), ("next_action", refusal.next_action)] {
+                if text.trim().is_empty() {
+                    return Err(format!("close_refusal requires {field}"));
+                }
+                validate_state_string(field, &Value::String(text))?;
+            }
+            Ok(())
+        }
         "answered_blocker" => {
             let receipt: TaskAnsweredBlocker = serde_json::from_value(value.clone())
                 .map_err(|e| format!("invalid answered_blocker: {e}"))?;
-            if receipt.message_id <= 0 || receipt.worker.is_empty() || receipt.supervisor.is_empty() || receipt.reason.is_empty() {
-                return Err("answered_blocker requires worker, supervisor, reason and a positive message_id".into());
+            let message = receipt.message_id > 0 && receipt.decision_event_id.is_none();
+            let decision = receipt.message_id == 0 && receipt.decision_event_id.is_some_and(|id| id > 0);
+            if !(message || decision) || receipt.worker.is_empty() || receipt.supervisor.is_empty() || receipt.reason.is_empty() {
+                return Err("answered_blocker requires worker, supervisor, reason and exactly one positive message_id or decision_event_id".into());
             }
             for (field, text) in [("worker", receipt.worker), ("supervisor", receipt.supervisor),
                 ("reason", receipt.reason), ("ask", receipt.ask.unwrap_or_default())] {
@@ -1161,16 +1244,26 @@ impl TaskDeliverables {
         {
             self.record_handoff_branch(&previous);
             self.retain_factory_branch_anchor_as_history();
-            self.factory_branch_anchor = Some(tip.to_string());
+            self.mint_or_append(tip);
             self.parked_branch = Some(branch.to_string());
             return;
         }
-        if self.factory_branch_anchor.is_none() {
-            self.factory_branch_anchor = measured_tip.map(str::to_string);
+        if self.factory_branch_anchor.is_none()
+            && let Some(tip) = measured_tip
+        {
+            self.mint_or_append(tip);
         }
         if self.parked_branch.is_none() {
             self.parked_branch = branch;
         }
+    }
+
+    /// cas-50b2: the only production setter of `factory_branch_anchor`.
+    /// Persisting the task mints its `DeliveryCycle` row, or appends this tip
+    /// to the current cycle (`SqliteTaskStore`). A new cycle starts only after
+    /// request-changes or a reopen; every other anchor move appends.
+    pub fn mint_or_append(&mut self, tip: &str) {
+        self.factory_branch_anchor = Some(tip.to_string());
     }
 
     /// Move the active factory anchor out of close authority while retaining
@@ -1234,6 +1327,7 @@ impl TaskDeliverables {
         self.epic_branch_origin.is_none()
             && self.split_takeover.is_none()
             && self.work_target.is_none()
+            && !self.work_target_pinned
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
             && self.evidence_only.is_none()
@@ -1246,6 +1340,7 @@ impl TaskDeliverables {
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
             && self.factory_branch_start.is_none()
+            && self.authorized_merge_sources.is_empty()
             && self.historical_factory_branch_anchors.is_empty()
             && self.declined_factory_branch_anchors.is_none()
             && self.parked_branch.is_none()
@@ -1519,6 +1614,8 @@ impl Task {
 
     /// Effective terminal outcome, including read-side interpretation of
     /// legacy NULL rows. This never mutates or backfills persistence.
+    // gate-audit[evidence_only]: selector Reads already-recorded disposition metadata; cannot authorize or change a close.
+    // gate-audit[negative_result]: selector Reads already-recorded negative-result metadata; cannot authorize or change a close.
     pub fn effective_terminal_outcome(&self) -> Option<TaskTerminalOutcome> {
         self.terminal_outcome.clone().or_else(|| match self.status {
             TaskStatus::Closed if self.deliverables.evidence_only.is_some() => {
@@ -1696,6 +1793,37 @@ mod tests {
         assert!(merge_task_execution_state_patch(&answered, &serde_json::json!({
             "answered_blocker": {"message_id": 0}
         })).is_err());
+        for (message_id, decision_event_id, valid) in [
+            (0, 73, true), (42, 73, false), (0, 0, false), (0, -1, false), (-1, 73, false),
+        ] {
+            let mut receipt = answered["answered_blocker"].clone();
+            receipt["message_id"] = serde_json::json!(message_id);
+            receipt["decision_event_id"] = serde_json::json!(decision_event_id);
+            assert_eq!(merge_task_execution_state_patch(&state, &serde_json::json!({
+                "answered_blocker": receipt
+            })).is_ok(), valid);
+        }
+
+        let refusal = serde_json::json!({
+            "code": "phase_outcome_gate", "next_action": "provide_outcome_receipt",
+            "operator_action_required": false, "input_digest": "a".repeat(64),
+        });
+        let refused = merge_task_execution_state_patch(&state,
+            &serde_json::json!({"close_refusal": refusal})).unwrap();
+        assert_eq!(refused["close_refusal"]["code"], "phase_outcome_gate");
+        assert_eq!(merge_task_execution_state_patch(&refused,
+            &serde_json::json!({"close_refusal": null})).unwrap(), state);
+        for (field, invalid) in [
+            ("code", serde_json::json!(" ")),
+            ("next_action", serde_json::json!(" ")),
+            ("operator_action_required", serde_json::json!("false")),
+            ("input_digest", serde_json::json!("invalid")),
+        ] {
+            let mut invalid_refusal = refusal.clone();
+            invalid_refusal[field] = invalid;
+            assert!(merge_task_execution_state_patch(&state,
+                &serde_json::json!({"close_refusal": invalid_refusal})).is_err());
+        }
 
         let mut future = answered.clone();
         future["future_resume"] = serde_json::json!({"checkpoint": "newer-runtime"});
@@ -1765,6 +1893,14 @@ mod tests {
         assert!(deliverables.phase_outcome.is_none());
         assert!(deliverables.model_eval.is_none());
         assert!(deliverables.pre_close_hook.is_none());
+        assert!(deliverables.no_delivery_close_intent.is_none());
+        let intent = serde_json::json!({"dispatch_id":"dispatch-1", "reason":"Measured no delivery", "assignee":"worker"});
+        for payload in [serde_json::json!({"no_delivery_close_intent":intent}),
+                        serde_json::Value::String(serde_json::json!({"no_delivery_close_intent":intent}).to_string())] {
+            let parsed: TaskDeliverables = serde_json::from_value(payload).unwrap();
+            assert_eq!(parsed.no_delivery_close_intent.as_ref().unwrap().dispatch_id, "dispatch-1");
+            assert_eq!(serde_json::to_value(parsed).unwrap()["no_delivery_close_intent"], intent);
+        }
         assert_eq!(deliverables.effective_merge_ci_admission(), MergeCiAdmission::Green);
         let eval = serde_json::json!({"target":{"dataset":"reader-v1","thresholds":{"accuracy":{"min":95}}},"receipt":null,"artifact":null});
         let parsed: TaskDeliverables = serde_json::from_value(serde_json::json!({"model_eval":eval})).unwrap();
@@ -1844,6 +1980,7 @@ mod tests {
             branch: "factory/worker".into(),
             base_sha: "b".repeat(40),
         });
+        task.deliverables.work_target_pinned = true;
         assert!(
             !task.deliverables.is_empty(),
             "start evidence alone must persist"
@@ -1851,12 +1988,18 @@ mod tests {
         task.deliverables
             .historical_factory_branch_anchors
             .push("a".repeat(40));
+        task.deliverables.authorized_merge_sources.push(AuthorizedMergeSource {
+            commit: "c".repeat(40),
+            supervisor_id: "supervisor".into(),
+            work_target: task.deliverables.factory_branch_start.as_ref().unwrap().work_target.clone(),
+        });
         let encoded = serde_json::to_value(&task).unwrap();
         assert_eq!(
             encoded["deliverables"]["historical_factory_branch_anchors"][0],
             "a".repeat(40)
         );
         let decoded: Task = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.deliverables.work_target_pinned);
         assert_eq!(
             decoded.deliverables.historical_factory_branch_anchors,
             vec!["a".repeat(40)]
@@ -1866,9 +2009,12 @@ mod tests {
             decoded.deliverables.factory_branch_start,
             task.deliverables.factory_branch_start
         );
+        assert_eq!(decoded.deliverables.authorized_merge_sources, task.deliverables.authorized_merge_sources);
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.work_target_pinned);
         assert!(legacy.historical_factory_branch_anchors.is_empty());
         assert!(legacy.factory_branch_start.is_none());
+        assert!(legacy.authorized_merge_sources.is_empty());
     }
 
     #[test]

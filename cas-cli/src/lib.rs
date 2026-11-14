@@ -72,15 +72,18 @@ pub(crate) mod factory_binary_skew;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
 pub(crate) mod supervisor_notices;
+pub(crate) mod supervisor_auto_clear;
 pub(crate) mod supervisor_continuity;
 pub(crate) mod supervisor_branch_recovery;
 pub(crate) mod train_guardrails;
+pub(crate) mod train_ci;
 pub(crate) mod gh_budget;
 pub(crate) mod supervisor_message_wakes;
 pub(crate) mod factory_scratch;
 pub mod factory_review_scratch;
 pub mod factory_target_cache;
 pub mod fs_space;
+pub mod gates;
 pub mod gh_graphql;
 pub mod github_issue_attach;
 pub(crate) mod github_repo;
@@ -107,6 +110,7 @@ pub mod otel;
 pub(crate) mod ops;
 pub mod qa_evidence;
 pub mod qa_ledger;
+pub(crate) mod qa_walk_progress;
 pub(crate) mod quality_ledger;
 pub(crate) mod peer_ask_gate;
 pub(crate) mod ci_waste;
@@ -117,6 +121,7 @@ pub(crate) mod worker_task_queue;
 pub mod qa_pass;
 pub mod qa_registry;
 pub mod qa_impact;
+pub mod qa_upkeep;
 pub mod qa_seed;
 pub mod qa_post_release;
 pub mod rapid_response;
@@ -127,6 +132,7 @@ pub mod qa_author_override;
 pub(crate) mod phase_outcome;
 pub(crate) mod model_eval;
 pub(crate) mod qa_batch;
+pub(crate) mod release_reconcile;
 pub(crate) mod review_body;
 pub mod retrieval_eval;
 pub mod retrieval_parity;
@@ -142,8 +148,6 @@ pub mod tracing;
 pub mod ui;
 pub mod worktree;
 
-#[cfg(test)]
-mod instruction_parity_tests;
 #[cfg(test)]
 mod test_env_guard;
 
@@ -343,7 +347,6 @@ pub(crate) mod test_support {
         let ambient_build_guard =
             crate::test_env_guard::AmbientEnvRestore::set("CAS_FACTORY_BUILD_GUARD", "inherit");
         let provider_keys = [
-            "VIKTOR_API_KEY",
             "NEON_API_KEY",
             "VERCEL_TOKEN",
             "OPENAI_API_KEY",
@@ -362,9 +365,9 @@ pub(crate) mod test_support {
                     "ambient provider credential {key} leaked"
                 );
             }
-            guard.set("VIKTOR_API_KEY", "explicit-fixture");
+            guard.set("NEON_API_KEY", "explicit-fixture");
             assert_eq!(
-                std::env::var("VIKTOR_API_KEY").as_deref(),
+                std::env::var("NEON_API_KEY").as_deref(),
                 Ok("explicit-fixture")
             );
         }
@@ -529,3 +532,5 @@ pub use types::{
 
 #[cfg(test)]
 mod project_hold_tests;
+
+mod finding_triage;

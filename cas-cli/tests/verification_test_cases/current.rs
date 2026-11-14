@@ -555,6 +555,8 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
             Some((verdict.created_at - dispatched_at).num_milliseconds() as u64),
             "direct answers use dispatch elapsed time and preserve it on retry"
         );
+        // The JSON-backed ledger stores fractional minutes. Compare at the
+        // measurement's millisecond precision, not floating-point bit equality.
         assert!(
             cas_store::quality_events_between(&fixture.root, None, None)
                 .unwrap()
@@ -562,7 +564,7 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
                 .any(|event| event.task_id.as_deref() == Some(task_id.as_str())
                     && matches!(&event.payload, cas_store::QualityPayload::CheckRun {
                         minutes: Some(minutes), ..
-                    } if *minutes == verdict.duration_ms.unwrap() as f64 / 60_000.0)),
+                    } if (*minutes * 60_000.0).round() as u64 == verdict.duration_ms.unwrap())),
             "automatic duration must reach the verifier measurement ledger"
         );
         assert!(
@@ -590,4 +592,135 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
             "terminal verdict remains single use"
         );
     }
+}
+
+/// cas-beaf: a supervisor verdict must not close the dispatch under a running verifier.
+#[tokio::test]
+async fn supervisor_verdict_waits_for_a_running_verifier_and_the_late_rejection_is_recorded() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = Fixture::new(&mut env);
+    let agents = open_agent_store(&fixture.root).unwrap();
+    let mut supervisor = Agent::new("running-supervisor".into(), "running-supervisor".into());
+    supervisor.role = AgentRole::Supervisor;
+    agents.register(&supervisor).unwrap();
+    let mut task = Task::new("cas-running".into(), "Verifier still running".into());
+    task.status = TaskStatus::InProgress;
+    task.pending_verification = true;
+    open_task_store_local(&fixture.root).unwrap().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &fixture.root, "cas-running", "running-supervisor", "running-supervisor",
+        &VerificationProofBoundary::task(), chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    agents.register(&Agent::new_sub_agent("running-verifier".into(), "task-verifier".into(), "running-supervisor".into())).unwrap();
+    let issued = cas_store::issue_verifier_capability(&fixture.root, "cas-running", "running-supervisor").unwrap();
+    cas_store::bind_verifier_capability(&fixture.root, &issued.token, "running-verifier").unwrap();
+    cas_store::claim_verification_dispatch(&fixture.root, "cas-running", "running-supervisor", "running-verifier", &issued.capability.id).unwrap();
+    let early = fixture.as_agent("running-supervisor").verification(json!({
+        "action":"add", "task_id":"cas-running", "dispatch_id":dispatch.id,
+        "status":"approved", "summary":"supervisor approves early",
+    })).await;
+    assert!(early.is_err(), "a live verifier keeps the dispatch open");
+    assert!(open_task_store_local(&fixture.root).unwrap().get("cas-running").unwrap().pending_verification);
+    text(fixture.as_agent("running-verifier").verification(json!({
+        "action":"add", "task_id":"cas-running", "dispatch_id":dispatch.id,
+        "status":"rejected", "summary":"verifier rejects", "verifier_capability":issued.token,
+        "issues":"[{\"file\":\"src/lib.rs\",\"category\":\"correctness\",\"problem\":\"incomplete\"}]",
+    })).await.expect("the verifier's late verdict is recorded"));
+    let latest = open_verification_store(&fixture.root).unwrap().get_latest_for_task("cas-running").unwrap().unwrap();
+    assert_eq!(latest.status.to_string(), "rejected");
+}
+
+#[tokio::test]
+async fn infrastructure_error_keeps_exact_dispatch_recoverable_cas_343d() {
+    use cas_types::VerificationDispatchState;
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = Fixture::new(&mut env);
+    let agents = open_agent_store(&fixture.root).unwrap();
+    let supervisor_id = "error-supervisor";
+    let mut supervisor = Agent::new(supervisor_id.into(), supervisor_id.into());
+    supervisor.role = AgentRole::Supervisor;
+    agents.register(&supervisor).unwrap();
+    let tasks = open_task_store_local(&fixture.root).unwrap();
+    for mode in ["redispatch", "supervisor", "legacy_supervisor"] {
+        let task_id = format!("cas-error-{mode}");
+        let mut task = Task::new(task_id.clone(), "Review infrastructure failed".into());
+        task.status = TaskStatus::InProgress;
+        task.pending_verification = true;
+        tasks.add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &fixture.root, &task_id, supervisor_id, supervisor_id,
+            &VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let child_id = format!("error-verifier-{mode}");
+        agents.register(&Agent::new_sub_agent(child_id.clone(), "task-verifier".into(), supervisor_id.into())).unwrap();
+        cas_store::issue_server_verifier_handoff(&fixture.root, &task_id, &dispatch.id, supervisor_id, &format!("first-{mode}")).unwrap();
+        cas_store::bind_server_verifier_handoff(&fixture.root, supervisor_id, &child_id).unwrap();
+        text(fixture.as_agent(&child_id).verification(json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"error", "summary":"Sandbox namespace creation failed before evidence could be read",
+        })).await.unwrap());
+        let after = cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap();
+        assert_eq!(after.state, VerificationDispatchState::Pending);
+        assert!(after.verifier_agent_id.is_none());
+        assert!(after.capability_id.is_none());
+        assert!(tasks.get(&task_id).unwrap().pending_verification);
+        assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(open_verification_store(&fixture.root).unwrap().get_latest_for_task(&task_id).unwrap().unwrap().status, VerificationStatus::Error);
+        assert!(fixture.as_agent(&child_id).verification(json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"approved", "summary":"Late verdict from failed child",
+        })).await.is_err());
+        let caller = if mode == "redispatch" {
+            let next = format!("replacement-{mode}");
+            agents.register(&Agent::new_sub_agent(next.clone(), "task-verifier".into(), supervisor_id.into())).unwrap();
+            cas_store::issue_server_verifier_handoff(&fixture.root, &task_id, &dispatch.id, supervisor_id, &format!("second-{mode}")).unwrap();
+            cas_store::bind_server_verifier_handoff(&fixture.root, supervisor_id, &next).unwrap();
+            next
+        } else {
+            if mode == "legacy_supervisor" {
+                // Replay the historical writer's incorrect terminal state.
+                rusqlite::Connection::open(fixture.root.join("cas.db")).unwrap()
+                    .execute("UPDATE verification_dispatches SET state='resolved',resolved_at=?2 WHERE id=?1",
+                        rusqlite::params![dispatch.id, chrono::Utc::now().to_rfc3339()]).unwrap();
+            }
+            supervisor_id.to_string()
+        };
+        text(fixture.as_agent(&caller).verification(json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"approved", "summary":"Evidence reviewed after infrastructure recovery",
+        })).await.unwrap());
+        let final_dispatch = cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap();
+        assert_eq!(final_dispatch.id, dispatch.id);
+        assert_eq!(final_dispatch.state, VerificationDispatchState::Resolved);
+        assert!(!tasks.get(&task_id).unwrap().pending_verification);
+        let history = open_verification_store(&fixture.root).unwrap().get_for_task(&task_id).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().any(|v| v.status == VerificationStatus::Error));
+        assert!(history.iter().any(|v| v.status == VerificationStatus::Approved));
+    }
+    // A code rejection still consumes the exact review permanently.
+    let task_id = "cas-rejection-terminal";
+    let mut task = Task::new(task_id.into(), "Code rejection".into());
+    task.status = TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &fixture.root, task_id, supervisor_id, supervisor_id,
+        &VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    text(fixture.as_agent(supervisor_id).verification(json!({
+        "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+        "status":"rejected", "summary":"Code defect confirmed",
+    })).await.unwrap());
+    let error = fixture.as_agent(supervisor_id).verification(json!({
+        "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+        "status":"approved", "summary":"Attempt to replace code rejection",
+    })).await.unwrap_err();
+    assert_eq!(cas::gates::codes_in(error.message.as_ref()), ["G-155"]);
+    assert!(cas_store::issue_server_verifier_handoff(
+        &fixture.root, task_id, &dispatch.id, supervisor_id, "rejected-retry",
+    ).is_err());
+    assert_eq!(cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap().state,
+        VerificationDispatchState::Resolved);
 }

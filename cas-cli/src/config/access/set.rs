@@ -166,13 +166,6 @@ impl Config {
                     MemError::Parse("Invalid boolean for hub.tailscale_serve".into())
                 })?);
             }
-            "viktor.enabled" => {
-                self.viktor
-                    .get_or_insert_with(ViktorConfig::default)
-                    .enabled = Some(value.parse().map_err(|_| {
-                    MemError::Parse("Invalid boolean for viktor.enabled".into())
-                })?);
-            }
             "slack.transport" => {
                 self.slack
                     .get_or_insert_with(SlackConfig::default)
@@ -217,6 +210,10 @@ impl Config {
                     .violet_bot_user_ids = (!ids.is_empty()).then_some(ids);
             }
             // Factory build contention
+            "factory.focus_mode" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).focus_mode =
+                    (!value.trim().is_empty()).then(|| value.trim().to_string());
+            }
             "factory.slot_id" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).slot_id =
                     (!value.trim().is_empty()).then(|| value.trim().to_string());
@@ -337,6 +334,12 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.max_workers" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).max_workers =
+                    value.parse().map_err(|_| MemError::Parse(format!(
+                        "Invalid integer value for factory.max_workers: {value}"
+                    )))?;
+            }
             "factory.auto_route_builds" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).auto_route_builds =
                     value.parse().map_err(|_| MemError::Parse(format!(
@@ -446,6 +449,10 @@ impl Config {
                 let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_wakes_per_hour: {value}")))?;
                 self.factory.get_or_insert_with(FactoryConfig::default).supervisor_message_wakes_per_hour = number;
             }
+            "factory.supervisor_wake_input_budget" => {
+                let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_wake_input_budget: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).supervisor_wake_input_budget = number;
+            }
             "factory.message_max_chars" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.message_max_chars = value.parse().map_err(|_| {
@@ -486,6 +493,11 @@ impl Config {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 let root = value.trim();
                 factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
+            }
+            "factory.codex_home" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let directory = value.trim();
+                factory.codex_home = (!directory.is_empty()).then(|| directory.to_string());
             }
             "factory.worker_local_gate" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
@@ -552,6 +564,11 @@ impl Config {
             "factory.ai_enrichment.effort" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.ai_enrichment.effort = value.trim().to_string();
+            }
+            "rules.draft_ttl_days" => {
+                let days = value.parse::<u32>()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+                self.rules.get_or_insert_with(RulesConfig::default).draft_ttl_days = days;
             }
             // Sync section
             "sync.enabled" => {
@@ -1312,6 +1329,19 @@ impl Config {
                     .filter(|entry| !entry.is_empty())
                     .collect();
             }
+            "release.auto_cut_max_per_day" | "release.auto_cut_min_interval_hours" => {
+                let number: u32 = value.trim().parse().map_err(|_| MemError::Parse(format!("Invalid integer for {key}: {value}")))?;
+                let (minimum, maximum) = if key == "release.auto_cut_max_per_day" { (0, 24) } else { (1, 168) };
+                if !(minimum..=maximum).contains(&number) {
+                    return Err(MemError::Parse(format!("{key} must be between {minimum} and {maximum}")));
+                }
+                let release = self.release.get_or_insert_with(ReleaseConfig::default);
+                if key == "release.auto_cut_max_per_day" {
+                    release.auto_cut_max_per_day = number;
+                } else {
+                    release.auto_cut_min_interval_hours = number;
+                }
+            }
             // Notifications section
             "notifications.enabled" => {
                 let notifications = self
@@ -1649,6 +1679,12 @@ impl Config {
                 } else {
                     Some(value.to_string())
                 };
+            }
+            "project.canonical_id" => {
+                return Err(MemError::Other(
+                    "PROJECT_CANONICAL_ID_REDIRECT: use `cas cloud project set <canonical-id>` to set project.canonical_id."
+                        .to_string(),
+                ));
             }
             // GH #1182: operator-only. Stored in config.toml, but written only
             // by `cas config set factory.write_roots` through

@@ -36,6 +36,7 @@ pub fn handle_pre_tool_use(
 
     // Select the literal capped Cargo route before policy stores or provider
     // lookups. Every protection still evaluates the rewritten command below.
+    // gate[H-02 pre-tool]: Worker-check cargo rewrite
     if worker_cargo_request(input) {
         let command = input
             .tool_input
@@ -43,15 +44,15 @@ pub fn handle_pre_tool_use(
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
             .unwrap();
-        let (args, suffix, isolated_test_env) = worker_check_command(command).expect("route was selected");
+        let (args, suffix, isolated_test_env, test_env) = worker_check_command(command).expect("route was selected");
         let Some(root) = cas_root else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Worker check needs a Cassy root for max_concurrent_builders admission",
+                &crate::gates::tag("H-02", "Worker check needs a Cassy root for max_concurrent_builders admission"),
             ));
         };
         if let Some(reason) = worker_check_log_denial(input, &suffix) {
-            return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+            return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-02", reason)));
         }
         // cas-3d04: a shell `&` job dies with its caller under Codex, whose
         // exec_command SIGKILLs the shell's process group on exit. Run the
@@ -65,7 +66,7 @@ pub fn handle_pre_tool_use(
         if detach && !suffix.contains('>') {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "WORKER CHECK BACKGROUND: a backgrounded check needs a log, or its output and receipt line are lost. Use `... > target/worker-check.log 2>&1 &` (create target/ first) or your task artifacts directory.",
+                &crate::gates::tag("H-02", "WORKER CHECK BACKGROUND: a backgrounded check needs a log, or its output and receipt line are lost. Use `... > target/worker-check.log 2>&1 &` (create target/ first) or your task artifacts directory."),
             ));
         }
         // The shell opens this log before the runner starts. Preserve every
@@ -79,11 +80,12 @@ pub fn handle_pre_tool_use(
         };
         let executable = std::env::current_exe()?;
         let rewritten = format!(
-            "{} factory worker-check --cas-root {}{}{} -- {}{}",
+            "{} factory worker-check --cas-root {}{}{}{} -- {}{}",
             shell_quote_path(&executable),
             shell_quote_path(root),
             if detach { " --detach" } else { "" },
             isolated_test_env.as_ref().map(|path| format!(" --isolated-test-env {}", shell_quote_path(path))).unwrap_or_default(),
+            test_env.iter().map(|spec| format!(" --test-env '{}'", spec.replace('\'', "'\"'\"'"))).collect::<String>(),
             args.iter()
                 .map(|arg| if arg.trim_start().starts_with("test(") {
                     format!("'{arg}'")
@@ -468,52 +470,85 @@ pub(crate) fn worker_cargo_request(input: &HookInput) -> bool {
             .and_then(worker_check_command)
             .is_some()
 }
+// gate-audit[git_push_bypasses_required_hooks]: selector A detector result used to reject skipped hooks; never authorizes skipping them.
 fn handle_pre_tool_use_inner(
     input: &HookInput,
     cas_root: Option<&Path>,
     prepared_cargo_input: Option<serde_json::Value>,
     turn_cwd: &Path,
 ) -> Result<HookOutput, MemError> {
+    let mut accepted_override_codes = Vec::new();
+    let mut output = handle_pre_tool_use_checked(input, cas_root, prepared_cargo_input, turn_cwd, &mut accepted_override_codes)?;
+    if crate::gates::facts::hook_denial(&output).is_none() {
+        for code in accepted_override_codes {
+            output.system_message = Some(crate::gates::override_tag(code, output.system_message.take().unwrap_or_default()));
+        }
+    }
+    Ok(output)
+}
+
+// gate-audit[local_merge_push_override]: bypass H-23 Explicitly authorized env switch permits this local-merge push; later denials discard the accepted tag.
+// gate-audit[git_push_bypasses_required_hooks]: selector Detects forbidden hook skips; does not authorize them.
+fn handle_pre_tool_use_checked(
+    input: &HookInput,
+    cas_root: Option<&Path>,
+    prepared_cargo_input: Option<serde_json::Value>,
+    turn_cwd: &Path,
+    accepted_override_codes: &mut Vec<&'static str>,
+) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
         None => return Ok(HookOutput::empty()),
     };
 
+    if let Some(reason) = crate::hooks::handlers::operator_evidence::outgoing_denial(input) {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-47", reason)));
+    }
+
     // Run before factory auto-approval and the missing-root early return.
     // Slack transport is an operator policy for every session.
+    // gate[H-06 pre-tool]: Slack transport (Violet only)
     if let Some(reason) =
         super::slack_transport::denial(tool_name, input.tool_input.as_ref(), cas_root)
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-06", reason)));
     }
     // cas-f6ad (GH #1057): no deliverable share before its epic's
     // verification passes, for every harness and role.
+    // gate[H-07 pre-tool]: Publication gate
     if let Some(reason) =
-        super::publication_gate::denial(tool_name, input.tool_input.as_ref(), cas_root)
+        super::publication_gate::denial_with_overrides(tool_name, input.tool_input.as_ref(), cas_root, accepted_override_codes)
     {
+        // A post-release hold already carries its own gate code (G-120).
+        let reason = if crate::gates::codes_in(&reason).is_empty() { crate::gates::tag("H-07", reason) } else { reason };
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
 
+    // gate[H-08 pre-tool]: Browser test tier
     if let Some(reason) = super::browser_tier_guard::denial(input) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", reason));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-08", reason)));
     }
 
+    // gate[H-09 pre-tool]: Worker operator-credential store read
     if let Some(reason) =
         super::worker_denied_tools::credential_store_access_denial(input, tool_name)
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-09", reason)));
     }
 
     // cas-d757 (GH #1219): operator-authenticated CLIs (vercel/neonctl) and their
     // MCP tools are the supervisor's. Workers only; before auto-approval and
     // the missing-root early return.
+    // gate[H-10 pre-tool]: Worker-denied CLIs and MCP tools
     if let Some(reason) = super::worker_denied_tools::denial(input, tool_name, cas_root) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-10", reason)));
     }
 
     // cas-3147 (GH #1169): write roots and grants are operator-only. Every
     // harness tool call is an agent's, so the operator-only CLI is refused
     // here for every role, before any auto-approval or root early return.
+    // gate[H-11 pre-tool]: Operator-only policy commands
+    // gate[H-12 pre-tool]: Role env tampering
     if tool_name == "Bash"
         && let Some(reason) = input
             .tool_input
@@ -522,28 +557,16 @@ fn handle_pre_tool_use_inner(
             .and_then(|command| command.as_str())
             .and_then(|command| {
                 operator_policy_command_denial(command)
-                    .or_else(|| role_env_tampering_denial(command))
+                    .map(|reason| crate::gates::tag("H-11", reason))
+                    .or_else(|| role_env_tampering_denial(command).map(|reason| crate::gates::tag("H-12", reason)))
             })
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
-    // cas-1b94: agent `cas mcp add|remove|import` cannot remove, replace or
-    // alias a supervisor-only MCP server (the proxy_add rule, cas-0d4f0).
-    #[cfg(feature = "mcp-proxy")]
-    if tool_name == "Bash"
-        && let Some(root) = cas_root
-        && let Some(reason) = input
-            .tool_input
-            .as_ref()
-            .and_then(|tool_input| tool_input.get("command"))
-            .and_then(|command| command.as_str())
-            .and_then(|command| supervisor_only_mcp_command_denial(command, root))
-    {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
-    }
     // cas-0d4f0: no agent writes a Cassy config file directly, for every role.
+    // gate[H-14 pre-tool]: Cassy config file direct write
     if let Some(reason) = cas_config_file_write_denial(input) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-14", reason)));
     }
 
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
@@ -551,6 +574,7 @@ fn handle_pre_tool_use_inner(
     // A worker or reviewer must not skip Git's pre-push hook: it enforces
     // parked delivery anchors and every fast-row check. Keep this above the
     // factory auto-approve path so it also runs when `cas_root` is unavailable.
+    // gate[H-15 pre-tool]: Worker push hook bypass
     if is_factory_agent
         && !crate::harness_policy::is_supervisor(input)
         && tool_name == "Bash"
@@ -563,7 +587,7 @@ fn handle_pre_tool_use_inner(
     {
         return Ok(HookOutput::with_pre_tool_permission(
             "deny",
-            "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push.",
+            &crate::gates::tag("H-15", "🚫 WORKER PUSH POLICY: `--no-verify`, Git config environment overrides, and `core.hooksPath` overrides can skip required factory push checks. `-n` is a dry-run and still runs the pre-push hook; worker pushes must use a plain `git push`. If an exception is needed, ask the supervisor to run the supervisor-approved push."),
         ));
     }
 
@@ -573,6 +597,7 @@ fn handle_pre_tool_use_inner(
     // Native subagents inherit their parent's role. Pattern signals must be
     // refused for every factory role before Bash auto-approval, including a
     // supervisor's subagent: full argv can contain another worker's task text.
+    // gate[H-16 pre-tool]: Factory process signal guard
     if is_factory_agent && tool_name == "Bash"
         && input.tool_input.as_ref()
             .and_then(|tool_input| tool_input.get("command"))
@@ -581,7 +606,7 @@ fn handle_pre_tool_use_inner(
     {
         return Ok(HookOutput::with_pre_tool_permission(
             "deny",
-            "FACTORY PROCESS SIGNAL: pattern-based kills can terminate another worker's processes on this shared host. Kill by the PID you started: capture $! or use your own PID file, then run `kill <pid>` (or `kill -0 <pid>` to inspect it). Do not use pkill, killall, or pgrep results to send signals.",
+            &crate::gates::tag("H-16", "FACTORY PROCESS SIGNAL: pattern-based kills can terminate another worker's processes on this shared host. Kill by the PID you started: capture $! or use your own PID file, then run `kill <pid>` (or `kill -0 <pid>` to inspect it). Do not use pkill, killall, or pgrep results to send signals."),
         ));
     }
 
@@ -602,16 +627,17 @@ fn handle_pre_tool_use_inner(
             .as_ref()
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str());
+        // gate[H-05 pre-tool]: Unscoped worker format run
         if command.is_some_and(worker_command_runs_dangerous_formatter) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "🚫 UNSCOPED WORKER FORMAT RUN: this repository is not workspace-rustfmt-clean, and rustfmt follows child modules by default. Either command can rewrite hundreds of unrelated files.\n\n\
+                &crate::gates::tag("H-05", "🚫 UNSCOPED WORKER FORMAT RUN: this repository is not workspace-rustfmt-clean, and rustfmt follows child modules by default. Either command can rewrite hundreds of unrelated files.\n\n\
                  Use a non-mutating check:\n  \
                  `cargo fmt --all -- --check`\n  \
                  `rustfmt --edition 2024 --check --config skip_children=true <task-files>`\n\n\
                  To format task files, make recursion explicit:\n  \
                  `rustfmt --edition 2024 --config skip_children=true <task-files>`\n\n\
-                 A workspace normalization requires separate operator approval and must not be run from a worker.",
+                 A workspace normalization requires separate operator approval and must not be run from a worker."),
             ));
         }
         if let Some(updated) = prepared_cargo_input {
@@ -621,17 +647,18 @@ fn handle_pre_tool_use_inner(
             output.rewrite_pre_tool_input(updated);
             return Ok(output);
         }
+        // gate[H-03 pre-tool]: NO WORKER RUST BUILDS
         if let Some(what) = command.and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd))) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                &format!(
+                &crate::gates::tag("H-03", format!(
                     "🚫 NO WORKER RUST BUILDS: `{what}` is outside the capped worker exceptions. \
                      Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed. Choose one target flag. \
                      The hook runs it under max_concurrent_builders. \
                      Commit first so a successful check records `check: PASS <sha>`. \
                      Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused (cas-4cbb). \
                      Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic."
-                ),
+                )),
             ));
         }
     }
@@ -639,6 +666,7 @@ fn handle_pre_tool_use_inner(
     // cas-d95c: a task-verifier subagent's Rust build runs on the shared host
     // like a worker's. Plain Cargo there bypassed the builder cap and PSI
     // admission; send it to the counted verifier lane at the bound head.
+    // gate[H-04 pre-tool]: Verifier Rust build
     if tool_name == "Bash"
         && input.agent_type.as_deref() == Some("task-verifier")
         && let Some(what) = input
@@ -648,7 +676,7 @@ fn handle_pre_tool_use_inner(
             .and_then(|command| command.as_str())
             .and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd)))
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &verifier_rust_build_denial(&what, cas_root)));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-04", verifier_rust_build_denial(&what, cas_root))));
     }
 
     // ========================================================================
@@ -660,6 +688,7 @@ fn handle_pre_tool_use_inner(
     // branches pass. Hoisted with the other root-independent worker guards so
     // a missing Cassy root cannot skip it.
     // ========================================================================
+    // gate[H-17 pre-tool]: Neon production write
     if is_factory_agent && crate::harness_policy::is_worker(input) {
         let mut roots = vec![std::path::PathBuf::from(&input.cwd)];
         if let Some(parent) = cas_root.and_then(Path::parent) {
@@ -670,7 +699,7 @@ fn handle_pre_tool_use_inner(
             input.tool_input.as_ref(),
             &roots,
         ) {
-            return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+            return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-17", reason)));
         }
     }
 
@@ -698,6 +727,7 @@ fn handle_pre_tool_use_inner(
         // Task-verifier is exempt: supervisors legitimately spawn it to resolve
         // a task-scoped verification dispatch.
         let is_verifier_exempt = subagent_type == Some("task-verifier");
+        // gate[H-18 pre-tool]: Supervisor Agent(isolation=worktree)
         if isolation == Some("worktree") && !is_verifier_exempt {
             // EPIC cas-8888 (cas-fd9f): own_tool_prefix() — this reminder
             // tells the supervisor what IT can call, so it needs the
@@ -705,65 +735,22 @@ fn handle_pre_tool_use_inner(
             let prefix = crate::harness_policy::own_tool_prefix();
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                &format!(
+                &crate::gates::tag("H-18", format!(
                     "🚫 Supervisors must not spawn isolated-worktree subagents.\n\
                     Use {prefix}factory action=spawn_workers — factory-managed worktrees get cleaned up; Agent(isolation=\"worktree\") ones leak.\n\
                     If you genuinely need a throwaway subagent, drop `isolation` or run as a worker via `cas factory`."
-                ),
+                )),
             ));
         }
     }
 
-    // ========================================================================
-    // FACTORY MODE: Block AskUserQuestion self-directed permission trap
-    //
-    // In factory mode, AskUserQuestion has no human UI surface. It appears as
-    // a permission prompt in the caller's own session and pauses the system, so
-    // both supervisors and workers must use factory-safe routes instead.
-    //
-    // This gate runs before the cas_root check because it only needs the
-    // factory role env/snapshot and must still fire when hook dispatch cannot
-    // resolve a Cassy root.
-    // ========================================================================
-    if is_factory_agent && tool_name == "AskUserQuestion" {
-        let prefix = crate::harness_policy::own_tool_prefix();
-        let guidance = if crate::harness_policy::is_supervisor(input) {
-            format!(
-                "AskUserQuestion cannot reach the human in factory mode - it surfaces as a permission prompt on your own session and pauses the system. \
-                Ask the human in plain text in your reply and END YOUR TURN; the director relays their answer. \
-                For workers/teammates use {prefix}coordination action=message."
-            )
-        } else {
-            format!(
-                "AskUserQuestion is blocked in factory mode - it surfaces as a permission prompt on your own session and pauses the system. \
-                Message your supervisor with {prefix}coordination action=message target=<supervisor> summary=\"...\" message=\"...\"."
-            )
-        };
-        return Ok(HookOutput::with_pre_tool_permission("deny", &guidance));
-    }
-
-    // ========================================================================
-    // FACTORY SUPERVISOR: Deny native SendMessage before cas_root resolution
-    // (GH #793).
-    //
-    // A supervisor must never reach the host harness's native transport: an
-    // `allow` result lets that transport run after this hook and bypass the
-    // durable CAS coordination queue. Hoist the deny next to the other
-    // root-independent factory guards so a missing Cassy root cannot create a
-    // silent escape hatch.
-    // ========================================================================
-    if is_factory_agent
-        && tool_name == "SendMessage"
-        && crate::harness_policy::is_supervisor(input)
-    {
-        return Ok(deny_factory_supervisor_send_message());
-    }
-
-    // Native SendMessage bypasses the policy and origin stamps on the CAS
-    // coordination path, so factory workers must use that path directly.
+    // Launch argv excludes factory questions and supervisor native messages.
+    // Workers may use native messaging only to their own recorded child IDs.
+    // gate[H-21 pre-tool]: SendMessage, worker
     if is_factory_agent
         && tool_name == "SendMessage"
         && crate::harness_policy::is_worker(input)
+        && !owns_native_message_target(input, cas_root)
     {
         return Ok(deny_factory_worker_send_message());
     }
@@ -800,8 +787,8 @@ fn handle_pre_tool_use_inner(
                 // delivery_mode) only decides for a worker with no task in
                 // progress; otherwise a push_branch task in a local_merge
                 // session could neither push nor pass its close's merge check.
+                // gate[H-23 pre-tool]: Local-merge push deny
                 if looks_like_git_push_to_origin(cmd)
-                    && !local_merge_push_override()
                     && effective_worker_delivery_mode(
                         worker_delivery_mode(),
                         &cas_root
@@ -812,11 +799,16 @@ fn handle_pre_tool_use_inner(
                             .unwrap_or_default(),
                     ) == cas_types::DeliveryMode::LocalMerge
                 {
+                    if local_merge_push_override() {
+                        accepted_override_codes.push("H-23");
+                    } else {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "🚫 LOCAL-MERGE DELIVERY: git push origin is disabled for this factory session. Commit locally; the supervisor merges your local factory branch. Set CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1 only when explicitly authorized by the supervisor.",
+                        &crate::gates::tag("H-23", "🚫 LOCAL-MERGE DELIVERY: git push origin is disabled for this factory session. Commit locally; the supervisor merges your local factory branch. Set CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1 only when explicitly authorized by the supervisor."),
                     ));
                 }
+                }
+                // gate[H-22 pre-tool]: Worker commit guard / git scope (layer 1)
                 if looks_like_git_write_op(cmd) {
                     // `CAS_CLONE_PATH` is the bootstrap value, but SessionStart
                     // persists the authoritative checkout binding in the agent
@@ -838,7 +830,7 @@ fn handle_pre_tool_use_inner(
                         if let Some(root) = cas_root {
                             log_factory_git_scope_rejection(root, input, &target, cmd);
                         }
-                        return Ok(HookOutput::with_pre_tool_permission("deny", &deny_msg));
+                        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-22", deny_msg)));
                     }
                 }
             }
@@ -855,6 +847,7 @@ fn handle_pre_tool_use_inner(
     // current tip lacks a passed or waived round; everything else is
     // untouched, and unreadable state fails open to the close backstop.
     // ========================================================================
+    // gate[H-24 pre-tool]: Independent QA merge (supervisor)
     if tool_name == "Bash"
         && crate::harness_policy::is_supervisor(input)
         && let Some(root) = cas_root
@@ -865,13 +858,14 @@ fn handle_pre_tool_use_inner(
         && let Some(refusal) =
             crate::qa_pass::supervisor_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-24", refusal)));
     }
 
     // cas-2ee2 (GH #1023): a pull request merged on GitHub skips both Cassy
     // merge paths, and any agent holding a `gh` token can do it, so the raw
     // GitHub merge check applies to every role. (The supervisor already got
     // it through `supervisor_merge_refusal` above.)
+    // gate[H-25 pre-tool]: GitHub raw merge QA (non-supervisor)
     if tool_name == "Bash"
         && !crate::harness_policy::is_supervisor(input)
         && let Some(root) = cas_root
@@ -882,11 +876,12 @@ fn handle_pre_tool_use_inner(
         && let Some(refusal) =
             crate::qa_pass::github_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-25", refusal)));
     }
 
     // cas-bddf9: a supervisor's raw PR merge waits on its own unanswered ask
     // to a peer about that PR, unless the ask is visibly overridden.
+    // gate[H-26 pre-tool]: Peer-ask merge hold
     if tool_name == "Bash"
         && crate::harness_policy::is_supervisor(input)
         && let Some(root) = cas_root
@@ -894,20 +889,22 @@ fn handle_pre_tool_use_inner(
             .tool_input
             .as_ref()
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-        && let Some(refusal) = crate::peer_ask_gate::github_merge_refusal(
+        && let Some(refusal) = crate::peer_ask_gate::github_merge_refusal_with_overrides(
             root,
             std::path::Path::new(&input.cwd),
             cmd,
             &crate::hooks::handlers::handlers_state::current_agent_id(input),
             &std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "supervisor".into()),
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
+            accepted_override_codes,
         )
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-26", refusal)));
     }
 
     // cas-fee3: an epic PR opens as a draft so every merge into the epic does
     // not rerun its full CI; the release PR is the one gate.
+    // gate[H-27 pre-tool]: Epic PR draft
     if tool_name == "Bash"
         && let Some(cmd) = input
             .tool_input
@@ -923,7 +920,7 @@ fn handle_pre_tool_use_inner(
                 .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         })
     {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-27", refusal)));
     }
 
     // ========================================================================
@@ -936,6 +933,7 @@ fn handle_pre_tool_use_inner(
     // `CAS_CLONE_PATH` binding without granting a shared artifact base, so an isolated
     // worker cannot write into the primary checkout on the cas_root=None path.
     // ========================================================================
+    // gate[H-28 pre-tool]: Workspace contract, root-less fallback
     if cas_root.is_none() && is_factory_agent {
         let worktree_root = std::env::var_os("CAS_CLONE_PATH")
             .filter(|value| !value.is_empty())
@@ -954,13 +952,13 @@ fn handle_pre_tool_use_inner(
         ) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                &factory_workspace_contract_denial(
+                &crate::gates::tag("H-28", factory_workspace_contract_denial(
                     input,
                     &violation,
                     artifacts_root.as_deref(),
                     None,
                     Some(&worktree_root),
-                ),
+                )),
             ));
         }
     }
@@ -1048,6 +1046,7 @@ fn handle_pre_tool_use_inner(
         let is_supervisor = crate::harness_policy::is_supervisor(input);
         let (write_policy, write_task_ids) =
             operator_write_policy_for(cas_root, &mut stores, input, is_supervisor);
+        // gate[H-29 pre-tool]: Factory workspace contract / write roots
         match factory_write_decision(
             input,
             &artifacts_root,
@@ -1065,7 +1064,7 @@ fn handle_pre_tool_use_inner(
                 log_factory_workspace_rejection(cas_root, input, &violation);
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
-                    &factory_workspace_contract_denial_with_roots(
+                    &crate::gates::tag("H-29", factory_workspace_contract_denial_with_roots(
                         input,
                         &violation,
                         artifacts_root.as_deref(),
@@ -1073,7 +1072,7 @@ fn handle_pre_tool_use_inner(
                         Some(&worktree_root),
                         &write_policy,
                         &write_task_ids,
-                    ),
+                    )),
                 ));
             }
         }
@@ -1111,64 +1110,6 @@ fn handle_pre_tool_use_inner(
         // calls in the overwhelmingly common same-tree case, and a no-op
         // whenever `config.json` says this IS the factory's tree.
         reap_stranded_native_send_message_copies();
-    }
-    let is_supervisor = crate::harness_policy::is_supervisor_from_env();
-
-    // ========================================================================
-    // CODEMAP FRESHNESS GATE: Block supervisor from creating tasks / spawning
-    // workers while CODEMAP.md is significantly out of date.
-    //
-    // Workers use CODEMAP for codebase orientation. Dispatching them against a
-    // stale map wastes tokens and produces drift. The SessionStart warning is
-    // informational; this gate enforces "update before assigning work".
-    //
-    // Only fires for supervisors, only on the two dispatch tools, only when
-    // staleness >= SIGNIFICANT_STALENESS_THRESHOLD. Running `/codemap` bumps
-    // CODEMAP.md's mtime and clears the gate on the next call.
-    // ========================================================================
-    if is_supervisor {
-        let action = input
-            .tool_input
-            .as_ref()
-            .and_then(|ti| ti.get("action").and_then(|v| v.as_str()));
-        let is_gated =
-            is_codemap_gated_tool_call(tool_name, action, crate::harness_policy::own_tool_prefix());
-        if is_gated {
-            let measurement = super::docs_freshness::Measurement::at(Path::new(&input.cwd), cas_root);
-            if let Some(
-                crate::hooks::handlers::handlers_events::CodemapStaleness::SignificantlyStale {
-                    total_changes,
-                    ..
-                },
-            ) = super::codemap::evaluate_codemap_at(&measurement).and_then(|evaluation| evaluation.staleness)
-            {
-                let sync = if measurement.reference != "HEAD"
-                    && super::docs_freshness::git(&measurement.root,
-                        &["merge-base", "--is-ancestor", &measurement.reference, "HEAD"]).is_none()
-                {
-                    match crate::worktree::GitOperations::git_remedies([
-                        &["merge", &measurement.reference],
-                        &["rebase", &measurement.reference],
-                    ]) {
-                        Ok([merge, rebase]) => {
-                            format!("Sync this checkout: `{merge}` or `{rebase}`.\n")
-                        }
-                        Err(refusal) => format!("{refusal}\n"),
-                    }
-                } else {
-                    String::new()
-                };
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    &format!(
-                        "🗺️  CODEMAP.md is significantly out of date ({total_changes} structural changes).\n\
-                        Measured ref: {} ({}).\n\n\
-                        Workers rely on CODEMAP for codebase orientation — dispatching against a stale map wastes tokens.\n\n\
-                        {sync}Run `/codemap` to refresh, then retry.", measurement.reference, measurement.root.display()
-                    ),
-                ));
-            }
-        }
     }
 
     // ========================================================================
@@ -1208,6 +1149,7 @@ fn handle_pre_tool_use_inner(
                     })
                     .collect();
 
+                // gate[H-30 pre-tool]: Worktree merge jail
                 if !pending_merge_tasks.is_empty() {
                     // cas-dc1b (M38): the sanctioned exit is the Cassy
                     // `factory action=worktree_merge` call under any
@@ -1247,14 +1189,14 @@ fn handle_pre_tool_use_inner(
 
                         return Ok(HookOutput::with_pre_tool_permission(
                             "deny",
-                            &format!(
+                            &crate::gates::tag("H-30", format!(
                                 "🔒 WORKTREE MERGE JAIL: Task(s) {task_list} require worktree merge before you can continue.\n\n\
                             Merge and clean up each task's worktree with \
                             `{prefix}factory action=worktree_merge id=<worktree branch> task_id=<task-id> cleanup=true` \
                             (the close rejection names the branch). That call is allowed through the jail and releases it; \
                             then retry `{prefix}task action=close id=<task-id>`.",
                                 prefix = crate::harness_policy::own_tool_prefix()
-                            ),
+                            )),
                         ));
                     }
                 }
@@ -1269,6 +1211,7 @@ fn handle_pre_tool_use_inner(
         // This ensures isolation between concurrent agents working on different epics.
         // ========================================================================
         let file_tools = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"];
+        // gate[H-31 pre-tool]: Worktree redirect
         if file_tools.iter().any(|t| tool_name.eq_ignore_ascii_case(t)) {
             // Get file path from tool input
             let tool_file_path = input.tool_input.as_ref().and_then(|ti| {
@@ -1335,7 +1278,7 @@ fn handle_pre_tool_use_inner(
 
                                                                         return Ok(HookOutput::with_pre_tool_permission(
                                                                         "deny",
-                                                                        &format!(
+                                                                        &crate::gates::tag("H-31", format!(
                                                                             "🌳 WORKTREE REDIRECT: You're working on epic [{}] \"{}\" which has a dedicated worktree.\n\n\
                                                                             ❌ Blocked: {}\n\
                                                                             ✅ Use instead: {}\n\n\
@@ -1346,7 +1289,7 @@ fn handle_pre_tool_use_inner(
                                                                             file_path,
                                                                             suggested_path,
                                                                             worktree_path
-                                                                        ),
+                                                                        )),
                                                                     ));
                                                                     }
                                                                 }
@@ -1453,6 +1396,7 @@ fn handle_pre_tool_use_inner(
 
     // Check for protected paths that should be blocked (configurable)
     let protection = &stores.config().hooks().pre_tool_use.protection;
+    // gate[H-33 pre-tool]: Protection files/patterns (.env, keys)
     if protection.enabled {
         // Operator Neon/Vercel store reads belong to supervisors and plain
         // sessions. Workers were refused before auto-approval above; writes
@@ -1498,7 +1442,7 @@ fn handle_pre_tool_use_inner(
                 if path.ends_with(pattern) || path.contains(&format!("/{pattern}")) {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        &format!("Protected file: {pattern} files may contain secrets"),
+                        &crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets")),
                     ));
                 }
             }
@@ -1511,11 +1455,39 @@ fn handle_pre_tool_use_inner(
                 if path.ends_with(pattern) || path.contains(pattern) {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "Protected file: may contain credentials or private keys",
+                        &crate::gates::tag("H-33", "Protected file: may contain credentials or private keys"),
                     ));
                 }
             }
         }
+    }
+
+    // cas-beaf: a factory `Agent` verifier mints no handoff, so its verdict
+    // is recorded under the spawning session. While a bound verifier is
+    // still running on the dispatch, a second verifier's verdict cannot land
+    // once the first resolves it; refuse that spawn and name the running one.
+    // gate[H-34 pre-tool]: Duplicate task-verifier
+    if tool_name == "Agent"
+        && is_factory_agent
+        && let Some(tool_input) = input.tool_input.as_ref()
+        && tool_input.get("subagent_type").and_then(|value| value.as_str()) == Some("task-verifier")
+        && let Some(task_id) = unique_existing_task_id(
+            tool_input.get("prompt").and_then(|value| value.as_str()).unwrap_or_default(),
+            stores.tasks(),
+        )
+        && let Ok(Some(dispatch)) = cas_store::get_latest_verification_dispatch(cas_root, &task_id)
+        && dispatch.state == cas_types::VerificationDispatchState::Claimed
+        && let Some(verifier) = dispatch.verifier_agent_id.as_deref()
+        && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| crate::mcp::tools::service::agent_liveness::verifier_is_running(&agent)))
+    {
+        return Ok(HookOutput::with_pre_tool_permission(
+            "deny",
+            &crate::gates::tag("H-34", format!(
+                "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
+                dispatch.id,
+                crate::harness_policy::own_tool_prefix(),
+            )),
+        ));
     }
 
     // Mint verifier authority only on the authenticated parent's Task/Agent
@@ -1528,6 +1500,7 @@ fn handle_pre_tool_use_inner(
     // bind and would deny that parent's next verifier spawn with "already
     // awaiting SubagentStart" until expiry. Keep factory `Agent` excluded;
     // generated solo settings install both halves atomically.
+    // gate[H-35 pre-tool]: Verifier spawn handoff gate
     if matches!(tool_name, "Task" | "Agent")
         && !(tool_name == "Agent" && is_factory_agent)
         && input
@@ -1543,7 +1516,7 @@ fn handle_pre_tool_use_inner(
             VerifierSpawnDenial, verifier_spawn_denial,
         };
         let verifier_denial = |denial: VerifierSpawnDenial, task_id: Option<&str>| {
-            verifier_spawn_denial(denial, task_id, crate::harness_policy::own_tool_prefix())
+            crate::gates::tag("H-35", verifier_spawn_denial(denial, task_id, crate::harness_policy::own_tool_prefix()))
         };
         let Some(agent_store) = stores.agents() else {
             return Ok(HookOutput::with_pre_tool_permission(
@@ -1731,14 +1704,24 @@ fn handle_pre_tool_use_inner(
 }
 
 /// Accept a literal check/targeted nextest plus a simple log/background suffix.
-/// The sole env prefix is the complete fixed provider-isolation profile; never
-/// accept general wrappers, shell substitutions, toolchains or build overrides.
-fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<std::path::PathBuf>)> {
+/// Test prefixes are metadata for the capped child, never runner bootstrap
+/// assignments. Shell substitutions, identity and build overrides stay refused.
+fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<std::path::PathBuf>, Vec<String>)> {
     let command = command.trim();
     if command.contains(['\n', '\r']) { return None; }
-    let (cargo, isolated) = if command.starts_with("env ") {
-        let split = command.find(" cargo ")?;
-        let words = command[..split].split_whitespace().collect::<Vec<_>>();
+    if let Some((args, suffix)) = literal_worker_check_command(command) {
+        return Some((args, suffix, None, vec![]));
+    }
+    let lexed = factory_shell_lex(command, true, 0);
+    let cargo = lexed.tokens.iter().position(|token| matches!(token, ShellToken::Word(word) if word == "cargo"))?;
+    let split = *lexed.ends.get(cargo.checked_sub(1)?)?;
+    let prefix = &command[..split];
+    if prefix.contains(['$', '`', ';', '|', '&', '>', '<', '(', ')', '\0']) { return None; }
+    let (args, suffix) = literal_worker_check_command(command[split..].trim_start())?;
+    if args.first().map(String::as_str) != Some("nextest") { return None; }
+    // Preserve the existing complete provider-isolation profile.
+    let isolated = (|| {
+        let words = prefix.split_whitespace().collect::<Vec<_>>();
         let (assignment, prefix) = words.split_last()?;
         let directory = assignment.strip_prefix("XDG_CONFIG_HOME=")?;
         // A literal path, never a shell expansion or arbitrary assignment.
@@ -1754,11 +1737,24 @@ fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<st
             { return None; }
         }
         if removed.len() != crate::factory_worker_check::ISOLATED_TEST_CREDENTIALS.len() { return None; }
-        (&command[split + 1..], Some(std::path::PathBuf::from(directory)))
-    } else { (command, None) };
-    let (args, suffix) = literal_worker_check_command(cargo)?;
-    if isolated.is_some() && args.first().map(String::as_str) != Some("nextest") { return None; }
-    Some((args, suffix, isolated))
+        Some(std::path::PathBuf::from(directory))
+    })();
+    if isolated.is_some() { return Some((args, suffix, isolated, vec![])); }
+    let words = shell_words::split(prefix).ok()?;
+    let mut index = usize::from(words.first().is_some_and(|word| word == "env"));
+    let mut test_env = vec![];
+    while let Some(word) = words.get(index) {
+        let spec = if matches!(word.as_str(), "-u" | "--unset") {
+            index += 1;
+            format!("-{}", words.get(index)?)
+        } else if let Some(key) = word.strip_prefix("--unset=") {
+            format!("-{key}")
+        } else { word.clone() };
+        crate::factory_worker_check::test_environment_spec(&spec)?;
+        test_env.push(spec);
+        index += 1;
+    }
+    Some((args, suffix, None, test_env))
 }
 
 fn literal_worker_check_command(command: &str) -> Option<(Vec<String>, String)> {
@@ -2272,7 +2268,7 @@ pub(crate) fn is_worker_commit_allowed_branch(branch: &str) -> bool {
     !matches!(b, "main" | "master" | "staging" | "")
 }
 
-/// Return true if `cmd` looks like a history-changing Git invocation.
+/// Return true if `cmd` needs Git scope checks: history writes or owned-checkout navigation.
 ///
 /// Matches common forms:
 /// - `git commit -m "msg"`
@@ -2305,6 +2301,11 @@ fn git_push_bypasses_required_hooks(command: &str) -> bool {
             })
 }
 
+// gate-audit[bypasses_hooks]: selector Detects a prohibited Git configuration; it does not accept a bypass.
+// gate-audit[git_config_environment_bypass_in_shell]: selector Recursive detector for prohibited Git configuration; no authorization waiver.
+// gate-audit[nested_bypass]: selector Detector result for nested prohibited Git configuration; not a request option.
+// gate-audit[exported_override]: selector Detects a shell attempt to bypass required hooks and refuses it; cannot authorize one.
+// gate-audit[git_config_environment_override]: selector Detector predicate only; true causes denial.
 fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
     if depth > 6 {
         return false;
@@ -2438,6 +2439,7 @@ fn shell_command_invokes_push(command: &str) -> bool {
         .any(|(name, args)| name == "git" && git_invocation_is_push_or_alias(args))
 }
 
+// gate-audit[git_config_env_value_bypasses_hooks]: selector Detector for environment values that disable hooks; refuses rather than accepts bypasses.
 fn git_config_environment_override(words: &[String]) -> bool {
     let mut index = 0;
     while index < words.len() {
@@ -2513,6 +2515,7 @@ fn git_invocation_writes_hooks_path(git_words: &[String]) -> bool {
         || arguments.get(key_index + 1).is_some()
 }
 
+// gate-audit[git_global_hooks_path_override]: selector Detects forbidden Git hook configuration; true causes denial.
 fn git_invocation_bypasses_required_hooks(git_words: &[String]) -> bool {
     let Some(operation_index) = git_subcommand_index(git_words) else {
         return false;
@@ -2701,11 +2704,23 @@ pub(crate) fn get_branch_at_cwd(cwd: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone)]
+enum GitHeadAction {
+    NewBranch,
+    Navigate { reference: Option<String>, guess: bool },
+    RefRewrite,
+    Guarded,
+}
+
+#[derive(Debug, Clone)]
 struct GitCommandTarget {
     cwd: std::path::PathBuf,
     git_dir: Option<std::path::PathBuf>,
     work_tree: Option<std::path::PathBuf>,
-    is_detached_checkout: bool,
+    head_action: GitHeadAction,
+    /// Checkout operands retained for a checkout-specific containment remedy.
+    checkout_args: Option<Vec<String>>,
+    unresolved_directory: bool,
+    uncertain_scope: bool,
 }
 
 impl GitCommandTarget {
@@ -2719,7 +2734,10 @@ impl GitCommandTarget {
             cwd,
             git_dir: None,
             work_tree: None,
-            is_detached_checkout: false,
+            head_action: GitHeadAction::Guarded,
+            checkout_args: None,
+            unresolved_directory: false,
+            uncertain_scope: false,
         }
     }
 
@@ -2740,6 +2758,77 @@ fn resolve_git_option_path(base: &std::path::Path, value: &str) -> std::path::Pa
     }
 }
 
+/// Checkout mixes HEAD navigation with path restoration. Switch cannot
+/// restore paths, but its force-create forms can rewrite an existing ref.
+fn git_head_action(operation: &str, args: &[String]) -> GitHeadAction {
+    let mut words = args.iter().peekable();
+    let mut references = Vec::new();
+    let (mut creates, mut detach, mut track, mut guess) = (false, false, false, true);
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--" => {
+                if operation == "checkout" && words.peek().is_some() { return GitHeadAction::Guarded; }
+                references.extend(words.cloned());
+                break;
+            }
+            "--orphan" | "--create" if word == "--orphan" || operation == "switch" => {
+                if words.next().is_none() { return GitHeadAction::Guarded; }
+                creates = true;
+            }
+            "--force-create" if operation == "switch" => return GitHeadAction::RefRewrite,
+            "--detach" => detach = true,
+            "--no-detach" => detach = false,
+            "--track" => track = true,
+            "--no-track" => track = false,
+            "--guess" => guess = true,
+            "--no-guess" => guess = false,
+            "--conflict" => { if words.next().is_none() { return GitHeadAction::Guarded; } }
+            "--quiet" | "--no-quiet" | "--progress" | "--no-progress" | "--force" | "--no-force"
+            | "--merge" | "--no-merge" | "--discard-changes" | "--no-discard-changes"
+            | "--recurse-submodules" | "--no-recurse-submodules" | "--overwrite-ignore"
+            | "--no-overwrite-ignore" | "--ignore-other-worktrees" | "--no-ignore-other-worktrees"
+            | "--overlay" | "--no-overlay" | "--no-patch" => {}
+            _ if word.starts_with("--orphan=") || (operation == "switch" && word.starts_with("--create=")) => creates = true,
+            _ if operation == "switch" && word.starts_with("--force-create=") => return GitHeadAction::RefRewrite,
+            _ if word.starts_with("--track=") => track = true,
+            _ if word.starts_with("--conflict=") || word.starts_with("--recurse-submodules=") => {}
+            "-" => references.push(word.clone()),
+            _ if word.starts_with('-') && !word.starts_with("--") => {
+                let mut flags = word[1..].chars().peekable();
+                while let Some(flag) = flags.next() {
+                    match flag {
+                        'b' if operation == "checkout" => {
+                            if flags.peek().is_none() && words.next().is_none() { return GitHeadAction::Guarded; }
+                            creates = true;
+                            break;
+                        }
+                        'c' if operation == "switch" => {
+                            if flags.peek().is_none() && words.next().is_none() { return GitHeadAction::Guarded; }
+                            creates = true;
+                            break;
+                        }
+                        'B' if operation == "checkout" => return GitHeadAction::RefRewrite,
+                        'C' if operation == "switch" => return GitHeadAction::RefRewrite,
+                        'd' => detach = true,
+                        't' => track = true,
+                        'q' | 'f' | 'm' | 'l' => {}
+                        _ => return GitHeadAction::Guarded,
+                    }
+                }
+            }
+            _ if word.starts_with('-') => return GitHeadAction::Guarded,
+            _ => references.push(word.clone()),
+        }
+    }
+    if references.len() > 1 { return GitHeadAction::Guarded; }
+    if creates || track { return GitHeadAction::NewBranch; }
+    if detach { return GitHeadAction::Navigate { reference: None, guess: false }; }
+    match references.pop() {
+        Some(reference) => GitHeadAction::Navigate { reference: Some(reference), guess },
+        None => GitHeadAction::Guarded,
+    }
+}
+
 fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
     // Only the subcommand can change history, never a global option's value
     // or a read command's operand (e.g. `git log --grep commit`).
@@ -2749,7 +2838,8 @@ fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
     let is_write = match operation {
         "commit" | "merge" | "push" | "rebase" | "cherry-pick" => true,
         "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
-        "checkout" => args.iter().any(|arg| !arg.starts_with('-')),
+        "checkout" => !args.is_empty() && !matches!(git_head_action(operation, args), GitHeadAction::NewBranch),
+        "switch" => matches!(git_head_action(operation, args), GitHeadAction::RefRewrite),
         "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
         _ => false,
     };
@@ -2776,17 +2866,38 @@ fn git_subcommand_index(git_words: &[String]) -> Option<usize> {
     git_words.get(operation_index).map(|_| operation_index)
 }
 
-/// Resolve the small subset of shell variable forms used in worker guidance
-/// before applying the worktree containment check. Unknown variables remain
-/// literal, which fails closed if they would resolve outside the worktree.
-fn resolve_worker_cd_path(base: &std::path::Path, value: &str) -> std::path::PathBuf {
-    let value = match value {
-        "$CAS_CLONE_PATH" | "${CAS_CLONE_PATH}" => {
-            std::env::var_os("CAS_CLONE_PATH").map_or_else(|| value.to_string(), |v| v.to_string_lossy().into_owned())
-        }
-        _ => value.to_string(),
-    };
-    resolve_git_option_path(base, &value)
+#[derive(Clone, Copy)]
+struct WorkerPathWord {
+    literal: Option<bool>,
+    quoted: bool,
+    raw_syntax_word: bool,
+}
+
+/// Only constants and whole, previously bound variables are known here. Never
+/// execute substitutions or infer a value from an argument that looks like an
+/// assignment. Mixed quoting of the same spelling remains uncertain.
+// gate-audit[allow_variables]: input Controls shell-variable parsing in a path validator; workspace policy is applied after parsing.
+fn worker_path_value(
+    value: &str, word: WorkerPathWord,
+    bindings: &std::collections::HashMap<String, String>, allow_variables: bool,
+) -> Option<String> {
+    if word.literal == Some(true) {
+        return Some(value.to_string());
+    }
+    if !value.contains(['$', '`', '*', '?', '[']) {
+        return Some(value.to_string());
+    }
+    if !allow_variables || word.literal != Some(false) {
+        return None;
+    }
+    let name = value.strip_prefix("${").and_then(|v| v.strip_suffix('}'))
+        .or_else(|| value.strip_prefix('$'))?;
+    if !is_shell_variable_name(name) { return None; }
+    let value = bindings.get(name)?;
+    if value.is_empty() || (!word.quoted && value.chars().any(|ch| ch.is_whitespace() || "*?[".contains(ch))) {
+        return None;
+    }
+    Some(value.clone())
 }
 
 /// Extract every history-changing git invocation's repository target from a
@@ -2794,25 +2905,184 @@ fn resolve_worker_cd_path(base: &std::path::Path, value: &str) -> std::path::Pat
 /// parsed before the operation so a linked worktree is checked instead of the
 /// hook's cwd. Explicit `cd` statements are carried forward across `&&`, `;`,
 /// and `|` statements because the hook receives the whole shell command.
+/// Shell command strings inherit cwd; only eval changes the enclosing cwd.
 fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     let default_target = GitCommandTarget::from_cwd(cwd);
     let mut targets = Vec::new();
-    let mut shell_cwd = default_target.cwd.clone();
+    let mut shell_cwd = Some(default_target.cwd.clone());
+    collect_git_write_targets(&default_target, &mut shell_cwd, command, 0, &mut targets);
+    targets
+}
 
-    // Strip only literal heredoc data for this allowance. Expanding bodies
-    // can run $(git ...); retain the raw subprocess scopes in that case.
-    let expanding_heredoc = shell_command_without_heredoc_bodies(command).lines().any(|line| {
-        heredoc_delimiters(line).iter().any(|delimiter| !delimiter.literal_body)
+fn collect_git_write_targets(
+    default_target: &GitCommandTarget,
+    shell_cwd: &mut Option<std::path::PathBuf>,
+    command: &str,
+    depth: usize,
+    targets: &mut Vec<GitCommandTarget>,
+) {
+    if depth > 6 {
+        let mut target = default_target.clone();
+        target.uncertain_scope = true;
+        targets.push(target);
+        return;
+    }
+    let projected = shell_command_without_heredoc_bodies(command);
+    let lexed = factory_shell_lex(&projected, false, 0);
+    let mut path_words = std::collections::HashMap::<String, WorkerPathWord>::new();
+    let mut previous_end = 0;
+    for ((token, literal), end) in lexed.tokens.iter().zip(&lexed.literals).zip(&lexed.ends) {
+        let raw = projected[previous_end..*end].trim();
+        previous_end = *end;
+        if let ShellToken::Word(value) = token {
+            let quoted = raw.starts_with('"') && raw.ends_with('"');
+            // Syntax-check allowances use the raw spelling, never cooked
+            // words that can hide quoting, escaping or shell expansion.
+            let raw_syntax_word = raw == value.as_str() && !raw.is_empty()
+                && raw.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte));
+            path_words.entry(value.clone()).and_modify(|prior| {
+                if prior.literal != Some(*literal) { prior.literal = None; }
+                prior.quoted &= quoted;
+                prior.raw_syntax_word &= raw_syntax_word;
+            }).or_insert(WorkerPathWord { literal: Some(*literal), quoted, raw_syntax_word });
+        }
+    }
+    let path_word = |word: &str| path_words.get(word).copied()
+        .unwrap_or(WorkerPathWord { literal: None, quoted: false, raw_syntax_word: false });
+    let allow_variables = lexed.unresolved_at.is_none() && !lexed.tokens.iter().enumerate().any(|(index, token)| match token {
+        ShellToken::Operator('(' | ')' | '|') => true,
+        ShellToken::Operator('&') => lexed.tokens.get(index.wrapping_sub(1)) != Some(&ShellToken::Operator('&'))
+            && lexed.tokens.get(index + 1) != Some(&ShellToken::Operator('&')),
+        ShellToken::Word(word) => matches!(word.as_str(), "if" | "then" | "else" | "elif" | "fi" | "for" | "while" | "until" | "case" | "esac" | "do" | "done"),
+        _ => false,
     });
-    let statements = if expanding_heredoc {
-        super::attribution::split_shell_statements(command)
-    } else {
-        shell_statement_words(command)
-    };
-    let mut pending_statements = std::collections::VecDeque::from(statements);
-    while let Some(words) = pending_statements.pop_front() {
+    let conditional = lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('&')));
+    let mut prefix_bindings = true;
+    let mut bindings = std::collections::HashMap::new();
+    if let Ok(value) = std::env::var("CAS_CLONE_PATH") {
+        bindings.insert("CAS_CLONE_PATH".to_string(), value);
+    }
+
+    // Heredoc bodies are data; only substitutions (including those in
+    // expanding bodies) execute. They share the shell_invocations scanner.
+    let substitutions = shell_substitutions(command);
+    if substitutions.unresolved() {
+        let mut target = default_target.clone();
+        target.uncertain_scope = true;
+        targets.push(target);
+    }
+    // A substitution runs before its statement, in that statement's cwd.
+    let mut visited_cwds = Vec::new();
+    let mut pending_statements = std::collections::VecDeque::from(shell_statement_words(command));
+    loop {
+        if !visited_cwds.contains(shell_cwd) {
+            visited_cwds.push(shell_cwd.clone());
+        }
+        let Some(words) = pending_statements.pop_front() else { break };
+        let standalone_assignments = !words.is_empty() && words.iter().all(|word| {
+            word.split_once('=').is_some_and(|(name, _)| is_shell_variable_name(name))
+        });
+        if standalone_assignments {
+            for word in &words {
+                let (name, value) = word.split_once('=').expect("assignment checked");
+                let mut provenance = path_word(word);
+                // Assignment RHSs do not undergo word splitting or globbing.
+                provenance.quoted = true;
+                let value = (!conditional || prefix_bindings).then(|| {
+                    worker_path_value(value, provenance, &bindings, allow_variables)
+                }).flatten();
+                if let Some(value) = value { bindings.insert(name.into(), value); }
+                else { bindings.remove(name); }
+            }
+            continue;
+        }
+        // Array/append assignment forms are not literal bindings.
+        bindings.retain(|name, _| !words.iter().any(|word| {
+            word.starts_with(&format!("{name}+=")) || word.starts_with(&format!("{name}["))
+        }));
         let Some(command_index) = unwrapped_command_index(&words) else {
             continue;
+        };
+        prefix_bindings = false;
+        let name = shell_word_basename(&words[command_index]);
+        let args = &words[command_index + 1..];
+        if name == "eval" {
+            let args = if args.first().is_some_and(|arg| arg == "--") {
+                &args[1..]
+            } else {
+                args
+            };
+            bindings.clear();
+            // eval runs in this shell: its cd also affects following commands.
+            collect_git_write_targets(default_target, shell_cwd, &args.join(" "), depth + 1, targets);
+            continue;
+        }
+        if matches!(
+            name,
+            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser"
+        ) {
+            // Only these exact forms have an unambiguous command string.
+            // Do not interpret shell option bundles or their operands.
+            let args = if args.first().is_some_and(|arg| matches!(arg.as_str(), "-l" | "--login")) {
+                &args[1..]
+            } else {
+                args
+            };
+            // A literal script file is opaque, just like executing it directly.
+            // Its remaining arguments are script data, not shell options.
+            let literal_script = |script: &String| {
+                !script.is_empty()
+                    && !script.starts_with(['-', '+'])
+                    && path_word(script).literal == Some(true)
+            };
+            // Syntax checks require exact raw noexec flags followed by raw
+            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Redirects
+            // and expansions can supply +n/-c and execute a payload.
+            let syntax_check = command_index == 0
+                && !lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('<' | '>')))
+                && shell_statement_arguments(command).iter().any(|statement| {
+                    if statement != &words { return false; }
+                    let flags = statement[1..].iter()
+                        .take_while(|flag| matches!(flag.as_str(), "-n" | "--noexec")
+                            && path_word(flag).raw_syntax_word)
+                        .count();
+                    flags > 0 && statement.len() > flags + 1
+                        && statement[flags + 1..].iter().all(|script| {
+                            literal_script(script) && path_word(script).raw_syntax_word
+                        })
+                });
+            if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+                && (args.first().is_some_and(literal_script) || syntax_check)
+            {
+                continue;
+            }
+            let payload = match args {
+                [flag, separator, payload, ..] if flag == "-c" && separator == "--" => Some(payload),
+                [flag, payload, ..] if flag == "-c"
+                    && !payload.starts_with('-') && !payload.starts_with('+') => Some(payload),
+                _ => None,
+            };
+            if let Some(payload) = payload {
+                // A child inherits cwd but cannot change its parent's cwd.
+                collect_git_write_targets(default_target, &mut shell_cwd.clone(), payload, depth + 1, targets);
+            } else {
+                let mut target = default_target.clone();
+                target.uncertain_scope = true;
+                targets.push(target);
+            }
+            continue;
+        }
+        if matches!(name, "read" | "readarray" | "mapfile" | "getopts" | "declare" | "typeset" | "local" | "export" | "readonly" | "let" | "unset" | "source" | ".")
+            || (name == "printf" && words[command_index + 1..].iter().any(|arg| arg.starts_with("-v")))
+        {
+            bindings.clear();
+            if matches!(name, "source" | ".") { *shell_cwd = None; }
+        }
+        let resolve_path = |base: Option<&std::path::Path>, value: &str, spelling: &str| {
+            let value = worker_path_value(value, path_word(spelling), &bindings, allow_variables)?;
+            let path = std::path::Path::new(&value);
+            if path.is_absolute() { Some(path.to_path_buf()) }
+            else { base.map(|base| resolve_git_option_path(base, &value)) }
         };
         if shell_word_basename(&words[command_index]) == "find" {
             // find runs each -exec/-execdir payload as a command. Inspect
@@ -2829,13 +3099,21 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
             continue;
         }
         if words[command_index] == "cd" {
-            if let Some(path) = words.get(command_index + 1).filter(|path| path.as_str() != "--") {
-                shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
-            } else if words.get(command_index + 1).is_some_and(|path| path == "--") {
-                if let Some(path) = words.get(command_index + 2) {
-                    shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
-                }
-            }
+            let path = words.get(command_index + 1).filter(|path| path.as_str() != "--")
+                .or_else(|| words.get(command_index + 2));
+            let cdpath = words[..command_index].iter().any(|word| word.starts_with("CDPATH=") && word != "CDPATH=")
+                || bindings.get("CDPATH").is_some_and(|value| !value.is_empty())
+                || std::env::var("CDPATH").is_ok_and(|value| !value.is_empty());
+            *shell_cwd = path.and_then(|path| {
+                let value = worker_path_value(path, path_word(path), &bindings, allow_variables)?;
+                if cdpath && !std::path::Path::new(&value).is_absolute()
+                    && !value.starts_with("./") && !value.starts_with("../")
+                    && value != "." && value != ".."
+                { return None; }
+                resolve_path(shell_cwd.as_deref(), path, path)
+            });
+            bindings.remove("PWD");
+            bindings.remove("OLDPWD");
             continue;
         }
         if shell_word_basename(&words[command_index]) != "git" {
@@ -2847,51 +3125,62 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         };
 
         let mut target = default_target.clone();
-        target.cwd = shell_cwd.clone();
-        target.is_detached_checkout = git_words[write_index] == "checkout"
-            && git_words[write_index + 1..]
-                .iter()
-                .take_while(|word| word.as_str() != "--")
-                .any(|word| word == "--detach");
+        target.unresolved_directory = shell_cwd.is_none();
+        target.cwd = shell_cwd.clone().unwrap_or_else(|| default_target.cwd.clone());
+        target.head_action = if matches!(git_words[write_index].as_str(), "checkout" | "switch") {
+            git_head_action(&git_words[write_index], &git_words[write_index + 1..])
+        } else { GitHeadAction::Guarded };
+        target.checkout_args = (git_words[write_index] == "checkout")
+            .then(|| git_words[write_index + 1..].to_vec());
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];
             if word == "-C" {
                 if let Some(path) = git_words.get(index + 1) {
-                    target.cwd = resolve_git_option_path(&target.cwd, path);
+                    match resolve_path(Some(&target.cwd), path, path) {
+                        Some(path) => target.cwd = path,
+                        None => target.unresolved_directory = true,
+                    }
                     index += 2;
                     continue;
                 }
                 break;
             }
             if let Some(path) = word.strip_prefix("-C").filter(|path| !path.is_empty()) {
-                target.cwd = resolve_git_option_path(&target.cwd, path);
+                match resolve_path(Some(&target.cwd), path, word) {
+                    Some(path) => target.cwd = path,
+                    None => target.unresolved_directory = true,
+                }
                 index += 1;
                 continue;
             }
             if word == "--git-dir" {
                 if let Some(path) = git_words.get(index + 1) {
-                    target.git_dir = Some(resolve_git_option_path(&target.cwd, path));
+                    target.git_dir = resolve_path(Some(&target.cwd), path, path);
+                    target.unresolved_directory |= target.git_dir.is_none();
                     index += 2;
                     continue;
                 }
                 break;
             }
             if let Some(path) = word.strip_prefix("--git-dir=") {
-                target.git_dir = Some(resolve_git_option_path(&target.cwd, path));
+                target.git_dir = resolve_path(Some(&target.cwd), path, word);
+                target.unresolved_directory |= target.git_dir.is_none();
                 index += 1;
                 continue;
             }
             if word == "--work-tree" {
                 if let Some(path) = git_words.get(index + 1) {
-                    target.work_tree = Some(resolve_git_option_path(&target.cwd, path));
+                    target.work_tree = resolve_path(Some(&target.cwd), path, path);
+                    target.unresolved_directory |= target.work_tree.is_none();
                     index += 2;
                     continue;
                 }
                 break;
             }
             if let Some(path) = word.strip_prefix("--work-tree=") {
-                target.work_tree = Some(resolve_git_option_path(&target.cwd, path));
+                target.work_tree = resolve_path(Some(&target.cwd), path, word);
+                target.unresolved_directory |= target.work_tree.is_none();
                 index += 1;
                 continue;
             }
@@ -2899,8 +3188,12 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         }
         targets.push(target);
     }
-
-    targets
+    for body in &substitutions.bodies {
+        for cwd in &visited_cwds {
+            // A subshell inherits cwd but cannot change its parent's cwd.
+            collect_git_write_targets(default_target, &mut cwd.clone(), body, depth + 1, targets);
+        }
+    }
 }
 
 fn git_command_at_target(target: &GitCommandTarget) -> std::process::Command {
@@ -2993,6 +3286,32 @@ fn worker_git_scope_violation_for_command_with_worktree(
         })
 }
 
+fn git_target_is_head_navigation(target: &GitCommandTarget) -> bool {
+    let GitHeadAction::Navigate { reference, guess } = &target.head_action else { return false; };
+    let Some(reference) = reference else {
+        return git_command_at_target(target).args(["rev-parse", "--git-dir"])
+            .output().is_ok_and(|output| output.status.success());
+    };
+    let reference = if reference == "-" { "@{-1}" } else { reference.as_str() };
+    let is_commit = |name: &str| git_command_at_target(target)
+        .args(["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{name}^{{commit}}")])
+        .output().is_ok_and(|output| output.status.success());
+    if is_commit(reference) { return true; }
+    // Git can create a tracking branch when a unique remote owns this name.
+    // A real path stays guarded when no local ref disambiguates it.
+    if !guess || target.cwd.join(reference).exists() { return false; }
+    let Ok(output) = git_command_at_target(target).args(["for-each-ref", "--format=%(refname)", "refs/remotes/"]).output() else { return false; };
+    if !output.status.success() { return false; }
+    let names = String::from_utf8_lossy(&output.stdout);
+    let suffix = format!("/{reference}");
+    let candidates: Vec<_> = names.lines().filter(|name| name.ends_with(&suffix)).collect();
+    if candidates.len() == 1 { return is_commit(candidates[0]); }
+    let Ok(remote) = git_command_at_target(target).args(["config", "--get", "checkout.defaultRemote"]).output() else { return false; };
+    if !remote.status.success() { return false; }
+    let preferred = format!("refs/remotes/{}/{reference}", String::from_utf8_lossy(&remote.stdout).trim());
+    candidates.iter().any(|candidate| *candidate == preferred) && is_commit(&preferred)
+}
+
 /// Check whether a factory worker's history-changing Git operation
 /// should be denied.
 ///
@@ -3020,6 +3339,14 @@ fn check_worker_git_commit_scope_at_target(
     target: &GitCommandTarget,
     registered_worktree_root: Option<&std::path::Path>,
 ) -> Option<String> {
+    if target.uncertain_scope {
+        return Some("WORKER COMMIT GUARD: Cannot determine nested shell command scope. Use the plain -c '<cmd>' form inside your assigned worktree; split deeply nested commands into explicit operations.".to_string());
+    }
+    let unresolved = || format!(
+        "WORKER_GIT_TARGET_UNRESOLVED: Cannot determine Git identity for the commit directory ({}). Branch state is unknown. Use a literal directory or a previously bound literal path, then retry.",
+        crate::worktree::GitOperations::visible_git_label(&target.cwd.to_string_lossy()),
+    );
+    if target.unresolved_directory { return Some(unresolved()); }
     let cwd = target.path_for_scope().display().to_string();
     let clone_path = registered_worktree_root
         .map(|path| path.to_string_lossy().into_owned())
@@ -3044,6 +3371,23 @@ fn check_worker_git_commit_scope_at_target(
             .is_some_and(|(cwd, worktree)| cwd.starts_with(worktree));
 
         if !inside_worktree {
+            if let Some(checkout_args) = &target.checkout_args {
+                let args: Vec<&str> = ["-C", clone_path, "checkout"].into_iter()
+                    .chain(checkout_args.iter().map(String::as_str)).collect();
+                let [checkout] = match crate::worktree::GitOperations::shell_remedies([("git", &args[..])]) {
+                    Ok(commands) => commands,
+                    Err(refusal) => return Some(refusal),
+                };
+                let cwd = crate::worktree::GitOperations::visible_git_label(&cwd);
+                let clone_path = crate::worktree::GitOperations::visible_git_label(clone_path);
+                return Some(format!(
+                    "WORKER_CHECKOUT_OUTSIDE_WORKTREE: 🚫 a worker runs checkouts only in \
+                    its assigned worktree ({clone_path}); {cwd} is outside it.\n\n\
+                    Run the checkout there:\n  {checkout}\n\n\
+                    To read another revision without moving your checkout, use \
+                    `git show <rev>:<path>`."
+                ));
+            }
             let worker_name =
                 std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
             let lane = format!("factory/{worker_name}");
@@ -3068,10 +3412,10 @@ fn check_worker_git_commit_scope_at_target(
         }
     }
 
-    // Checking out a commit during a bisect changes only the worker's own
-    // checkout. Keep the worktree containment check above, but do not apply
-    // the branch rule reserved for commits and other history mutations.
-    if is_isolated && target.is_detached_checkout {
+    // Navigation never creates a commit. Keep the effective-directory and
+    // worktree containment checks above, then distinguish checkout refs from
+    // ambiguous path operands using this command's actual Git identity.
+    if git_target_is_head_navigation(target) {
         return None;
     }
 
@@ -3088,6 +3432,13 @@ fn check_worker_git_commit_scope_at_target(
         .or_else(|| get_branch_at_rebase_git_target(target))
     {
         None => {
+            // A failed lookup is not proof of detachment (cas-84ea). Missing
+            // directories, non-repositories and unreadable Git state stay unknown.
+            if !git_command_at_target(target).args(["rev-parse", "--verify", "HEAD"])
+                .output().is_ok_and(|output| output.status.success())
+            {
+                return Some(unresolved());
+            }
             let lane = format!("factory/{worker_name}");
             let [switch] = match crate::worktree::GitOperations::git_remedies([&["switch", &lane]])
             {
@@ -3445,7 +3796,8 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
                      literal: &mut bool,
                      word_quoted: &mut bool,
                      ends: &mut Vec<usize>, end: usize| {
-        if !word.is_empty() {
+        // Argument consumers must preserve quoted empty values (e.g. --shuffle '').
+        if !word.is_empty() || (arguments_only && *word_quoted) {
             tokens.push(ShellToken::Word(std::mem::take(word)));
             literals.push(*literal);
             ends.push(end);
@@ -3611,6 +3963,10 @@ fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> Shell
         }
         match quote {
             Some(active) if ch == active => quote = None,
+            Some('"') if ch == '\\' && chars.peek().is_some_and(|(_, next)| *next == '"') => {
+                // An escaped double quote is word data, not the end of its quote context.
+                word.push(chars.next().unwrap().1);
+            }
             Some('"') if ch == '\\'
                 && chars.peek().is_some_and(|(_, next)| matches!(next, '`' | '\\')) =>
             {
@@ -4813,53 +5169,42 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     targets
 }
 
-/// Claude Code advertises this exact per-session ephemeral root to agents:
-/// `/tmp/claude-<uid>/<project-slug>/<session-id>/scratchpad/...` (or the
-/// macOS canonical spelling `/private/tmp/...`).
+/// Shared by scratchpad admission and its refusal guidance. The UID and project
+/// components are placeholders; the session component is always literal.
+fn harness_session_scratchpad_pattern(session_id: &str) -> [&str; 5] {
+    ["tmp", "claude-<uid>", "<project-slug>", session_id, "scratchpad"]
+}
+
+/// Claude Code's per-session ephemeral root, including its macOS canonical
+/// spelling `/private/tmp/...`. Allow creating the root as well as its files.
 /// Bind the exemption to the hook's own session ID and reject traversal so it
 /// cannot become a general `/tmp` escape hatch.
 pub(crate) fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bool {
     use std::path::Component;
 
-    let mut components = path.components();
+    let mut components = path.components().peekable();
     if components.next() != Some(Component::RootDir) {
         return false;
     }
-    match components.next() {
-        Some(Component::Normal(component)) if component == std::ffi::OsStr::new("tmp") => {}
-        Some(Component::Normal(component)) if component == std::ffi::OsStr::new("private") => {
-            if components.next() != Some(Component::Normal(std::ffi::OsStr::new("tmp"))) {
-                return false;
-            }
+    if components.peek() == Some(&Component::Normal(std::ffi::OsStr::new("private"))) {
+        components.next();
+    }
+    for (index, expected) in harness_session_scratchpad_pattern(session_id).iter().enumerate() {
+        let Some(Component::Normal(actual)) = components.next() else {
+            return false;
+        };
+        let matches = match index {
+            1 => actual.to_str().and_then(|value| value.strip_prefix("claude-"))
+                .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())),
+            2 => true,
+            _ => actual == std::ffi::OsStr::new(expected),
+        };
+        if !matches {
+            return false;
         }
-        _ => return false,
-    }
-    let Some(Component::Normal(claude_user)) = components.next() else {
-        return false;
-    };
-    let Some(uid) = claude_user
-        .to_str()
-        .and_then(|value| value.strip_prefix("claude-"))
-    else {
-        return false;
-    };
-    if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
-    }
-    if !matches!(components.next(), Some(Component::Normal(_)))
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new(session_id)))
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("scratchpad")))
-    {
-        return false;
     }
 
-    // The sanctioned root is for files below `scratchpad`, not the directory
-    // entry itself, and no `..` component may escape it.
-    let remaining: Vec<_> = components.collect();
-    !remaining.is_empty()
-        && remaining
-            .iter()
-            .all(|component| matches!(component, Component::Normal(_)))
+    components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 #[cfg(test)]
@@ -5802,6 +6147,9 @@ fn factory_write_decision(
     }
 }
 
+/// Heading of every agent-config write refusal; tests name the guard by it.
+const CASSY_CONFIG_DENIAL: &str = "🚫 CASSY CONFIG";
+
 /// cas-0d4f0: refusal for an agent tool call that writes, edits, moves over
 /// or deletes a Cassy config file (`.cas/config.toml` or `config.yaml`, or
 /// the global `~/.config/cas/` one) directly. Agents change ordinary keys with
@@ -5869,7 +6217,7 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
         ));
     }
     Some(format!(
-        "🚫 CASSY CONFIG (cas-0d4f0): agents do not write {target} directly. Change an ordinary key with `cas config set <key> <value>`; keys that relax a Cassy guard (slack.transport, verification.force_bypass_allowed, factory.supervisor_only_mcp, the qa gates, …) are operator-only, so ask the supervisor to request the operator's approval."
+        "{CASSY_CONFIG_DENIAL} (cas-0d4f0): agents do not write {target} directly. Change an ordinary key with `cas config set <key> <value>`; keys that relax a Cassy guard (slack.transport, verification.force_bypass_allowed, factory.supervisor_only_mcp, the qa gates, …) are operator-only, so ask the supervisor to request the operator's approval."
     ))
 }
 
@@ -5914,15 +6262,12 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     if depth > 3 {
         return;
     }
-    let mut bodies = shell_heredoc_bodies(command).into_iter();
-    for delimiter in shell_command_without_heredoc_bodies(command).lines().flat_map(heredoc_delimiters) {
-        if let Some(body) = bodies.next()
-            && !delimiter.literal_body
-        {
-            collect_heredoc_substitutions(&body, depth, found);
-        }
+    let substitutions = shell_substitutions(command);
+    found.unresolved_heredoc |= substitutions.unresolved_heredoc;
+    found.unresolved_ansi_c |= substitutions.unresolved_ansi_c;
+    for body in &substitutions.bodies {
+        collect_shell_invocations(body, depth + 1, found);
     }
-    collect_shell_substitutions(&shell_command_without_heredoc_bodies(command), depth, found);
     for words in shell_statement_words(command) {
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
@@ -5964,14 +6309,43 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     }
 }
 
+/// Command text one shell line runs through substitution, for every guard
+/// that inspects executed commands. Expanding heredoc bodies contribute only
+/// their substitutions; literal bodies are data. Each flag marks text that
+/// could not be bounded, which callers must refuse rather than skip. An
+/// unterminated `$(` is a syntax error; the workspace contract names it.
+#[derive(Default)]
+pub(super) struct ShellSubstitutions {
+    pub(super) bodies: Vec<String>,
+    pub(super) unresolved_heredoc: bool,
+    pub(super) unresolved_ansi_c: bool,
+}
+
+impl ShellSubstitutions {
+    pub(super) fn unresolved(&self) -> bool {
+        self.unresolved_heredoc || self.unresolved_ansi_c
+    }
+}
+
+pub(super) fn shell_substitutions(command: &str) -> ShellSubstitutions {
+    let mut found = ShellSubstitutions::default();
+    let projected = shell_command_without_heredoc_bodies(command);
+    let mut bodies = shell_heredoc_bodies(command).into_iter();
+    for delimiter in projected.lines().flat_map(heredoc_delimiters) {
+        if let Some(body) = bodies.next()
+            && !delimiter.literal_body
+        {
+            collect_heredoc_substitutions(&body, &mut found);
+        }
+    }
+    collect_shell_substitutions(&projected, &mut found);
+    found
+}
+
 /// Inspect substitutions before word projection removes quote provenance.
 /// Parameter/arithmetic word parts can contain executable substitutions even
 /// when the outer word is unquoted; their source must remain inspectable.
-fn collect_shell_substitutions(
-    command: &str,
-    depth: usize,
-    found: &mut ShellInvocationScan,
-) {
+fn collect_shell_substitutions(command: &str, found: &mut ShellSubstitutions) {
     let bytes = command.as_bytes();
     let mut index = 0;
     let mut quote = None;
@@ -6035,12 +6409,11 @@ fn collect_shell_substitutions(
             continue;
         };
         let Some(end) = end else { break };
-        if ch == b'`' {
-            let body = shell_effects::backquote_body(&command[start..end]);
-            collect_shell_invocations(&body, depth + 1, found);
+        found.bodies.push(if ch == b'`' {
+            shell_effects::backquote_body(&command[start..end])
         } else {
-            collect_shell_invocations(&command[start..end], depth + 1, found);
-        }
+            command[start..end].to_string()
+        });
         word_start = false;
         index = end + 1;
     }
@@ -6048,7 +6421,7 @@ fn collect_shell_substitutions(
 
 /// Expanding heredoc text is data except for substitutions. Quotes in its
 /// body do not suppress expansion; escaped markers and quoted delimiters do.
-fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvocationScan) {
+fn collect_heredoc_substitutions(body: &str, found: &mut ShellSubstitutions) {
     // The shell removes unescaped backslash-newline pairs before expanding
     // the body. Preserve escaped backslashes so marker escaping stays exact.
     let mut logical = String::new();
@@ -6090,15 +6463,18 @@ fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvo
             found.unresolved_heredoc = true;
             break;
         };
-        if bytes[index] == b'`' {
-            let body = shell_effects::backquote_body(&logical[start..end]);
-            collect_shell_invocations(&body, depth + 1, found);
+        found.bodies.push(if bytes[index] == b'`' {
+            shell_effects::backquote_body(&logical[start..end])
         } else {
-            collect_shell_invocations(&logical[start..end], depth + 1, found);
-        }
+            logical[start..end].to_string()
+        });
         index = end + 1;
     }
 }
+
+/// Heading of every factory workspace contract refusal; tests name the
+/// guard by it.
+const WORKSPACE_CONTRACT_DENIAL: &str = "🚫 FACTORY WORKSPACE CONTRACT";
 
 /// The refusal for an agent shell command that would change write roots or
 /// grants (cas-3147, GH #1182).
@@ -6136,6 +6512,12 @@ fn operator_policy_command_denial(command: &str) -> Option<String> {
             return Some(format!(
                 "🚫 OPERATOR-ONLY (cas-3c26): {action} is the operator's to do, from their own terminal, never an agent's. Ask the supervisor to request it from the operator."
             ));
+        }
+        // Clap stops at help/version before dispatching a command. Keep the
+        // fallback word-position checks from treating that output path as a
+        // policy mutation.
+        if cas_invocation_displays_help(&args) {
+            continue;
         }
         // cas-b181: config writes judged by the CLI parser, so options and
         // their values (`set --store here <key>`) cannot hide the key. The
@@ -6178,6 +6560,17 @@ fn operator_policy_command_denial(command: &str) -> Option<String> {
         }
     }
     operator_policy_command_textual(command).then(|| OPERATOR_POLICY_COMMAND_DENIAL.to_string())
+}
+
+/// Whether the real CLI parser handles this invocation by displaying help
+/// or version output before dispatching any command.
+fn cas_invocation_displays_help(args: &[String]) -> bool {
+    use clap::{error::ErrorKind, Parser};
+
+    let argv = std::iter::once("cas".to_string()).chain(args.iter().cloned());
+    crate::cli::Cli::try_parse_from(argv).is_err_and(|error| {
+        matches!(error.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion)
+    })
 }
 
 /// An operator-only `cas config` write, as the CLI parser reads `args` (the
@@ -6430,8 +6823,15 @@ fn read_only_statement(words: &[String]) -> bool {
         "git" => index == 0 && policy_git_flags(args),
         "cas" => {
             index == 0
-                && matches!(args, [verb, action, key]
-            if verb == "config" && action == "get" && !key.is_empty() && !key.starts_with('-'))
+                && (cas_invocation_displays_help(args)
+                    || matches!(
+                        args,
+                        [verb, action, key]
+                            if verb == "config"
+                                && action == "get"
+                                && !key.is_empty()
+                                && !key.starts_with('-')
+                    ))
         }
         // cas-b7b2: searches that cas-1768 QA found refused, judged by
         // POSITIVE allowlists that fail closed. No environment assignment or
@@ -6970,69 +7370,6 @@ fn read_only_find(args: &[String]) -> bool {
     true
 }
 
-/// cas-1b94: refusal for an agent's Bash `cas mcp add|remove|import` that
-/// would remove, replace or alias a `factory.supervisor_only_mcp` server, by
-/// the rule `proxy_add`/`proxy_remove` apply (cas-0d4f0). Ordinary servers
-/// stay manageable; `cas mcp import --force` is refused while any
-/// supervisor-only server is configured, since it may overwrite one.
-#[cfg(feature = "mcp-proxy")]
-fn supervisor_only_mcp_command_denial(command: &str, cas_root: &Path) -> Option<String> {
-    use crate::config::operator_policy::{supervisor_only_mcp_names, supervisor_only_mcp_refusal};
-    let mut only: Option<Vec<String>> = None;
-    for args in cas_invocations(command) {
-        let Some(at) = args.iter().position(|arg| arg == "mcp") else {
-            continue;
-        };
-        let rest = &args[at + 1..];
-        let Some(sub) = rest.first() else { continue };
-        let only = only.get_or_insert_with(|| supervisor_only_mcp_names(cas_root));
-        if only.is_empty() {
-            return None;
-        }
-        let load = |scope: &str| {
-            let path = match scope {
-                "user" | "global" => cmcp_core::config::Scope::User.config_path().ok(),
-                _ => Some(cas_root.join("proxy.toml")),
-            };
-            path.and_then(|path| cmcp_core::config::Config::load_from(&path).ok())
-                .unwrap_or_default()
-        };
-        let refusal = match sub.as_str() {
-            "remove" | "rm" => {
-                let mut scope = "local".to_string();
-                let mut name = None;
-                let mut words = rest[1..].iter();
-                while let Some(word) = words.next() {
-                    match word.as_str() {
-                        "-s" | "--scope" => scope = words.next().cloned().unwrap_or(scope),
-                        flag if flag.starts_with('-') => {}
-                        value => name = name.or(Some(value.to_string())),
-                    }
-                }
-                name.and_then(|name| supervisor_only_mcp_refusal(&name, None, &load(&scope), only))
-            }
-            "add" => crate::cli::mcp_cmd::parse_add_args(&rest[1..])
-                .ok()
-                .and_then(|parsed| {
-                    supervisor_only_mcp_refusal(
-                        &parsed.name,
-                        Some(&parsed.server_config),
-                        &load(&parsed.scope),
-                        only,
-                    )
-                }),
-            "import" if rest.iter().any(|arg| arg == "--force") => Some(format!(
-                "🚫 OPERATOR-ONLY (cas-0d4f0): `cas mcp import --force` may overwrite a supervisor-only MCP server ({}). factory.supervisor_only_mcp keeps those from workers, so only the operator runs it, from their own terminal. Ask the supervisor to request the operator's approval.",
-                only.join(", ")
-            )),
-            _ => None,
-        };
-        if refusal.is_some() {
-            return refusal;
-        }
-    }
-    None
-}
 
 /// cas-3c26: the variables Cassy's role gates read. An agent that sets,
 /// unsets or clears them for a command it runs is impersonating another role.
@@ -7045,6 +7382,7 @@ fn role_env_tampering_denial(command: &str) -> Option<String> {
     role_env_tampering_at_depth(command, 0)
 }
 
+// gate-audit[forward]: H-12 Returned denial is tagged by the environment-role spoof guard.
 fn role_env_denial(what: &str) -> String {
     format!(
         "🚫 ROLE SPOOF REFUSED (cas-3c26): {what}. {} tell Cassy which role this agent has; an agent may not set, unset or clear them for the commands it runs. Run the command as you are. Operator-only actions are the operator's to run from their own terminal.",
@@ -7375,6 +7713,11 @@ fn factory_workspace_contract_denial_with_roots(
         configured_scratch_root,
         worktree_root,
     );
+    let artifacts = crate::config::resolved_factory_artifacts_root(configured_artifacts_root);
+    let canonical_artifacts = canonicalize_for_containment(&artifacts)
+        .map(|path| format!("`{}`", path.display()))
+        .unwrap_or_else(|| "unresolved".to_string());
+    let measured = format!(" Artifact root: configured `{}`; canonical {canonical_artifacts}.", artifacts.display());
     let roots = policy.describe(task_ids);
     let roots = if roots.is_empty() {
         String::new()
@@ -7382,7 +7725,7 @@ fn factory_workspace_contract_denial_with_roots(
         format!(" Operator write roots in effect: {}.", roots.join("; "))
     };
     format!(
-        "{denial}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml`, or in `~/.cas/config.toml` for every project (`cas config set factory.write_roots`), or add task grants."
+        "{denial}{measured}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml`, or in `~/.cas/config.toml` for every project (`cas config set factory.write_roots`), or add task grants."
     )
 }
 
@@ -7601,7 +7944,7 @@ fn factory_workspace_contract_denial(
 ) -> String {
     if violation.matched_rule == "Codex hook input omits workdir" {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve relative redirection `{}` because the Codex hook input omits workdir. Use an absolute in-worktree path.",
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot resolve relative redirection `{}` because the Codex hook input omits workdir. Use an absolute in-worktree path.",
             violation.evaluated_path,
         );
     }
@@ -7617,7 +7960,7 @@ fn factory_workspace_contract_denial(
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
     if violation.matched_rule == "an unresolved shell payload" {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve shell filesystem effects (an unresolved shell payload). For gh issue or PR text, save a literal body file under your configured scratch root or assigned worktree and pass `--body-file <path>`. Assigned worktree: `{}`.",
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot resolve shell filesystem effects (an unresolved shell payload). For gh issue or PR text, save a literal body file under your configured scratch root or assigned worktree and pass `--body-file <path>`. Assigned worktree: `{}`.",
             worktree.display(),
         );
     }
@@ -7632,7 +7975,7 @@ fn factory_workspace_contract_denial(
         | "a shell payload beyond the resolution limit"
         | "an unmatched shell scope") {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve shell filesystem effects ({}). Use literal directory operands and a literal, bounded shell payload so every write can be checked against its effective directory. Assigned worktree: `{}`.",
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot resolve shell filesystem effects ({}). Use literal directory operands and a literal, bounded shell payload so every write can be checked against its effective directory. Assigned worktree: `{}`.",
             violation.matched_rule, worktree.display(),
         );
     }
@@ -7646,13 +7989,13 @@ fn factory_workspace_contract_denial(
             format!("${name}")
         };
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: cannot establish the write root because of unexpanded shell variable `{variable}` in `{}`. Use a literal sanctioned root before the variable suffix, or bind the variable with a simple earlier assignment. Assigned worktree: `{}`.",
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot establish the write root because of unexpanded shell variable `{variable}` in `{}`. Use a literal sanctioned root before the variable suffix, or bind the variable with a simple earlier assignment. Assigned worktree: `{}`.",
             violation.evaluated_path, worktree.display(),
         );
     }
     if violation.matched_rule.starts_with("link") || violation.matched_rule.starts_with("a path through") {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: {} (`{}` resolves to `{}`). A write is judged where it lands: a link may not point at, into or above a Cassy policy path (`.cas/config.toml`, `.cas/config.yaml`, `.cas/operator/`), a hard link is a write to the file it shares, and a write through a link the same command creates must land in your worktree, under `{}/<task-id>/`{} or in an operator write root. Use literal link operands. Assigned worktree: `{}`.",
+            "{WORKSPACE_CONTRACT_DENIAL}: {} (`{}` resolves to `{}`). A write is judged where it lands: a link may not point at, into or above a Cassy policy path (`.cas/config.toml`, `.cas/config.yaml`, `.cas/operator/`), a hard link is a write to the file it shares, and a write through a link the same command creates must land in your worktree, under `{}/<task-id>/`{} or in an operator write root. Use literal link operands. Assigned worktree: `{}`.",
             violation.matched_rule,
             violation.evaluated_path,
             violation.resolved_path.display(),
@@ -7663,7 +8006,7 @@ fn factory_workspace_contract_denial(
     }
     if violation.matched_rule.starts_with("deletion") {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: deletion refused ({}): {}. Assigned worktree: `{}`. Deleting is allowed inside your worktree, under `{}/<task-id>/`{}, and for stale Cassy runtime files (sockets, locks, pid and session files) under ~/.cas. $HOME, /, /tmp, the repository and your worktree root are never deleted.",
+            "{WORKSPACE_CONTRACT_DENIAL}: deletion refused ({}): {}. Assigned worktree: `{}`. Deleting is allowed inside your worktree, under `{}/<task-id>/`{}, and for stale Cassy runtime files (sockets, locks, pid and session files) under ~/.cas. $HOME, /, /tmp, the repository and your worktree root are never deleted.",
             violation.matched_rule,
             violation.resolved_path.display(),
             worktree.display(),
@@ -7671,8 +8014,9 @@ fn factory_workspace_contract_denial(
             scratch,
         );
     }
+    let scratchpad = harness_session_scratchpad_pattern(&input.session_id).join("/");
     format!(
-        "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
+        "{WORKSPACE_CONTRACT_DENIAL}: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; this session's harness scratchpad `/{scratchpad}` (also `/private/{scratchpad}`) is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
         violation.resolved_path.display(),
         worktree.display(),
         artifacts,
@@ -7704,7 +8048,7 @@ fn log_factory_git_scope_rejection(
     let operation_index = operation_tokens.iter().position(|word| {
         matches!(
             *word,
-            "commit" | "merge" | "push" | "rebase" | "reset" | "checkout" | "add"
+            "commit" | "merge" | "push" | "rebase" | "reset" | "checkout" | "switch" | "add"
         )
     });
     let operation = operation_index
@@ -8263,70 +8607,6 @@ mod workspace_contract_tests {
         }
     }
 
-    /// cas-1b94: an agent's Bash `cas mcp add|remove|import` cannot remove,
-    /// replace or alias a supervisor-only MCP server, however wrapped; the
-    /// rule is the one `proxy_add`/`proxy_remove` apply, and ordinary servers
-    /// stay manageable.
-    #[cfg(feature = "mcp-proxy")]
-    #[test]
-    fn cas_1b94_agent_shell_cannot_remove_or_alias_supervisor_only_mcp_servers() {
-        let root = tempfile::tempdir().expect("cas root");
-        std::fs::write(
-            root.path().join("config.toml"),
-            "[factory]\nsupervisor_only_mcp = [\"vercel\"]\n",
-        )
-        .expect("config");
-        std::fs::write(
-            root.path().join("proxy.toml"),
-            "[servers.vercel]\ntransport = \"http\"\nurl = \"https://mcp.vercel.com\"\n\n[servers.docs]\ntransport = \"http\"\nurl = \"https://docs.example/mcp\"\n",
-        )
-        .expect("proxy config");
-        for command in [
-            "cas mcp remove vercel",
-            "cas mcp remove -s local vercel",
-            "cas mcp add vercel https://other.example/mcp",
-            "cas mcp add deploys https://mcp.vercel.com",
-            "bash -c 'cas mcp add --transport http deploys https://mcp.vercel.com'",
-            "nohup /usr/local/bin/cas mcp remove vercel",
-            "cas mcp import --from claude --force",
-        ] {
-            let denial = supervisor_only_mcp_command_denial(command, root.path())
-                .unwrap_or_else(|| panic!("{command} must be refused"));
-            assert!(
-                denial.contains("supervisor-only") && denial.contains("operator"),
-                "{denial}"
-            );
-        }
-        for allowed in [
-            "cas mcp remove docs",
-            "cas mcp add search https://search.example/mcp",
-            "cas mcp list",
-            "cas mcp import --from claude",
-            "rg 'cas mcp remove vercel' docs",
-        ] {
-            assert_eq!(
-                supervisor_only_mcp_command_denial(allowed, root.path()),
-                None,
-                "{allowed}"
-            );
-        }
-
-        // The PreToolUse hook applies it to an agent's Bash call.
-        let input = bash_input("cas mcp remove vercel", root.path());
-        let output = handle_pre_tool_use_inner(&input, Some(root.path()), None, Path::new(&input.cwd)).expect("hook");
-        let rendered = serde_json::to_string(&output).expect("serialize");
-        assert!(
-            rendered.contains("deny") && rendered.contains("supervisor-only"),
-            "{rendered}"
-        );
-
-        // Nothing is supervisor-only: nothing to refuse.
-        let open = tempfile::tempdir().expect("cas root");
-        assert_eq!(
-            supervisor_only_mcp_command_denial("cas mcp remove vercel", open.path()),
-            None
-        );
-    }
 
     /// cas-0d4f0: no agent tool call writes a Cassy config file directly,
     /// whatever its role; other files under `.cas/` and other config.toml
@@ -8423,10 +8703,8 @@ mod workspace_contract_tests {
             "echo $(cat $(ls src)) tee ../../config.toml",
         ] {
             let (decision, reason) = decide(command);
-            assert!(
-                decision != "deny" && !reason.contains("CASSY CONFIG"),
-                "read-only `{command}` must be allowed: {decision} {reason}"
-            );
+            assert_ne!(decision, "deny", "read-only `{command}` must be allowed: {reason}");
+            assert!(!reason.contains(CASSY_CONFIG_DENIAL), "`{command}`: {reason}");
         }
         for command in [
             "touch ../../config.toml",
@@ -8440,7 +8718,7 @@ mod workspace_contract_tests {
         ] {
             let (decision, reason) = decide(command);
             assert_eq!(decision, "deny", "`{command}` writes the config and stays refused: {reason}");
-            assert!(reason.contains("CASSY CONFIG"), "`{command}`: {reason}");
+            assert!(reason.contains(CASSY_CONFIG_DENIAL), "`{command}`: {reason}");
         }
     }
 
@@ -9112,7 +9390,7 @@ EOF
             let response = serde_json::to_value(response).unwrap();
             let decision = &response["hookSpecificOutput"]["permissionDecision"];
             let reason = response["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
-            if (decision == "deny") != denied || (denied && !reason.contains("FACTORY WORKSPACE CONTRACT")) {
+            if (decision == "deny") != denied || (denied && !reason.contains(WORKSPACE_CONTRACT_DENIAL)) {
                 failures.push(format!("{case}: {decision}: {reason}"));
             }
         }
@@ -9151,7 +9429,7 @@ EOF
                 let decision = &response["hookSpecificOutput"]["permissionDecision"];
                 let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
                     .as_str().unwrap_or("");
-                if decision != "deny" || !reason.contains("FACTORY WORKSPACE CONTRACT") {
+                if decision != "deny" || !reason.contains(WORKSPACE_CONTRACT_DENIAL) {
                     failures.push(format!("{source}/{context}: {decision}: {reason}"));
                 }
             }
@@ -9221,6 +9499,20 @@ EOF
                     .to_string(),
             )
         };
+        // H-11 classifies the Bash command itself: searches, help and quoted
+        // command text are data, while an actual policy command is refused.
+        for (command, expected) in [
+            (r#"grep -rn "grant-write\|GrantWrite" cas-cli/src/cli/config/mod.rs"#, "allow"),
+            ("cas config grant-write --help", "allow"),
+            (r#"printf '%s\n' 'cas config grant-write --task cas-1234 --path /x --reason r'"#, "allow"),
+            ("cas config grant-write --task cas-1234 --path /x --reason r", "deny"),
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, expected, "{command}: {reason}");
+            if expected == "deny" {
+                assert!(reason.contains("[H-11]"), "{reason}");
+            }
+        }
         // cas-9685: each independent spelling/command-position bypass must
         // reach the real hook; collect failures so RED proves every vector.
         let mut bypasses = Vec::new();
@@ -9236,7 +9528,7 @@ EOF
             ("named coproc if", "coproc NAME if cas config gr''ant-write --task cas-1234 --path /x --reason r; then :; fi"),
         ] {
             let (status, reason) = decision(command);
-            if status != "deny" || !reason.contains("operator") {
+            if status != "deny" || !reason.contains("[H-11]") {
                 bypasses.push(format!("{vector}: {status}: {reason}"));
             }
         }
@@ -9342,7 +9634,7 @@ EOF
         ] {
             let (status, reason) = decision(command);
             assert_eq!(status, "deny", "{command}: {reason}");
-            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+            assert!(reason.contains(WORKSPACE_CONTRACT_DENIAL), "{reason}");
         }
         // cas-d6f2: these operands recursively evaluate subscript text.
         let indirect = "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; ";
@@ -9371,7 +9663,7 @@ EOF
             let command = format!("{indirect}{expression}");
             let (status, reason) = decision(&command);
             assert_eq!(status, "deny", "{command}: {reason}");
-            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+            assert!(reason.contains(WORKSPACE_CONTRACT_DENIAL), "{reason}");
         }
         for allowed in [
             "[[ 1 -eq 1 ]]",
@@ -9468,7 +9760,7 @@ EOF
                     status, "deny",
                     "execution stays closed: {invocation}: {reason}"
                 );
-                assert!(reason.contains("OPERATOR-ONLY"), "{invocation}: {reason}");
+                assert!(reason.contains(OPERATOR_POLICY_COMMAND_DENIAL), "{invocation}: {reason}");
             }
         }
     }
@@ -10379,6 +10671,17 @@ EOF
         }
     }
 
+    #[test]
+    fn quoted_read_only_regex_keeps_shell_boundaries_gh_1583() {
+        let command = r#"rg -n "name=\"content\"|:label=.*content|Content'|Content\"|tour" app/page.vue app/components/IdeaUnified* | head -65; ps -p 12345 -o pid=,etime=,stat=; tail -4 /task-artifacts/read-only.log; grep -E "item=\"value\"|=>" app/data.log"#;
+        let cwd = Path::new("/fixture/worktree");
+        let effects = shell_effects::collect(command, cwd).expect("read-only regex must resolve");
+        assert!(effects.writes.is_empty() && effects.edits.is_empty() && effects.deletes.is_empty());
+        let effects = shell_effects::collect(&format!("{command}; printf x > /outside/file"), cwd)
+            .expect("a following write must still resolve");
+        assert!(effects.writes.iter().any(|(path, _)| path == "/outside/file"));
+    }
+
     /// The three ordinary-worker allow-to-deny flips in the 200-call replay,
     /// with only the artifact namespace/cwd mapped into a hermetic project.
     #[test]
@@ -10401,6 +10704,7 @@ EOF
             format!(r#"bash -c 'printf "%s\n" "$$" > {artifacts}/cas-426f/release.pid; scripts/release.sh > {artifacts}/cas-426f/release.log 2>&1; rc=$?; printf "\nRELEASE_EXIT=%s\n" "$rc" >> {artifacts}/cas-426f/release.log; exit "$rc"'"#),
             r#"timeout 590 bash -c 'while [ $(grep -c "Summary \[" target/w58r2.log) -lt 2 ]; do sleep 10; done'; grep -E "FAIL|Summary|SIGABRT|TIMEOUT" target/w58r2.log; grep -c PASS target/w58r2.log"#.to_string(),
             r#"sh -c 'printf "%s\n" "$?"'"#.to_string(),
+            format!(r#"false > {artifacts}/cas-426f/guard.log 2>&1; result=$?; printf '%s\n' "$result" > {artifacts}/cas-426f/guard.exit; test "$result" -eq 1"#),
         ];
         let mut mismatches = Vec::new();
         for command in commands {
@@ -10698,18 +11002,14 @@ EOF
             assert_eq!(decide(path), None, "{case}: a stale leftover is deletable");
         }
         for (case, path, reason) in [
-            ("socket with a live listener", &live_sock, "listener"),
-            ("lock held by another handle", &held_lock, "held"),
-            ("lock recording a live pid", &pid_lock_live, "alive"),
-            ("pid file of a live pid", &live_pidfile, "alive"),
-            ("session record of a live daemon", &live_session, "alive"),
+            ("socket with a live listener", &live_sock, "the socket has a listener"),
+            ("lock held by another handle", &held_lock, "the lock is held"),
+            ("lock recording a live pid", &pid_lock_live, "the lock's recorded pid is alive"),
+            ("pid file of a live pid", &live_pidfile, "its recorded pid is alive"),
+            ("session record of a live daemon", &live_session, "its recorded pid is alive"),
         ] {
             let violation = decide(path).unwrap_or_else(|| panic!("{case} must be refused"));
-            assert!(
-                violation.matched_rule.contains("live Cassy runtime file")
-                    && violation.matched_rule.contains(reason),
-                "{case}: {violation:?}"
-            );
+            assert_eq!(violation.matched_rule, live_runtime_rule(reason), "{case}: {violation:?}");
         }
         drop(holder);
     }
@@ -11106,7 +11406,7 @@ EOF
         let input = bash_input("printf proof > $UNKNOWN_ROOT/all.jsonl", worktree.path());
         let violation = factory_write_violation(&input, &None, None, false, Some(worktree.path())).unwrap();
         let reason = factory_workspace_contract_denial(&input, &violation, None, None, Some(worktree.path()));
-        assert!(reason.contains("unexpanded shell variable `$UNKNOWN_ROOT`"), "{reason}");
+        assert!(reason.contains("$UNKNOWN_ROOT"));
     }
 
     #[test]
@@ -11213,6 +11513,63 @@ EOF
             None,
             "symlinked registered roots must compare by their canonical target"
         );
+    }
+
+    /// GH #1603: an inline relative Python write from the real artifact cwd
+    /// must receive the same decision as its configured symlink spelling.
+    #[cfg(unix)]
+    #[test]
+    fn configured_artifact_symlink_and_realpath_writes_agree_cas_a767() {
+        use std::os::unix::fs::symlink;
+        let mut env = TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let cas_root = crate::store::init_cas_dir(&root.join("project")).unwrap();
+        let worktree = root.join("worktree");
+        let real_base = root.join("real-artifacts");
+        let logical_base = root.join("configured-artifacts");
+        let outside = root.join("outside");
+        for dir in [&worktree, &real_base, &outside] { std::fs::create_dir_all(dir).unwrap(); }
+        symlink(&real_base, &logical_base).unwrap();
+        std::fs::write(cas_root.join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", logical_base.display().to_string())).unwrap();
+        let logical_root = crate::config::resolved_factory_artifact_paths(&cas_root,
+            Some(logical_base.to_str().unwrap())).project_root;
+        let real_root = real_base.join(logical_root.strip_prefix(&logical_base).unwrap());
+        std::fs::create_dir_all(real_root.join("cas-a767")).unwrap();
+        symlink(&outside, real_root.join("cas-a767/escape")).unwrap();
+        std::fs::write(real_root.join("cas-a767/existing.json"), "{}").unwrap();
+        for (key, value) in [("CAS_AGENT_ROLE", "worker"), ("CAS_FACTORY_MODE", "1"),
+            ("CAS_HOOK_HARNESS", "codex"), ("CAS_AGENT_NAME", "worker-a767"),
+            ("CAS_FACTORY_SESSION", "artifact-root-a767")] { env.set(key, value); }
+        env.set("CAS_CLONE_PATH", &worktree);
+        env.set("CAS_ROOT", &cas_root);
+        let run = |cwd: &Path, path: &str| {
+            // Codex projects exec_command as Bash/command plus workdir, while
+            // the hook's turn cwd remains the worker's assigned checkout.
+            let input = tool_input("Bash", serde_json::json!({
+                "command": format!("python3 -c \"from pathlib import Path; Path('{path}').write_text('{{}}')\""),
+                "workdir": cwd,
+            }), &worktree);
+            serde_json::to_value(handle_pre_tool_use(&input, Some(&cas_root)).unwrap()).unwrap()
+        };
+        let mut denials = Vec::new();
+        for cwd in [logical_root.join("cas-a767"), real_root.join("cas-a767")] {
+            for path in ["helper-audit.json", "new/nested.json", "existing.json"] {
+                let output = run(&cwd, path);
+                assert_ne!(output["hookSpecificOutput"]["permissionDecision"], "deny", "cwd={} target={path}: {output}", cwd.display());
+            }
+            let output = run(&cwd, "escape/helper-audit.json");
+            assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny", "{output}");
+            let denial = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_string();
+            assert!(denial.contains(&outside.join("helper-audit.json").display().to_string()), "{denial}");
+            denials.push(denial);
+        }
+        // Paths are diagnostic data, not pinned human-facing wording. Check
+        // these only after both spellings and their escape controls have run.
+        for denial in denials {
+            assert!(denial.contains(&logical_root.display().to_string()), "{denial}");
+            assert!(denial.contains(&real_root.display().to_string()), "{denial}");
+        }
     }
 
     #[cfg(unix)]
@@ -11519,23 +11876,6 @@ EOF
     }
 }
 
-/// Whether `tool_name`/`action` is one of the CODEMAP-freshness-gated calls
-/// (task creation, worker spawn) — keyed on the CALLER's own `tool_prefix`
-/// so this recognizes `mcp__cas__task`/`mcp__cs__task`/`cas__task` etc.
-/// correctly for whichever harness is actually running.
-///
-/// EPIC cas-8888 (cas-fd9f): extracted from `handle_pre_tool_use` (was
-/// inline, hardcoded to `mcp__cas__task`/`mcp__cas__coordination` — silently
-/// inert for every non-Claude supervisor, since `tool_name` is whatever the
-/// CALLING process's own harness actually named the tool).
-fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix: &str) -> bool {
-    let task_tool = format!("{tool_prefix}task");
-    let factory_tool = format!("{tool_prefix}factory");
-    (tool_name == task_tool && action == Some("create"))
-        || (tool_name == factory_tool
-            && matches!(action, Some("spawn_workers") | Some("spawn_worker")))
-}
-
 /// Return the single existing Cassy task ID named in a verifier prompt.
 ///
 /// Ambiguous prompts fail closed: authority must bind to one exact task, not
@@ -11650,23 +11990,31 @@ fn reap_stranded_native_send_message_copies() {
     }
 }
 
-/// Deny the host harness transport for factory supervisors (GH #793).
-///
-/// A `SendMessage` hook result of `allow` does not replace Claude Code's
-/// native delivery: the host runs that transport after the hook returns. A
-/// supervisor assignment therefore has to fail closed here and point at the
-/// durable CAS commands instead.
-fn deny_factory_supervisor_send_message() -> HookOutput {
-    let prefix = crate::harness_policy::own_tool_prefix();
-    HookOutput::with_pre_tool_permission(
-        "deny",
-        &format!(
-            "🚫 SendMessage is disabled for factory supervisors.\n\n\
-             Use {prefix}coordination action=message target=<worker> summary=\"<brief summary>\" message=\"<message>\"\n\
-             For task assignments, use {prefix}task action=update id=<task-id> assignee=<worker>.\n\n\
-             The CAS coordination path is the only durable supervisor-to-worker transport."
-        ),
-    )
+
+/// Only the official child ID from this session's SubagentStart can use
+/// the native transport. Missing, conflicting and broadcast targets fail closed.
+fn owns_native_message_target(input: &HookInput, cas_root: Option<&Path>) -> bool {
+    let Some(args) = input.tool_input.as_ref() else { return false; };
+    if args.get("type").and_then(serde_json::Value::as_str).is_some_and(|kind| kind != "message") {
+        return false;
+    }
+    let target = args.get("recipient").or_else(|| args.get("to")).and_then(serde_json::Value::as_str);
+    let (Some(root), Some(target)) = (cas_root, target) else { return false; };
+    if args.get("recipient").zip(args.get("to")).is_some_and(|(a, b)| a != b) {
+        return false;
+    }
+    if matches!(target, "supervisor" | "director" | "all_workers" | "team-lead") {
+        return false;
+    }
+    // A claimed child never overrides a registered factory recipient.
+    let Ok(store) = crate::store::open_agent_store(root) else { return false; };
+    let Ok(agents) = store.list(None) else { return false; };
+    if agents.iter().any(|agent| (agent.id == target || agent.name == target)
+        && matches!(agent.role, crate::types::AgentRole::Worker | crate::types::AgentRole::Supervisor))
+    {
+        return false;
+    }
+    crate::hooks::handlers::owns_native_subagent(root, &input.session_id, target)
 }
 
 /// Deny the host harness transport for factory workers.
@@ -11674,11 +12022,11 @@ fn deny_factory_worker_send_message() -> HookOutput {
     let prefix = crate::harness_policy::own_tool_prefix();
     HookOutput::with_pre_tool_permission(
         "deny",
-        &format!(
-            "🚫 SendMessage is disabled for factory workers.\n\n\
+        &crate::gates::tag("H-21", format!(
+            "🚫 Native SendMessage is limited to this session's recorded subagent IDs.\n\n\
              Use {prefix}coordination action=message target=<peer> summary=\"<brief summary>\" message=\"<message>\".\n\n\
              This sends the message through the durable factory coordination path."
-        ),
+        )),
     )
 }
 
@@ -11875,6 +12223,8 @@ mod worker_commit_guard_tests {
             "git cherry-pick --continue",
             "git reset --hard HEAD~1",
             "git checkout main",
+            "git checkout -B replay-at-release HEAD",
+            "git checkout HEAD -- -b",
             "git add -A",
         ] {
             assert!(
@@ -12318,76 +12668,141 @@ mod worker_commit_guard_tests {
 
     #[test]
     fn detached_bisect_checkout_is_navigation_but_commit_is_refused_cas_f600() {
+        let mut env = TestEnvGuard::temp_home();
         let repo = make_git_repo();
         let path = repo.path().to_string_lossy().to_string();
-        let head = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git")
+            .args(args).current_dir(repo.path()).output().unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
         let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
-        let detach = std::process::Command::new("git")
-            .args(["checkout", "--detach", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(detach.status.success(), "{detach:?}");
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("worker")),
-            ("CAS_FACTORY_MODE", Some("1")),
-            ("CAS_CLONE_PATH", Some(&path)),
-            ("CAS_AGENT_NAME", Some("bisect-worker")),
-        ]);
+        assert!(git(&["branch", "factory/bisect-worker"]).status.success());
+        assert!(git(&["remote", "add", "origin", "."]).status.success());
+        assert!(git(&["remote", "add", "other", "."]).status.success());
+        assert!(git(&["config", "checkout.defaultRemote", "origin"]).status.success());
+        assert!(git(&["update-ref", "refs/remotes/origin/guessable", &sha]).status.success());
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_CLONE_PATH", &path);
+        env.set("CAS_AGENT_NAME", "bisect-worker");
 
-        let classify = hook_git_write_input(
-            &path,
-            &format!("git bisect good\ngit checkout --detach {sha}"),
-        );
-        let output = handle_pre_tool_use(&classify, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_ne!(
-            value["hookSpecificOutput"]["permissionDecision"],
-            "deny",
-            "bisect classification and detached checkout must remain usable: {value}"
-        );
-
-        let restore = hook_git_write_input(&path, &format!("git checkout {sha} -- --detach"));
-        let output = handle_pre_tool_use(&restore, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(
-            value["hookSpecificOutput"]["permissionDecision"],
-            "deny",
-            "a pathspec named --detach must not bypass the detached-HEAD guard: {value}"
-        );
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("HEAD is detached"));
-
-        let commit = hook_git_write_input(&path, "git commit -m forbidden");
-        let output = handle_pre_tool_use(&commit, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("HEAD is detached"));
-
+        // One row per HEAD-moving form (and per ref-rewrite/path control).
+        // Execute allowed rows against Git too: these navigate the existing
+        // commit graph, rather than merely looking like navigation to us.
+        let cases: &[(&[&str], bool)] = &[
+            (&["checkout", "factory/bisect-worker"], true),
+            (&["checkout", "-"], true),
+            (&["checkout", "@{-1}"], true),
+            (&["checkout", "TIP"], true),
+            (&["checkout", "TIP", "--"], true),
+            (&["checkout", "--detach", "TIP"], true),
+            (&["checkout", "-d", "TIP"], true),
+            (&["checkout", "--detach"], true),
+            (&["checkout", "-qd", "TIP"], true),
+            (&["checkout", "-b", "NEW", "TIP"], true),
+            (&["checkout", "-bNEW", "TIP"], true),
+            (&["checkout", "-qbNEW", "TIP"], true),
+            (&["checkout", "--orphan", "NEW", "TIP"], true),
+            (&["checkout", "--orphan=NEW", "TIP"], true),
+            (&["checkout", "--track", "-b", "NEW", "main"], true),
+            (&["checkout", "-t", "-bNEW", "main"], true),
+            (&["checkout", "--conflict", "merge", "factory/bisect-worker"], true),
+            (&["checkout", "guessable"], true),
+            (&["checkout", "--guess", "NEW"], true),
+            (&["checkout", "-t", "origin/NEW"], true),
+            (&["checkout", "--track=direct", "origin/NEW"], true),
+            (&["-C", "REPO", "checkout", "factory/bisect-worker"], true),
+            (&["--git-dir=REPO/.git", "--work-tree=REPO", "checkout", "factory/bisect-worker"], true),
+            (&["switch", "factory/bisect-worker"], true),
+            (&["switch", "-"], true),
+            (&["switch", "@{-1}"], true),
+            (&["switch", "-c", "NEW", "TIP"], true),
+            (&["switch", "-cNEW", "TIP"], true),
+            (&["switch", "-qcNEW", "TIP"], true),
+            (&["switch", "--create", "NEW", "TIP"], true),
+            (&["switch", "--create=NEW", "TIP"], true),
+            (&["switch", "--detach", "TIP"], true),
+            (&["switch", "-d", "TIP"], true),
+            (&["switch", "--detach"], true),
+            (&["switch", "--orphan", "NEW"], true),
+            (&["switch", "--orphan=NEW"], true),
+            (&["switch", "--guess", "NEW"], true),
+            (&["switch", "--track", "-c", "NEW", "main"], true),
+            (&["checkout", "-B", "main", "TIP"], false),
+            (&["checkout", "-Bmain", "TIP"], false),
+            (&["checkout", "-qBmain", "TIP"], false),
+            (&["switch", "-C", "main", "TIP"], false),
+            (&["switch", "-Cmain", "TIP"], false),
+            (&["switch", "-qCmain", "TIP"], false),
+            (&["switch", "--force-create", "main", "TIP"], false),
+            (&["switch", "--force-create=main", "TIP"], false),
+            (&["checkout", "f.txt"], false),
+            (&["checkout", "--", "f.txt"], false),
+            (&["checkout", "TIP", "f.txt"], false),
+            (&["checkout", "TIP", "--", "--detach"], false),
+            (&["checkout", "--patch", "TIP"], false),
+            (&["checkout", "--pathspec-from-file=paths"], false),
+            (&["checkout", "--pathspec-from-file", "paths"], false),
+            (&["checkout", "--ours", "f.txt"], false),
+            (&["checkout", "--theirs", "f.txt"], false),
+            (&["checkout", "--detach", "--no-detach", "f.txt"], false),
+            (&["checkout", "--no-guess", "NEW"], false),
+            (&["commit", "-m", "forbidden"], false),
+            (&["merge", "main"], false),
+            (&["reset", "--hard", "TIP"], false),
+        ];
+        for (index, (words, allow)) in cases.iter().enumerate() {
+            assert!(git(&["switch", "factory/bisect-worker"]).status.success());
+            assert!(git(&["checkout", "--detach", &sha]).status.success());
+            let new_branch = format!("factory/navigation-{index}");
+            for remote in ["origin", "other"] {
+                assert!(git(&["update-ref", &format!("refs/remotes/{remote}/{new_branch}"), &sha]).status.success());
+            }
+            let args: Vec<_> = words.iter().map(|word| word.replace("TIP", &sha)
+                .replace("NEW", &new_branch).replace("REPO", &path)).collect();
+            let refs: Vec<_> = args.iter().map(String::as_str).collect();
+            let [command] = crate::worktree::GitOperations::git_remedies([refs.as_slice()]).unwrap();
+            let output = handle_pre_tool_use(&hook_git_write_input(&path, &command), None).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            assert_eq!(value["hookSpecificOutput"]["permissionDecision"] != "deny", *allow,
+                "{command}: {value}");
+            if *allow {
+                let result = std::process::Command::new("git").args(&args).current_dir(repo.path()).output().unwrap();
+                assert!(result.status.success(), "{command}: {result:?}");
+                // Orphan HEAD has no commit; every other transition keeps
+                // this exact existing tip, and none adds a graph node.
+                if !args.iter().any(|arg| arg.starts_with("--orphan")) {
+                    assert_eq!(String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout).trim(), sha);
+                }
+            }
+            assert_eq!(String::from_utf8_lossy(&git(&["rev-list", "--all", "--count"]).stdout).trim(), "1");
+        }
         let outside = tempfile::tempdir().unwrap();
-        let outside_checkout = hook_git_write_input(
-            &path,
-            &format!(
-                "git -C '{}' checkout --detach {sha}",
-                outside.path().display()
-            ),
-        );
-        let output = handle_pre_tool_use(&outside_checkout, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
+        let input = hook_git_write_input(&path, &format!("git -C '{}' checkout --detach {sha}", outside.path().display()));
+        let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
         assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("outside your assigned worktree"));
+        // GH #1860: the refusal names the checkout fix, not commit guidance.
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or_default();
+        let [checkout, switch] = crate::worktree::GitOperations::shell_remedies([
+            ("git", &["-C", path.as_str(), "checkout", "--detach", sha.as_str()][..]),
+            ("git", &["switch", "factory/bisect-worker"][..]),
+        ]).unwrap();
+        assert!(reason.starts_with("WORKER_CHECKOUT_OUTSIDE_WORKTREE"), "{reason}");
+        assert!(reason.contains(&checkout) && !reason.contains(&switch), "{reason}");
+        // A revisionless path restore is a checkout too, not a commit.
+        let outside_restore = hook_git_write_input(
+            &path, &format!("git -C '{}' checkout -- tracked.rs", outside.path().display()));
+        let value = serde_json::to_value(handle_pre_tool_use(&outside_restore, None).expect("handler ok")).unwrap();
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or_default();
+        let [restore] = crate::worktree::GitOperations::shell_remedies([
+            ("git", &["-C", path.as_str(), "checkout", "--", "tracked.rs"][..]),
+        ]).unwrap();
+        assert!(reason.starts_with("WORKER_CHECKOUT_OUTSIDE_WORKTREE"), "{reason}");
+        assert!(reason.contains(&restore) && !reason.contains(&switch), "{reason}");
+        let outside_commit = hook_git_write_input(
+            &path, &format!("git -C '{}' commit -m outside", outside.path().display()));
+        let value = serde_json::to_value(handle_pre_tool_use(&outside_commit, None).expect("handler ok")).unwrap();
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or_default();
+        assert!(reason.contains(&switch) && !reason.starts_with("WORKER_CHECKOUT_OUTSIDE_WORKTREE"), "{reason}");
     }
 
     #[test]
@@ -12492,6 +12907,35 @@ mod worker_commit_guard_tests {
         );
     }
 
+    /// GH #1752: preparing an isolated replay fixture creates no commit.
+    #[test]
+    fn isolated_replay_checkout_batch_is_not_a_commit_cas_7584() {
+        let worktree = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let worktree_path = worktree.path().to_string_lossy().to_string();
+        let replay = scratch.path().join("replay/cassy");
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(&worktree_path)),
+            ("CAS_AGENT_NAME", Some("worker")),
+        ]);
+        let command = format!(
+            "git clone --shared --no-checkout '{worktree_path}' '{replay}'\n\
+             sqlite3 -readonly '{worktree_path}/.cas/cas.db' \".backup '{replay}/.cas/cas.db'\"\n\
+             git -C '{replay}' remote set-url origin https://example.com/cassy.git\n\
+             git -C '{replay}' checkout -b replay-at-release c7b1267a95b77b8ea8122566131b8cefe88da6ac",
+            replay = replay.display(),
+        );
+        let input = hook_git_write_input(&worktree_path, &command);
+        let output = handle_pre_tool_use(&input, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{value}"
+        );
+    }
+
     /// cas-93e8: a `cd` in the same shell command changes the repository
     /// targeted by every following Git history mutation. The hook cwd alone
     /// is not sufficient because a worker can leave its worktree with
@@ -12506,6 +12950,8 @@ mod worker_commit_guard_tests {
         let worktree_path = worktree.to_string_lossy().to_string();
         let outside_path = outside.to_string_lossy().to_string();
         let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(worktree_path.as_str())),
             ("CAS_AGENT_NAME", Some("worker")),
         ]);
@@ -12519,11 +12965,31 @@ mod worker_commit_guard_tests {
             "git add -A",
         ] {
             let command = format!("cd '{outside_path}' && {operation}");
-            let message = check_worker_git_commit_scope_for_command(&worktree_path, &command)
-                .unwrap_or_else(|| panic!("outside-worktree operation must be denied: {command}"));
             assert!(
-                message.contains("outside your assigned worktree"),
-                "refusal must identify the workspace boundary: {message}"
+                check_worker_git_commit_scope_for_command(&worktree_path, &command).is_some()
+            );
+        }
+        for options in [
+            format!("-C '{outside_path}'"),
+            format!("-C '{worktree_path}' -C '../primary'"),
+        ] {
+            let command = format!(
+                "git -C '{outside_path}' remote set-url origin https://example.com/cassy.git; \
+                 git -C '{outside_path}' checkout -b replay-at-release HEAD; \
+                 git {options} commit -m work"
+            );
+            let targets = git_write_targets(&worktree_path, &command);
+            assert_eq!(targets.len(), 1, "only the commit requires the history guard");
+            assert_eq!(
+                canonicalize_for_containment(targets[0].path_for_scope()),
+                canonicalize_for_containment(&outside),
+            );
+            let input = hook_git_write_input(&worktree_path, &command);
+            let output = handle_pre_tool_use(&input, None).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            assert_eq!(
+                value["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{value}"
             );
         }
     }
@@ -12573,6 +13039,146 @@ mod worker_commit_guard_tests {
                 && log.contains("reset --hard"),
             "git workspace refusal must be durable and identify the operation/path: {log}"
         );
+    }
+
+    #[test]
+    fn nested_shell_commit_scope_cas_4923e() {
+        let mut env = TestEnvGuard::temp_home();
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().unwrap();
+        add_linked_worktree(repo.path(), linked.path(), "factory/nested-worker");
+        let repo_path = repo.path().display().to_string();
+        let linked_path = linked.path().display().to_string();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "nested-worker");
+        env.set("CAS_CLONE_PATH", &linked_path);
+
+        let mut deep_command = format!("cd '{repo_path}'; git commit -m probe");
+        for _ in 0..8 {
+            deep_command = shell_words_as_command(&["sh".into(), "-c".into(), deep_command]);
+        }
+        let mut mismatches = Vec::new();
+        for (command, denied) in [
+            (format!("bash scripts/test-release.sh > '{linked_path}/shell.log' 2>&1"), false),
+            ("sh scripts/test-release.sh --check > shell.log 2>&1".into(), false),
+            // Script recognition must not bypass the later workspace-write guard.
+            ("bash scripts/test-release.sh > /tmp/cas-6837.log 2>&1".into(), true),
+            ("bash 'scripts/test release.sh' --flag -c 'git commit -m argument'".into(), false),
+            ("bash scripts/test-release.sh".into(), false),
+            ("bash".into(), true),
+            ("sh -s".into(), true),
+            (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
+            (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
+            (format!("bash -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("sh -c 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("sh -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("zsh -c 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("eval 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("sh -c 'bash -c \"cd {repo_path} && git commit -m probe\"'"), true),
+            (format!("eval 'cd \"{repo_path}\"'; git commit -m probe"), true),
+            (format!("eval -- 'cd \"{repo_path}\"'; git commit -m probe"), true),
+            (format!("cd '{repo_path}'; bash -c 'git commit -m probe'"), true),
+            (deep_command, true),
+            ("bash -c 'git commit -m work'".to_string(), false),
+            ("bash -c -- 'git commit -m work'".to_string(), false),
+            ("bash -l -c 'git commit -m work'".to_string(), false),
+            ("bash -l -c -- 'git commit -m work'".to_string(), false),
+            ("bash --login -c 'git commit -m work'".to_string(), false),
+            ("bash --login -c -- 'git commit -m work'".to_string(), false),
+            ("bash -c 'git commit -m work' -ec".to_string(), false),
+            ("bash -co nounset 'git commit -m work'".to_string(), true),
+            ("bash -oc nounset 'git commit -m work'".to_string(), true),
+            ("bash -ec 'git commit -m work'".to_string(), true),
+            ("bash -O extglob -c 'git commit -m work'".to_string(), true),
+            ("bash -c -e 'git commit -m work'".to_string(), true),
+            ("bash -c -o nounset 'git commit -m work'".to_string(), true),
+            ("bash -c +O extglob 'git commit -m work'".to_string(), true),
+            ("bash -c --rcfile config 'git commit -m work'".to_string(), true),
+            ("bash -c --unknown 'git commit -m work'".to_string(), true),
+            ("bash -c -Z 'git commit -m work'".to_string(), true),
+            ("bash -c -o".to_string(), true),
+            ("bash -c --".to_string(), true),
+            (format!("bash -c 'cd \"{repo_path}\"'; git commit -m work"), false),
+            (format!("cd '{repo_path}'; sh -c 'cd \"{linked_path}\" && git commit -m work'"), false),
+            // The merged directory resolver also applies inside shell payloads.
+            (format!("bash -c 'W=\"{linked_path}\"; cd \"$W\"; git commit -m work'"), false),
+            ("bash -c 'cd \"$TASK_WORKTREE_UNSET\"; git commit -m work'".into(), true),
+            ("eval 'cd \"$TASK_WORKTREE_UNSET\"'; git commit -m work".into(), true),
+            // cas-17a5 and GH #1814: literal heredoc bodies are data even
+            // when another heredoc in the command expands.
+            ("python3 - <<'PY'\nCommand::new(\"nohup\")\n.arg(\"bash\")\nPY\ncat <<EOF\nok\nEOF".into(), false),
+            ("python3 - <<'PY'\nprint(1)\nPY\ncat > notes.md <<MD\nwhile read -r l; do sudo bash -lc \"$l\"; done\nMD".into(), false),
+            // A substitution runs its command; its scope is still checked.
+            (format!("echo \"$(cd '{repo_path}' && git commit -m probe)\""), true),
+        ] {
+            let input = hook_git_write_input(&linked_path, &command);
+            let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+            let value = serde_json::to_value(output).unwrap();
+            if (value["hookSpecificOutput"]["permissionDecision"] == "deny") != denied {
+                mismatches.push(format!("{command}: expected denied={denied}: {value}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn shell_syntax_checks_preserve_worker_scope_cas_93e0() {
+        let mut env = TestEnvGuard::temp_home();
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().unwrap();
+        add_linked_worktree(repo.path(), linked.path(), "factory/syntax-worker");
+        let repo_path = repo.path().display().to_string();
+        let linked_path = linked.path().display().to_string();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "syntax-worker");
+        env.set("CAS_CLONE_PATH", &linked_path);
+
+        for (command, denied) in [
+            (format!("bash -n {{+n,-c,'cd \"{repo_path}\"; git commit -m probe'}}"), true),
+            (format!("bash -n < scripts/release.sh +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            ("bash -n scripts/release.sh scripts/fast-rows-pre-push.sh".into(), false),
+            ("bash -n ./scripts/release-v1.sh".into(), false),
+            ("bash --noexec scripts/release.sh".into(), false),
+            ("bash -n --noexec -n scripts/release.sh".into(), false),
+            ("sh -n scripts/release.sh".into(), false),
+            ("bash -n 'scripts/release.sh'".into(), true),
+            ("bash -n 'scripts/release check.sh'".into(), true),
+            ("bash -n $VAR".into(), true),
+            ("bash -n scripts/*.sh".into(), true),
+            ("bash -n ~/x".into(), true),
+            ("bash -n scripts/release=check.sh".into(), true),
+            ("bash -n scripts/release\\.sh".into(), true),
+            ("bash '-n' scripts/release.sh".into(), true),
+            ("bash '--noexec' scripts/release.sh".into(), true),
+            ("bash -l -n scripts/release.sh".into(), true),
+            ("bash -n -- scripts/release.sh".into(), true),
+            ("bash --noexec -- scripts/release.sh".into(), true),
+            ("bash -n scripts/release.sh > syntax.log 2>&1".into(), true),
+            ("bash -n < scripts/release.sh".into(), true),
+            ("bash -n scripts/release.sh > /tmp/cas-93e0.log 2>&1".into(), true),
+            ("bash -n scripts/release.sh +n -c ':'".into(), true),
+            ("bash -n scripts/release.sh -c ':'".into(), true),
+            ("bash -n scripts/release.sh -o nounset".into(), true),
+            ("bash -n scripts/release.sh -i".into(), true),
+            ("bash -n scripts/release.sh -s".into(), true),
+            ("bash -n scripts/release.sh --rcfile config".into(), true),
+            ("bash -n scripts/release.sh --unknown".into(), true),
+            (format!("bash -n scripts/release.sh; git -C '{repo_path}' commit -m probe"), true),
+            (format!("bash -n +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            (format!("bash +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            (format!("bash -c 'cd \"{repo_path}\"; git commit -m probe' -n"), true),
+        ] {
+            let input = hook_git_write_input(&linked_path, &command);
+            let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+            let value = serde_json::to_value(output).unwrap();
+            assert_eq!(
+                value["hookSpecificOutput"]["permissionDecision"] == "deny",
+                denied,
+                "{command}: {value}",
+            );
+        }
     }
 
     // ── Integration: handle_pre_tool_use for Bash git commit ─────────────
@@ -12876,28 +13482,54 @@ mod worker_commit_guard_tests {
     #[test]
     fn pre_tool_allows_commit_when_hook_cwd_is_linked_factory_worktree() {
         let repo = make_git_repo();
-        let linked = tempfile::tempdir().expect("linked worktree path");
-        add_linked_worktree(repo.path(), linked.path(), "factory/cwd-worker");
-        let linked_path = linked.path().to_string_lossy().to_string();
+        let scratch = tempfile::tempdir().expect("linked worktree parent");
+        let linked = scratch.path().join("work tree");
+        std::fs::create_dir(&linked).unwrap();
+        add_linked_worktree(repo.path(), &linked, "factory/cwd-worker");
+        let linked_path = linked.to_string_lossy().to_string();
+        let backend = linked.join("apps/backend");
+        std::fs::create_dir_all(&backend).unwrap();
+        let backend_path = backend.to_string_lossy().to_string();
+        let reflog = || std::process::Command::new("git")
+            .args(["reflog", "show", "--format=%H"]).current_dir(&linked)
+            .output().unwrap().stdout;
+        let original = reflog();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", None),
             ("CAS_AGENT_NAME", Some("cwd-worker")),
+            ("TASK_WORKTREE_UNSET", None),
         ]);
 
-        let input = hook_git_write_input(&linked_path, "git commit -m work");
-        let out = handle_pre_tool_use(&input, None).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str());
-        assert_ne!(
-            decision,
-            Some("deny"),
-            "linked cwd branch must be honored: {val}"
-        );
+        // cas-84ea: the guard inspects the directory of the actual commit,
+        // including relative traversal and a prior literal variable binding.
+        for (cwd, command, denied, unresolved) in [
+            (&linked_path, "git commit -m work".to_string(), false, false),
+            (&backend_path, "cd ../..; git commit -m work".into(), false, false),
+            (&linked_path, "cd apps/backend; cd ../..; git commit -m work".into(), false, false),
+            (&backend_path, format!("W='{linked_path}'; cd \"$W\"; git commit -m work"), false, false),
+            (&backend_path, format!("W='{linked_path}'; cd \"${{W}}\"; git commit -m work"), false, false),
+            (&linked_path, format!("W='{}'; cd \"$W\"; git commit -m work", repo.path().display()), true, false),
+            (&linked_path, "cd \"$TASK_WORKTREE_UNSET\"; git commit -m work".into(), true, true),
+            (&linked_path, format!("cd '{linked_path}/missing'; git commit -m work"), true, true),
+            (&linked_path, format!("printf '%s' 'W={linked_path}'; cd \"$W\"; git commit -m work"), true, true),
+            (&linked_path, format!("if false; then W='{linked_path}'; fi; cd \"$W\"; git commit -m work"), true, true),
+            (&linked_path, format!("W='{linked_path}'; cd '$W'; git commit -m work"), true, true),
+            (&linked_path, "W=''; cd $W; git commit -m work".into(), true, true),
+            (&linked_path, format!("W='{linked_path}'; printf -v W '%s' '{}'; cd \"$W\"; git commit -m work", repo.path().display()), true, true),
+        ] {
+            let input = hook_git_write_input(cwd, &command);
+            let out = handle_pre_tool_use(&input, None).expect("handler ok");
+            let val = serde_json::to_value(&out).unwrap();
+            assert_eq!(val["hookSpecificOutput"]["permissionDecision"] == "deny", denied,
+                "cwd={cwd}, command={command}: {val}");
+            if unresolved {
+                assert!(val["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                    .unwrap_or_default().contains("WORKER_GIT_TARGET_UNRESOLVED"), "{val}");
+            }
+        }
+        assert_eq!(reflog(), original);
     }
 
     #[test]
@@ -13143,99 +13775,54 @@ mod worker_commit_guard_tests {
         );
     }
 
-    // ========================================================================
-    // EPIC cas-8888 (cas-fd9f): harness-aware tool-name matcher guard tests.
-    // ========================================================================
-
+    /// cas-beaf incident (cas-06f53): the daemon's bound verifier claimed the
+    /// dispatch, then the factory supervisor spawned a second task-verifier.
+    /// That spawn is refused while the bound verifier runs, and allowed again
+    /// once it has finished.
     #[test]
-    fn codemap_gate_recognizes_claude_task_create() {
-        assert!(is_codemap_gated_tool_call(
-            "mcp__cas__task",
-            Some("create"),
-            "mcp__cas__"
-        ));
-    }
-
-    #[test]
-    fn codemap_gate_recognizes_codex_spawn_workers() {
-        assert!(is_codemap_gated_tool_call(
-            "mcp__cs__factory",
-            Some("spawn_workers"),
-            "mcp__cs__"
-        ));
-    }
-
-    /// The load-bearing regression: before cas-fd9f this matcher was
-    /// hardcoded to "mcp__cas__task"/"mcp__cas__coordination" and so NEVER
-    /// fired for a Grok supervisor (whose tool_name is "cas__task" etc.) —
-    /// the CODEMAP freshness gate was silently inert for every non-Claude
-    /// supervisor.
-    #[test]
-    fn codemap_gate_recognizes_grok_task_create_and_spawn_workers() {
-        assert!(is_codemap_gated_tool_call(
-            "cas__task",
-            Some("create"),
-            "cas__"
-        ));
-        assert!(is_codemap_gated_tool_call(
-            "cas__factory",
-            Some("spawn_workers"),
-            "cas__"
-        ));
-    }
-
-    #[test]
-    fn codemap_gate_does_not_match_wrong_prefix_or_action() {
-        // A Grok tool_name must not match under a stale/wrong prefix guess.
-        assert!(!is_codemap_gated_tool_call(
-            "cas__task",
-            Some("create"),
-            "mcp__cas__"
-        ));
-        // Right tool, wrong action.
-        assert!(!is_codemap_gated_tool_call(
-            "cas__task",
-            Some("list"),
-            "cas__"
-        ));
-        // Unrelated tool.
-        assert!(!is_codemap_gated_tool_call("Bash", Some("create"), "cas__"));
-    }
-
-    /// Sanity check that the full `handle_pre_tool_use` entrypoint reaches
-    /// the codemap-gate matcher for a Grok supervisor's `cas__factory`
-    /// call at all (rather than short-circuiting on role/tool checks
-    /// upstream) and, with no CODEMAP.md present to be stale against,
-    /// doesn't false-positive deny. The matcher's actual gate/no-gate logic
-    /// is proven by the dedicated unit tests above — this only guards the
-    /// wiring between `own_tool_prefix()`, the env, and the real handler.
-    #[test]
-    fn grok_supervisor_codemap_gate_wiring_reaches_matcher_without_false_deny() {
+    fn factory_verifier_spawn_waits_for_the_running_bound_verifier_cas_beaf() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("supervisor")),
-            ("CAS_FACTORY_MODE", Some("1")),
-            ("CAS_FACTORY_SUPERVISOR_CLI", Some("grok")),
-            ("CAS_FACTORY_WORKER_CLI", None),
-        ]);
+        let cas_root = crate::store::init_cas_dir(tmp.path()).expect("init cas");
+        let agents = open_agent_store(&cas_root).expect("agent store");
+        let owner = Agent::new_with_role("factory-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        agents.register(&owner).expect("register supervisor");
+        open_task_store(&cas_root)
+            .expect("task store")
+            .add(&Task::new("cas-beaf-two".into(), "Two verifiers".into()))
+            .expect("task");
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &cas_root, "cas-beaf-two", &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        )
+        .expect("dispatch");
+        let bound = Agent::new_sub_agent(format!("task-verifier-{}", dispatch.id), "task-verifier".into(), owner.id.clone());
+        cas_store::issue_server_verifier_handoff(&cas_root, "cas-beaf-two", &dispatch.id, &owner.id, "daemon")
+            .expect("handoff");
+        cas_store::bind_server_verifier_handoff_and_register_child(&cas_root, &owner.id, &bound)
+            .expect("bound verifier claims the dispatch");
 
         let mut input = crate::hooks::handlers::HookInput::default();
         input.hook_event_name = "PreToolUse".to_string();
-        input.tool_name = Some("cas__factory".to_string());
+        input.session_id = owner.id.clone();
+        input.agent_role = Some("supervisor".into());
         input.cwd = tmp.path().to_string_lossy().to_string();
-        input.tool_input = Some(serde_json::json!({"action": "spawn_workers"}));
+        input.tool_name = Some("Agent".to_string());
+        input.tool_use_id = Some("tool-use-second-verifier".to_string());
+        input.tool_input = Some(serde_json::json!({
+            "subagent_type": "task-verifier", "prompt": "Verify task cas-beaf-two"
+        }));
+        let decision = |input: &crate::hooks::handlers::HookInput| {
+            serde_json::to_value(handle_pre_tool_use(input, Some(&cas_root)).expect("pretool"))
+                .expect("serialize")["hookSpecificOutput"]
+                .clone()
+        };
+        let refused = decision(&input);
+        assert_eq!(refused["permissionDecision"], "deny", "{refused}");
+        assert!(refused["permissionDecisionReason"].as_str().unwrap().contains(&bound.id), "{refused}");
 
-        let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str());
-        assert_ne!(
-            decision,
-            Some("deny"),
-            "no CODEMAP.md present → nothing to gate on, must not deny: {val}"
-        );
+        agents.graceful_shutdown(&bound.id).expect("bound verifier finished");
+        assert_ne!(decision(&input)["permissionDecision"], "deny");
     }
 
     #[test]
@@ -13328,11 +13915,17 @@ mod worker_commit_guard_tests {
             concurrent_json["hookSpecificOutput"]["permissionDecision"],
             "deny"
         );
-        assert!(
-            concurrent_json["hookSpecificOutput"]["permissionDecisionReason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("already awaiting SubagentStart")),
-            "concurrent denial must be actionable: {concurrent_json}"
+        use crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::{
+            VerifierSpawnDenial, verifier_spawn_denial,
+        };
+        assert_eq!(
+            concurrent_json["hookSpecificOutput"]["permissionDecisionReason"],
+            crate::gates::tag("H-35", verifier_spawn_denial(
+                VerifierSpawnDenial::SpawnAlreadyPending,
+                Some("cas-hook-capability"),
+                crate::harness_policy::own_tool_prefix(),
+            )),
+            "the concurrent spawn is refused as already pending: {concurrent_json}"
         );
         assert!(!concurrent_json.to_string().contains(sentinel_text));
 

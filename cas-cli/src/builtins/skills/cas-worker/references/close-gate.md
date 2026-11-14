@@ -51,13 +51,22 @@ When task start's close checks list a Ledger or `Adversarial probe` line, run
 Fill it from the real walk, then fix every `cas qa ledger check <path> --task <id>`
 diagnostic. A structural PASS does not judge captures.
 
+## Report deliverables
+
+A report under `docs/` (an `.html` beside its same-basename `.md`) parks only as a
+triplet: the `.md`, the `.brief.md` (with `Audience:` and a `## Critique` table meeting the
+cas-ui-craft floor) and the `.html`. The HTML must declare the DESIGN.md tokens, use no network,
+put its `data-verdict` first and stay within its height budget. Business reports carry no
+task ids and no jargon. A visual-QA PASS is necessary, not sufficient. The G7 refusal lists each gap;
+see [cas-html-reports](../../cas-html-reports/SKILL.md).
+
 ## Merge and freshness
 
 A successful park reads `PARKED <sha> on <branch>; awaiting merge verdict; nothing more to do`.
 Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
 The park relay is the completion signal; send merge_request=true only for local_merge.
 A dispatched verifier reviews the candidate before publication; PASS publishes
-and closes, FAIL reopens it to you with findings. In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.
+and closes, FAIL reopens it to you with findings. In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.
 MERGE REQUIRED is a genuine refusal, such as unpushed or unattributable work:
 
 1. Drain `coordination action=inbox_poll` to `No unread messages`; act on
@@ -77,14 +86,12 @@ unpublished tip for candidate verification. A following task starts its own
 branch from the epic tip (`factory/<name>-<task-id>`), preserving the parked
 one. Never set `status=closed` or invent a verification record to bypass close.
 
-## Upkeep refusals at park
+## Shared docs
 
-At park, close checks that the delivery kept the journey registry, `.claude/CODEMAP.md`
-and `docs/PRODUCT_OVERVIEW.md` true for the paths it changed. Fix a refusal in
-this branch. When the change truly needs no upkeep, record the gate's token from
-the [escape vocabulary](../../cas-qa-craft/references/journeys.md#escape-vocabulary)
-as a decision note with a specific reason; reviewers see each escape. Never
-hand-write the `UPKEEP ESCAPE` or `UPKEEP OBSERVE` notes.
+Never edit `.claude/CODEMAP.md` or `docs/PRODUCT_OVERVIEW.md`; release prep
+regenerates them. Add a bug case as its own `docs/qa/bug-families/<slug>.yaml`
+and, where `docs/product-overview.d/` exists, product changes as
+`docs/product-overview.d/<task-id>.md`. Park does not check these files.
 
 ## Changelog at park
 
@@ -111,8 +118,8 @@ alone. Test-only, docs-only or internal QA deliveries record a decision note
 - Human-facing output: put the `design:` line from
   [DESIGN.md first](../../design-spec/references/design-md-first.md#5-record-it)
   in the close reason.
-- Risk: read task `risk` and `proof_targets`. Full Rust execution is
-  the merge-queue run (or `ASSEMBLY_PROOF` where the project has no queue). Non-Rust platform risk needs a
+- Risk: read task `risk` and `proof_targets`. Full-suite evidence follows
+  the project's integration policy. Non-Rust platform risk needs a
   `platform_proof` note with the actual platform, command and passing result.
   A `risk=concurrency` non-Rust target needs one `note_type=loaded_proof` line;
   its refusal prints the parsed and missing fields and an example. Rust
@@ -152,5 +159,6 @@ Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
 criterion evidence, the plan section and its metric receipt when the brief links one,
 and safety facts. A missed plan metric is never non-blocking.
 
-When close returns VERIFICATION REQUIRED naming a dispatch, that dispatch's
-verdict closes the task; follow [Verification-required close](recovery.md#verification-required-close).
+When close returns VERIFICATION REQUIRED naming a dispatch:
+Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
+Follow [Verification-required close](recovery.md#verification-required-close).

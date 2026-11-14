@@ -55,6 +55,7 @@
 //! - Detach with Ctrl+D keeps daemon running
 
 mod app;
+pub(crate) use app::{preferred_epic_focus_from_session_metadata_named, session_progress_named};
 pub(crate) use app::provisioning::{provisioner_executable, strip_deleted_suffix};
 pub(crate) use app::provisioning::{
     installed_provisioner_build_hash, pin_daemon_provisioner, pinned_provisioner_build_hash,
@@ -69,7 +70,7 @@ mod client;
 pub(crate) mod daemon;
 mod director;
 #[cfg(test)]
-pub(crate) use director::merge_relay_for_parity;
+pub(crate) use director::{run_worker_health_probe, WorkerHealthRequest};
 pub(crate) use director::effective_stall_threshold_secs;
 #[cfg(test)]
 pub(crate) use director::delivery_marked_ready;
@@ -143,7 +144,9 @@ pub use daemon::{
 };
 pub use layout::{Direction, MissionControlLayout, PANE_SIDECAR, PaneGrid};
 pub use notification::{Notifier, NotifyBackend, NotifyConfig};
-pub(crate) use protocol::{COMMANDER_REPLAY_BYTES_PER_PANE, MAX_MESSAGE_SIZE, encode_message};
+pub(crate) use protocol::{
+    COMMANDER_REPLAY_BYTES_PER_PANE, MAX_MESSAGE_SIZE, encode_message, local_gui_capabilities,
+};
 pub(crate) use session::{gui_socket_path, sessions_dir, valid_session_name, validate_daemon_start};
 pub use protocol::{
     ClientMessage, ConversationHistoryMessage, ConversationHistoryReply, DaemonMessage, OperatorNotice,
@@ -186,3 +189,7 @@ pub fn set_terminal_title(project_dir: &Path, epic_title: Option<&str>) {
     let title = build_terminal_title(project_dir, epic_title);
     let _ = execute!(io::stdout(), SetTitle(title));
 }
+
+pub(crate) use protocol::{FRAME_HEADER_SIZE, decode_length};
+
+pub use daemon::reexec::{handoff_check as daemon_handoff_check, resume_inherited_daemon};

@@ -63,6 +63,33 @@ impl NormalProbeJobs {
         }
     }
 }
+/// A probe is about its original notification, never merely a quiet pane.
+/// A read, acknowledgment, or completed worker-check handoff can retire it
+/// without an authored reply. None means retry the read.
+fn normal_probe_still_needed(
+    queue: &dyn cas_store::PromptQueueStore,
+    session: &str,
+    row_id: i64,
+    probe: &NormalDeliveryProbe,
+) -> Option<bool> {
+    let Some(row) = queue.queued_prompt(row_id).ok()? else { return Some(false) };
+    if row.target != probe.target || row.source != probe.source || row.prompt != probe.prompt
+        || row.factory_session.as_deref().is_some_and(|owner| owner != session)
+        || row.created_at > probe.delivered_at_utc
+    {
+        return Some(false);
+    }
+    // The detached runner's completion has already reached the worker.
+    // Keep its inbox receipt independent from this redundant wake.
+    if row.origin == Some(cas_store::QueueOrigin::Daemon)
+        && row.source == "worker-check"
+        && queue.message_delivery_report(row_id).ok()??.delivered_at.is_some()
+    {
+        return Some(false);
+    }
+    super::poison_sweep_jobs::still_unread(queue, &row)
+}
+
 pub(crate) fn read_normal_probe(
     cas_dir: &std::path::Path,
     session: &str,
@@ -73,6 +100,15 @@ pub(crate) fn read_normal_probe(
 ) -> NormalPrepared {
     let activity = crate::store::open_prompt_queue_store(cas_dir)
         .map(|queue| {
+            // Native startup has its own pane/turn observation lifetime. An
+            // ordinary probe must stop once its notification leaves the inbox.
+            if probe.startup_pane.is_none() {
+                match normal_probe_still_needed(queue.as_ref(), session, row_id, &probe) {
+                    Some(false) => return RecipientActivity::Found,
+                    None => return RecipientActivity::Unknown,
+                    Some(true) => {}
+                }
+            }
             authored_activity_io(
                 cas_dir,
                 session,
@@ -86,7 +122,22 @@ pub(crate) fn read_normal_probe(
     let mut evidence = NormalDeliveryTurnEvidence::Unavailable {
         pane_output_grew: false,
     };
-    if activity == RecipientActivity::Absent {
+    if probe.startup_pane.is_some() {
+        // Supervisor registrations carry the project root/native session and
+        // supervisor_account_dir, not a worker clone or worker account.
+        if let Some(path) = super::supervisor_commands::supervisor_transcript(
+            cas_dir, session, &probe.pane, cas_mux::SupervisorCli::Claude,
+        ).filter(|path| path.is_file()) {
+            let latest = crate::mcp::tools::service::harness_observation::latest_turn_observations(
+                &path, cas_mux::SupervisorCli::Claude,
+            );
+            evidence = classify_normal_delivery_turn(
+                probe.delivered_at_utc, None,
+                latest.wake.map(|observation| observation.at),
+                latest.completion.map(|observation| observation.at),
+            );
+        }
+    } else if activity == RecipientActivity::Absent {
         evidence = normal_delivery_turn_evidence_io(
             cas_dir,
             &probe.pane,
@@ -110,6 +161,7 @@ pub(crate) fn read_normal_probe(
         live,
     }
 }
+// gate[W-28 watchdog]: Worker delivery stalled after bounded retry (worker_delivery_stalled)
 pub(crate) fn write_normal_flag(
     cas_dir: &std::path::Path,
     session: &str,
@@ -124,17 +176,7 @@ pub(crate) fn write_normal_flag(
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return false;
     };
-    let Ok(current) = queue.queued_prompt(row_id) else {
-        return false;
-    };
-    // An acknowledged, removed or replaced original needs no health incident.
-    let Some(row) = current else {
-        return true;
-    };
-    if row.prompt != probe.prompt || row.target != probe.target {
-        return true;
-    }
-    match super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) {
+    match normal_probe_still_needed(queue.as_ref(), session, row_id, probe) {
         Some(false) => return true,
         None => return false,
         Some(true) => {}

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Selection of script-tier tests, including real git diffs and selector calls."""
 import importlib.util
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,6 +18,18 @@ TIER = ["python3 scripts/test-worker-memory.py", "python3 scripts/test-example.p
 
 
 class Selection(unittest.TestCase):
+    def test_shared_skill_scripts_select_their_suite_once(self):
+        commands = SELECTOR.tier_commands(Path(__file__).resolve().parents[1])
+        for resource, suite, command in [
+            ("cas-cli/src/builtins/skills/cas-qa-craft/scripts/walk-kit.mjs", "scripts/test-walk-kit.mjs", "node --test scripts/test-walk-kit.mjs"),
+            ("cas-cli/src/builtins/skills/cas-test-audit/scripts/audit.py", "scripts/test-test-audit.py", "python3 scripts/test-test-audit.py"),
+            ("cas-cli/src/builtins/skills/cas-test-audit/scripts/history.py", "scripts/test-test-audit.py", "python3 scripts/test-test-audit.py"),
+            ("scripts/fixtures/test-audit/serve-teardown.rs.txt", "scripts/test-test-audit.py", "python3 scripts/test-test-audit.py"),
+        ]:
+            for changed in [[resource], [suite], [resource, suite], ["docs/unrelated.md"]]:
+                selected = [(test, cmd) for test, cmd in SELECTOR.select(commands, changed) if test == suite]
+                self.assertEqual(selected, [] if changed == ["docs/unrelated.md"] else [(suite, command)])
+
     def test_provisioned_suites_follow_real_pr_inputs_and_ignore_unrelated_pr(self):
         # Independent consumer inputs, not a copy of the selector's registry.
         inputs = {
@@ -74,7 +87,7 @@ class Selection(unittest.TestCase):
                         actual = {SELECTOR.test_script(line.split('would run ', 1)[1])
                                   for line in output.splitlines() if 'would run ' in line}
                         self.assertEqual(actual, expected, output)
-            self.assertIn('no script test covers', selected(['docs/unrelated.md']))
+            self.assertFalse(any(line.startswith('would run ') for line in selected(['docs/unrelated.md']).splitlines()))
             output = selected([transition])
             actual = {SELECTOR.test_script(line.split('would run ', 1)[1])
                       for line in output.splitlines() if 'would run ' in line}
@@ -153,6 +166,51 @@ class Selection(unittest.TestCase):
         self.assertIn("AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
                       selected[0][1])
         self.assertEqual(SELECTOR.select(TIER, ["hub-web/src/app.ts"]), [])
+
+    def test_suites_on_a_train_run_once_and_ignore_the_outer_job_cas_f235(self):
+        # Train run 42351777395: suites inherited FULL_SET and the train event,
+        # so fixture repositories classified as the outer full set or re-wrapped
+        # their selector in a queue step that the fixture does not contain.
+        with tempfile.TemporaryDirectory(prefix='script-suite-env-') as directory:
+            repo = Path(directory)
+            (repo / 'cas-cli').mkdir()
+            (repo / 'scripts').mkdir()
+            (repo / 'cas-cli/Makefile').write_text('test-ci-tiers:\n\tcd .. && python3 scripts/test-probe.py\n')
+            (repo / 'scripts/test-probe.py').write_text(
+                "import os, pathlib, sys\nassert not {'FULL_SET', 'BASE_SHA'} & set(os.environ), os.environ\n"
+                "attempt = pathlib.Path('scripts/probe-ran')\nfailed = not attempt.exists()\n"
+                "with attempt.open('a') as out: out.write('attempt\\n')\n"
+                "sys.exit(int(failed))\n")
+            env = dict(os.environ, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/epic/release-train-x',
+                       FULL_SET='true', BASE_SHA='abc')
+            result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all',
+                                     '--only', 'scripts/test-probe.py'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual((repo / 'scripts/probe-ran').read_text().splitlines(), ['attempt'])
+
+    def test_a_failing_suite_repeats_its_last_lines_after_later_suites_cas_5365(self):
+        # Run 42415112049: test-release-scratch.py failed, a later suite's
+        # output followed, and the gate's row tail showed only "failed:".
+        with tempfile.TemporaryDirectory(prefix='script-failure-tail-') as directory:
+            repo = Path(directory)
+            (repo / 'cas-cli').mkdir()
+            (repo / 'scripts').mkdir()
+            (repo / 'cas-cli/Makefile').write_text(
+                'test-ci-tiers:\n\tcd .. && python3 scripts/test-broken.py\n\tcd .. && python3 scripts/test-later.py\n')
+            (repo / 'scripts/test-broken.py').write_text(
+                "import sys\nfor n in range(80):\n    print(f'broken line {n}')\nsys.exit('FAIL: test_named_failure')\n")
+            (repo / 'scripts/test-later.py').write_text("for n in range(40):\n    print('later ok')\n")
+            env = {key: value for key, value in os.environ.items()
+                   if key not in {'GITHUB_EVENT_NAME', 'GITHUB_REF'}}
+            result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            excerpt = result.stdout.split('failed: scripts/test-broken.py\n', 1)[1]
+            self.assertIn('FAIL: test_named_failure', excerpt)
+            self.assertIn('broken line 79', excerpt)
+            self.assertNotIn('broken line 20', excerpt)
+            self.assertNotIn('later ok', excerpt)
 
 
 if __name__ == "__main__":

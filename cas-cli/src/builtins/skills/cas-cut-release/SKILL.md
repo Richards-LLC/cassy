@@ -12,13 +12,7 @@ proves the exact tree that ships, and landing on `main` publishes it. There is
 no release PR, no tag push and no local build. Platforms: Linux runs the suite;
 macOS: compile-checked and launch-tested; suite runs on Linux.
 
-Release prep checklist: compare the locked `@playwright/test` version in
-`hub-web/package-lock.json` with `npm view @playwright/test version` (run from
-the checkout). Flag **more than one minor behind** in the prep notes; a major
-gap also needs review. Upgrade and refresh Playwright guidance before the cut,
-or record the supervisor's explicit deferral. After an upgrade, regenerate
-agents in scratch with `npx playwright init-agents --loop=<harness>` and review
-them against `cas-playwright-debug`'s healer guard before adopting any changes.
+Release prep checklist: compare the locked Playwright version with the latest stable and verify browser binaries plus the chosen Node runtime. Any gap needs an upgrade decision before authoring/cut; the Node 26 tracing incident is a compatibility warning, not a universal engine constraint. Generate `npx playwright init-agents --loop=<harness>` and `npx playwright init-skills --loop=<harness>` in scratch, then review the official diff against [cas-playwright-tests](../cas-playwright-tests/SKILL.md), including its healer guard.
 
 1. Start from the epic branch only after closeout is complete: one full review,
    one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` and the
@@ -27,14 +21,31 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    Write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
-   Commit the regenerated `.claude/CODEMAP.md` and the previous release's
-   report there too; no docs PR follows. Fixture versions use `9.99.x`.
+   Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`. The cut checks each member's existing merge approval alongside the green frozen-train receipt; missing approvals are named before push. No separate release-review ledger or recorder is needed for code deliveries. Deliberate light, sampled and Tier 0 exemptions use green lane CI plus the green train run; a missing lane receipt is named separately.
+   Commit the regenerated `.claude/CODEMAP.md` (`/codemap`) and the previous
+   release's report there too; no docs PR follows. The command refuses while a
+   file added or removed since the map's last commit is unmapped. Deliveries never edit
+   CODEMAP or PRODUCT_OVERVIEW: the command folds the `docs/qa/bug-families/`
+   and `docs/product-overview.d/` fragments into the registry and overview
+   (`scripts/doc-fragments.py compile`); refresh the overview with
+   project-overview when its fragments call for it. Fixture versions use `9.99.x`.
    The train's ready-to-cut notice prompts this preparation after review.
-2. Check out the train lane, then run `scripts/release.sh` with an installed
+   Auto-cut: when the exact train tip is green with changelog fragments,
+   Cassy freezes the train and runs `scripts/release.sh --notes` itself with
+   the draft at the `release-notes.md` path its wake names. Write that draft
+   and commit a regenerated CODEMAP;
+   Cassy never writes or posts notes. The operator pauses auto-cut in Commander.
+2. Read the train CI receipt and complete log artifact; fix every red first.
+   The existing CI suite at the newest train tip replaces a local pre-cut full
+   run. A known red holds `train_merge`; any override is a visible decision for
+   that observed run and does not authorize a red cut. The command checks a
+   green receipt for the starting tip before version preparation, reusing it
+   on an unchanged prepared retry. The queue proves the version commit.
+   Check out the train lane, then run `scripts/release.sh` with an installed
    Cassy that has `release context`, `release track` and `release installed`
    (`CAS_BIN` selects a candidate for the first cut). It validates the canonical
    train and integration branch, merges the base when behind, bumps versions,
-   promotes the changelog, builds Commander, commits and pushes. It reuses the
+   promotes the changelog, builds Commander, commits, marks the train cut and pushes. It reuses the
    train PR, requests auto-merge only when needed and checks admission once.
    An auto-merge request awaiting required checks is reported as not admitted;
    a red required-check snapshot exits nonzero without a CI polling loop.
@@ -42,8 +53,11 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    or PR polling stage runs: the queue proves the prepared tree once.
    A hotfix is a branch from `main` released with `scripts/release.sh --hotfix`
    (next patch), through the same queue. No train or a different train lane
-   keeps the caller's `--base` flow (default `main`); tracking is advisory and
-   cannot prevent the cut. Missing/unreachable owners use the shared resolver's
+   keeps the caller's `--base` flow (default `main`). A matched train must persist
+   its cut marker before push/enqueue; failure stops with a retry command. New
+   tasks join a fresh train, and unfinished deliveries need retargeting; merges
+   into the cut lane stay refused after landing too. Reminder tracking stays advisory.
+   Missing/unreachable owners use the shared resolver's
    peer fallback, or print one clear tracking-skipped message.
 3. The command automatically arms cross-session `branch_contained_in` for the
    release SHA and integration branch, plus `tag_exists` for the version, even

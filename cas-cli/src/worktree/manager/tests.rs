@@ -1122,10 +1122,6 @@ fn test_create_epic_branch_rejects_corrupt_base_without_writing_ref_cas_42a4() {
         .expect_err("a corrupt configured base must abort epic branch creation");
 
     assert!(
-        error.to_string().contains("does not resolve to a commit"),
-        "failure must identify the unresolvable start point: {error}"
-    );
-    assert!(
         !repo_path
             .join(".git/refs/heads/epic/must-not-exist")
             .exists(),
@@ -1798,6 +1794,35 @@ fn merge_and_cleanup_detects_pre_existing_dirty_target_index() {
     }
     assert_eq!(manager.git().ref_sha("HEAD").unwrap(), pre_head);
     assert!(!manager.git().merge_in_progress());
+}
+
+/// cas-10ad: sync residue has a runnable recovery, mixed project work does not.
+#[test]
+fn managed_sync_residue_names_clearing_command_cas_10ad() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+    let epic = manager.create_epic_branch("Managed sync residue").unwrap();
+    manager.git().checkout(&epic).unwrap();
+    commit_file(&repo_path, ".gitignore", "project-output/\n", "project ignore");
+    let mut worker = manager.create_for_worker("sync-residue-worker").unwrap();
+    commit_file(&worker.path, ".gitignore", "project-output/\nworker-output/\n", "worker ignore");
+    worker.parent_branch = epic;
+    let paths = crate::cli::project_files::ignored_paths(&repo_path, &[cas_mux::SupervisorCli::Claude]);
+    let block = crate::builtins::render_builtin_gitignore_block(&paths);
+    for mixed in [false, true] {
+        let prefix = if mixed { "project-output/\nuser-change/\n" } else { "project-output/\n" };
+        std::fs::write(repo_path.join(".gitignore"), format!("{prefix}\n{block}")).unwrap();
+        assert!(Command::new("git").args(["add", ".gitignore"]).current_dir(&repo_path).status().unwrap().success());
+        let before = manager.git().ref_sha("HEAD").unwrap();
+        let error = manager.merge_and_cleanup(&mut worker, false, false).unwrap_err();
+        let WorktreeError::Git(GitError::MergeCheckoutDirty(details)) = error else { panic!("{error:?}") };
+        assert_eq!(details.contains("cas update --sync"), !mixed, "{details}");
+        assert_eq!(manager.git().ref_sha("HEAD").unwrap(), before);
+        assert!(!manager.git().merge_in_progress());
+    }
 }
 
 /// Current branch of a checkout, or "HEAD" when detached.

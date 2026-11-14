@@ -1,3 +1,5 @@
+use std::os::fd::FromRawFd;
+
 use crate::ui::factory::daemon::imports::*;
 
 /// Daemonize and run factory daemon (legacy - spawns subprocess)
@@ -289,16 +291,27 @@ pub enum ForkResult {
 
 /// Run the daemon loop after fork (called by child process)
 pub async fn run_daemon_after_fork(
-    mut app: FactoryApp,
-    listener: UnixListener,
-    session_name: String,
+    app: FactoryApp, listener: UnixListener, session_name: String,
 ) -> anyhow::Result<()> {
-    crate::server_signals::ignore_sigpipe_for_server();
+    // This legacy fork entry establishes the environment before adoption can
+    // create any fresh runtime workers. The shared reconstruction stays pure.
     unsafe { std::env::set_var("CAS_FACTORY_SESSION", &session_name) };
+    from_app_after_fork(app, listener, session_name, None)?.run().await
+}
+
+pub(super) fn from_app_after_fork(
+    mut app: FactoryApp, listener: UnixListener, session_name: String,
+    handoff: Option<&super::reexec::Handoff>,
+) -> anyhow::Result<FactoryDaemon> {
+    #[cfg(not(target_os = "linux"))]
+    if handoff.is_none() {
+        super::reexec::pin_startup_image(&session_name)?;
+    }
+    crate::server_signals::ignore_sigpipe_for_server();
     app.set_factory_session(session_name.clone());
 
     let trace_path = daemon_trace_log_path(&session_name);
-    let trace_file = open_log_file_truncate(&trace_path)?;
+    let trace_file = if handoff.is_some() { open_log_file_append(&trace_path)? } else { open_log_file_truncate(&trace_path)? };
     let subscriber = tracing_subscriber::fmt()
         .with_writer(trace_file)
         .with_ansi(false)
@@ -308,10 +321,11 @@ pub async fn run_daemon_after_fork(
     install_panic_hook(panic_log_path(&session_name));
     // Get terminal size from boot or use reasonable default
     // The client will send resize on connect to sync dimensions
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
+    let (cols, rows) = handoff.map(|h| (h.app.mux.cols, h.app.mux.rows))
+        .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((120, 40)));
 
     // Sync pane sizes to match current dimensions
-    let _ = app.handle_resize(cols, rows);
+    if handoff.is_none() { let _ = app.handle_resize(cols, rows); }
 
     let session_manager = SessionManager::new();
 
@@ -320,14 +334,19 @@ pub async fn run_daemon_after_fork(
 
     // Create GUI socket for desktop clients
     let gui_sock_path = gui_socket_path(&session_name);
-    let gui_listener = bind_factory_socket(&gui_sock_path)?;
+    let gui_listener = match handoff {
+        Some(h) => unsafe { std::os::unix::net::UnixListener::from_raw_fd(super::reexec::duplicate(h.gui_listener)?) },
+        None => bind_factory_socket(&gui_sock_path)?,
+    };
     gui_listener.set_nonblocking(true)?;
 
     // Remove orphaned team directories from previous crashed sessions
-    super::runtime::teams::TeamsManager::cleanup_orphans();
+    if handoff.is_none() { super::runtime::teams::TeamsManager::cleanup_orphans(); }
 
     // Initialize native Agent Teams for inter-agent messaging.
-    let teams = {
+    let teams = if let Some(handoff) = handoff {
+        handoff.teams_present.then(|| super::runtime::teams::TeamsManager::new(&session_name))
+    } else {
         let tm = super::runtime::teams::TeamsManager::new(&session_name);
         let worker_cwds: std::collections::HashMap<String, std::path::PathBuf> = app
             .worktree_manager()
@@ -354,7 +373,8 @@ pub async fn run_daemon_after_fork(
     };
 
     // Re-save session metadata with team_name (metadata was saved pre-fork without it)
-    if let Some(ref teams) = teams {
+    if let Some(ref teams) = teams
+        && handoff.is_none() {
         let project_dir = app.cas_dir().to_string_lossy().to_string();
         let mut metadata = create_metadata(
             &session_name,
@@ -367,6 +387,14 @@ pub async fn run_daemon_after_fork(
         );
         metadata.team_name = Some(teams.team_name().to_string());
         let _ = session_manager.save_daemon_metadata(metadata, app.cas_dir());
+    }
+
+    if handoff.is_some() {
+        let path = crate::ui::factory::session::metadata_path(&session_name);
+        let mut metadata: crate::ui::factory::protocol::SessionMetadata =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        metadata.daemon_build_hash = Some(option_env!("CAS_GIT_HASH").unwrap_or("unknown").into());
+        session_manager.save_daemon_metadata(metadata, app.cas_dir())?;
     }
 
     // Bind notification socket for instant prompt queue wakeup
@@ -387,7 +415,7 @@ pub async fn run_daemon_after_fork(
 
     // cas-d2a2: the prompt queue's store work runs on its own job lanes.
     let queue_jobs = crate::ui::factory::daemon::runtime::prompt_queue_jobs::QueueJobs::start(app.cas_dir().to_path_buf(), app.project_scope());
-    let mut daemon = FactoryDaemon {
+    let daemon = FactoryDaemon {
         session_name,
         app,
         listener,
@@ -419,7 +447,14 @@ pub async fn run_daemon_after_fork(
         gui_listener,
         gui_clients: HashMap::new(),
         next_gui_client_id: 0,
-        ws_listener: None,
+        ws_listener: match handoff.and_then(|h| h.ws_listener) {
+            Some(fd) => {
+                let listener = unsafe { std::net::TcpListener::from_raw_fd(super::reexec::duplicate(fd)?) };
+                listener.set_nonblocking(true)?;
+                Some(tokio::net::TcpListener::from_std(listener)?)
+            }
+            None => None,
+        },
         ws_clients: HashMap::new(),
         terminal_exchange: Default::default(),
         next_ws_client_id: 0,
@@ -467,7 +502,7 @@ pub async fn run_daemon_after_fork(
         reported_stalled_spawn_requests: std::collections::HashSet::new(),
     };
 
-    daemon.run().await
+    Ok(daemon)
 }
 
 /// Run the factory daemon (called by the daemon subprocess - legacy mode)

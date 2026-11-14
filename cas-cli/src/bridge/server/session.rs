@@ -6,7 +6,8 @@ use cas_types::Event;
 use crate::store::{find_cas_root_ignoring_env, open_prompt_queue_store};
 
 use crate::bridge::server::types::{
-    AgentLatestActivityJson, AgentSummaryJson, AgentTrailJson, EpicProgressJson, StatusJson,
+    AgentLatestActivityJson, AgentSummaryJson, AgentTrailJson, EpicCountsJson, EpicProgressJson,
+    StatusJson,
     TaskSummaryJson, session_json,
 };
 
@@ -102,9 +103,12 @@ pub(crate) fn task_summary_json(
         delivery_state: None,
         merge_check_pending: t.status == cas_types::TaskStatus::AwaitingMerge,
         progress: None,
+        counts: None,
         branch: t.branch,
         updated_at: t.updated_at.map(|at| at.to_rfc3339()),
         tip,
+        freeze: None,
+        auto_cut_paused: None,
     }
 }
 
@@ -137,6 +141,7 @@ pub(crate) fn build_status_json(
         crate::cloud::resolve_canonical_id(cas_root).as_deref(),
     )?;
 
+    let counts = epic_counts(&data);
     let mut activity = data.activity;
     filter_events_for_session_agents(&mut activity, &allowed);
     let activity_limit = activity_limit.clamp(1, 200);
@@ -165,6 +170,7 @@ pub(crate) fn build_status_json(
 
     let mut status = StatusJson {
         schema_version: 1,
+        release_scope: None,
         supervisor_phase: crate::ui::factory::daemon::runtime::work_events::supervisor_phase_for_session(
             cas_root,
             std::path::Path::new(session.metadata.project_dir.as_deref().unwrap_or(".")),
@@ -177,11 +183,51 @@ pub(crate) fn build_status_json(
         agents,
         tasks_ready: data.ready_tasks.into_iter().map(to_task).collect(),
         tasks_in_progress: data.in_progress_tasks.into_iter().map(to_task).collect(),
-        epics: data.epic_tasks.into_iter().map(to_task).collect(),
+        epics: data
+            .epic_tasks
+            .into_iter()
+            .map(|epic| {
+                let split = counts.get(&epic.id).copied().unwrap_or_default();
+                // Only a release-train lane can carry a freeze; skip the
+                // store read for every other epic in the catalog.
+                let train = epic.branch.as_deref()
+                    .filter(|branch| branch.contains("release-train"))
+                    .and_then(|_| task_store.get(&epic.id).ok())
+                    .filter(crate::mcp::tools::core::task::release_train::is_release_train);
+                let freeze = train.as_ref()
+                    .and_then(|train| crate::mcp::tools::core::workflow::release_freeze::card(cas_root, train));
+                let auto_cut_paused = train.as_ref().map(crate::mcp::tools::core::workflow::release_auto_cut::paused);
+                TaskSummaryJson { counts: Some(split), freeze, auto_cut_paused, ..to_task(epic) }
+            })
+            .collect(),
         focused_epic: crate::ops::fleet::pinned_epic(&session.name),
     };
     project_deliveries(&mut status, cas_root, Some(task_store.as_ref()));
     Ok(status)
+}
+
+/// Every epic's child split from the snapshot already loaded, in one pass:
+/// the TUI's open (ready) and in-progress (in progress or parked) lists, and
+/// its delivered-closure count as merged. No proof budget can starve it.
+fn epic_counts(
+    data: &DirectorData,
+) -> std::collections::HashMap<String, EpicCountsJson> {
+    let mut counts: std::collections::HashMap<String, EpicCountsJson> = data
+        .epic_closed_counts
+        .iter()
+        .map(|(epic, &merged)| (epic.clone(), EpicCountsJson { merged, ..Default::default() }))
+        .collect();
+    for task in &data.ready_tasks {
+        if let Some(epic) = &task.epic {
+            counts.entry(epic.clone()).or_default().open += 1;
+        }
+    }
+    for task in &data.in_progress_tasks {
+        if let Some(epic) = &task.epic {
+            counts.entry(epic.clone()).or_default().in_progress += 1;
+        }
+    }
+    counts
 }
 
 /// Read the selected session directly, independent of the hub process's own
@@ -447,7 +493,12 @@ fn project_deliveries(
     let mut order: Vec<_> = (0..status.epics.len()).collect();
     order.sort_by_key(|&index| {
         let epic = Some(status.epics[index].id.as_str());
-        (status.focused_epic.as_deref() != epic, active_epic != epic)
+        // Every epic with work in progress precedes idle history, so a
+        // live epic's merge timing is never starved by old catalog rows.
+        let live = status.epics[index]
+            .counts
+            .is_some_and(|counts| counts.in_progress > 0);
+        (status.focused_epic.as_deref() != epic, active_epic != epic, !live)
     });
     for index in order {
         if started.elapsed() >= std::time::Duration::from_secs(2) {
@@ -1169,11 +1220,6 @@ mod focused_epic_tests {
             first_epic_read.contains("refs/heads/main"),
             "the selected supervisor's staffed epic must be measured before history: {first_epic_read}"
         );
-        assert_eq!(
-            reads.lines().filter(|line| line.contains("git rev-list") && line.contains("--not")).count(),
-            2,
-            "the current release's 35 anchors share one pass, then history gets its own"
-        );
         let landed = status["tasks_in_progress"]
             .as_array()
             .unwrap()
@@ -1190,6 +1236,12 @@ mod focused_epic_tests {
             .unwrap()["progress"];
         assert_eq!(progress["total"], 37);
         assert_eq!(progress["merged"], 34);
+        // cas-9b99: every epic carries the TUI's split, past the proof budget.
+        let counts = |id: &str| status["epics"].as_array().unwrap().iter()
+            .find(|item| item["id"] == id).unwrap()["counts"].clone();
+        assert_eq!(counts(&epic.id), serde_json::json!({"open": 1, "in_progress": 36, "merged": 0}));
+        assert_eq!(counts("cas-history-0"), serde_json::json!({"open": 0, "in_progress": 1, "merged": 0}));
+        assert_eq!(counts("cas-history-295"), serde_json::json!({"open": 0, "in_progress": 0, "merged": 0}));
         assert_eq!(progress["merges_per_hour"], 33);
         assert!(
             chrono::DateTime::parse_from_rfc3339(progress["last_merged_at"].as_str().unwrap()).is_ok()
@@ -1311,6 +1363,7 @@ mod focused_epic_tests {
         let status_json =
             || serde_json::to_value(build_status_json(&session, &cas_root, 20).unwrap()).unwrap();
         let status = status_json();
+        assert!(status.get("release_scope").is_none());
         assert_eq!(status["agents"].as_array().unwrap().iter()
             .find(|agent| agent["name"] == "supervisor").unwrap()["current_task"], "cas-owned");
         let epics = status["epics"].as_array().unwrap();

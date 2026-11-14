@@ -24,7 +24,7 @@ pub(super) fn capture(
     mut receipt: CaptureReceipt,
 ) -> anyhow::Result<CaptureReceipt> {
     let mut manifest = PairManifest {
-        schema: 1,
+        schema: 2,
         task_id: request.task.clone(),
         base_sha: base.into(),
         head_sha: head.into(),

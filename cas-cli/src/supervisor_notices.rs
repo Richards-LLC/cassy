@@ -84,16 +84,69 @@ pub(crate) fn enqueue(
     detail: &str,
     occurrence: &str,
 ) -> Result<(), crate::error::CasError> {
+    enqueue_with_context(root, recipient, kind, detail, occurrence, None)
+}
+
+/// Machine-readable evidence for notices revalidated before delivery.
+pub(crate) fn enqueue_with_context(
+    root: &Path,
+    recipient: &Recipient,
+    kind: &str,
+    detail: &str,
+    occurrence: &str,
+    context: Option<serde_json::Value>,
+) -> Result<(), crate::error::CasError> {
+    let key = format!("supervisor-notice:{kind}:{occurrence}:{}", recipient.id);
+    enqueue_keyed(root, recipient, kind, detail, &key, context)
+}
+
+/// Keep routing identity separate from the operator-facing summary.
+pub(crate) fn enqueue_with_summary(
+    root: &Path,
+    recipient: &Recipient,
+    kind: &str,
+    detail: &str,
+    occurrence: &str,
+    summary: &str,
+) -> Result<(), crate::error::CasError> {
+    let key = format!("supervisor-notice:{kind}:{occurrence}:{}", recipient.id);
+    enqueue_notice(root, recipient, kind, detail, &key, Some(summary), None)
+}
+
+/// Exactly one notice per caller-owned `key`, whoever the recipient becomes.
+pub(crate) fn enqueue_keyed(
+    root: &Path,
+    recipient: &Recipient,
+    kind: &str,
+    detail: &str,
+    key: &str,
+    context: Option<serde_json::Value>,
+) -> Result<(), crate::error::CasError> {
+    enqueue_notice(root, recipient, kind, detail, key, None, context)
+}
+
+// gate[N-29 notice]: Supervisor notices with operator fallback and adoption
+fn enqueue_notice(
+    root: &Path,
+    recipient: &Recipient,
+    kind: &str,
+    detail: &str,
+    key: &str,
+    summary: Option<&str>,
+    context: Option<serde_json::Value>,
+) -> Result<(), crate::error::CasError> {
     let sq = open_supervisor_queue_store(root)?;
     let pq = open_prompt_queue_store(root)?;
-    let key = format!("supervisor-notice:{kind}:{occurrence}:{}", recipient.id);
-    let payload = serde_json::json!({ "kind": kind, "detail": detail, "recipient": recipient.name, "factory_session": recipient.session }).to_string();
+    let mut payload = serde_json::json!({ "kind": kind, "detail": detail, "recipient": recipient.name, "factory_session": recipient.session });
+    if let Some(summary) = summary { payload["summary"] = summary.into(); }
+    if let Some(context) = context { payload["context"] = context; }
+    let payload = payload.to_string();
     let id = match sq.notify_idempotent(
         &recipient.id,
         "supervisor_notice",
         &payload,
         NotificationPriority::High,
-        &key,
+        key,
     )? {
         NotifyIdempotentResult::Created(id) | NotifyIdempotentResult::AlreadyExists { id, .. } => {
             id
@@ -115,7 +168,7 @@ pub(crate) fn enqueue(
         recipient.session.as_deref(),
         Some(kind),
         Some(NotificationPriority::High),
-        &key,
+        key,
         Some(&QueueOrigin::Daemon),
     )?;
     sq.mark_prompt_delivered(id)?;
@@ -139,6 +192,7 @@ pub(crate) fn operator_prompt(
             options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
+            task_id: None,
         },
     )?)
 }
@@ -163,7 +217,7 @@ pub(crate) fn adopt_operator_notices(
         pq.enqueue_idempotent(
             &format!("supervisor-notice:{}", notice.id),
             "operator",
-            &operator_prompt(detail, kind)?,
+            &operator_prompt(detail, payload.get("summary").and_then(|value| value.as_str()).unwrap_or(kind))?,
             Some(session),
             Some(kind),
             Some(NotificationPriority::High),
@@ -251,15 +305,19 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReleaseNoticePhase {
     CutReady,
+    RustRed,
     #[allow(dead_code)] // cas-61e0 sends it on publish.
     PostPublish,
+    PostPublishFailed,
 }
 
 impl ReleaseNoticePhase {
     pub(crate) fn kind(self) -> &'static str {
         match self {
             Self::CutReady => "release_cut_ready",
+            Self::RustRed => "train_ci_red",
             Self::PostPublish => "release_post_publish",
+            Self::PostPublishFailed => "release_post_publish_failed",
         }
     }
 }
@@ -283,7 +341,7 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew"]
+    let valid_kind = ["blocker", "premerge_verification", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "release_post_publish_failed", "release_closeout", "factory_binary_skew", "train_ci_red", "registration_outcome"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

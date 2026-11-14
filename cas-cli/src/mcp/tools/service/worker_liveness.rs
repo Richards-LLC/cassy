@@ -660,6 +660,73 @@ pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
     }
 }
 
+/// Last measured advancement from a still-owned child incarnation. Two
+/// readers share the timestamp, so a status read cannot consume a watchdog's
+/// delta. A cold sample, changed session/PID, exited child or service heartbeat
+/// supplies no progress. No transcript or arbitrary checkout mtime is trusted.
+pub(crate) fn child_progress(agent: &cas_types::Agent, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    use crate::cli::factory::wedged;
+    let registered = agent.pid?;
+    let expected = agent.pid_starttime?;
+    if !crate::mcp::daemon::pid_matches_fingerprint(registered, expected) { return None; }
+    if agent.machine_id.as_ref().is_some_and(|machine| machine != &cas_types::Agent::get_or_generate_machine_id()) {
+        return None;
+    }
+    let root = if let Some(parent) = agent.ppid {
+        if !descends_from_harness(registered, parent) { return None; }
+        parent
+    } else { registered };
+    if !wedged::process_commandline(root).is_some_and(|raw| is_harness_command(&raw)) { return None; }
+    let start = crate::mcp::daemon::read_pid_starttime(root)?;
+    let current = wedged::worker_child_samples(root)?;
+    if !crate::mcp::daemon::pid_matches_fingerprint(registered, expected)
+        || crate::mcp::daemon::read_pid_starttime(root) != Some(start) { return None; }
+    #[derive(Clone)]
+    struct Sample { start: u64, cpu: u64, written: u64, advanced: Option<DateTime<Utc>> }
+    type Samples = std::collections::HashMap<u32, Sample>;
+    static SAMPLES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Samples>>> =
+        std::sync::LazyLock::new(Default::default);
+    let key = format!("{}:{:?}:{}:{root}:{start}", agent.id, agent.factory_session, agent.registered_at);
+    let mut all = SAMPLES.lock().ok()?;
+    if all.len() > 128 { all.clear(); }
+    let samples = all.entry(key).or_default();
+    let mut next = Samples::new();
+    for (pid, start, cpu, written) in current {
+        let prior = samples.get(&pid).filter(|old| old.start == start);
+        let advanced = prior.and_then(|old| {
+            if cpu > old.cpu || written > old.written { Some(now) } else { old.advanced }
+        });
+        next.insert(pid, Sample { start, cpu, written, advanced });
+    }
+    *samples = next;
+    samples.values().filter_map(|sample| sample.advanced).filter(|at| *at <= now).max()
+}
+
+/// The registered PID is the MCP child. `cas serve` runs a frontend that owns
+/// a `--backend` grandchild, so the harness the row names as `ppid` can sit two
+/// hops above the registered PID (cas-8ea3). Only `cas serve` hops may sit
+/// between them, so an unrelated process is never mistaken for the owner.
+fn descends_from_harness(registered: u32, harness: u32) -> bool {
+    use crate::cli::factory::wedged;
+    let mut at = registered;
+    for _ in 0..3 {
+        let Some(up) = wedged::process_parent(at) else { return false };
+        if up == harness { return true; }
+        if !wedged::process_commandline(up).is_some_and(|raw| is_cas_serve(&raw)) { return false; }
+        at = up;
+    }
+    false
+}
+
+fn is_cas_serve(raw: &[u8]) -> bool {
+    let mut parts = raw.split(|byte| *byte == 0);
+    parts.next()
+        .and_then(|arg| std::str::from_utf8(arg).ok())
+        .and_then(|arg| Path::new(arg).file_name()?.to_str())
+        .is_some_and(|name| name == "cas" || name.starts_with("cas-"))
+        && parts.any(|part| part == b"serve")
+}
+
 /// A cold probe has no delta. Keep sampling separate from classification so
 /// two status views can be checked against identical process evidence.
 fn record_cpu_sample(

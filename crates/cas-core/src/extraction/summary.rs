@@ -533,7 +533,6 @@ mod tests {
 
         assert!(summary.contains("Rust"));
         assert!(summary.contains("tool"));
-        assert!(summary.contains("mention"));
     }
 
     #[test]

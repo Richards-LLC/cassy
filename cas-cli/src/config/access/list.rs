@@ -44,6 +44,7 @@ impl Config {
                 "slack.violet_bot_user_ids".to_string(),
                 self.get("slack.violet_bot_user_ids").unwrap(),
             ),
+            ("rules.draft_ttl_days".into(), self.rules().draft_ttl_days.to_string()),
             // Sync section
             ("sync.enabled".to_string(), self.sync.enabled.to_string()),
             ("sync.target".to_string(), self.sync.target.clone()),
@@ -173,6 +174,7 @@ impl Config {
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
             // Factory section (cas-1a05): the keys `get` and `set` accept.
+            ("factory.focus_mode".into(), factory.focus_mode.clone().unwrap_or_default()),
             ("factory.slot_id".into(), factory.slot_id.clone().unwrap_or_default()),
             ("factory.claude.worker_mcp".into(), factory.claude.worker_mcp.as_str().into()),
             ("factory.claude.remote_control".into(), factory.claude.remote_control.to_string()),
@@ -195,6 +197,7 @@ impl Config {
                 "factory.scratch_root".to_string(),
                 factory.scratch_root.clone().unwrap_or_default(),
             ),
+            ("factory.codex_home".to_string(), factory.codex_home.clone().unwrap_or_default()),
             (
                 "factory.worker_local_gate".to_string(),
                 factory.worker_local_gate.clone().unwrap_or_default(),
@@ -224,6 +227,10 @@ impl Config {
                 factory.supervisor_message_wakes_per_hour.to_string(),
             ),
             (
+                "factory.supervisor_wake_input_budget".to_string(),
+                factory.supervisor_wake_input_budget.to_string(),
+            ),
+            (
                 "factory.message_max_chars".to_string(),
                 factory.message_max_chars.to_string(),
             ),
@@ -243,6 +250,7 @@ impl Config {
                 "factory.auto_route_builds".to_string(),
                 factory.auto_route_builds.to_string(),
             ),
+            ("factory.max_workers".to_string(), factory.max_workers.to_string()),
             ("factory.build_guard.max_load_ratio".to_string(), format!("{:?}", factory.build_guard.max_load_ratio)),
             ("factory.build_guard.max_cpu_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),
             ("factory.build_guard.max_memory_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_memory_pressure_percent)),
@@ -860,6 +868,9 @@ impl Config {
             ),
         ]
     }
+
+    /// Draft rule lifecycle defaults.
+    pub fn rules(&self) -> RulesConfig { self.rules.unwrap_or_default() }
 
     /// Get skill validation sandbox policy with defaults.
     pub fn skill_validation(&self) -> SkillValidationConfig {

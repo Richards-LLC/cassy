@@ -6,6 +6,8 @@ import { appendEmojiText } from "./emoji-text";
  * innerHTML, which keeps tags, entities, and unsupported link schemes literal.
  */
 import { createCodeFrame } from "./code-frame";
+import { imagePlaceholder, imageReference } from "./reply-images";
+import { URL_PATTERN } from "./terminal-links";
 
 interface ListMarker {
   indent: number;
@@ -21,7 +23,7 @@ const LIST = /^(\s*)([-+*]|\d+[.)])\s+(.*)$/;
 const LEGACY_NUMBER = /(?:\(\d+\)|\d+\))(?=[ \t]+)/g;
 const ALL_CAPS_LABEL = "[A-Z][A-Z0-9]*(?:[ \\t]+[A-Z][A-Z0-9]*)*";
 const LEAD = new RegExp(`^(?:Status\\s+\\d{1,2}:[\\dx]{2}Z\\.(?:[ \\t]+${ALL_CAPS_LABEL}:)?|[^.\\n]{1,120}\\.[ \\t]+${ALL_CAPS_LABEL}:)`);
-const INLINE_MARKDOWN = /`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\n)]+\)/;
+const INLINE_MARKDOWN = /`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|!?\[[^\]\n]*\]\([^\n)]+\)/;
 
 function listMarker(line: string): ListMarker | undefined {
   const match = LIST.exec(line);
@@ -110,6 +112,36 @@ function normalizePlainText(source: string): string {
   return `# ${lead}${source.slice(lead.length)}`;
 }
 
+const BARE_URL = new RegExp(URL_PATTERN.source, "y");
+
+/** Only https URLs become anchors; every other scheme stays literal. */
+function isSafeLinkUrl(url: string): boolean {
+  return /^https:\/\//i.test(url) && !/[\s<>]/.test(url);
+}
+
+function linkElement(document: Document, url: string): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.className = "markdown-link";
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  return link;
+}
+
+/** A bare URL at `index`, without trailing sentence punctuation or an unbalanced ')'. */
+function bareUrlAt(source: string, index: number): string | undefined {
+  if (index > 0 && /[\w/]/.test(source[index - 1]!)) return undefined;
+  BARE_URL.lastIndex = index;
+  let url = BARE_URL.exec(source)?.[0];
+  while (url) {
+    const trimmed = url.replace(/[.,;:!?*]+$/, "");
+    if (trimmed !== url) { url = trimmed; continue; }
+    if (url.endsWith(")") && url.split(")").length > url.split("(").length) { url = url.slice(0, -1); continue; }
+    break;
+  }
+  return url && isSafeLinkUrl(url) && url.length > "https://".length ? url : undefined;
+}
+
 export function appendInline(document: Document, parent: HTMLElement, source: string): void {
   let index = 0;
   let plainStart = 0;
@@ -133,6 +165,22 @@ export function appendInline(document: Document, parent: HTMLElement, source: st
       }
     }
 
+    // An image is an artifact or a project artifacts-directory file the
+    // machine re-proves; every other image URL stays literal text.
+    if (source[index] === "!" && source[index + 1] === "[") {
+      const labelEnd = source.indexOf("](", index + 2);
+      const urlEnd = labelEnd < 0 ? -1 : source.indexOf(")", labelEnd + 2);
+      if (labelEnd >= index + 2 && urlEnd > labelEnd + 2) {
+        const text = source.slice(index, urlEnd + 1);
+        const reference = imageReference(source.slice(labelEnd + 2, urlEnd));
+        flush(index);
+        parent.append(reference ? imagePlaceholder(document, source.slice(index + 2, labelEnd).trim(), reference, text) : document.createTextNode(text));
+        index = urlEnd + 1;
+        plainStart = index;
+        continue;
+      }
+    }
+
     if (source[index] === "[") {
       const labelEnd = source.indexOf("](", index + 1);
       const urlEnd = labelEnd < 0 ? -1 : source.indexOf(")", labelEnd + 2);
@@ -140,12 +188,8 @@ export function appendInline(document: Document, parent: HTMLElement, source: st
         const label = source.slice(index + 1, labelEnd);
         const url = source.slice(labelEnd + 2, urlEnd);
         flush(index);
-        if (/^https:\/\//i.test(url) && !/[\s<>]/.test(url)) {
-          const link = document.createElement("a");
-          link.className = "markdown-link";
-          link.href = url;
-          link.target = "_blank";
-          link.rel = "noopener";
+        if (isSafeLinkUrl(url)) {
+          const link = linkElement(document, url);
           nested(link, label);
           parent.append(link);
         } else {
@@ -157,6 +201,17 @@ export function appendInline(document: Document, parent: HTMLElement, source: st
         plainStart = index;
         continue;
       }
+    }
+
+    const bare = source[index] === "h" ? bareUrlAt(source, index) : undefined;
+    if (bare) {
+      flush(index);
+      const link = linkElement(document, bare);
+      link.textContent = bare;
+      parent.append(link);
+      index += bare.length;
+      plainStart = index;
+      continue;
     }
 
     const strong = source.startsWith("**", index);
@@ -200,13 +255,21 @@ function inlinePlainText(source: string): string {
       const close = source.indexOf("`", index + 1);
       if (close > index + 1) { output += source.slice(index + 1, close); index = close + 1; continue; }
     }
+    // An inline image reads as its alt text in previews.
+    if (source[index] === "!" && source[index + 1] === "[") {
+      const labelEnd = source.indexOf("](", index + 2);
+      const urlEnd = labelEnd < 0 ? -1 : source.indexOf(")", labelEnd + 2);
+      if (labelEnd >= index + 2 && urlEnd > labelEnd + 2 && imageReference(source.slice(labelEnd + 2, urlEnd))) {
+        output += source.slice(index + 2, labelEnd).trim() || "Image"; index = urlEnd + 1; continue;
+      }
+    }
     if (source[index] === "[") {
       const labelEnd = source.indexOf("](", index + 1);
       const urlEnd = labelEnd < 0 ? -1 : source.indexOf(")", labelEnd + 2);
       if (labelEnd > index + 1 && urlEnd > labelEnd + 2) {
         const label = source.slice(index + 1, labelEnd);
         const url = source.slice(labelEnd + 2, urlEnd);
-        if (/^https:\/\//i.test(url) && !/[\s<>]/.test(url)) {
+        if (isSafeLinkUrl(url)) {
           output += inlinePlainText(label); index = urlEnd + 1; continue;
         }
         output += source.slice(index, urlEnd + 1); index = urlEnd + 1; continue;

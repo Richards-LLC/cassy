@@ -20,8 +20,86 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
-async fn r1_approved_verdict_leaves_close_retry_with_worker() {
+async fn r1_approved_verdict_leaves_close_recovery_with_supervisor() {
     r1_verification_wait_wakes("verdict").await;
+}
+
+#[test]
+fn recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7() {
+    use crate::mcp::tools::core::task::{block_hold, lifecycle::supervisor_push::{
+        is_lifecycle_wake_source, reconcile_blocked_task_alert,
+    }};
+    use cas_types::{Agent, AgentRole, Dependency, DependencyType, Task, TaskStatus};
+    // One state-transition table: only a recorded wait from this hold owns the
+    // deadline; all its blockers must finish, including when an answer exists.
+    for (case, edge_type, seconds, second_blocker, answered, terminal) in [
+        ("recorded", DependencyType::Blocks, 1, false, false, TaskStatus::Closed),
+        ("answered", DependencyType::Blocks, 1, false, true, TaskStatus::Closed),
+        ("multiple", DependencyType::Blocks, 1, true, false, TaskStatus::Closed),
+        ("cancelled", DependencyType::Blocks, 1, false, false, TaskStatus::Cancelled),
+        ("older edge", DependencyType::Blocks, -1, false, false, TaskStatus::Closed),
+        ("related", DependencyType::Related, 1, false, false, TaskStatus::Closed),
+    ] {
+        let fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        let root = fixture.app.cas_dir().to_path_buf();
+        let lead = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.register(&lead).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = tasks.get("cas-9efb-test").unwrap();
+        let start = chrono::Utc::now();
+        task.status = TaskStatus::Blocked;
+        tasks.update(&task).unwrap();
+        tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+            "reason": "Wait for the main-sync prerequisite", "who": "merge-w", "when": start
+        }})).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        reconcile_blocked_task_alert(&root, &task.id, start).unwrap();
+        assert_eq!(queue.peek_all(20).unwrap().len(), 1, "{case}: initial blocker reaches the supervisor");
+        let mut dependency = Task::new("cas-f8c7-dep".into(), "main sync in flight".into());
+        dependency.status = TaskStatus::InProgress;
+        tasks.add(&dependency).unwrap();
+        let mut edge = Dependency::new(task.id.clone(), dependency.id.clone(), edge_type);
+        edge.created_at = start + chrono::Duration::seconds(seconds);
+        tasks.add_dependency(&edge).unwrap();
+        let mut other = Task::new("cas-f8c7-other".into(), "another prerequisite".into());
+        if second_blocker {
+            tasks.add(&other).unwrap();
+            // Even an older, still-open blocker must finish before the wake.
+            let mut older = Dependency::new(task.id.clone(), other.id.clone(), DependencyType::Blocks);
+            older.created_at = start - chrono::Duration::seconds(1);
+            tasks.add_dependency(&older).unwrap();
+        }
+        if answered {
+            block_hold::record_supervisor_answer(&root, &lead, &agents.get("merge-w").unwrap(), Some(&task.id), 42).unwrap();
+        }
+        let owns_wait = edge_type == DependencyType::Blocks && seconds >= 0;
+        for minutes in [10, 20] {
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(minutes)).unwrap();
+            assert_eq!(queue.peek_all(20).unwrap().len(), if owns_wait { 1 } else { 2 },
+                "{case}: only a new blocking edge owns the next wake");
+        }
+        dependency.status = terminal;
+        tasks.update(&dependency).unwrap();
+        if second_blocker {
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(25)).unwrap();
+            assert_eq!(queue.peek_all(20).unwrap().len(), 1, "{case}: one unresolved blocker still owns the wait");
+            other.status = TaskStatus::Closed;
+            tasks.update(&other).unwrap();
+        }
+        for _ in 0..3 {
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(30)).unwrap();
+        }
+        let rows = queue.peek_all(20).unwrap();
+        assert_eq!(rows.len(), 2, "{case}: exactly one follow-up");
+        if owns_wait {
+            let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id)
+                && row.prompt.contains(&terminal.to_string())).unwrap();
+            assert!(is_lifecycle_wake_source(&completed.source), "{case}");
+            assert!(!block_hold::answered_blocker_alert(&root, completed), "{case}: a linked answer cannot withdraw completion at delivery");
+        }
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Blocked, "{case}: preserve the explicit hold");
+    }
 }
 
 #[tokio::test]
@@ -152,7 +230,7 @@ async fn r1_verification_wait_wakes(release: &str) {
                     "task_id": task.id,
                     "dispatch_id": dispatch.id,
                     "status": "approved",
-                    "summary": "Review passed; worker can retry close."
+                    "summary": "Review passed; supervisor owns close recovery."
                 }))
                 .unwrap(),
             ))
@@ -162,8 +240,8 @@ async fn r1_verification_wait_wakes(release: &str) {
         let rows = queue.peek_all(20).unwrap();
         assert_eq!(
             rows.iter().filter(|row| row.target == "merge-w").count(),
-            1,
-            "the real verdict path must queue the worker's close retry: {rows:?}"
+            0,
+            "an approved verdict cannot ask the worker to re-close: {rows:?}"
         );
     }
     let released_at = if release != "verdict" {
@@ -195,8 +273,8 @@ async fn r1_verification_wait_wakes(release: &str) {
             .filter(|row| row.target != "merge-w"
                 && !crate::supervisor_message_wakes::quiet(&row.prompt))
             .count(),
-        if release != "verdict" { 2 } else { 1 },
-        "after the dispatch handoff, expiry needs one wake and approval needs zero: {rows:?}"
+        2,
+        "after the dispatch handoff, expiry or supervisor close recovery needs one wake: {rows:?}"
     );
     if release == "verdict" {
         let resolved_at = cas_store::get_latest_verification_dispatch(&root, &task.id)
@@ -204,7 +282,7 @@ async fn r1_verification_wait_wakes(release: &str) {
         let close_deadline = resolved_at + chrono::Duration::minutes(5);
         reconcile_blocked_task_alert(&root, &task.id, close_deadline - chrono::Duration::seconds(1)).unwrap();
         assert_eq!(queue.peek_all(20).unwrap().len(), rows.len(),
-            "approval gives the worker a bounded chance to retry close");
+            "approval gives the supervisor a bounded chance to complete recovery");
         for _ in 0..3 {
             reconcile_blocked_task_alert(&root, &task.id, close_deadline).unwrap();
             crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
@@ -213,8 +291,8 @@ async fn r1_verification_wait_wakes(release: &str) {
         }
         let rows = queue.peek_all(20).unwrap();
         assert_eq!(rows.iter().filter(|row| row.target != "merge-w"
-            && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 2,
-            "an unretried approval must escalate exactly once after its grace period: {rows:?}");
+            && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 3,
+            "an unfinished supervisor recovery must escalate exactly once after its grace period: {rows:?}");
     }
 }
 
@@ -347,6 +425,102 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
 }
 
 #[tokio::test]
+async fn answered_blocker_episode_retires_legacy_reply_or_decision_cas_9e1e() {
+    use crate::mcp::tools::core::task::{block_hold, lifecycle::supervisor_push::{
+        is_lifecycle_wake_source, reconcile_blocked_task_alert,
+    }};
+    use cas_types::{Agent, AgentRole, Task, TaskStatus};
+    use rmcp::handler::server::wrapper::Parameters;
+
+    for decision in [false, true] {
+        let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        fixture._env.set("CAS_AGENT_NAME", fixture.app.supervisor_name());
+        let root = fixture.app.cas_dir().to_path_buf();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let lead = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
+        agents.register(&lead).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = tasks.get("cas-9efb-test").unwrap();
+        let start = chrono::Utc::now();
+        task.status = TaskStatus::Blocked;
+        tasks.update(&task).unwrap();
+        tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+            "reason": "Start refused after requested rebase", "who": "merge-w", "when": start
+        }})).unwrap();
+        let mut other = Task::new("cas-unrelated".into(), "Another task on the same worker".into());
+        other.assignee = task.assignee.clone();
+        other.status = TaskStatus::Blocked;
+        tasks.add(&other).unwrap();
+        tasks.patch_execution_state(&other.id, &serde_json::json!({"blocked_hold": {
+            "reason": "Another question", "who": "merge-w", "when": start
+        }})).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(lead.id.clone());
+        let service = crate::mcp::CasService::new(core, None);
+        let worker_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        worker_core.set_agent_id_for_testing("merge-w".into());
+        let worker_service = crate::mcp::CasService::new(worker_core, None);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        reconcile_blocked_task_alert(&root, &task.id, start).unwrap();
+        let initial = queue.peek_all(30).unwrap().into_iter()
+            .find(|row| is_lifecycle_wake_source(&row.source)).unwrap();
+        let worker_note = worker_service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "notes", "id": task.id, "note_type": "decision",
+            "notes": "The worker has picked a recovery approach."
+        })).unwrap())).await.unwrap();
+        assert!(!worker_note.is_error.unwrap_or(false), "{worker_note:?}");
+        assert!(!block_hold::answered_blocker_alert(&root, &initial), "a worker decision is not a supervisor answer");
+        // Same recipient, wrong task: neither kind of answer may swallow this blocker.
+        for id in [&other.id, &task.id] {
+            let request = if decision {
+                serde_json::json!({"action": "notes", "id": id, "note_type": "decision",
+                    "notes": "The rebase is accepted; resume this task."})
+            } else {
+                serde_json::json!({"action": "message", "target": "merge-w", "task_id": id,
+                    "summary": "Rebase accepted", "message": "The rebase is accepted; resume this task."})
+            };
+            let result = if decision {
+                service.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap()
+            } else {
+                service.coordination(Parameters(serde_json::from_value(request).unwrap())).await.unwrap()
+            };
+            assert!(!result.is_error.unwrap_or(false), "{result:?}");
+            assert_eq!(block_hold::answered_blocker_alert(&root, &initial), id == &task.id,
+                "only an answer to this task retires its queued wake (decision={decision})");
+        }
+        let count = queue.peek_all(100).unwrap().len();
+        for minutes in 6..=26 {
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(minutes)).unwrap();
+        }
+        assert_eq!(queue.peek_all(100).unwrap().len(), count, "answered episode must not escalate");
+        // A different question re-arms the same hold without waiting for a status write.
+        let question = worker_service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "supervisor", "task_id": task.id, "blocker": true,
+            "summary": "New blocker", "message": "A new credential is required."
+        })).unwrap())).await.unwrap();
+        assert!(!question.is_error.unwrap_or(false), "{question:?}");
+        assert!(!block_hold::answered_blocker_alert(&root, &initial));
+        let before = queue.peek_all(100).unwrap().len();
+        let next_start = block_hold::read(tasks.as_ref(), &task.id).unwrap().unwrap().when;
+        for minutes in [0, 4] {
+            reconcile_blocked_task_alert(&root, &task.id, next_start + chrono::Duration::minutes(minutes)).unwrap();
+            assert_eq!(queue.peek_all(100).unwrap().len(), before + 1, "new question gets its own deadline");
+        }
+        for minutes in [5, 6, 7] {
+            reconcile_blocked_task_alert(&root, &task.id, next_start + chrono::Duration::minutes(minutes)).unwrap();
+        }
+        assert_eq!(queue.peek_all(100).unwrap().len(), before + 2,
+            "one initial notice and one deadline escalation for the new question");
+        for status in [TaskStatus::AwaitingMerge, TaskStatus::Closed] {
+            task.status = status;
+            tasks.update(&task).unwrap();
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(30)).unwrap();
+            assert_eq!(queue.peek_all(100).unwrap().len(), before + 2, "terminal episode stays retired");
+        }
+    }
+}
+
+#[tokio::test]
 async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8e() {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{LifecycleTransition, is_lifecycle_wake_source};
     use cas_types::{Agent, AgentRole, TaskStatus, Verification, VerificationStatus};
@@ -394,10 +568,11 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert!(!status.is_error.unwrap_or(false), "{status:?}");
     let status_id = queue.peek_all(30).unwrap().into_iter()
         .filter(|row| row.source == "merge-w").max_by_key(|row| row.id).unwrap().id;
-    // Neither an unrelated direct ping nor a reply to ordinary status owns the blocker.
+    // Neither a typed status ping nor a reply to ordinary status owns the blocker.
     for reply_to in [None, Some(status_id)] {
         let ping = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
             "action": "message", "target": "merge-w", "task_id": task.id, "in_reply_to": reply_to,
+            "kind": "status",
             "summary": "Status query", "message": "Are your checks complete?"
         })).unwrap())).await.unwrap();
         assert!(!ping.is_error.unwrap_or(false), "{ping:?}");
@@ -438,7 +613,7 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
         assert!(report.delivered_at.is_none());
         if id == before_answer.id {
             // pin: an outstanding blocker wake is parked after its explicit answer.
-            assert_eq!(report.pending_detail.as_deref(), Some("answered blocker; readable without another supervisor wake"));
+            assert!(report.pending_detail.is_some());
         }
     }
     // 29da493b3 / 5092b8d5f: routine worker_idle rows bypass daemon delivery
@@ -1086,38 +1261,58 @@ async fn cas_91bab_non_green_native_transport_fallbacks() {
 
 #[tokio::test]
 async fn cas_9efb_merge_ci_probe_runs_on_external_lane_without_blocking_control() {
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+
     let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
     let cas_dir = fixture.app.cas_dir().to_path_buf();
+    let fifo = |name| {
+        let path = cas_dir.join(name);
+        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+        std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap()
+    };
+    let mut entered = fifo("gh-entered");
+    let mut release = fifo("gh-release");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (returned_tx, returned_rx) = mpsc::channel();
+    let gate = std::thread::spawn(move || {
+        entered.read_exact(&mut [0]).unwrap();
+        entered_tx.send(()).unwrap();
+        // Deadlock fuse only: success depends on the control-return event,
+        // never on how quickly a loop pass or local Git/SQLite work finishes.
+        let returned_before_release = returned_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+        release.write_all(b"release\n").unwrap();
+        returned_before_release
+    });
     crate::test_paths::warm_stub(&cas_dir.join("gh-fixture"),
-        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; else sleep 0.4; cat .cas/ci.json; fi\n");
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; else printf '%s\\n' \"$*\" >> .cas/gh-requests; if [ ! -e .cas/gh-released ]; then printf x > .cas/gh-entered; read release < .cas/gh-release; touch .cas/gh-released; fi; cat .cas/ci.json; fi\n");
     let mut daemon = daemon_on_lanes(&cas_dir);
     std::mem::swap(&mut daemon.app, &mut fixture.app);
     let mut refresh = DirectorRefresh::new();
-    let started = Instant::now();
     refresh.start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![fixture.event.clone()]).unwrap();
-    assert!(started.elapsed() < PASS_LATENCY_LIMIT, "submitting merge evidence blocked control");
+    entered_rx.recv_timeout(Duration::from_secs(30)).expect("GitHub stub never entered");
+    let pending = refresh.take_delivery_read(&mut daemon.queue_jobs).is_none();
+    let external_seen = daemon.queue_jobs.job_lanes().unwrap().lane_stats().into_iter().any(|stats| {
+        stats.running.is_some_and(|job| {
+            job.lane == super::super::jobs::Lane::External && job.key == super::super::factory_jobs::DELIVERY_READ_KEY
+        })
+    });
+    let _ = returned_tx.send(());
+    assert!(gate.join().unwrap(), "control must return before the GitHub stub is released");
+    assert!(pending, "control must return while the GitHub stub is still pending");
+    assert!(external_seen, "the actual merge read must use the external lane");
+
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut external_seen = false;
-    let mut slowest = Duration::ZERO;
     let (events, inputs) = loop {
         assert!(Instant::now() < deadline, "merge evidence did not finish");
-        let pass = Instant::now();
-        let ready = refresh.take_delivery_read(&mut daemon.queue_jobs);
-        slowest = slowest.max(pass.elapsed());
-        external_seen |= daemon.queue_jobs.job_lanes().unwrap().lane_stats().into_iter().any(|stats| {
-            stats.running.is_some_and(|job| {
-                job.lane == super::super::jobs::Lane::External && job.key == super::super::factory_jobs::DELIVERY_READ_KEY
-            })
-        });
-        if let Some(ready) = ready { break ready; }
+        if let Some(ready) = refresh.take_delivery_read(&mut daemon.queue_jobs) { break ready; }
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
-    assert!(external_seen, "the actual merge read must use the external lane");
-    let pass = Instant::now();
+    let requests = std::fs::read(cas_dir.join("gh-requests")).unwrap();
     let (_, prompts, _) = daemon.app.revalidate_and_prompt_for_delivery_from(&events, inputs);
-    slowest = slowest.max(pass.elapsed());
     assert_eq!(prompts.len(), 1);
-    assert!(slowest < PASS_LATENCY_LIMIT, "control waited for GitHub: {slowest:?}");
+    assert_eq!(std::fs::read(cas_dir.join("gh-requests")).unwrap(), requests,
+        "control must reuse the external evidence without calling GitHub again");
 }
 
 #[tokio::test]

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import ast
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,6 +12,136 @@ spec.loader.exec_module(shape)
 
 
 class Shapes(unittest.TestCase):
+    def test_human_message_assertions_use_behavior_or_machine_ids(self):
+        cases = [
+            ('test_example.py', 'with self.assertRaisesRegex(ValueError, "please try later"): run()', True),
+            ('test_example.py', r'with self.assertRaisesRegex(ValueError, r"^\S+$"): run()', False),
+            ('test_example.py', 'self.assertIn("permission was denied", result.stderr)', True),
+            ('test_example.py', 'self.assertIn("titled category and area format", result.stdout)', True),
+            ('src/example.rs', '#[test] fn check() { assert!(result.stdout.contains("please try later")); }', True),
+            ('test_example.py', 'self.assertEqual("permission was denied", error.message)', True),
+            ('test_example.py', 'assert "permission was denied" in str(exc)', True),
+            ('test_example.py', 'assert str(error) == "permission was denied"', True),
+            ('test_example.py', 'assert f"please retry {name} later" in str(exc)', True),
+            ('test_example.py', 'self.assertIn(f"please retry {name} later", result.stderr)', True),
+            ('test_example.py', 'assert error.code == "scope_denied"', False),
+            ('test_example.py', 'assert error.code == "forbidden"', False),
+            ('test_example.py', 'self.assertEqual(error.code, "forbidden")', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.code(), "forbidden"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.redirect_command(), "cas cloud project set"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(format!("Use {} to configure this project.", error.command()), "Use cas cloud project set to configure this project."); }', True),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.message(), "Use cas cloud project set to configure this project."); }', True),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("2026-05-01T00:00:00Z")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("entry:e1")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("database.md:42")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("protected=4")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("project=acme")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("HTTP 503")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains(".claude-alt")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.message.contains("SKILL.md")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("$UNKNOWN_ROOT")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.message.contains("4dd898a71")); }', False),
+            ('example.test.ts', 'expect(error.code).toBe("forbidden");', False),
+            ('test_example.py', 'self.assertIn("[rule: scope_denied]", result.stderr)', False),
+            ('test_example.py', 'self.assertIn("FAIL test-shape", result.stdout)', False),
+            ('test_example.py', 'self.assertEqual(saved_payload, "hello from the operator")', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.contains("please try later")); }', True),
+            ('src/example.rs', 'fn validate(error: &str) { assert!(error.contains("required input phrase")); }', False),
+            ('src/example.rs', '#[cfg(test)] mod tests { fn helper(error: &str) { assert!(error.contains("please try later")); } }', True),
+            ('src/example.rs', '#[test] fn check() {\n// pin: an old copy preference\nassert!(error.contains("please try later")); }', True),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.code(), "scope_denied"); }', False),
+            ('src/example.rs', r"#[test] fn check() { assert!(!error.contains('\x1b')); }", False),
+            ('src/example.rs', r"#[test] fn check() { assert!(!error.contains(b'\n')); }", False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(output.stdout, b"caller payload bytes"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(receipt, Receipt { warning: Some("caller-provided diagnostic".into()) }); }', False),
+            ('src/example.rs', '#[test] fn check() { let fixture = "caller diagnostic"; assert_eq!(error.message, fixture); }', False),
+            ('src/example.rs', r'#[test] fn check() { assert!(stderr.contains(&format!("{FIXTURE}\n{SECOND}\n"))); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!("please try later", error.message); }', True),
+            ('src/example.rs', '#[test] fn check() { assert!(result.unwrap_err().to_string().contains("please try later")); }', True),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(get_error().message, "please try later"); }', True),
+            ('src/example.rs', '#[test] fn check() { assert!(result.is_err(), "expected an authorization refusal"); }', False),
+            ('example.test.ts', 'expect(run()).toThrow("please try later");', True),
+            ('example.test.ts', 'expect(run()).toThrow(new Error("please try later"));', True),
+            ('example.test.ts', 'expect(error).toMatchObject({\nmessage: "please try later"\n});', True),
+            ('example.test.ts', 'expect(error.message).toBe("forbidden");', True),
+            ('example.journey.ts', 'expect(error.message).toBe("forbidden");', True),
+            ('src/example_tests.rs', 'fn helper(error: &str) { assert!(error.contains("please try later")); }', True),
+            ('example.test.ts', 'expect(error.message).toMatch(/permission was denied/);', True),
+            ('example.test.ts', 'expect(error.message).toMatch(/\\S/);', False),
+            ('example.test.mjs', 'assert.equal(error.message, "please try later");', True),
+            ('example.test.mjs', 'assert.throws(run, /please try later/);', True),
+            ('example.test.ts', 'expect(error.code).toBe("scope_denied");', False),
+            ('src/example.rs', '#[test] fn check() { for phrase in ["please try later", "run it again"] { assert!(error.contains(phrase)); } }', True),
+            ('test_example.py', 'def test_x():\n    for phrase in ("please try later",):\n        self.assertIn(phrase, result.stderr)', True),
+            ('example.test.ts', 'for (const phrase of ["please try later"]) { expect(error.message).toContain(phrase); }', True),
+        ]
+        for path, source, rejected in cases:
+            with self.subTest(path=path, source=source):
+                self.assertEqual(bool(shape.message_assertions(source, path)), rejected)
+
+    def test_cli_parser_payload_round_trip_cas_5442(self):
+        source = '''#[test]
+fn cli_round_trip() {
+    let parsed = crate::cli::Cli::try_parse_from([
+        "cas", "artifact", "revoke", "art-fixture", "--reason", "Harmless fixture cleanup",
+    ]).unwrap();
+    let Some(crate::cli::Commands::Artifact(ArtifactCommands::Revoke(args))) = parsed.command else {
+        panic!("unrouted command");
+    };
+    ASSERTION
+}
+'''
+        for assertion, rejected in [
+            ('assert_eq!(args.reason, "Harmless fixture cleanup");', False),
+            ('assert_eq!("Harmless fixture cleanup", args.reason);', False),
+            ('assert_eq!(args.reason, "Generated refusal wording");', True),
+            ('assert_eq!(generated.reason, "Harmless fixture cleanup");', True),
+            ('assert_eq!(args.warning, "Harmless fixture cleanup");', True),
+            ('assert_ne!(args.reason, "Harmless fixture cleanup");', True),
+            ('assert!(args.reason.contains("Harmless fixture cleanup"));', True),
+        ]:
+            code = source.replace('ASSERTION', assertion)
+            line = next(i for i, text in enumerate(code.splitlines(), 1) if text.strip() == assertion)
+            for changed in [None, {line}]:
+                with self.subTest(assertion=assertion, changed=changed):
+                    self.assertEqual(bool(shape.message_assertions(code, 'src/cli.rs', changed)), rejected)
+
+        # Calling generated code or a same-named binding in another block
+        # must not make generated prose look like the parser's returned field.
+        assertion = 'assert_eq!(args.reason, "Harmless fixture cleanup");'
+        parser_bindings = source[source.index('    let parsed'):source.index('    ASSERTION')]
+        for extra in ['let args = parsed.warning;', 'let args = render(parsed.command);',
+                      'let args = render(parsed.command); {' + parser_bindings + '}']:
+            code = source.replace('ASSERTION', extra + '\n    ' + assertion)
+            self.assertTrue(shape.message_assertions(code, 'src/cli.rs'))
+
+    def test_escaped_python_caller_payload_cas_8447(self):
+        source = r"""def test_entry(self):
+    name = 'Bank *operating* | R&D'
+    self.chart['accounts'][2]['Name'] = name
+    self.model['entries'][1]['lines'][1]['account'] = name
+    self.save('chart.json', self.chart)
+    markdown = self.run_cli(fmt='markdown')
+    self.assertIn(r'Bank \*operating\* \| R&amp;D', markdown.stdout)
+"""
+        cases = [(source, False),
+                 (source.replace('    self.assertIn(', "    label = 'é'; self.assertIn("), False),
+                 (source + "\ndef test_unrelated(self):\n" + source.splitlines()[-1] + '\n', True),
+                 (source.replace(r'Bank \*operating\* \| R&amp;D', 'Bank *operating* | R&amp;D'), False),
+                 (source.replace(r'Bank \*operating\* \| R&amp;D', r'Unrelated \*account\* \| R&amp;D'), True),
+                 (source.replace("    self.chart['accounts'][2]['Name'] = name\n", '').replace(
+                     "    self.model['entries'][1]['lines'][1]['account'] = name\n", ''), True),
+                 (source.replace('    markdown =', "    name = 'Changed account'\n    markdown ="), True),
+                 (source.replace('self.assertIn(', 'self.assertNotIn('), True),
+                 (source.replace('    self.assertIn(', "    # pin: escaped wording\n    self.assertIn(").replace(
+                     r'Bank \*operating\* \| R&amp;D', 'The entry must preserve all wording in this generated report.'), True)]
+        for code, rejected in cases:
+            line = max(i for i, text in enumerate(code.splitlines(), 1) if 'self.assert' in text)
+            for changed in [None, {line}]:
+                with self.subTest(code=code, changed=changed):
+                    self.assertEqual(bool(shape.message_assertions(code, 'tests/test_entry.py', changed)), rejected)
+                    self.assertEqual(bool(shape.lint_text_pins(code, 'tests/test_entry.py', changed_lines=changed)), rejected)
+
     def hits(self, code, path='src/lib.rs'):
         return shape.lint(code, path)
 
@@ -41,6 +172,42 @@ class Shapes(unittest.TestCase):
     def test_source_read_and_position_check(self):
         self.assertTrue(self.hits('#[test] fn t() { let p = root.join("lib.rs"); let s = fs::read_to_string(&p).unwrap(); assert!(s.find("a") < s.find("b")); }'))
 
+    def test_fixture_source_mutation_cas_81b7(self):
+        # cas-28c5 at 094294333a: editing compiled inputs of a disposable repo
+        # drives Git/MCP behavior; no assertion inspects the fixture's text.
+        source = r'''#[tokio::test]
+async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    let lib = repo.join("crates/widget/src/lib.rs");
+    let body = std::fs::read_to_string(&lib).unwrap();
+    std::fs::write(lib, format!("{body}pub const SYNCED: bool = true;\n")).unwrap();
+    git(repo, &["add", "crates/widget/src/lib.rs"]);
+    git(repo, &["commit", "-q", "-m", "target update"]);
+    let output = call(&f.worker, request).await;
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    assert_eq!(f.task().deliverables.factory_branch_anchor, Some(tip));
+}
+'''
+        write = 'std::fs::write(lib, format!("{body}pub const SYNCED: bool = true;\\n")).unwrap();'
+        cases = [
+            (source, False),
+            (source.replace('std::fs::', 'fs::'), False),
+            (source.replace('{body}pub const', '{}pub const').replace('true;\\n"))', 'true;\\n", body))'), False),
+            ('#[cfg(test)] mod tests {' + source + 'fn other() { let body = unrelated(); } }', False),
+            (source.replace(write, 'std::fs::write(lib, format!("{}", body == expected_source)).unwrap();'), True),
+            (source.replace('std::fs::write(lib,', 'std::fs::write(repo.join("expected.rs"),'), True),
+            (source.replace(write, 'assert!(body.contains("SYNCED")); ' + write), True),
+            (source.replace(write, write + ' assert!(body.contains("SYNCED"));'), True),
+            (source.replace(write, write + ' assert_eq!(body, expected_source);'), True),
+            (source.replace(write, write + ' let alias = body; assert_eq!(alias, expected_source);'), True),
+            (source.replace('std::fs::read_to_string(&lib).unwrap()', 'include_str!("lib.rs")'), True),
+        ]
+        for code, rejected in cases:
+            with self.subTest(code=code):
+                self.assertEqual(bool(self.hits(code)), rejected)
+
     def test_test_only_helper_and_integration_helper(self):
         code = 'fn helper() { let s = include_str!("lib.rs"); }'
         self.assertTrue(self.hits(code, 'tests/contract.rs'))
@@ -59,10 +226,15 @@ class Shapes(unittest.TestCase):
         self.assertFalse(self.hits('#[tokio::test]\n// pin: compatibility\nasync fn t() { assert_eq!(LIMIT, 3); }'))
 
     def test_non_rust_text_is_clean(self):
+        self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
+        self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
+        self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner"), "the outage is announced once").toHaveLength(1);', 'reconnect.journey.ts'))
+        self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner")).toEqual([expect.stringContaining("Atlas · Linux")]);', 'reconnect.journey.ts'))
+        self.assertFalse(shape.lint_text_pins('expect.soft(source, "The original source must preserve every caller value and its exact encoded boundaries.").toEqual(input);', 'payload.test.ts'))
         self.assertFalse(self.hits('#[test] fn t() { let s=include_str!("contract.md"); assert!(s.contains("word")); }'))
 
-    def test_exact_prose_pin_needs_a_reasoned_escape(self):
-        # // pin: these fixtures exercise the exact prose pin and its intentional exception.
+    def test_exact_prose_pin_cannot_be_waived_by_comments(self):
+        # These fixtures exercise rejection of exact prose, including pin comments.
         unpinned = '''def test_prompt_contract():
     assert prompt == "When a test fails, name the responsible boundary and preserve its first result."
 def test_workflow_command():
@@ -76,7 +248,122 @@ def test_workflow_command():
             shape.lint_text_pins(unpinned, 'tests/test_prompt.py'),
             [(2, 'exact-text pin'), (4, 'exact-text pin')],
         )
-        self.assertFalse(shape.lint_text_pins(pinned, 'tests/test_prompt.py'))
+        self.assertEqual(shape.lint_text_pins(pinned, 'tests/test_prompt.py'), [(3, 'exact-text pin')])
+
+    def test_rust_assert_diagnostics_are_not_text_pins_cas_cae5(self):
+        message = '"preserve original content and routing instructions"'
+        cases = [
+            (f'assert_eq!(&row.prompt, body, {message});', False),
+            (f'assert_ne!(prompt, render((left, right), [a, b]), {message}, prompt);', False),
+            (f'debug_assert!(\n source.contains("marker"),\n {message}\n);', False),
+            ('assert!(valid, r#"The prompt must preserve the original content, routing, and useful context."#);', False),
+            (f'assert_eq!(prompt, {message}, "unexpected value");', True),
+            (f'assert_eq!({message}, prompt, "unexpected value");', True),
+            (f'assert_eq!(prompt::<A, B>(), {message}, "unexpected value");', True),
+            (f'assert_eq!(prompt::<A, B>(), body, {message});', False),
+        ]
+        for assertion, expected_pin in cases:
+            with self.subTest(assertion=assertion):
+                hits = self.hits('#[test] fn preserve_payload() {\n' + assertion + '\n}')
+                self.assertEqual(bool(hits), expected_pin, hits)
+
+    def test_git_inputs_and_expect_diagnostics_cas_26f3(self):
+        for rejected, code in [
+            (False, '#[test] fn t() { assert_eq!(git(&["rev-parse", &format!("refs/heads/{source}")]), source_head); }'),
+            (False, '#[test] fn t() { let completed = rows.iter().find(|row| row.prompt.contains(&dependency.id) && row.prompt.contains(&terminal.to_string())).expect("completion names the dependency and its terminal state"); }'),
+            (True, '#[test] fn t() { assert_eq!(git(&["show", &format!("refs/heads/{source}")]), "When a test fails, name the responsible boundary and preserve its first result."); }'),
+            (True, '#[test] fn t() { assert!(source.contains("uses: actions/checkout@v4")); }'),
+        ]:
+            with self.subTest(code=code):
+                self.assertEqual(bool(self.hits(code, 'tests/probe.rs')), rejected)
+
+    def test_python_file_read_inputs_leave_output_pins_in_scope_cas_c49b(self):
+        cases = [
+            ("self.assertEqual(json.loads((self.repo/'receipts/receipt.json').read_text())['outcome'], 'FLAKY')", 0),
+            ("""label = 'é'; self.assertEqual(json.loads((self.repo / 'receipts/receipt.json').read_text())['outcome'],
+    'FLAKY')""", 0),
+            ("self.assertEqual((self.repo/'receipts/receipt.json').read_text(), 'When a test fails, name the responsible boundary and preserve its first result.')", 1),
+            ("self.assertIn('uses: actions/checkout@v4', (self.repo/'.github/workflows/ci.yml').read_text())", 1),
+        ]
+        for code, expected in cases:
+            with self.subTest(code=code):
+                self.assertEqual(len(self.hits(code, 'tests/test_receipt.py')), expected)
+
+    def test_recorded_cli_argv_is_data_without_waiving_prose_cas_632b(self):
+        payload = '["task", "notes", "--notes", "Record config get qa.registry.enforce exactly, including the supplied caller argument boundaries."]'
+        cases = [
+            ('self.assertIn(["config", "get", "qa.registry.enforce"], '
+             '[shlex.split(line) for line in calls.read_text().splitlines()])', False),
+            (f'self.assertEqual(shlex.split(calls.read_text()), {payload})', False),
+            (f'assert {payload} == shlex.split(calls.read_text())', False),
+            (f'self.assertNotIn({payload}, [shlex.split(line) for line in calls.read_text().splitlines()])', False),
+            ('self.assertIn("config get qa.registry.enforce", calls.read_text())', True),
+            (f'self.assertEqual(calls.read_text().split(), {payload})', True),
+            (f'self.assertEqual(shlex.split(result.stderr), {payload})', True),
+            (f'self.assertEqual(render(shlex.split(calls.read_text())), {payload})', True),
+            (f'self.assertIn({payload}, [shlex.split(line.strip()) for line in calls.read_text().splitlines()])', True),
+            (f'label = "é"; self.assertEqual(shlex.split(calls.read_text()), {payload})', False),
+            (f'self.assertEqual(shlex.split(calls.read_text()), {payload}); '
+             'self.assertEqual(calls.read_text(), "Please retry the operation later.")', True),
+            ('# pin: recorded caller payload\n'
+             'self.assertEqual(calls.read_text(), "Please retry the operation later.")', True),
+        ]
+        for code, rejected in cases:
+            line = len(code.splitlines())
+            for changed in [None, {line}]:
+                with self.subTest(code=code, changed=changed):
+                    hits = (shape.lint_text_pins(code, 'tests/test_calls.py', changed_lines=changed)
+                            + shape.message_assertions(code, 'tests/test_calls.py', changed))
+                    self.assertEqual(bool(hits), rejected, hits)
+
+    def test_recorded_cli_argv_local_binding_cas_632b(self):
+        payload = '["task", "notes", "--notes", "Record config get qa.registry.enforce exactly, including the supplied caller argument boundaries."]'
+        records = '[shlex.split(line) for line in calls.read_text().splitlines()]'
+        cases = [
+            (f'argv = {records}\nself.assertIn({payload}, argv)', False),
+            (f'argv = {records}\nassert {payload} not in argv', False),
+            (f'captured = shlex.split(calls.read_text())\nself.assertEqual(captured, {payload})', False),
+            (f'argv = {records}\nargv = generated\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nself.assertIn({payload}, argv)\nargv = generated', False),
+            (f'argv = {records}\nself.assertIn({payload}, argv)\nargv = {records}\nself.assertNotIn({payload}, argv)', False),
+            (f'self.assertIn({payload}, argv)\nargv = {records}', True),
+            (f'argv = render({records})\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nself.assertIn({payload}, other)', True),
+            (f'def nested():\n    argv = {records}\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\ndef nested():\n    self.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nfor argv in generated:\n    pass\nself.assertIn({payload}, argv)', True),
+        ]
+        for body, rejected in cases:
+            code = 'def test_recording():\n' + '\n'.join('    ' + line for line in body.splitlines())
+            for changed in [None, set(range(1, len(code.splitlines()) + 1))]:
+                with self.subTest(body=body, changed=changed):
+                    hits = (shape.lint_text_pins(code, 'tests/test_calls.py', changed_lines=changed)
+                            + shape.message_assertions(code, 'tests/test_calls.py', changed))
+                    self.assertEqual(bool(hits), rejected, hits)
+
+        # Exercise the motivating file itself, including both assignments to
+        # argv in one function, with its actual assertion lines marked changed.
+        path = Path(__file__).with_name('test-fast-release-rows.py')
+        source = path.read_text()
+        function = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.FunctionDef)
+                        and node.name == 'test_legacy_registry_uses_explicit_policy_without_a_store')
+        literals = [node.args[0] for node in ast.walk(function)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ('assertIn', 'assertNotIn') and node.args
+                    and isinstance(node.args[0], ast.List)
+                    and all(isinstance(item, ast.Constant) for item in node.args[0].elts)
+                    and [ast.literal_eval(item) for item in node.args[0].elts]
+                    == ['config', 'get', 'qa.registry.enforce']]
+        self.assertEqual(len(literals), 2)
+        changed = {node.lineno for node in literals}
+        ranges = list(shape.python_runtime_inputs(source))
+        lines = source.splitlines(keepends=True)
+        for operand in literals:
+            for literal in operand.elts:
+                offset = sum(map(len, lines[:literal.lineno - 1])) + literal.col_offset
+                self.assertTrue(any(left <= offset < right for left, right in ranges))
+        self.assertFalse(shape.lint_text_pins(source, str(path), changed_lines=changed))
+        self.assertFalse(shape.message_assertions(source, str(path), changed))
 
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [
@@ -134,7 +421,7 @@ def test_workflow_command():
             for args in [[], ['--changed-since', base]]:
                 result = subprocess.run(command+args, cwd=root, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn('cas-cli/tests/nested/probe.rs:1: archive-unsafe Cargo binary path', result.stdout)
+                self.assertIn('cas-cli/tests/nested/probe.rs:1:', result.stdout)
                 self.assertIn('cas::test_paths::cas_binary()', result.stdout)
                 self.assertNotIn('add // pin:', result.stdout)
 
@@ -174,10 +461,10 @@ def test_workflow_command():
             command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', base]
             result = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 1, result.stdout)
-            self.assertIn('tests/test_prompt.py:2: exact-text pin', result.stdout)
+            self.assertIn('tests/test_prompt.py:2:', result.stdout)
             path.write_text('def test_prompt():\n    # // pin: this phrase is an external compatibility contract.\n    assert prompt == "The release gate should identify which component caused this failure."\n')
             clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
-            self.assertEqual(clean.returncode, 0, clean.stdout)
+            self.assertEqual(clean.returncode, 1, clean.stdout)
 
     def test_cli_changed_since_checks_only_added_or_modified_pin_lines(self):
         with tempfile.TemporaryDirectory() as root:
@@ -200,8 +487,7 @@ fn old_contract() {
             base = git('rev-parse', 'HEAD')
             command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', base]
 
-            # An unchanged legacy pin must not fail just because this file has
-            # a newly added, reasoned pin.
+            # Only the added prose pin fails; a pin comment cannot waive it.
             reasoned_pin = '''
 #[test]
 fn added_reasoned_contract() {
@@ -211,7 +497,9 @@ fn added_reasoned_contract() {
 '''
             path.write_text(old_pin + reasoned_pin)
             clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
-            self.assertEqual(clean.returncode, 0, clean.stdout)
+            self.assertEqual(clean.returncode, 1, clean.stdout)
+            self.assertNotIn('tests/test_prompt.rs:3:', clean.stdout)
+            self.assertIn('tests/test_prompt.rs:9:', clean.stdout)
 
             # A changed legacy line is in scope, including when only one part
             # of the string literal's text changes.
@@ -219,7 +507,7 @@ fn added_reasoned_contract() {
             path.write_text(modified)
             changed = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(changed.returncode, 1, changed.stdout)
-            self.assertIn('tests/test_prompt.rs:3: exact-text pin', changed.stdout)
+            self.assertIn('tests/test_prompt.rs:3:', changed.stdout)
 
             # The pin rule still rejects a new unreasoned exact-text pin.
             new_unreasoned = '''
@@ -231,14 +519,14 @@ fn added_unreasoned_contract() {
             path.write_text(modified + new_unreasoned)
             added = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(added.returncode, 1, added.stdout)
-            self.assertIn('tests/test_prompt.rs:14: exact-text pin', added.stdout)
+            self.assertIn('tests/test_prompt.rs:14:', added.stdout)
 
             # Without --changed-since, changed test files retain full-file
             # scanning, so the unchanged legacy pin remains visible.
             full = subprocess.run(['python3', str(Path(shape.__file__).resolve())],
                                  cwd=root, capture_output=True, text=True)
             self.assertEqual(full.returncode, 1, full.stdout)
-            self.assertIn('tests/test_prompt.rs:3: exact-text pin', full.stdout)
+            self.assertIn('tests/test_prompt.rs:3:', full.stdout)
 
 
 class SyncMergeScope(unittest.TestCase):

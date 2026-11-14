@@ -126,6 +126,10 @@ function changedFiles(document: Document, event: WorkEvent, context: WorkRowsCon
       detail.tabIndex = 0; detail.dataset.focusKey = `detail:${fileKey}`;
       if (!context.detail(file.source_event_id)) context.requestDetail(file.source_event_id);
       const state = context.detail(file.source_event_id);
+      // Bind retrieval status to this source, independently of cached sibling
+      // details. HUB-J25 waits on this result rather than the last open file.
+      detail.dataset.sourceEventId = file.source_event_id;
+      detail.dataset.retrievalState = state?.state ?? "loading";
       if (!state || state.state === "loading") { detail.textContent = "Loading source edit…"; detail.setAttribute("aria-busy", "true"); }
       else if (state.state === "offline") detail.textContent = "Machine offline. Source edit will load when it reconnects.";
       else if (state.state === "gone") detail.textContent = "This source edit is no longer on the machine.";
@@ -215,8 +219,8 @@ function chips(document: Document, events: readonly WorkEvent[]): HTMLElement | 
     item.className = `work-chip work-chip--${chip.tone}`;
     item.title = chip.label;
     const dot = document.createElement("span"); dot.className = "work-chip-dot"; dot.setAttribute("aria-hidden", "true");
-    const subject = document.createElement("span"); subject.className = "work-chip-id"; subject.textContent = chip.subject;
-    item.append(dot, subject, document.createTextNode(` ${chip.verb}`));
+    const subject = document.createElement("span"); subject.className = "work-chip-title"; subject.textContent = chip.subject;
+    item.append(dot, document.createTextNode(`${chip.verb.charAt(0).toUpperCase()}${chip.verb.slice(1)}: `), subject);
     list.append(item);
   }
   return list;

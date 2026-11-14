@@ -202,6 +202,7 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
     let mut reader = VioletReader::new("factory-session");
     for registration in [REGISTRATION, "successor-registration"] {
         cloud.registration_id = registration;
+        cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(registration);
         let outcome = tick_with(&mut reader, &cloud, registration, &violet_body(None));
         assert!(matches!(outcome, ClaimOutcome::Read(_)));
     }
@@ -486,6 +487,7 @@ fn unknown_registration_stops_consumption_until_successor_cas_c186() {
         cloud.claim = fixture(CLAIM, "leases this reader's deliveries");
         cloud.ack_response = None;
         cloud.registration_id = "successor-registration";
+        cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(cloud.registration_id);
         let outcome = tick_with(&mut reader, &cloud, cloud.registration_id, &violet_body(None));
         assert!(matches!(outcome, ClaimOutcome::Read(ReaderReport { typed: 1, .. })));
         assert_eq!(cloud.claim_calls.load(Ordering::Relaxed), 2);
@@ -503,10 +505,12 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
     let (resumed, uncertain) = ("0000de1b-1111-4111-8111-00000000de1b", "0000de1c-1111-4111-8111-00000000de1c");
     let mut cloud = FixtureCloud::new("leases this reader's deliveries");
     cloud.registration_id = "reg-supervisor-beta-07";
+    cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(cloud.registration_id);
     cloud.ack_response = Some(json!({})); // the predecessor crashes before its ack lands
     tick_as(&mut VioletReader::new("factory-session"), &cloud);
 
     cloud.registration_id = SUCCESSOR;
+    cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(SUCCESSOR);
     cloud.ack_response = None;
     // cas-3f9b: keep different-width seconds eligible for actual delivery,
     // so their timeline distinguishes numeric sorting from text sorting.
@@ -615,6 +619,32 @@ fn strict_activation_refusal_is_named_and_unmanaged_keeps_legacy() {
     let mut reader = VioletReader::new("factory-session");
     assert_eq!(tick(&mut reader, &cloud), ClaimOutcome::Unmanaged);
     assert!(!reader.managed());
+
+    // A clone has no local binding history yet: only Cloud's explicit
+    // unmanaged answer may send the daemon down its project-wide v1 lane.
+    let temp = tempfile::tempdir().unwrap();
+    let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    let reader = Mutex::new(VioletReader::new("non-owner-session"));
+    let body = CountingBody(AtomicUsize::new(0));
+    let quarantine = FileQuarantine(temp.path().join("violet/quarantine.jsonl"));
+    let io = ReaderIo { body: &body, typer: &PromptQueueTyper(&queue), quarantine: &quarantine };
+    for code in ["authority_unavailable", "unrecognized_refusal", "strict_activation_required"] {
+        let mut cloud = FixtureCloud::new("nothing pending");
+        cloud.claim = json!({"schema": CONTRACT_SCHEMA, "code": code});
+        let held = read_managed_on(&reader, &cloud, REGISTRATION, temp.path(), &io, Utc::now());
+        assert!(held.is_some_and(|report| report.wakes == 0 && report.errors.len() == 1), "{code}: uncertain routing must hold the legacy lane");
+        assert_eq!(body.0.load(Ordering::Relaxed), 0);
+        assert!(queue.peek_all(10).unwrap().is_empty());
+        let receipts = read_claim_receipts(&claim_receipts_path(temp.path())).unwrap();
+        assert_eq!(receipts.last().unwrap().code, code);
+    }
+    // A positive managed observation stays fenced even if a later response
+    // says unmanaged. A fresh reader may use that explicit legacy answer.
+    let cloud = FixtureCloud::new("binding not activated for v2");
+    assert!(read_managed_on(&reader, &cloud, REGISTRATION, temp.path(), &io, Utc::now()).is_some());
+    let fresh = Mutex::new(VioletReader::new("legacy-session"));
+    assert!(read_managed_on(&fresh, &cloud, REGISTRATION, temp.path(), &io, Utc::now()).is_none());
 }
 
 /// cas-b94d: counts body fetches, so a withheld delivery provably has none.
@@ -710,6 +740,7 @@ fn recovery_resume_of_history_is_quarantined_without_rebind_cas_b94d() {
     let (resumed, uncertain) = ("0000de1b-1111-4111-8111-00000000de1b", "0000de1c-1111-4111-8111-00000000de1c");
     let mut cloud = FixtureCloud::new("leases this reader's deliveries");
     cloud.registration_id = SUCCESSOR;
+    cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(SUCCESSOR);
     cloud.recover = fixture(RECOVER, "successor on another machine");
     // The resumed admission (12:00:00Z) predates activation; the claim (12:00:42Z) does not.
     cloud.activation = Some(activation("C08COORD01", Some("2025-10-16T12:00:20.000Z")));
@@ -777,7 +808,7 @@ fn managed_wake_reports_source_age_and_preserves_dedupe_cas_8875() {
     let delivery = ClaimedDelivery {
         id: DELIVERY.to_owned(),
         occurrence_id: None,
-        event_kind: None,
+        event_kind: None, registration_id: None, route_kind: None,
         delivery_generation: 1,
         lease_token: "fixture-lease".into(),
         target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":old}, "message_ts":old}),
@@ -842,7 +873,7 @@ fn managed_wake_invalid_future_and_fresh_age_policy_cas_8875() {
         let delivery = ClaimedDelivery {
             id: DELIVERY.to_owned(),
             occurrence_id: None,
-            event_kind: None,
+            event_kind: None, registration_id: None, route_kind: None,
             delivery_generation: 1,
             lease_token: "fixture-lease".into(),
             target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":fresh}, "message_ts":source}),
@@ -919,4 +950,35 @@ fn managed_claims_leave_bounded_receipts_without_bodies() {
     let report = read_managed_on(&reader, &cloud, REGISTRATION, blocked.path(), &io, at(200));
     assert!(report.is_some_and(|report| report.errors.is_empty()));
     assert!(claim_receipts_summary(blocked.path(), at(200)).is_none());
+}
+
+#[test]
+fn owner_routed_mention_wakes_only_its_registration_cas_0288() {
+    for route in ["owner", "unclaimed_fanout"] {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap(); queue.init().unwrap();
+        let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+        cloud.claim["deliveries"][0]["delivery"]["event_kind"] = json!("app_mention");
+        cloud.claim["deliveries"][0]["delivery"]["route_kind"] = json!(route);
+        for (registration, session) in [("reg-supervisor-beta-07", "other-session"), (REGISTRATION, "owner-session")] {
+            cloud.registration_id = registration;
+            if route == "unclaimed_fanout" {
+                cloud.claim["deliveries"][0]["delivery"]["id"] = json!(if registration == REGISTRATION {
+                    DELIVERY
+                } else { "0000de2b-1111-4111-8111-00000000de2b" });
+                cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(registration);
+            }
+            let io = ReaderIo { body: &violet_body(None), typer: &PromptQueueTyper(&queue), quarantine: &Quarantined(&cloud) };
+            VioletReader::new(session).tick(&cloud, registration, &io, Utc::now());
+        }
+        let rows = queue.peek_all(10).unwrap();
+        if route == "owner" {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].factory_session.as_deref(), Some("owner-session"));
+        } else {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows.iter().map(|row| row.factory_session.as_deref().unwrap()).collect::<std::collections::BTreeSet<_>>(),
+                ["owner-session", "other-session"].into());
+        }
+    }
 }

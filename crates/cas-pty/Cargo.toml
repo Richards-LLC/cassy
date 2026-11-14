@@ -17,6 +17,7 @@ portable-pty = "0.9"
 [target.'cfg(unix)'.dependencies]
 # Process-group kill for PTY tree shutdown (cas-8c5a)
 libc = "0.2"
+anyhow.workspace = true
 
 # Async runtime
 tokio = { version = "1", features = ["sync", "io-util", "time", "net"] }

@@ -113,6 +113,119 @@
       }
     },
     {
+      "name": "dead holder's reply outcome unknown: read it back first",
+      "request": {
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "0000000b-2222-4222-8222-00000000000b",
+          "project_id": "github.com/richards-llc/cassy",
+          "external_ref": {
+            "provider": "slack",
+            "workspace_id": "T07ABCDEF",
+            "channel_id": "C08COORD01",
+            "root_ts": "1760616000.123456"
+          },
+          "actor": {
+            "registration_id": "reg-supervisor-beta-07"
+          }
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "held",
+          "guidance": "The owner is gone and its last reply has an unknown Slack outcome. Have Violet read the thread back for receipt.reply_intent, then claim again with a new request ID.",
+          "reason": "reply_unresolved",
+          "receipt": {
+            "operation_id": "00000b0b-1111-4111-8111-000000000b0b",
+            "request_id": "0000000b-2222-4222-8222-00000000000b",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": false
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T02:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "reconcile",
+            "reply_intent": {
+              "id": "00007e91-1111-4111-8111-000000007e91",
+              "status": "outcome_unknown",
+              "claim_generation": 1,
+              "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "reclaimed after the readback settles the reply",
+      "request": {
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "0000000c-2222-4222-8222-00000000000c",
+          "project_id": "github.com/richards-llc/cassy",
+          "external_ref": {
+            "provider": "slack",
+            "workspace_id": "T07ABCDEF",
+            "channel_id": "C08COORD01",
+            "root_ts": "1760616000.123456"
+          },
+          "actor": {
+            "registration_id": "reg-supervisor-beta-07"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "acquired",
+          "guidance": "You own this thread until it is completed, released or handed off.",
+          "receipt": {
+            "operation_id": "00000b0c-1111-4111-8111-000000000b0c",
+            "request_id": "0000000c-2222-4222-8222-00000000000c",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-07",
+              "label": "beta (workstation)",
+              "is_caller": true
+            },
+            "generation": 2,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed"
+          }
+        }
+      }
+    },
+    {
       "name": "replay of an in-flight request",
       "request": {
         "payload": {

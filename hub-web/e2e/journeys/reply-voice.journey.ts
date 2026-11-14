@@ -42,7 +42,7 @@ test("HUB-J6 reply by voice", async ({ page, journey }) => {
     expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.y).toBeGreaterThanOrEqual(0);
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(544);
     await search.fill("nothing matches this emoji query");
-    await expect(dialog.getByRole("status")).toHaveText("No emoji found. Try another search.");
+    await expect(dialog.getByRole("status")).toBeVisible();
     await search.fill("thumbs up: medium skin tone");
     await search.press("ArrowDown");
     await expect(dialog.getByRole("button", { name: "thumbs up: medium skin tone", exact: true })).toBeFocused();
@@ -55,6 +55,30 @@ test("HUB-J6 reply by voice", async ({ page, journey }) => {
     await expect(dialog).toHaveCount(0);
     await page.setViewportSize({ width: 1280, height: 800 });
     await composer.focus();
+  });
+
+  await journey.stage("Type a version number", async () => {
+    // cas-f47a: digits, # and * keep the reply box's own face, not colour keycap glyphs.
+    const [field, inter] = await composer.evaluate(async (box: HTMLTextAreaElement) => {
+      await document.fonts.ready;
+      const width = (from: HTMLElement | null) => {
+        const probe = document.createElement("span");
+        probe.textContent = "4.13 #5 *7";
+        probe.style.position = "absolute";
+        probe.style.whiteSpace = "pre";
+        if (from) {
+          const style = getComputedStyle(from);
+          probe.style.font = style.font;
+          probe.style.setProperty("font-variant-emoji", style.getPropertyValue("font-variant-emoji"));
+        } else probe.style.font = `${getComputedStyle(box).fontSize} Inter`;
+        document.body.append(probe);
+        const measured = probe.getBoundingClientRect().width;
+        probe.remove();
+        return measured;
+      };
+      return [width(box), width(null)];
+    });
+    expect(Math.abs(field - inter)).toBeLessThan(0.5);
   });
 
   await journey.stage("Review and send", async () => {

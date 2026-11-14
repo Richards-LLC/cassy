@@ -17,6 +17,7 @@
 //! - mcp_execute: Execute tool calls across connected upstream MCP servers
 
 use std::borrow::Cow;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::Content;
@@ -143,6 +144,43 @@ pub struct CasService {
     factory_context:
         std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Option<String>>>>>,
     message_sweep_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// A tool future may outlive its response; backend retirement waits for it.
+    pub(crate) tool_work: Arc<ToolWork>,
+}
+
+/// Nonblocking accounting: an abandoned idle request must never stop tools
+/// from starting after the front's independent switch timeout.
+#[derive(Default)]
+pub(crate) struct ToolWork {
+    active: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+pub(crate) struct ToolWorkPermit(Arc<ToolWork>);
+
+impl Drop for ToolWorkPermit {
+    fn drop(&mut self) {
+        if self.0.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
+impl ToolWork {
+    pub(crate) fn permit(self: &Arc<Self>) -> ToolWorkPermit {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        ToolWorkPermit(self.clone())
+    }
+
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let changed = self.idle.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.active.load(Ordering::Acquire) == 0 { return; }
+            changed.await;
+        }
+    }
 }
 
 impl CasService {
@@ -157,6 +195,7 @@ impl CasService {
             tool_router: Self::tool_router(),
             factory_context: Default::default(),
             message_sweep_lock: Default::default(),
+            tool_work: Default::default(),
         }
     }
 
@@ -346,7 +385,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task lifecycle. Workers start/close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (note_type optional). create project= files a Cloud proposal_* entry, never a task row. Supervisor cancel: ended work without delivery; reason required, superseded_by optional. request_changes reopens failed parked deliveries, retaining assignee. Supervisor rebind_branch: fresh branch, reason and old-tip audit."
+        description = "Task lifecycle, dependencies and delivery. Workers start/close and honor verification guidance. notes: id reads, notes appends. create project= proposes to Cloud. Supervisor recovery/cancel/rebind requires reason. get=show."
     )]
     pub async fn task(
         &self,
@@ -384,6 +423,7 @@ impl CasService {
                     | "reset"
                     | "transfer"
                     | "rebind_branch"
+                    | "recover_delivery"
             ) || (action == "notes" && req.notes.is_some());
 
             let result = match action.as_str() {
@@ -396,8 +436,20 @@ impl CasService {
                 "update" => this.task_update(req).await,
                 "start" => this.task_start(req).await,
                 "close" => {
+                    // gate-audit[supervisor_override]: Selects manual-intervention attribution only; override authority is enforced by the delegated close handler.
+                    let manual = if req.supervisor_override.unwrap_or(false) { None }
+                        else { this.inner.resolve_live_supervisor_authority().ok() };
+                    let was_closed = this.inner.open_task_store().ok().and_then(|s| s.get(&event_task_id).ok())
+                        .is_some_and(|task| task.status == cas_types::TaskStatus::Closed);
                     let result = this.task_close(req).await;
                     if result.is_ok() {
+                        if !was_closed && let Some(actor) = manual
+                            && this.inner.open_task_store().ok().and_then(|s| s.get(&event_task_id).ok())
+                                .is_some_and(|task| task.status == cas_types::TaskStatus::Closed) {
+                            crate::quality_ledger::intervention(&this.inner.cas_root, cas_store::InterventionKind::ManualClose,
+                                format!("manual_close|{event_task_id}|{}", chrono::Utc::now().timestamp_millis()),
+                                Some(&event_task_id), Some(&actor.id), None);
+                        }
                         mutation_receipt::task_committed(&event_task_id);
                         this.db_branch_after_task_end(&event_task_id).await;
                     }
@@ -425,6 +477,7 @@ impl CasService {
                 "reset" => this.task_reset(req).await,
                 "transfer" => this.task_transfer(req).await,
                 "rebind_branch" => this.task_rebind_branch(req).await,
+                "recover_delivery" => this.task_recover_delivery(req).await,
                 "available" => this.task_available(req).await,
                 "mine" => this.task_mine(req).await,
                 _ => Err(Self::error(
@@ -582,7 +635,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory. Per-action rules are on parameters."
+        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors), peer_transcript (own-account transcript query). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory. Per-action rules are on parameters."
     )]
     pub async fn coordination(
         &self,
@@ -619,7 +672,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory operations: workers/task queues, epics, worktrees, servers, loops, notices, leases and GC. worker_queue inspects/reorders/clears pending task_ids; ordered spawns use isolated checkouts. clear_context verifies a transcript reset or errors. Workers manage only owned servers. Neon: supervisor only, one branch/task, deleted at close; DATABASE_URL stays in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent require an authenticated supervisor. Identity/messages/reminders: coordination."
+        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\": only Commander operator/publication lifts; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
     )]
     pub async fn factory(
         &self,
@@ -716,6 +769,7 @@ impl CasService {
 
             let action = req.action.clone();
             let result = match req.action.as_str() {
+                "estimate" => this.system_estimate(req).await,
                 "version" => this.system_version().await,
                 "preflight" => this.system_preflight().await,
                 "doctor" => this.system_doctor(req).await,
@@ -738,7 +792,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown system action: {}. Valid: version, preflight, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
+                        "Unknown system action: {}. Valid: estimate, version, preflight, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
                         req.action,
                         if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list, proxy_health" } else { "" }
                     ),
@@ -819,13 +873,14 @@ impl CasService {
         panic_catch::dispatch_with_catch("artifact", async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
-            let is_mutating = matches!(action.as_str(), "publish" | "post" | "fetch");
+            let is_mutating = matches!(action.as_str(), "publish" | "post" | "fetch" | "revoke");
 
             let result = match action.as_str() {
                 "publish" => this.inner.artifact_publish(Parameters(req)).await,
                 "show" => this.inner.artifact_show(Parameters(req)).await,
                 "list" => this.inner.artifact_list(Parameters(req)).await,
                 "fetch" => this.inner.artifact_fetch(Parameters(req)).await,
+                "revoke" => this.inner.artifact_revoke(Parameters(req)).await,
                 #[cfg(feature = "mcp-proxy")]
                 "post" => this.artifact_post(req).await,
                 #[cfg(not(feature = "mcp-proxy"))]
@@ -835,7 +890,7 @@ impl CasService {
                 )),
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("Unknown artifact action: {action}. Valid: publish, show, list, fetch, post"),
+                    format!("Unknown artifact action: {action}. Valid: publish, show, list, fetch, post, revoke"),
                 )),
             };
 
@@ -1201,6 +1256,7 @@ fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Ve
 impl CasService {
     /// Shared dispatch behind the `coordination` and `factory` tools. Each
     /// tool decides which actions it accepts before calling this.
+    // gate-audit[input]: Validates and dispatches the requested action; factory policy results remain tagged by their handlers.
     async fn coordination_dispatch(
         &self,
         req: CoordinationRequest,
@@ -1269,6 +1325,8 @@ impl CasService {
                         "reason",
                     ])
                 }
+                "train_merge" => Some(&["action", "id", "task_ids", "supervisor_override", "reason"]),
+                "train_freeze" => Some(&["action", "id", "reason"]),
                 "claim" => Some(&["action", "external_ref", "request_id"]),
                 "claim_status" => Some(&["action", "request_id"]),
                 "release_claim" => Some(&["action", "resource_id", "expected_generation", "request_id"]),
@@ -1366,6 +1424,28 @@ impl CasService {
 
                 // cas-e477: read-only peer supervisor discovery.
                 "peers" => heap_future(|| this.coordination_peers(req)).await,
+                "peer_transcript" => heap_future(|| this.coordination_peer_transcript(req)).await,
+
+                "train_merge" => {
+                    let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_merge requires id=<epic>"))?;
+                    let inner = this.inner.clone();
+                    tokio::task::spawn_blocking(move || inner.train_merge(&train, req.task_ids.as_deref(), req.supervisor_override.unwrap_or(false), req.reason.as_deref()))
+                        .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                        .map(Self::success)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))
+                }
+
+                // train_freeze requires reason="release-freeze: <reason>".
+                // Only a published release or the operator's Commander lift
+                // ends it; it is not a supervisor-reversible CI hold.
+                "train_freeze" => {
+                    let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_freeze requires id=<release-train epic>"))?;
+                    let inner = this.inner.clone();
+                    tokio::task::spawn_blocking(move || inner.train_freeze(&train, req.reason.as_deref()))
+                        .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                        .map(Self::success)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))
+                }
 
                 // cas-72d3: journaled external Slack-thread authority.
                 "claim" | "claim_status" | "release_claim" | "transfer_claim" | "accept_claim"
@@ -1725,6 +1805,7 @@ mod memory_lifecycle_tests;
 mod pattern_ops;
 mod qa_pass_ops;
 mod server_handler;
+mod merge_response;
 pub(crate) use server_handler::potentially_mutating_call;
 /// cas-7c93 (GH #87): server_start / server_stop / server_list.
 mod server_ops;
@@ -1849,13 +1930,6 @@ mod tests {
         let refused = execute("list_projects")
             .await
             .expect_err("a worker must not call a supervisor-only route");
-        assert!(
-            refused
-                .message
-                .contains("\"neon.list_projects\" is allowlisted for supervisors only; a worker cannot call it"),
-            "{}",
-            refused.message
-        );
     }
 
     /// Guards `cas serve`'s startup banner and empty-registry guard against

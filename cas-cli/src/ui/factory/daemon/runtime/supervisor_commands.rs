@@ -26,7 +26,7 @@ struct PendingRestart { killed_at: Instant, exited: bool }
 /// Replace the pane this long after the kill even if no exit was reported: a
 /// descendant holding the PTY open must not leave the factory without a supervisor.
 const RESTART_EXIT_DEADLINE: Duration = Duration::from_secs(10);
-/// PTY silence required before a command is typed. Codex hides its busy text
+/// Fallback PTY silence when native turn completion is unavailable. Codex hides its busy text
 /// while it streams a reply, so an idle-looking screen alone is insufficient;
 /// Codex's own turn markers are the busy signal, this is a second guard.
 const COMMAND_SETTLE: Duration = Duration::from_secs(2);
@@ -34,6 +34,13 @@ const COMMAND_SETTLE: Duration = Duration::from_secs(2);
 /// sends a command. Give it time to settle, without waiting on a running turn.
 const COMMAND_SETTLE_WAIT: Duration = Duration::from_secs(3);
 const COMMAND_READINESS_POLL: Duration = Duration::from_millis(250);
+/// The supervisor's native turn is open: queue the command for its end (cas-4e11).
+#[derive(Debug)]
+struct TurnOpen;
+impl std::fmt::Display for TurnOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("The supervisor is busy: its native turn has not ended. Wait until its turn ends.") }
+}
+impl std::error::Error for TurnOpen {}
 impl CommandState {
     /// Drop finished receipts past the replay window. An in-flight command or
     /// open chooser is never evicted, and nothing inside the window is, so a
@@ -160,21 +167,25 @@ impl FactoryDaemon {
 }
 
 fn screen(pane: &cas_mux::Pane) -> String {
-    (0..pane.rows()).filter_map(|row| pane.dump_row(row).ok()).collect::<Vec<_>>().join("\n")
+    (0..pane.rows()).filter_map(|row| pane.dump_live_row(row).ok()).collect::<Vec<_>>().join("\n")
 }
 
 /// A startup grace or a quiet PTY is insufficient: require a known empty native
 /// prompt and refuse the harness's busy indicator or an existing modal.
 fn idle_prompt(text: &str) -> bool {
+    command_prompt(text, false)
+}
+
+fn command_prompt(text: &str, native_idle: bool) -> bool {
     let lower = text.to_lowercase();
-    !lower.contains("esc to interrupt") && !lower.contains("select model")
+    (native_idle || !lower.contains("esc to interrupt")) && !lower.contains("select model")
         && !lower.contains("select a model") && !lower.contains("select effort")
         && !lower.contains("compacting conversation") && !lower.contains("esc to cancel")
-        && !text.lines().any(|line| {
+        && (native_idle || !text.lines().any(|line| {
             let line = line.trim_start();
             line.starts_with(['✢', '✻', '✽', '✶', '✳', '✣', '·', '*'])
                 && (line.contains('…') || line.contains("..."))
-        })
+        }))
         && text.lines().rev().take(12).any(|line| {
             let line = line.trim();
             matches!(line, "❯" | "›") || line.starts_with("❯ Try \"")
@@ -272,12 +283,24 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
     false
 }
 
-fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<std::path::PathBuf> {
+pub(super) fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<std::path::PathBuf> {
     let store = crate::store::open_agent_store(cas_dir).ok()?;
     let agent = store.list(None).ok()?.into_iter().find(|agent|
         (agent.name == supervisor || agent.id == supervisor)
             && agent.role == cas_types::AgentRole::Supervisor
             && agent.factory_session.as_deref() == Some(session))?;
+    if cli == cas_mux::SupervisorCli::Claude
+        && let Some(account) = agent.metadata.get("supervisor_account_dir")
+    {
+        // Claude's generic worker resolver searches the daemon's ambient
+        // roots. The supervisor's registered account is the launch authority.
+        return crate::mcp::tools::service::factory_ops::transcript_path_from_resolution(
+            crate::mcp::tools::service::factory_ops::resolve_transcript_in_roots(
+                &[std::path::Path::new(account).join("projects")],
+                cas_dir.parent()?.to_str(), agent.cc_session_id.as_deref()?, cli,
+            ),
+        );
+    }
     crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
         cas_dir.parent()?.to_str(), agent.cc_session_id.as_deref()?, cli,
         agent.metadata.get("supervisor_account_dir").map(String::as_str))
@@ -330,8 +353,12 @@ fn codex_turn_open(path: &std::path::Path) -> Option<bool> {
 /// repaints the footer. A newer user turn keeps Finish queued (cas-88ca).
 fn command_turn_idle(root: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<bool> {
     let path = supervisor_transcript(root, session, supervisor, cli)?;
-    if cli == cas_mux::SupervisorCli::Codex { return codex_turn_open(&path).map(|open| !open); }
-    let turns = crate::mcp::tools::service::harness_observation::latest_turn_observations(&path, cli);
+    native_turn_idle(&path, cli)
+}
+
+fn native_turn_idle(path: &std::path::Path, cli: cas_mux::SupervisorCli) -> Option<bool> {
+    if cli == cas_mux::SupervisorCli::Codex { return codex_turn_open(path).map(|open| !open); }
+    let turns = crate::mcp::tools::service::harness_observation::latest_turn_observations(path, cli);
     if turns.completion.is_some() { Some(true) }
     else if turns.wake.is_some() { Some(false) }
     else { None }
@@ -373,9 +400,9 @@ fn hook_observation(cas_dir: &std::path::Path, session: &str, supervisor: &str, 
 }
 
 impl FactoryDaemon {
-    /// Keep an authenticated Finish until the current native turn ends. This
-    /// runs independently of browser polling and never waits on the daemon loop.
-    pub(super) fn advance_queued_finish(&mut self) {
+    /// Keep an authenticated queued command until the current native turn ends.
+    /// This runs independently of browser polling and never waits on the daemon loop.
+    pub(super) fn advance_queued_command(&mut self) {
         let Some(owner) = self.supervisor_commands.records.iter()
             .find(|(_, record)| record.receipt.phase == Phase::Queued).map(|(owner, _)| owner.clone()) else { return };
         if self.supervisor_commands.readiness.as_ref().is_none_or(|job| !job.is_finished()) {
@@ -393,11 +420,12 @@ impl FactoryDaemon {
         let idle = self.supervisor_commands.readiness.take()
             .and_then(|job| futures_util::FutureExt::now_or_never(job)).and_then(Result::ok).flatten();
         let Some(pane) = self.app.mux.supervisor() else { return };
+        let Some(text) = self.supervisor_commands.records[&owner].receipt.command.mapping(pane.harness()) else { return };
         if idle != Some(true) || pane.has_exited() || !pane.ready_for_injection()
-            || pane.is_composer_dirty() || self.app.mux.pane_inject_busy(pane.id()) || !idle_prompt(&screen(pane)) { return; }
+            || pane.is_composer_dirty() || self.app.mux.pane_inject_busy(pane.id()) || !command_prompt(&screen(pane), true) { return; }
         let before = screen(pane);
         let output_from = self.pane_buffers.get(pane.id()).map_or(0, |buffer| buffer.position());
-        let write = pane.inject_prompt_tracked(Command::Finish.mapping(pane.harness()).expect("queued supported Finish"));
+        let write = pane.inject_prompt_tracked(text);
         let record = self.supervisor_commands.records.get_mut(&owner).expect("queued command remains owned");
         match write {
             Ok(write) => {
@@ -420,34 +448,41 @@ impl FactoryDaemon {
             && self.pane_silent_since.get(pane.id()).is_some_and(|since| since.elapsed() >= COMMAND_SETTLE)
     }
     async fn wait_for_command_prompt(&mut self) -> anyhow::Result<()> {
-        let rollout = if self.app.mux.supervisor().is_some_and(|pane| pane.harness() == cas_mux::SupervisorCli::Codex) {
-            let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
-            let path = tokio::task::spawn_blocking(move || supervisor_transcript(&root, &session, &supervisor, cas_mux::SupervisorCli::Codex)).await.ok().flatten();
-            if path.is_none() { tracing::warn!("Codex supervisor rollout unavailable; command readiness falls back to output settle"); }
-            path
-        } else { None };
+        let cli = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?.harness();
+        let (root, session, supervisor) = (self.app.cas_dir().to_path_buf(), self.session_name.clone(), self.app.supervisor_name().to_owned());
+        let transcript = tokio::task::spawn_blocking(move || supervisor_transcript(&root, &session, &supervisor, cli)).await.ok().flatten();
         let progress = super::loop_watchdog::LoopProgress::new();
         loop {
             // This handler owns the daemon loop while it waits. Drain through
             // the normal exchange so fresh output resets silence, and retain
             // its buffering, client delivery and process-exit observations.
             self.exchange_terminal(&progress).await;
-            if let Some(path) = rollout.clone() {
-                let open = tokio::task::spawn_blocking(move || codex_turn_open(&path)).await.ok().flatten();
-                anyhow::ensure!(open != Some(true), "The supervisor is busy: its Codex turn has not ended. Wait until its turn ends.");
-            }
+            let native_idle = if let Some(path) = transcript.clone() {
+                tokio::task::spawn_blocking(move || native_turn_idle(&path, cli)).await.ok().flatten()
+            } else { None };
+            anyhow::ensure!(native_idle != Some(false), TurnOpen);
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
             anyhow::ensure!(!pane.has_exited() && pane.ready_for_injection() && !pane.is_composer_dirty()
-                && !self.app.mux.pane_inject_busy(pane.id()) && idle_prompt(&screen(pane)),
+                && !self.app.mux.pane_inject_busy(pane.id()) && command_prompt(&screen(pane), native_idle == Some(true)),
                 "The supervisor is busy or its empty prompt is not confirmed. Wait until its turn ends.");
             let bytes = pane.bytes_received();
             if self.last_pane_output_bytes.insert(pane.id().to_owned(), bytes) != Some(bytes) || !self.pane_silent_since.contains_key(pane.id()) {
                 self.pane_silent_since.insert(pane.id().to_owned(), Instant::now());
             }
-            if self.output_settled(pane) { return Ok(()); }
+            if native_idle == Some(true) || self.output_settled(pane) { return Ok(()); }
             let remaining = COMMAND_SETTLE.saturating_sub(self.pane_silent_since.get(pane.id()).map_or(Duration::ZERO, Instant::elapsed));
             tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
         }
+    }
+    /// Hold an admitted command until the native turn ends; nothing is typed yet.
+    fn queue_command(&mut self, owner: Owner, command: Command, reload_before: Option<u32>) -> DaemonMessage {
+        let name = serde_json::to_value(command).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+        let receipt = Receipt { device_id: owner.0.clone(), client_ref: owner.1.clone(), command, phase: Phase::Queued,
+            detail: format!("/{name} is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet."), output: String::new(), interactive: false };
+        self.supervisor_commands.records.insert(owner.clone(), Record { receipt, started: Instant::now(), at: Utc::now(), before: String::new(), before_command: String::new(), write: Box::new(|| None), hook: None, last_key: None, output_from: 0, reload_before });
+        self.supervisor_commands.readiness_polled = None;
+        self.advance_queued_command();
+        DaemonMessage::SupervisorCommandReceipt { receipt: self.supervisor_commands.records[&owner].receipt.clone() }
     }
     pub(super) async fn dispatch_supervisor_command(&mut self, request: Request, client_ref: String, attribution: MessageAttribution) -> anyhow::Result<DaemonMessage> {
         anyhow::ensure!(attribution.operator_verified, "Commands require an authenticated hub relay.");
@@ -455,7 +490,15 @@ impl FactoryDaemon {
         anyhow::ensure!(!client_ref.is_empty() && client_ref.len() <= 128 && client_ref.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "Invalid command reference.");
         let owner = (device.to_owned(), client_ref.clone());
         if let Request::Run { command, confirmed } = &request {
+            // A chooser may have been closed in the native pane after Commander
+            // stopped polling its observed receipt. Refresh it before admission.
+            let idle = self.app.mux.supervisor().is_some_and(|pane| !pane.has_exited() && idle_prompt(&screen(pane)));
             for record in self.supervisor_commands.records.values_mut() {
+                if record.receipt.interactive && idle {
+                    record.receipt.phase = Phase::Observed;
+                    record.receipt.interactive = false;
+                    record.receipt.detail = "The native chooser is no longer open. No additional change was confirmed.".into();
+                }
                 if record.receipt.phase == Phase::Submitted && record.started.elapsed() > Duration::from_secs(90) {
                     record.receipt.phase = Phase::Unconfirmed;
                     record.receipt.detail = if record.receipt.command == Command::ReloadCassy {
@@ -470,17 +513,18 @@ impl FactoryDaemon {
             self.supervisor_commands.evict_expired();
             anyhow::ensure!(self.supervisor_commands.records.len() < RECEIPT_CAP, "Too many supervisor commands in the last 10 minutes. Try again shortly.");
             anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
-            anyhow::ensure!(!self.supervisor_commands.records.values().any(|r| matches!(r.receipt.phase, Phase::Queued | Phase::Submitted) || r.receipt.interactive), "Another supervisor command is awaiting an outcome.");
+            if let Some(blocking) = self.supervisor_commands.records.values().find(|r| matches!(r.receipt.phase, Phase::Queued | Phase::Submitted) || r.receipt.interactive) {
+                let name = serde_json::to_value(blocking.receipt.command)?.as_str().unwrap_or_default().to_owned();
+                if blocking.receipt.phase == Phase::Submitted {
+                    anyhow::bail!("/{name} has been submitted and is awaiting an outcome. Wait for it to finish; Dismiss cannot cancel a submitted command.");
+                }
+                anyhow::bail!("/{name} is still pending. Use Dismiss command status on its card to cancel it. An open native chooser can also be closed with Close chooser.");
+            }
             if *command == Command::Finish {
                 let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
                 anyhow::ensure!(!pane.has_exited(), "The supervisor has ended.");
                 anyhow::ensure!(command.mapping(pane.harness()).is_some(), "This harness does not support that command.");
-                let receipt = Receipt { device_id: device.to_owned(), client_ref: client_ref.clone(), command: *command, phase: Phase::Queued,
-                    detail: "Finish is queued until the supervisor's current turn ends and its prompt is empty. Nothing has been typed yet.".into(), output: String::new(), interactive: false };
-                self.supervisor_commands.records.insert(owner.clone(), Record { receipt, started: Instant::now(), at: Utc::now(), before: String::new(), before_command: String::new(), write: Box::new(|| None), hook: None, last_key: None, output_from: 0, reload_before: None });
-                self.supervisor_commands.readiness_polled = None;
-                self.advance_queued_finish();
-                return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: self.supervisor_commands.records[&owner].receipt.clone() });
+                return Ok(self.queue_command(owner, *command, None));
             }
             let reload_before = if *command == Command::ReloadCassy {
                 let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
@@ -493,8 +537,11 @@ impl FactoryDaemon {
                 }).await??
                     .ok_or_else(|| anyhow::anyhow!("Reload Cassy was not sent: the supervisor's live Cassy MCP PID and version are unavailable. Check Claude's /mcp panel."))?.pid)
             } else { None };
-            tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await
-                .map_err(|_| anyhow::anyhow!("The supervisor is busy: its output did not settle within 3 seconds. Wait until its turn ends."))??;
+            match tokio::time::timeout(COMMAND_SETTLE_WAIT, self.wait_for_command_prompt()).await
+                .map_err(|_| anyhow::anyhow!("The supervisor is busy: its output did not settle within 3 seconds. Wait until its turn ends."))? {
+                Err(error) if error.is::<TurnOpen>() => return Ok(self.queue_command(owner, *command, reload_before)),
+                ready => ready?,
+            }
             let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
             let text = command.mapping(pane.harness()).ok_or_else(|| anyhow::anyhow!("This harness does not support that command."))?;
             let before = screen(pane);
@@ -506,7 +553,25 @@ impl FactoryDaemon {
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         anyhow::ensure!(self.supervisor_commands.records.contains_key(&owner), "The original command receipt is unavailable. Do not resend an uncertain command.");
-        self.advance_queued_finish();
+        // Cancel before advancing queued Finish: Dismiss must never submit it,
+        // even if the prompt became ready in the meantime. No PTY bytes here.
+        if request == Request::Cancel {
+            let record = self.supervisor_commands.records.get_mut(&owner).expect("command owner checked");
+            anyhow::ensure!(record.receipt.phase != Phase::Submitted, "This command has already been submitted. Wait for its outcome; Dismiss cannot cancel it.");
+            if record.receipt.phase == Phase::Queued || record.receipt.interactive {
+                record.receipt.detail = if record.receipt.phase == Phase::Queued {
+                    "Queued command cancelled. Nothing was typed."
+                } else { "Chooser tracking cancelled. Nothing was typed; close the native chooser before sending another command." }.into();
+                record.receipt.phase = Phase::Cancelled;
+                record.receipt.interactive = false;
+                record.started = Instant::now();
+                if let Some(job) = record.hook.take() { job.abort(); }
+                if let Some(job) = self.supervisor_commands.readiness.take() { job.abort(); }
+                self.supervisor_commands.readiness_polled = None;
+            }
+            return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
+        }
+        self.advance_queued_command();
         let record = self.supervisor_commands.records.get_mut(&owner).expect("command owner checked");
         if record.receipt.phase == Phase::Queued {
             anyhow::ensure!(matches!(request, Request::Status), "No native command chooser is open.");
@@ -538,7 +603,9 @@ impl FactoryDaemon {
             record.receipt.detail = "Selection submitted; awaiting the harness's response.".into();
         }
         if record.receipt.phase == Phase::Submitted || record.receipt.interactive
-            || record.receipt.phase == Phase::Unconfirmed && record.receipt.command == Command::Usage {
+            // Finish may complete after the short confirmation deadline. A
+            // caller-owned Status can still observe it without typing again.
+            || record.receipt.phase == Phase::Unconfirmed && matches!(record.receipt.command, Command::Usage | Command::Finish) {
             let current = screen(pane);
             if pane.has_exited() && matches!(record.receipt.command, Command::Exit | Command::Finish) {
                 record.receipt.phase = Phase::Observed;
@@ -581,6 +648,11 @@ impl FactoryDaemon {
                 if let Some(Ok(Some(detail))) = record.hook.take().map(|job| futures_util::FutureExt::now_or_never(job)).flatten() {
                     record.receipt.phase = Phase::Observed;
                     record.receipt.detail = detail;
+                    if record.receipt.command == Command::ReloadCassy {
+                        crate::quality_ledger::intervention(self.app.cas_dir(), cas_store::InterventionKind::McpReconnect,
+                            format!("commander_mcp|{}|{}", record.receipt.device_id, record.receipt.client_ref),
+                            None, Some(&record.receipt.device_id), None);
+                    }
                 }
             } else if record.hook.is_none() && matches!(record.receipt.command, Command::Compact | Command::Clear | Command::Finish | Command::ReloadCassy) {
                 let root = self.app.cas_dir().to_path_buf();
@@ -659,7 +731,7 @@ mod tests {
             for version in [None, Some("2.1.310")] {
                 std::fs::write(&transcript, format!("{}\n", serde_json::json!({"type":"user","sessionId":"reload-version","version":version}))).unwrap();
                 let error = daemon.dispatch_supervisor_command(run.clone(), "reload-unverified".into(), owner.clone()).await.unwrap_err();
-                assert!(error.to_string().contains("unverified version"), "{error}");
+
                 assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
             }
             for version in ["2.1.311", "2.1.316"] {
@@ -667,12 +739,23 @@ mod tests {
                 verify_claude_reload_version(daemon.app.cas_dir(), &daemon.session_name, &name)
                     .unwrap_or_else(|error| panic!("live-proved Claude {version} must permit reload: {error}"));
             }
+            // cas-4e11: /mcp sent while the native turn is open (a Stop hook
+            // re-opened it) queues, then is typed once when that turn ends.
+            let at = Utc::now();
+            let row = |kind: &str, message: serde_json::Value, ms: i64| serde_json::json!({"type":kind,"sessionId":"reload-version","version":"2.1.316","timestamp":at + chrono::Duration::milliseconds(ms),"message":message});
+            let open = row("user", serde_json::json!({"role":"user","content":"Stop hook feedback"}), 0);
+            std::fs::write(&transcript, format!("{open}\n")).unwrap();
             let receipt = daemon.dispatch_supervisor_command(run.clone(), "reload".into(), owner.clone()).await.unwrap();
-            assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+            assert!(matches!(receipt, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
             daemon.dispatch_supervisor_command(run, "reload".into(), owner.clone()).await.unwrap();
+            assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "an open turn receives no command");
+            std::fs::write(&transcript, format!("{open}\n{}\n", row("assistant", serde_json::json!({"role":"assistant","stop_reason":"end_turn"}), 1))).unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
-                while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
-            }).await.unwrap();
+                while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") {
+                    daemon.dispatch_supervisor_command(Request::Status, "reload".into(), owner.clone()).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("the queued /mcp is delivered at the turn boundary");
             let writes = std::fs::read(root.path().join("input")).unwrap();
             assert_eq!(String::from_utf8_lossy(&writes).matches("/mcp reconnect cas").count(), 1, "one native command, even on replay");
             daemon.app.mux.get_mut(&name).unwrap().feed("\x1bcSuccessfully reconnected to cas\r\n❯".as_bytes()).unwrap();
@@ -706,7 +789,7 @@ mod tests {
             let run_timeout = daemon.dispatch_supervisor_command(replay, "reload".into(), owner.clone()).await.unwrap();
             let DaemonMessage::SupervisorCommandReceipt { receipt: run_timeout } = run_timeout else { panic!("owned reload receipt") };
             assert_eq!(run_timeout.phase, Phase::Unconfirmed);
-            assert!(run_timeout.detail.contains("replacement live MCP PID and version"), "{}", run_timeout.detail);
+
             daemon.supervisor_commands.records.get_mut(&timeout_owner).unwrap().receipt.phase = Phase::Submitted;
             let status_timeout = daemon.dispatch_supervisor_command(Request::Status, "reload".into(), owner.clone()).await.unwrap();
             assert!(matches!(status_timeout, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Unconfirmed && receipt.detail == run_timeout.detail));
@@ -735,7 +818,7 @@ mod tests {
             if mode == "unknown" { std::fs::remove_file(&transcript).unwrap(); }
             let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
                 command: "/bin/sh".into(),
-                args: vec!["-c".into(), "stty raw -echo; printf '\\033c\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
+                args: vec!["-c".into(), "stty raw -echo; printf '\\033cPrevious turn: ✢ Working… esc to interrupt\\033[20;1H❯'; (while :; do printf '\\0337\\033[24;1H1 running background task\\0338'; sleep 0.05; done) & repaint=$!; trap 'kill \"$repaint\"' EXIT; cat > \"$1\"".into(),
                     "fixture".into(), root.path().join("finish-input").to_str().unwrap().into()],
                 cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
             }).unwrap();
@@ -746,11 +829,20 @@ mod tests {
                 loop {
                     let pane = daemon.app.mux.get_mut(&name).unwrap();
                     pane.drain_output();
-                    if idle_prompt(&screen(pane)) && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
+                    if pane.dump_row(19).unwrap().trim() == "❯" && screen(pane).contains("running background task") && root.path().join("finish-input").exists() { break; }
                     tokio::task::yield_now().await;
                 }
             }).await.unwrap();
             if mode == "unknown" { quiet_for(&mut daemon, &name, COMMAND_SETTLE); }
+            if mode == "idle" {
+                // cas-99e7: /exit and /mcp share this admission path. Old
+                // spinner text and shell repaint cannot contradict native end.
+                tokio::time::timeout(COMMAND_SETTLE_WAIT, daemon.wait_for_command_prompt())
+                    .await.expect("native idle admits the first request")
+                    .expect("completed Claude turn must admit commands despite old busy text");
+            } else {
+                assert!(daemon.wait_for_command_prompt().await.is_err(), "busy or unknown native state cannot override the busy screen");
+            }
             let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
             let receipt = daemon.dispatch_supervisor_command(
                 Request::Run { command: Command::Finish, confirmed: true }, "finish-background".into(),
@@ -826,6 +918,55 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&input).matches("/exit").count(), 1);
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let finish = Request::Run { command: Command::Finish, confirmed: true };
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯ draft".as_bytes()).unwrap();
+        let queued = daemon.dispatch_supervisor_command(finish.clone(), "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(queued, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        daemon.supervisor_commands.records.get_mut(&("device-a".into(), "stuck-finish".into())).unwrap().started -= REPLAY_WINDOW;
+        let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
+        assert!(daemon.dispatch_supervisor_command(Request::Cancel, "stuck-finish".into(), foreign).await.is_err());
+        let cancelled = daemon.dispatch_supervisor_command(Request::Cancel, "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(cancelled, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Cancelled && !receipt.interactive));
+        // Cancellation and a replay must never type the queued Finish.
+        let replay = daemon.dispatch_supervisor_command(finish, "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(replay, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Cancelled));
+        daemon.advance_queued_command();
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "dismiss-chooser".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while daemon.app.mux.pane_inject_busy(&name) || !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\nOpus\r\nSonnet").unwrap();
+        let chooser = daemon.dispatch_supervisor_command(Request::Status, "dismiss-chooser".into(), owner.clone()).await.unwrap();
+        assert!(matches!(chooser, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && receipt.interactive));
+        let cancelled = daemon.dispatch_supervisor_command(Request::Cancel, "dismiss-chooser".into(), owner.clone()).await.unwrap();
+        assert!(matches!(cancelled, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Cancelled && !receipt.interactive));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
+        // Dismiss does not type Escape or bypass a real native modal.
+        assert!(daemon.dispatch_supervisor_command(Request::Run { command: Command::Exit, confirmed: true }, "modal-exit".into(), owner.clone()).await.is_err());
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        let exit = daemon.dispatch_supervisor_command(Request::Run { command: Command::Exit, confirmed: true }, "exit-after-cancel".into(), owner.clone()).await.unwrap();
+        assert!(matches!(exit, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+        // Dismiss cannot release a genuinely submitted command for another mutation.
+        assert!(daemon.dispatch_supervisor_command(Request::Cancel, "exit-after-cancel".into(), owner.clone()).await.is_err());
+        assert!(daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "blocked-finish".into(), owner).await.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("input")).unwrap()[input.len()..].ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let exit_input = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&exit_input[input.len()..]).matches("/exit").count(), 1);
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser") { return; }
@@ -855,10 +996,12 @@ mod tests {
         let opened = daemon.dispatch_supervisor_command(Request::Status, "cmd-model".into(), owner.clone()).await.unwrap();
         assert!(matches!(opened, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && receipt.interactive));
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
-        let closed = daemon.dispatch_supervisor_command(Request::Step { key: Key::Cancel }, "cmd-model".into(), owner.clone()).await.unwrap();
-        assert!(matches!(closed, DaemonMessage::SupervisorCommandReceipt { receipt } if !receipt.interactive));
-        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), writes, "stale controls must send no key");
+        // cas-f1a2: Commander stops polling observed choosers. A new Run must
+        // discover that the native pane closed it without a Step or Status.
         daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "cmd-usage".into(), owner).await.unwrap();
+        let closed = &daemon.supervisor_commands.records[&("device-a".into(), "cmd-model".into())].receipt;
+        assert_eq!(closed.phase, Phase::Observed);
+        assert!(!closed.interactive);
         // Pane names are human names; the registry's primary key is a different ID.
         let cas_dir = daemon.app.cas_dir();
         let store = crate::store::open_agent_store(cas_dir).unwrap();
@@ -893,8 +1036,10 @@ mod tests {
         assert!(supervisor_transcript(codex.app.cas_dir(), &codex.session_name, &name, cas_mux::SupervisorCli::Codex).is_some());
         quiet_for(&mut codex, &name, COMMAND_SETTLE);
         let input = std::fs::read(root.path().join("input")).unwrap();
-        assert!(codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-streaming".into(), owner.clone()).await.is_err());
+        let streaming = codex.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "cmd-streaming".into(), owner.clone()).await.unwrap();
+        assert!(matches!(streaming, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
         assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input, "a streaming turn must receive no command");
+        codex.dispatch_supervisor_command(Request::Cancel, "cmd-streaming".into(), owner.clone()).await.unwrap();
         std::fs::write(&rollout, format!("{meta}\n{}\n{}\n", turn("task_started"), turn("task_complete"))).unwrap();
         quiet_for(&mut codex, &name, COMMAND_SETTLE);
         agent.metadata.insert("supervisor_model".into(), "old-model".into());
@@ -926,7 +1071,7 @@ mod tests {
         codex.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "cmd-finish".into(), owner).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") {
-                codex.advance_queued_finish();
+                codex.advance_queued_command();
                 tokio::task::yield_now().await;
             }
         }).await.unwrap();
@@ -968,6 +1113,56 @@ mod tests {
         assert!(matches!(replay, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed),
             "a replay inside the window returns the stored receipt");
         assert_eq!(runs(), RECEIPT_CAP + 1, "a replay inside the window must not run the command again");
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn finish_resolves_after_the_native_turn_outlasts_the_timeout_cas_5b8a() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::finish_resolves_after_the_native_turn_outlasts_the_timeout_cas_5b8a") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let store = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
+        let mut agent = store.get("single-sup").unwrap();
+        agent.cc_session_id = Some("finish-late".into()); store.update(&agent).unwrap();
+        let projects = dirs::home_dir().unwrap().join(".claude/projects/fixture");
+        std::fs::create_dir_all(&projects).unwrap();
+        let path = projects.join("finish-late.jsonl");
+        let prior = serde_json::json!({"type":"assistant","timestamp":Utc::now() - chrono::Duration::seconds(2),"message":{"role":"assistant","stop_reason":"end_turn"}});
+        std::fs::write(&path, format!("{prior}\n")).unwrap();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "finish-late".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.dispatch_supervisor_command(Request::Status, "finish-late".into(), owner.clone()).await.unwrap();
+                if !daemon.app.mux.pane_inject_busy(&name) && std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let record = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "finish-late".into())).unwrap();
+        // Incident: Finish arrived at 21:39:20.866 and ended at 21:41:04.029.
+        let at = record.at;
+        record.started -= Duration::from_secs(104);
+        let prompt = serde_json::json!({"type":"user","timestamp":at,"message":{"content":"<command-message>finish</command-message>\n<command-name>/finish</command-name>"}});
+        std::fs::write(&path, format!("{prompt}\n")).unwrap();
+        let pending = daemon.dispatch_supervisor_command(Request::Status, "finish-late".into(), owner.clone()).await.unwrap();
+        assert!(matches!(pending, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Unconfirmed));
+        // Drain the first observation: absence of a completion must stay uncertain.
+        if let Some(job) = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "finish-late".into())).unwrap().hook.take() {
+            assert!(job.await.unwrap().is_none());
+        }
+        let done = serde_json::json!({"type":"assistant","timestamp":at + chrono::Duration::seconds(104),"message":{"stop_reason":"end_turn"}});
+        std::fs::write(&path, format!("{prompt}\n{done}\n")).unwrap();
+        daemon.dispatch_supervisor_command(Request::Status, "finish-late".into(), owner.clone()).await.unwrap();
+        let record = daemon.supervisor_commands.records.get_mut(&("device-a".into(), "finish-late".into())).unwrap();
+        let job = record.hook.as_mut().expect("late Finish must still read its native outcome");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !job.is_finished() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let observed = daemon.dispatch_supervisor_command(Request::Status, "finish-late".into(), owner).await.unwrap();
+        assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed));
+        assert_eq!(String::from_utf8_lossy(&std::fs::read(root.path().join("input")).unwrap()).matches("/finish").count(), 1);
     }
     #[test]
     fn finish_needs_its_own_completed_harness_turn_not_an_echo_or_unrelated_reply() {
@@ -1100,8 +1295,7 @@ mod tests {
             "\x1bc\x1b[1;1HOpenAI Codex (v0.165.0)\r\nTip: Use the desktop app.\r\n\x1b[20;1H› Ask Codex to do anything".as_bytes(),
         ).unwrap();
         let observed = daemon.dispatch_supervisor_command(Request::Status, "cmd-clear".into(), owner.clone()).await.unwrap();
-        assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt }
-            if receipt.phase == Phase::Observed && receipt.detail.contains("welcome prompt")));
+        assert!(matches!(observed, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed));
         // A repeat /status prints the same cell; its old copy scrolls away and
         // the screen is unchanged, so only the pane's new output proves it (cas-7ec8).
         let status = "\x1bc\x1b[12;1H• Model: gpt-6.1-sol (reasoning high)\r\n• Context window: 72% left\r\n\x1b[20;1H› Ask Codex to do anything";

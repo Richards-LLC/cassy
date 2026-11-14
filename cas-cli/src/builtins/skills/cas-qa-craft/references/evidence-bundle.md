@@ -3,7 +3,7 @@
 ## API surfaces
 
 `qa.api_paths` selects non-rendered API/server code, including server-only TSX;
-keep rendered components out of these globs. Follow [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
+keep rendered components out of these globs. Follow [Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests):
 one transcript per changed status/error code, including refusal cases. The only
 required artifacts are `LEDGER.md` (the transcript itself) and `contracts.diff`
 (captured comparison against vendored contract fixtures, empty when they agree).
@@ -24,18 +24,15 @@ mixed rendered changes still require the web bundle below.
 
 ## Playwright evidence bundle
 
-Rendered web/hub cells use this bundle with `@playwright/test` **^1.63**.
-Playwright below 1.63 means `NOT EXERCISED: <reason>`. CLI cells use terminal captures.
-The 1.64 recording and agent features are optional: use them only when the
-project's installed version supports them. Valid 1.63 captures remain acceptable;
-missing optional 1.64 features do not make a cell NOT EXERCISED.
+Rendered web/hub cells use the latest stable locked Playwright and matching browser binaries under the project's supported Node runtime. Follow [cas-playwright-tests](../../cas-playwright-tests/SKILL.md) for authoring/configuration; this reference owns evidence packaging. CLI cells use terminal captures.
 
 ## Layout
 
 The bundle lives at `~/.cas/artifacts/<project-key>/<task-id>/qa/`. `LEDGER.md` stays one
-level up. An independent QA round uses `independent-qa/round-<n>/` and a
+level up. An independent QA round uses `independent-qa/<full-head>/<pass-id>/round-<n>/` and a
 journey uses `journeys/<journey-id>/`, each with the same shape and its own
-`bundle.json`.
+`bundle.json`. Use the dispatched pass's directory; leave historical round-only
+directories unchanged.
 
 | `files` key | name | required |
 | --- | --- | --- |
@@ -66,6 +63,9 @@ journey evaluation scores polish for it.
 
 - `schema: 1`, `task_id`, and `producer` (`cas-qa-craft`, `independent-qa`, or `journey`)
 - `head_sha`: the full SHA of the build under test
+- `pass_id`: for `independent-qa`, the immutable pass id from the dispatched QA task.
+  `qa_record` rejects a supplied id for another pass; historical bundles without
+  this field remain readable at their recorded paths.
 - `build_url`, `playwright_version`, `created_at` (RFC 3339)
 - `visual_change` (boolean) and `visual_qa_status` (`pass`, `fail`, or `unavailable`).
   `pass` is a claim that close checks against the run's own report,
@@ -160,7 +160,7 @@ Without capture configuration, absence is advisory. On deploy-only projects, run
    only one side goes in `unpaired[]`: it is kept for the record and never rendered.
 
    ```json
-   {"schema": 1, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
+   {"schema": 2, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
     "pairs": [{"id": "saved-filters", "surface": "/projects", "viewport": [1280,800], "scheme": "light", "masked": [".avatar"],
       "before": {"jpg": "saved-filters.before.jpg", "png": "saved-filters.before.png", "sha256": "<PNG hex>", "jpg_sha256": "<JPG hex>", "ref": "<base SHA>", "source": "merge-base", "captured_at": "<RFC 3339>"},
       "after": {"jpg": "saved-filters.after.jpg", "png": "saved-filters.after.png", "sha256": "<PNG hex>", "jpg_sha256": "<JPG hex>", "ref": "<head SHA>", "source": "delivered-build", "captured_at": "<RFC 3339>"}}],
@@ -171,6 +171,12 @@ Without capture configuration, absence is advisory. On deploy-only projects, run
    use the same row shape, with just `before` or `after`; each present side must
    name nonempty `png` and `jpg` files with matching `sha256` and `jpg_sha256`,
    resolved relative to, and confined inside, the directory containing `pairs.json`.
+   New manifests use schema 2, which requires both digests. Close also reads
+   historical schema 1 manifests that sealed only the PNG: it verifies that seal
+   and any supplied JPG seal, still requires both image files, and preserves the
+   original manifest bytes. This does not certify an unsealed historical JPG.
+   Unknown schema versions require a compatible reader or a provenance-preserving
+   migration, never a fabricated seal or a new BEFORE capture.
    Every `pairs[]` row needs both sides; every `unpaired[]` row needs exactly one.
    Keep every baseline cell, including cells with no AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
    AFTER must contain every BEFORE id, and may add ids. A partial comparison that
@@ -198,17 +204,13 @@ add the per-surface limits.
 ## Affected journeys
 
 <!-- cas-src:begin -->
-For hub-web deliveries, run vitest, tsc and the source-impact-selected journeys
-while iterating, with `scripts/journey-eval.sh <task-artifact-dir>` (default
-affected, four workers) or `--affected <base>`. Close and QA do not require a
-journey receipt.
+For hub-web deliveries, workers run touched vitest files and tsc. Release batch QA runs source-impact-selected journeys with `scripts/journey-eval.sh <task-artifact-dir>` or `--affected <base>`.
 <!-- cas-src:else -->
-For browser deliveries, run the project's unit, type and source-impact-selected
-journey checks while iterating. Close and QA do not require a journey receipt.
+For browser deliveries, workers run touched unit and type checks; release batch QA owns affected journeys through the project's existing runner.
 <!-- cas-src:end -->
 
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-Workers produce affected-journey evidence; independent QA consumes matching
+Named failure iteration may produce receipts; batch QA consumes matching
 receipts before running missing checks (see [independent-pass.md](independent-pass.md)).
 The hook denies factory worker and QA full or unfiltered runs. A failure control may rerun the failing
 spec at one worker, keeping the original failure.
@@ -224,25 +226,7 @@ the separate source-review, verdict and CI limits, including test-only changes.
 
 ## Config
 
-```ts
-// playwright.config.ts
-import { defineConfig } from '@playwright/test';
-
-const QA = process.env.QA_ARTIFACTS!; // ~/.cas/artifacts/<project-key>/<task-id>/qa
-
-export default defineConfig({
-  outputDir: `${QA}/test-results`,
-  use: {
-    baseURL: process.env.BASE_URL, // the real build under test
-    trace: {
-      mode: 'on',
-      snapshots: { dom: true, aria: true, screen: true },
-      screenshots: false, // the filmstrip shares page.screencast and shrinks receipt.webm
-      sources: true,
-    },
-  },
-});
-```
+Use the journey/evidence project in [the canonical authoring configuration](../../cas-playwright-tests/references/configuration.md). Keep its full reports and successful trace/video/ARIA capture; set outputDir to this bundle's test-results directory. This reference adds evidence packaging, not another runner configuration.
 
 The evidence trace is always the test runner's own `trace.zip`. Close counts
 assertions from its `test.trace`, which records every assertion's outcome and
@@ -251,7 +235,7 @@ test-level errors. A library `context.tracing` zip (including one saved with
 
 For an authenticated run, sign in through a setup project with `trace: 'off'` that
 saves `storageState`, and give the evidence project `dependencies: ['setup']`, that
-`storageState`, and the trace settings above. Evaluate arguments and network headers
+`storageState`, and the canonical journey trace settings. Evaluate arguments and network headers
 can still carry credentials, so scrub the runner's zip before listing it. The scrub
 replaces cookie, authorization and token values with `[REDACTED]` and leaves
 `test.trace` intact:
@@ -273,25 +257,19 @@ harness may still use `saveQaTrace(context, path, { secrets })` and
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks
 ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
 `visual_change`: only visual changes record chapters and media-mode captures.
-The example keeps 1.63-compatible recording options. On 1.64, optionally use
-10 fps to reduce encoder backlog: it encodes VP9 automatically and exposes `fps`
-on `use.video`, `recordVideo` and `screencast.start`. Omit `fps` on 1.63.
-Firefox/WebKit capture at most 25 fps. Optional 1.64 action styling uses
-`showActions({ style: { title: 'font-size: 16px' } })`, replacing deprecated
-`fontSize`; `style.point` and `style.highlight` also accept CSS declarations.
-Use the project's type tokens when styling; see the [official 1.64 notes](https://playwright.dev/docs/release-notes#version-164).
+Use current stable recording options. Start evidence at 10 fps when frame-rate control is needed; measure before raising it. Firefox/WebKit capture at most 25 fps. Action captions use showActions({ style: { title: 'font-size: 16px' } }); follow the project's type tokens.
 The worked example below is self-contained for other projects. Its chapter
 helper uses constructed stylesheets under `style-src 'self'`; adapt the caption
 styles to the target project's DESIGN.md.
 
-Commander-only, in the Cassy source checkout: replace the inline helper with
-this import (adjust the relative path for the spec). Other projects do not ship
-this repository file:
+<!-- cas-src:begin -->
+Cassy source only: import the helper instead, adjusting the spec's relative path:
 
 ```ts
 // Commander-only; not a dependency of the generic example below.
 import { showRecordingChapter } from '../hub-web/e2e/journeys/receipt-directory.mjs';
 ```
+<!-- cas-src:end -->
 
 ```ts
 // tests/qa-evidence.spec.ts
@@ -344,19 +322,20 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('fix');
   await page.getByRole('button', { name: 'Apply' }).click();
-  await expect(page.getByRole('status')).toHaveText('1 task');
+  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(1); // fixture has one matching task
   await page.screenshot({ path: `${QA}/M01.png` });
 
   if (visualChange) {
-    await showRecordingChapter(page, 'M02 query with no matches — expect clear no-results copy', {
+    await showRecordingChapter(page, 'M02 query with no matches — expect the empty result state', {
       duration: 1000,
     });
   }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('zzz');
   await page.getByRole('button', { name: 'Apply' }).click();
+  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(0);
   await expect(page.getByRole('main')).toMatchAriaSnapshot(`
-    - heading "Tasks" [level=1]
-    - status: No tasks match
+    - heading [level=1]
+    - status
     - list
   `);
   await page.screenshot({ path: `${QA}/M02.png` });
@@ -374,7 +353,7 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
     ] as const) {
       await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
       expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
-      await expect(page.getByRole('status')).toHaveText('No tasks match');
+      await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(0);
       await page.screenshot({ path: `${QA}/a11y-${name}.png` });
     }
     await page.screencast.stop();
@@ -433,7 +412,7 @@ and repeat that path in the close reason.
 
 `cas-playwright-debug` owns diagnosis when a step fails.
 
-## Measured gotchas (1.63.0)
+## Historical measurements (not authoring guidance)
 
 - `trace.screenshots: true` capped the screencast at 800×450 content inside a
   1280×720 frame. With `screenshots: false` it is full size. The per-action

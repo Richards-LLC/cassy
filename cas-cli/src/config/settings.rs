@@ -1,6 +1,17 @@
 use cas_factory::AutoPromptConfig;
 use serde::{Deserialize, Serialize};
 
+/// Lifetime of unpromoted project rules.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RulesConfig {
+    pub draft_ttl_days: u32,
+}
+
+impl Default for RulesConfig {
+    fn default() -> Self { Self { draft_ttl_days: 30 } }
+}
+
 /// Slack writes use Violet unless the operator explicitly opts out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,19 +68,6 @@ pub struct SlackConfig {
     /// produce local warnings, never a claim of shared exclusion.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stakeholder_contacts: Vec<StakeholderContactPolicy>,
-}
-
-/// Machine-wide managed Viktor upstream setting. Absence keeps the default on.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ViktorConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-}
-
-impl ViktorConfig {
-    pub fn enabled(&self) -> bool {
-        self.enabled.unwrap_or(true)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -342,12 +340,32 @@ impl IssuesConfig {
 /// configured here instead of being written into the shipped `cli-routing`
 /// skill (cas-37f6). The list is empty by default and the gate fails closed:
 /// an unconfigured project approves no Claude account at all.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseConfig {
     /// E-mail addresses approved for the one-shot Claude route. Compared
     /// case-insensitively against the probed `email` field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_account_allowlist: Vec<String>,
+    /// Automatic cuts of a green release train allowed in any 24 hours
+    /// (cas-e060). Zero turns auto-cut off.
+    #[serde(default = "default_auto_cut_max_per_day")]
+    pub auto_cut_max_per_day: u32,
+    /// Minimum hours between one release freeze and the next automatic cut.
+    #[serde(default = "default_auto_cut_min_interval_hours")]
+    pub auto_cut_min_interval_hours: u32,
+}
+
+fn default_auto_cut_max_per_day() -> u32 { 4 }
+fn default_auto_cut_min_interval_hours() -> u32 { 2 }
+
+impl Default for ReleaseConfig {
+    fn default() -> Self {
+        Self {
+            claude_account_allowlist: Vec::new(),
+            auto_cut_max_per_day: default_auto_cut_max_per_day(),
+            auto_cut_min_interval_hours: default_auto_cut_min_interval_hours(),
+        }
+    }
 }
 
 impl ReleaseConfig {
@@ -433,7 +451,7 @@ pub struct SyncConfig {
 /// even when stack detection does not find their usual language/framework.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillsConfig {
-    /// Optional builtin skill ids, such as `fallow`, `cas-nuxt-playwright`, or
+    /// Optional builtin skill ids, such as `fallow`, the legacy `cas-nuxt-playwright` redirect, or
     /// `cas-playwright-debug`.
     #[serde(default)]
     pub optional: Vec<String>,
@@ -862,6 +880,11 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
 
+    /// Default Codex account directory for this project's workers on this machine.
+    /// Explicit spawn config_dir overrides this preference; empty uses recommendation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<String>,
+
     /// cas-3f93: absolute base for regenerable worker build output. When set,
     /// each managed worker's Cargo target lives at
     /// `<scratch_root>/<project-key>/targets/<worktree>` and target baselines
@@ -919,6 +942,12 @@ pub struct FactoryConfig {
     /// Maximum wakes per sender and recipient in a rolling hour; further messages wait for another turn.
     #[serde(default = "default_supervisor_message_wakes_per_hour")]
     pub supervisor_message_wakes_per_hour: u64,
+
+    /// Latest-call input cap for idle-boundary supervisor clearing. When the
+    /// harness reports a window, the threshold is also capped at 80% of it.
+    /// 0 disables the automatic clear.
+    #[serde(default = "default_supervisor_wake_input_budget")]
+    pub supervisor_wake_input_budget: u64,
 
     /// Maximum number of characters accepted in an ordinary agent message.
     #[serde(default = "default_message_max_chars")]
@@ -981,6 +1010,10 @@ pub struct FactoryConfig {
     /// `force=true` overrides only that spawn-time check.
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
+
+    /// Machine-wide live worker cap used by local admission and peer routing.
+    #[serde(default = "default_max_workers")]
+    pub max_workers: usize,
 
     /// Route spawned build tasks to a fresh same-account, same-repository
     /// peer when local admission is saturated. Disable to release routes.
@@ -1102,10 +1135,15 @@ pub struct FactoryConfig {
 
     /// One integration per release: a task created with no epic and no
     /// explicit target joins the repository's open release-train epic, cut
-    /// from the integration branch, instead of targeting it directly. Off
-    /// restores per-task trunk targets.
-    #[serde(default = "default_true")]
+    /// from the integration branch, instead of targeting it directly. Opt-in
+    /// (Cassy's own repository sets it); off keeps per-task integration
+    /// targets and retires trains the old default opened (GH #1613).
+    #[serde(default)]
     pub release_train: bool,
+
+    /// Operator intent inherited by worker and reviewer briefs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_mode: Option<String>,
 
     /// Refuse to silently fall back when a resolved worker/supervisor spec
     /// requests Codex but Codex is unavailable — bail with an actionable
@@ -1236,6 +1274,10 @@ fn default_max_concurrent_builders() -> usize {
     4
 }
 
+fn default_max_workers() -> usize {
+    8
+}
+
 fn default_spawn_min_free_gib() -> u32 {
     25
 }
@@ -1263,6 +1305,8 @@ fn default_release_train_max_age_hours() -> u32 { 3 }
 fn default_supervisor_message_debounce_secs() -> u64 { 20 }
 
 fn default_supervisor_message_wakes_per_hour() -> u64 { 6 }
+
+fn default_supervisor_wake_input_budget() -> u64 { 1_000_000 }
 
 fn default_message_max_chars() -> usize {
     1200
@@ -1338,6 +1382,7 @@ impl Default for FactoryConfig {
             worker_denied_clis: default_worker_denied_clis(),
             worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,
+            codex_home: None,
             scratch_root: None,
             worker_local_gate: None,
             release_command: None,
@@ -1348,6 +1393,7 @@ impl Default for FactoryConfig {
             write_roots: Vec::new(),
             supervisor_message_debounce_secs: default_supervisor_message_debounce_secs(),
             supervisor_message_wakes_per_hour: default_supervisor_message_wakes_per_hour(),
+            supervisor_wake_input_budget: default_supervisor_wake_input_budget(),
             message_max_chars: default_message_max_chars(),
             message_max_chars_escalation: default_message_max_chars_escalation(),
             note_max_chars: default_note_max_chars(),
@@ -1357,6 +1403,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            max_workers: default_max_workers(),
             auto_route_builds: true,
             build_guard: BuildGuardConfig::default(),
             worker_memory_high_gib: 0,
@@ -1374,7 +1421,8 @@ impl Default for FactoryConfig {
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,
-            release_train: true,
+            release_train: false,
+            focus_mode: None,
             strict_cli: false,
             target_cache_high_watermark_percent: default_target_cache_high_watermark_percent(),
             target_cache_low_watermark_percent: default_target_cache_low_watermark_percent(),

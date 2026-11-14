@@ -83,7 +83,7 @@ a[href^="http"]::after{content:" (" attr(href) ")";font:7pt var(--font-mono);ove
 <div class="page">
 <!-- section: hero -->
 <header class="hero" data-section="hero"><div class="folio"><span class="lockup"><!--cas:brand-mark-->{{TITLE}}</span><span class="eyebrow">Release report · {{DATE}}</span></div>
-<div class="hero-grid"><h1>{{VERDICT}}</h1><figure class="map-card">
+<div class="hero-grid"><h1 data-verdict>{{VERDICT}}</h1><figure class="map-card">
 <!-- Change-map contract v2: each g[data-area] has data-count (integer >= 1),
      data-changes (JSON string array of plain-language change titles) and
      data-emphasis (true/false). Every circle carries data-change and a title;

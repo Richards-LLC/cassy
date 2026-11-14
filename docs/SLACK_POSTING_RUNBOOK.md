@@ -140,3 +140,23 @@ must never be used as current posting authorization.
 | Claude `claude.ai Slack` MCP on the approved `pippenz@gmail.com` profile (`~/.claude-alt`) | `claude auth status --json` passed the exact account gate and `claude mcp list` reported the Slack server connected. A normal noninteractive read was permission-blocked, while the explicit one-shot mode completed a read and a smoke DM write; receipt: `D076VR4ATTK`, ts `1787836424.011069`, <https://petra-stella.slack.com/archives/D076VR4ATTK/p1787836424011069>. | **Canonical route.** |
 | Codex `codex_apps` Slack plugin | A bounded `codex exec` probe called `list_mcp_resources(server="codex_apps")` and returned no Slack resource, plugin name, or callable Slack tools. | Not available to default Codex workers; do not spend a turn searching for it. |
 | CAS Slack bridge (`cas-bridge-router`) | The router was inactive/not installed; `/etc/cas-bridge/config.json`, `/etc/cas-bridge/router.env`, its systemd unit, and `/opt/cas-bridge` were absent. | Not a configured route. |
+
+## Managed mentions and claim failures
+
+Factory claim and daemon claim reconciliation request `violet_read` with
+`external_ref` and `include_threads:false`: they need verified thread identity,
+not a thread digest. Message-body reads retain `include_threads:true`.
+
+For managed activity, `route_kind=owner` is admitted only by the matching
+`delivery.registration_id`; `unclaimed_fanout` retains its fan-out behavior.
+Reading a mention does not proactively acquire a thread claim. If the
+supervisor's subsequent factory claim fails, Cassy links the refusal to the
+existing daemon-authenticated mention and records one `blocker` notice with its
+code, thread and request identity. It addresses the claim owner directly, with
+no fallback wake to another project supervisor. Repeating the same refusal for
+that mention does not create another blocker, even after its wake was consumed.
+
+Artifact and CLI upload refusals preserve `managed_reply_required` as a named
+refusal, and expose `authority_unavailable` as retryable. A preflight refusal
+allocates no upload; retryability never authorizes a new unmanaged reply or
+changes the existing claim/request-ID requirements.

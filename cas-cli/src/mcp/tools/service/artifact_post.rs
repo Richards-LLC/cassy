@@ -55,11 +55,12 @@ impl CasService {
         &self,
         req: ArtifactRequest,
     ) -> Result<CallToolResult, McpError> {
-        let options = PostOptions {
+        let mut options = PostOptions {
             channel: req.channel.clone().unwrap_or_default(),
             reply_to: req.reply_to.clone(),
             title: req.title.clone(),
             initial_comment: req.initial_comment.clone(),
+            reply_claim: None,
         };
         if options.channel.trim().is_empty() {
             return Err(post_error(PostError::new(
@@ -76,6 +77,11 @@ impl CasService {
         let caller = self.proxy_caller()?;
 
         let cas_root = self.inner.cas_root.clone();
+        if let Some(reply_to) = options.reply_to.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            options.reply_claim = crate::coordination::external_work::reply_post(
+                &cas_root, &caller.agent_id, reply_to,
+            ).map_err(|error| post_error(PostError::new(&error.code, error.message)))?;
+        }
         let id = req.id.clone().unwrap_or_default();
         let (view, bytes) = tokio::task::spawn_blocking({
             let cas_root = cas_root.clone();
@@ -158,7 +164,7 @@ fn post_error(error: PostError) -> McpError {
     McpError {
         code,
         message: std::borrow::Cow::Owned(error.to_string()),
-        data: Some(json!({ "error_code": error.code, "file_id": error.file_id })),
+        data: Some(json!({ "error_code": error.code, "file_id": error.file_id, "retryable": error.retryable })),
     }
 }
 
@@ -219,6 +225,9 @@ mod tests {
         let data = mcp.data.unwrap();
         assert_eq!(data["error_code"], "file_integrity_mismatch");
         assert_eq!(data["file_id"], "F1");
+        assert_eq!(data["retryable"], false);
+        let unavailable = post_error(PostError::new("authority_unavailable", "preflight unavailable"));
+        assert_eq!(unavailable.data.unwrap()["retryable"], true);
         assert_eq!(
             post_error(PostError::new("artifact_not_found", "x")).code,
             ErrorCode::INVALID_PARAMS

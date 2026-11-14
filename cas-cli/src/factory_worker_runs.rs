@@ -188,6 +188,53 @@ pub(crate) fn bind(root: &Path, id: &str, pid: u32) -> Result<()> {
     run.fingerprint = crate::mcp::daemon::read_pid_starttime(pid);
     save(root, &run)
 }
+
+/// Stop the registered producer before recycle can kill its worker cgroup.
+/// Cargo may be in a sibling scope, so killing only the producer strands its
+/// inherited target lease. The producer's TERM handler drains that tree first.
+pub(crate) async fn stop_before_recycle(root: &Path, workers: Vec<String>) -> Result<()> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let runs: Vec<_> = entries(&root)?.into_iter()
+            .filter(|run| workers.contains(&run.worker_id) && run.exit_code.is_none())
+            .collect();
+        for run in &runs {
+            if run.finished_at.is_some() { continue; }
+            let (Some(pid), Some(fingerprint)) = (run.pid, run.fingerprint) else {
+                bail!("Detached run {} has not bound its process identity; retry recycle after launch", run.id);
+            };
+            if !crate::mcp::daemon::pid_matches_fingerprint(pid, fingerprint) { continue; }
+            #[cfg(unix)]
+            {
+                // Signal only the durably recorded process incarnation. Its
+                // handler owns Cargo's separate process group and grace period.
+                if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0
+                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+                {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            loop {
+                if load(&root, &run.id)?.finished_at.is_some()
+                    || !crate::mcp::daemon::pid_matches_fingerprint(pid, fingerprint)
+                { break; }
+                if std::time::Instant::now() >= deadline {
+                    bail!("Detached run {} (pid {pid}) still owns its build; recycle refused before worker teardown", run.id);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        for run in runs {
+            // Also catch a previously lost producer with inherited survivors.
+            // An unverifiable or still-held lease refuses teardown; never kill
+            // descendants guessed from a stale PID or another worker's name.
+            crate::factory_target_cache::owner::for_retirement(&root, &run.repo)?;
+        }
+        Ok(())
+    }).await?
+}
+
 fn alive(run: &Run, now: DateTime<Utc>) -> bool {
     run.finished_at.is_none()
         && run.pid.map_or_else(

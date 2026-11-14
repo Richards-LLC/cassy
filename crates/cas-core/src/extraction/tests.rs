@@ -38,9 +38,9 @@ fn test_build_prompt() {
 
     let prompt = extractor.build_prompt(&observation);
     // Check that prompt contains quality criteria
-    assert!(prompt.contains("Quality Standards"));
+
     assert!(prompt.contains("quality_score"));
-    assert!(prompt.contains("Project-specific"));
+
     // Check observation is included
     assert!(prompt.contains("[Write]"));
 }
@@ -371,7 +371,7 @@ fn test_build_batch_prompt_multiple_observations() {
     // Both observations should be in the prompt
     assert!(prompt.contains("[Write]"));
     assert!(prompt.contains("[Bash]"));
-    assert!(prompt.contains("(tags: api)"));
+    assert!(prompt.contains("api"));
     assert!(prompt.contains("API handler"));
     assert!(prompt.contains("cargo test"));
 }

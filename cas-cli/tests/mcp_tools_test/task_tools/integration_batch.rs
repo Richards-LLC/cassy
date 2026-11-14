@@ -195,7 +195,9 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
                 .unwrap(),
         );
         env.remove("CAS_AGENT_ROLE");
-        assert!(report.contains("integration batch squash"), "{report}");
+
+        let row = report.lines().find(|line| line.starts_with("| cas-b401 |")).unwrap();
+
         assert_eq!(
             task.deliverables.factory_branch_anchor.as_deref(),
             Some(head.as_str())

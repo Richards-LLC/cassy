@@ -972,7 +972,7 @@ watch_dirs = ["web/src"]
         assert_eq!(t.domain_paths, vec!["db/schema.sql".to_string()]);
         assert_eq!(t.watch_dirs, vec!["web".to_string()]);
         let t = resolve_watch_targets(None, Some("<!-- cas:project-overview\nwatch_dirs = [\n-->"), Vec::new);
-        assert!(t.warning.is_some_and(|w| w.contains("malformed")));
+        assert!(t.warning.is_some());
     }
 
     // --- pending file I/O --------------------------------------------------

@@ -221,7 +221,7 @@ export class InboxView {
     section.append(
       el("p", { class: "operator-inbox-lead" }, "Read your supervisors’ messages here even when their machines are off, and leave a reply for when they’re back."),
       // cas-97d58 F21: one brand, and plainly who can read the messages.
-      el("p", {}, "Your Cassy Cloud account approves this browser. Cassy Cloud keeps messages for 90 days, encrypted when stored and sent. It holds the keys, so Cassy Cloud can read them as well as you: this isn’t end-to-end encryption."),
+      el("p", { class: "operator-inbox-disclosure" }, "Your Cassy Cloud account approves this browser. Cassy Cloud keeps messages for 90 days, encrypted when stored and sent. It holds the keys, so Cassy Cloud can read them as well as you: this isn’t end-to-end encryption."),
     );
     const label = el("label", {}, "Name this browser");
     const input = el("input", { id: "operator-inbox-label", type: "text", maxlength: "80", value: this.deps.defaultLabel });
@@ -369,7 +369,7 @@ export class InboxView {
       const machines = el("ul", { class: "machine-presence-rows", "aria-label": "Monitored machines" });
       for (const machine of presence.machines) {
         const label = snapshot?.machines.find((entry) => entry.machineId === machine.machineId)?.label ?? "Machine";
-        const row = el("li", { "data-machine-presence": machine.machineId });
+        const row = el("li", { "data-machine-presence": machine.machineId, "data-monitoring": machine.monitoring, "data-presence": machine.presence ?? "none" });
         row.append(el("strong", {}, label), el("p", {}, `${snapshot?.presenceError ? "Last known: " : ""}${presenceLabel(machine)}`));
         if (machine.lastReportAt) {
           const report = el("p", {}, "Last report ");
@@ -382,7 +382,7 @@ export class InboxView {
           for (const component of machine.components) {
             const names = { hub: "Hub", serve: "Serve", factory: "Factory" };
             const states = { up: "up", degraded: "degraded", down: "down", unknown: "not known" };
-            const item = el("li", {}, `${names[component.component]}: ${states[component.state]} · observed `);
+            const item = el("li", { "data-component": component.component, "data-state": component.state }, `${names[component.component]}: ${states[component.state]} · observed `);
             item.append(el("time", { datetime: component.observedAt }, presenceTimestamp(component.observedAt)));
             components.append(item);
           }
@@ -488,6 +488,7 @@ export class InboxView {
       if (machine && upgrades?.supported) {
         form.replaceChildren(el("p", {}, "This browser can read this conversation but not reply."));
         const request = [...upgrades.requests].reverse().find(r => r.device_id === upgrades.deviceId && r.hub_id === thread.hubId && r.project_id === thread.projectId && r.session_id === thread.sessionId);
+        form.dataset.requestStatus = request?.status ?? "none";
         const copy = request?.status === "pending" ? "Waiting for the account owner to allow replies. Your messages stay here."
           : request?.status === "denied" ? "The owner denied this reply request. This browser is still read-only."
           : request?.status === "expired" ? "This reply request expired. This browser is still read-only."

@@ -145,7 +145,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("operator")).unwrap();
         std::fs::write(dir.path().join(STATE_FILE), "truncated{").unwrap();
         assert!(is_held(dir.path()));
-        assert!(notice(dir.path()).unwrap().contains("state unreadable"));
+        assert!(notice(dir.path()).is_some());
     }
 
     #[test]

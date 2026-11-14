@@ -78,14 +78,14 @@ test('hook opt-out and Violet proxy allow decisions are honored', async () => {
 });
 test('missing policy executable refuses Slack dispatch', async () => {
   process.env.PATH = join(root, 'absent');
-  await assert.rejects(before('slack_send_message'), /policy unavailable/);
+  await assert.rejects(before('slack_send_message'));
   process.env.PATH = bin;
 });
 test('invalid policy output refuses Slack dispatch', async () => {
   process.env.CASSY_TEST_DECISION = 'invalid';
-  await assert.rejects(before('slack_send_message'), /Invalid Cassy Slack policy response/);
+  await assert.rejects(before('slack_send_message'));
 });
 test('failed policy executable refuses Slack dispatch', async () => {
   process.env.CASSY_TEST_DECISION = 'error';
-  await assert.rejects(before('slack_send_message'), /policy failed/);
+  await assert.rejects(before('slack_send_message'));
 });

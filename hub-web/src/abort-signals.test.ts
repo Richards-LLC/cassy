@@ -42,7 +42,7 @@ describe("anySignal", () => {
       already.abort(new Error("event stream replaced"));
       const combined = anySignal([already.signal, new AbortController().signal]);
       expect(combined.aborted).toBe(true);
-      expect((combined.reason as Error).message).toBe("event stream replaced");
+      expect(combined.reason).toBe(already.signal.reason);
     });
   });
 

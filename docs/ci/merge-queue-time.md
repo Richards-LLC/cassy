@@ -84,8 +84,8 @@ Constraints for the implementation:
 cas-4cb8 implements this with the release train's own full-gate receipt rather
 than the PR run's: a `cas/full-gate` status on the proven SHA, naming its tree.
 On a matching queue tree, the suite, doctests and gate-covered preflight
-steps are skipped. The Commander journeys (no full-gate row), the compile
-checks still run. The November 4 operator decision (cas-04c3) subsequently
+steps are skipped. Later changes also cover journeys and preflight compilation
+as described below. The November 4 operator decision (cas-04c3) subsequently
 removed `macOS Check` from merge-group events and the required set; Release
 Prebuild retains pre-publish macOS proof. The branch-protection review is section 3 of
 `docs/branch-protection/README.md`.
@@ -95,6 +95,29 @@ receipt proves every catalog journey on the exact release tree, and
 `journey-receipt.py verify-full` accepts it. The train then also posts
 `cas/full-journeys`, and the queue skips the Commander step entirely. Without
 that receipt, the queue runs the journeys as before.
+
+## Exact-tree preflight executable reuse (cas-a6df)
+
+The v4.4.0 queue run `42396696687` took 15m51s even though its tree
+`ead8df74` matched train run `42396241006`: Check took 4m14s and the
+no-default-features build took 8m30s. The queue reused the complete train
+receipt for tests, but still paid for these preflight compiles. Full job receipts
+also bind runtime selection and runner environment, so the hosted train and
+an isolated self-hosted queue cannot always share a job receipt.
+
+Preflight now publishes a stripped `preflight-cli` executable. An identical-tree
+queue can restore it from the validated full-gate run without weakening the
+job receipt's selection or runner bindings. A matching job receipt restores
+its original producer's executable. Restore checks `--version` on the current
+runner; unavailable or incompatible artifacts fall back to compilation.
+Release-plumbing changes that produce a different tree also compile normally.
+The queue still runs CLI smoke and rebuilds/checks web assets after restore.
+
+The workflow-body regression in `scripts/ci_tiers/test-policy.py` exercises
+restore, wrong-tree/no-proof refusal, absent artifacts and incompatible binaries,
+including a lost artifact after a job-receipt hit. Live queue duration under
+eight minutes remains deferred to the next release ledger; local fixture
+routing is not a release latency measurement.
 
 ## What cas-12ab changed for factory lanes
 

@@ -62,7 +62,10 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
   body.append(title, lead, status, list); dialog.append(body, actions); doc.body.append(dialog);
   dialog.addEventListener("close", () => { dialog.remove(); if (opener?.isConnected) opener.focus(); }, { once: true });
   dialog.showModal();
-  try {
+  // cas-0dcf: a failed list says which list failed, in a sentence, and offers Retry.
+  const retry = doc.createElement("button"); retry.type = "button"; retry.textContent = "Retry";
+  retry.onclick = () => { retry.remove(); status.textContent = "Loading installations…"; void load(); };
+  const load = async () => { try {
     const devices = await client.request<InstallationSummary[]>("GET", "/v1/auth/devices");
     status.textContent = machine.scopes.includes("hub-admin") ? `${devices.length} installations. ${devices.filter((device) => device.account_enrollment?.state === "enrolled").length} in your operator inbox.` : "This browser's access. Viewing other installations requires hub admin permission.";
     devices.sort((a, b) => Number(b.device_id === machine.deviceId) - Number(a.device_id === machine.deviceId));
@@ -80,11 +83,11 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
       const disclosure = doc.createElement("summary"); disclosure.textContent = "Technical details";
       const details = doc.createElement("dl"); details.className = "pair-details";
       const id = doc.createElement("code"); id.textContent = device.device_id;
-      detailRow(doc, details, "Installation ID", id);
-      for (const [name, value] of [["Credential generation", String(device.credential_generation)], ["Paired (UTC)", device.issued_at], ["Last used (UTC)", device.last_used_at], ["Origin", device.controller_origin], ["Signing key", device.key_fingerprint]]) {
-        detailRow(doc, details, name!, value!);
+      detailRow(doc, details, "Installation ID", id).dataset.field = "device_id";
+      for (const [field, name, value] of [["credential_generation", "Credential generation", String(device.credential_generation)], ["issued_at", "Paired (UTC)", device.issued_at], ["last_used_at", "Last used (UTC)", device.last_used_at], ["controller_origin", "Origin", device.controller_origin], ["key_fingerprint", "Signing key", device.key_fingerprint]]) {
+        detailRow(doc, details, name!, value!).dataset.field = field!;
       }
-      if (device.account_enrollment?.state === "enrolled") detailRow(doc, details, "Account key epoch", device.account_enrollment.epoch);
+      if (device.account_enrollment?.state === "enrolled") detailRow(doc, details, "Account key epoch", device.account_enrollment.epoch).dataset.field = "epoch";
       technical.append(disclosure, details);
       row.append(heading, summary, technical);
       if (!device.revoked_at) {
@@ -98,11 +101,22 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
             status.textContent = `Revoked ${label}. Its live connections are closing.`;
             if (device.device_id === machine.deviceId) { await onOwnRevoke(); dialog.close(); }
             else { revoke.textContent = "Revoked"; }
-          } catch (error) { revoke.disabled = false; status.textContent = error instanceof Error ? error.message : "Revocation failed. Retry when the hub is reachable."; }
+          } catch (error) { revoke.disabled = false; status.textContent = error instanceof Error ? `Revoking ${label} failed. ${sentence(error.message)}` : "Revocation failed. Retry when the hub is reachable."; }
         };
         row.append(revoke);
       }
       list.append(row);
     }
-  } catch (error) { status.textContent = error instanceof Error ? error.message : "Could not load installations. Retry when the hub is reachable."; }
+  } catch (error) {
+    const machineName = machine.label.split(" · ")[0]?.trim() || machine.label;
+    status.textContent = `${machineName} didn't return its browser installations.${error instanceof Error && error.message ? ` ${sentence(error.message)}` : ""}`;
+    actions.prepend(retry);
+  } };
+  await load();
+}
+
+/** A connection reason ("the machine refused …") read on its own, as a sentence. */
+function sentence(reason: string): string {
+  const text = reason.trim();
+  return text ? `${text[0]!.toUpperCase()}${text.slice(1)}${/[.!?]$/.test(text) ? "" : "."}` : "";
 }

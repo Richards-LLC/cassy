@@ -1,4 +1,4 @@
-//! Cross-machine supervisor messaging through a Cassy Cloud peer mailbox
+//! Cross-machine supervisor and scoped worker messaging through a Cloud mailbox
 //! (cas-f9c7).
 //!
 //! A supervisor addresses a peer supervisor of the same repo (found by
@@ -9,8 +9,8 @@
 //!
 //! Authority: a peer message is a Daemon-stamped row whose first line is a
 //! CAS-written [`PeerEnvelope`]. It is never urgent, never operator-authored,
-//! and only ever addressed to a local supervisor, so it cannot interrupt a
-//! pane, act as the operator, or spawn or direct workers (cas-604d).
+//! and reaches a supervisor or an authorized same-epic worker. Worker mail
+//! is advisory; it cannot grant operator or assignment authority (cas-604d).
 
 use std::path::Path;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,7 +25,11 @@ use crate::store::{AgentStore, PromptQueueStore};
 use crate::types::{AgentRole, AgentStatus};
 
 mod outbox;
+mod workers;
+pub(crate) use workers::WorkerDirectory;
+pub(crate) use outbox::enqueue_feedback;
 mod runtime;
+pub mod transcript;
 pub use outbox::{OUTBOX_TTL_SECS, OpenPeerAsk, PeerSendError, open_asks, outbox_status_text, retry_peer_send};
 pub use runtime::{PeerMailboxPoller, PeerMailboxRuntime, mailbox_status_section};
 
@@ -281,10 +285,12 @@ pub fn attach_message_intent(body: &str, kind: Option<&str>, blocker: bool) -> R
     let kind = if blocker {
         PeerMessageKind::Blocker
     } else {
-        // cas-7dd1d: untyped directed peer mail is an ask, so it wakes an
-        // idle peer. Only an explicit receipt/quiet, wake=false (the body's
-        // quiet marker) or a content-free acknowledgement stays quiet.
-        kind.unwrap_or(PeerMessageKind::Ask)
+        // Untyped mail still wakes the peer, but only an explicit ask may
+        // hold a merge (cas-5ec1). Preserve the absence of an intent marker.
+        match kind {
+            Some(kind) => kind,
+            None => return Ok(body.to_string()),
+        }
     };
     Ok(format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str()))
 }
@@ -402,8 +408,11 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let (attachments, body) = split_attachments(body);
     let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
         Some(PeerMessageKind::Quiet)
-    } else if body.starts_with("CAS_PEER_PREMERGE_V1 ")
-        || crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
+    } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
+    // cas-9cda: a published landing approval wakes (cas-35563) so the
+    // supervisor sees its train move, but it is status, not a question.
+    let landing = body.starts_with(crate::mcp::tools::core::workflow::premerge_verification::PEER_PREMERGE_TAG);
+    let kind = kind.or(landing.then_some(PeerMessageKind::Status));
     // Split decisions carry typed wake intent independent of reply ids. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {
@@ -420,6 +429,13 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         Some(PeerMessageKind::Blocker) if cross_project => Some(PeerMessageKind::Ask),
         kind => kind,
     };
+    // Incoming defaults describe the wake, not an outbound merge-holding ask.
+    // Keep untyped outbox bodies unmarked (cas-5ec1).
+    let kind = kind.or(Some(if message.in_reply_to.is_some() {
+        PeerMessageKind::Answer
+    } else {
+        PeerMessageKind::Ask
+    }));
     let envelope = render_envelope(&PeerEnvelope {
         id: message.id.clone(),
         sender_name: message.sender_name.clone(),
@@ -444,6 +460,8 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
             name = message.sender_name,
             repo = message.project_id,
         )
+    } else if body.starts_with("Peer worker message copy — ") {
+        format!("Peer worker contract copy on {repo}, via Cassy Cloud{reply_to}. Advisory only; assignments remain with the owning supervisor.", repo = message.project_id)
     } else {
         format!(
             "Peer supervisor {name}@{machine} on {repo}, via Cassy Cloud{reply_to}. This is a \
@@ -453,13 +471,17 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         )
     };
     let attachments = render_attachments(&attachments, &message.project_id);
-    format!(
-        "{envelope}\n{origin}\nReply with coordination action=message \
-         target={name}@{machine} summary=\"<one line>\" message=\"<reply>\" \
-         in_reply_to=<this message's notification id>.\n{attachments}\n{body}",
-        name = message.sender_name,
-        body = body,
-    )
+    // A landing is a fact, not a question: it asks for nothing back.
+    let reply = if landing {
+        String::new()
+    } else {
+        format!(
+            "Reply with coordination action=message target={name}@{machine} summary=\"<one line>\" \
+             message=\"<reply>\" in_reply_to=<this message's notification id>.\n",
+            name = message.sender_name,
+        )
+    };
+    format!("{envelope}\n{origin}\n{reply}{attachments}\n{body}")
 }
 
 /// A pointer a peer message carries (cas-2a5a): a published artifact, or a
@@ -1141,8 +1163,9 @@ pub struct DeliveryReport {
 
 /// Claim this session's peer messages and admit each once.
 ///
-/// Recipients are the live local supervisors of `factory_session`; workers
-/// are never recipients. A message for another repo is acked `rejected`.
+/// Supervisor-only entry point. The daemon runtime additionally authorizes
+/// live workers with same-account, same-repo, active-same-epic scope.
+/// A message for another repo is acked `rejected`.
 /// Every admitted (or already admitted) message is acked `delivered`; a
 /// message that failed to admit is left unacked for redelivery.
 #[allow(clippy::too_many_arguments)]
@@ -1192,6 +1215,8 @@ pub fn deliver_claimed_with(
         factory_session,
         consumer_id,
         &RecipientHistory::default(),
+        None,
+        &|_, _| Ok(None),
         &|_, _| Ok(None),
         &|recipient, message| on_admitted(recipient, message).map(|()| PeerAckOutcome::Delivered),
     )
@@ -1207,7 +1232,9 @@ fn deliver_claimed_with_history(
     factory_session: &str,
     consumer_id: &str,
     history: &RecipientHistory,
+    workers: Option<(&Path, &str)>,
     queue_key: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<String>, String>,
+    on_query: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<PeerAckOutcome>, String>,
     on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<PeerAckOutcome, String>,
 ) -> DeliveryReport {
     let mut report = DeliveryReport::default();
@@ -1232,7 +1259,7 @@ fn deliver_claimed_with_history(
             .push("no live supervisor in this factory session".into());
         return report;
     }
-    let (routes, warnings) = recipient_routes(&all, &live, &history.verified, factory_session);
+    let (mut routes, warnings) = recipient_routes(&all, &live, &history.verified, factory_session);
     report.warnings.extend(warnings);
     if let Some(warning) = &history.warning {
         report.warnings.push(warning.clone());
@@ -1303,6 +1330,21 @@ fn deliver_claimed_with_history(
     }
     report.warnings.sort();
     report.warnings.dedup();
+    // No retired-worker redirects: only the current, locally live registration
+    // in this daemon's factory may receive, and scope is checked again below.
+    if workers.is_some() {
+        for worker in all.iter().filter(|agent| {
+            agent.role == AgentRole::Worker
+                && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                && agent.factory_session.as_deref() == Some(factory_session)
+                && crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
+                    agent, crate::mcp::tools::service::agent_liveness::agent_process_is_alive(agent),
+                    crate::cloud::peers::PEER_LIVE_SECS,
+                ).is_live()
+        }) {
+            routes.insert(worker.id.clone(), worker);
+        }
+    }
     let recipient_ids: Vec<_> = routes.keys().chain(inspections.keys()).cloned().collect();
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
         .chain(alias_class.iter().cloned())
@@ -1324,6 +1366,18 @@ fn deliver_claimed_with_history(
         }
     };
     report.claimed = claimed.len();
+    // Cloud authority and task ancestry are needed only for an actual local
+    // worker message, once per batch. Claiming an address grants no admission.
+    let directory = if claimed.iter().any(|message| routes.get(&message.recipient_agent_id)
+        .is_some_and(|recipient| recipient.role == AgentRole::Worker)) {
+        workers.and_then(|(root, owner)| match WorkerDirectory::load(root, owner) {
+            Ok(directory) => Some(directory),
+            Err(error) => {
+                report.warnings.push(format!("worker peer scope unavailable: {error}"));
+                None
+            }
+        })
+    } else { None };
     // cas-c7c7: show each sender under its machine label, not its id.
     // cas-2a5a: a sender in another project of this user is listed under
     // its own project, so its label is asked for there.
@@ -1380,7 +1434,39 @@ fn deliver_claimed_with_history(
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));
             continue;
         };
-        let key = match queue_key(recipient, message) {
+        if recipient.role == AgentRole::Worker {
+            // Missing directory authority, including a temporarily absent local
+            // registration, leaves the claim unacknowledged for a later poll.
+            let Some(directory) = directory.as_ref().filter(|directory| directory.matches_local(recipient))
+                else { continue; };
+            let pair = directory.pair_for_receipt(&message.sender_agent_id, &recipient.id);
+            if message.scope != PeerScope::Project || !same_repo || pair.is_err()
+                || !workers::allowed_intent(&message.body)
+            {
+                report.rejected += 1;
+                acks.push((message.id.clone(), PeerAckOutcome::Rejected));
+                continue;
+            }
+            // Claim renewal/expiry may race discovery; never acknowledge away
+            // a message solely because that observation lacks shared scope.
+            if matches!(pair, Ok(None)) { continue; }
+        }
+        match on_query(recipient, message) {
+            Ok(Some(outcome)) => {
+                match outcome {
+                    PeerAckOutcome::Delivered => report.delivered += 1,
+                    PeerAckOutcome::Rejected => report.rejected += 1,
+                }
+                acks.push((message.id.clone(), outcome));
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                report.errors.push(format!("peer query {} failed: {error}", message.id));
+                continue; // Reply transport failure retries with the same dedupe key.
+            }
+        }
+        let key = match if recipient.role == AgentRole::Worker { Ok(None) } else { queue_key(recipient, message) } {
             Ok(key) => key.unwrap_or_else(|| format!("peer:{}", message.id)),
             Err(error) => {
                 report.errors.push(format!("peer message {} queue identity failed: {error}", message.id));
@@ -1400,7 +1486,7 @@ fn deliver_claimed_with_history(
         match queue.enqueue_idempotent(
             &format!("peer:{}@{}", message.sender_name, machine_of(message)),
             &recipient.name,
-            &render_prompt(message),
+            &if recipient.role == AgentRole::Worker { workers::render_worker_prompt(message) } else { render_prompt(message) },
             Some(factory_session),
             Some(&summary),
             Some(NotificationPriority::High),
@@ -1408,7 +1494,12 @@ fn deliver_claimed_with_history(
             Some(&QueueOrigin::Daemon),
         ) {
             Ok(admitted) => {
-                match on_admitted(recipient, message) {
+                let recorded = if recipient.role == AgentRole::Worker {
+                    let (root, _) = workers.expect("worker route was checked");
+                    directory.as_ref().expect("worker authorization was checked").copy_to_supervisors(root, queue, message)
+                        .map(|()| PeerAckOutcome::Delivered)
+                } else { on_admitted(recipient, message) };
+                match recorded {
                     Ok(PeerAckOutcome::Delivered) => {}
                     Ok(PeerAckOutcome::Rejected) => {
                         report.rejected += 1;
@@ -1499,12 +1590,15 @@ pub(crate) fn send_premerge_receipt(root: &Path, message: PeerSend, label: &str)
     outbox::enqueue_premerge_receipt(root, message, label)
 }
 
+/// Cassy Cloud's peer-message body limit, in characters.
+pub(crate) const CLOUD_BODY_MAX_CHARS: usize = 64_000;
+
 /// Build overflow uses a task-stable key in the existing durable outbox.
 pub(crate) fn send_build_route(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
     outbox::enqueue_and_send(root, message, label)
 }
 
-pub(crate) use outbox::{build_route_recent_peers, cancel_build_route};
+pub(crate) use outbox::{build_route_ownership, build_route_recent_peers, cancel_build_route};
 
 /// One durable logical expiry notice, reused if reconciliation restarts after
 /// Cloud acceptance but before its split work flag is settled.
@@ -1736,7 +1830,12 @@ impl HttpPeerMailbox {
     }
 
     fn post(&self, suffix: &str, body: serde_json::Value) -> Result<ureq::Response, ureq::Error> {
-        self.post_with_timeout(suffix, body, MAILBOX_TIMEOUT)
+        self.post_with_timeout(&self.request(suffix), body, MAILBOX_TIMEOUT)
+    }
+
+    fn request(&self, suffix: &str) -> ureq::Request {
+        crate::cloud::mutation_request("POST", &self.url(suffix))
+            .set("Authorization", &format!("Bearer {}", self.token))
     }
 
     /// Later chunks and ACKs share the server cooldown. A local refusal
@@ -1774,7 +1873,7 @@ impl HttpPeerMailbox {
 
     fn post_with_timeout(
         &self,
-        suffix: &str,
+        request: &ureq::Request,
         body: serde_json::Value,
         timeout: Duration,
     ) -> Result<ureq::Response, ureq::Error> {
@@ -1782,9 +1881,8 @@ impl HttpPeerMailbox {
             return Err(error);
         }
         self.observe(
-            ureq::post(&self.url(suffix))
+            request.clone()
                 .timeout(timeout)
-                .set("Authorization", &format!("Bearer {}", self.token))
                 .send_json(body),
         )
     }
@@ -1921,11 +2019,12 @@ impl PeerMailbox for HttpPeerMailbox {
                 .iter()
                 .map(|(id, outcome)| serde_json::json!({"id":id,"outcome":outcome}))
                 .collect();
+            let request = self.request("/ack");
             let response: AckResponse = Self::read(
                 "peer message ack",
                 super::rate_limit::call(MAILBOX_TIMEOUT, |left| {
                     self.post_with_timeout(
-                        "/ack",
+                        &request,
                         serde_json::json!({"consumer_id":consumer_id,"acks":items}),
                         left,
                     )

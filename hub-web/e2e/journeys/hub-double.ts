@@ -131,10 +131,12 @@ export type WorkWorld = {
 
 /** A session's fleet in the double: agents with a spawn generation, tasks, epics and the focused one (cas-a474). */
 export type FleetWorld = {
-  supervisor_phase?: { event_id: string; kind: string; lifecycle: { id: string; stage: string; phase?: string; started_at?: string; ended_at?: string; outcome?: string }; observed_at: string; stale: boolean };
+  supervisor_phase?: { event_id: string; kind: string; lifecycle: { id: string; stage: string; phase?: string; started_at?: string; ended_at?: string; outcome?: string }; step?: string; last_activity_at?: string; observed_at: string; stale: boolean };
+  /** The session's daemon as status reports it; absent reads as an older daemon. */
+  session?: { is_running: boolean };
   agents: Array<{ harness?: string; model?: string; task_started_at?: string; recent_trail?: readonly { step: string; reference: string; at?: string }[]; id?: string; name: string; status: string; current_task?: string | null; generation: number; role?: string; liveness?: string; latest_activity?: { summary: string; created_at_rfc3339?: string } }>;
   tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string; epic_id?: string | null; delivery_state?: string | null }>;
-  epics: Array<{ id: string; title?: string; status?: string; assignee?: string | null; epic_verification_owner?: string | null; progress?: { total: number; merged: number; merges_per_hour: number; last_merged_at?: string | null } }>;
+  epics: Array<{ id: string; title?: string; status?: string; assignee?: string | null; epic_verification_owner?: string | null; progress?: { total: number; merged: number; merges_per_hour: number; last_merged_at?: string | null }; counts?: { open: number; in_progress: number; merged: number } }>;
   focused_epic: string | null;
   /** Names new workers get, in order. */
   spawnNames: string[];
@@ -215,6 +217,8 @@ export class HubDouble {
   /** The hub origin each pairing exchange was posted to, in order. */
   readonly exchangeOrigins: string[] = [];
   readonly historyRequests: Array<Record<string, unknown>> = [];
+  /** Model a hub that accepts history reads without a daemon answer. */
+  readonly pausedHistory = new Set<string>();
   /** Browser application ACKs, separate from socket forwarding. */
   readonly persistedReplies: Array<{ session: string; notification_id: number }> = [];
   readonly pendingReplies = new Map<string, Array<Record<string, unknown>>>();
@@ -545,6 +549,7 @@ export class HubDouble {
   private fleetStatus(fleet: FleetWorld): Record<string, unknown> {
     return {
       supervisor_phase: fleet.supervisor_phase ?? null,
+      ...(fleet.session ? { session: fleet.session } : {}),
       agents: fleet.agents,
       tasks_in_progress: fleet.tasks.filter((task) => task.status !== "open"),
       tasks_ready: fleet.tasks.filter((task) => task.status === "open"),
@@ -1487,6 +1492,7 @@ export class HubDouble {
     if (message.ConversationHistoryRequest) {
       const request = message.ConversationHistoryRequest;
       this.historyRequests.push({ session, ...request });
+      if (this.pausedHistory.has(session)) return;
       const page = request.before === undefined ? pages[0] : pages.find((p, i) => i > 0 && pages[i - 1].next_before === request.before);
       let reply: HistoryPage = page ?? { messages: [], replies: [], has_earlier: false };
       const live = this.live.get(session);

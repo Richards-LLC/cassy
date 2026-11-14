@@ -1,10 +1,13 @@
 import { appendEmojiText } from "./emoji-text";
 import { updateCommandReceipts, type CommandReceipt, type CommandKey } from "./supervisor-commands";
-import { sentAttachments, sentMessageLabel } from "./sent-attachments";
+import { nativeCommandReceipt, sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
+import { providerAvatarMarkup } from "./provider-mark";
 import { appendInline, plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
+import { hydrateReplyImages } from "./reply-images";
+import type { ArtifactViewResult } from "./artifact-open";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { reconcileChildren, ThreadWindow } from "./thread-window";
@@ -30,6 +33,11 @@ import {
   type ThreadItem,
   type ThreadTurn,
 } from "./thread-model";
+
+/** What re-renders the working line; elapsed and last-activity text change in place. */
+function phaseSignature(phase?: PhaseLine): string {
+  return JSON.stringify([phase?.label, phase?.state, phase?.step, phase?.active, phase?.unavailable, phase?.elapsed !== undefined, phase?.lastActivityAt !== undefined]);
+}
 
 /**
  * Pebble thread (cas-d167). The conversation shows only operator turns and
@@ -99,6 +107,14 @@ const turnRenderers = new Map<RenderableKind, TurnRenderer>();
  * blocker fall back to a plain `.bub[data-kind]` and attachments to a link.
  * Returns a function that removes the registration.
  */
+/** Resolves a reply's inline image (cas-85bfb) through the publishing machine's media ticket. */
+export type ReplyImageResolver = (reference: string, context: TurnRenderContext) => Promise<ArtifactViewResult | undefined>;
+let replyImageResolver: ReplyImageResolver | undefined;
+export function registerReplyImageResolver(resolve: ReplyImageResolver): () => void {
+  replyImageResolver = resolve;
+  return () => { if (replyImageResolver === resolve) replyImageResolver = undefined; };
+}
+
 export function registerTurnRenderer(kind: RenderableKind, render: TurnRenderer): () => void {
   turnRenderers.set(kind, render);
   return () => { if (turnRenderers.get(kind) === render) turnRenderers.delete(kind); };
@@ -111,6 +127,8 @@ export interface ConversationViewOptions {
   /** Machine label and project name for the mono line beneath the name. */
   machine?: string;
   project?: string;
+  /** The session's reported harness: the empty card wears its mark, as the header does (cas-36cb). */
+  harness?: () => string | undefined;
   /**
    * Machine accent class (machineAccentClass from machine-accent.ts). The shell
    * root already carries it (conversation-shell.ts) so the thread inherits the
@@ -160,6 +178,7 @@ export interface ConversationViewOptions {
   sessionLive?: () => boolean;
   commandReceipts?: () => readonly CommandReceipt[];
   commandStep?: (clientRef: string, key: CommandKey) => void;
+  commandDismiss?: (clientRef: string) => void;
   /**
    * The device holding control when this one cannot take it over. A control
    * refusal then names it and says to take control once it is released, as
@@ -203,6 +222,8 @@ export interface ConversationViewOptions {
    * line rather than claiming nothing is waiting (cas-04ee).
    */
   loadingHistory?: () => boolean;
+  historyError?: () => { detail: string; before?: number } | undefined;
+  retryHistory?: () => void;
   /**
    * When this conversation began to open (cas-813a). The loading line keeps
    * the attach's motion clock, so it doesn't start its motion over.
@@ -470,6 +491,8 @@ export class ConversationView {
   private readonly above: HTMLElement;
   private readonly below: HTMLElement;
   private readonly loadLater: HTMLButtonElement;
+  private readonly historyFailure: HTMLElement;
+  private readonly historyFailureDetail: HTMLElement;
   private windowFrame?: number;
   private model?: readonly ThreadItem[];
   private earlierIntent = false;
@@ -588,6 +611,15 @@ export class ConversationView {
     this.loadLater = document.createElement("button"); this.loadLater.type = "button";
     this.loadLater.className = "conversation-load-earlier"; this.loadLater.textContent = "Load later"; this.loadLater.hidden = true;
     this.loadLater.onclick = () => this.moveWindow(false);
+    this.historyFailure = document.createElement("div");
+    this.historyFailure.className = "conversation-history-error";
+    this.historyFailure.setAttribute("role", "alert");
+    this.historyFailure.hidden = true;
+    this.historyFailureDetail = document.createElement("p");
+    const retryHistory = document.createElement("button"); retryHistory.type = "button";
+    retryHistory.className = "conversation-load-earlier"; retryHistory.textContent = "Retry history";
+    retryHistory.onclick = () => this.options.retryHistory?.();
+    this.historyFailure.append(this.historyFailureDetail, retryHistory);
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
@@ -597,7 +629,7 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.commands, this.endReceipt, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.historyFailure, this.commands, this.endReceipt, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -746,7 +778,7 @@ export class ConversationView {
     if (signature === this.commandSignature) return;
     this.commandSignature = signature;
     this.commands.hidden = !receipts.length;
-    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key));
+    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key), this.options.commandDismiss);
   }
 
   /** Scroll-only window changes reuse the last data/state presentation. */
@@ -768,7 +800,7 @@ export class ConversationView {
     const ended = this.options.sessionEnd?.();
     this.phase = ended ? undefined : this.options.phase?.();
     const working = !ended && (this.phase !== undefined || this.options.working?.() === true);
-    if (!this.phase?.active && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
+    if (!this.phase && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
     if (!reuseModel || !this.model) {
@@ -811,7 +843,16 @@ export class ConversationView {
     if (!same || window.above > 0 || window.below > 0) reconcileChildren(this.msgs, [...(window.above > 0 ? [this.above] : []), ...children, ...(window.below > 0 ? [this.below] : [])]);
     this.renderPinned(document);
     this.renderUnsent();
-    this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
+    const historyError = this.options.historyError?.();
+    const failureAnchor = historyError?.before === undefined ? this.empty : this.loadEarlier;
+    const moveHistoryFailure = failureAnchor.nextElementSibling !== this.historyFailure;
+    const revealHistoryFailure = !!historyError && (this.historyFailure.hidden || moveHistoryFailure);
+    this.historyFailure.hidden = !historyError;
+    this.historyFailureDetail.textContent = historyError?.detail ?? "";
+    // An older-page failure belongs beside the paging control the reader
+    // used, not beyond the cached tail of a long conversation.
+    if (moveHistoryFailure) failureAnchor.after(this.historyFailure);
+    this.renderEmpty(model.length === 0 && !historyError, this.options.loadingHistory?.() === true);
     this.renderEarlier(model.length === 0);
     this.endReceipt.hidden = !ended;
     if (ended) {
@@ -842,6 +883,20 @@ export class ConversationView {
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
+    if (revealHistoryFailure) {
+      // An older-page error is now the reader's place. A queued activity pin
+      // or reconnect restoration must not take its Retry control back offscreen.
+      if (historyError?.before !== undefined) {
+        this.following = false;
+        this.pinDeferred = false;
+        this.placePending = false;
+        this.place = undefined;
+      }
+      this.historyFailure.scrollIntoView?.({ block: "nearest" });
+      this.scrolledTo = this.element.scrollTop;
+      this.notePlace();
+      this.jump.hidden = shouldFollowTail(this.element);
+    }
   }
 
   /** Explicit paging through rows already held in memory. */
@@ -1288,12 +1343,14 @@ export class ConversationView {
     const echo = this.options.echo?.()?.trim() || "";
     const activity = this.options.activity?.();
     const activityText = activity ? emptyCardActivityText(activity, Date.now()) : "";
-    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, copy.said]);
+    const harness = this.options.harness?.();
+    const signature = JSON.stringify([supervisor, machine, project, harness, echo, activityText, copy.said]);
     if (this.empty.dataset.signature === signature) return;
     this.empty.dataset.signature = signature;
     const document = this.element.ownerDocument;
-    const mono = document.createElement("span"); mono.className = "mono"; mono.setAttribute("aria-hidden", "true");
-    mono.textContent = machineMonogram(machine || supervisor);
+    const avatar = document.createElement("template");
+    avatar.innerHTML = providerAvatarMarkup({ harness, fallback: machineMonogram(machine || supervisor), className: "mono" });
+    const mono = avatar.content.firstElementChild as HTMLElement; mono.setAttribute("aria-hidden", "true");
     // The project titles the card, as it titles the header and every list row
     // (journey F7); machine and codename sit beneath it. Without a project the
     // codename is the only name there is, and it keeps the title.
@@ -1371,23 +1428,16 @@ export class ConversationView {
     const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
     const phase = this.options.phase?.();
     const working = !this.options.sessionEnd?.() && (phase !== undefined || this.options.working?.() === true) && !sending;
-    const signature = (value?: PhaseLine): string => JSON.stringify([value?.label, value?.active, value?.unavailable, value?.elapsed !== undefined]);
-    if (working !== this.nodes.has("working") || signature(phase) !== signature(this.phase)) this.update();
-    else {
-      const clock = this.nodes.get("working")?.querySelector(".phase-clock");
-      if (clock && phase?.elapsed !== undefined) clock.textContent = phase.elapsed;
-    }
+    if (working !== this.nodes.has("working") || phaseSignature(phase) !== phaseSignature(this.phase)) this.update();
+    else if (phase) this.syncPhase(this.nodes.get("working"), phase);
   }
 
   private renderItem(node: HTMLElement, item: ThreadItem): void {
     const rows = this.options.workRows;
-    const signature = item.type === "working" ? JSON.stringify([this.phase?.label, this.phase?.active, this.phase?.unavailable, this.phase?.elapsed !== undefined])
+    const signature = item.type === "working" ? phaseSignature(this.phase)
       : item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
     if (node.dataset.signature === signature) {
-      if (item.type === "working") {
-        const clock = node.querySelector(".phase-clock");
-        if (clock && this.phase?.elapsed !== undefined) clock.textContent = this.phase.elapsed;
-      }
+      if (item.type === "working" && this.phase) this.syncPhase(node, this.phase);
       return;
     }
     node.dataset.signature = signature;
@@ -1425,7 +1475,7 @@ export class ConversationView {
     node.className = "turn working-turn";
     const phase = this.phase;
     const line = document.createElement("div"); line.className = phase?.unavailable ? "phase-line" : phase ? "working phase-line" : "working"; line.setAttribute("role", "status");
-    if (phase) line.dataset.active = String(phase.active);
+    if (phase) { line.dataset.active = String(phase.active); line.dataset.state = phase.state; }
     const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
     dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
     line.append(dots, document.createTextNode(phase?.label ?? "working"));
@@ -1433,13 +1483,28 @@ export class ConversationView {
       const clock = document.createElement("span"); clock.className = "phase-clock"; clock.setAttribute("role", "timer"); clock.setAttribute("aria-live", "off"); clock.textContent = phase.elapsed;
       line.append(document.createTextNode(" · "), clock);
     }
+    if (phase?.step) {
+      const step = document.createElement("span"); step.className = "phase-step"; step.textContent = phase.step;
+      line.append(document.createTextNode(" · "), step);
+    }
+    if (phase?.lastActivityAt) line.append(document.createTextNode(" · Last activity "), document.createElement("time"));
     node.replaceChildren(line);
-    if (phase?.active && phase.elapsed !== undefined && this.phaseClock === undefined) {
-      this.phaseClock = setInterval(() => {
-        const clock = this.nodes.get("working")?.querySelector(".phase-clock");
-        const current = this.options.phase?.();
-        if (this.element.isConnected && clock && current?.active && current.elapsed !== undefined) clock.textContent = current.elapsed;
-      }, 1000);
+    if (phase) this.syncPhase(node, phase);
+    // Facts expire without any new event, so the line re-reads its phase each
+    // second while one is shown, not only while it is busy.
+    if (phase && this.phaseClock === undefined) {
+      this.phaseClock = setInterval(() => { if (this.element.isConnected) this.refreshWorking(); }, 1000);
+    }
+  }
+
+  /** Moving values change in place; a new state or step re-renders the line. */
+  private syncPhase(node: HTMLElement | undefined, phase: PhaseLine): void {
+    const clock = node?.querySelector(".phase-clock");
+    if (clock && phase.elapsed !== undefined) clock.textContent = phase.elapsed;
+    const time = node?.querySelector("time");
+    if (time && phase.lastActivityAt && time.dateTime !== phase.lastActivityAt) {
+      time.dateTime = phase.lastActivityAt;
+      time.textContent = new Date(phase.lastActivityAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
     }
   }
 
@@ -1582,6 +1647,14 @@ export class ConversationView {
   }
 
   private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend, run?: UnconfirmedRun): HTMLElement {
+    const command = send.deviceLabel === "Terminal" && !send.stamped ? nativeCommandReceipt(send.text) : undefined;
+    if (command) {
+      const receipt = document.createElement("div"); receipt.className = "native-command-receipt phase-line";
+      const label = document.createElement("span"); label.textContent = command.label;
+      const body = document.createElement("code"); body.textContent = command.text;
+      receipt.append(label, document.createTextNode(" · "), body);
+      return receipt;
+    }
     const bubble = document.createElement("div");
     bubble.className = "bub";
     bubble.dataset.state = send.state;
@@ -2049,7 +2122,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     table.append(scroll, actions, status);
     nodes.push(table);
   }
-  if (options.attachments === "none") return nodes;
+  if (options.attachments === "none") return withReplyImages(nodes, context);
   const sheet = turnRenderers.get("attachment");
   for (const attachment of reply.attachments ?? []) {
     if (sheet && context) { nodes.push(sheet(reply, { ...context, attachment })); continue; }
@@ -2057,6 +2130,13 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`; link.dataset.artifactId = attachment.artifact_id; link.textContent = attachment.name; link.title = `${attachment.mime} · ${attachment.size_bytes} bytes`;
     row.append(link); nodes.push(row);
   }
+  return withReplyImages(nodes, context);
+}
+
+/** Without a machine to ask, an inline image stays the reply's own text. */
+function withReplyImages(nodes: HTMLElement[], context: TurnRenderContext | undefined): HTMLElement[] {
+  const resolve = replyImageResolver;
+  hydrateReplyImages(nodes, reference => context && resolve ? resolve(reference, context) : Promise.resolve(undefined));
   return nodes;
 }
 

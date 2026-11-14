@@ -22,6 +22,9 @@ pub struct SessionEndOutcome {
     pub at: String,
     pub reason: String,
     pub workers_stopped: Vec<String>,
+    /// Work measured before teardown, with the observed stop and recovery outcome.
+    #[serde(default)]
+    pub worker_states: Vec<String>,
     pub orphans: Vec<String>,
     /// Missing ownership evidence must never count as a successful stop.
     #[serde(default)]
@@ -71,6 +74,7 @@ fn retain_end_receipt(sessions: &Path, metadata: &SessionMetadata) -> std::io::R
         ended: SessionEndOutcome {
             at: Utc::now().to_rfc3339(), reason: "metadata_removed".into(),
             workers_stopped: Vec::new(), orphans: Vec::new(),
+            worker_states: Vec::new(),
             // Metadata removal proves the session ended, not its workers.
             unverified: metadata.workers.iter().map(|worker| worker.name.clone()).collect(),
         },
@@ -680,6 +684,7 @@ impl SessionInfo {
             })
     }
 
+    // gate-audit[override_policy]: selector Chooses whether CAS_ROOT participates in read-only registry lookup.
     fn live_registry_worker_names(&self, override_policy: RootOverride) -> Option<Vec<String>> {
         let project_dir = self.metadata.project_dir.as_deref()?;
         let cas_root = match override_policy {
@@ -923,6 +928,7 @@ mod tests {
         let rich = SessionEndOutcome {
             at: Utc::now().to_rfc3339(), reason: "prompt_input_exit".into(),
             workers_stopped: vec!["worker".into()], orphans: Vec::new(), unverified: Vec::new(),
+            worker_states: Vec::new(),
         };
         manager.record_ended(&replacement.name, rich.clone()).unwrap();
         assert!(manager.remove_metadata_if_current(&replacement).unwrap());

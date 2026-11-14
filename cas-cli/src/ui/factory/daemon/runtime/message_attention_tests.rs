@@ -1551,3 +1551,44 @@ fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
         );
     }
 }
+
+/// cas-c1598 (GH #1570): a Codex supervisor registered with an eager,
+/// synthetic `codex-` id consumed and answered a worker message natively.
+/// Its rollout is found the way the Commander mirror finds it, so the
+/// consumed message gets its receipt and raises no unread alarm or bounce.
+#[test]
+fn cas_c1598_unbound_codex_supervisor_turn_consumes_the_message() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = f.aged("worker", "supervisor", "status: QA green on the fixture");
+    f.queue.mark_transport_delivered(id).unwrap();
+    let row = f.queue.queued_prompt(id).unwrap().unwrap();
+    let wire = super::super::delivery::frame_pty_payload(
+        cas_mux::SupervisorCli::Codex,
+        "worker",
+        &super::teams_body_fallback_text(&row),
+    );
+    let account = f.root.path().join("codex-supervisor");
+    let rollout_id = "019f84af-3121-7950-ba14-b01db2da1199";
+    let path = account.join(format!("sessions/2026/10/15/rollout-2026-10-15T12-00-00-{rollout_id}.jsonl"));
+    let now = chrono::Utc::now() - chrono::Duration::seconds(400);
+    let records = [
+        serde_json::json!({"timestamp":now.to_rfc3339(),"type":"session_meta","payload":{"id":rollout_id,"cwd":f.daemon.app.project_path(),"originator":"codex-tui","source":"cli"}}),
+        serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"answered"}}),
+        serde_json::json!({"timestamp":now.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":wire}],"internal_chat_message_metadata_passthrough":{"turn_id":"answered"}}}),
+        serde_json::json!({"timestamp":(now+chrono::Duration::seconds(2)).to_rfc3339(),"type":"event_msg","payload":{"type":"task_complete","turn_id":"answered"}}),
+    ];
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, records.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+    let store = open_agent_store(&f.cas_dir).unwrap();
+    let mut supervisor = store.get(&format!("{SUPERVISOR}-id")).unwrap();
+    supervisor.cc_session_id = Some("codex-test-supervisor-synthetic".into());
+    supervisor.metadata.insert("supervisor_cli".into(), "codex".into());
+    supervisor.metadata.insert("supervisor_account_dir".into(), account.to_string_lossy().into());
+    store.register(&supervisor).unwrap();
+
+    let alarms = f.scan();
+    let report = f.queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::ObservedWake));
+    assert!(alarms.is_empty(), "a consumed message raises no unread alarm");
+}

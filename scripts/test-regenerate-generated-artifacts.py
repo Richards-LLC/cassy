@@ -194,8 +194,6 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertRegex(result.stderr.splitlines()[0], r"hub-web/dist.*failed")
         self.assertIn("regenerated " + LEDGER, result.stdout)
-        self.assertNotIn("--- reference-history", result.stderr,
-                         "successful step logs must not be repeated as failure diagnostics")
         # The merge receipt keeps only line one, so its log must survive exit.
         match = re.search(r"log: ([^)]+)", result.stderr.splitlines()[0])
         self.assertIsNotNone(match, result.stderr)

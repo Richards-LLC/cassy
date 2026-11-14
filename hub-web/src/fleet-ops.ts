@@ -10,6 +10,7 @@
  * current}, and announces FleetChanged; nothing here polls.
  */
 
+import { epicTitle, type ReleaseEpic } from "./progress-model";
 import { fleetControlGate, type FleetControlGate, type FleetOperation } from "./fleet-permissions";
 import type { Scope } from "./types";
 
@@ -60,7 +61,10 @@ export type OperationKind =
   | "set_worker_hold"
   | "recycle_worker"
   | "shutdown_workers"
-  | "assign_task";
+  | "assign_task"
+  | "freeze_train"
+  | "lift_train_freeze"
+  | "set_auto_cut_paused";
 
 export interface OperationRequest {
   readonly op: { readonly kind: OperationKind } & Readonly<Record<string, unknown>>;
@@ -186,28 +190,69 @@ export function assignAction(task: FleetTask, worker: string | null): FleetActio
 }
 
 /** Focus the factory on an epic (O2). Reversible. */
-export function focusEpicAction(epicId: string, current: string | null): FleetAction {
+export function focusEpicAction(epic: Pick<ReleaseEpic, "id" | "title">, current: Pick<ReleaseEpic, "id" | "title"> | null): FleetAction {
+  const epicId = epic.id;
+  const title = epicTitle(epic) || "Untitled epic";
   return {
     id: `focus:${epicId}`,
     operation: "focus-epic",
-    label: `Focus ${epicId}`,
+    label: title,
     destructive: false,
-    request: { op: { kind: "focus_epic", epic_id: epicId }, expected: { epic_id: current } },
-    progress: `Focusing ${epicId}…`,
-    done: `Focused on ${epicId}.`,
+    request: { op: { kind: "focus_epic", epic_id: epicId }, expected: { epic_id: current?.id ?? null } },
+    progress: `Focusing ${title}…`,
+    done: `Focused on ${title}.`,
     // Undo restores the previous focus, or clears it when there was none.
-    inverse: () => (current ? focusEpicAction(current, epicId) : clearFocusAction(epicId)),
+    inverse: () => (current ? focusEpicAction(current, epic) : clearFocusAction(epic)),
+  };
+}
+
+/** cas-2f4d: freeze the release train at its tip. One tap; only the release publishing or Lift ends it. */
+export function freezeTrainAction(epicId: string): FleetAction {
+  return {
+    id: `freeze:${epicId}`,
+    operation: "freeze-train",
+    label: "Freeze for release",
+    destructive: false,
+    request: { op: { kind: "freeze_train", epic_id: epicId }, expected: {} },
+    progress: "Freezing the train…",
+    done: "Train frozen for release.",
+  };
+}
+
+/** cas-2f4d: the operator's one-tap lift; no supervisor action lifts a freeze. */
+export function liftFreezeAction(epicId: string): FleetAction {
+  return {
+    id: `lift-freeze:${epicId}`,
+    operation: "lift-freeze",
+    label: "Lift freeze",
+    destructive: false,
+    request: { op: { kind: "lift_train_freeze", epic_id: epicId }, expected: {} },
+    progress: "Lifting the freeze…",
+    done: "Freeze lifted; merges resume.",
+  };
+}
+
+/** cas-e060: the operator's pause, or resume, of the train's automatic cut. */
+export function autoCutAction(epicId: string, paused: boolean): FleetAction {
+  return {
+    id: `auto-cut:${epicId}`,
+    operation: "auto-cut",
+    label: paused ? "Resume auto-cut" : "Pause auto-cut",
+    destructive: false,
+    request: { op: { kind: "set_auto_cut_paused", epic_id: epicId, paused: !paused }, expected: {} },
+    progress: paused ? "Resuming auto-cut…" : "Pausing auto-cut…",
+    done: paused ? "Auto-cut resumed." : "Auto-cut paused; the supervisor cuts this train.",
   };
 }
 
 /** Clear the factory's epic focus: focus_epic with clear=true (cas-566b). */
-export function clearFocusAction(current: string): FleetAction {
+export function clearFocusAction(current: Pick<ReleaseEpic, "id" | "title">): FleetAction {
   return {
     id: "focus:clear",
     operation: "focus-epic",
     label: "Clear focus",
     destructive: false,
-    request: { op: { kind: "focus_epic", clear: true }, expected: { epic_id: current } },
+    request: { op: { kind: "focus_epic", clear: true }, expected: { epic_id: current.id } },
     progress: "Clearing the epic focus…",
     done: "Epic focus cleared.",
     inverse: () => focusEpicAction(current, null),

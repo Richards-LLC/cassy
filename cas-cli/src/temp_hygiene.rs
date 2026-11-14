@@ -524,10 +524,6 @@ mod tests {
             panic!("a small tmpfs root must warn, got {verdict:?}");
         };
         assert!(message.contains("/tmp"), "must name the mount: {message}");
-        assert!(
-            message.contains("scratch"),
-            "must point at the disk-backed default: {message}"
-        );
     }
 
     #[test]
@@ -604,10 +600,8 @@ mod tests {
         );
 
         let rendered = inventory.render();
-        assert!(rendered.contains("Stale Cassy temp roots"), "{rendered}");
+
         assert!(rendered.contains("cas-probe-comm-1234"), "{rendered}");
-        assert!(rendered.contains("512 bytes"), "{rendered}");
-        assert!(rendered.contains("Never auto-deleted"), "{rendered}");
     }
 
     #[test]

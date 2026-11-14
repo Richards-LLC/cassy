@@ -11,6 +11,9 @@ use serde::Serialize;
 
 use super::Cli;
 
+#[path = "ledger_scorers.rs"]
+mod scorers;
+
 #[derive(Args)]
 pub struct LedgerArgs {
     #[command(subcommand)]
@@ -33,6 +36,25 @@ enum LedgerCommand {
         /// How many days of task notes and verifications to read
         #[arg(long, default_value_t = 30)]
         days: i64,
+        /// Push/pull the ledger after recording local history
+        #[arg(long)]
+        sync: bool,
+    },
+    /// Give a measured range and record who received it; use --preview for a read
+    Estimate {
+        /// pipeline, task, epic or release
+        kind: String,
+        /// Stage name, task id or release version
+        subject: String,
+        /// Bind a pipeline promise to the SHA whose completion will settle it
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(long, default_value = "operator")]
+        recipient: String,
+        #[arg(long, default_value_t = 20)]
+        runs: usize,
+        #[arg(long)]
+        preview: bool,
     },
     /// Record a published release from its latency receipt (the release train runs this)
     #[command(hide = true)]
@@ -57,24 +79,35 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
                 print!("{}", render(&report));
             }
         }
-        LedgerCommand::Backfill { days } => {
+        LedgerCommand::Backfill { days,sync } => {
             let since = Utc::now() - Duration::days(*days);
             let inserted = crate::quality_ledger::backfill(cas_root, since)?;
             let gh = std::env::var_os(crate::github_issue_attach::GH_BIN_ENV)
                 .filter(|value| !value.is_empty())
                 .map_or_else(|| std::path::PathBuf::from("gh"), std::path::PathBuf::from);
+            let pipeline = crate::quality_ledger::estimates::github_history(cas_root, 20, since);
+            let (pipeline_inserted, pipeline_skipped) = match pipeline {
+                Ok(n) => (n,None), Err(error) => (0,Some(error.to_string())),
+            };
             let friction = crate::quality_ledger::backfill_friction(cas_root, since, &gh)?;
+            let cloud_sync=if *sync { sync_ledger(cas_root)? } else { None };
             if cli.json {
                 println!(
                     "{}",
                     serde_json::json!({
-                        "inserted": inserted + friction.tasks + friction.issues,
+                        "cloud_sync": cloud_sync,
+                        "inserted": inserted + pipeline_inserted + friction.tasks + friction.issues,
+                        "pipeline_samples": pipeline_inserted,
+                        "pipeline_skipped": pipeline_skipped,
                         "friction_tasks": friction.tasks,
                         "friction_issues": friction.issues,
                         "friction_issues_skipped": friction.issues_skipped,
                     })
                 );
             } else {
+                if *sync { println!("Cloud sync: {}",cloud_sync.map_or_else(||"not logged in".into(),|s|format!("{} pushed, {} pulled, {} refused, unavailable={}",s.pushed,s.pulled,s.refused,s.capability_absent))); }
+                println!("Recorded {pipeline_inserted} measured pipeline samples.");
+                if let Some(reason)=pipeline_skipped { println!("Pipeline history skipped: {reason}"); }
                 println!("Recorded {inserted} events from the last {days} days of history.");
                 println!(
                     "Recorded {} friction row(s): {} Cassy bug task(s), {} Cassy issue(s).",
@@ -85,6 +118,16 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
                 if let Some(reason) = &friction.issues_skipped {
                     println!("Cassy issues skipped: {reason}");
                 }
+            }
+        }
+        LedgerCommand::Estimate { kind,subject,instance,recipient,runs,preview } => {
+            if kind == "pipeline" && !preview && instance.is_none() {
+                bail!("pipeline estimates need --instance <sha> so completion can settle the promise; use --preview for a read");
+            }
+            let result=crate::quality_ledger::estimates::estimate(cas_root,kind,subject,instance.as_deref(),recipient,*runs,!preview)?;
+            if cli.json { println!("{}",serde_json::to_string_pretty(&result)?); }
+            else { println!("{}",result.render());
+                for reference in result.references { println!("  {}: {:.1} min",reference.id,reference.minutes); }
             }
         }
         LedgerCommand::RecordRelease { receipt } => {
@@ -99,27 +142,16 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
 /// A report reads the fleet's rows, so it asks for them first. Being offline or
 /// on a server without the route still leaves a correct local report.
 fn pull_before_report(cas_root: &Path) {
-    let synced = (|| -> Result<_> {
-        use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
-        let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
-        if !config.is_logged_in() {
-            return Ok(None);
-        }
-        let queue = std::sync::Arc::new(SyncQueue::open(cas_root)?);
-        queue.init()?;
-        let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)?;
-        let syncer = CloudSyncer::new_for_project(
-            queue,
-            config,
-            CloudSyncerConfig::default(),
-            project_id,
-            cas_root,
-        );
-        Ok(Some(syncer.sync_quality_events(true)?))
-    })();
-    if let Err(error) = synced {
-        tracing::warn!(%error, "ledger report: showing local rows; cloud sync failed");
-    }
+    if let Err(error)=sync_ledger(cas_root) { tracing::warn!(%error,"ledger report: showing local rows; cloud sync failed"); }
+}
+fn sync_ledger(cas_root:&Path)->Result<Option<crate::cloud::syncer::quality_events::QualitySyncSummary>> {
+    use crate::cloud::{CloudConfig,CloudSyncer,CloudSyncerConfig,SyncQueue};
+    let config=CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    if !config.is_logged_in() { return Ok(None); }
+    let queue=std::sync::Arc::new(SyncQueue::open(cas_root)?); queue.init()?;
+    let project_id=crate::cloud::resolve_canonical_id_for_sync(cas_root)?;
+    let syncer=CloudSyncer::new_for_project(queue,config,CloudSyncerConfig::default(),project_id,cas_root);
+    Ok(Some(syncer.sync_quality_events(true)?))
 }
 
 /// Trimmed stdout of a successful git command, empty output included.
@@ -151,7 +183,7 @@ fn minutes_between(from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
     (to - from).num_seconds().max(0) as f64 / 60.0
 }
 
-fn median(mut values: Vec<f64>) -> Option<f64> {
+pub(crate) fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
@@ -263,36 +295,49 @@ fn release_range(repo: &Path, release: &str, published: bool) -> Result<(String,
     Ok((previous, release.to_string()))
 }
 
-fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
-    let rank = ((percentile * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
-    sorted[rank - 1]
-}
 
-/// Per delivery (each first-parent landing on main), minutes from its earliest
-/// authored commit to the landing.
-fn delivery_landing_spread(repo: &Path, from: &str, to: &str) -> Measure<LandingSpread> {
-    let Some(landings) =
-        git_output(repo, &["log", "--first-parent", "--format=%H %cI", &format!("{from}..{to}")])
-    else {
+/// First-parent main landings carry a train's individual deliveries. Recorded
+/// merges identify train boundaries; Git also retains deliveries whose local
+/// observation was lost. A release preparation commit is not another delivery.
+fn delivery_landing_spread(root: &Path, repo: &Path, from: &str, to: &str) -> Measure<LandingSpread> {
+    let Some(landings) = git_output(repo, &["log", "--first-parent", "--format=%H %cI", &format!("{from}..{to}")]) else {
         return unknown(format!("git log {from}..{to} failed"));
     };
-    let mut minutes: Vec<f64> = landings
-        .lines()
-        .filter_map(|landing| {
-            let (sha, landed_at) = landing.split_once(' ')?;
-            let landed_at = parse_time(landed_at)?;
-            let authored = git(repo, &["log", "--no-merges", "--format=%aI", &format!("{sha}^1..{sha}")])?;
-            let first = authored.lines().filter_map(parse_time).min()?;
-            Some(minutes_between(first, landed_at))
-        })
-        .collect();
-    if minutes.is_empty() {
-        return unknown(format!("no deliveries landed in {from}..{to}"));
+    let recorded = cas_store::observed_delivery_merges(root).unwrap_or_default();
+    let known: std::collections::BTreeSet<_> = recorded.iter().map(|m| m.merge_commit_sha.as_str()).collect();
+    let mut minutes = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for landing in landings.lines() {
+        let Some((sha, at)) = landing.split_once(' ') else { continue };
+        let Some(at) = parse_time(at) else { continue };
+        let incoming = git(repo, &["log", "--first-parent", "--format=%H %P", &format!("{sha}^1..{sha}^2")])
+            .unwrap_or_default();
+        let train = incoming.lines().any(|line| line.split_whitespace().next().is_some_and(|id| known.contains(id)));
+        let deliveries: Vec<_> = if train {
+            incoming.lines().filter_map(|line| {
+                let parts: Vec<_> = line.split_whitespace().collect();
+                (parts.len() >= 3 || parts.first().is_some_and(|id| known.contains(id))).then(|| parts[0].to_string())
+            }).collect()
+        } else { vec![sha.to_string()] };
+        for delivery in deliveries {
+            let recorded = recorded.iter().find(|m| m.merge_commit_sha == delivery);
+            let identity = recorded.and_then(|m| {
+                let cycles = cas_store::delivery_cycles(root, &m.task_id).ok()?;
+                cycles.into_iter().find(|c| c.anchors.contains(&m.source_commit_sha)).map(|c| c.cycle_id)
+            }).unwrap_or_else(|| recorded.map_or_else(|| delivery.clone(), |m| m.task_id.clone()));
+            if !seen.insert(identity) { continue }
+            let authored = git(repo, &["log", "--no-merges", "--format=%aI", &format!("{delivery}^1..{delivery}"), "--not", from])
+                .unwrap_or_default();
+            if let Some(first) = authored.lines().filter_map(parse_time).min() {
+                minutes.push(minutes_between(first, at));
+            }
+        }
     }
+    if minutes.is_empty() { return unknown(format!("no deliveries landed in {from}..{to}")) }
     minutes.sort_by(f64::total_cmp);
     Measure::Known(LandingSpread {
         median_minutes: median(minutes.clone()).unwrap_or_default(),
-        p90_minutes: nearest_rank(&minutes, 0.9),
+        p90_minutes: crate::quality_ledger::estimates::percentile(&minutes, 0.9),
         deliveries: minutes.len(),
     })
 }
@@ -412,6 +457,7 @@ fn new_checks(repo: &Path, from: &str, to: &str) -> Measure<NewChecks> {
 }
 
 fn release_shape(
+    root: &Path,
     repo: &Path,
     release: &str,
     published: bool,
@@ -422,7 +468,7 @@ fn release_shape(
         main_to_published(repo, release, published, recorded_publish_minutes, published_at);
     match release_range(repo, release, published) {
         Ok((from, to)) => (
-            SpeedRow { commit_to_main: delivery_landing_spread(repo, &from, &to), main_to_published_minutes },
+            SpeedRow { commit_to_main: delivery_landing_spread(root, repo, &from, &to), main_to_published_minutes },
             ComplexityRow {
                 lines: line_churn(repo, &from, &to),
                 config_keys: new_config_keys(repo, &from, &to),
@@ -477,6 +523,15 @@ fn record_release(cas_root: &Path, repo: &Path, receipt: &Path) -> Result<String
     event.occurred_at = published_at;
     event.release_version = Some(version.clone());
     crate::quality_ledger::emit(cas_root, &event);
+    // A full release sample uses the receipt's request-to-publication endpoint.
+    if let Some(seconds)=fields.get("REQUEST_TO_PUBLISHED_SECS").and_then(|v|v.parse::<f64>().ok()) {
+        let mut sample=cas_store::NewQualityEvent::new(format!("release_duration|{version}"),
+            QualityPayload::CheckRun { review: None, check_id:"release_total".into(),stage:cas_store::CheckStage::Lane,
+                outcome:CheckOutcome::Pass,sha:None,minutes:Some(seconds/60.0) });
+        sample.occurred_at=published_at; sample.release_version=Some(version.clone());
+        crate::quality_ledger::emit(cas_root,&sample);
+    }
+    crate::quality_ledger::estimates::complete(cas_root,"release",&version,published_at,None,Some(&version));
     Ok(version)
 }
 
@@ -517,6 +572,79 @@ struct CheckRow {
     fail: u32,
     flaky: u32,
     error: u32,
+    /// Sum of observed durations, absent when none was observed; rows without
+    /// one count in `untimed`, never as zero.
+    minutes: Option<f64>,
+    timed: u32,
+    untimed: u32,
+}
+
+impl CheckRow {
+    fn add(&mut self, outcome: CheckOutcome, minutes: Option<f64>) {
+        match outcome {
+            CheckOutcome::Pass => self.pass += 1,
+            CheckOutcome::Fail => self.fail += 1,
+            CheckOutcome::Flaky => self.flaky += 1,
+            CheckOutcome::Error => self.error += 1,
+        }
+        if let Some(minutes) = minutes { *self.minutes.get_or_insert(0.0) += minutes; }
+        self.timed += u32::from(minutes.is_some());
+        self.untimed += u32::from(minutes.is_none());
+    }
+}
+
+/// What a check row measures. Only `result` rows are workflow, job or review
+/// outcomes; the rest must never enter a failure rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckCohort {
+    Result,
+    /// `worktree_merge` admission of a lane into its target, not a CI run.
+    MergeAdmission,
+    /// A queue ejection relayed without its failed run.
+    QueueNotice,
+    /// Success-only timing samples recorded for estimates.
+    DurationSample,
+}
+
+fn check_cohort(check_id: &str, outcome: CheckOutcome, minutes: Option<f64>, link: Option<&str>) -> CheckCohort {
+    use crate::quality_ledger::{MERGE_GATE_CHECK, MERGE_QUEUE_CHECK};
+    match check_id {
+        MERGE_GATE_CHECK => CheckCohort::MergeAdmission,
+        MERGE_QUEUE_CHECK if outcome == CheckOutcome::Fail && link.is_none() => CheckCohort::QueueNotice,
+        // Relay outcomes carry no duration; timed queue rows are pass-only run samples.
+        MERGE_QUEUE_CHECK if minutes.is_some() => CheckCohort::DurationSample,
+        "release_total" | "release_publish" | "train_tip_suite" => CheckCohort::DurationSample,
+        id if id.starts_with("task_duration:") => CheckCohort::DurationSample,
+        _ => CheckCohort::Result,
+    }
+}
+
+/// One project's rows for one check in one cohort.
+#[derive(Debug, Serialize)]
+struct CheckCohortRow {
+    project: String,
+    cohort: CheckCohort,
+    stage: String,
+    check_id: String,
+    #[serde(flatten)]
+    row: CheckRow,
+}
+
+/// A run-linked result row, kept with its own run identity.
+#[derive(Debug, Serialize)]
+struct CheckRunRow {
+    check_id: String,
+    stage: String,
+    outcome: CheckOutcome,
+    run_id: Option<u64>,
+    /// Workflow and job, when the emitter recorded them.
+    title: Option<String>,
+    link: String,
+    task: Option<String>,
+    sha: Option<String>,
+    minutes: Option<f64>,
+    at: DateTime<Utc>,
 }
 
 /// Sums of measured usage, with explicit counts for missing measurements.
@@ -544,6 +672,58 @@ impl TurnTotals {
 }
 
 #[derive(Debug, Serialize)]
+struct ReviewRound {
+    verification_id: String,
+    outcome: CheckOutcome,
+    provenance: String,
+    at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeliveryReviews {
+    project: String,
+    task: String,
+    cycle_id: Option<String>,
+    rounds: Vec<ReviewRound>,
+}
+
+#[derive(Debug, Serialize)]
+struct InterventionRow {
+    kind: &'static str,
+    title: Option<String>,
+    at: DateTime<Utc>,
+    actor: Option<String>,
+    source: Option<String>,
+}
+
+/// Detail rows retain each verdict, including errors and legacy unknowns.
+fn review_rows(events: &[QualityEvent]) -> Vec<DeliveryReviews> {
+    let superseded: std::collections::BTreeSet<_> = events.iter().filter_map(|e| match &e.payload {
+        QualityPayload::CheckRun { review: Some(r), .. } => r.supersedes.as_deref().map(|id| (e.project_id.as_str(), id)),
+        _ => None,
+    }).collect();
+    let mut rows = BTreeMap::<(String, String, Option<String>), Vec<ReviewRound>>::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for event in events {
+        let QualityPayload::CheckRun { check_id, outcome, review, .. } = &event.payload else { continue };
+        if check_id != "task_verifier" || superseded.contains(&(event.project_id.as_str(), event.id.as_str())) { continue }
+        let Some(task) = &event.task_id else { continue };
+        let id = review.as_ref().map_or(event.id.as_str(), |r| r.verification_id.as_str());
+        if !seen.insert((event.project_id.clone(), id.to_string())) { continue }
+        rows.entry((project_name(event), task.clone(), review.as_ref().and_then(|r| r.cycle_id.clone())))
+            .or_default().push(ReviewRound {
+                verification_id: id.to_string(), outcome: *outcome,
+                provenance: review.as_ref().map_or_else(|| "unknown".into(), |r| if r.provenance == "legacy" { "unknown".into() } else { r.provenance.clone() }),
+                at: event.occurred_at,
+            });
+    }
+    rows.into_iter().map(|((project, task, cycle_id), mut rounds)| {
+        rounds.sort_by_key(|r| (r.at, r.verification_id.clone()));
+        DeliveryReviews { project, task, cycle_id, rounds }
+    }).collect()
+}
+
+#[derive(Debug, Serialize)]
 struct LedgerReport {
     release: String,
     published: bool,
@@ -552,7 +732,21 @@ struct LedgerReport {
     events: usize,
     projects: Vec<String>,
     turns: TurnTotals,
+    turns_by_notice_kind: BTreeMap<String, TurnTotals>,
     turns_by_channel: BTreeMap<&'static str, TurnTotals>,
+    /// Turns per supervisor (its agent id), then per wake channel.
+    turns_by_actor: BTreeMap<String, BTreeMap<&'static str, TurnTotals>>,
+    /// Distinct tasks whose delivery merged in the window, from the merge record:
+    /// the per-delivery denominator. Unknown when the record does not cover the window.
+    deliveries: Measure<usize>,
+    /// The merges behind `deliveries`, oldest first.
+    merged: Vec<MergedRow>,
+    /// Skills, guards, rules and gates the release changed, from git between its tags.
+    changes: Measure<Vec<String>>,
+    reviews: Vec<DeliveryReviews>,
+    /// Rubric scorers with cited hits (cas-a5eb); measurement only.
+    scorers: Vec<scorers::Scorer>,
+    intervention_rows: Vec<InterventionRow>,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
     commit_to_main_minutes: Option<f64>,
@@ -562,10 +756,19 @@ struct LedgerReport {
     speed: SpeedRow,
     complexity: ComplexityRow,
     escapes: Vec<EscapeRow>,
+    /// This project's workflow, job and review results per stage, inside the
+    /// report window. Merge admissions, queue notices, duration samples and
+    /// other projects' rows are only in `check_cohorts`.
     checks: BTreeMap<String, CheckRow>,
+    check_cohorts: Vec<CheckCohortRow>,
+    /// This project's run-linked results; a failed queue run counts once in
+    /// `checks` however many deliveries it ejected.
+    check_runs: Vec<CheckRunRow>,
     features: BTreeMap<String, FeatureRow>,
     excluded_unscoped_measurements: usize,
     friction: Vec<FrictionRow>,
+    estimates: crate::quality_ledger::estimates::Calibration,
+    estimate_trend: Vec<(String,crate::quality_ledger::estimates::Calibration)>,
 }
 
 /// `(from, to]` for a release. A release ends at its release event, or at its tag
@@ -623,7 +826,23 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
                 }),
         );
     }
+    let history = cas_store::quality_events_between(cas_root, None, None)?;
+    events.retain(|event| !matches!(event.payload, QualityPayload::Intervention { .. })
+        || event.release_version.as_deref().is_none_or(|version| version == name));
+    for event in history.iter().filter(|e| matches!(e.payload, QualityPayload::Intervention { .. })
+        && e.release_version.as_deref() == Some(name.as_str())) {
+        if !events.iter().any(|e| e.id == event.id && e.project_id == event.project_id) { events.push(event.clone()); }
+    }
+    let duplicate_rebinds = crate::quality_ledger::duplicate_rebind_ids(cas_root, &history)?;
+    events.retain(|event| !event.project_id.is_empty() || !duplicate_rebinds.contains(&event.id));
     let mut report = aggregate(name, published, from, to, &events);
+    // Review is the delivery's history, not merely checks that happened between
+    // tag timestamps. Keep later/earlier rounds visible with their own dates.
+    let reviewed: std::collections::BTreeSet<_> = report.reviews.iter().map(|r| (r.project.clone(), r.task.clone())).collect();
+    let reviews: Vec<_> = history.iter().filter(|e| e.task_id.as_ref()
+        .is_some_and(|task| reviewed.contains(&(project_name(e), task.clone())))).cloned().collect();
+    report.reviews = review_rows(&reviews);
+    report.scorers = scorers::score(cas_root, repo, &report);
     let published_at = published
         .then(|| cas_store::quality_release_events(cas_root))
         .transpose()?
@@ -634,6 +853,7 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
                 .map(|event| event.occurred_at)
         });
     (report.speed, report.complexity) = release_shape(
+        cas_root,
         repo,
         &report.release,
         published,
@@ -641,6 +861,23 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         published_at,
     );
     report.friction = friction_rows(cas_root, repo, &events);
+    (report.deliveries, report.merged) = merged_in_window(cas_root, from, to);
+    report.changes = match release_range(repo, &report.release, published) {
+        Ok((from, to)) => gate_changes(repo, &from, &to),
+        Err(reason) => unknown(reason),
+    };
+    let mut grouped=BTreeMap::<String,Vec<QualityEvent>>::new();
+    let releases=cas_store::quality_release_events(cas_root)?;
+    for event in history.into_iter().filter(|e| matches!(e.payload,QualityPayload::EstimateOutcome {..})) {
+        let version=event.release_version.clone().or_else(|| releases.iter()
+            .filter(|r| r.occurred_at>=event.occurred_at).min_by_key(|r|r.occurred_at)
+            .and_then(|r| r.release_version.clone())).unwrap_or_else(||"unreleased".into());
+        grouped.entry(version).or_default().push(event);
+    }
+    let mut grouped:Vec<_>=grouped.into_iter().collect();
+    grouped.sort_by_key(|(_,events)|events.iter().map(|e|e.occurred_at).max());
+    report.estimate_trend=grouped.into_iter().map(|(release,events)|
+        (release,crate::quality_ledger::estimates::calibration(&events))).collect();
     Ok(report)
 }
 
@@ -688,6 +925,8 @@ fn friction_rows(cas_root: &Path, repo: &Path, events: &[QualityEvent]) -> Vec<F
         };
         let (state, status) = if !event.project_id.is_empty() {
             ("filed", format!("reported by {}", event.project_id))
+        } else if *source == FrictionSource::Estimate {
+            ("missed", "actual exceeded the bad-day estimate".into())
         } else if *source == FrictionSource::Task {
             tasks.get(reference).map_or(("filed", "task not found here".into()), |task| {
                 task_state(repo, task)
@@ -745,7 +984,15 @@ fn aggregate(
         events: events.len(),
         projects: Vec::new(),
         turns: TurnTotals::default(),
+        turns_by_notice_kind: BTreeMap::new(),
         turns_by_channel: BTreeMap::new(),
+        turns_by_actor: BTreeMap::new(),
+        deliveries: unknown("no merge record read"),
+        merged: Vec::new(),
+        changes: unknown("no repository read"),
+        reviews: review_rows(events),
+        scorers: Vec::new(),
+        intervention_rows: Vec::new(),
         interventions_total: 0,
         interventions: BTreeMap::new(),
         commit_to_main_minutes: None,
@@ -762,37 +1009,69 @@ fn aggregate(
         },
         escapes: Vec::new(),
         checks: BTreeMap::new(),
+        check_cohorts: Vec::new(),
+        check_runs: Vec::new(),
         features: BTreeMap::new(),
         excluded_unscoped_measurements: 0,
         friction: Vec::new(),
+        estimates: crate::quality_ledger::estimates::calibration(events),
+        estimate_trend: Vec::new(),
     };
+    let superseded: std::collections::BTreeSet<_> = events.iter().filter_map(|e| match &e.payload {
+        QualityPayload::CheckRun { review: Some(r), .. } => r.supersedes.as_deref().map(|id| (e.project_id.as_str(), id)),
+        QualityPayload::Turn { supersedes, .. } => supersedes.as_deref().map(|id| (e.project_id.as_str(), id)),
+        _ => None,
+    }).collect();
+    let mut cohorts = BTreeMap::<(String, CheckCohort, String, String), CheckRow>::new();
+    let mut failed_queue_runs = std::collections::BTreeSet::new();
     for event in events {
+        if superseded.contains(&(event.project_id.as_str(), event.id.as_str())) { continue }
         let project = project_name(event);
         if !report.projects.contains(&project) {
             report.projects.push(project.clone());
         }
         match &event.payload {
-            QualityPayload::Turn { woken_by, no_op, input_tokens, output_tokens, minutes, .. } => {
+            QualityPayload::Turn { woken_by, notice_kind, no_op, input_tokens, output_tokens, minutes, .. } => {
+                report.turns_by_notice_kind.entry(notice_kind.as_ref()
+                    .filter(|kind| !kind.bytes().all(|b| b.is_ascii_digit())).cloned()
+                    .unwrap_or_else(|| "unknown".into())).or_default()
+                    .add(*no_op, *input_tokens, *output_tokens, *minutes);
                 report.turns.add(*no_op, *input_tokens, *output_tokens, *minutes);
                 report.turns_by_channel.entry(woken_by.as_str()).or_default()
                     .add(*no_op, *input_tokens, *output_tokens, *minutes);
+                if let Some(actor) = &event.actor {
+                    report.turns_by_actor.entry(actor.clone()).or_default()
+                        .entry(woken_by.as_str()).or_default()
+                        .add(*no_op, *input_tokens, *output_tokens, *minutes);
+                }
             }
             QualityPayload::Intervention { intervention, .. } => {
+                report.intervention_rows.push(InterventionRow { kind: intervention.as_str(), title: event.title.clone(), at: event.occurred_at,
+                    actor: event.actor.clone(), source: event.local_note.clone() });
                 report.interventions_total += 1;
                 *report.interventions.entry(intervention.as_str()).or_default() += 1;
             }
-            QualityPayload::CheckRun { stage, outcome, .. } => {
+            QualityPayload::CheckRun { check_id, stage, outcome, sha, minutes, .. } => {
                 let stage = serde_json::to_value(stage)
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_string))
                     .unwrap_or_default();
-                let row = report.checks.entry(stage).or_default();
-                match outcome {
-                    CheckOutcome::Pass => row.pass += 1,
-                    CheckOutcome::Fail => row.fail += 1,
-                    CheckOutcome::Flaky => row.flaky += 1,
-                    CheckOutcome::Error => row.error += 1,
+                let cohort = check_cohort(check_id, *outcome, *minutes, event.link.as_deref());
+                cohorts.entry((project.clone(), cohort, stage.clone(), check_id.clone()))
+                    .or_default().add(*outcome, *minutes);
+                if cohort != CheckCohort::Result || !event.project_id.is_empty() { continue }
+                // One failed merge-group run ejects every delivery in its group.
+                if let Some(link) = &event.link {
+                    let ejection = check_id == crate::quality_ledger::MERGE_QUEUE_CHECK && *outcome == CheckOutcome::Fail;
+                    if ejection && !failed_queue_runs.insert(link.clone()) { continue }
+                    report.check_runs.push(CheckRunRow {
+                        check_id: check_id.clone(), stage: stage.clone(), outcome: *outcome,
+                        run_id: link.rsplit_once("/runs/").and_then(|(_, run)| run.split('/').next()?.parse().ok()),
+                        title: event.title.clone(), link: link.clone(), task: event.task_id.clone(),
+                        sha: sha.clone(), minutes: *minutes, at: event.occurred_at,
+                    });
                 }
+                report.checks.entry(stage).or_default().add(*outcome, *minutes);
             }
             QualityPayload::Escape { found_in, missed_stage } => report.escapes.push(EscapeRow {
                 project,
@@ -816,7 +1095,7 @@ fn aggregate(
                 }
             }
             // Status needs the task store; build_report resolves these rows.
-            QualityPayload::Friction { .. } => {}
+            QualityPayload::Friction { .. } | QualityPayload::Estimate { .. } | QualityPayload::EstimateOutcome { .. } => {}
             QualityPayload::FeatureFeedback { feature, verdict, source, injected, opened, used } => {
                 // Old backfills dated lifetime totals as new measured rows.
                 // Their keys were hashed and the rows may already be synced, so
@@ -838,6 +1117,9 @@ fn aggregate(
             }
         }
     }
+    report.check_cohorts = cohorts.into_iter()
+        .map(|((project, cohort, stage, check_id), row)| CheckCohortRow { project, cohort, stage, check_id, row })
+        .collect();
     // Recovered facts can arrive after an immutable release snapshot. Keep
     // snapshot counts as a floor when older relay history has been pruned.
     let observed_ejections = events.iter().filter(|event| event.project_id.is_empty()
@@ -845,6 +1127,118 @@ fn aggregate(
             outcome: CheckOutcome::Fail, .. } if check_id == crate::quality_ledger::MERGE_QUEUE_CHECK)).count() as u32;
     report.ejections = report.ejections.max(observed_ejections);
     report
+}
+
+/// One delivery that merged in the window (cas-3dd7).
+#[derive(Debug, Serialize)]
+struct MergedRow {
+    task: String,
+    title: Option<String>,
+    merged_at: DateTime<Utc>,
+}
+
+/// Distinct tasks whose delivery merged in `(from, to]`, first merge each. The
+/// record must already exist before the window opens, or the count would read
+/// a partly recorded window as a small number.
+fn merged_in_window(
+    cas_root: &Path,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> (Measure<usize>, Vec<MergedRow>) {
+    let merges = match cas_store::observed_delivery_merges(cas_root) {
+        Ok(merges) => merges,
+        Err(error) => return (unknown(format!("merge record unreadable: {error}")), Vec::new()),
+    };
+    let Some(from) = from else { return (unknown("the window has no start"), Vec::new()) };
+    if !merges.first().is_some_and(|first| first.created_at <= from) {
+        return (unknown("the merge record starts inside this window"), Vec::new());
+    }
+    let tasks = crate::store::open_task_store(cas_root).ok();
+    let mut rows: Vec<MergedRow> = Vec::new();
+    for merge in merges.into_iter().filter(|merge| merge.created_at > from && to.is_none_or(|to| merge.created_at <= to)) {
+        if rows.iter().any(|row| row.task == merge.task_id) {
+            continue;
+        }
+        let title = tasks.as_ref().and_then(|store| store.get(&merge.task_id).ok()).map(|task| task.title);
+        rows.push(MergedRow { task: merge.task_id, title, merged_at: merge.created_at });
+    }
+    (Measure::Known(rows.len()), rows)
+}
+
+/// Paths whose change alters how work is gated or guided, and what to call it.
+const GATE_PATHS: &[(&str, &str)] = &[
+    ("cas-cli/src/builtins/skills/", "skill"),
+    ("cas-cli/src/hooks/", "guard"),
+    (".claude/rules/", "rule"),
+    ("cas-cli/src/mcp/tools/core/task/lifecycle/close_ops", "close gate"),
+    ("cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs", "merge gate"),
+    ("cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs", "merge gate"),
+];
+
+/// The skills, guards, rules and gates touched between a release's tags:
+/// "skill cas-worker", "guard handlers", "rule rule-176", "close gate".
+fn gate_changes(repo: &Path, from: &str, to: &str) -> Measure<Vec<String>> {
+    let range = format!("{from}..{to}");
+    let mut args = vec!["log", "--format=", "--name-only", range.as_str(), "--"];
+    args.extend(GATE_PATHS.iter().map(|(path, _)| *path));
+    let Some(paths) = git_output(repo, &args) else {
+        return unknown(format!("git log {range} failed"));
+    };
+    let mut changes: Vec<String> = paths
+        .lines()
+        .filter_map(|path| {
+            let (prefix, kind) = GATE_PATHS.iter().find(|(prefix, _)| path.starts_with(prefix))?;
+            Some(match *kind {
+                "skill" => format!("skill {}", path[prefix.len()..].split('/').next()?),
+                "guard" | "rule" => format!("{kind} {}", Path::new(path).file_stem()?.to_string_lossy()),
+                gate => gate.to_string(),
+            })
+        })
+        .collect();
+    changes.sort();
+    changes.dedup();
+    Measure::Known(changes)
+}
+
+/// Commander's Quality sheet (cas-3dd7): the newest `published` releases, oldest
+/// first, then work in progress, plus names for the supervisors their turns name.
+/// Local SQLite and git only; the CLI's Cloud pull is not the hub's job.
+pub(crate) fn quality_reports(cas_root: &Path, published: usize) -> Result<serde_json::Value> {
+    let repo = cas_root.parent().unwrap_or(cas_root);
+    // Published releases are the tags, plus any release event without one; a
+    // tag with no event still has a window (release_window falls back to tag time).
+    let mut versions: Vec<String> = git_output(repo, &["tag", "--list", "v*.*.0"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for event in cas_store::quality_release_events(cas_root)? {
+        if let Some(version) = event.release_version.filter(|version| !versions.contains(version)) {
+            versions.push(version);
+        }
+    }
+    let order = |version: &str| -> Vec<u64> {
+        version.trim_start_matches('v').split('.').map(|part| part.parse().unwrap_or(0)).collect()
+    };
+    versions.sort_by_key(|version| std::cmp::Reverse(order(version)));
+    let mut releases: Vec<Option<String>> = versions.into_iter().take(published).map(Some).collect();
+    releases.reverse();
+    releases.push(None);
+    // Each report shells out to git; build them side by side.
+    let reports: Vec<LedgerReport> = std::thread::scope(|scope| {
+        let builds: Vec<_> = releases
+            .iter()
+            .map(|release| scope.spawn(move || build_report(cas_root, repo, release.as_deref())))
+            .collect();
+        builds.into_iter().filter_map(|build| build.join().ok()?.ok()).collect()
+    });
+    let agents = crate::store::open_agent_store(cas_root).ok();
+    let supervisors: BTreeMap<&str, String> = reports
+        .iter()
+        .flat_map(|report| report.turns_by_actor.keys())
+        .filter_map(|id| Some((id.as_str(), agents.as_ref()?.get(id).ok()?.name)))
+        .collect();
+    Ok(serde_json::json!({ "releases": reports, "supervisors": supervisors }))
 }
 
 fn verdict_name(verdict: FeedbackVerdict) -> &'static str {
@@ -898,9 +1292,24 @@ fn render(report: &LedgerReport) -> String {
         }
     }
 
+    for (kind, row) in &report.turns_by_notice_kind {
+        let _ = writeln!(out, "  notice {kind}: {} wakes, {} no-op", row.wakes, row.no_op_wakes);
+    }
+    let _ = writeln!(out, "\nDelivery review history");
+    for row in &report.reviews {
+        let _ = writeln!(out, "  {} {}: {} rounds", row.task, row.cycle_id.as_deref().unwrap_or("cycle unknown"), row.rounds.len());
+        for (index, round) in row.rounds.iter().enumerate() {
+            let _ = writeln!(out, "    {}. {:?} {} {} ({})", index + 1, round.outcome, round.provenance, round.verification_id, when(round.at));
+        }
+    }
+    scorers::render(&mut out, &report.scorers);
     let _ = writeln!(out, "\nInterventions: {}", report.interventions_total);
     for (kind, count) in &report.interventions {
         let _ = writeln!(out, "  {kind:<16}{count:>4}");
+    }
+
+    for row in report.intervention_rows.iter().filter(|r| r.source.as_deref().is_some_and(|s| s.starts_with("supervisor-attested:"))) {
+        let _ = writeln!(out, "  {} {} {}: {}", when(row.at), row.kind, row.title.as_deref().unwrap_or_default(), row.source.as_deref().unwrap_or_default());
     }
 
     let minutes = |minutes: &f64| duration(Some(*minutes));
@@ -952,13 +1361,33 @@ fn render(report: &LedgerReport) -> String {
         );
     }
 
-    let _ = writeln!(out, "\nChecks (pass/fail/flaky/could not run)");
+    let counts = |row: &CheckRow| {
+        let timing = row.minutes.map_or_else(String::new, |minutes| format!(", {minutes:.0} min over {} timed", row.timed));
+        format!("{}/{}/{}/{}{timing}, {} untimed", row.pass, row.fail, row.flaky, row.error, row.untimed)
+    };
+    let _ = writeln!(out, "\nCheck results for this project, {window} (pass/fail/flaky/could not run)");
     if report.checks.is_empty() {
         let _ = writeln!(out, "  none recorded");
     }
     for (stage, row) in &report.checks {
-        let _ = writeln!(out, "  {stage:<10}{}/{}/{}/{}", row.pass, row.fail, row.flaky, row.error);
+        let _ = writeln!(out, "  {stage:<10}{}", counts(row));
     }
+    for run in &report.check_runs {
+        let _ = writeln!(out, "    {} {:?} run {} {}", run.check_id, run.outcome,
+            run.run_id.map_or_else(|| run.link.clone(), |id| id.to_string()), run.title.as_deref().unwrap_or("workflow not recorded"));
+    }
+    let _ = writeln!(out, "\nCheck events by project and cohort (not run rates)");
+    for row in &report.check_cohorts {
+        let cohort = serde_json::to_value(row.cohort).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let _ = writeln!(out, "  {} {cohort} {} {}: {}", row.project, row.stage, row.check_id, counts(&row.row));
+    }
+
+    let estimates=&report.estimates;
+    let _ = writeln!(out,"\nEstimates: {} completed, {} hits, {} misses, {} below typical",
+        estimates.completed,estimates.hits,estimates.misses.len(),estimates.below_typical);
+    let _ = writeln!(out,"  hit rate: {}",estimates.hit_rate.map_or_else(||"uncalibrated: no completed estimates".into(),|r|format!("{:.0}%",r*100.0)));
+    for miss in &estimates.misses { let _=writeln!(out,"  {}: {:.1} min ({}, estimate {})",miss.subject,miss.actual_minutes,miss.reason,miss.estimate_id); }
+    for (release,row) in &report.estimate_trend { let _=writeln!(out,"  {release}: {}/{} hits, {} below typical",row.hits,row.completed,row.below_typical); }
 
     let _ = writeln!(out, "\nFeature feedback");
     if report.excluded_unscoped_measurements > 0 {
@@ -993,6 +1422,81 @@ fn render(report: &LedgerReport) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn estimate_outcomes_link_and_report_hits_without_early_friction() {
+        use crate::quality_ledger::estimates::{estimate,complete,calibration};
+        let mut env=crate::test_support::TestEnvGuard::temp_home();
+        let temp=tempfile::tempdir().unwrap();
+        let root=crate::store::init_cas_dir(temp.path()).unwrap();
+        env.set("CAS_ROOT",&root);
+        for (i, m) in [8.0, 12.0, 16.0, 20.0, 31.0].into_iter().enumerate() {
+            crate::quality_ledger::emit(&root,&NewQualityEvent::new(format!("ref-{i}"),QualityPayload::CheckRun { review: None,
+                check_id:"merge_queue".into(),stage:cas_store::CheckStage::Queue,outcome:CheckOutcome::Pass,sha:None,minutes:Some(m) }));
+        }
+        let early = estimate(
+            &root,
+            "pipeline",
+            "merge_queue",
+            Some("aaa0001"),
+            "client",
+            20,
+            true,
+        )
+        .unwrap();
+        let late = estimate(
+            &root,
+            "pipeline",
+            "merge_queue",
+            Some("aaa0002"),
+            "operator",
+            20,
+            true,
+        )
+        .unwrap();
+        let at = Utc::now() + chrono::Duration::minutes(60);
+        for _ in 0..2 {
+            complete(
+                &root,
+                "pipeline",
+                "merge_queue:aaa0001",
+                at,
+                Some(10.0),
+                Some("v1.2.3"),
+            );
+            complete(
+                &root,
+                "pipeline",
+                "merge_queue:aaa0002",
+                at,
+                Some(45.0),
+                Some("v1.2.3"),
+            );
+        }
+        let events = cas_store::quality_events_between(&root, None, None).unwrap();
+        let tally = calibration(&events);
+        assert_eq!(
+            (
+                tally.completed,
+                tally.hits,
+                tally.below_typical,
+                tally.hit_rate
+            ),
+            (2, 1, 1, Some(0.5))
+        );
+        assert_eq!(tally.misses[0].estimate_id, late.estimate_id.unwrap());
+        assert!(events.iter().any(|e| matches!(&e.payload,QualityPayload::EstimateOutcome { estimate_id,inside_range:true,below_typical:true,.. } if Some(estimate_id)==early.estimate_id.as_ref())));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.payload, QualityPayload::Friction { .. }))
+                .count(),
+            1
+        );
+        let report=super::aggregate("v1.2.3".into(),true,None,None,&events);
+        let text=super::render(&report);
+        assert!(text.contains("hit rate: 50%") && text.contains("above_p90"));
+    }
+
     use super::*;
     use cas_store::{InterventionKind, NewQualityEvent};
     use chrono::TimeZone;
@@ -1074,6 +1578,131 @@ mod tests {
         cas_root
     }
 
+    /// v4.0.0 (cas-6114): lane read merge admissions, a downstream project's
+    /// admission and duration samples; queue counted a run once per ejected
+    /// delivery plus unlinked notices.
+    #[test]
+    fn check_rates_count_only_this_projects_runs() {
+        let run = "https://github.com/o/r/actions/runs/41855101589";
+        let row = |project: &str, check: &str, stage: &str, outcome: &str, link: Option<&str>, minutes: Option<f64>| QualityEvent {
+            seq: 0, id: format!("{project}{check}{outcome}{link:?}{minutes:?}"), occurred_at: Utc::now(), task_id: Some("cas-1".into()),
+            release_version: None, actor: None, title: None, link: link.map(str::to_string), local_note: None, from_cloud: false,
+            project_id: project.into(),
+            payload: serde_json::from_value(serde_json::json!({"kind": "check_run", "check_id": check, "stage": stage,
+                "outcome": outcome, "minutes": minutes})).unwrap(),
+        };
+        let mut events = vec![
+            row("", "worktree_merge", "lane", "pass", None, None),
+            row("", "worktree_merge", "lane", "fail", None, None),
+            row("gabber-studio", "worktree_merge", "lane", "fail", None, None),
+            row("", "task_duration:bug", "lane", "pass", None, Some(30.0)),
+            row("", "train_full_gate", "lane", "fail", Some("https://github.com/o/r/actions/runs/7"), Some(12.0)),
+            row("", "merge_queue", "queue", "fail", Some(run), None),
+            row("", "merge_queue", "queue", "fail", None, None),
+            row("", "merge_queue", "queue", "pass", None, None),
+        ];
+        let mut second_ejection = row("", "merge_queue", "queue", "fail", Some(run), None);
+        second_ejection.id = "other-delivery".into();
+        events.push(second_ejection);
+        let json = serde_json::to_value(aggregate("v4.0.0".into(), true, None, None, &events)).unwrap();
+        let rates = |stage: &str| (json["checks"][stage]["pass"].clone(), json["checks"][stage]["fail"].clone(), json["checks"][stage]["untimed"].clone());
+        assert_eq!(rates("lane"), (0.into(), 1.into(), 0.into()));
+        assert_eq!(rates("queue"), (1.into(), 1.into(), 2.into()));
+        assert_eq!(json["check_runs"].as_array().map(|runs| runs.iter().map(|r| r["run_id"].clone()).collect::<Vec<_>>()),
+            Some(vec![7.into(), 41855101589u64.into()]));
+        let cohort = |project: &str, cohort: &str, check: &str| json["check_cohorts"].as_array().unwrap().iter()
+            .find(|r| r["project"] == project && r["cohort"] == cohort && r["check_id"] == check).map(|r| (r["pass"].clone(), r["fail"].clone()));
+        assert_eq!(cohort("this project", "merge_admission", "worktree_merge"), Some((1.into(), 1.into())));
+        assert_eq!(cohort("gabber-studio", "merge_admission", "worktree_merge"), Some((0.into(), 1.into())));
+        assert_eq!(cohort("this project", "queue_notice", "merge_queue"), Some((0.into(), 1.into())));
+        assert_eq!(cohort("this project", "duration_sample", "task_duration:bug"), Some((1.into(), 0.into())));
+    }
+
+    #[test]
+    fn report_keeps_review_rounds_and_wake_notice_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = Vec::new();
+        for (id, outcome, provenance) in [("ver-1", "fail", "independent"), ("ver-2", "fail", "independent"), ("ver-3", "pass", "supervisor_direct")] {
+            let payload = serde_json::from_value(serde_json::json!({
+                "kind": "check_run", "check_id": "task_verifier", "stage": "verifier", "outcome": outcome,
+                "review": {"verification_id": id, "cycle_id": "dc-delivery", "provenance": provenance}
+            })).unwrap();
+            let mut event = cas_store::NewQualityEvent::new(id, payload);
+            event.task_id = Some("cas-b5cd".into());
+            cas_store::record_quality_event(dir.path(), &event).unwrap();
+        }
+        let payload = serde_json::from_value(serde_json::json!({"kind": "turn", "woken_by": "daemon",
+            "notice_kind": "ci_completed", "actions": [], "no_op": true,
+            "input_tokens": null, "output_tokens": null, "minutes": null})).unwrap();
+        let mut wake = cas_store::NewQualityEvent::new("wake", payload);
+        let mut old = wake.clone();
+        if let QualityPayload::Turn { notice_kind, .. } = &mut old.payload { *notice_kind = None; }
+        crate::quality_ledger::emit_checked(dir.path(), &old).unwrap();
+        let original_id = cas_store::quality_events_between(dir.path(), None, None).unwrap().last().unwrap().id.clone();
+        let mut legacy_detail = wake.clone();
+        legacy_detail.natural_key = "turn_detail|wake".into();
+        if let QualityPayload::Turn { notice_kind, supersedes, .. } = &mut legacy_detail.payload {
+            *notice_kind = Some("102644".into());
+            *supersedes = Some(original_id);
+        }
+        crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (false, false));
+        let mut missing_stamp = wake.clone();
+        if let QualityPayload::Turn { notice_kind, .. } = &mut missing_stamp.payload { *notice_kind = None; }
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &missing_stamp).unwrap(), (false, false));
+        // A new completed turn remains one new wake.
+        wake.natural_key = "fresh-wake".into();
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, true));
+        let mut untyped = wake.clone();
+        untyped.natural_key = "untyped-wake".into();
+        if let QualityPayload::Turn { notice_kind, .. } = &mut untyped.payload { *notice_kind = None; }
+        crate::quality_ledger::emit_checked(dir.path(), &untyped).unwrap();
+        let original_id = cas_store::quality_events_between(dir.path(), None, None).unwrap().last().unwrap().id.clone();
+        let mut legacy_detail = untyped.clone();
+        legacy_detail.natural_key = "turn_detail|untyped-wake".into();
+        if let QualityPayload::Turn { notice_kind, supersedes, .. } = &mut legacy_detail.payload {
+            *notice_kind = Some("102644".into());
+            *supersedes = Some(original_id);
+        }
+        crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
+        events.extend(cas_store::quality_events_between(dir.path(), None, None).unwrap());
+        let report = aggregate("v9.99.0".into(), true, None, None, &events);
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["reviews"][0]["rounds"].as_array().map(Vec::len), Some(3));
+        assert_eq!(json["reviews"][0]["cycle_id"], "dc-delivery");
+        assert_eq!(json["reviews"][0]["rounds"][2]["provenance"], "supervisor_direct");
+        assert_eq!(json["turns_by_notice_kind"]["ci_completed"]["no_op_wakes"], 2);
+        assert_eq!(json["turns"]["wakes"], 3);
+        assert_eq!(json["turns_by_notice_kind"]["unknown"]["wakes"], 1);
+        assert!(json["turns_by_notice_kind"].get("102644").is_none());
+    }
+
+    #[test]
+    fn report_measures_deliveries_inside_a_release_train() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = release_fixture(dir.path());
+        // The release train carries three recorded deliveries in one main merge.
+        for (task, rev, source) in [("cas-feature", "v1.1.0~2", "v1.1.0~2^2"),
+            ("cas-config", "v1.1.0~1", "v1.1.0~1"), ("cas-lint", "v1.1.0", "v1.1.0")] {
+            let merge = git(dir.path(), &["rev-parse", &format!("{rev}^{{commit}}")]).unwrap();
+            let anchor = git(dir.path(), &["rev-parse", &format!("{source}^{{commit}}")]).unwrap();
+            cas_store::record_observed_delivery_merge(&root, task, "factory/worker", "epic/train", &anchor, &merge, "supervisor").unwrap();
+        }
+        git_in(dir.path(), &["branch", "train"]);
+        git_in(dir.path(), &["checkout", "-q", "main"]);
+        git_in(dir.path(), &["reset", "--hard", "v1.0.0"]);
+        git_dated(dir.path(), &["merge", "-q", "--no-ff", "-m", "land train", "train"],
+            "2026-10-01T15:00:00Z", "2026-10-01T15:00:00Z");
+        git_in(dir.path(), &["tag", "-f", "v1.1.0"]);
+        let report = build_report(&root, dir.path(), Some("v1.1.0")).unwrap();
+        assert_eq!(report.speed.commit_to_main,
+            Measure::Known(LandingSpread { median_minutes: 90.0, p90_minutes: 240.0, deliveries: 3 }));
+    }
+
     /// Commit to main is per delivery, from its first commit to its landing.
     #[test]
     fn report_shows_commit_to_main_median_and_p90_per_delivery() {
@@ -1085,13 +1714,11 @@ mod tests {
             report.speed.commit_to_main,
             Measure::Known(LandingSpread { median_minutes: 30.0, p90_minutes: 120.0, deliveries: 3 })
         );
-        let text = render(&report);
-        assert!(text.contains("commit to main  median 30 min, p90 120 min over 3 deliveries"), "{text}");
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["speed"]["commit_to_main"]["p90_minutes"], 120.0);
         // The first release has no earlier tag to bound it.
-        let first = render(&build_report(&cas_root, dir.path(), Some("v1.0.0")).unwrap());
-        assert!(first.contains("commit to main  unknown (no earlier tag bounds v1.0.0)"), "{first}");
+        let first = build_report(&cas_root, dir.path(), Some("v1.0.0")).unwrap();
+        assert!(matches!(first.speed.commit_to_main, Measure::Unknown { .. }));
     }
 
     /// Without a release record, an annotated tag dates the publication; a
@@ -1103,13 +1730,8 @@ mod tests {
         let cas_root = release_fixture(dir.path());
         let report = build_report(&cas_root, dir.path(), Some("v1.1.0")).unwrap();
         assert_eq!(report.speed.main_to_published_minutes, Measure::Known(15.0));
-        assert!(render(&report).contains("main to publish 15 min"));
         let first = build_report(&cas_root, dir.path(), Some("v1.0.0")).unwrap();
-        let json = serde_json::to_value(&first).unwrap();
-        assert_eq!(
-            json["speed"]["main_to_published_minutes"]["unknown"],
-            "no release record, and v1.0.0 is a lightweight tag"
-        );
+        assert!(matches!(first.speed.main_to_published_minutes, Measure::Unknown { .. }));
     }
 
     /// Complexity added: line churn, new config registry keys, and new checks.
@@ -1123,15 +1745,6 @@ mod tests {
         assert_eq!(json["complexity"]["lines"], serde_json::json!({"added": 7, "removed": 1}));
         assert_eq!(json["complexity"]["config_keys"], 1);
         assert_eq!(json["complexity"]["checks"], serde_json::json!({"total": 2, "tests": 1, "ci_jobs": 1}));
-        let text = render(&report);
-        for expected in [
-            "Complexity added",
-            "lines           +7 / -1",
-            "config keys     1 new",
-            "new checks      2 (1 tests, 1 CI jobs)",
-        ] {
-            assert!(text.contains(expected), "missing {expected}:\n{text}");
-        }
     }
 
     /// cas-87a2: filed Cassy problems become friction rows, a rerun adds none,
@@ -1182,7 +1795,7 @@ mod tests {
         let since = Utc::now() - Duration::days(30);
         let missing = crate::quality_ledger::backfill_friction(&cas_root, since, Path::new("/nonexistent/gh")).unwrap();
         assert_eq!((missing.tasks, missing.issues), (2, 0));
-        assert!(missing.issues_skipped.is_some_and(|reason| reason.contains("gh issue list")));
+        assert!(missing.issues_skipped.is_some());
 
         let created = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let issues = format!(
@@ -1220,6 +1833,15 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         git_in(repo, &["init", "-q", "-b", "main"]);
         for (tag, date) in [("v1.0.0", "2026-10-01T12:00:00Z"), ("v1.1.0", "2026-10-02T12:00:00Z")] {
+            if tag == "v1.1.0" {
+                // A skill and a rule changed inside the release are its change markers.
+                for path in ["cas-cli/src/builtins/skills/cas-worker/SKILL.md", ".claude/rules/rule-176.md"] {
+                    let file = repo.join(path);
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(&file, "changed\n").unwrap();
+                    git_in(repo, &["add", path]);
+                }
+            }
             let commit = Command::new("git")
                 .current_dir(repo)
                 .args(["commit", "-q", "--allow-empty", "-m", tag])
@@ -1258,12 +1880,21 @@ mod tests {
             ("no-op turn", at(2, 7), cas_store::WakeChannel::Worker, true, None),
             ("future turn", at(3, 6), cas_store::WakeChannel::Director, false, Some(900)),
         ] {
-            let mut event = NewQualityEvent::new(key, QualityPayload::Turn {
+            let mut event = NewQualityEvent::new(key, QualityPayload::Turn { supersedes: None, notice_kind: None,
                 woken_by: channel, actions: if no_op { vec![] } else { vec![cas_store::TurnAction::TaskMutation] },
                 no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5),
             });
             event.occurred_at = occurred_at;
+            event.actor = Some("sup-a".into());
             crate::quality_ledger::emit(&cas_root, &event);
+        }
+        // The merge record: one task merged twice and another once inside v1.1.0,
+        // one before it (so the record covers the window) and one after it.
+        cas_store::record_observed_delivery_merge(&cas_root, "cas-late", "factory/w-late", "main", "s0", "m0", "sup").unwrap();
+        let db = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        for (task, merge, merged_at) in [("cas-old", "m1", at(1, 6)), ("cas-a", "m2", at(2, 8)), ("cas-a", "m3", at(2, 9)), ("cas-b", "m4", at(2, 10))] {
+            db.execute("INSERT INTO observed_delivery_merges VALUES (?1, 'factory/w', 'main', ?2, ?2, 'sup', ?3)",
+                rusqlite::params![task, merge, merged_at.to_rfc3339()]).unwrap();
         }
         // Found two days after the release, it still counts against that release.
         let mut escape = NewQualityEvent::new(
@@ -1334,7 +1965,7 @@ mod tests {
         // alias. The append-only ledger retains that row across the upgrade.
         let mut old_ejection = NewQualityEvent::new(
             "merge_queue|cas-legacy|1447|queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444",
-            QualityPayload::CheckRun { check_id: crate::quality_ledger::MERGE_QUEUE_CHECK.into(),
+            QualityPayload::CheckRun { review: None, check_id: crate::quality_ledger::MERGE_QUEUE_CHECK.into(),
                 stage: cas_store::CheckStage::Queue, outcome: CheckOutcome::Fail,
                 sha: None, minutes: None },
         );
@@ -1389,6 +2020,15 @@ mod tests {
         assert_eq!(json["turns"]["minutes"], 0.5);
         assert_eq!(json["turns"]["missing_tokens"], 1);
         assert_eq!(json["turns_by_channel"]["director"]["wakes"], 1);
+        assert_eq!(json["turns_by_actor"]["sup-a"]["worker"]["no_op_wakes"], 1);
+        assert_eq!(json["turns_by_actor"]["sup-a"]["director"]["input_tokens"], 30);
+        assert_eq!(json["deliveries"], 2, "distinct tasks merged in the window");
+        assert_eq!(json["merged"][0]["task"], "cas-a");
+        assert_eq!(json["changes"], serde_json::json!(["rule rule-176", "skill cas-worker"]));
+        let quality = quality_reports(&cas_root, 5).unwrap();
+        let shown: Vec<_> = quality["releases"].as_array().unwrap().iter().map(|r| r["release"].clone()).collect();
+        // v1.0.0 is tagged but has no release event: it still appears, in order.
+        assert_eq!(shown, ["v1.0.0", "v1.1.0", "unreleased"], "oldest release first, work in progress last");
         let text = render(&report);
         for expected in [
             "Friction ledger: v1.1.0",

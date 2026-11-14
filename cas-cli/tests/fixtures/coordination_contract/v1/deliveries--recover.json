@@ -23,6 +23,8 @@
               "delivery": {
                 "id": "0000de1b-1111-4111-8111-00000000de1b",
                 "occurrence_id": "00000cc1-1111-4111-8111-000000000cc1",
+                "event_kind": "app_mention",
+                "author_user_id": "U01HUMAN42",
                 "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
                 "registration_id": "reg-supervisor-beta-07",
                 "route_kind": "unclaimed_fanout",
@@ -53,6 +55,8 @@
               "delivery": {
                 "id": "0000de1c-1111-4111-8111-00000000de1c",
                 "occurrence_id": "00000cc3-1111-4111-8111-000000000cc3",
+                "event_kind": "app_mention",
+                "author_user_id": "U01HUMAN42",
                 "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
                 "registration_id": "reg-supervisor-beta-07",
                 "route_kind": "unclaimed_fanout",
@@ -113,6 +117,8 @@
               "delivery": {
                 "id": "0000de1b-1111-4111-8111-00000000de1b",
                 "occurrence_id": "00000cc1-1111-4111-8111-000000000cc1",
+                "event_kind": "app_mention",
+                "author_user_id": "U01HUMAN42",
                 "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
                 "registration_id": "reg-supervisor-beta-07",
                 "route_kind": "unclaimed_fanout",

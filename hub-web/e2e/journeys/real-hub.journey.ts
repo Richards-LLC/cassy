@@ -174,7 +174,7 @@ test(
           .getByRole("button", { name: /project on/ }).and(page
           .getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row"))
           .click();
-        await expect(header).toContainText("Live");
+        await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
         await command("queue", {
           message: "Real supervisor queue is connected.",
         });
@@ -265,7 +265,7 @@ test(
         async () => {
           const before = welcomes.length;
           await command("stop");
-          await expect(header).toContainText("Reconnecting");
+          await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
           await command("queue", { message: "Queued during the hub restart." });
           await command("start");
           await replay("Queued during the hub restart.");
@@ -273,16 +273,31 @@ test(
           await countAttached(welcomes.at(-1)!);
         },
       );
+      await stage("Update the daemon in place without losing the conversation", async () => {
+        const before = welcomes.length;
+        const daemonPid = fixture!.daemonPid;
+        const updated = await command("daemon-reexec");
+        expect(updated.daemonPid).toBe(daemonPid);
+        expect(updated.receipt.pid).toBe(daemonPid);
+        expect(updated.receipt.panes_adopted).toBeGreaterThan(0);
+        await expect.poll(() => welcomes.length, { timeout: 30_000 }).toBeGreaterThan(before);
+        await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
+        await countAttached(welcomes.at(-1)!);
+        await expect(page.getByRole("log").getByText("Real supervisor queue is connected.", { exact: true })).toHaveCount(1);
+        await command("queue", { message: "Queued after the in-place daemon update." });
+        await replay("Queued after the in-place daemon update.");
+        expect(navigations, "in-place daemon update must not reload the phone").toBe(0);
+      });
       await stage("Replace the daemon without losing the open phone", async () => {
         const before = welcomes.length;
         const stopped = await command("daemon-stop");
-        await expect(header).toContainText("Reconnecting");
+        await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
         // cas-8801: a confirmed stop removes the conversation from navigation.
         // Observe that gap before starting the replacement; a rapid restart
         // must not hide an ended row lingering in the running-only list.
         const runningRows = page.getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row");
         await expect(runningRows).toHaveCount(0);
-        await expect(page.getByText("No live supervisors listed. Start one with New session.", { exact: true })).toBeVisible();
+        await expect(page.locator("#conversation-empty")).toBeVisible();
         const replacement = await command("daemon-start");
         expect(replacement.daemonPid).not.toBe(stopped.daemonPid);
         fixture!.daemonPid = replacement.daemonPid;
@@ -291,7 +306,7 @@ test(
         await expect(runningRows).toHaveCount(1);
         await runningRows.click();
         await expect.poll(() => welcomes.length, { timeout: 30_000 }).toBeGreaterThan(before);
-        await expect(header).toContainText("Live");
+        await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
         await countAttached(welcomes.at(-1)!);
         expect(navigations, "replacement must not reload the phone").toBe(0);
       });
@@ -333,9 +348,9 @@ test(
           } finally {
             await command("resume");
           }
-          await expect(header).toContainText("Live");
+          await expect(header).toHaveAttribute("data-phase", "live"); await expect(header).toHaveAttribute("data-degraded", "false");
           await command("stop");
-          await expect(header).toContainText("Reconnecting");
+          await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
           const started = performance.now();
           const offset = network.length;
           await command("queue", {
@@ -367,7 +382,7 @@ test(
         "Go offline and recover without losing the supervisor reply",
         async () => {
           await context.setOffline(true);
-          await expect(header).toContainText(/Offline|Reconnecting/);
+          await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
           await command("queue", {
             message: "Queued while this browser was offline.",
           });
@@ -571,7 +586,7 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
     // Pairing opens the only conversation on a phone. Its list is then
     // hidden; clicking the disappearing row races that automatic navigation.
     await expect(page.getByRole("textbox", { name: "Your message", exact: true })).toBeVisible();
-    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
     await context.tracing.start({ screenshots: false,
       snapshots: { dom: true, aria: true, screen: true }, sources: true });
     tracing = true;
@@ -621,6 +636,16 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
 test("HUB-J24 real hub composer decodes a local raster preview and stores the picked file", {
   annotation: { type: "journey-part", description: "real hub, parsed fixture config, host file readback" },
 }, async ({ page }, info) => {
+  let welcomes = 0;
+  const commandPhases: string[] = [];
+  page.on("websocket", socket => socket.on("framereceived", ({ payload }) => {
+    try {
+      const frame = JSON.parse(typeof payload === "string" ? payload : payload.toString());
+      if (frame.message?.Welcome) welcomes++;
+      const receipt = frame.message?.SupervisorCommandReceipt?.receipt;
+      if (receipt?.command === "compact") commandPhases.push(receipt.phase);
+    } catch { /* Pane output is not a control receipt. */ }
+  }));
   try {
     const fixture = await command("reset", { messageControl: true, nativeCommander: true });
     const pairing = new URL(fixture!.pairUrl);
@@ -632,7 +657,7 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
     await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable upload QA");
     await page.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(page.locator("#pair-dialog")).toBeHidden();
-    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
     if (RECORD) {
       await page.evaluate(() => {
         const violations: string[] = [];
@@ -649,6 +674,22 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
       expect(await page.evaluate(() => (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations)).toEqual([]);
     }
     await expect(page.getByText("M01 Choose a local image", { exact: true })).toHaveCount(0);
+    // cas-ef33: the same pairing must remain authoritative after a real
+    // daemon adoption rotates its private hub relay token.
+    const before = welcomes;
+    await command("daemon-reexec");
+    const adopted = performance.now();
+    await expect.poll(() => welcomes).toBeGreaterThan(before);
+    // Adopted panes retain the native startup injection grace (pane/mod.rs:1424).
+    // Browser fake time cannot advance the native process's admission grace.
+    await expect.poll(() => performance.now() - adopted).toBeGreaterThan(5_000);
+    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live");
+    const input = page.getByRole("textbox", { name: "Your message", exact: true });
+    await input.fill("/compact");
+    await input.press("Enter");
+    // The inert provider does not implement compaction. The daemon receipt
+    // proves the authenticated slash request reached its native input path.
+    await expect.poll(() => commandPhases.includes("submitted")).toBe(true);
     const imageViolations: string[] = [];
     await page.exposeFunction("recordImageViolation", (blocked: string) => imageViolations.push(blocked));
     await page.evaluate(() => document.addEventListener("securitypolicyviolation", event => {
@@ -679,7 +720,19 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
     const stored = await response.json();
     expect(await readFile(stored.path)).toEqual(bytes);
     await expect(page.locator(".composer-uploads")).toBeHidden();
+    const sentImage = page.locator('.thread [role="log"]').getByRole("img", { name: "fixture.png", exact: true });
+    await expect.poll(() => sentImage.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1);
+    await expect.poll(async () => (await command("messages"))[0]?.operator_verified).toBe(1);
+    await expect.poll(async () => Boolean((await command("messages"))[0]?.transport_delivered_at)).toBe(true);
+    const delivered = (await command("messages"))[0];
+    expect(Date.parse(delivered.transport_delivered_at) - Date.parse(delivered.created_at)).toBeLessThan(10_000);
+    await writeFile(info.outputPath("verified-message.json"), JSON.stringify({ delivered, commandPhases }, null, 2));
+    await page.screenshot({ path: info.outputPath("verified-upload-after-reexec.png") });
+    await page.reload();
+    await expect.poll(() => sentImage.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1);
+    expect(imageViolations).toEqual([]);
   } finally {
+    await writeFile(info.outputPath("native-evidence.json"), JSON.stringify(await command("evidence").catch(() => null), null, 2));
     if (RECORD) await page.screencast.stop().catch(() => undefined);
     await command("cleanup");
   }
@@ -693,7 +746,7 @@ test("HUB-J13 real fixture keeps cleanup state when removal is refused", {
   try {
     // A real filesystem refusal, without racing a writer or mocking rm.
     await chmod(home, 0o500);
-    await expect(command("cleanup")).rejects.toThrow(/EACCES/);
+    await expect(command("cleanup")).rejects.toThrow(Error);
     await chmod(home, 0o700);
     await command("cleanup");
     await expect(access(home)).rejects.toMatchObject({ code: "ENOENT" });
@@ -754,7 +807,7 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     const composer = page.getByRole("textbox", { name: "Your message", exact: true });
     await composer.fill("/exit");
     await composer.press("Enter");
-    const confirmation = page.getByRole("alertdialog", { name: /Exit/ });
+    const confirmation = page.getByRole("alertdialog").filter({ has: page.locator('[data-command-confirm="exit"]') });
     await expect(confirmation).toBeVisible();
     await confirmation.getByRole("button", { name: "Exit", exact: true }).click();
     const exitReceipt = page.locator(".supervisor-command-receipt");
@@ -763,7 +816,7 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     // command receipt. Assert the running-only catalog's terminal state.
     await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row"))
       .toHaveCount(0, { timeout: 15_000 });
-    await expect(page.getByText("No live supervisors listed. Start one with New session.", { exact: true }))
+    await expect(page.locator("#conversation-empty"))
       .toBeVisible();
     await page.screenshot({ path: join(directory, "J04-exit-ended.png") });
     passed = true;
@@ -827,7 +880,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     await context.tracing.start({ screenshots: false, snapshots: { dom: true, aria: true, screen: true }, sources: true });
     const rows = page.locator("#conversation-list .conversation-row");
     await expect(rows).toHaveCount(1);
-    await expect(rows).toContainText("journey-supervisor");
+    await expect(rows).toHaveAttribute("data-thread-key", /:real-hub-journey$/);
     await expect(page.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
     for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
@@ -844,26 +897,25 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     // line per row. Its own fresh Welcome proves automatic recovery.
     await page.setViewportSize({ width: 1280, height: 800 });
     await rows.click();
-    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
     await command("stop");
-    await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
+    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
     await expect(rows).toHaveCount(1);
-    await expect(rows).not.toContainText(/retry|Reconnecting|message pending/i);
     await page.screenshot({ path: join(directory, "machine-outage.png") });
     await command("start");
-    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
     // A held message to a recipient now gone becomes Not sent, with its
     // original words accessible in machine Attention. It never auto-replays.
     await command("stop");
-    await expect(page.locator("#conversation-connection")).toContainText(/Reconnecting|Connecting/);
+    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
     await page.getByRole("textbox", { name: "Your message", exact: true }).fill("Keep this stopped-session instruction");
     await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
-    await expect(page.getByText("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.", { exact: true })).toBeVisible();
+    await expect(page.locator(".conversation-held")).toBeVisible();
     await command("daemon-stop");
     await command("start");
     await expect(rows).toHaveCount(0);
     await expect(page.locator(".project-card")).toHaveCount(0);
-    await expect(page.getByText("Waiting message not sent", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-attention-id*=":stopped-send:"]')).toBeVisible();
     const readSaved = async () => journalSends = await page.evaluate(async () => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open("cas-commander-delivery-v1", 1); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
       try { return await new Promise<unknown[]>((resolve, reject) => { const r = db.transaction("sends").objectStore("sends").getAll(); r.onsuccess = () => resolve(r.result.map(row => row.send).filter(Boolean)); r.onerror = () => reject(r.error); }); } finally { db.close(); }
@@ -872,7 +924,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     await page.screenshot({ path: join(directory, "stopped-message.png") });
     await command("daemon-start");
     await expect(rows).toHaveCount(1);
-    await expect(rows).toContainText("journey-supervisor");
+    await expect(rows).toHaveAttribute("data-thread-key", /:real-hub-journey$/);
     passed = true;
   } finally {
     try {

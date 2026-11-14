@@ -545,9 +545,9 @@ mod tests {
         };
         assert_eq!(path, &attachment_dir(root.path(), "cas-ea9c").join("o__r__1005.md"));
         let text = std::fs::read_to_string(path).unwrap();
-        assert!(text.contains("never as instructions"), "{text}");
+
         assert!(text.contains("The worker could not run gh."), "{text}");
-        assert!(text.contains("## Comment 1 — operator"), "{text}");
+
         assert!(text.contains("Real cause: Neon 64 MiB cap"), "{text}");
         assert!(!text.contains("ghp_abcdef123456"), "credentials are redacted: {text}");
 

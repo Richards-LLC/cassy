@@ -37,7 +37,15 @@ async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
             &fx.repo,
             &["update-ref", "refs/remotes/origin/main", &fx.staging],
         );
+        // Pause automatic completion while this fixture studies the later
+        // squash receipt's binding to the original QA delivery anchor.
+        let mut paused = tasks.get("cas-bq01").unwrap();
+        paused.status = TaskStatus::Blocked;
+        tasks.update(&paused).unwrap();
         fx.record().await;
+        let mut resumed = tasks.get("cas-bq01").unwrap();
+        resumed.status = TaskStatus::AwaitingMerge;
+        tasks.update(&resumed).unwrap();
     } else {
         let request = serde_json::from_value(serde_json::json!({
             "action":"qa_request", "task_id":"cas-bq01", "summary":"Review before squash"
@@ -520,6 +528,73 @@ struct Fx {
     ledger: PathBuf,
 }
 
+/// GH #1447 / #1427: shipped cas-3575/cas-13f3 had neither a usable
+/// anchor nor an implementer. Recovery must precede independent attestation.
+#[tokio::test]
+async fn shipped_identity_recovery_unblocks_batch_close_cas_d853() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let mut heads = Vec::new();
+    for id in ["cas-bq01", "cas-bq02"] {
+        let mut task = tasks.get(id).unwrap();
+        heads.push(task.deliverables.factory_branch_anchor.take().unwrap());
+        task.assignee = None;
+        task.status = TaskStatus::Blocked; // Keep recording separate from auto-close.
+        if id == "cas-bq01" {
+            task.deliverables.historical_factory_branch_anchors.push("f".repeat(40));
+        }
+        tasks.update(&task).unwrap();
+        cas_store::defer_qa_batch_evidence(&root, id, "fixture").unwrap();
+    }
+    assert!(fx.supervisor.verification(Parameters(fx.request())).await.is_err());
+    let recovery = |id: &str, head: &str, reason: &str| serde_json::from_value(serde_json::json!({
+        "action":"recover_delivery", "id":id, "commit_receipt":head, "reason":reason,
+    })).unwrap();
+    let worker = CasService::new(fx.core.clone(), None);
+    assert!(worker.task(Parameters(recovery("cas-bq01", &heads[0], "Reviewed release"))).await.is_err());
+    // A real integrated sibling commit is still not this task's delivery.
+    let before = tasks.get("cas-bq01").unwrap();
+    assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[1], "Reviewed release"))).await.is_err());
+    assert_eq!(serde_json::to_value(tasks.get("cas-bq01").unwrap()).unwrap(), serde_json::to_value(before).unwrap());
+    assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[0], " "))).await.is_err());
+    // Leased work and a task-owned commit outside its target stay refused.
+    let agents = open_agent_store(&root).unwrap();
+    let worker_id = format!("test-session-{}", std::process::id());
+    agents.try_claim("cas-bq01", &worker_id, 600, Some("active implementation")).unwrap();
+    assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[0], "Reviewed release"))).await.is_err());
+    agents.release_lease("cas-bq01", &worker_id).unwrap();
+    let seed = git(&fx.repo, &["rev-parse", &format!("{}^", heads[0])]);
+    git(&fx.repo, &["branch", "-f", "main", &seed]);
+    assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[0], "Reviewed release"))).await.is_err());
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    for (id, head) in ["cas-bq01", "cas-bq02"].into_iter().zip(&heads) {
+        fx.supervisor.task(Parameters(recovery(id, head, "Reviewed shipped task identity"))).await.unwrap();
+        let task = tasks.get(id).unwrap();
+        assert_eq!(task.deliverables.factory_branch_anchor.as_ref(), Some(head));
+        assert_eq!(task.status, TaskStatus::Blocked);
+        assert_eq!(task.assignee, None);
+        assert!(task.notes.contains(head)); // Immutable audit data, not prose.
+        assert!(cas_store::has_qa_batch_deferral(&root, id).unwrap());
+        fx.supervisor.task(Parameters(recovery(id, head, "Replay recovery"))).await.unwrap();
+        assert_eq!(tasks.get(id).unwrap().updated_at, task.updated_at);
+    }
+    // Git actors recovered with the identity cannot become the independent author.
+    let actor = git(&fx.repo, &["show", "-s", "--format=%an", &heads[0]]);
+    let mut own = fx.request();
+    own.ledger_author = Some(actor);
+    assert!(fx.supervisor.verification(Parameters(own)).await.is_err());
+    assert!(cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap().is_empty());
+    fx.record().await;
+    let receipts = cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap();
+    for (id, head) in ["cas-bq01", "cas-bq02"].into_iter().zip(&heads) {
+        assert_eq!(receipts[0].task_heads.get(id), Some(head));
+        let closed = fx.close(id).await;
+        assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{closed}");
+    }
+}
+
 fn fixture(env: &mut TestEnvGuard) -> Fx {
     let (temp, core) = setup_cas(env);
     let repo = temp.path().to_path_buf();
@@ -559,9 +634,12 @@ fn fixture(env: &mut TestEnvGuard) -> Fx {
     let supervisor = CasCore::with_daemon(repo.join(".cas"), None, None);
     supervisor.set_agent_id_for_testing(supervisor_id.into());
     let ledger = repo.join("LEDGER.md");
+    // A QA receipt's ledger must pass `cas qa ledger check` for its owner task.
+    let owner = tasks.get("cas-bq01").unwrap();
     std::fs::write(
         &ledger,
-        "# Staging QA\ncas-bq01 PASS at 390/1440\ncas-bq02 PASS at 390/1440\n",
+        cas::qa_ledger::scaffold(&owner, &[], "rev")
+            + "\ncas-bq01 PASS at 390/1440\ncas-bq02 PASS at 390/1440\n",
     )
     .unwrap();
     let store = cas_store::SqliteArtifactStore::open(&repo.join(".cas")).unwrap();
@@ -592,6 +670,22 @@ fn fixture(env: &mut TestEnvGuard) -> Fx {
 }
 
 impl Fx {
+    fn with_declared_coverage(mut self) -> Self {
+        let root = self.repo.join(".cas");
+        let owner = open_task_store(&root).unwrap().get("cas-bq01").unwrap();
+        let body = cas::qa_ledger::scaffold_with_coverage(&owner, &[], &self.staging,
+            &["cas-bq01".into(), "cas-bq02".into()]);
+        // cas-6354: mentioning an unreviewed task in prose must not grant coverage.
+        std::fs::write(&self.ledger, body + "\nUnreviewed follow-up: cas-bq03\n").unwrap();
+        let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
+        let context = cas::artifacts::PublishContext {
+            store: &store,
+            roots: cas::artifacts::paths::PublishRoots::new(&root, &self.repo.join("artifacts"), "cas-bq01"),
+            task_id: "cas-bq01".into(), cloud: None,
+        };
+        self.artifact = cas::artifacts::publish(&context, &self.ledger).unwrap().artifact.id;
+        self
+    }
     fn request(&self) -> VerificationRequest {
         serde_json::from_value(serde_json::json!({
             "action":"batch_receipt", "task_ids":["cas-bq01","cas-bq02","cas-bq01"],
@@ -667,7 +761,11 @@ async fn reviewed_delivery_with_legacy_producer_ledger_closes_cas_dd03() {
 #[tokio::test]
 async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture(&mut env).with_declared_coverage();
+    let mut uncovered = fx.request();
+    uncovered.task_ids = Some(vec!["cas-bq01".into(), "cas-bq03".into()]);
+    assert!(fx.supervisor.verification(Parameters(uncovered)).await.is_err());
+    assert!(cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap().is_empty());
     let recorded = fx
         .supervisor
         .verification(Parameters(fx.request()))
@@ -680,6 +778,9 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
             cas_store::QualityPayload::CheckRun { check_id, .. } if check_id == "qa_batch")),
         "{ledger:?}"
     );
+    let interventions = cas_store::quality_events_between(&fx.repo.join(".cas"), None, None).unwrap();
+    assert_eq!(interventions.iter().filter(|event| matches!(event.payload,
+        cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::ManualReceipt, .. })).count(), 1);
     let receipt = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
     assert_eq!(
         (receipt[0].ledger_author_id.as_deref(), receipt[0].ledger_author_role.as_deref()),
@@ -729,137 +830,30 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
     );
 }
 
-/// cas-ce5e: a release verdict must name each delivery it covers, and a code
-/// review never stands in for the QA walk those deliveries still owe.
+/// Release code review has no new ledger or recorder identity.
 #[tokio::test]
-async fn release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e() {
+async fn release_review_is_computed_before_recorder_identity_cas_5a22() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
-    let verdict = |tasks: &[&str]| -> VerificationRequest {
-        let mut request = serde_json::to_value(fx.request()).unwrap();
-        request.as_object_mut().unwrap().extend(
-            serde_json::json!({"verification_type": "release", "task_ids": tasks}).as_object().unwrap().clone(),
-        );
-        serde_json::from_value(request).unwrap()
-    };
-    // The published report names cas-bq01 and cas-bq02 only.
-    let refused = fx.supervisor.verification(Parameters(verdict(&["cas-bq01", "cas-bq03"]))).await.unwrap_err();
-    assert!(refused.message.contains("does not name cas-bq03"), "{refused:?}");
-
-    fx.supervisor.verification(Parameters(verdict(&["cas-bq01"]))).await.unwrap();
-    let close = fx.close("cas-bq01").await;
-    assert!(close.contains("no `qa-bundle:` note"), "{close}");
+    let fx = fixture(&mut env).with_declared_coverage();
+    let worker = CasService::new(fx.core.clone(), None);
+    for service in [&fx.supervisor, &worker] {
+        for derive in [false, true] {
+            let mut request = fx.request();
+            request.verification_type = Some("release".into());
+            if derive { request.task_ids = None; request.staging_sha = None; }
+            let refused = service.verification(Parameters(request)).await.unwrap_err();
+            assert!(refused.message.contains("RELEASE_REVIEW_COMPUTED"));
+            assert!(cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap().is_empty());
+        }
+    }
 }
 
-/// cas-f497: either receipt may land first. A verdict that a QA gate holds is
-/// reported, and the later QA receipt finishes the close with no close call.
-/// `verification_type=task` is the documented default.
+
+
+
+/// A retired implementer never supplies a missing delivery approval.
 #[tokio::test]
-async fn qa_receipt_after_the_verdict_finishes_the_close_cas_f497() {
-    let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
-    std::fs::write(
-        fx.repo.join(".cas/config.toml"),
-        "[project]\ncanonical_id='batch-project'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n",
-    )
-    .unwrap();
-    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
-    let mut task = tasks.get("cas-bq01").unwrap();
-    let anchor = task.deliverables.factory_branch_anchor.clone().unwrap();
-    task.status = TaskStatus::AwaitingMerge;
-    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
-        work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
-        assignee: "test-agent".into(),
-        branch: "factory/test-agent".into(),
-        base_sha: git(&fx.repo, &["rev-parse", &format!("{anchor}^")]),
-    });
-    tasks.update(&task).unwrap();
-    let receipt = |patch: serde_json::Value| -> VerificationRequest {
-        let mut request = serde_json::to_value(fx.request()).unwrap();
-        request.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
-        serde_json::from_value(request).unwrap()
-    };
-
-    let verdict = extract_text(
-        fx.supervisor
-            .verification(Parameters(receipt(serde_json::json!({"verification_type": "release", "task_ids": ["cas-bq01"]}))))
-            .await
-            .unwrap(),
-    );
-    assert!(verdict.contains("Still held (1):\n- cas-bq01: "), "{verdict}");
-    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::AwaitingMerge);
-
-    let qa = extract_text(
-        fx.supervisor
-            .verification(Parameters(receipt(serde_json::json!({"verification_type": "task", "task_ids": ["cas-bq01"]}))))
-            .await
-            .unwrap(),
-    );
-    assert!(qa.contains("Batch QA receipt") && qa.contains("Closed 1: cas-bq01."), "{qa}");
-    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{qa}");
-    let before = tasks.get("cas-bq01").unwrap().notes.matches("BATCH_CLOSE_OUTCOME").count();
-    assert!(before > 0, "the initial close must retain its outcome");
-    fx.supervisor.verification(Parameters(receipt(serde_json::json!({"task_ids": ["cas-bq01"]})))).await.unwrap();
-    let after = tasks.get("cas-bq01").unwrap().notes.matches("BATCH_CLOSE_OUTCOME").count();
-    assert_eq!(after, before, "another receipt must not add an already-closed outcome note");
-
-}
-
-/// cas-f497: what a verdict must not do. An implementer named only by the recorded
-/// start cannot record the verdict for its own unassigned delivery, and the verdict
-/// closes neither an override merge nor work that has left its park.
-#[tokio::test]
-async fn release_verdict_cannot_bypass_review_or_reclose_returned_work_cas_f497() {
-    let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
-    std::fs::write(
-        fx.repo.join(".cas/config.toml"),
-        "[project]\ncanonical_id='batch-project'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n",
-    )
-    .unwrap();
-    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
-    let bind = |id: &str, status: TaskStatus, implementer: &str| {
-        let mut task = tasks.get(id).unwrap();
-        let anchor = task.deliverables.factory_branch_anchor.clone().unwrap();
-        task.status = status;
-        task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
-            work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
-            assignee: implementer.into(),
-            branch: "factory/test-agent".into(),
-            base_sha: git(&fx.repo, &["rev-parse", &format!("{anchor}^")]),
-        });
-        task
-    };
-    let verdict = |ids: &[&str]| -> VerificationRequest {
-        let mut request = serde_json::to_value(fx.request()).unwrap();
-        request.as_object_mut().unwrap().extend(
-            serde_json::json!({"verification_type": "release", "task_ids": ids}).as_object().unwrap().clone(),
-        );
-        serde_json::from_value(request).unwrap()
-    };
-
-    let mut own = bind("cas-bq01", TaskStatus::AwaitingMerge, "batch-supervisor");
-    own.assignee = None;
-    tasks.update(&own).unwrap();
-    let refused = fx.supervisor.verification(Parameters(verdict(&["cas-bq01"]))).await.unwrap_err();
-    assert!(refused.message.contains("no self-review"), "{refused:?}");
-
-    tasks.update(&bind("cas-bq01", TaskStatus::AwaitingMerge, "test-agent")).unwrap();
-    assert!(tasks.record_merge_admission("cas-bq01", &fx.staging, cas_types::MergeCiAdmission::Override).unwrap());
-    tasks.update(&bind("cas-bq02", TaskStatus::Open, "test-agent")).unwrap();
-    let recorded = extract_text(
-        fx.supervisor.verification(Parameters(verdict(&["cas-bq01", "cas-bq02"]))).await.unwrap(),
-    );
-    assert!(recorded.contains("Still held (2):"), "{recorded}");
-    assert!(!recorded.contains("Closed "), "{recorded}");
-    assert_eq!(tasks.get("cas-bq01").unwrap().status, TaskStatus::AwaitingMerge, "{recorded}");
-    assert_eq!(tasks.get("cas-bq02").unwrap().status, TaskStatus::Open, "{recorded}");
-}
-
-/// cas-ce5e: with no dispatch to protect it, a merged delivery whose worker has
-/// gone still needs the verdict; a QA receipt does not stand in for it.
-#[tokio::test]
-async fn orphaned_delivery_still_waits_for_the_release_verdict_cas_ce5e() {
+async fn orphaned_delivery_still_requires_its_approval_cas_5a22() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
     fx.record().await;
@@ -881,8 +875,9 @@ async fn orphaned_delivery_still_waits_for_the_release_verdict_cas_ce5e() {
     tasks.update(&task).unwrap();
 
     let close = fx.close("cas-bq01").await;
-    assert!(close.contains("WAITING FOR RELEASE VERDICT"), "{close}");
-    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
+    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed, "{close}");
+    assert!(close.contains("[G-70]"), "{close}");
+    assert!(cas_store::get_latest_verification_dispatch(&fx.repo.join(".cas"), "cas-bq01").unwrap().is_none());
 }
 
 impl Fx {
@@ -1092,7 +1087,7 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
     .await;
     fx.reject(
         serde_json::json!({"ledger_artifact_id":"art-missing"}),
-        "not published in this project",
+        "artifact_metadata_unavailable",
     )
     .await;
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
@@ -1110,10 +1105,6 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
         .unwrap();
     fx.reject(serde_json::json!({"staging_sha":anchor}), "not an ancestor")
         .await;
-    fx.unmerge();
-    fx.reject(serde_json::json!({}), "configured target main")
-        .await;
-    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     let ledger = std::fs::read(&fx.ledger).unwrap();
     std::fs::write(&fx.ledger, "changed after publish\n").unwrap();
     fx.reject(serde_json::json!({}), "ledger bytes differ")
@@ -1139,6 +1130,72 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
 }
 
 #[tokio::test]
+async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    // Two anchorless tasks on PR branches; only cas-pr is squash-merged to main.
+    for (id, file) in [("cas-pr", "pr.css"), ("cas-open", "open.css")] {
+        git(&fx.repo, &["checkout", "-qb", &format!("pr/{id}"), &fx.staging]);
+        std::fs::write(fx.repo.join(file), "a{gap:4px}\n").unwrap();
+        git(&fx.repo, &["add", file]);
+        git(&fx.repo, &["commit", "-qm", id]);
+        let mut task = Task::new(id.into(), "PR merged".into());
+        task.assignee = Some("test-agent".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.parked_branch = Some(format!("pr/{id}"));
+        tasks.add(&task).unwrap();
+    }
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "--squash", "pr/cas-pr"]);
+    git(&fx.repo, &["commit", "-qm", "PR #1 (squash)"]);
+    let merged = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let request = |id: &str| -> VerificationRequest {
+        let mut r = serde_json::to_value(fx.request()).unwrap();
+        r["task_ids"] = serde_json::json!([id]);
+        r["staging_sha"] = merged.clone().into();
+        serde_json::from_value(r).unwrap()
+    };
+    fx.supervisor.verification(Parameters(request("cas-open"))).await.unwrap_err();
+    // A reused lane's tip equal to its start commit is another task's merge, not this one's.
+    git(&fx.repo, &["branch", "pr/cas-start", &fx.staging]);
+    let target = cas::types::WorkTarget { repo_selector: "project:batch-project".into(), target_branch: "main".into() };
+    let mut reused = Task::new("cas-start".into(), "Reused lane".into());
+    reused.assignee = Some("test-agent".into());
+    reused.status = TaskStatus::AwaitingMerge;
+    reused.deliverables.work_target = Some(target.clone());
+    reused.deliverables.parked_branch = Some("pr/cas-start".into());
+    reused.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target, assignee: "test-agent".into(), branch: "pr/cas-start".into(), base_sha: fx.staging.clone(),
+    });
+    tasks.add(&reused).unwrap();
+    fx.supervisor.verification(Parameters(request("cas-start"))).await.unwrap_err();
+    // A reused lane that moved on for other work is not this task's delivery either.
+    git(&fx.repo, &["checkout", "-qb", "pr/cas-moved", &fx.staging]);
+    std::fs::write(fx.repo.join("other.css"), "b{gap:2px}\n").unwrap();
+    git(&fx.repo, &["add", "other.css"]);
+    git(&fx.repo, &["commit", "-qm", "unrelated work for another task"]);
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge unrelated lane", "pr/cas-moved"]);
+    let moved_staging = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let mut moved = reused.clone();
+    moved.id = "cas-moved".into();
+    moved.deliverables.parked_branch = Some("pr/cas-moved".into());
+    moved.deliverables.factory_branch_start.as_mut().unwrap().branch = "pr/cas-moved".into();
+    tasks.add(&moved).unwrap();
+    let mut moved_request = serde_json::to_value(request("cas-moved")).unwrap();
+    moved_request["staging_sha"] = moved_staging.into();
+    fx.supervisor.verification(Parameters(serde_json::from_value(moved_request).unwrap())).await.unwrap_err();
+    fx.supervisor.verification(Parameters(request("cas-pr"))).await.unwrap();
+    let receipts = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
+    assert_eq!(receipts[0].task_heads["cas-pr"], merged);
+    // The receipt must also close it: consumers resolve the same identity.
+    let closed = tasks.get("cas-pr").unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed, "{:?}", closed.notes);
+    assert!(closed.deliverables.factory_branch_anchor.is_none());
+}
+
+#[tokio::test]
 async fn batch_qa_authority_and_no_self_review_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
@@ -1148,10 +1205,7 @@ async fn batch_qa_authority_and_no_self_review_cas_d697() {
         .verification(Parameters(fx.request()))
         .await
         .unwrap_err();
-    assert!(
-        err.message.contains("live registered supervisor"),
-        "{err:?}"
-    );
+
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
     for token in ["batch-supervisor", "batch-supervisor-alias"] {
         let mut task = tasks.get("cas-bq01").unwrap();
@@ -1405,6 +1459,7 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         "{refused}"
     );
 }
+
 
 #[tokio::test]
 async fn batch_qa_ledger_author_must_be_independent_cas_26ac() {

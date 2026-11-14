@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use cas_mux::SupervisorCli;
 use serde::Serialize;
+use sha2::Digest;
 
 use crate::builtins::{
     self, BUILTIN_GITIGNORE_BEGIN as IGNORE_BEGIN, BUILTIN_GITIGNORE_END as IGNORE_END,
@@ -78,7 +79,7 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
-    let Some(branch) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
+    let Some(_) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .and_then(|reference| reference.trim().strip_prefix("refs/heads/").map(str::to_string))
@@ -87,22 +88,16 @@ fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
         // Detached or unreadable HEAD is not permission to create history.
         return Ok(false);
     };
-    if matches!(branch.as_str(), "main" | "master" | "staging" | "develop" | "trunk")
-        || branch.starts_with("epic/")
-        || branch == crate::worktree::GitOperations::new(root.to_path_buf()).detect_default_branch()
-    {
-        return Ok(false);
+    // Sync owns managed commits on named branches, including main and train
+    // branches. Never complete someone else's merge/rebase/sequencer operation.
+    crate::config::Config::load(cas_root)?;
+    for state in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"] {
+        let path = git(root, &["rev-parse", "--path-format=absolute", "--git-path", state])?;
+        if Path::new(text(&path)?.trim()).exists() {
+            return Ok(false);
+        }
     }
-    let config = crate::config::Config::load(cas_root)?;
-    let configured_base = config.factory().epic_base_branch;
-    Ok(!configured_base.as_deref().is_some_and(|base| {
-        let normalized = base
-            .strip_prefix("refs/heads/")
-            .or_else(|| base.strip_prefix("refs/remotes/origin/"))
-            .or_else(|| base.strip_prefix("origin/"))
-            .unwrap_or(base);
-        base == branch || normalized == branch
-    }))
+    Ok(true)
 }
 
 // Read the effective rules (including nested/global ignores) without touching
@@ -300,9 +295,32 @@ pub(crate) struct Report {
 }
 
 const CONFLICT_RECORD: &str = "cache/managed-file-conflicts.json";
+const WRITE_RECORD: &str = "cache/managed-project-writes.json";
 
-/// Persist the last sync's blocking conflicts so SessionStart can report them;
-/// an unblocked sync clears the record (cas-3199). Unattended syncs otherwise
+fn prior_writes(root: &Path) -> BTreeMap<String, String> {
+    std::fs::read(root.join(".cas").join(WRITE_RECORD)).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+fn fragment_hash(fragment: &str) -> String {
+    format!("{:x}", sha2::Sha256::digest(fragment.as_bytes()))
+}
+
+// Bootstrap the statusline migration on pre-receipt installs: an owned
+// field may still be HEAD's value while another already equals this writer.
+fn matches_settings_projection(local: &str, baseline: &str, expected: &str) -> bool {
+    let values: Result<Vec<serde_json::Value>, _> = [local, baseline, expected]
+        .into_iter().map(serde_json::from_str).collect();
+    let Ok(values) = values else { return false; };
+    let Some(local) = values[0].as_object() else { return false; };
+    let Some(baseline) = values[1].as_object() else { return false; };
+    let Some(expected) = values[2].as_object() else { return false; };
+    local.keys().chain(baseline.keys()).chain(expected.keys()).all(|key|
+        local.get(key) == baseline.get(key) || local.get(key) == expected.get(key))
+}
+
+/// Persist the last sync's preserved conflicts so SessionStart can report them;
+/// a sync without conflicts clears the record (cas-3199). Unattended syncs otherwise
 /// leave the refusal only in a timer journal nobody reads.
 pub(crate) fn record_conflicts(cas_root: &Path, conflicts: &[String]) -> Result<()> {
     let path = cas_root.join(CONFLICT_RECORD);
@@ -329,7 +347,6 @@ pub(crate) struct Reconcile {
     root: PathBuf,
     index: BTreeMap<String, (String, Vec<u8>)>,
     before: BTreeMap<String, Option<Vec<u8>>>,
-    staged_before: bool,
     index_signature: Vec<u8>,
     pub report: Report,
 }
@@ -337,11 +354,12 @@ pub(crate) struct Reconcile {
 impl Reconcile {
     /// Preflight before any writer, including malformed documents, unmerged
     /// files, symlinks and local edits to a managed body. Conflicts are visible
-    /// and leave this project's files and index untouched.
+    /// and preserve each conflicting path in both the worktree and index.
     pub(crate) fn begin(root: &Path, harnesses: &[SupervisorCli]) -> Result<Option<Self>> {
         if authoring(root) || !git_root(root) {
             return Ok(None);
         }
+        let writes = prior_writes(root);
         let mut index = BTreeMap::new();
         let mut conflicts = Vec::new();
         let index_signature = git(root, &["ls-files", "--stage", "-z"])?;
@@ -399,18 +417,15 @@ impl Reconcile {
         let mut before = BTreeMap::new();
         for path in candidates {
             let absolute = root.join(&path);
-            if absolute
-                .ancestors()
-                .take_while(|p| *p != root)
-                .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
-            {
-                conflicts.push(path.clone());
+            if let Some(link) = absolute.ancestors().take_while(|p| *p != root)
+                .find(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())) {
+                conflicts.push(link.strip_prefix(root)?.to_string_lossy().into_owned());
                 continue;
             }
             let working = std::fs::read(&absolute).ok();
             let indexed = index.get(&path).map(|(_, b)| b);
             let baseline = committed.get(&path);
-            if let Some(bytes) = &working {
+            for bytes in working.iter().chain(indexed) {
                 if builtins::project_managed_body(&path)
                     && !text(bytes).is_ok_and(builtins::is_managed_by_cas)
                     && !builtins::matches_shipped_project_file(&path, bytes)
@@ -487,7 +502,7 @@ impl Reconcile {
                 }
             }
             if path == ".codex/config.toml" {
-                if let Some(bytes) = &working {
+                for bytes in working.iter().chain(indexed) {
                     match toml::from_str::<toml::Value>(text(bytes)?) {
                         Ok(v) if v.is_table() => {
                             for key in ["cs", "cas"] {
@@ -506,12 +521,13 @@ impl Reconcile {
             }
             before.insert(path, working);
         }
-        if conflicts.is_empty() {
+        {
             let mut dirty = Vec::new();
             for path in TRACKED
                 .iter()
                 .filter(|p| p.ends_with(".json") || p.ends_with(".toml"))
             {
+                if conflicts.iter().any(|conflict| conflict == path) { continue; }
                 let Some(Some(bytes)) = before.get(*path) else {
                     continue;
                 };
@@ -519,9 +535,12 @@ impl Reconcile {
                     .get(*path)
                     .map(|b| b.as_slice())
                     .unwrap_or_default();
-                let local = owned_fragment(path, bytes)?;
-                if local != owned_fragment(path, indexed)? {
-                    dirty.push((path, local));
+                let baseline = owned_fragment(path, indexed)?;
+                for candidate in std::iter::once(bytes.as_slice()).chain(index.get(*path).map(|(_, bytes)| bytes.as_slice())) {
+                    let local = owned_fragment(path, candidate)?;
+                    if local != baseline && writes.get(*path) != Some(&fragment_hash(&local)) {
+                        dirty.push((path, local));
+                    }
                 }
             }
             if !dirty.is_empty() {
@@ -529,10 +548,13 @@ impl Reconcile {
                     .iter()
                     .filter_map(|(p, b)| b.clone().map(|b| (p.clone(), b)))
                     .collect();
-                let projected = configuration_projection(root, &seed)?;
+                let projected = configuration_projection_excluding(root, &seed, &conflicts)?;
                 for (path, local) in dirty {
                     let expected = std::fs::read(projected.path().join(path)).unwrap_or_default();
-                    if local != owned_fragment(path, &expected)? {
+                    let expected = owned_fragment(path, &expected)?;
+                    let baseline = owned_fragment(path, committed.get(*path).map(Vec::as_slice).unwrap_or_default())?;
+                    if local != expected && !(*path == ".claude/settings.json"
+                        && matches_settings_projection(&local, &baseline, &expected)) {
                         conflicts.push((*path).to_string());
                     }
                 }
@@ -540,12 +562,10 @@ impl Reconcile {
         }
         conflicts.sort();
         conflicts.dedup();
-        let staged_before = !git(root, &["diff", "--cached", "--name-only", "-z"])?.is_empty();
         Ok(Some(Self {
             root: root.into(),
             index,
             before,
-            staged_before,
             index_signature,
             report: Report {
                 outcome: if conflicts.is_empty() {
@@ -559,8 +579,12 @@ impl Reconcile {
         }))
     }
 
-    pub(crate) fn blocked(&self) -> bool {
-        !self.report.conflicts.is_empty()
+    pub(crate) fn allows(&self, path: &str) -> bool {
+        !self.report.conflicts.iter().any(|conflict| Path::new(path).starts_with(conflict))
+    }
+
+    pub(crate) fn exclusions(&self) -> Vec<PathBuf> {
+        self.report.conflicts.iter().map(|path| self.root.join(path)).collect()
     }
 
     pub(crate) fn finish(mut self, harnesses: &[SupervisorCli], cas_root: &Path) -> Result<Report> {
@@ -572,14 +596,24 @@ impl Reconcile {
                 .push("index changed during update; rerun cas update".into());
             return Ok(self.report);
         }
-        builtins::ensure_builtin_gitignore(root, harnesses)?;
+        if self.allows(".gitignore") { builtins::ensure_builtin_gitignore(root, harnesses)?; }
+        let mut writes = prior_writes(root);
+        for path in TRACKED.iter().filter(|path| self.allows(path)) {
+            if let Ok(bytes) = std::fs::read(root.join(path)) {
+                writes.insert((*path).to_string(), fragment_hash(&owned_fragment(path, &bytes)?));
+            }
+        }
+        let receipt = root.join(".cas").join(WRITE_RECORD);
+        let body = serde_json::to_vec(&writes)?;
+        if std::fs::read(&receipt).ok().as_deref() != Some(body.as_slice()) {
+            std::fs::create_dir_all(receipt.parent().unwrap())?;
+            std::fs::write(receipt, body)?;
+        }
         let paths = ignored_paths(root, harnesses);
-        let mut changed = BTreeSet::new();
         for (path, (_, bytes)) in &self.index {
-            if ignored(path, &paths) || (!root.join(path).exists() && cassy_body(path, bytes)) {
+            if self.allows(".gitignore") && self.allows(path) && (ignored(path, &paths) || (!root.join(path).exists() && cassy_body(path, bytes))) {
                 git(root, &["update-index", "--force-remove", "--", path])?;
                 self.report.untracked += 1;
-                changed.insert(path.clone());
             }
         }
         // Render configuration from the INDEX's project content, never from
@@ -590,9 +624,9 @@ impl Reconcile {
             .iter()
             .map(|(p, (_, b))| (p.clone(), b.clone()))
             .collect();
-        let temp = configuration_projection(root, &seed)?;
+        let temp = configuration_projection_excluding(root, &seed, &self.report.conflicts)?;
         for path in TRACKED {
-            if ignored(path, &paths) {
+            if !self.allows(path) || ignored(path, &paths) {
                 continue;
             }
             let indexed = self
@@ -619,13 +653,12 @@ impl Reconcile {
             };
             if desired != indexed {
                 self.stage(path, &desired)?;
-                changed.insert((*path).to_string());
             }
         }
         for path in [".env.worktree.template", "scripts/worktree-boot.sh"] {
             // These become project-owned after creation. Only a file this
             // invocation created may be committed automatically.
-            if !self.index.contains_key(path) {
+            if self.allows(path) && !self.index.contains_key(path) {
                 if let Ok(bytes) = std::fs::read(root.join(path)) {
                     let expected = if path.ends_with(".sh") {
                         crate::cli::factory_tooling::BOOT_SCRIPT
@@ -634,7 +667,6 @@ impl Reconcile {
                     };
                     if bytes == expected.as_bytes() {
                         self.stage(path, &bytes)?;
-                        changed.insert(path.into());
                     }
                 }
             }
@@ -644,22 +676,23 @@ impl Reconcile {
             .filter(|b| !b.is_empty())
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
-        self.report.staged = changed.len();
-        self.report.outcome = if changed.is_empty() {
-            if self.staged_before && drift(root, harnesses)? > 0 {
-                "staged"
-            } else {
-                "current"
-            }
-        } else if self.staged_before
-            || pending.iter().any(|p| !changed.contains(p))
+        self.report.staged = pending.len();
+        self.report.outcome = if pending.is_empty() {
+            "current"
+        } else if !self.report.conflicts.is_empty()
             || !may_commit_managed_files(root, cas_root).unwrap_or_else(|_| {
                 self.report.commit_warning = Some(
                     "Commit guard config unreadable; repair staged. Fix config, then retry.".into(),
                 );
                 false
             })
+            || !staged_sync_only(root).unwrap_or(false)
         {
+            if self.report.commit_warning.is_none() {
+                self.report.commit_warning = Some(
+                    "Changes remain staged; review git diff --cached before committing.".into(),
+                );
+            }
             "staged"
         } else {
             // No repository configuration is changed. Normal Git hooks still
@@ -673,7 +706,7 @@ impl Reconcile {
                     "user.email=cassy@localhost",
                     "commit",
                     "-m",
-                    crate::worktree::git::MANAGED_RECONCILE_SUBJECT,
+                    crate::worktree::git::MANAGED_SYNC_SUBJECT,
                 ],
             ) {
                 Ok(_) => {
@@ -702,6 +735,7 @@ impl Reconcile {
                 }
             }
         };
+        if !self.report.conflicts.is_empty() { self.report.outcome = "partial"; }
         Ok(self.report)
     }
 
@@ -736,12 +770,59 @@ impl Reconcile {
     }
 }
 
-fn configuration_projection(
-    root: &Path,
-    seed: &BTreeMap<String, Vec<u8>>,
+/// True only when every staged blob/mode can be produced from HEAD by sync.
+/// In particular, a managed path may also contain staged project content.
+/// Read-only: callers use this both for commit admission and merge recovery.
+pub(crate) fn staged_sync_only(root: &Path) -> Result<bool> {
+    let harnesses = harnesses(root);
+    let Some(plan) = Reconcile::begin(root, &harnesses)? else { return Ok(false); };
+    if !plan.report.conflicts.is_empty() { return Ok(false); }
+    let pending = git(root, &["diff", "--cached", "--name-only", "-z"])?;
+    if pending.is_empty() { return Ok(false); }
+    let committed: BTreeMap<_, _> = TRACKED.iter().filter_map(|path| {
+        git(root, &["show", &format!("HEAD:{path}")]).ok().map(|bytes| ((*path).to_string(), bytes))
+    }).collect();
+    let projected = configuration_projection_excluding(root, &committed, &[])?;
+    let ignored_paths = ignored_paths(root, &harnesses);
+    for path in pending.split(|b| *b == 0).filter(|path| !path.is_empty()) {
+        let path = text(path)?;
+        let head = git(root, &["ls-tree", "HEAD", "--", path])?;
+        let head_mode = text(&head)?.split_whitespace().next();
+        let Some((mode, indexed)) = plan.index.get(path) else {
+            // Sync untracks generated files, retaining their working copies.
+            let retired = !root.join(path).exists()
+                && git(root, &["show", &format!("HEAD:{path}")]).is_ok_and(|bytes| cassy_body(path, &bytes));
+            if (ignored(path, &ignored_paths) || retired)
+                && matches!(head_mode, Some("100644" | "100755")) { continue; }
+            return Ok(false);
+        };
+        let expected_mode = head_mode.unwrap_or(if path.ends_with(".sh") { "100755" } else { "100644" });
+        if mode != expected_mode || !matches!(mode.as_str(), "100644" | "100755") { return Ok(false); }
+        let expected = if matches!(path, ".env.worktree.template" | "scripts/worktree-boot.sh") && head.is_empty() {
+            if path.ends_with(".sh") { crate::cli::factory_tooling::BOOT_SCRIPT.as_bytes().to_vec() }
+            else { crate::cli::factory_tooling::ENV_TEMPLATE.as_bytes().to_vec() }
+        } else if !TRACKED.contains(&path) {
+            return Ok(false);
+        } else if matches!(path, ".gitignore" | "CLAUDE.md" | "AGENTS.md") {
+            let (a, b) = if path == ".gitignore" { (IGNORE_BEGIN, IGNORE_END) } else { (BEGIN, END) };
+            let Some(owned) = block(text(indexed)?, a, b)? else { return Ok(false); };
+            let baseline = committed.get(path).map(Vec::as_slice).unwrap_or_default();
+            replace_block(text(baseline)?, owned, a, b)?.into_bytes()
+        } else {
+            std::fs::read(projected.path().join(path))?
+        };
+        if *indexed != expected { return Ok(false); }
+    }
+    Ok(true)
+}
+
+fn configuration_projection_excluding(
+    root: &Path, seed: &BTreeMap<String, Vec<u8>>, excluded: &[String],
 ) -> Result<tempfile::TempDir> {
+    let allowed = |path: &str| !excluded.iter().any(|conflict| Path::new(path).starts_with(conflict));
     let temp = tempfile::tempdir()?;
     for path in TRACKED {
+        if !allowed(path) { continue; }
         if let Some(bytes) = seed.get(*path) {
             let dest = temp.path().join(path);
             std::fs::create_dir_all(dest.parent().unwrap())?;
@@ -752,10 +833,12 @@ fn configuration_projection(
     if let Ok(config) = std::fs::read(root.join(".cas/config.toml")) {
         std::fs::write(temp.path().join(".cas/config.toml"), config)?;
     }
-    crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root)?;
-    crate::cli::hook::configure_mcp_server(temp.path())?;
+    if allowed(".claude/settings.json") { crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root)?; }
+    if allowed(".mcp.json") { crate::cli::hook::configure_mcp_server(temp.path())?; }
     if root.join(".codex").is_dir() {
-        crate::cli::hook::config_gen::configure_codex_mcp_server(temp.path())?;
+        crate::cli::hook::config_gen::configure_codex_project_files(
+            temp.path(), !allowed(".codex/config.toml"), !allowed(".codex/hooks.json"),
+        )?;
     }
     Ok(temp)
 }
@@ -902,6 +985,7 @@ pub(crate) fn drift(root: &Path, harnesses: &[SupervisorCli]) -> Result<usize> {
         count += 1;
     }
     for path in TRACKED {
+        if !plan.allows(path) { continue; }
         let Some(Some(bytes)) = plan.before.get(*path) else {
             continue;
         };

@@ -2,15 +2,15 @@
   "contract": "cassy.coordination/v1",
   "vendored": {
     "source": "Richards-LLC/petra-stella-cloud",
-    "ref": "00d0675af62e00734cc22fa533442ac9c4fb64fb",
+    "ref": "9f8d49e8c535ced518425e02bab2cdf46735c444",
     "path": "tests/contracts/coordination/v1",
     "note": "Copied byte for byte. Cloud authors these (petra-stella-cloud#161, PR #164); update only by re-vendoring a newer Cloud ref, and a breaking change means a new v2/.",
     "files": {
       "activity--observe.json": "9ed03cda538a370920a579d2c59c9803372a7055f824a490854322a80c62c6f9",
-      "deliveries--rebind.json": "41756be568a848f27d7d6cb761fa55048f494a9d6037401144a1ef2f7814b4db",
-      "deliveries--receipts.json": "9a941eedca0c9cda754099d986cfc11b14b0d90b8d3506e3d244e9ec094e0f3e",
-      "deliveries--recover.json": "42eecad5645a474c8ac113a1df68166b92a77e251b2cbf68ec91e238731cce6f",
-      "external_work--claim.json": "437bf9b122e5e3d4d4d9aecd3908d59bee82b3abc52da6e3985cc39f87e1f587",
+      "deliveries--rebind.json": "e3e16f7b4140d2a556d8f8d58172499e3e387be3f745573b33fa557461a75d07",
+      "deliveries--receipts.json": "4b96f44da44314273b1c7f520e3981fd993b40866113476befbddee873780b3d",
+      "deliveries--recover.json": "9a75ddedd4d03cd3ffbbb2ee9c72fa00b599c6942cc17f52c86b0f563a7ba3a2",
+      "external_work--claim.json": "d8421f01e30f53cc1b498dce9be2da748157c0940e43b76e971079386042b447",
       "external_work--complete.json": "e48e9a564ceaa3c47f90adc4e25abf8b667415075c9903b6410f00fbaaef2822",
       "external_work--handoff_offer.json": "6bafb66dac87191a75a2dd3e07a951e81442b180ddc9b9e9b62e183bf6c44872",
       "external_work--release.json": "017161bcf02e88fc74b65bc58cc5e240f6782d500644fe07285e42fc0aa39c34",
@@ -18,9 +18,9 @@
       "external_work--reply_intents.json": "2aa4314928bb89b83b6c12724a38101cfec9038b701e1c9574ccf03ef1eac9ac",
       "handoffs--accept.json": "728d465e51ccc3d23e2743e96e0a27e3c86fbaf94eadc946a19f261e58caf618",
       "operations--lookup.json": "e67e7f2515f9a0489099788362997368013ef76101201483d6a81afb64d6ba74",
-      "reply_intents--dispatch.json": "4d857cae65f30c2a6ea7487a2a092387010d552a930cd1a4ba2c4ffe0124d4e7",
+      "reply_intents--dispatch.json": "24952b96fa5dc618329c6ae08900a8279d32cfeab24992a1dd65f8b904510c5b",
       "violet_activity--ack_v2.json": "4717b70a40999144f64f5567881589d032ef0b096ba91b3a81b4f155d8420d23",
-      "violet_activity--claim_v2.json": "15de4b0edad3e8c6b682521b25bec290c7f682b2c2becc6f6a0827f1049b3359"
+      "violet_activity--claim_v2.json": "41c18883443efa4e9a662638c2970d7b48ded7184d3b63d38157261c0eeb8f85"
     }
   },
   "authored": {

@@ -11,6 +11,29 @@ use crate::mcp::tools::core::imports::*;
 
 use super::close_ops::{ALREADY_CLOSED_PREFIX, as_cassy_merge_close};
 
+/// Read-only admission shared by receipt close and release backfill preview.
+/// `Some` retains the task's own ordinary review path; `None` lets the release
+/// verdict authorize it. Neither result bypasses the remaining close gates.
+// gate[G-89 close-after-merge integrity]: Release receipt close admission (CI_OVERRIDE / REQUEST_CHANGES / NOT_PARKED)
+pub(crate) fn release_receipt_close_admission(
+    root: &std::path::Path,
+    task: &Task,
+    repo: &std::path::Path,
+) -> Result<Option<String>, String> {
+    if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override {
+        return Err(crate::gates::tag("G-89", "CI_OVERRIDE: merged under a CI override; it needs its own close"));
+    }
+    if task.deliverables.factory_branch_anchor.is_none()
+        && !task.deliverables.historical_factory_branch_anchors.is_empty()
+    {
+        return Err(crate::gates::tag("G-89", "REQUEST_CHANGES: request_changes moved the task out of its park; close the retired delivery with task close commit_receipt=<merged sha>"));
+    }
+    if task.status != TaskStatus::AwaitingMerge && task.deliverables.green_merge_commit.is_none() {
+        return Err(crate::gates::tag("G-89", "NOT_PARKED: not parked; it needs its own close"));
+    }
+    Ok(super::review_tier::own_review(root, task, repo))
+}
+
 /// The delivery a `worktree_merge` just landed: the repository, the source
 /// branch it merged and the exact source commit it merged.
 pub(crate) struct MergedLane<'a> {
@@ -57,6 +80,7 @@ pub(crate) fn delivery_tip_belongs_to_task(
 /// branch can: only the worker commits to `refs/heads/<branch>`, while a
 /// commit pushed straight to origin by anyone else exists only on the
 /// remote-tracking ref. The tip must be on both.
+// gate[G-91 close-after-merge integrity]: Pushed delivery tip ownership (merge-on-green close)
 pub(crate) fn pushed_delivery_tip(
     repo: &std::path::Path,
     task: &Task,
@@ -64,28 +88,28 @@ pub(crate) fn pushed_delivery_tip(
     tip: &str,
 ) -> Result<(), String> {
     if task.task_type == TaskType::Epic {
-        return Err("an epic closes through epic verification".to_string());
+        return Err(crate::gates::tag("G-91", "an epic closes through epic verification"));
     }
     let Some(worker) = task.assignee.as_deref() else {
-        return Err("the task has no assignee".to_string());
+        return Err(crate::gates::tag("G-91", "the task has no assignee"));
     };
     let branch = branch.strip_prefix("origin/").unwrap_or(branch);
     if !crate::mcp::tools::core::workflow::task_delivery_branch_matches(
         branch, worker, &task.id,
     ) {
-        return Err(format!("{branch} is not {worker}'s delivery branch for {}", task.id));
+        return Err(crate::gates::tag("G-91", format!("{branch} is not {worker}'s delivery branch for {}", task.id)));
     }
     let Some(pushed) = super::close_ops::resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}")) else {
-        return Err(format!("cached origin/{branch} does not resolve; live publication is unknown"));
+        return Err(crate::gates::tag("G-91", format!("cached origin/{branch} does not resolve; live publication is unknown")));
     };
     if pushed != tip && !super::close_ops::git_commit_is_ancestor(repo, tip, &pushed) {
-        return Err(format!("{tip} is absent from cached origin/{branch}; live publication is unknown"));
+        return Err(crate::gates::tag("G-91", format!("{tip} is absent from cached origin/{branch}; live publication is unknown")));
     }
     let local = super::close_ops::resolve_branch_sha(repo, &format!("refs/heads/{branch}"));
     if !local.is_some_and(|local| local == tip || super::close_ops::git_commit_is_ancestor(repo, tip, &local)) {
-        return Err(format!(
+        return Err(crate::gates::tag("G-91", format!(
             "{tip} is on cached origin/{branch} but not on {worker}'s local {branch}; this does not establish the worker's own delivery"
-        ));
+        )));
     }
     Ok(())
 }
@@ -96,10 +120,13 @@ struct VerdictRelease {
     note: String,
     foreign_hold: Option<String>,
     was_blocked: bool,
+    resumed_status: TaskStatus,
     hold: Option<serde_json::Value>,
 }
 
 /// What Cassy's own post-merge close did.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum CassyMergeClose {
     /// The task does not carry a published merge Cassy may close for.
     NotEligible,
@@ -154,6 +181,7 @@ fn record_batch_close_outcome(
     store: &dyn cas_store::TaskStore,
     task_id: &str,
     receipt_id: &str,
+    recorded_at: &str,
     outcome: &str,
 ) -> Result<String, String> {
     let summary = summarize_gate(outcome);
@@ -169,10 +197,55 @@ fn record_batch_close_outcome(
             "batch-close", &brief, outcome,
         )?.replace('\n', " ")
     };
-    let note = format!("[{}] 📝 PROGRESS BATCH_CLOSE_OUTCOME {receipt_id}: {body}",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M"));
-    store.append_note(task_id, &note).map_err(|error| error.to_string())?;
-    Ok(note)
+    // The immutable receipt's timestamp makes a replay byte-identical. The
+    // store's trusted append deduplicates atomically; neutralize gate text as
+    // the ordinary append did before giving it that internal authority.
+    let note = format!("[{recorded_at}] 📝 PROGRESS BATCH_CLOSE_OUTCOME {receipt_id}: {body}");
+    let note = cas_store::task_note_markers::neutralize_new_markers(&note, None);
+    store.append_trusted_note(task_id, &note).map_err(|error| error.to_string())?;
+    Ok(note.into_owned())
+}
+
+/// One recorder-owned action after every member of this receipt has settled.
+/// Full gate details remain on each task; replay cannot create another wake.
+fn queue_batch_close_holds(
+    root: &std::path::Path,
+    receipt: &cas_store::QaBatchReceipt,
+    outcomes: &std::collections::BTreeMap<String, CassyMergeClose>,
+) -> Result<(), String> {
+    if crate::release_reconcile::active() { return Ok(()); }
+    #[derive(serde::Serialize)]
+    struct Hold<'a> { task_id: &'a str, reason: &'a str, next_action: String }
+    let mut groups = std::collections::BTreeMap::<String, Vec<Hold<'_>>>::new();
+    for (id, outcome) in outcomes {
+        let CassyMergeClose::Held(reason) = outcome else { continue; };
+        let heading = reason.lines().find(|line| !line.trim().is_empty()).unwrap_or("OTHER");
+        let kind = heading.split_once(':').map_or(heading, |(kind, _)| kind)
+            .trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).trim();
+        let action = format!("task action=close id={id} commit_receipt={} reason=\"<gate proof>\"", receipt.task_heads[id]);
+        groups.entry(kind.to_string()).or_default().push(Hold { task_id: id, reason, next_action: action });
+    }
+    if groups.is_empty() { return Ok(()); }
+    let closed = outcomes.values().filter(|outcome| matches!(outcome, CassyMergeClose::Closed { .. })).count();
+    let already = outcomes.values().filter(|outcome| matches!(outcome, CassyMergeClose::AlreadyClosed)).count();
+    let held: usize = groups.values().map(Vec::len).sum();
+    let mut detail = format!("Receipt {} at {}: {closed} closed, {already} already closed, {held} held.\n", receipt.id, receipt.staging_sha);
+    for (kind, members) in &groups {
+        detail.push_str(&format!("\n{kind} ({}):\n", members.len()));
+        for member in members {
+            detail.push_str(&format!("- {}: {}\nSupervisor action: resolve this gate, then {}.\n",
+                member.task_id, member.reason, member.next_action));
+        }
+    }
+    detail.push_str("\nPer-member details are retained in task notes. No worker re-close is required.");
+    let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?
+        .list(None).map_err(|error| error.to_string())?;
+    let recipient = crate::supervisor_notices::resolve(&agents, Some(&receipt.recorder_agent_id), None);
+    crate::supervisor_notices::enqueue_keyed(root, &recipient, "batch_close_hold", &detail,
+        &format!("supervisor-notice:batch_close_hold:{}", receipt.id),
+        Some(serde_json::json!({"receipt_id": receipt.id, "closed_count": closed,
+            "already_closed_count": already, "held_by_kind": groups})))
+        .map_err(|error| error.to_string())
 }
 
 /// The shared, delivery-bound return path for synchronous close and durable QA decisions.
@@ -214,6 +287,7 @@ pub(crate) fn return_merged_delivery_for_source_fix(
             .map_err(|error| error.to_string())?;
         cas_store::request_changes_for_parked_delivery(cas_root, &task.id, actor, &reason)
             .map_err(|error| error.to_string())?;
+        let _ = crate::store::publish_direct_task_write(cas_root, &task.id);
         let returned = store.get(&task.id).map_err(|error| error.to_string())?;
         let notice = match super::supervisor_push::queue_source_fix_reopen_notice(
             cas_root, &returned, anchor, merge, &reason,
@@ -227,17 +301,47 @@ pub(crate) fn return_merged_delivery_for_source_fix(
 }
 
 impl CasCore {
-    /// Source-upkeep refusals opt in here at their typed call sites. Only a
-    /// published, still-current parked delivery may be returned for a fix;
-    /// verification/QA waits and unreadable evidence keep their own recovery.
+    /// A close gate after landing belongs to the supervisor. Keep its parked
+    /// delivery authority; only an explicit correction decision reopens work.
     pub(super) fn return_merged_delivery_for_source_fix(
         &self, task: &Task, repo: &std::path::Path, target: &str, gate: &str,
     ) -> String {
-        let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
-        match return_merged_delivery_for_source_fix(&self.cas_root, &actor, task, repo, target, gate) {
-            Ok(detail) if detail.is_empty() => String::new(),
-            Ok(detail) => format!("\n\n{detail}"),
-            Err(error) => format!("\n\nCassy could not return task {} for its source fix ({error}); run task action=request_changes id={}.", task.id, task.id),
+        let recover = || -> Result<Option<String>, String> {
+            let (Some(anchor), Some(merge)) = (
+                task.deliverables.factory_branch_anchor.as_deref(),
+                task.deliverables.green_merge_commit.as_deref(),
+            ) else { return Ok(None) };
+            if task.status != TaskStatus::AwaitingMerge
+                || !super::close_ops::commit_is_merged_into_parent(repo, anchor, target)
+                || !super::close_ops::commit_is_merged_into_parent(repo, merge, target)
+            {
+                return Ok(None);
+            }
+            let tasks = crate::store::open_task_store(&self.cas_root).map_err(|e| e.to_string())?;
+            let current = tasks.get(&task.id).map_err(|e| e.to_string())?;
+            if current.status != task.status
+                || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
+                || current.deliverables.green_merge_commit != task.deliverables.green_merge_commit
+                || current.deliverables.work_target != task.deliverables.work_target
+            {
+                return Ok(None);
+            }
+            let agents = crate::store::open_agent_store(&self.cas_root).map_err(|e| e.to_string())?;
+            let session = super::supervisor_push::resolve_lifecycle_factory_session(
+                agents.as_ref(), task.assignee.as_deref().unwrap_or("cassy"));
+            let recipient = super::supervisor_push::resolve_notice_recipient(agents.as_ref(), session.as_deref());
+            let detail = format!("Post-merge close recovery for {}: delivery {anchor} landed at {merge}. The supervisor owns this gate; the delivery remains parked. Resolve the gate and retry supervisor close. The worker has no new source delivery or close action.\n{gate}", task.id);
+            crate::supervisor_notices::enqueue_with_context(
+                &self.cas_root, &recipient, "post_merge_close_recovery", &detail,
+                &format!("{}:{anchor}:{merge}", task.id),
+                Some(serde_json::json!({"task_id":task.id, "delivery":anchor, "merge":merge, "target":target, "owner":"supervisor"})),
+            ).map_err(|e| e.to_string())?;
+            Ok(Some(format!("Supervisor close recovery queued for {}; delivery remains parked.", task.id)))
+        };
+        match recover() {
+            Ok(None) => String::new(),
+            Ok(Some(detail)) => format!("\n\n{detail}"),
+            Err(error) => format!("\n\nSupervisor owns post-merge close recovery for {}; notice could not be queued: {error}", task.id),
         }
     }
 
@@ -317,7 +421,7 @@ impl CasCore {
         parked.status = TaskStatus::AwaitingMerge;
         if parked.deliverables.factory_branch_anchor.as_deref() != Some(lane.tip) {
             parked.deliverables.retain_factory_branch_anchor_as_history();
-            parked.deliverables.factory_branch_anchor = Some(lane.tip.to_string());
+            parked.deliverables.mint_or_append(lane.tip);
         }
         parked.deliverables.parked_branch =
             Some(lane.branch.strip_prefix("origin/").unwrap_or(lane.branch).to_string());
@@ -351,6 +455,85 @@ impl CasCore {
         Ok(())
     }
 
+    /// Resume only the explicit close saved with this proof cycle. The ordinary
+    /// close remeasures absence of delivery and enforces every existing gate.
+    pub(crate) async fn close_no_delivery_after_verdict(
+        &self, task_id: &str, dispatch_id: &str,
+    ) -> Result<Option<String>, McpError> {
+        let store = self.open_task_store()?;
+        let task = store.get(task_id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let Some(intent) = task.deliverables.no_delivery_close_intent.as_ref() else { return Ok(None); };
+        // A retired attempt cannot change the behavior of a newer ordinary
+        // close. Only this dispatch owns the no-delivery declaration.
+        if intent.dispatch_id != dispatch_id { return Ok(None); }
+        // A saved intent never falls back to a forbidden worker retry, even
+        // when a successor or independent hold now prevents its completion.
+        let held = |reason: &str| Some(format!("\nCassy no-delivery close of {task_id} is held: {reason}. No worker close retry was queued."));
+        let latest = cas_store::get_latest_verification_dispatch(&self.cas_root, task_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        if intent.assignee != task.assignee
+            || latest.as_ref().is_none_or(|dispatch| dispatch.id != dispatch_id
+                || dispatch.state != cas_types::VerificationDispatchState::Resolved)
+        {
+            return Ok(held("saved close intent no longer matches the current assignment and exact verdict"));
+        }
+        if task.status == TaskStatus::Blocked
+            && !super::super::block_hold::blocked_only_by_verification_wait(&self.cas_root, task_id, dispatch_id)
+        {
+            return Ok(held("an independent blocker remains"));
+        }
+        if !matches!(task.status, TaskStatus::Blocked | TaskStatus::InProgress | TaskStatus::Open) {
+            return Ok(held("task left its no-delivery close cycle"));
+        }
+        let hold = super::super::block_hold::read(store.as_ref(), task_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
+        if task.status != TaskStatus::Blocked && hold.is_some() {
+            return Ok(held("an independent hold remains"));
+        }
+        let release = VerdictRelease {
+            note: format!("[{}] Cassy close authority: explicit no_delivery intent + verdict dispatch {dispatch_id}.", chrono::Utc::now().format("%Y-%m-%d %H:%M")),
+            foreign_hold: None,
+            was_blocked: task.status == TaskStatus::Blocked,
+            resumed_status: TaskStatus::InProgress,
+            hold: hold.as_ref().and_then(|hold| serde_json::to_value(hold).ok()),
+        };
+        if release.was_blocked {
+            // Reuse the existing restoration path for a failed verdict close.
+            let mut released = task.clone();
+            released.status = release.resumed_status;
+            store.update_if_current(&released, &task)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        }
+        if release.hold.is_some() {
+            if let Err(error) = store.patch_execution_state(task_id, &serde_json::json!({"blocked_hold": null})) {
+                return Ok(Some(self.held_after_verdict(store.as_ref(), task_id, Some(release), error.to_string()).receipt(task_id)));
+            }
+        }
+        let request = TaskCloseRequest {
+            id: task_id.to_string(), reason: Some(intent.reason.clone()), no_delivery: Some(true),
+            stranded_branch_override: None, supervisor_override: None, search_manifest: None, commit_receipt: None,
+        };
+        let close = crate::async_runtime::heap_future(|| self.cas_task_close(Parameters(request)));
+        let result = as_cassy_merge_close(close).await;
+        let text = match result {
+            Ok(result) => result.content.iter().filter_map(|content| match &content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+            }).collect::<Vec<_>>().join("\n"),
+            Err(error) => error.message.to_string(),
+        };
+        let current = store.get(task_id).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        if current.status != TaskStatus::Closed {
+            let outcome = self.held_after_verdict(store.as_ref(), task_id, Some(release), text);
+            return Ok(Some(format!("{}\nNo worker close retry was queued.", outcome.receipt(task_id))));
+        }
+        let unrecorded = self.record_verdict_release(store.as_ref(), &current, &release);
+        let notice = super::supervisor_push::queue_no_delivery_close_notice(&self.cas_root, &current, dispatch_id)
+            .map(|id| id.map(|id| format!("worker notified (prompt {id})")).unwrap_or_else(|| "no live assigned worker to notify".into()))
+            .unwrap_or_else(|error| format!("worker notice failed: {error}"));
+        Ok(Some(format!("\nCassy closed task {task_id} on its approved no-delivery intent; {notice}.{}",
+            if unrecorded.is_empty() { String::new() } else { format!(" NOT RECORDED: {}", unrecorded.join("; ")) })))
+    }
+
     /// Close a delivery that carries a recorded green merge, with the parked
     /// close reason and the task's own delivered commit as receipt.
     pub(crate) async fn close_green_merged_delivery(&self, task_id: &str) -> CassyMergeClose {
@@ -381,7 +564,7 @@ impl CasCore {
         if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override {
             return CassyMergeClose::NotEligible;
         }
-        self.close_merged_delivery(store.as_ref(), task, &merge_commit, verification_id).await
+        self.close_merged_delivery(store.as_ref(), task, &merge_commit, verification_id, None).await
     }
 
     /// The ordinary close of a merged delivery, with `merge_commit` as its
@@ -392,6 +575,7 @@ impl CasCore {
         mut task: Task,
         merge_commit: &str,
         verification_id: Option<&str>,
+        release_receipt: Option<&cas_store::QaBatchReceipt>,
     ) -> CassyMergeClose {
         let task_id = task.id.clone();
         let task_id = task_id.as_str();
@@ -417,9 +601,25 @@ impl CasCore {
             reason: Some(reason),
             supervisor_override: None,
             search_manifest: None,
-            commit_receipt: task.deliverables.factory_branch_anchor.clone(),
+            commit_receipt: task.deliverables.factory_branch_anchor.clone().or_else(|| {
+                // GH #1641: a PR merge recorded no anchor; close on the resolved delivery.
+                let (repo, target) = crate::qa_batch::task_context(&self.cas_root, &task).ok()?;
+                crate::qa_batch::resolved_delivery_anchor(&repo, &task, &target)
+            }),
         };
+        let fixed_release = if crate::qa_batch::release_close::target(&self.cas_root, task_id).is_none() {
+            release_receipt.and_then(|receipt| {
+                let (repo, _) = crate::qa_batch::task_context(&self.cas_root, &task).ok()?;
+                Some(crate::qa_batch::release_close::ReleaseClose::for_receipt(&self.cas_root, &repo, &task, receipt))
+            })
+        } else { None };
         let close = crate::async_runtime::heap_future(|| self.cas_task_close(Parameters(request)));
+        let close = async {
+            match fixed_release {
+                Some(context) => context.scope(close).await,
+                None => close.await,
+            }
+        };
         let result = match as_cassy_merge_close(close).await {
             Ok(result) => result,
             Err(error) => {
@@ -448,7 +648,9 @@ impl CasCore {
         let unrecorded = release.as_ref()
             .map(|release| self.record_verdict_release(store, &closed, release))
             .unwrap_or_default();
-        let mut notice = match super::supervisor_push::queue_cassy_merge_close_notice(
+        let mut notice = if crate::release_reconcile::active() {
+            "completion included in release receipt".to_string()
+        } else { match super::supervisor_push::queue_cassy_merge_close_notice(
             &self.cas_root,
             &closed,
             merge_commit,
@@ -456,7 +658,7 @@ impl CasCore {
             Ok(Some(prompt_id)) => format!("worker notified (prompt {prompt_id})"),
             Ok(None) => "no live assigned worker to notify".to_string(),
             Err(error) => format!("worker notice failed: {error}"),
-        };
+        } };
         // cas-43d2: the supervisor reads this receipt; a record that failed
         // after the close committed belongs in it, not only in a warn log.
         for failure in unrecorded {
@@ -465,21 +667,22 @@ impl CasCore {
         CassyMergeClose::Closed { notice }
     }
 
-    /// cas-f497: close one delivery a release verdict covers. The verdict bound
-    /// its anchor to a staging commit on the target, so that commit is the merge
+    /// Close one receipt-covered delivery, retaining optional review authority.
+    /// The receipt binds its anchor to staging on the target, which is the merge
     /// evidence for a delivery merged outside `worktree_merge`. An override merge
     /// stays a manual close, and work that has left its park is not closed.
-    async fn close_after_release_verdict(&self, task_id: &str, verdict: &cas_store::QaBatchReceipt) -> CassyMergeClose {
+    async fn close_after_batch_receipt(&self, task_id: &str, receipt: &cas_store::QaBatchReceipt, verification_id: Option<&str>) -> CassyMergeClose {
         let Ok(store) = self.open_task_store() else {
             return CassyMergeClose::NotEligible;
         };
         let Ok(task) = store.get(task_id) else {
             return CassyMergeClose::NotEligible;
         };
-        let outcome = if task.deliverables.green_merge_commit.is_some() {
-            self.close_green_merged_delivery_after_verdict(task_id, Some(&verdict.id)).await
-        } else if task.status == TaskStatus::AwaitingMerge {
-            self.close_merged_delivery(store.as_ref(), task, &verdict.staging_sha, Some(&verdict.id)).await
+        let outcome = if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override {
+            CassyMergeClose::NotEligible
+        } else if task.status == TaskStatus::AwaitingMerge || task.deliverables.green_merge_commit.is_some() {
+            let merged = task.deliverables.green_merge_commit.clone().unwrap_or_else(|| receipt.staging_sha.clone());
+            self.close_merged_delivery(store.as_ref(), task, &merged, verification_id, Some(receipt)).await
         } else {
             CassyMergeClose::NotEligible
         };
@@ -500,7 +703,7 @@ impl CasCore {
                 &actor,
                 Some(&actor),
                 None,
-                Some(&verdict.staging_sha),
+                Some(&receipt.staging_sha),
                 None,
             ) {
                 notice.push_str(&format!("; NOT RECORDED: delivery completion ({error})"));
@@ -509,27 +712,65 @@ impl CasCore {
         CassyMergeClose::Closed { notice }
     }
 
+    /// Trusted publish/promotion adapters pass the shared immutable inventory.
+    /// Each approval-bound member is finalized with one guarded write; a stale
+    /// member is held while independent members continue.
+    pub(crate) async fn close_release_inventory_outcomes(
+        &self, inventory: &crate::qa_batch::ReleaseInventory,
+    ) -> std::collections::BTreeMap<String, CassyMergeClose> {
+        self.close_release_inventory_with_checkpoint(inventory, &mut |_, _| Ok(())).await
+            .unwrap_or_else(|error| inventory.deliveries.iter().map(|d|
+                (d.task_id.clone(), CassyMergeClose::Held(error.clone()))).collect())
+    }
+
+    /// The durable release controller commits each result before this loop
+    /// proceeds. A failed checkpoint stops effects; the guarded close remains
+    /// replayable if it committed just before the process died.
+    pub(crate) async fn close_release_inventory_with_checkpoint(
+        &self,
+        inventory: &crate::qa_batch::ReleaseInventory,
+        checkpoint: &mut impl FnMut(&str, CassyMergeClose) -> Result<(), String>,
+    ) -> Result<std::collections::BTreeMap<String, CassyMergeClose>, String> {
+        let repo = self.cas_root.parent().unwrap_or(&self.cas_root);
+        crate::qa_batch::release_close::reconcile_members(&self.cas_root, repo, inventory, true, checkpoint)
+    }
+
     /// cas-f497: a recorded release verdict closes the deliveries it owns. A QA
-    /// receipt does too once a verdict already covers them, since either may be
-    /// recorded first. Tier 0, Tier 2 and `force-verifier` deliveries keep their
-    /// own path. Returns the report for the receipt's response.
-    pub(crate) async fn close_release_covered_deliveries(&self, receipt: &cas_store::QaBatchReceipt) -> String {
-        let recording_verdict = receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA;
-        let (mut closed, mut already, mut own_review, mut held) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    /// receipt retries ordinary close too: its existing review gates either
+    /// finish the delivery or name the remaining verdict. QA never replaces
+    /// release review or a dedicated task review. Returns the report for the receipt's response.
+    // gate[G-90 close-after-merge integrity]: Release-covered close re-runs ordinary gates (Held / TASK_STORE_UNREADABLE)
+    pub(crate) async fn close_release_covered_delivery_outcomes(
+        &self, receipt: &cas_store::QaBatchReceipt,
+    ) -> std::collections::BTreeMap<String, CassyMergeClose> {
+        let recording_verdict = matches!(
+            receipt.schema_version,
+            cas_store::RELEASE_VERDICT_SCHEMA | cas_store::RELEASE_TAG_VERDICT_SCHEMA
+        );
+        let mut outcomes = std::collections::BTreeMap::new();
         let Ok(store) = self.open_task_store() else {
-            return "\nNo delivery was closed: the task store is unreadable; retry task close.".to_string();
+            return receipt.task_heads.keys().map(|id| (id.clone(), CassyMergeClose::Held(
+                crate::gates::tag("G-90", "TASK_STORE_UNREADABLE: the task store is unreadable; retry task close."),
+            ))).collect();
         };
         for task_id in receipt.task_heads.keys() {
             // A close can outlive the batch response's post-commit grace.
             // Persist each result as it happens, including a selector refusal.
             let record = |outcome: &str| {
-                if let Err(error) = record_batch_close_outcome(&self.cas_root, store.as_ref(), task_id, &receipt.id, outcome) {
+                if let Err(error) = record_batch_close_outcome(&self.cas_root, store.as_ref(), task_id, &receipt.id, &receipt.recorded_at, outcome) {
                     tracing::warn!(%task_id, %error, "batch close outcome not recorded");
                 }
             };
             let mut hold = |reason: &str| {
-                record(reason);
-                held.push(format!("- {task_id}: {}", summarize_gate(reason)));
+                let detail = format!(
+                    "Receipt {} covers {task_id} at {}. Ordinary finalization is held:\n{reason}\n\n\
+                     Supervisor action: resolve the gate above, then retry ordinary close with \
+                     task action=close id={task_id} commit_receipt={} reason=\"<gate proof>\". \
+                     No worker re-close is required.",
+                    receipt.id, receipt.staging_sha, receipt.task_heads[task_id],
+                );
+                record(&detail);
+                outcomes.insert(task_id.clone(), CassyMergeClose::Held(crate::gates::tag("G-90", reason)));
             };
             let task = match store.get(task_id) {
                 Ok(task) => task,
@@ -539,53 +780,117 @@ impl CasCore {
                 }
             };
             if task.status == TaskStatus::Closed {
-                already.push(task_id.as_str());
+                outcomes.insert(task_id.clone(), CassyMergeClose::AlreadyClosed);
                 continue;
             }
-            let (repo, target) = match crate::qa_batch::task_context(&self.cas_root, &task) {
+            let (repo, _) = match crate::qa_batch::task_context(&self.cas_root, &task) {
                 Ok(context) => context,
                 Err(error) => {
                     hold(&error);
                     continue;
                 }
             };
-            if let Some(review) = super::review_tier::own_review(&self.cas_root, &task, &repo) {
-                record(&format!("keeps its own review: {review}"));
-                if recording_verdict {
-                    own_review.push(format!("- {task_id}: {review}"));
-                }
+            let target = crate::qa_batch::release_close::target(&self.cas_root, &task.id)
+                .unwrap_or_else(|| receipt.staging_sha.clone());
+            if task.status == TaskStatus::Blocked
+            {
+                hold("RELEASE_MEMBER_HELD: independent task hold remains active");
                 continue;
             }
+            if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
+                let Some(anchor) = receipt.task_heads.get(task_id) else {
+                    hold("the release verdict has no delivery anchor for this task");
+                    continue;
+                };
+                if !crate::qa_batch::release_tag_ships_delivery(&repo, anchor, &receipt.staging_sha, &task.id) {
+                    hold("the release tag no longer contains this delivery");
+                    continue;
+                }
+            }
+            match super::super::block_hold::read(store.as_ref(), &task.id) {
+                Ok(Some(_)) => { hold("RELEASE_MEMBER_HELD: independent task hold remains active"); continue; }
+                Err(error) => { hold(&format!("RELEASE_HOLD_UNREADABLE: {error}")); continue; }
+                Ok(None) => {}
+            }
+            let own_review = match release_receipt_close_admission(&self.cas_root, &task, &repo) {
+                Ok(own_review) => own_review,
+                Err(reason) => {
+                    hold(&reason);
+                    continue;
+                }
+            };
             // cas-bc15: after request_changes the retired anchor is the delivery.
-            let anchor = crate::qa_batch::delivery_anchor(&repo, &task).unwrap_or_default();
+            let anchor = crate::qa_batch::resolved_delivery_anchor(&repo, &task, &target).unwrap_or_default();
             let verdict = match crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, &anchor) {
-                Ok(Some(verdict)) => verdict,
+                Ok(Some(verdict)) => Some(verdict),
                 Ok(None) if recording_verdict => {
                     hold("this verdict does not cover the delivery's current anchor; review it again");
                     continue;
                 }
-                Ok(None) => continue,
+                Ok(None) => None,
                 Err(error) => {
                     hold(&error);
                     continue;
                 }
             };
-            match self.close_after_release_verdict(task_id, &verdict).await {
+            let outcome = if let Some(verdict) = verdict.as_ref().filter(|_| own_review.is_none()) {
+                self.close_after_batch_receipt(task_id, verdict, Some(&verdict.id)).await
+            } else if task.status == TaskStatus::AwaitingMerge
+                && task.deliverables.effective_merge_ci_admission() != cas_types::MergeCiAdmission::Override
+            {
+                // QA attests the walk, never the review. Ordinary close may
+                // finish a dedicated review or report the missing release verdict.
+                match crate::qa_batch::satisfying_receipt(&self.cas_root, &task, &repo, &target, &anchor)
+                    .map(|qa| qa.or(verdict)) {
+                    Ok(Some(qa)) => self.close_after_batch_receipt(task_id, &qa, None).await,
+                    Ok(None) => CassyMergeClose::Held("Batch QA receipt no longer covers the current delivery anchor; record current QA evidence before close.".into()),
+                    Err(error) => CassyMergeClose::Held(error),
+                }
+            } else {
+                CassyMergeClose::NotEligible
+            };
+            match outcome {
                 CassyMergeClose::Closed { notice } => {
                     record(&format!("closed; {notice}"));
-                    closed.push(task_id.as_str());
+                    outcomes.insert(task_id.clone(), CassyMergeClose::Closed { notice });
                 }
                 CassyMergeClose::AlreadyClosed => {
-                    already.push(task_id.as_str());
+                    outcomes.insert(task_id.clone(), CassyMergeClose::AlreadyClosed);
                 }
                 CassyMergeClose::Held(text) => hold(&text),
-                CassyMergeClose::NotEligible if task.deliverables.factory_branch_anchor.is_none() => hold(&format!(
-                    "this verdict covers its merged delivery, but request_changes moved the task out of its park; close it with task close commit_receipt={}",
-                    verdict.staging_sha
-                )),
+                CassyMergeClose::NotEligible if task.deliverables.factory_branch_anchor.is_none() => hold(&crate::gates::tag("G-89", format!(
+                    "this receipt covers its merged delivery, but request_changes moved the task out of its park; close it with task close commit_receipt={}",
+                    receipt.staging_sha
+                ))),
                 CassyMergeClose::NotEligible => {
-                    hold("not parked, or merged under a CI override; it needs its own close")
+                    hold(&crate::gates::tag("G-89", "not parked, or merged under a CI override; it needs its own close"))
                 }
+            }
+        }
+        if let Err(error) = queue_batch_close_holds(&self.cas_root, receipt, &outcomes) {
+            for outcome in outcomes.values_mut() {
+                if let CassyMergeClose::Held(reason) = outcome {
+                    reason.push_str(&format!("; supervisor notice not queued: {error}"));
+                }
+            }
+        }
+        outcomes
+    }
+
+    pub(crate) async fn close_release_covered_deliveries(&self, receipt: &cas_store::QaBatchReceipt) -> String {
+        let outcomes = self.close_release_covered_delivery_outcomes(receipt).await;
+        let (mut closed, mut already, mut held) = (Vec::new(), Vec::new(), Vec::new());
+        for (id, outcome) in &outcomes {
+            match outcome {
+                CassyMergeClose::Closed { .. } => closed.push(id.as_str()),
+                CassyMergeClose::AlreadyClosed => already.push(id.as_str()),
+                CassyMergeClose::Held(reason) => {
+                    let summary = if let Some((gate, warning)) = reason.rsplit_once("; supervisor notice not queued:") {
+                        format!("{}; supervisor notice not queued:{warning}", summarize_gate(gate))
+                    } else { summarize_gate(reason) };
+                    held.push(format!("- {id}: {summary}"));
+                },
+                CassyMergeClose::NotEligible => {},
             }
         }
         let mut report = String::new();
@@ -594,9 +899,6 @@ impl CasCore {
         }
         if !already.is_empty() {
             report.push_str(&format!("\nAlready closed: {}.", already.join(", ")));
-        }
-        if !own_review.is_empty() {
-            report.push_str(&format!("\nKeeps its own review ({}):\n{}", own_review.len(), own_review.join("\n")));
         }
         if !held.is_empty() {
             report.push_str(&format!("\nStill held ({}):\n{}", held.len(), held.join("\n")));
@@ -638,6 +940,7 @@ impl CasCore {
             note,
             foreign_hold: foreign_hold.map(|hold| hold.reason.clone()),
             was_blocked: task.status == TaskStatus::Blocked,
+            resumed_status: TaskStatus::AwaitingMerge,
             hold: hold
                 .as_ref()
                 .and_then(|hold| serde_json::to_value(hold).ok()),
@@ -703,7 +1006,7 @@ impl CasCore {
         // A source gate may already have returned this delivery to the
         // worker. Never restore the old verdict hold over that fresh cycle.
         let current = match store.get(task_id) {
-            Ok(current) if current.status != TaskStatus::AwaitingMerge => {
+            Ok(current) if current.status != release.resumed_status => {
                 return CassyMergeClose::Held(text);
             }
             Ok(current) => Some(current),
@@ -772,6 +1075,7 @@ impl CasCore {
                 "\nCassy could not return task {task_id} to its worker ({error}); run task action=request_changes id={task_id}."
             );
         }
+        let _ = crate::store::publish_direct_task_write(&self.cas_root, task_id);
         let notice = self
             .open_task_store()
             .ok()
@@ -824,7 +1128,7 @@ mod tests {
         store.add(&Task::new("cas-note".into(), "outcome note".into())).unwrap();
         let hold = "PARK REFUSED: more than one close gate failed.\n\nTASK CLOSE REJECTED: cas-6faf is user-facing and its QA evidence bundle is not cited. Next: produce the bundle, then `task action=notes id=cas-6faf notes=\"qa-bundle: /proof/cas-6faf/qa/bundle.json\"`.";
         for outcome in [hold.to_string(), "Unreadable qa-bundle: /suggested/bundle.json".into(), format!("{hold}{}", " long detail".repeat(100))] {
-            let note = record_batch_close_outcome(&root, store.as_ref(), "cas-note", "qab-fixture", &outcome).unwrap();
+            let note = record_batch_close_outcome(&root, store.as_ref(), "cas-note", "qab-fixture", "2026-11-09T03:00:00Z", &outcome).unwrap();
             assert_eq!(crate::qa_evidence::cited_bundle_path(&note), None, "{note}");
             assert_eq!(note.lines().count(), 1);
             assert!(note.chars().count() <= 800, "outcome note is too long");
@@ -840,7 +1144,7 @@ mod tests {
         store.add(&Task::new("cas-dd05".into(), "scoped proof hold".into())).unwrap();
         let command = "SCOPED_PROOF_BASE=eee347de689bf0b842a14b8146d42118e1d455fd scripts/run-scoped-tests.sh --proof";
         let outcome = format!("scoped proof receipt has base None; must be proven against SCOPED_PROOF_BASE=eee347de689bf0b842a14b8146d42118e1d455fd. Re-run the delivered tip in a detached supervisor checkout with: {command}");
-        record_batch_close_outcome(&root, store.as_ref(), "cas-dd05", "qab-remedy", &outcome).unwrap();
+        record_batch_close_outcome(&root, store.as_ref(), "cas-dd05", "qab-remedy", "2026-11-09T03:00:00Z", &outcome).unwrap();
         let note = store.get("cas-dd05").unwrap().notes;
         let path = note.split_once("Details: ").expect("the bounded note must point to its complete remedy")
             .1.split_once(" (SHA-256 ").unwrap().0;
@@ -849,6 +1153,44 @@ mod tests {
         assert!(detail.contains(command));
         assert_eq!(note.lines().count(), 1);
         assert!(note.chars().count() <= 800, "{note}");
+    }
+
+    #[test]
+    fn automatic_post_merge_recovery_keeps_delivery_and_notifies_supervisor_once_cas_5bbe() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "recovery-session");
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "main"]);
+        git(repo.path(), &["commit", "-q", "--allow-empty", "-m", "delivery"]);
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+        let root = crate::store::init_cas_dir(repo.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (id, name, role) in [("sup-id", "supervisor", cas_types::AgentRole::Supervisor),
+            ("worker-id", "worker", cas_types::AgentRole::Worker)] {
+            let mut agent = cas_types::Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("recovery-session".into());
+            agents.register(&agent).unwrap();
+        }
+        let mut task = Task::new("cas-recovery".into(), "parked delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        task.deliverables.green_merge_commit = Some(head);
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("sup-id".into());
+        for _ in 0..2 {
+            core.return_merged_delivery_for_source_fix(&task, repo.path(), "main", "upkeep refusal");
+        }
+        let after = tasks.get(&task.id).unwrap();
+        assert_eq!(after.status, TaskStatus::AwaitingMerge);
+        assert_eq!(serde_json::to_value(&after.deliverables).unwrap(), serde_json::to_value(&task.deliverables).unwrap());
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "supervisor");
+        assert_eq!(rows[0].factory_session.as_deref(), Some("recovery-session"));
     }
 
     /// cas-e9d6: agents share one Git identity, so a tip someone else pushed
@@ -891,7 +1233,8 @@ mod tests {
         task.status = TaskStatus::AwaitingMerge;
         let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
         let release = || VerdictRelease {
-            note: "Cassy close authority".into(), foreign_hold: None, was_blocked: true, hold: None,
+            note: "Cassy close authority".into(), foreign_hold: None, was_blocked: true,
+            resumed_status: TaskStatus::AwaitingMerge, hold: None,
         };
         store.inject_error(cas_store::StoreError::Other("disk full".into()));
         let held = core.held_after_verdict(&store, &task.id, Some(release()), "gate text".into());

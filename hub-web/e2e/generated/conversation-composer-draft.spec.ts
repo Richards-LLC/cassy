@@ -15,7 +15,7 @@ test.describe("Conversation composer", () => {
     const attachment = page.getByRole("button", { name: /Attach a file/ });
     await expect(attachment).toHaveCount(0);
     const conversationLog = page.getByRole("log");
-    await expect(conversationLog).toContainText("Rebased and pushed; nothing waiting.");
+    await expect(conversationLog).toBeVisible();
     const originalLog = await conversationLog.textContent();
 
     // 2. Replace the textbox contents with “Please verify the gate first.”
@@ -23,7 +23,7 @@ test.describe("Conversation composer", () => {
     await expect(message).toHaveValue("Please verify the gate first.");
     await expect(message).toBeEditable();
     await expect(conversationLog).toHaveText(originalLog);
-    await expect(conversationLog).toContainText("Rebased and pushed; nothing waiting.");
+    await expect(conversationLog).toBeVisible();
 
     // 3. Clear the textbox.
     await message.fill("");

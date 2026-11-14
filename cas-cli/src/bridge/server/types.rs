@@ -179,6 +179,9 @@ pub(crate) struct TargetsJson {
 #[serde(rename_all = "snake_case")]
 pub(crate) struct StatusJson {
     pub(crate) schema_version: u32,
+    /// Populated by completed reconciliation only (#3/#4), never by a tracked release.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) release_scope: Option<ReconciledReleaseScopeJson>,
     pub(crate) supervisor_phase: Option<crate::ui::factory::daemon::runtime::work_events::SupervisorPhase>,
     pub(crate) session: SessionJson,
     pub(crate) prompt_queue_pending: usize,
@@ -190,6 +193,13 @@ pub(crate) struct StatusJson {
     /// The epic this session is pinned to, `null` when unpinned (cas-9b08):
     /// what a Commander `focus_epic` operation names as its precondition.
     pub(crate) focused_epic: Option<String>,
+}
+
+/// Minimal release identity shared with ReleaseScope from the release inventory contract.
+#[derive(Debug, Serialize)]
+pub(crate) struct ReconciledReleaseScopeJson {
+    pub(crate) release_id: String,
+    pub(crate) final_release_sha: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,6 +223,11 @@ pub(crate) struct TaskSummaryJson {
     pub(crate) merge_check_pending: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) progress: Option<EpicProgressJson>,
+    /// An epic's child split, as the factory TUI counts it: open (open or
+    /// blocked), in progress (in progress or parked) and merged (delivered
+    /// closures). Unbounded by the delivery-proof budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) counts: Option<EpicCountsJson>,
     pub(crate) branch: Option<String>,
     /// Last update, RFC 3339 (cas-566b): a fleet operation's precondition.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,6 +236,20 @@ pub(crate) struct TaskSummaryJson {
     /// "ask the supervisor to merge" states it saw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tip: Option<String>,
+    /// A release train's freeze (cas-2f4d): frozen_at, tip, measured eta
+    /// (null when a stage is unmeasured) and the card's summary line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) freeze: Option<serde_json::Value>,
+    /// A release train's auto-cut pause (cas-e060); absent on other epics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_cut_paused: Option<bool>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct EpicCountsJson {
+    pub(crate) open: usize,
+    pub(crate) in_progress: usize,
+    pub(crate) merged: usize,
 }
 
 #[derive(Debug, Serialize)]

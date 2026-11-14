@@ -241,7 +241,7 @@ reusing its matrix and ledger discipline. Order of work:
    Walk each one from its real entry point to the user's goal with
    `scripts/journey-eval.sh <dir> --grep <ID>`. Then judge the experience:
    dead ends, copy, steps, lost context, waits (scored 0–3). Where the
-   catalog has no suite, walk the journey by hand with Playwright 1.63
+   catalog has no suite, walk the journey by hand with the latest stable locked Playwright
    (`playwright-cli`) and record a trace.
 3. **Check correctness paths.** Walk the demo_statement end to end, then the
    adjacent paths:
@@ -274,9 +274,9 @@ The QA worker never edits the delivery. Fixes belong to the implementer.
 
 ## 5. Finding format
 
-Everything goes in `~/.cas/artifacts/<delivery-task>/independent-qa/round-<n>/`, , as a
+Everything goes in `~/.cas/artifacts/<project-key>/<delivery-task>/independent-qa/<full-head>/<pass-id>/round-<n>/` as a
 cas-c3b8 evidence bundle (contract v1). Its `bundle.json` must have
-`producer: "independent-qa"` and a `head_sha` equal to the reviewed tip, and
+`producer: "independent-qa"`, the dispatched `pass_id` and a `head_sha` equal to the reviewed tip, and
 `qa_record` refuses a verdict without it. Findings are `F01.png`…, each with
 one `showChapter` in `receipt.webm`. `LEDGER.md` has these sections:
 

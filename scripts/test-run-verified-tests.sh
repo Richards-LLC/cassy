@@ -54,7 +54,7 @@ echo '------------'
 echo '     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped'
 EOF
 chmod +x "${stub}"
-expect pass 'PASS: 2 test(s) passed' 'nextest green receipt passes' \
+expect pass - 'nextest green receipt passes' \
     env CARGO="${stub}" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
     "${guard}" nextest run -p cas --lib module
 
@@ -68,12 +68,12 @@ if hasattr(os, 'waitid'):
 if hasattr(select, 'kqueue'):
     del select.kqueue
 EOF
-expect pass 'PASS: 2 test(s) passed' 'nextest discovery works without os.waitid' \
+expect pass - 'nextest discovery works without os.waitid' \
     env PYTHONPATH="${fallback_dir}" CARGO="${stub}" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
     "${guard}" nextest run -p cas --lib module
 
 count_file="${tmpdir}/count"
-expect pass 'PASS: 2 test(s) passed' 'embedded guard exports count in supplied worktree' \
+expect pass - 'embedded guard exports count in supplied worktree' \
     env CARGO="${stub}" VERIFIED_TEST_REPO_ROOT="${tmpdir}" VERIFIED_TEST_COUNT_FILE="${count_file}" \
     bash -c "$(cat "${guard}")" worker-verified-tests nextest run -p cas --lib -E 'test(module)'
 expect pass '2' 'count export contains guarded nonzero count' cat "${count_file}"
@@ -84,7 +84,7 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
 EOF
 )"
-expect fail '0 tests passed' 'zero-match Cargo result fails loudly' \
+expect fail - 'zero-match Cargo result fails loudly' \
     env CARGO="${stub}" "${guard}" test -p cas --lib stale_filter
 
 stub="$(make_stub zero-nextest 0 <<'EOF'
@@ -93,11 +93,11 @@ stub="$(make_stub zero-nextest 0 <<'EOF'
      Summary [   0.001s] 0 tests run: 0 passed, 4 skipped
 EOF
 )"
-expect fail '0 tests passed' 'zero-match nextest result fails loudly' \
+expect fail - 'zero-match nextest result fails loudly' \
     env CARGO="${stub}" "${guard}" nextest run -p cas --lib stale_filter
 
 echo 99 >"${count_file}"
-expect fail '0 tests passed' 'zero-match retry clears stale exported count' \
+expect fail - 'zero-match retry clears stale exported count' \
     env CARGO="${stub}" VERIFIED_TEST_COUNT_FILE="${count_file}" "${guard}" nextest run -p cas --lib -E 'test(stale)'
 expect pass - 'failed guard leaves no exported count' test ! -e "${count_file}"
 
@@ -118,7 +118,7 @@ cat >"${tmpdir}/sample" <<'EOF'
 echo 'fake libtest stack: StdoutLock::write'
 EOF
 chmod +x "${tmpdir}/sample"
-expect fail 'nextest discovery timeout' 'stalled nextest lister has a bounded, named failure' \
+expect fail - 'stalled nextest lister has a bounded, named failure' \
     env PATH="${tmpdir}:${PATH}" CARGO="${tmpdir}/stalled-nextest" \
     VERIFIED_TEST_LOG="${tmpdir}/stalled.log" CAS_TEST_TERM_MARKER="${tmpdir}/terminated" \
     CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
@@ -134,14 +134,14 @@ stub="$(make_stub no-harness 0 <<'EOF'
 Finished `test` profile after a swallowed build failure
 EOF
 )"
-expect fail 'no test harness ever reported' 'swallowed pre-harness failure fails loudly' \
+expect fail - 'swallowed pre-harness failure fails loudly' \
     env CARGO="${stub}" "${guard}" test -p cas --doc
 
 stub="$(make_stub failing 42 <<'EOF'
 test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 EOF
 )"
-expect fail 'the test run exited 42' 'real Cargo failure propagates' \
+expect fail - 'real Cargo failure propagates' \
     env CARGO="${stub}" "${guard}" test -p cas --doc
 
 # cas-aee36: simulate termination of the capped foreground process group.

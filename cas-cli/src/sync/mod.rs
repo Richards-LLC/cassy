@@ -171,18 +171,23 @@ impl Syncer {
 
     /// Sync all proven rules and remove stale files
     pub fn sync_all(&self, rules: &[Rule]) -> Result<SyncReport, CasError> {
+        self.sync_all_excluding(rules, &HashSet::new())
+    }
+
+    pub(crate) fn sync_all_excluding(&self, rules: &[Rule], excluded: &HashSet<String>) -> Result<SyncReport, CasError> {
         let mut report = SyncReport::default();
 
         // Collect IDs of proven rules
-        let proven_ids: HashSet<_> = rules
+        let mut proven_ids: HashSet<_> = rules
             .iter()
             .filter(|r| self.should_sync(r))
             .map(|r| r.id.clone())
             .collect();
 
+        proven_ids.extend(excluded.iter().cloned());
         // Sync proven rules
         for rule in rules {
-            if self.sync_rule(rule)? {
+            if !excluded.contains(&rule.id) && self.sync_rule(rule)? {
                 report.synced += 1;
                 report.synced_ids.push(rule.id.clone());
             }

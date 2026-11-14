@@ -179,7 +179,11 @@ impl GitOperations {
         for row in metadata.lines() {
             result.total += 1;
             let fields: Vec<_> = row.split('\0').collect();
-            if fields.as_slice() == ["Cassy", "cassy@localhost", super::MANAGED_RECONCILE_SUBJECT] {
+            if fields.len() == 3 && fields[0] == "Cassy" && fields[1] == "cassy@localhost"
+                && (fields[2] == super::MANAGED_RECONCILE_SUBJECT
+                    || fields[2].strip_prefix("chore(cas): sync managed files to v")
+                        .is_some_and(|version| semver::Version::parse(version).is_ok()))
+            {
                 result.count += 1;
             }
         }

@@ -1,6 +1,7 @@
 pub(crate) mod audit;
 pub(crate) mod integration_batch;
 pub(crate) mod block_hold;
+pub(crate) mod close_refusal;
 mod dependencies;
 pub(crate) mod lifecycle;
 mod notes;
@@ -8,6 +9,7 @@ pub(crate) use notes::note_notification_ids;
 mod proposals;
 mod query;
 mod rebind;
+mod recover_delivery;
 pub(crate) mod repo_context;
 pub(crate) mod release_train;
 pub(crate) mod source_claim;
@@ -15,15 +17,18 @@ mod update;
 
 /// Caller text appended to the task timeline cannot forge the marker lines
 /// emitted by artifact publication or server-attested proposal sync.
+/// Each message ends with the `[G-19]` code token (static text, so the token is
+/// literal rather than appended by `crate::gates::tag`).
+// gate[G-19 park integrity]: Caller note-marker injection rejection
 pub(crate) fn caller_note_marker_rejection(text: &str) -> Option<&'static str> {
     if crate::cloud::syncer::contains_proposal_provenance_marker(text) {
-        Some("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).")
+        Some("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).\n\n[G-19]")
     } else if crate::artifacts::proof::contains_proof_marker(text) {
-        Some("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references.")
+        Some("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references.\n\n[G-19]")
     } else if text.lines().any(|line| line.starts_with("QA_PASS_PROOF:") || line.starts_with("QA_EVIDENCE_PROOF:") || line.starts_with("QA_BATCH_RECEIPT_PROOF:") || line.starts_with("RELEASE_VERDICT_PROOF:")) {
-        Some("Task notes cannot contain QA proof markers; Cassy records QA verdicts and published evidence itself.")
+        Some("Task notes cannot contain QA proof markers; Cassy records QA verdicts and published evidence itself.\n\n[G-19]")
     } else if text.lines().any(|line| line.starts_with(crate::fast_lane::PROOF)) {
-        Some("Task notes cannot contain FAST_LANE_PROOF: markers; Cassy records fast-lane merges, reruns, reverts and follow-ups itself.")
+        Some("Task notes cannot contain FAST_LANE_PROOF: markers; Cassy records fast-lane merges, reruns, reverts and follow-ups itself.\n\n[G-19]")
     } else {
         None
     }
@@ -299,12 +304,13 @@ pub(crate) fn ensure_task_origin(
     let current = project_id
         .as_deref()
         .unwrap_or("unresolved current project");
+    // gate[G-03 start]: Origin project mismatch
     Err(rmcp::ErrorData {
         code: rmcp::model::ErrorCode::INVALID_PARAMS,
-        message: std::borrow::Cow::from(format!(
+        message: std::borrow::Cow::from(crate::gates::tag("G-03", format!(
             "Cannot {action} task {}: origin project `{origin}` does not match current project `{current}`. This row is owned by another project; use an authorized supervisor `task action=update id={} origin_project=<canonical id>` to reassign it explicitly.",
             task.id, task.id
-        )),
+        ))),
         data: None,
     })
 }
@@ -408,12 +414,13 @@ pub(crate) fn ensure_no_start_gates(
         return Ok(());
     }
 
+    // gate[G-01 start]: Explicit requires_start prerequisite still open
     Err(rmcp::ErrorData {
         code: rmcp::model::ErrorCode::INVALID_PARAMS,
-        message: std::borrow::Cow::from(format!(
+        message: std::borrow::Cow::from(crate::gates::tag("G-01", format!(
             "Cannot start task {task_id}: explicit requires_start dependencies are still open: {}. Close those prerequisite tasks first, or remove an incorrect `requires_start` dependency with `task action=dep_remove id={task_id} to_id=<prerequisite-id> dep_type=requires_start`.",
             gate_ids.join(", ")
-        )),
+        ))),
         data: None,
     })
 }
@@ -445,11 +452,12 @@ pub(crate) fn ensure_no_external_blockers(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    // gate[G-02 start]: External cross-project blocking dependency
     Err(rmcp::ErrorData {
         code: rmcp::model::ErrorCode::INVALID_PARAMS,
-        message: std::borrow::Cow::from(format!(
+        message: std::borrow::Cow::from(crate::gates::tag("G-02", format!(
             "Cannot {action} task {task_id}: cross-project blockers are unresolved: {rendered}. Reconcile after the target closes; a rejected handoff remains blocking until an operator removes or replaces it."
-        )),
+        ))),
         data: None,
     })
 }

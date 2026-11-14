@@ -1,4 +1,4 @@
-//! Session handoffs: one current handoff per project and role (GH #992,
+//! Session handoffs: one current handoff per project, role and supervisor lineage (GH #992,
 //! cas-0339).
 //!
 //! A handoff is the note an outgoing session leaves for the next one. It is a
@@ -8,16 +8,16 @@
 //! lives in.
 //!
 //! Handoffs are never merged or overwritten. Saving a new one *supersedes* the
-//! previous current handoff for the same role: the old entry keeps its content
+//! previous current handoff for the same role and supervisor lineage: the old entry keeps its content
 //! as history but gains a `superseded` tag and a `superseded-by:<id>` link, its
 //! validity ends, and it drops out of the active tier. Session start injects
-//! only the newest non-superseded handoff for the session's role, and never
+//! only the newest non-superseded handoff for the session's role and lineage, and never
 //! ranks handoffs among ordinary memories, so a stale "CURRENT handoff" cannot
 //! resurface.
 
 use chrono::{DateTime, Utc};
 
-use cas_types::{Entry, MemoryTier};
+use cas_types::{Agent, AgentRole, Entry, MemoryTier};
 
 /// Tag that marks a memory as a handoff.
 pub const HANDOFF_TAG: &str = "handoff";
@@ -30,6 +30,76 @@ pub const ROLE_TAG_PREFIX: &str = "role:";
 /// Role of a handoff that names none. Every handoff written before roles
 /// existed was a supervisor's session handoff.
 pub const DEFAULT_HANDOFF_ROLE: &str = "supervisor";
+
+/// Project-store and role filtering provide the outer scope; the host is the
+/// remaining supervisor continuity boundary (GH #1661). Names and sessions
+/// change on takeover, so the owner is retained only as an audit stamp.
+#[derive(Debug, Clone)]
+pub struct HandoffLineage {
+    machine: String,
+    owner: String,
+}
+
+const MACHINE_PREFIX: &str = "handoff-machine:";
+const OWNER_PREFIX: &str = "handoff-owner:";
+
+impl HandoffLineage {
+    pub fn for_agent(agent: &Agent) -> Self {
+        let owner = if agent.role == AgentRole::Supervisor && !agent.name.trim().is_empty() {
+            format!("supervisor:{}", agent.name)
+        } else {
+            format!("session:{}", agent.id)
+        };
+        Self {
+            machine: agent
+                .machine_id
+                .clone()
+                .unwrap_or_else(Agent::get_or_generate_machine_id),
+            owner,
+        }
+    }
+
+    /// A fresh local supervisor can restore its predecessor before registration.
+    pub fn for_local_machine() -> Self {
+        Self {
+            machine: Agent::get_or_generate_machine_id(),
+            owner: String::new(),
+        }
+    }
+
+    pub fn from_entry(entry: &Entry) -> Option<Self> {
+        let tag = |prefix| {
+            entry
+                .tags
+                .iter()
+                .find_map(|tag| tag.strip_prefix(prefix))
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        Some(Self {
+            machine: tag(MACHINE_PREFIX)?,
+            owner: tag(OWNER_PREFIX).unwrap_or_default(),
+        })
+    }
+
+    /// Replace caller-provided ownership with the authenticated writer's scope.
+    pub fn stamp(&self, entry: &mut Entry) {
+        entry
+            .tags
+            .retain(|tag| !tag.starts_with(MACHINE_PREFIX) && !tag.starts_with(OWNER_PREFIX));
+        entry.tags.push(format!("{MACHINE_PREFIX}{}", self.machine));
+        if !self.owner.is_empty() {
+            entry.tags.push(format!("{OWNER_PREFIX}{}", self.owner));
+        }
+    }
+}
+
+fn belongs_to_lineage(entry: &Entry, role: &str, lineage: Option<&HandoffLineage>) -> bool {
+    role != DEFAULT_HANDOFF_ROLE
+        || lineage.is_some_and(|lineage| {
+            HandoffLineage::from_entry(entry).is_some_and(|saved| saved.machine == lineage.machine)
+        })
+}
 
 /// Whether `entry` is a handoff.
 pub fn is_handoff(entry: &Entry) -> bool {
@@ -65,13 +135,24 @@ pub fn is_superseded(entry: &Entry) -> bool {
 }
 
 /// The current handoff for `role` among `entries`: the newest handoff of that
-/// role that is not superseded. Ties on `created` go to the larger id, so the
+/// role that is not superseded. Supervisor handoffs require matching machine
+/// within the project store; memories without a machine stamp fail closed. Ties on `created`
+/// go to the larger id, so the
 /// choice is stable.
-pub fn current_handoff<'a>(entries: &'a [Entry], role: &str) -> Option<&'a Entry> {
+pub fn current_handoff<'a>(
+    entries: &'a [Entry],
+    role: &str,
+    lineage: Option<&HandoffLineage>,
+) -> Option<&'a Entry> {
     let role = normalize_role(Some(role));
     entries
         .iter()
-        .filter(|entry| is_handoff(entry) && !is_superseded(entry) && handoff_role(entry) == role)
+        .filter(|entry| {
+            is_handoff(entry)
+                && !is_superseded(entry)
+                && handoff_role(entry) == role
+                && belongs_to_lineage(entry, &role, lineage)
+        })
         .max_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)))
 }
 
@@ -100,13 +181,17 @@ pub fn tag_new_handoff(tags: &mut Vec<String>, role: Option<&str>) -> String {
 }
 
 /// The handoffs a new handoff `new_id` of `role` supersedes: every other
-/// current handoff of the same role.
+/// current handoff of the same role and, for supervisors, the same lineage.
 pub fn handoffs_superseded_by<'a>(
     entries: &'a [Entry],
     new_id: &str,
     role: &str,
 ) -> Vec<&'a Entry> {
     let role = normalize_role(Some(role));
+    let lineage = entries
+        .iter()
+        .find(|entry| entry.id == new_id)
+        .and_then(HandoffLineage::from_entry);
     entries
         .iter()
         .filter(|entry| {
@@ -114,6 +199,7 @@ pub fn handoffs_superseded_by<'a>(
                 && is_handoff(entry)
                 && !is_superseded(entry)
                 && handoff_role(entry) == role
+                && belongs_to_lineage(entry, &role, lineage.as_ref())
         })
         .collect()
 }
@@ -149,12 +235,21 @@ mod tests {
     use chrono::Duration;
 
     fn handoff(id: &str, minutes_ago: i64, tags: &[&str], content: &str) -> Entry {
-        Entry {
+        let mut entry = Entry {
             id: id.to_string(),
             tags: tags.iter().map(|tag| tag.to_string()).collect(),
             content: content.to_string(),
             created: Utc::now() - Duration::minutes(minutes_ago),
             ..Default::default()
+        };
+        test_lineage().stamp(&mut entry);
+        entry
+    }
+
+    fn test_lineage() -> HandoffLineage {
+        HandoffLineage {
+            machine: "fixture-machine".into(),
+            owner: "fixture-lineage".into(),
         }
     }
 
@@ -177,15 +272,15 @@ mod tests {
             handoff("note", 1, &["summary"], "not a handoff"),
         ];
         assert_eq!(
-            current_handoff(&entries, "supervisor").map(|e| e.id.as_str()),
+            current_handoff(&entries, "supervisor", Some(&test_lineage())).map(|e| e.id.as_str()),
             Some("new")
         );
         assert_eq!(
-            current_handoff(&entries, "Worker").map(|e| e.id.as_str()),
+            current_handoff(&entries, "Worker", Some(&test_lineage())).map(|e| e.id.as_str()),
             Some("worker")
         );
         assert_eq!(
-            current_handoff(&entries, "director").map(|e| e.id.as_str()),
+            current_handoff(&entries, "director", Some(&test_lineage())).map(|e| e.id.as_str()),
             None
         );
     }
@@ -209,12 +304,12 @@ mod tests {
             },
         ];
         assert_eq!(
-            current_handoff(&entries, "supervisor").map(|e| e.id.as_str()),
+            current_handoff(&entries, "supervisor", Some(&test_lineage())).map(|e| e.id.as_str()),
             Some("legacy")
         );
         entries[2].tags.push("superseded-by:later".into());
         assert_eq!(
-            current_handoff(&entries, "supervisor").map(|e| e.id.as_str()),
+            current_handoff(&entries, "supervisor", Some(&test_lineage())).map(|e| e.id.as_str()),
             Some("keep")
         );
     }
@@ -257,7 +352,12 @@ mod tests {
         assert_eq!(entry.content, "CURRENT handoff body");
         assert_eq!(entry.title.as_deref(), Some("Handoff 2026-09-23"));
         assert_eq!(
-            entry.tags,
+            entry
+                .tags
+                .iter()
+                .filter(|tag| !tag.starts_with(MACHINE_PREFIX) && !tag.starts_with(OWNER_PREFIX))
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             [
                 "handoff",
                 "role:supervisor",
@@ -268,6 +368,45 @@ mod tests {
         assert_eq!(entry.valid_until, Some(now));
         assert_eq!(entry.memory_tier, MemoryTier::Cold);
         assert!(is_superseded(&entry));
+    }
+
+    /// A local successor may have a new supervisor name and factory lifetime.
+    /// Only the machine boundary may prevent it from restoring this project's
+    /// supervisor handoff (GH #1661 review).
+    #[test]
+    fn renamed_supervisor_restores_predecessor_only_on_same_machine_cas_fb21() {
+        let mut predecessor = Agent::new_with_role(
+            "before-session".into(),
+            "before-name".into(),
+            AgentRole::Supervisor,
+        );
+        predecessor.machine_id = Some("machine-a".into());
+        let mut entry = handoff(
+            "predecessor",
+            1,
+            &["handoff", "role:supervisor"],
+            "approval receipt",
+        );
+        HandoffLineage::for_agent(&predecessor).stamp(&mut entry);
+        let entries = vec![entry];
+        for (machine, expected) in [("machine-a", Some("predecessor")), ("machine-b", None)] {
+            let mut successor = Agent::new_with_role(
+                "after-session".into(),
+                "after-name".into(),
+                AgentRole::Supervisor,
+            );
+            successor.machine_id = Some(machine.into());
+            successor.factory_session = Some("new-factory-lifetime".into());
+            assert_eq!(
+                current_handoff(
+                    &entries,
+                    "supervisor",
+                    Some(&HandoffLineage::for_agent(&successor))
+                )
+                .map(|entry| entry.id.as_str()),
+                expected
+            );
+        }
     }
 
     #[test]

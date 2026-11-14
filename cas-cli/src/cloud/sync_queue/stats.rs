@@ -184,9 +184,22 @@ impl SyncQueue {
         local_revision: Option<i64>,
         remote_revision: Option<i64>,
     ) -> Result<(), CasError> {
+        // One atomic statement also deduplicates writers on other connections.
+        // Preserve every distinct state, verdict and revision; repeats retain
+        // their original observation time rather than extending retention.
+        // Lifecycle guards have a latest-state consumer: A -> B -> A must
+        // publish A again, while A -> A is still a duplicate.
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sync_conflicts (entity_type, entity_id, discarded_row_json, winner_side, strategy, resolved_at, local_revision, remote_revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO sync_conflicts (entity_type, entity_id, discarded_row_json, winner_side, strategy, resolved_at, local_revision, remote_revision)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+             WHERE NOT EXISTS (SELECT 1 FROM sync_conflicts
+                 WHERE entity_type=?1 AND entity_id=?2 AND discarded_row_json=?3
+                   AND winner_side=?4 AND strategy=?5
+                   AND local_revision IS ?7 AND remote_revision IS ?8
+                   AND (?5 != 'task_lifecycle_guard' OR id = (
+                       SELECT MAX(id) FROM sync_conflicts
+                       WHERE entity_type=?1 AND entity_id=?2 AND strategy=?5)))",
             rusqlite::params![entity_type, entity_id, discarded_row_json, winner_side, strategy, Utc::now().to_rfc3339(), local_revision, remote_revision],
         )?;
         Ok(())

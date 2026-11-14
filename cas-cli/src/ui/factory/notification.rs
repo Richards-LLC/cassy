@@ -27,6 +27,8 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    pub(crate) fn configuration(&self) -> &NotifyConfig { &self.config }
+
     /// Create a new notifier with the given config
     pub fn new(config: NotifyConfig) -> Self {
         Self { config }
@@ -86,7 +88,8 @@ impl Notifier {
                 urgency: Urgency::Normal,
             }),
             // Don't notify for these events
-            DirectorEvent::TaskAssigned { .. } | DirectorEvent::AgentRegistered { .. } => None,
+            DirectorEvent::TaskAssigned { .. } | DirectorEvent::AgentRegistered { .. }
+            | DirectorEvent::QaWalkAttention { .. } => None,
         }
     }
 
@@ -166,6 +169,7 @@ impl Notifier {
     }
 
     /// Send a notification about a worker crash
+    // gate[N-105 notice]: Desktop and terminal notifications
     pub fn notify_crash(&self, worker: &str, exit_info: &str) {
         if !self.config.enabled {
             return;

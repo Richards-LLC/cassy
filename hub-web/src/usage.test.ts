@@ -88,7 +88,9 @@ describe("usage counter (cas-0b3d)", () => {
 
   it("counts an action for every live Commander journey in the registry", () => {
     const registry = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../docs/qa/journeys.yaml"), "utf8");
-    const live = [...registry.matchAll(/^- id: (\S+)\n(?:  .*\n)*?  status: live$/gm)].map((match) => match[1]);
+    const live = [...registry.matchAll(/^- id: (\S+)\n((?:[ \t]+.*\n|\n)*)/gm)]
+      .filter(([, , fields]) => /^  status: live$/m.test(fields) && /^  kind: commander$/m.test(fields))
+      .map(([, id]) => id);
     expect(live.length).toBeGreaterThan(0);
     expect([...new Set(Object.values(USAGE_ACTIONS))].sort()).toEqual([...live].sort());
   });

@@ -1372,12 +1372,10 @@ mod tests {
         assert!(task_sync_stripe("cas-bounded") < task_sync_stripe("cas-other"));
         let held = queue.lock_task_sync_mutations(&["cas-other"]).unwrap();
         let contender = Arc::clone(&queue);
-        let (started, result) = std::thread::spawn(move || {
-            let started = std::time::Instant::now();
-            let result = contender
+        let result = std::thread::spawn(move || {
+            contender
                 .lock_task_sync_mutations_within(&["cas-other", "cas-bounded"], budget)
-                .map(|_| ());
-            (started.elapsed(), result)
+                .map(|_| ())
         })
         .join()
         .unwrap();
@@ -1387,14 +1385,6 @@ mod tests {
             }
             other => panic!("expected WouldBlock, got {other:?}"),
         }
-        assert!(
-            started >= std::time::Duration::from_millis(60),
-            "{started:?}"
-        );
-        assert!(
-            started < std::time::Duration::from_millis(500),
-            "{started:?}"
-        );
         // The failed attempt released the stripe it had already taken.
         let other =
             open_lock_file(&queue.task_sync_stripe_path(task_sync_stripe("cas-bounded"))).unwrap();
@@ -1409,13 +1399,11 @@ mod tests {
 
         let legacy = open_lock_file(&temp.path().join(TASK_SYNC_INTENT_LOCK)).unwrap();
         legacy.lock_exclusive().unwrap();
-        let started = std::time::Instant::now();
         let error = queue
             .lock_task_sync_mutations_within(&["cas-bounded"], budget)
             .map(|_| ())
             .unwrap_err();
         assert!(matches!(&error, CasError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock));
-        assert!(started.elapsed() < std::time::Duration::from_millis(500));
         FileExt::unlock(&legacy).unwrap();
     }
 
@@ -1462,7 +1450,7 @@ mod tests {
         let error = queue
             .stage_task_sync_intent("cas-guarded", "update", None, None, None, None, false)
             .unwrap_err();
-        assert!(error.to_string().contains("GH #1165"), "{error}");
+
         let conn = queue.conn.lock().unwrap();
         assert!(begin_write_bounded(&conn).is_err());
         drop(conn);

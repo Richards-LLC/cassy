@@ -11,6 +11,7 @@ use crate::coordination::external_work::{
     SqliteRequestJournal, VioletThreadResolver,
 };
 
+// gate[W-67 watchdog]: External-work reconcile against Cloud and Violet
 pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let journal = SqliteRequestJournal::open(cas_dir).map_err(|error| error.to_string())?;
@@ -73,7 +74,7 @@ struct DaemonVioletResolver {
 #[cfg(feature = "mcp-proxy")]
 impl VioletThreadResolver for DaemonVioletResolver {
     fn resolve(&self, external_ref: &str, timeout: Duration) -> Result<Value, RemoteError> {
-        let args = serde_json::Map::from_iter([("external_ref".to_string(), json!(external_ref))]);
+        let args = crate::coordination::external_work::violet_identity_read_args(external_ref);
         let runtime = self
             .runtime
             .lock()
@@ -93,6 +94,18 @@ impl VioletThreadResolver for DaemonVioletResolver {
         // cas-85c1: the MCP resolver's classification, so a daemon reconcile
         // retries a reconnecting drop exactly as a supervisor's claim does.
         crate::coordination::external_work::violet_proxy_outcome(result)
+    }
+
+    fn reconcile_reply(&self, intent_id: &str, timeout: Duration) -> Result<Value, RemoteError> {
+        let args = serde_json::Map::from_iter([("coordination_operation_id".into(), json!(intent_id))]);
+        let runtime = self.runtime.lock()
+            .map_err(|_| RemoteError::unavailable("Violet runtime lock poisoned"))?;
+        let result = runtime.block_on(async {
+            tokio::time::timeout(timeout, self.proxy.call_tool(
+                &self.caller, cmcp_core::config::VIOLET_SERVER, "violet_reconcile_reply", Some(args),
+            )).await
+        });
+        crate::coordination::external_work::violet_proxy_payload(result)
     }
 }
 

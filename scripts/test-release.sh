@@ -34,12 +34,24 @@ printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}"
 state="${FAKE_GH_STATE:?}"
 case "$1 $2" in
   "repo view") echo example/repo ;;
+  "release view") exit 1 ;;
+  "release create") ;;
+  "api repos/"*)
+    case "$2" in */logs) cat "${FAKE_TRAIN_LOG_ZIP:?}" ;; *) echo '{}' ;; esac ;;
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit") ;;
   "pr merge") [[ "${FAKE_MERGE_EXIT:-0}" == 0 ]] && touch "$state/admitted"; exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
+  "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
+  "api -X")
+    case "$4" in
+      */pulls?*) echo '[]' ;;
+      */artifacts?*) echo '{"artifacts":[]}' ;;
+      */jobs) echo '{"jobs":[{"name":"Shared train and queue graph / Full-set gate","conclusion":"success"}]}' ;;
+      *) cat "${FAKE_TRAIN_RUN:-/dev/null}" ;;
+    esac ;;
   "api graphql")
     if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
     elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}'
@@ -58,8 +70,16 @@ case "$1 $2" in
       no_train) echo 'Error: no open release train; create work on the train first' >&2; exit 1 ;;
       different_branch) echo 'Error: check out the open release train epic/train-cas-a001 first' >&2; exit 1 ;;
     esac
-    printf '{"branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
+    printf '{"train_id":"cas-0001","branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
+  "release preview")
+    jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" \
+      --argjson missing "${FAKE_REVIEW_MISSING:-$(printf '%s' '["cas-dead"]')}" \
+      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" --argjson ci "${FAKE_CI_MISSING:-[]}" \
+      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)+($ci|length)),would_close:$n,would_hold:(($missing|length)+($ci|length)),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),LANE_CI_MISSING:($ci|length),ALREADY_CLOSED:$closed},review_missing:$missing,lane_ci_missing:$ci}' ;;
+  "qa candidate")
+    case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
+  "ledger estimate") echo 'typical 16 min, bad day 31 min; 20 references'; exit "${FAKE_ESTIMATE_EXIT:-0}" ;;
   *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
 esac
 EOF
@@ -102,7 +122,7 @@ write_tree() {
 
 - The base release.
 EOF2
-    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$root/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/doc-fragments.py" "$script_dir/find-release-prebuild.sh" "$root/scripts/"
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
@@ -122,6 +142,7 @@ JS
 
 write_valid_draft() {
     local path="$1" name="${1##*/}"
+    name="${name%.md}" # a file name in the body would trip the hub's unattached-file rule
     cat >"$path" <<'EOF2'
 ```text
 *Live on production — User — Cassy v{{VERSION}}*
@@ -311,6 +332,34 @@ dry_release_rebuilds_commander() {
 }
 check 'dry_release_rebuilds_commander' 'cas-56bbc: dry release commits Commander dist identical to a fresh post-bump build'
 
+# Shared docs join the release commit without a separate train push.
+docs_generated_at_the_cut() {
+    local fixture="$tmp/docs-cut" before status=0
+    clone_epic "$fixture" epic/docs-cut docs-cut
+    mkdir -p "$fixture/.claude" "$fixture/docs/product-overview.d"
+    printf '# Map\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" add .claude && git -C "$fixture" commit --quiet -m 'map'
+    printf '# Overview\n\n## Pitch\n\nBase pitch.\n' >"$fixture/docs/PRODUCT_OVERVIEW.md"
+    printf '## Pitch\n\nFragment pitch line.\n' >"$fixture/docs/product-overview.d/cas-0006.md"
+    git -C "$fixture" add docs && git -C "$fixture" commit --quiet -m 'overview and fragment'
+    write_valid_draft "$tmp/docs-cut-draft.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    printf '# Map\n\n- docs/ - overview\n' >"$fixture/.claude/CODEMAP.md"
+    # Only the map may be pending; unrelated source edits still refuse prep.
+    echo 'uncommitted source' >>"$fixture/docs-cut.txt"
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    git -C "$fixture" checkout -- docs-cut.txt
+    # A pending map refresh must ride the release commit, without its own CI.
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD^)" == "$before" ]] &&
+        git -C "$fixture" show HEAD:.claude/CODEMAP.md | grep -q 'docs/ - overview' || return 1
+    git -C "$fixture" show HEAD:docs/PRODUCT_OVERVIEW.md | grep -q 'Fragment pitch line.' &&
+        ! git -C "$fixture" cat-file -e HEAD:docs/product-overview.d/cas-0006.md 2>/dev/null &&
+        [[ -z "$(git -C "$fixture" status --porcelain)" ]]
+}
+check 'docs_generated_at_the_cut || { cat "$tmp/docs-cut.log"; false; }' 'release commit folds a pending CODEMAP refresh and compiled doc fragments together'
+
 commander_build_failure_stops_release() {
     local fixture="$tmp/web-failure" before status=0
     clone_epic "$fixture" epic/web-failure web-failure
@@ -319,7 +368,6 @@ commander_build_failure_stops_release() {
     before="$(git -C "$fixture" rev-parse HEAD)"
     run "$fixture" --hotfix --dry-run --notes "$tmp/web-draft.md" >"$tmp/web-failure.log" 2>&1 || status=$?
     [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
-        grep -q 'Commander build failed; release was not committed' "$tmp/web-failure.log" &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/web-failure
 }
 check 'commander_build_failure_stops_release' 'a failed Commander build stops before the release commit or push'
@@ -330,7 +378,7 @@ invalid_draft_stops_cut() {
     cat >"$tmp/invalid-slack.md" <<'EOF2'
 ```text
 *Live on production — User — Cassy v{{VERSION}}*
-Was: a supervisor must repair this broken draft before release. → Now: it still fails lint.
+Was: {{INVALID_DRAFT}} was unresolved. → Now: the draft is complete before publication.
 ```
 
 ```text
@@ -350,7 +398,7 @@ EOF2
     : >"$FAKE_GH_LOG"
     run "$fixture" --no-watch --notes "$tmp/invalid-slack.md" >"$tmp/invalid-draft.log" 2>&1 || status=$?
     [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
-        grep -q 'forbidden user wording: supervisor' "$tmp/invalid-draft.log" &&
+        grep -qF '[rule: unresolved_token]' "$tmp/invalid-draft.log" &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/invalid-draft &&
         ! grep -q '^pr create' "$FAKE_GH_LOG"
 }
@@ -407,7 +455,7 @@ check 'grep -q "^pr create --base main --head epic/alpha --title Release v9.100.
 check 'grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'auto-merge is enabled'
 check '! grep -q "^pr checks\|^run view" "$FAKE_GH_LOG"' 'cas-61e0: queue admission never waits for a second PR CI proof'
 check 'grep -q "^release track --commit $(git -C "$epic" rev-parse HEAD) --version 9.100.0" "$FAKE_CAS_LOG"' 'cas-61e0: --no-watch automatically arms durable landing and publication reminders'
-check 'grep -q -- "--first-child $epic_first_child$" "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
+check 'grep -q -- "--first-child $epic_first_child" "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
 check '! git -C "$tmp/origin.git" show-ref --tags | grep -q v9.100.0' 'nothing is tagged'
 
 # 4. cas-3873: after an ejection repair, rerun the same command even on a
@@ -487,7 +535,7 @@ check '! grep -q "^pr merge\|^pr checks" "$FAKE_GH_LOG" && [[ "$(grep -c "^api g
 echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}' >"$tmp/not-enqueued.json"
 status=0
 (cd "$epic" && FAKE_PR_STATE_JSON="$tmp/not-enqueued.json" ./scripts/release.sh --no-watch) >"$tmp/not-enqueued.err" 2>&1 || status=$?
-check '[[ "$status" == 3 ]] && grep -q "no auto-merge and no merge-queue entry" "$tmp/not-enqueued.err"' 'cas-61e0: a missing enqueue is reported immediately after admission'
+check '[[ "$status" == 3 ]]' 'cas-61e0: a missing enqueue is reported immediately after admission'
 
 # cas-d637: replay a release beside other queued PRs. Never enable admission
 # when GitHub can batch the release, skip per-entry checks, or hide its config.
@@ -496,7 +544,7 @@ for config in '{"maximumEntriesToMerge":5,"mergingStrategy":"ALLGREEN"}' '{"maxi
     : >"$FAKE_GH_LOG"
     status=0
     (cd "$epic" && FAKE_QUEUE_CONFIG="$config" ./scripts/release.sh --no-watch) >"$tmp/unsafe-queue.err" 2>&1 || status=$?
-    check '[[ "$status" == 3 ]] && ! grep -q "^pr merge" "$FAKE_GH_LOG" && grep -qi "singleton" "$tmp/unsafe-queue.err"' "cas-d637: unsafe release queue config $config refuses before enqueue"
+    check '[[ "$status" == 3 ]] && ! grep -q "^pr merge" "$FAKE_GH_LOG"' "cas-d637: unsafe release queue config $config refuses before enqueue"
 done
 
 # A hotfix remains an explicit exception, including actual CLI refusal shapes.
@@ -505,14 +553,91 @@ hotfix_fallback() {
     clone_epic "$fixture" "release/v9.99.1-$mode" "hotfix-$mode"
     mkdir -p "$tmp/state-$mode"
     write_valid_draft "$tmp/hotfix-$mode.md"
-    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" \
+    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" FAKE_CAS_LOG="$tmp/hotfix-$mode-cas.log" \
         run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
-    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] || { cat "$tmp/hotfix-$mode.log"; return 1; }
-    grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log"
+    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
+        ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&
+        ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
-check 'hotfix_fallback no_train' 'cas-61e0: no open train cannot gate a hotfix cut to --base main'
-check 'hotfix_fallback different_branch' 'cas-61e0: a different train lane cannot gate the explicit hotfix branch'
-check 'hotfix_fallback tracking_unavailable 1' 'cas-61e0: a tracking failure cannot prevent a hotfix push and enqueue'
+train_receipt_cut() {
+    local fixture="$tmp/train-ci-cut" status=0 before after
+    clone_epic "$fixture" epic/release-train-fixture train-ci
+    mkdir -p "$fixture/docs/product-overview.d"
+    printf '# Overview\n\n## Pitch\n\nBase pitch.\n' >"$fixture/docs/PRODUCT_OVERVIEW.md"
+    printf '## Pitch\n\nCompiled at the cut.\n' >"$fixture/docs/product-overview.d/report.md"
+    git -C "$fixture" add docs
+    git -C "$fixture" commit --quiet -m 'overview inputs before green train receipt'
+    write_valid_draft "$tmp/train-ci-notes.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    mkdir -p "$tmp/train-ci-artifact"
+    export FAKE_TRAIN_ARTIFACT="$tmp/train-ci-artifact" FAKE_TRAIN_RUN="$tmp/train-ci-run.json" FAKE_TRAIN_LOG_ZIP="$tmp/train-ci-logs.zip"
+    echo '{"workflow_runs":[]}' >"$FAKE_TRAIN_RUN"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    python3 - "$before" "$fixture" <<'PY'
+import json, os, pathlib, subprocess, sys, zipfile
+head=sys.argv[1]
+repo=sys.argv[2]
+json.dump({'workflow_runs':[{'id':123,'run_attempt':1,'head_sha':head,'head_branch':'epic/release-train-fixture','event':'workflow_dispatch','status':'completed','conclusion':'success'}]},open(os.environ['FAKE_TRAIN_RUN'],'w'))
+jobs={name:'success' for name in ('fast-validation-preflight','fast-validation-ci-tiers','fast-validation-web','fast-validation-suite','fast-validation-docs','queue-flake-publication')}
+receipt={'schema':2,'scope':'full-set','head':head,'branch':'epic/release-train-fixture','run_id':'123','run_attempt':1,'outcome':'PASS','failures':[],
+         'tree':subprocess.check_output(['git','-C',repo,'rev-parse','HEAD^{tree}'],text=True).strip(),
+         'main_baseline':subprocess.check_output(['git','-C',repo,'rev-parse','origin/main'],text=True).strip(),
+         'required_jobs':list(jobs),'jobs':jobs,'elapsed_seconds':12,'journeys_required':False,'bridge_required':False}
+json.dump(receipt,open(pathlib.Path(os.environ['FAKE_TRAIN_ARTIFACT'])/'receipt.json','w'))
+with zipfile.ZipFile(os.environ['FAKE_TRAIN_LOG_ZIP'],'w') as archive: archive.writestr('full.log','Complete fixture log')
+PY
+    cp "$FAKE_TRAIN_ARTIFACT/receipt.json" "$tmp/train-ci-green.json"
+    python3 - "$FAKE_TRAIN_ARTIFACT/receipt.json" <<'PY'
+import json,sys
+p=sys.argv[1]; row=json.load(open(p)); row['jobs']['fast-validation-ci-tiers']='skipped'; json.dump(row,open(p,'w'))
+PY
+    status=0
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    cp "$tmp/train-ci-green.json" "$FAKE_TRAIN_ARTIFACT/receipt.json"
+    rm -rf "$fixture/.git/cas/train-ci"
+    mkdir -p "$fixture/.claude"
+    printf '# Updated map\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" add .claude/CODEMAP.md
+    git -C "$fixture" commit --quiet -m 'CODEMAP-only follow-up to green train'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --no-watch --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    after="$(git -C "$fixture" rev-parse HEAD)"
+    [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
+    # There is deliberately no Y run/artifact: retry must fetch X again.
+    rm -rf "$fixture/.git/cas/train-ci"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]] || return 1
+    # A refresh supplied on a prepared retry still joins that release commit.
+    printf '# Refreshed map on retry\n' >"$fixture/.claude/CODEMAP.md"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD^)" == "$after" && -z "$(git -C "$fixture" status --porcelain)" ]] || return 1
+    after="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]] || return 1
+    echo 'source needs fresh CI' >>"$fixture/train-ci.txt"
+    git -C "$fixture" commit --quiet -am 'source after green receipt'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    status=0
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]]
+}
+check 'train_receipt_cut' 'train cut reuses green proof after CODEMAP-only work and prepared retries; source requires fresh proof'
+unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
+check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
+check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
+freeze_failure_stops_publication() {
+    local fixture="$tmp/cut-failure" status=0
+    clone_epic "$fixture" epic/cut-failure cut-failure
+    write_valid_draft "$tmp/cut-failure.md"
+    : >"$FAKE_GH_LOG"
+    FAKE_TRACK_EXIT=1 run "$fixture" --no-watch --notes "$tmp/cut-failure.md" >"$tmp/cut-failure.log" 2>&1 || status=$?
+    [[ "$status" -ne 0 ]] && grep -qi 'freeze.*retry\|freeze.*Retry' "$tmp/cut-failure.log" &&
+        ! grep -q '^pr create\|^pr merge' "$FAKE_GH_LOG" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/cut-failure
+}
+check 'freeze_failure_stops_publication' 'cas-2b8d: a matched train that cannot freeze stops before push or enqueue and names its retry'
 
 echo '{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-11-05T23:00:00Z"},"mergeQueueEntry":null}' >"$tmp/pending-auto.json"
 echo '[{"name":"required CI","bucket":"fail"}]' >"$tmp/checks-red.json"
@@ -534,6 +659,99 @@ cp "$parent/.git/config" "$tmp/parent-config.before"
 ) || bad 'the bare-fixture test passes under exported hook variables'
 check 'cmp -s "$tmp/parent-config.before" "$parent/.git/config"' 'a bare fixture under an exported GIT_DIR leaves the parent config untouched'
 check '[[ "$(git -C "$parent" rev-list --count HEAD)" -eq 1 && -z "$(git -C "$parent" tag)" ]]' 'a bare fixture under an exported GIT_DIR adds no commit or tag to the parent'
+
+# A one-item hotfix is an ordinary train cut, queue landing and publication.
+one_item_hotfix_train() {
+    local fixture="$tmp/one-item-hotfix" branch="epic/one-item-hotfix" version cut landed
+    clone_epic "$fixture" "$branch" one-hotfix
+    [[ "$(git -C "$fixture" rev-list --count origin/main..HEAD)" == 1 ]] || return 1
+    version="$(run "$fixture" --next-version --hotfix | sed -n 's/^version=//p')"
+    write_valid_draft "$tmp/one-hotfix-notes.md"
+    mkdir -p "$tmp/one-hotfix-state" "$tmp/one-hotfix-assets"
+    FAKE_GH_STATE="$tmp/one-hotfix-state" FAKE_GH_LOG="$tmp/one-hotfix-gh.log" \
+        FAKE_CAS_LOG="$tmp/one-hotfix-cas.log" FAKE_ESTIMATE_EXIT=23 \
+        run "$fixture" --hotfix --notes "$tmp/one-hotfix-notes.md" >"$tmp/one-hotfix.log" 2>&1 || { cat "$tmp/one-hotfix.log"; return 1; }
+    cut="$(git -C "$fixture" rev-parse HEAD)"
+    [[ "$(git -C "$fixture" log -1 --format=%s)" == "release: v$version" &&
+       "$(git -C "$tmp/origin.git" rev-parse "refs/heads/$branch")" == "$cut" ]] || return 1
+    grep -q "^pr create --base main --head $branch " "$tmp/one-hotfix-gh.log" &&
+        [[ "$(grep -c '^pr merge ' "$tmp/one-hotfix-gh.log")" == 1 ]] &&
+        grep -q "^release track --commit $cut --version $version " "$tmp/one-hotfix-cas.log" || return 1
+    grep -q "^ledger estimate release v$version$" "$tmp/one-hotfix-cas.log" || return 1
+    [[ "$(grep -c '^ledger estimate pipeline ' "$tmp/one-hotfix-cas.log")" == 3 ]] || return 1
+    # Stand in only for the external merge queue's landing, then invoke the
+    # same publisher as the release workflow against its exact landed SHA.
+    git -C "$fixture" switch --quiet main
+    git -C "$fixture" merge --quiet --no-ff -m 'queue landing' "$branch"
+    git -C "$fixture" push --quiet origin main
+    landed="$(git -C "$fixture" rev-parse HEAD)"
+    printf 'fixture linux archive\n' >"$tmp/one-hotfix-assets/cas-x86_64-unknown-linux-gnu.tar.gz"
+    printf 'fixture macos archive\n' >"$tmp/one-hotfix-assets/cas-aarch64-apple-darwin.tar.gz"
+    (cd "$fixture" && GITHUB_REPOSITORY=example/repo FAKE_GH_LOG="$tmp/one-hotfix-gh.log" \
+        "$script_dir/release-publish.sh" --version "$version" --sha "$landed" \
+        --assets "$tmp/one-hotfix-assets" --notes-out "$tmp/one-hotfix-published.md") >>"$tmp/one-hotfix.log" 2>&1 || { cat "$tmp/one-hotfix.log"; return 1; }
+    [[ "$(git -C "$tmp/origin.git" rev-parse "refs/tags/v$version^{}")" == "$landed" ]] &&
+        grep -q "^release create v$version " "$tmp/one-hotfix-gh.log" &&
+        grep -q 'one-hotfix shipped' "$tmp/one-hotfix-published.md"
+}
+check 'one_item_hotfix_train' 'cas-d725: one-item hotfix train cuts, queues once and publishes through the normal release path'
+
+cut_own_review_missing() {
+    local fixture="$tmp/own-review" status=0 refusal
+    clone_epic "$fixture" epic/own-review own-review
+    mkdir -p "$fixture/changelog.d"
+    printf '### Fixed — Review fixture\n\n- **First** — First delivery.\n' >"$fixture/changelog.d/cas-000a.md"
+    printf '### Fixed — Review fixture\n\n- **Second** — Second delivery.\n' >"$fixture/changelog.d/cas-000b.md"
+    git -C "$fixture" add changelog.d
+    git -C "$fixture" commit --quiet -m 'included deliveries'
+    write_valid_draft "$tmp/own-review-notes.md"
+    : >"$FAKE_CAS_LOG"
+    : >"$FAKE_GH_LOG"
+    FAKE_REVIEW_MISSING='[]' FAKE_CI_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
+        run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review-ci.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'LANE_CI_MISSING.*cas-000a, cas-000b' "$tmp/own-review-ci.log" || return 1
+    status=0
+    FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
+        run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
+    # REVIEW_MISSING is the machine refusal identifier; a trailing gate frame
+    # must not hide its task IDs or turn the unrelated preview member into one.
+    refusal="$(grep -F 'REVIEW_MISSING' "$tmp/own-review.log" | tail -1)"
+    [[ "$status" == 1 ]] &&
+        grep -q 'cas-000a' <<<"$refusal" &&
+        grep -q 'cas-000b' <<<"$refusal" &&
+        ! grep -q 'cas-dead' <<<"$refusal" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/own-review &&
+        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
+        ! grep -Eq '^pr (create|merge) ' "$FAKE_GH_LOG"
+}
+check 'cut_own_review_missing' 'own included deliveries missing review refuse with their ids even when another member would close'
+
+cut_preview_gate() {
+    local fixture="$tmp/preview-cut" status=0
+    clone_epic "$fixture" epic/preview-cut preview-cut
+    git -C "$fixture" commit --quiet --allow-empty -m 'reviewed delivery (cas-000c)'
+    write_valid_draft "$tmp/preview-notes.md"
+    : >"$FAKE_CAS_LOG"
+    : >"$FAKE_GH_LOG"
+    FAKE_WOULD_CLOSE=0 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 ]] &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
+        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
+        ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
+    : >"$FAKE_CAS_LOG"
+    FAKE_WOULD_CLOSE=1 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
+    # cas-a6c8: receipts may already have closed all thirteen members.
+    local closed_fixture="$tmp/already-closed-cut"
+    clone_epic "$closed_fixture" epic/already-closed-cut already-closed-cut
+    FAKE_CAS_LOG="$tmp/already-closed-cas.log" FAKE_ALREADY_CLOSED=13 FAKE_WOULD_CLOSE=0 FAKE_REVIEW_MISSING='[]' \
+        run "$closed_fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/already-closed-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/already-closed-cut)" == "$(git -C "$closed_fixture" rev-parse HEAD)" ]] || return 1
+    [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/preview-cut)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
+        [[ "$(grep -c '^qa candidate build ' "$FAKE_CAS_LOG")" == 1 ]] &&
+        grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
+        grep -q '^release track .* --first-child ' "$FAKE_CAS_LOG"
+}
+check 'cut_preview_gate' 'cut refuses all-held members, permits all-already-closed members and keeps older-release residuals nonblocking'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

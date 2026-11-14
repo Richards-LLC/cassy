@@ -76,6 +76,9 @@ pub enum HookCommand {
     PreCompact,
     /// Handle MessageDisplay hook event (Ink-crash guard + assistant-text redaction, opt-in)
     MessageDisplay,
+    /// Validate a non-fast-forward checkpoint push against live task/delivery state.
+    #[command(name = "WorkerCheckpointPush")]
+    WorkerCheckpointPush,
     /// Record a factory worker pre-push refusal for supervisor activity views.
     #[command(name = "WorkerPushRejected")]
     WorkerPushRejected,
@@ -115,7 +118,65 @@ pub fn execute(args: &HookArgs, cli: &Cli) -> anyhow::Result<()> {
         HookCommand::PreCompact => execute_event("PreCompact", cli),
         HookCommand::MessageDisplay => execute_event("MessageDisplay", cli),
         HookCommand::WorkerPushRejected => execute_worker_push_rejected(),
+        HookCommand::WorkerCheckpointPush => execute_worker_checkpoint_push(),
     }
+}
+
+/// H-40's narrow exception for a supervisor-directed rebase of live work.
+/// Commit-time branch/anchor capture is task identity, not a parked receipt.
+fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
+    use anyhow::{Context, ensure};
+    use cas_types::{QaPassState, TaskStatus};
+    let required = |key: &str| std::env::var(key).with_context(|| format!("H-40: missing {key}; checkpoint ownership is unproven"));
+    let root = std::path::PathBuf::from(required("CAS_ROOT")?);
+    let worker = required("CAS_AGENT_NAME")?;
+    let branch = required("CAS_PUSH_GUARD_BRANCH")?;
+    let remote_ref = required("CAS_PUSH_GUARD_REMOTE_REF")?;
+    let local = required("CAS_PUSH_GUARD_LOCAL_SHA")?;
+    let remote = required("CAS_PUSH_GUARD_REMOTE_SHA")?;
+    let sha = |value: &str| matches!(value.len(), 40 | 64)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit()) && value.bytes().any(|byte| byte != b'0');
+    ensure!(sha(&local) && sha(&remote), "H-40: checkpoint pushes cannot delete or use unknown tips");
+    ensure!(!worker.is_empty() && crate::factory_isolation::classify_worker_binding(&worker, Some(&branch))
+        == crate::factory_isolation::WorkerBinding::Own && remote_ref == format!("refs/heads/{branch}"),
+        "H-40: checkpoint source and destination must be the worker's own branch");
+    let git = crate::worktree::GitOperations::new(std::env::current_dir()?);
+    ensure!(git.resolve_commit(&branch).as_deref() == Some(local.as_str()), "H-40: checkpoint push must publish the current worker branch tip");
+    let tasks = store::open_task_store(&root)?.list(None)?;
+    let mut checkpoint = false;
+    for task in tasks.iter().filter(|task| {
+        task.deliverables.parked_branch.as_deref() == Some(branch.as_str())
+            || task.deliverables.factory_branch_start.as_ref().is_some_and(|start| start.branch == branch)
+            || task.deliverables.handoff_branches.contains(&branch)
+    }) {
+        ensure!(task.status != TaskStatus::AwaitingMerge && (task.is_terminal()
+            || (!task.pending_verification && task.deliverables.review_envelope.is_none())),
+            "H-40: {} is parked or under review; merge the target into its branch", task.id);
+        if task.is_terminal() && let Some(anchor) = &task.deliverables.factory_branch_anchor {
+            ensure!(git.is_ancestor(anchor, &local), "H-40: {} has a recorded delivered anchor that must remain reachable", task.id);
+        }
+        if let Some((receipt, transaction)) = cas_store::get_latest_worker_delivery(&root, &task.id)?
+            && receipt.source_branch == branch && !transaction.state.is_recoverable_failure()
+        {
+            ensure!(git.is_ancestor(&receipt.commit_sha, &local), "H-40: {} has an immutable delivery receipt; merge the target instead", task.id);
+        }
+        for pass in cas_store::list_qa_passes(&root, &task.id)? {
+            if pass.branch == branch && matches!(pass.state, QaPassState::Pending | QaPassState::Claimed | QaPassState::Passed | QaPassState::Waived) {
+                ensure!(git.is_ancestor(&pass.bound_head, &local), "H-40: {} has a bound review tip; merge the target instead", task.id);
+            }
+        }
+        let owner = task.assignee.as_deref().is_some_and(|owner| owner == worker
+            || store::open_agent_store(&root).ok().and_then(|agents| agents.get(owner).ok()).is_some_and(|agent| agent.name == worker));
+        if task.status == TaskStatus::InProgress && owner
+            && let Some(start) = &task.deliverables.factory_branch_start
+            && start.branch == branch && Some(start.assignee.as_str()) == task.assignee.as_deref()
+            && sha(&start.base_sha) && git.is_ancestor(&start.base_sha, &remote) && git.is_ancestor(&start.base_sha, &local)
+        {
+            checkpoint = true;
+        }
+    }
+    ensure!(checkpoint, "H-40: cannot prove an owned InProgress checkpoint with its recorded start ancestry; no rewrite permitted");
+    Ok(())
 }
 
 /// Persist a pre-push guard refusal without making the guard depend on the
@@ -183,26 +244,40 @@ fn execute_event(event: &str, cli: &Cli) -> anyhow::Result<()> {
     let mut input_json = String::new();
     io::stdin().read_to_string(&mut input_json)?;
 
-    // Parse the hook input
-    let mut input: HookInput = serde_json::from_str(&input_json)
-        .map_err(|e| anyhow::anyhow!("Failed to parse hook input: {e}"))?;
-
-    // Harness-side population: snapshot CAS_AGENT_ROLE into the HookInput so
-    // downstream handlers read the role explicitly from the request rather
-    // than re-reading process-global env at call time. Makes the contract
-    // robust against inline hook dispatch from long-lived MCP processes
-    // where other tools mutate env concurrently.
-    if input.agent_role.is_none() {
-        input.agent_role = std::env::var("CAS_AGENT_ROLE").ok();
-    }
-
-    // Handle the hook event
-    let output = handle_hook(event, input)?;
+    let output = process_hook_input(event, Ok(input_json), false)?;
 
     // Output JSON to stdout
     println!("{}", serde_json::to_string(&output)?);
 
     Ok(())
+}
+
+/// Shared entry enclosing native fast validation and ordinary hook handlers.
+/// Native failures become a fail-closed H-01 output before leaving this entry.
+// gate-audit[native]: selector Chooses the harness projection; both routes share this final fact observer.
+pub(crate) fn process_hook_input(
+    event: &str,
+    input: Result<String, io::Error>,
+    native: bool,
+) -> anyhow::Result<crate::hooks::HookOutput> {
+    let output = if native {
+        input.map_err(anyhow::Error::from)
+            .and_then(|text| native_pre_tool::process_native_input(&text))
+            .unwrap_or_else(|_| crate::hooks::HookOutput::with_pre_tool_permission(
+                "deny", &crate::gates::tag("H-01", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive."),
+            ))
+    } else {
+        let mut input: HookInput = serde_json::from_str(&input?)
+            .map_err(|error| anyhow::anyhow!("Failed to parse hook input: {error}"))?;
+        if input.agent_role.is_none() {
+            input.agent_role = std::env::var("CAS_AGENT_ROLE").ok();
+        }
+        handle_hook(event, input)?
+    };
+    if let Ok(root) = store::find_cas_root() {
+        crate::gates::facts::observe_hook_output(&root, &output);
+    }
+    Ok(output)
 }
 
 /// Initialize logging for hook execution
@@ -464,6 +539,7 @@ fn find_settings_files_with_cas_hooks(
 }
 
 /// Configure Claude Code hooks
+// gate-audit[force]: selector Chooses replacement of an existing hook configuration rather than leaving it unchanged; no running factory work is admitted.
 fn execute_configure(force: bool, cli: &Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
 
@@ -685,6 +761,8 @@ pub(crate) fn configure_claude_hooks_for_index(
     configure_claude_hooks_at(target, false, &[], project)
 }
 
+// gate-audit[force]: selector Replaces hook configuration instead of merging it; generated hook permissions remain enforced.
+// gate-audit[allow_arr]: selector Installs the explicitly requested optional automatic-response route; no policy refusal is bypassed.
 fn configure_claude_hooks_at(
     project_root: &Path,
     force: bool,

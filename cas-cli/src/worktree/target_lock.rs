@@ -33,6 +33,7 @@ const DOMAIN: &str = "cas-0a21/delivery-target-lock/v1";
 pub struct DeliveryTargetLock {
     _file: File,
     key: String,
+    path: PathBuf,
 }
 
 impl Drop for DeliveryTargetLock {
@@ -87,7 +88,7 @@ pub fn lock_delivery_target(
     target_ref: &str,
 ) -> std::io::Result<DeliveryTargetLock> {
     let lock = open_delivery_lock(cas_root, canonical_repo, target_ref)?;
-    lock._file.lock_exclusive()?;
+    lock._file.lock_exclusive().map_err(|error| path_error(&lock.path, error))?;
     Ok(lock)
 }
 
@@ -102,7 +103,7 @@ pub fn try_lock_delivery_target(
     match lock._file.try_lock_exclusive() {
         Ok(()) => Ok(Some(lock)),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-        Err(error) => Err(error),
+        Err(error) => Err(path_error(&lock.path, error)),
     }
 }
 
@@ -113,15 +114,19 @@ fn open_delivery_lock(
 ) -> std::io::Result<DeliveryTargetLock> {
     let key = delivery_target_key(canonical_repo, target_ref);
     let dir = cas_root.join("locks").join("delivery-target");
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir).map_err(|error| path_error(&dir, error))?;
     let path: PathBuf = dir.join(format!("{key}.lock"));
     let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(&path)?;
-    Ok(DeliveryTargetLock { _file: file, key })
+        .open(&path).map_err(|error| path_error(&path, error))?;
+    Ok(DeliveryTargetLock { _file: file, key, path })
+}
+
+fn path_error(path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("delivery-target lock {}: {error}", path.display()))
 }
 
 #[cfg(test)]

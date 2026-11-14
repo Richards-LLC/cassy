@@ -44,10 +44,8 @@ fn test_verification_config_toggle() {
         .expect("cas config set must run");
     assert!(!human_refusal.status.success());
     let stderr = String::from_utf8_lossy(&human_refusal.stderr);
-    assert!(
-        stderr.contains("Operator-only config change refused."),
-        "the CLI should show the short refusal headline; stderr: {stderr}"
-    );
+    assert_eq!(cas::gates::codes_in(&stderr), ["H-41"]);
+
     assert!(
         stderr.lines().skip(1).all(|line| line.starts_with("  ")),
         "refusal details should be indented; stderr: {stderr}"
@@ -66,8 +64,8 @@ fn test_verification_config_toggle() {
         .expect("--json refusal should still be one JSON document");
     assert_eq!(json["status"], "error");
     assert_eq!(
-        json["message"],
-        "refused: CLAUDECODE is set, so this runs inside an agent session. verification.enabled is operator-only because it relaxes a Cassy guard; run `cas config set verification.enabled <value>` yourself from your own terminal. If this is your own terminal, it inherited CLAUDECODE from an agent pane: open a fresh terminal and run it there."
+        cas::gates::codes_in(json["message"].as_str().expect("refusal message")),
+        ["H-41"]
     );
     command()
         .args(["config", "get", "verification.enabled"])

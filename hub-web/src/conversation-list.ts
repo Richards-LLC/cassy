@@ -6,6 +6,8 @@ import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { providerAvatarMarkup } from "./provider-mark";
 import { supervisorVersion } from "./machine-version";
+import type { CommandReceipt } from "./supervisor-commands";
+import type { ProjectStatusLine } from "./progress-model";
 
 export interface ConversationRow {
   ended?: SessionEndOutcome;
@@ -59,8 +61,10 @@ export interface ConversationRow {
   machine_online?: boolean;
   mcp_version?: string;
   installed_version?: string;
+  reloadReceipt?: CommandReceipt;
+  reloadPending?: boolean;
+  reloadUnavailable?: string;
   workerCount?: number;
-  mergesPerHour?: number;
   needsYou?: boolean;
   operatorReason?: string;
   supervisorState?: "working" | "idle" | "needs-you" | "offline";
@@ -72,6 +76,14 @@ export interface ConversationRow {
   group?: { key: string; label: string; size: number; first: boolean; active: boolean };
   /** This device may end the session (factory-manage), offered on grouped and dormant rows. */
   canEnd?: boolean;
+  /** The question a waiting ask puts to the operator (cas-da546). */
+  operatorQuestion?: string;
+  /** Train split and blocked count from this session's status, when read (cas-da546). */
+  statusLine?: ProjectStatusLine;
+  /** Another session of this project runs on the same machine: the row names its codename. */
+  showCodename?: boolean;
+  /** Project cards identify their supervisor by name before the machine. */
+  showSupervisorName?: boolean;
 }
 
 /** The badge follows whole-minute activity, tied by stable identity (cas-6faf).
@@ -113,7 +125,7 @@ export function groupConversationRows<T extends ConversationRow>(rows: readonly 
     const recent = mostRecentConversation(group);
     // cas-5d2c: the same noun as the footer's "3 conversations".
     const label = `${rowProjectName(row) ?? row.supervisor} · ${group.length} conversations on ${machineName(row.host)}`;
-    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: member === recent && rank(member) !== -Infinity } }));
+    ordered.forEach((member, index) => out.push({ ...member, showCodename: true, group: { key, label, size: group.length, first: index === 0, active: member === recent && rank(member) !== -Infinity } }));
   }
   return out;
 }
@@ -238,10 +250,6 @@ function rowVersion(row: ConversationRow) {
   return supervisorVersion(row.mcp_version, row.installed_version);
 }
 
-/** One Pebble row: `avatar · project machine · codename · preview · time`, with
- * two distinct affordances — waiting (ochre dot, hot time) and unread (accent
- * count pill). Users think in projects (journey F7): the project is the title,
- * the machine follows it, and the generated codename is tertiary text. */
 /**
  * What the row's second line says. A connection problem leads, so the row
  * agrees with the header (cas-a447); then a parked draft in another
@@ -261,15 +269,21 @@ function rowPreviewText(row: ConversationRow, fallback: string): string {
   return row.preview || fallback;
 }
 
+/**
+ * One line per session (cas-da546): `avatar · Supervisor · machine · time ·
+ * marks`. The project card names the project, so the row names the role and
+ * where it runs. A second line appears only for a state the operator must
+ * see: ended, unreachable, interrupted, its machine down, or a reply parked
+ * here as a draft.
+ * The last turn is spoken, not shown. The version shows only on skew.
+ */
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = !row.ended && row.attention > 0;
   const unread = row.unread ?? 0;
-  // cas-5d2c: a grouped row with no turn of its own yet shows what its
-  // session last did, so siblings differ before any of them is opened.
-  const fallback = row.group ? row.activityLine || row.connection : row.connection;
-  const preview = truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, fallback)));
-  // The time always holds the headline end; an unread count sits beneath it
-  // with the waiting dot, so the most active row never loses its time (P13).
+  const draft = row.draft?.trim() && !row.selected;
+  // A machine that is down says so ("Last known") rather than its last turn.
+  const outage = !row.ended && !row.unreachable && !row.interrupted && row.machine_online === false;
+  const note = outage ? row.connection : row.ended || row.unreachable || row.interrupted || draft ? truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, row.connection))) : "";
   // cas-6acf: assistive tech hears the time in words ("20 minutes ago"), not "20m".
   const time = row.when
     ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}"${row.whenSpoken ? ' aria-hidden="true"' : ""}>${escapeHtml(row.when)}</span>`
@@ -278,27 +292,20 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
-  // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
-  const project = rowProjectName(row);
-  // The title is "project · machine": the project leads, never a dot (P13);
-  // the one separator rides with the machine, so a dot never dangles at a
-  // line end when a long project pushes the machine to the next line. The
-  // machine is legible as text on every row (operator direction): the
-  // monogram and accent alone do not name it. A long machine name ellipsises
-  // inside the title column (its title attribute carries it whole) instead of
-  // running under the time stamp (cas-1ca1). The codename sits beneath.
-  // cas-6faf: every sibling reserves the same badge slot, including its wrap
-  // onto another line. Inactive slots occupy space but have no spoken name.
-  const mark = row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
-  const account = row.account_email ? `<span class="conversation-account" title="${escapeHtml(row.account_email)}">${escapeHtml(row.account_email)}</span>` : "";
   const version = rowVersion(row);
-  const badge = version ? `<span class="supervisor-version${version.update ? " update-available" : ""}" title="${escapeHtml(version.description)}">${escapeHtml(version.version)}${version.update ? ' <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span>' : ""}</span>` : "";
-  // DESIGN.md Avatars: the model's provider mark, or the machine monogram.
+  const badge = version?.update ? `<span class="supervisor-version update-available" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "";
+  // Two sessions of one project on one machine read apart by their codename.
+  // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
+  const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
+  const name = row.supervisor.trim();
+  const hasName = name && name.toLowerCase() !== "supervisor";
+  const supervisorLabel = row.showSupervisorName && hasName ? name : "Supervisor";
+  const codename = row.showCodename ? `${row.showSupervisorName ? "" : `<span class="conversation-supervisor-name codename">${escapeHtml(name)}</span>`}${mark}` : "";
   return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename"><span class="conversation-supervisor-name">${escapeHtml(row.supervisor)}</span>${badge}${mark}</span>` : `${mark}${badge}`}${account}</span>`
+    + `<span class="conversation-who" title="${escapeHtml(row.supervisor)}"><span class="conversation-role">${escapeHtml(supervisorLabel)}</span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span>${codename}${badge}</span>`
     + time
-    + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${emojiMarkup(preview)}</span>`
     + marks
+    + (note ? `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : draft ? " draft" : ""}">${emojiMarkup(note)}</span>` : "")
     + spoken;
 }
 
@@ -352,7 +359,7 @@ export class ConversationList {
    * conversation opens, and repainting into that detached list emptied the
    * live one until the next catalog poll.
    */
-  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void> };
+  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void>; reload?: (row: ConversationRow) => void };
   /**
    * cas-f60a: the session that just ended, said where its row was and through
    * a polite live region, until ENDED_NOTICE_MS passes or another one ends.
@@ -372,8 +379,8 @@ export class ConversationList {
   private press?: { pointerId: number; pointerType: string; key: string; x: number; y: number; released: boolean; opened?: boolean; timer?: ReturnType<typeof setTimeout> };
   /** The document whose pointer events this list follows. */
   private watched?: Document;
-  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>): void {
-    this.latest = { container, rows, open, end };
+  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>, reload?: (row: ConversationRow) => void): void {
+    this.latest = { container, rows, open, end, reload };
     const document = container.ownerDocument;
     this.watch(document);
     const ordered: HTMLElement[] = [];
@@ -433,6 +440,32 @@ export class ConversationList {
         ordered.push(control);
 
       }
+      if (reload && !row.ended) {
+        const control = extra(`reload:${row.key}`, () => {
+          const node = document.createElement("div"); node.className = "conversation-reload";
+          // Secondary actions stay in the existing conversation-header menu.
+          // Ordinary rows must keep their height and one navigation Tab stop.
+          node.innerHTML = '<button type="button" tabindex="-1" data-reload-cassy="direct">Reload Cassy</button><p class="conversation-reload-receipt" role="status"></p>';
+          return node;
+        });
+        const receipt = row.reloadReceipt;
+        const pending = row.reloadPending || receipt?.phase === "queued" || receipt?.phase === "submitted";
+        const unavailable = row.harness !== "claude" ? `Reload Cassy requires Claude Code; this supervisor uses ${row.harness ?? "an unknown harness"}.`
+          : row.reloadUnavailable ?? (row.machine_online === false ? "Reconnect this machine to reload Cassy." : undefined);
+        const direct = control.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!;
+        direct.hidden = !rowVersion(row)?.update;
+        for (const action of control.querySelectorAll<HTMLButtonElement>("button")) {
+          action.disabled = Boolean(unavailable || pending);
+          action.onclick = () => reload(row);
+        }
+        control.setAttribute("aria-label", `Cassy controls for ${row.supervisor} on ${machineName(row.host)}`);
+        const status = control.querySelector<HTMLElement>(".conversation-reload-receipt")!;
+        status.textContent = receipt ? `${receipt.phase === "observed" ? "" : `${receipt.phase}: `}${receipt.detail}` : row.reloadPending ? "Connecting to reload Cassy…" : !direct.hidden ? unavailable ?? "" : "";
+        status.hidden = !status.textContent;
+        control.hidden = direct.hidden && status.hidden;
+        ordered.push(control);
+      }
+
     }
     for (const [key, node] of this.extras) {
       if (!extrasKept.has(key)) { node.remove(); this.extras.delete(key); }
@@ -591,7 +624,7 @@ export class ConversationList {
     const container = latest.container.isConnected || !latest.container.id
       ? latest.container
       : latest.container.ownerDocument.getElementById(latest.container.id) ?? latest.container;
-    this.render(container, latest.rows, latest.open, latest.end);
+    this.render(container, latest.rows, latest.open, latest.end, latest.reload);
   }
 
   /** The ended row is gone; if focus went with it, land it on the nearest thing left. */

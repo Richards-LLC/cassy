@@ -27,6 +27,8 @@ pub const COMMANDER_EARLIER_SESSIONS_LIMIT: usize = 30;
 pub enum ProtocolCapability {
     /// Local framed Unix GUI control only; never advertised by WS/relay.
     BindingIntakeControlV1,
+    /// Launch a stored verifier dispatch from the local daemon context.
+    VerifierLaunch,
     TargetedInterrupt,
     SupervisorCommands,
     AttributedSendMessage,
@@ -68,6 +70,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
 pub fn local_gui_capabilities() -> Vec<ProtocolCapability> {
     let mut capabilities = daemon_capabilities();
     capabilities.push(ProtocolCapability::BindingIntakeControlV1);
+    capabilities.push(ProtocolCapability::VerifierLaunch);
     capabilities
 }
 
@@ -200,6 +203,9 @@ pub struct OperatorReplyPayload {
     /// thread and only quotes the earlier one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_session: Option<String>,
+    /// Optional task linkage; the enclosing notification ID identifies the operator request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// A durable operator message replayed into the Commander conversation.
@@ -282,6 +288,9 @@ pub struct ConversationHistoryReply {
     /// thread and only quotes the earlier one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_session: Option<String>,
+    /// Optional task linkage; the enclosing notification ID identifies the operator request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// Version of the [`WorkEvent`] schema; documented in
@@ -445,6 +454,10 @@ impl MessageAttribution {
 /// Messages sent from TUI client to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
+    /// Local control: resolve all task, owner and harness data in the daemon.
+    LaunchVerifier { dispatch_id: String },
+    /// Local daemon control; never accepted from a remote WebSocket client.
+    Reexec { binary: std::path::PathBuf, version: String, nonce: String },
     /// Attach to the session (sent on connect)
     Attach {
         /// Request full scrollback buffer
@@ -561,6 +574,12 @@ pub enum ClientMessage {
     },
     /// Read the original command receipt; this never sends a second command.
     SupervisorCommandStatus {
+        client_ref: String,
+        #[serde(default)]
+        attribution: MessageAttribution,
+    },
+    /// Cancel the caller's queued command or chooser tracking without PTY input.
+    SupervisorCommandCancel {
         client_ref: String,
         #[serde(default)]
         attribution: MessageAttribution,
@@ -695,6 +714,8 @@ pub enum PaneSizeAuthority {
 /// Messages sent from daemon to TUI client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
+    VerifierLaunched { dispatch_id: String },
+    ReexecResult { receipt: super::daemon::reexec::ReexecReceipt },
     /// Local-only response. An acknowledgement exists only after both tasks drain.
     BindingIntake {
         reply: super::daemon::runtime::violet_intake::IntakeReply,
@@ -746,6 +767,9 @@ pub enum DaemonMessage {
         /// Session of the answered turn when it is another session's (cas-e829).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to_session: Option<String>,
+        /// Optional task linkage; the enclosing notification ID identifies the operator request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
 
     /// A system notice delivered earlier is over (cas-e829): the relay it
@@ -983,6 +1007,12 @@ pub struct PaneInfo {
     pub title: String,
     /// Whether the pane process has exited
     pub exited: bool,
+    /// Bytes accepted by the pane's PTY input queue, including control replies.
+    #[serde(default)]
+    pub input_bytes_received: u64,
+    /// Bytes physically written to the PTY master (not proof of child consumption).
+    #[serde(default)]
+    pub input_bytes_written: u64,
 }
 
 /// Per-pane attach metadata. This deliberately contains no terminal content.
@@ -1410,6 +1440,7 @@ mod tests {
             r#"{"schema_version":1,"reply_to":41,"message":"ready","summary":"reply","device_id":"device-7"}"#,
         )
         .unwrap();
+        assert_eq!(legacy.task_id, None);
         assert_eq!(legacy.reply_to, Some(41));
         assert_eq!(legacy.kind, OperatorTurnKind::Answer);
         assert!(legacy.attachments.is_empty());
@@ -1432,6 +1463,7 @@ mod tests {
                 sha256: "ab".repeat(32),
             }],
             reply_to_session: None,
+            task_id: None,
         };
         let encoded = serde_json::to_string(&current).unwrap();
         assert!(!encoded.contains("reply_to_session"), "{encoded}");
@@ -1464,9 +1496,11 @@ mod tests {
             "summary": "Choose the next step",
             "device_id": "*",
             "kind": "ask",
+            "task_id": "cas-operator-decision",
             "options": ["Keep testing", "Stop testing"]
         }))
         .unwrap();
+        assert_eq!(ask.task_id.as_deref(), Some("cas-operator-decision"));
         assert_eq!(
             serde_json::to_value(&ask).unwrap()["options"],
             serde_json::json!(["Keep testing", "Stop testing"])

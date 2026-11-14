@@ -89,7 +89,7 @@ mod search_index_impl;
 mod search_index_query;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
@@ -241,6 +241,8 @@ pub struct SearchIndex {
     cached_reader: Mutex<Option<IndexReader>>,
     // Cached QueryParser (index + fields don't change)
     cached_query_parser: Mutex<Option<QueryParser>>,
+    // Last canonical task-store snapshot written to the shared index.
+    task_snapshot: Arc<Mutex<Option<Vec<(String, i64)>>>>,
 }
 
 impl Clone for SearchIndex {
@@ -268,6 +270,7 @@ impl Clone for SearchIndex {
             // them avoids sharing synchronization state between CasCore clones.
             cached_reader: Mutex::new(None),
             cached_query_parser: Mutex::new(None),
+            task_snapshot: Arc::clone(&self.task_snapshot),
         }
     }
 }
@@ -390,6 +393,23 @@ mod tests {
                 results.iter().any(|result| result.id == "001"),
                 "expected literal query {query:?} to match the indexed entry"
             );
+        }
+    }
+
+    #[test]
+    fn natural_language_apostrophes_in_task_search_gh_1534() {
+        let index = SearchIndex::in_memory().unwrap();
+        let task = Task {
+            id: "cas-apostrophe".into(),
+            title: "viral idea narrates request back you're looking for idea echo workers tasks 90s".into(),
+            ..Default::default()
+        };
+        index.index_task(&task).unwrap();
+        for query in [task.title.as_str(), "you're", "title:\"you're looking\"", "'looking for' AND echo", "workers' tasks", "'90s"] {
+            let results = index.search_unified(&SearchOptions {
+                query: query.into(), doc_types: vec![DocType::Task], ..Default::default()
+            }).unwrap_or_else(|error| panic!("{query:?}: {error}"));
+            assert!(results.iter().any(|result| result.id == task.id), "{query:?}");
         }
     }
 

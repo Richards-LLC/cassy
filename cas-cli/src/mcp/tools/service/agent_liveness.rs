@@ -50,6 +50,19 @@ pub fn agent_process_is_alive(agent: &Agent) -> bool {
     agent_process_is_alive_with_table(agent, &RealProcessTable)
 }
 
+/// A registered verifier keeps its dispatch until it exits. Native children
+/// without a recorded PID retain status-based protection; a recorded process
+/// must still exist with its original fingerprint, independent of heartbeats.
+pub(crate) fn verifier_is_running(agent: &Agent) -> bool {
+    agent.is_alive()
+        && (agent.pid.is_none()
+            || agent_process_is_alive_with(
+                agent,
+                crate::mcp::daemon::pid_alive,
+                crate::mcp::daemon::pid_matches_fingerprint,
+            ))
+}
+
 /// Keep the OS process discovery boundary injectable across host platforms.
 pub(crate) fn agent_process_is_alive_with_table(agent: &Agent, table: &dyn ProcessTable) -> bool {
     if agent_process_is_alive_with(

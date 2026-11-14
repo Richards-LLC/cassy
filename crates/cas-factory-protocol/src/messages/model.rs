@@ -133,6 +133,12 @@ pub struct PaneInfo {
     pub title: String,
     /// Whether the pane's process has exited.
     pub exited: bool,
+    /// Bytes accepted by the pane's PTY input queue, including control replies.
+    #[serde(default)]
+    pub input_bytes_received: u64,
+    /// Bytes physically written to the PTY master (not proof of child consumption).
+    #[serde(default)]
+    pub input_bytes_written: u64,
 }
 
 /// Kind of pane in the multiplexer.

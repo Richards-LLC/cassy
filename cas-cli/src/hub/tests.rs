@@ -360,7 +360,7 @@ fn operator_reply_relay_reaches_another_authenticated_device() {
         operator_label: "Daniel".into(),
         controller_origin: "https://controller.example".into(),
         scopes: [Scope::PaneRead].into_iter().collect(),
-        request_id: "request-shared".into(),
+        request_id: "request-shared".into(), preview: false,
     };
     let frame = serde_json::to_vec(&DaemonMessage::OperatorReply {
         notification_id: 42,
@@ -374,6 +374,7 @@ fn operator_reply_relay_reaches_another_authenticated_device() {
         attachments: Vec::new(),
         notice: None,
         reply_to_session: None,
+        task_id: None,
     }).unwrap();
     assert!(super::server::operator_reply_allowed(&Some((auth, viewer)), &frame));
     assert!(!super::server::operator_reply_allowed(&None, &frame));
@@ -1986,6 +1987,8 @@ async fn h1_real_daemon_connector_transforms_welcome_preserves_output_and_one_up
                 focused: true,
                 title: "Worker 1".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             }],
             epic_id: Some("cas-epic".into()),
             epic_title: Some("Commander".into()),
@@ -2105,6 +2108,8 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
                 focused: false,
                 title: "Worker 1".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
         },
     );
@@ -2123,6 +2128,8 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
                 focused: true,
                 title: "Supervisor".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
         },
     );
@@ -2963,7 +2970,7 @@ fn hub_forwards_the_operator_in_reply_to_reference_unchanged() {
         operator_label: "Daniel".into(),
         controller_origin: "https://controller.example".into(),
         scopes,
-        request_id: "request-1".into(),
+        request_id: "request-1".into(), preview: false,
     };
     // The exact frame hub-web's supervisorMessage() emits for a quick reply.
     let frame = serde_json::json!({
@@ -3024,7 +3031,7 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
         operator_label: "Daniel".into(),
         controller_origin: "https://controller.example".into(),
         scopes: [Scope::MessageSend].into_iter().collect(),
-        request_id: "request-2109".into(),
+        request_id: "request-2109".into(), preview: false,
     };
     let auth = Some((AuthStore::open(&root, "machine-test").unwrap(), phone));
     use super::server::PendingRefKind::{History, Send};
@@ -3275,7 +3282,7 @@ fn hub_stamps_send_message_attribution_from_the_device_session_not_the_client() 
         operator_label: "Daniel".into(),
         controller_origin: "https://controller.example".into(),
         scopes,
-        request_id: "request-1".into(),
+        request_id: "request-1".into(), preview: false,
     };
     let spoofed = serde_json::json!({
         "SendMessage": {
@@ -3362,7 +3369,7 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
             operator_label: "test operator".into(),
             controller_origin: "https://controller.example".into(),
             scopes: scopes.clone(),
-            request_id: format!("request-{label}"),
+            request_id: format!("request-{label}"), preview: false,
         }
     };
     let phone = pair("phone");
@@ -4754,6 +4761,59 @@ fn control_scopes() -> std::collections::BTreeSet<Scope> {
     .collect()
 }
 
+/// cas-16c0a: the release decision belongs to a verified pairing, without
+/// granting it worker management. Both directions use the real operation gate.
+#[tokio::test]
+async fn release_freeze_default_pairing_cas_16c0a() {
+    use crate::mcp::tools::core::workflow::release_freeze::freeze_of;
+
+    let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+    let fixture = ops_fixture(Scope::default_read_only());
+    let repo = fixture.cas_dir.parent().unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "epic/release-train-vnext-cas-tr"],
+        vec!["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "seed", "--allow-empty"],
+    ] {
+        let output = Command::new("git").current_dir(repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    let store = crate::store::open_task_store(&fixture.cas_dir).unwrap();
+    let mut train = cas_types::Task::new("cas-tr".into(), "Release train vNEXT".into());
+    train.task_type = cas_types::TaskType::Epic;
+    train.branch = Some("epic/release-train-vnext-cas-tr".into());
+    train.labels = vec!["release-train".into(), format!("release-train-frozen:1730000000:{OPS_TIP}")];
+    store.add(&train).unwrap();
+
+    for (index, (kind, frozen)) in [("lift_train_freeze", false), ("freeze_train", true)].into_iter().enumerate() {
+        let request = serde_json::json!({
+            "op_id": format!("release-decision-{index}"),
+            "op": {"kind": kind, "epic_id": "cas-tr"},
+            "expected": {},
+        });
+        let (status, body) = fixture.operate(request).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["outcome"]["kind"], kind);
+        assert_eq!(freeze_of(&store.get("cas-tr").unwrap()).is_some(), frozen);
+    }
+
+    let interventions = cas_store::quality_events_between(&fixture.cas_dir, None, None).unwrap();
+    let kinds: Vec<_> = interventions.iter().filter_map(|event| {
+        let payload = serde_json::to_value(&event.payload).unwrap();
+        payload["intervention"].as_str().map(str::to_string)
+    }).collect();
+    assert_eq!(kinds, ["train_freeze_lift", "commander_action"]);
+
+    // Possession of an expired/revoked pairing never authorizes a lift.
+    fixture.auth.revoke_device(&fixture.device_id, chrono::Utc::now()).unwrap();
+    let (status, body) = fixture.operate(serde_json::json!({
+        "op_id": "revoked-release-decision",
+        "op": {"kind": "lift_train_freeze", "epic_id": "cas-tr"},
+        "expected": {},
+    })).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(freeze_of(&store.get("cas-tr").unwrap()).is_some());
+}
+
 /// O1: the hub's "ask the supervisor to merge" reaches the supervisor as the
 /// same queue row an MCP `coordination message` produces (target, text,
 /// session, summary, priority, urgency), stamped with the device that asked,
@@ -4957,6 +5017,7 @@ fn record_secret_request(cas_dir: &std::path::Path, kind: crate::ui::factory::Op
         attachments: Vec::new(),
         options: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     })
     .unwrap();
     crate::store::open_prompt_queue_store(cas_dir)
@@ -5486,6 +5547,7 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     ended.ended = Some(crate::ui::factory::SessionEndOutcome {
         at: "2026-10-31T11:00:00Z".into(), reason: "prompt_input_exit".into(),
         workers_stopped: vec![], orphans: vec![], unverified: vec![],
+        worker_states: vec![],
     });
     let app = |auth: AuthStore, rows: Vec<HubSession>| router(HubState::new(
         SessionCatalog::new(RecordingReadModel::with_sessions(rows)), Arc::new(PreAuthAuthorizer),
@@ -6139,6 +6201,10 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let artifact = first.unwrap();
     let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
     assert_eq!(store.get(artifact["artifact_id"].as_str().unwrap()).unwrap().unwrap().mime, "text/plain");
+    store.revoke(image_id, "supervisor", "Harmless preview cleanup").unwrap();
+    assert_eq!(app.clone().oneshot(ticket_request("factory-a")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    let old_ticket = Request::get(format!("/v1/sessions/factory-a/artifacts/{image_id}/content?t={}", ticket["ticket"].as_str().unwrap()));
+    assert_eq!(app.oneshot(old_ticket.body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::NOT_FOUND);
 }
 
 /// cas-3aff: a visual reply page opens only through a DPoP-minted ticket for
@@ -6470,6 +6536,13 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     std::fs::write(auth_path, saved).unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "auth storage outage is retryable");
     assert_eq!(upstream.received_requests().await.unwrap().len(), before);
+    artifacts.revoke("art-pdf", "supervisor", "Harmless media cleanup").unwrap();
+    let before_revoke = upstream.received_requests().await.unwrap().len();
+    let response = f.app.clone().oneshot(Request::get(format!(
+        "/v1/sessions/{OPS_SESSION}/artifacts/art-pdf/content?t={}", tickets["art-pdf"]))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(upstream.received_requests().await.unwrap().len(), before_revoke);
     let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-video", now - chrono::Duration::minutes(6)).unwrap().ticket;
     let valid = tickets["art-image"].clone();
     let mut tampered = valid.clone();
@@ -6549,6 +6622,7 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
         at: "2026-10-28T15:24:00Z".into(), reason: "prompt_input_exit".into(),
         workers_stopped: vec!["worker-a".into(), "worker-b".into()],
         orphans: vec!["worker-c".into()], unverified: vec!["worker-d".into()],
+        worker_states: vec!["worker-a: tasks=[cas-work in_progress]; dirty_files=1; unpushed_commits=1; stopped".into()],
     };
     manager.record_ended(&metadata.name, outcome.clone()).unwrap();
     let rows = LocalSessionReadModel::default().list_sessions().unwrap();
@@ -6699,4 +6773,72 @@ fn supervisor_mcp_versions_stay_bound_to_the_live_session_cas_8125() {
             assert_eq!(wire["installed_version"], "9.99.2");
         }
     }
+}
+
+/// cas-93d1: a `cas hub preview` origin reads live data, but its device holds
+/// only read scopes, every mutation class is refused (including mutation
+/// routes that name a read scope, self-grant and pane input), and the device
+/// stops authenticating, refresh included, when the preview window ends. A
+/// live-origin device on the same hub is unaffected.
+#[tokio::test]
+async fn preview_origin_reads_but_every_mutation_class_is_refused_until_its_window_ends_cas_93d1() {
+    use chrono::{Duration, Utc};
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let until = now + Duration::hours(1);
+    let every: std::collections::BTreeSet<Scope> = [
+        Scope::MachineRead, Scope::SessionRead, Scope::SessionLaunch, Scope::PaneRead, Scope::PaneInput,
+        Scope::MessageSend, Scope::PaneInterrupt, Scope::FactoryOperate, Scope::FactoryManage, Scope::HubAdmin,
+    ].into_iter().collect();
+    let pair = |origin: &str, preview: bool, scopes: std::collections::BTreeSet<Scope>| {
+        let signing = SigningKey::random(&mut OsRng);
+        let invitation = if preview { auth.mint_preview_pairing(origin, Some("cas-93d1"), until, now) } else { auth.mint_pairing(origin, scopes.clone(), now) }.unwrap();
+        let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", origin, scopes);
+        exchange.public_key_jwk = public_jwk(&signing);
+        auth.exchange_pairing(exchange, now).map(|credential| (signing, credential))
+    };
+    let preview = "http://127.0.0.1:4999";
+    assert!(pair(preview, true, every.clone()).is_err(), "a preview invitation never yields a mutating scope");
+    let (preview_key, preview_device) = pair(preview, true, Scope::default_read_only()).unwrap();
+    let (live_key, live_device) = pair("https://controller.example", false, every.clone()).unwrap();
+    let events = MachineEventBus::new(16);
+    let state = HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth.clone());
+    let headers = |key: &SigningKey, credential: &DeviceCredential, origin: &str, method: &str, at| {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("origin", origin.parse().unwrap());
+        headers.insert("authorization", format!("DPoP {}", credential.credential).parse().unwrap());
+        headers.insert("dpop", sign_dpop(key, &credential.credential, method, "/v1/probe", at, &uuid::Uuid::new_v4().to_string()).parse().unwrap());
+        headers
+    };
+    let read = super::server::authorize(&state, HubAction::SessionRead, Scope::SessionRead, &headers(&preview_key, &preview_device, preview, "GET", now), "GET", "/v1/probe")
+        .unwrap().unwrap();
+    assert!(read.preview);
+    assert_eq!(read.scopes, Scope::default_read_only());
+    for scope in every.iter().copied() {
+        assert!(super::server::authorize(&state, HubAction::Mutation, scope, &headers(&preview_key, &preview_device, preview, "POST", now), "POST", "/v1/probe").is_err(),
+            "preview mutation with {scope:?} must be refused");
+        assert!(super::server::authorize(&state, HubAction::Mutation, scope, &headers(&live_key, &live_device, "https://controller.example", "POST", now), "POST", "/v1/probe").is_ok(),
+            "a live device holding {scope:?} is unaffected");
+    }
+    let input = ClientMessage::Input { pane_id: "worker-1".into(), data: b"x".to_vec() };
+    assert!(!read.has(required_scope(&input).unwrap()), "pane input over the socket needs a scope the preview never holds");
+    assert!(auth.grant_own_scope(&read, Scope::SessionLaunch, now).is_err());
+    // The window ends: no authentication, and no refresh that extends it.
+    let after = until + Duration::seconds(1);
+    let authenticate = |key: &SigningKey, credential: &DeviceCredential, origin: &str, jti: &str| auth.authenticate_dpop(
+        &format!("DPoP {}", credential.credential), &sign_dpop(key, &credential.credential, "GET", "/v1/probe", after, jti), origin, "GET", "/v1/probe", after);
+    assert!(authenticate(&preview_key, &preview_device, preview, "preview-after").is_err());
+    let refresh = sign_dpop(&preview_key, &preview_device.credential, "POST", "/v1/auth/refresh", after, "refresh-after-preview");
+    assert!(auth.refresh_device_credential(&format!("DPoP {}", preview_device.credential), &refresh, preview, "POST", "/v1/auth/refresh", after).is_err());
+    assert!(authenticate(&live_key, &live_device, "https://controller.example", "live-after").is_ok());
+    // Commander links the parked task to the preview only while it runs.
+    assert_eq!(auth.live_previews(now).unwrap().iter().map(|window| (window.origin.as_str(), window.task.as_deref())).collect::<Vec<_>>(), [(preview, Some("cas-93d1"))]);
+    assert!(auth.live_previews(after).unwrap().is_empty());
 }

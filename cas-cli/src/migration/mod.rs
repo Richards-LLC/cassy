@@ -940,9 +940,13 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
     }
     let db_path = cas_dir.join("cas.db");
 
-    let conn = Connection::open(&db_path)?;
+    // Keep migration transactions private while using the stores' WAL+NORMAL
+    // policy; a raw connection defaults to FULL and fsyncs every ledger commit.
+    let connection = cas_store::shared_db::dedicated_connection(&db_path)?;
+    let conn = connection
+        .lock()
+        .map_err(|_| CasError::Other("migration connection lock poisoned".to_string()))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
     // Check that base tables exist (cas init has been run)
     if !is_db_initialized(&conn) {
@@ -1591,7 +1595,6 @@ mod tests {
             .expect_err("destructive replay must be refused");
         conn.execute("ROLLBACK", []).unwrap();
 
-        assert!(error.to_string().contains("not provably safe to replay"));
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM sqlite_master
@@ -2017,6 +2020,30 @@ mod tests {
             lazy_tables_after, 2,
             "skills and agents must both exist after run_migrations bootstrap"
         );
+    }
+
+    #[test]
+    fn migrations_use_normal_synchronous_policy() {
+        let temp = TempDir::new().unwrap();
+        {
+            let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+            conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA).unwrap();
+            conn.execute_batch(cas_store::TASK_SCHEMA).unwrap();
+            ensure_migrations_table(&conn).unwrap();
+            // Observe the real runner's connection at its ledger writes:
+            // synchronous is connection-local, so reopening afterward cannot
+            // detect a runner that silently used SQLite's FULL default.
+            conn.execute_batch(
+                "CREATE TRIGGER require_normal_sync BEFORE INSERT ON cas_migrations
+                 WHEN (SELECT synchronous FROM pragma_synchronous) <> 1
+                 BEGIN SELECT RAISE(ABORT, 'migration_sync_policy'); END;",
+            )
+            .unwrap();
+        }
+
+        let result = run_migrations(temp.path(), false).unwrap();
+        assert!(result.applied_count > 0);
+        assert_eq!(check_migrations(temp.path()).unwrap().pending_count(), 0);
     }
 
     /// cas-bdb9: running migrations a second time on the same already-
@@ -2973,8 +3000,8 @@ mod tests {
     fn test_failing_migration_rolls_back_cleanly() {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path().join("cas.db");
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let connection = cas_store::shared_db::dedicated_connection(&db_path).unwrap();
+        let conn = connection.lock().unwrap();
         ensure_migrations_table(&conn).unwrap();
 
         // Create base tables so migration flow is considered initialized.

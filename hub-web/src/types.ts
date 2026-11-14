@@ -111,6 +111,8 @@ export interface ArtifactRef {
 
 /** Supervisor turn routed to this paired Commander device. */
 export interface OperatorReply {
+  /** Task named by this explicit operator request; notification_id is its request ID. */
+  task_id?: string;
   /** Local application receipt, never shared operator-read state. */
   device_persisted?: boolean;
   /** cas-97d58 F05: storing this reply on this device failed (not just pending). */

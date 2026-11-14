@@ -97,6 +97,29 @@ pub(crate) fn presented_token<B>(
         .map(str::to_owned)
 }
 
+/// Authenticate the hub relay at the WebSocket boundary. Anonymous local
+/// viewers remain usable but cannot supply operator provenance.
+pub(crate) async fn accept(
+    stream: tokio::net::TcpStream,
+    expected: Option<&str>,
+) -> Result<(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, bool), tokio_tungstenite::tungstenite::Error> {
+    let mut trusted = false;
+    let socket = tokio_tungstenite::accept_hdr_async(stream, |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+        let presented = presented_token(request);
+        trusted = expected.is_some_and(|expected| matches(presented.as_deref(), expected));
+        // A relay that raced token rotation must reconnect with the current
+        // credential, never remain connected with downgraded provenance.
+        if presented.is_some() && !trusted {
+            return Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(401)
+                .body(Some("relay_token_rejected".to_owned()))
+                .expect("fixed relay refusal response"));
+        }
+        Ok(response)
+    }).await?;
+    Ok((socket, trusted))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,7 +127,7 @@ mod tests {
     #[test]
     fn cas_ca22_relay_token_is_private_random_and_compared_exactly() {
         let home = tempfile::tempdir().unwrap();
-        let hub_root = home.path().join(".cas/hub");
+        let hub_root = home.path().canonicalize().unwrap().join(".cas/hub");
         let first = mint(&hub_root, "factory-1").unwrap();
         assert_eq!(first.len(), 64, "256 random bits, hex");
         assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));

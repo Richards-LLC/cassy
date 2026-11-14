@@ -7,9 +7,11 @@ import json
 import sys
 from pathlib import Path
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +33,21 @@ def _pinned_linter():
 LINTER = _pinned_linter()
 if LINTER:
     os.environ["MARKDOWNLINT_CLI2"] = LINTER
+# The journey-catalog row's registry upkeep needs a Cassy validator; keep the
+# fixture rows hermetic (cas-4b33): no CAS_BIN and an installer that fails.
+os.environ.pop("CAS_BIN", None)
+os.environ["CAS_VALIDATOR_INSTALLER"] = "/nonexistent/cas-install.sh"
+REGISTRY = """version: 1
+updated: '2026-11-11'
+surfaces: ['hub-web/src/**']
+journeys:
+  - id: J1
+    status: live
+    seeded: true
+    entry: {url: /signup, trigger: Open}
+    owners: ['hub-web/src/signup.ts']
+    traffic: {share_pct: null, basis: fixture}
+"""
 
 
 EXAMPLE_SKILL = "---\nname: example\ndescription: Use when exercising the fixture contract.\n---\nfixture contract\n"
@@ -73,24 +90,6 @@ JOURNEY_CATALOG = """# Journeys
 - An empty list.
 """
 JOURNEY_SPEC = "test('HUB-J1 open a conversation', async () => {\n  await test.step('Tap the row', async () => {});\n});\n"
-DOCTOR_RS = """impl CheckGroup {
-    fn for_name(name: &str) -> Self {
-        match name.to_ascii_lowercase().as_str() {
-            "symbol index" => Self::Indexes,
-            _ => Self::Store,
-        }
-    }
-}
-fn run(recorder: &mut Recorder) {
-    recorder.mark("store open", &checks);
-}
-"""
-DOCTOR_SNAPSHOT = """---
-source: cas-cli/tests/component_output_test.rs
----
-Store         [OK] database
-Indexes       [OK] symbol index
-"""
 MIGRATIONS_RS = "mod m001_first;\n\npub static MIGRATIONS: &[Migration] = &[\n    m001_first::MIGRATION,\n];\n"
 
 
@@ -110,26 +109,25 @@ class FastRows(unittest.TestCase):
         for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "release-test-env.sh", "release-integration-gates.py", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py", "markdownlint.py",
                        "check-builtin-doc-hygiene.py", "check-design-paths.py", "builtin-doc-hygiene.json",
-                       "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
-                       "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
+                       "check-test-env.py", "rust_test_source.py",
+                       "journeys-for-diff.py", "check-builtin-skill-limits.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
                        "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
-                       "release-diary-thread.py"):
+                       "release-diary-thread.py", "doc-fragments.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
             for source in (ROOT / source_dir).glob("*.sql"):
                 self.write(source_dir + "/" + source.name, source.read_text())
         (self.repo / "scripts/fast-rows-pre-push.sh").chmod(0o755)
         self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
-        self.write("scripts/builtin-contract-phrases.json", '{"version":2,"documents":{"skills/example/SKILL.md":{"source":"cas-cli/src/builtins/skills/example/SKILL.md","catalogs":["claude","codex","grok"],"contains":[{"text":"fixture contract","reason":"Named fixture contract."}],"absent":[],"any_of":[]}},"alternatives":[]}\n')
         self.write("cas-cli/src/builtins/skills/example/SKILL.md", EXAMPLE_SKILL)
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
+        self.write("docs/qa/journeys.yaml", REGISTRY)
+        self.write("hub-web/src/signup.ts", "signup\n")
         self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
-        self.write("cas-cli/src/cli/doctor.rs", DOCTOR_RS)
-        self.write("cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap", DOCTOR_SNAPSHOT)
         self.write("cas-cli/src/migration/migrations/m001_first.rs", "pub const MIGRATION: Migration = Migration {\n    id: 1,\n};\n")
         self.write("cas-cli/src/migration/migrations/mod.rs", MIGRATIONS_RS)
         self.write(".markdownlint-cli2.jsonc", (ROOT / ".markdownlint-cli2.jsonc").read_text())
@@ -195,7 +193,7 @@ class FastRows(unittest.TestCase):
         for row in ("failure-log", "version-literals", "changelog-and-versions", "release-script",
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
-                    "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
+                    "journey-catalog", "builtin-skill-limits", "migration-registry",
                     "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
                     "call-shapes", "release-notes-draft"):
             if row == "test-shape":
@@ -216,7 +214,6 @@ class FastRows(unittest.TestCase):
         missing_title = self.fast()
         self.assertNotEqual(missing_title.returncode, 0, missing_title.stdout + missing_title.stderr)
         self.assertIn("FAIL changelog-and-versions", missing_title.stdout)
-        self.assertIn("titled category and area format", missing_title.stdout)
 
         self.write("CHANGELOG.md", (
             "## [Unreleased]\n\n### Fixed — Fixture\n\n"
@@ -280,7 +277,6 @@ class FastRows(unittest.TestCase):
         dirty = self.fast()
         self.assertEqual(dirty.returncode, 0, dirty.stdout + dirty.stderr)
         self.assertFalse(self.receipt()[1].exists(), dirty.stdout)
-        self.assertIn("no receipt", dirty.stdout)
 
 
     def test_fast_test_env_skips_unchanged_crate_paths_and_fixture_suite(self):
@@ -296,6 +292,15 @@ class FastRows(unittest.TestCase):
         self.assertIn("PASS test-env", result.stdout)
 
 
+    def test_fast_version_literals_ignores_exemplar_prose(self):
+        self.write("cas-cli/src/builtins/skills/example/references/exemplars/report.html",
+                   "<p>Checkout release 9.99.7.</p>\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS version-literals", result.stdout)
+
+
     def test_real_defects_name_the_row(self):
         cases = [
             ("test-env", "cas-cli/tests/sample.rs", '#[test] fn sample() { std::env::set_var("HOME", "other"); }\n'),
@@ -308,19 +313,15 @@ class FastRows(unittest.TestCase):
             ("changelog-and-versions", "crates/cas-core/Cargo.toml", '[package]\nversion = "9.99.8"\n'),
             ("procedure-guardrails", "cas-cli/src/builtins/skills/cas-cut-release/SKILL.md", "missing procedure\n"),
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "Repository Richards-LLC/private-project\n"),
-            ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "removed contract\n"),
             # cas-462b: rows that failed only at the October 2026 release cut.
             ("journey-catalog", "docs/qa/journeys.md",
              JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
+            # cas-4b33: registry upkeep moved from park to this lane lint.
+            ("journey-catalog", "docs/qa/bug-families/ghost.yaml", "title: Ghost case\njourneys: [MISSING]\n"),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/violet/SKILL.md",
              VIOLET_SKILL + "x" * 80 + "\n" + "Padding line.\n" * 1200),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/example/SKILL.md",
              "---\nname: example\ndescription: " + "y" * 251 + "\n---\nfixture contract\n"),
-            ("doctor-snapshot", "cas-cli/src/cli/doctor.rs",
-             DOCTOR_RS.replace('recorder.mark("store open", &checks);',
-                               'recorder.mark("store open", &checks);\n    recorder.mark("code index copies", &checks);')),
-            ("doctor-snapshot", "cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap",
-             DOCTOR_SNAPSHOT.replace("[OK] database", "[OK] database  [OK] symbol index")),
             ("migration-registry", "cas-cli/src/migration/migrations/m002_second.rs",
              "pub const MIGRATION: Migration = Migration {\n    id: 2,\n};\n"),
             ("fixture-paths-src", "cas-cli/src/example_tests.rs",
@@ -342,6 +343,127 @@ class FastRows(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("FAIL " + row, result.stdout)
 
+
+    def test_registry_upkeep_fails_closed_without_a_validator_cas_4b33(self):
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL journey-catalog", result.stdout)
+
+    def test_selector_failure_invokes_registry_validator_cas_4b33(self):
+        tools = self.repo / ".git" / "tools"
+        tools.mkdir()
+        selector = tools / "python3"
+        selector.write_text(f'''#!/bin/sh
+if [ "$1" = scripts/doc-fragments.py ] && [ "$2" = needs-upkeep ]; then
+    echo 'ModuleNotFoundError: No module named yaml' >&2
+    echo no
+    exit 1
+fi
+exec {shlex.quote(sys.executable)} -S "$@"
+''')
+        selector.chmod(0o755)
+        validator = tools / "cas"
+        validator.write_text('''#!/bin/sh
+case "$*" in
+    'qa journeys --help') [ "${LEGACY_VALIDATOR:-0}" = 1 ] || echo --base ;;
+    'qa journeys --check'*) echo "$*" >> .git/validator-calls ;;
+    'config get qa.registry.enforce') echo enforce ;;
+    'qa impact '*)
+        echo "$*" >> .git/validator-calls
+        echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("hub-web/src/signup.ts", "updated owned surface\n")
+        self.commit()
+        result = self.fast_from(self.base, CAS_BIN=str(validator),
+                                PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.repo / ".git" / "validator-calls"
+        self.assertTrue(calls.exists(), result.stdout + result.stderr)
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["qa journeys --check", "qa journeys --check --base " + self.base])
+        calls.unlink()
+        legacy = self.fast_from(self.base, CAS_BIN=str(validator), LEGACY_VALIDATOR="1",
+                                PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(legacy.returncode, 0, legacy.stdout + legacy.stderr)
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["qa journeys --check", "qa impact " + self.base + " --json"])
+
+    def test_legacy_registry_uses_explicit_policy_without_a_store(self):
+        validator = self.repo / ".git" / "legacy-cas"
+        validator.write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> .git/validator-calls
+case "$*" in
+    'qa journeys --help'|'qa journeys --check') exit 0 ;;
+    'config get qa.registry.enforce') exit 1 ;;
+    'qa impact '*) echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: enforce\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("hub-web/src/signup.ts", "modified owned surface\n")
+        self.commit()
+        calls = self.repo / ".git" / "validator-calls"
+        explicit = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)
+        argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+        self.assertNotIn(["config", "get", "qa.registry.enforce"], argv)
+        self.assertIn(["qa", "impact", base, "--json"], argv)
+
+        # A missing header still needs config, and a failed lookup fails closed.
+        calls.unlink()
+        self.write("docs/qa/journeys.yaml", REGISTRY)
+        self.commit()
+        fallback = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(fallback.returncode, 1, fallback.stdout + fallback.stderr)
+        argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+        self.assertIn(["config", "get", "qa.registry.enforce"], argv)
+        self.assertNotIn(["qa", "impact", base, "--json"], argv)
+
+    def test_strict_registry_requires_a_validator_with_base_cas_4b33(self):
+        validator = self.repo / ".git" / "legacy-cas"
+        validator.write_text('''#!/usr/bin/env bash
+case "$*" in
+    'qa journeys --help'|'qa journeys --check') exit 0 ;;
+    'config get qa.registry.enforce') echo enforce ;;
+    'qa impact '*) echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: strict\n")
+        self.write("hub-web/src/email.ts", "pre-existing unowned surface\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("hub-web/src/email.ts", "modified unowned surface\n")
+        # The stricter base policy must survive a delivery's downgrade.
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: enforce\n")
+        self.commit()
+        result = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL journey-catalog", result.stdout)
+
+    @unittest.skipUnless(shutil.which("cas"), "needs a released cas to provision")
+    def test_self_provisioned_validator_catches_an_unowned_surface_cas_4b33(self):
+        installer = self.repo / ".git" / "fake-install.sh"
+        installer.write_text('#!/usr/bin/env bash\ninstall -m 755 "$REAL_CAS" "$CAS_INSTALL_DIR/cas"\n')
+        env = {"CAS_VALIDATOR_INSTALLER": str(installer), "REAL_CAS": shutil.which("cas")}
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        unowned = self.fast_from(self.base, **env)
+        self.assertEqual(unowned.returncode, 1, unowned.stdout + unowned.stderr)
+        self.assertIn("FAIL journey-catalog", unowned.stdout)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "ignore: ['hub-web/src/email.ts']\n")
+        self.commit()
+        owned = self.fast_from(self.base, **env)
+        self.assertIn("PASS journey-catalog", owned.stdout, owned.stdout + owned.stderr)
 
     def test_script_test_for_a_changed_script_runs_and_its_failure_is_named(self):
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n"
@@ -415,7 +537,6 @@ class FastRows(unittest.TestCase):
         self.commit()
         result = self.fast_from("0" * 39 + "1", ZERO_BASE_REF="origin/no-such-branch")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("are unavailable; comparing against HEAD^", result.stdout)
         self.assertNotIn("FAIL ", result.stdout)
 
     def test_env_baseline_growth_and_staleness_fail_admission(self):
@@ -433,12 +554,10 @@ class FastRows(unittest.TestCase):
         grown = self.fast()
         self.assertEqual(grown.returncode, 1, grown.stdout + grown.stderr)
         self.assertIn('FAIL test-env', grown.stdout)
-        self.assertIn('baseline growth', grown.stdout)
         self.write('cas-cli/tests/sample.rs', '#[test] fn sample() {}')
         self.commit()
         stale = self.fast()
         self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
-        self.assertIn('stale baseline entry', stale.stdout)
 
     def test_env_checker_is_mandatory_and_receives_base(self):
         self.write('scripts/check-test-env.py', "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "', '--changed-paths']\nprint('bad process state fixture.rs:1')\nsys.exit(1)\n")
@@ -451,7 +570,6 @@ class FastRows(unittest.TestCase):
         result = self.fast()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('FAIL test-env', result.stdout)
-        self.assertIn('scripts/check-test-env.py is missing', result.stdout)
 
     def test_optional_shape_checker_receives_the_lane_base_and_failure_is_named(self):
         self.write("scripts/check-test-shape.py", "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "']\nprint('bad shape fixture.rs:1')\nsys.exit(1)\n")
@@ -529,7 +647,6 @@ class FastRows(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS version-literals", result.stdout)
         log = (self.repo / ".git/gate-rows/version-literals.log").read_text()
-        self.assertIn("NOTE pre-existing next-version literals", log)
         self.assertIn("crates/cas-core/src/lib.rs:1:", log)
         self.assertIn("cas-cli/tests/sample.rs:4:", log)
 
@@ -568,16 +685,28 @@ class FastRows(unittest.TestCase):
         command(self.repo, "git", "init", "-q", "--bare", str(remote))
         command(self.repo, "git", "remote", "add", "origin", str(remote))
         self.copy_hook_installer()
+        self.write("scripts/example.py", "# baseline script\n")
+        self.write("scripts/test-example.py", "from pathlib import Path\n"
+                   "(Path(__file__).resolve().parents[1] / '.git/script-suite-ran').write_text('ran')\n")
+        self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n")
         self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^10.0.0\n')
         self.commit()
+        fork = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
         self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^9.99.0\n')
         self.commit()
         command(self.repo, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
         command(self.repo, "git", "checkout", "-qb", "factory/lane", "origin/epic/train")
         self.assertEqual(self.install_hooks().returncode, 0)
-        self.write("scripts/example.py", "# unrelated lane\n")
+        self.write("lane.txt", "branch change without scripts\n")
         self.commit()
+        # cas-3b04: the epic moves after the worker fork, touching a script the
+        # worker did not change. A two-tree diff would select its script suite.
+        command(self.repo, "git", "checkout", "-qb", "epic/train", fork)
+        self.write("scripts/example.py", "# later epic-only script change\n")
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        command(self.repo, "git", "checkout", "-q", "factory/lane")
         root = self.repo / ".cas"
         root.mkdir()
         with sqlite3.connect(root / "cas.db") as db:
@@ -588,9 +717,92 @@ class FastRows(unittest.TestCase):
             })))
         pushed = self.push()
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        ran = self.repo / ".git/script-suite-ran"
+        self.assertFalse(ran.exists(), pushed.stderr)
         _, path = self.receipt()
-        # pin: the fast-row receipt records the comparison ref actually used by the push.
-        self.assertIn("base=origin/epic/train ", path.read_text())
+        # pin: receipts name the actual comparison commit, while the hook log names its target ref.
+        self.assertIn(f"base={fork} ", path.read_text())
+        self.write("scripts/example.py", "# this branch now changes the script\n")
+        self.commit()
+        pushed = self.push()
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertTrue(ran.exists(), pushed.stderr)
+
+    def test_epic_push_refuses_stale_hub_web_dist_cas_1efb(self):
+        remote = Path(self.scratch.name) / "remote.git"
+        command(self.repo, "git", "init", "-q", "--bare", str(remote))
+        command(self.repo, "git", "remote", "add", "origin", str(remote))
+        self.copy_hook_installer()
+        self.write("hub-web/package.json", '{"name":"fixture","private":true}\n')
+        self.write("hub-web/package-lock.json", '{}\n')
+        self.write("hub-web/dist/app.js", "signup\n")
+        self.write("npm-fixture", '#!/bin/sh\nprintf "%s\\n" "$*" >> ../.git/npm-calls\ncase "$1" in\n'
+                   'ci) exit 0;;\nrun) cp src/signup.ts dist/app.js;;\n*) exit 1;;\nesac\n')
+        (self.repo / "npm-fixture").chmod(0o755)
+        self.commit()
+        branch = "refs/heads/epic/release-train-fixture"
+        pushed = command(self.repo, "git", "push", "origin", "HEAD:" + branch)
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        baseline = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(self.install_hooks().returncode, 0)
+        # The engine integrates a proven lane; its new merge tip needs no
+        # second copy of the lane's fast checks.
+        command(self.repo, "git", "checkout", "-qb", "factory/proven")
+        self.write("lane.txt", "proven delivery\n")
+        self.commit()
+        self.base = baseline
+        self.assertEqual(self.fast().returncode, 0)
+        command(self.repo, "git", "checkout", "-q", "target")
+        merged = command(self.repo, "git", "merge", "--no-ff", "factory/proven", "-m", "integration")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        integration = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        env = dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"),
+                   NPM=str(self.repo / "npm-fixture"),
+                   CAS_PROVEN_MERGE_HEAD=integration, CAS_PROVEN_MERGE_BASE=baseline)
+        started = time.monotonic()
+        pushed = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        elapsed = time.monotonic() - started
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertFalse((self.repo / f".git/cas/fast-rows/{integration}.pass").exists())
+        self.assertLess(elapsed, 1.0)
+        print(f"integration_push_seconds={elapsed:.3f}")
+
+        # Even inherited engine markers cannot authorize new authored content.
+        draft = "docs/release-notes/2099-01-01-v9.99.8-slack.md"
+        self.write(draft, "# Invalid release draft\n")
+        self.commit()
+        refused = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("FAIL release-notes-draft", refused.stderr)  # machine row identifier
+        (self.repo / draft).unlink()
+        self.write("hub-web/src/signup.ts", "changed signup\n")
+        self.commit()
+        refused = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("FAIL hub-web-dist-drift", refused.stderr)  # machine row identifier
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", branch).stdout.split()[0], integration)
+        self.assertFalse((self.repo / "cargo-called").exists())
+        # The refused build produced fresh dist. Commit it, then replay the
+        # same pre-push payload twice, as after a transport failure.
+        self.commit()
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        validator = self.repo / ".git/receipt-validator"
+        validator.write_text('#!/bin/sh\ncase "$*" in\n'
+                             "'qa journeys --help') echo --base;;\n"
+                             "'qa journeys --check'*) exit 0;;\n*) exit 1;;\nesac\n")
+        validator.chmod(0o755)
+        env = dict(env, CAS_BIN=str(validator))
+        update = f"refs/heads/target {head} {branch} {integration}\n"
+        hook = ("bash", "scripts/fast-rows-pre-push.sh", "origin", str(remote))
+        first = command(self.repo, *hook, input=update, env=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        npm_calls = (self.repo / ".git/npm-calls").read_bytes()
+        receipts = [self.repo / f".git/cas/fast-rows/{head}{suffix}" for suffix in (".pass", ".web.pass")]
+        modified = [path.stat().st_mtime_ns for path in receipts]
+        retry = command(self.repo, *hook, input=update, env=env)
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertEqual((self.repo / ".git/npm-calls").read_bytes(), npm_calls)
+        self.assertEqual([path.stat().st_mtime_ns for path in receipts], modified)
 
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"
@@ -614,20 +826,23 @@ class FastRows(unittest.TestCase):
         config = (self.repo / ".git/config.worktree").read_bytes()
         self.assertEqual(self.install_hooks().returncode, 0)
         self.assertEqual((self.repo / ".git/config.worktree").read_bytes(), config)
-        self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n")
+        self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n" * 40)
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n")
         self.write("scripts/test-example.py", "raise SystemExit('fixture diagnostic: prebuild poll expired')\n")
         self.commit()
-        refused = self.push()
+        base = "origin/epic/release-train-with-a-long-name"
+        command(self.repo, "git", "update-ref", "refs/remotes/" + base, self.base)
+        refused = self.push(ZERO_BASE_REF=base)
         self.assertNotEqual(refused.returncode, 0, refused.stderr)
-        self.assertIn("FIX version-literals: ", refused.stderr)
-        self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
-        self.assertIn("FAIL ci-script-tests-changed", refused.stderr)
+        # The comparison base may resolve to a SHA; refusal must preserve
+        # the offending source location and the detailed row evidence.
+        self.assertIn("cas-cli/tests/sample.rs:40:", refused.stderr)
+        self.assertLessEqual(len(re.findall(r"^  \| cas-cli/tests/sample.rs:\d+:", refused.stderr, re.M)), 20)
         # The real hook must keep the detailed child output after the gate's
         # scratch guardian has exited, and tell the worker where it is.
-        retained = re.search(r"pre-push: fast-row logs: (.+)", refused.stderr)
-        self.assertIsNotNone(retained, refused.stderr)
-        logs = Path(retained.group(1))
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        [logs] = (self.repo / ".git/cas/fast-rows").glob(f"{head}.logs.*")
+        self.assertIn(str(logs), refused.stderr)
         row_log = logs / "ci-script-tests-changed.log"
         original_log = row_log.read_text()
         self.assertIn("fixture diagnostic: prebuild poll expired", original_log)
@@ -636,11 +851,21 @@ class FastRows(unittest.TestCase):
         self.assertIn("ci-script-tests-changed", (logs / "timing.tsv").read_text())
         self.assertEqual(command(self.repo, "git", "ls-remote", "origin").stdout, "")
 
-        skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue")
+        self.write("fixture-cas", '#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(self.repo / "gate-argv") + '"\n')
+        (self.repo / "fixture-cas").chmod(0o755)
+        override_reason = "hotfix for the queue"
+        skipped = self.push(CAS_SKIP_FAST_ROWS=override_reason, CAS_BIN=str(self.repo / "fixture-cas"))
         self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        recorded = (self.repo / "gate-argv").read_text().splitlines()
+        self.assertEqual(recorded[:4], ["gates", "record-override", "C-07", "H-38"])
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         log = (self.repo / ".git/cas/fast-rows/overrides.log").read_text()
-        self.assertIn(f"{head} factory/lane skipped fast rows: hotfix for the queue", log)
+        [entry] = log.splitlines()
+        _, logged_tip, logged_ref, detail = entry.split(maxsplit=3)
+        self.assertEqual((logged_tip, logged_ref), (head, "factory/lane"))
+        self.assertIn(override_reason, detail)
+        remote_tip, remote_ref = command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane").stdout.split()
+        self.assertEqual((remote_tip, remote_ref), (head, "refs/heads/" + logged_ref))
 
         # A same-tip PASS receipt makes the next push free: no rows run.
         self.write("scripts/test-example.py", "print('example ok')\n")
@@ -649,7 +874,6 @@ class FastRows(unittest.TestCase):
         self.assertEqual(self.fast().returncode, 0)
         repeat = self.push()
         self.assertEqual(repeat.returncode, 0, repeat.stderr)
-        self.assertNotIn("running fast rows", repeat.stderr)
 
         # cas-eac2: lane CI no longer repeats these rows, so a missing tool
         # fails the push loudly instead of passing it.
@@ -657,10 +881,10 @@ class FastRows(unittest.TestCase):
         self.commit()
         missing = self.push(MARKDOWNLINT_CLI2=str(self.repo / "missing-markdownlint"))
         self.assertNotEqual(missing.returncode, 0, missing.stderr)
-        self.assertIn("FAIL markdown-lint", missing.stderr)
-        later = re.search(r"pre-push: fast-row logs: (.+)", missing.stderr)
-        self.assertIsNotNone(later, missing.stderr)
-        self.assertNotEqual(Path(later.group(1)), logs)
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        [later] = (self.repo / ".git/cas/fast-rows").glob(f"{head}.logs.*")
+        self.assertIn(str(later), missing.stderr)
+        self.assertNotEqual(later, logs)
         # pin: retaining evidence means its bytes survive later attempts unchanged.
         self.assertEqual(row_log.read_text(), original_log, "later pushes retain the original failure")
 
@@ -688,7 +912,6 @@ class FastRows(unittest.TestCase):
                           env={key: value for key, value in os.environ.items()
                                if not key.startswith(("CAS_", "GIT_"))})
         self.assertNotEqual(refused.returncode, 0, refused.stdout)
-        self.assertIn("linked worktree", refused.stderr)
         self.assertEqual((self.repo / ".git/config").read_bytes(), config)
 
     def test_builtin_agent_projection_drift_is_refused_cas_7bce(self):
@@ -711,10 +934,11 @@ class FastRows(unittest.TestCase):
 
     def test_posted_release_drafts_skip_lint_but_unposted_drafts_do_not(self):
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
-        # This real historical body contains the now-forbidden "factory"
-        # wording. Only its posting status should change admission.
+        # A real draft receives invalid Slack markup; only its posting status
+        # should change admission, independent of its vocabulary.
         draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().partition(
             "\n## POSTED\n")[0]
+        draft = re.sub(r"(```(?:text)?\n[^\n]*\n)([^\n]*)", r"\1**\2**", draft, count=1)
         receipt = "message_id=1790000000.000001"
         permalink = "<https://example.slack.com/archives/C0123456789/p1790000000000001>"
         timestamp_receipt = "- User thread: #cas-internal root 1793326626.677139, reply 1793326628.503689"
@@ -736,20 +960,28 @@ class FastRows(unittest.TestCase):
                 self.assertEqual(result.returncode, 0 if posted else 1, result.stdout + result.stderr)
                 row_log = (self.repo / ".git/gate-rows/release-notes-draft.log").read_text()
                 if posted:
-                    self.assertIn(f"release-notes-draft: skipping posted draft {path}", row_log)
-                    self.assertNotIn("forbidden user wording", row_log)
+                    self.assertIn(path, row_log)
+                    self.assertNotIn("[rule: slack_bold]", row_log)
                 else:
                     self.assertIn("FAIL release-notes-draft", result.stdout)
-                    self.assertIn("forbidden user wording: factory", row_log)
+                    self.assertIn("[rule: slack_bold]", row_log)
 
     def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
         """A cut once stopped at preflight on a draft committed hours earlier."""
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
         # The historical draft predates the User-reply wording check (cas-c5af);
         # drop its one config-key mention and posting receipt so this remains
-        # an unposted draft with only the punch length under test.
-        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().replace(
-            "factory.write_roots", "write_roots").partition("\n## POSTED\n")[0]
+        # an unposted draft with only the punch length under test. It also
+        # predates the hub's unattached-file check (cas-a72d), so each file name
+        # the hub refuses is replaced by the lint's own pattern.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "announce", ROOT / "scripts/release-train-announce.py")
+        announce = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(announce)
+        draft = announce.HUB_FILE_REFERENCE.sub("the file", (
+            ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().replace(
+            "factory.write_roots", "write_roots").partition("\n## POSTED\n")[0])
         # The Dev top-level punch: the second line of the third fenced body.
         punch = draft.split("```")[5].strip("\n").splitlines()[2]
         self.write(path, draft)
@@ -759,11 +991,9 @@ class FastRows(unittest.TestCase):
         self.commit()
         result = self.fast()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("no release-notes draft change",
-                      (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
         self.refused_at_park("release-notes-draft",
                              {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
-                             "dev-top-level top-level punch exceeds 25 words")
+                             "[rule: punch_length]")
 
     def test_harness_diary_draft_uses_the_thread_rubric_at_park(self):
         path = "docs/release-notes/2026-10-14-harness-diary-sweep-slack.md"

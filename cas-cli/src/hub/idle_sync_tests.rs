@@ -97,7 +97,7 @@ fn idle_linked_stores_sync_under_their_own_roots_and_unregistered_ones_drop_out(
 #[cfg(unix)]
 #[test]
 fn store_with_a_live_serve_is_skipped() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_paths::short_socket_tempdir();
     let repo = linked_repo(dir.path(), "alpha");
     let _serve =
         std::os::unix::net::UnixListener::bind(crate::mcp::socket::socket_path(&repo.join(".cas")))

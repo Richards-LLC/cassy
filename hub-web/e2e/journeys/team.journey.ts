@@ -1,7 +1,14 @@
-import { test, expect, journeyPart } from "./journey";
+import type { Locator } from "@playwright/test";
+import { clickConversationHeaderAction, test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { journeyNow } from "./clock";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { FleetWorld } from "./hub-double";
+
+// Counts are asserted as the numbers a panel shows, in order, so a copy edit cannot pass or fail them.
+const numbers = async (where: Locator) => ((await where.innerText()).match(/\d+/g) ?? []).map(Number);
+const expectNumbers = (where: Locator, exact: number[]) => expect.poll(() => numbers(where)).toEqual(exact);
+const expectRun = (where: Locator, run: number[]) => expect.poll(async () => { const all = await numbers(where); return all.some((_, at) => run.every((n, i) => all[at + i] === n)); }).toBe(true);
 
 for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
   test.describe(`Team staffing ${width}`, () => {
@@ -27,13 +34,14 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await tab.focus(); await page.keyboard.press("ArrowRight");
         await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeFocused();
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
-        await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 working, 2 waiting, 1 parked. 1 needs you.");
+        await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1]);
         expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
         await expect(panel.locator(".team-lane")).toHaveCount(4);
-        // The whole team fits above the fold, and the release block has one home.
+        await panel.locator(".team-lane").last().scrollIntoViewIfNeeded();
         const lastLane = await panel.locator(".team-lane").last().boundingBox();
         expect(lastLane!.y + lastLane!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
         await expect(page.locator(".conversation-context .release-progress")).toBeHidden();
+        await panel.evaluate(element => { element.scrollTop = 0; });
         if (width === 1280) {
           // The rail stays a working control list, and the lanes out-weigh it.
           const card = page.locator(".conversation-context .status-agent").first();
@@ -44,10 +52,13 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
           const centers = await card.evaluate(row => [row.querySelector(".status-identifier")!, row.querySelector(".status-timeline")!, row.querySelector(".fleet-ops-trigger")!].map(node => { const box = node.getBoundingClientRect(); return box.top + box.height / 2; }));
           expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(2);
         }
-        await expect(panel).toContainText("3 of 8 merged");
+        await expectRun(panel, [3, 8]);
         await expect(panel).toContainText("Build the Team view");
-        await expect(panel.locator('.team-lane[data-worker="swift-lark-3"] .team-model')).toHaveText("codex · gpt-6.1");
-        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-model')).toHaveText("codex · Model not reported");
+        const model = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"] .team-model`);
+        await expect(model("swift-lark-3")).toHaveAttribute("data-model-reported", "true");
+        await expect(model("swift-lark-3")).toHaveAttribute("data-model", "gpt-6.1");
+        await expect(model("brisk-wren-9")).toHaveAttribute("data-model-reported", "false");
+        await expect(model("brisk-wren-9")).not.toHaveAttribute("data-model", /.*/);
         await expect(panel).not.toContainText("RAW TOOL OUTPUT");
         // Working and waiting differ by color and mark, not just by the word.
         const look = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"]`).evaluate(lane => [lane.querySelector(".team-state")!, lane.querySelector(".supervisor-state")!].map(node => { const s = getComputedStyle(node); return [s.color, s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius].join(" "); }));
@@ -66,8 +77,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
           return (Math.max(line, card) + 0.05) / (Math.min(line, card) + 0.05);
         });
         expect(connector).toBeGreaterThanOrEqual(3);
-        const merges = panel.locator('[data-team-action="merges"]');
-        expect(await merges.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+        await expect(panel.locator("[data-team-action]")).toHaveCount(0);
         await expect(page.locator("#conversation-composer-slot")).toBeHidden();
         expect(hub.frames.filter(frame => ["ScrollbackRequest", "WorkEventsRequest", "WorkEventDetailRequest"].includes(frame.kind))).toEqual([]);
       });
@@ -78,9 +88,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
         await expect(panel.locator(".team-lane").first()).toHaveAttribute("data-worker", "brisk-wren-9");
         await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-state')).toHaveText("Blocked");
-        await panel.getByRole("button", { name: "brisk-wren-9 · Blocked", exact: true }).click();
-        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"]')).toBeFocused();
-        await expect(panel.getByRole("heading", { level: 2 })).toHaveText("1 blocked, 2 waiting, 1 parked. 2 need you.");
+        await expect(panel.locator("[data-team-action]")).toHaveCount(0);
+        await expect(panel.locator(".team-needs")).toHaveAttribute("data-active", "false");
+        await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1]);
       });
       await journey.stage("A lifecycle event updates staffing without reloading", async () => {
         fleet.tasks[2].status = "in_progress";
@@ -111,7 +121,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(waitingLook[1]).not.toBe(offlineLook[1]);
         const forced = await page.evaluate(() => {
           const color = (selector: string, property: "color" | "borderBottomColor" = "color") => getComputedStyle(document.querySelector(selector)!)[property];
-          return { selected: color("#team-tab", "borderBottomColor"), unselected: color("#conversation-tab", "borderBottomColor"), page: getComputedStyle(document.body).backgroundColor, row: color('.conversation-row[aria-current="true"]'), name: color('.conversation-row[aria-current="true"] .conversation-supervisor') };
+          return { selected: color("#team-tab", "borderBottomColor"), unselected: color("#conversation-tab", "borderBottomColor"), page: getComputedStyle(document.body).backgroundColor, row: color('.conversation-row[aria-current="true"]'), name: color('.conversation-row[aria-current="true"] .conversation-role') };
         });
         expect(forced.unselected).toBe(forced.page);
         expect(forced.selected).not.toBe(forced.unselected);
@@ -123,6 +133,145 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         if (width === 1280) await expect(page.locator(".conversation-context .release-progress")).toBeVisible();
         await expect(page.locator("#conversation-composer-slot")).toBeVisible();
         await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("Keep my draft while checking the team");
+      });
+    });
+  });
+}
+
+for (const width of [1280, 390] as const) for (const colorScheme of ["light", "dark"] as const) {
+  test.describe(`Project epics ${width} ${colorScheme}`, () => {
+    test.use({ viewport: { width, height: width === 1280 ? 800 : 844 }, colorScheme });
+    test(`HUB-J26 project epics in Tasks & progress ${width} ${colorScheme}`, journeyPart, async ({ page, journey }) => {
+      const at = new Date(journeyNow()).toISOString();
+      const local: FleetWorld = {
+        agents: ["builder", "reviewer"].map((name, i) => ({ name, generation: 1, status: "active", current_task: i ? "rail-1" : "train-0", liveness: "executing" })),
+        tasks: [{ id: "train-0", title: "Check the release", status: "in_progress", epic_id: "train", assignee: "builder", updated_at: at },
+          { id: "rail-1", title: "Build the progress rail", status: "in_progress", epic_id: "rail", assignee: "reviewer", updated_at: at },
+          { id: "rail-2", title: "Wait on the design review", status: "blocked", epic_id: "rail", updated_at: at },
+          { id: "rail-3", title: "Park the token pass", status: "awaiting_merge", epic_id: "rail", updated_at: at },
+          // The producer's split counts exactly these rows (session.rs epic_counts).
+          ...[1, 2, 3].flatMap(n => [{ id: `train-open-${n}`, title: `Queue release step ${n}`, status: "open", epic_id: "train", updated_at: at },
+            { id: `rail-open-${n}`, title: `Queue rail step ${n}`, status: "open", epic_id: "rail", updated_at: at }])],
+        epics: [{ id: "train", title: "Release train", status: "inprogress", counts: { open: 3, in_progress: 1, merged: 1 }, progress: { merged: 1, total: 5, merges_per_hour: 1, last_merged_at: at } },
+          { id: "rail", title: "EPIC: Commander progress rail", status: "inprogress", counts: { open: 4, in_progress: 2, merged: 6 } },
+          { id: "untitled", title: "EPIC:", status: "inprogress" }, { id: "quiet", title: "Someday", status: "open" }],
+        focused_epic: "train", spawnNames: [],
+      };
+      const follow: FleetWorld = {
+        agents: [{ name: "remote-worker", generation: 1, status: "active", current_task: "follow-1", liveness: "waiting_for_input" }],
+        tasks: [{ id: "follow-1", title: "Follow up on the release", epic_id: "follow-ups", status: "awaiting_merge", assignee: "remote-worker", updated_at: at },
+          ...[1, 2].map(n => ({ id: `follow-open-${n}`, title: `Queue follow-up ${n}`, status: "open", epic_id: "follow-ups", updated_at: at }))],
+        epics: [{ id: "follow-ups", title: "Follow-ups", status: "open", counts: { open: 2, in_progress: 1, merged: 2 } },
+          { id: "rail", title: "EPIC: Commander progress rail", status: "inprogress", counts: { open: 4, in_progress: 2, merged: 6 } }],
+        focused_epic: null, spawnNames: [],
+      };
+      const foreign: FleetWorld = {
+        agents: [{ name: "voice-worker", generation: 1, status: "active", current_task: "voice-1", liveness: "executing" }],
+        tasks: [{ id: "voice-1", title: "Tune the voice model", epic_id: "voice", status: "in_progress", assignee: "voice-worker", updated_at: at }],
+        epics: [{ id: "voice", title: "Gabber voice", status: "inprogress", counts: { open: 1, in_progress: 1, merged: 0 } }], focused_epic: null, spawnNames: [],
+      };
+      const remote = { id: "prowl", label: "prowl", sessions: [
+        { name: "remote-session", supervisor: "remote-supervisor", project_dir: "/projects/cas-src", workers: ["remote-worker"], liveness: "live" as const },
+        { name: "gabber-session", supervisor: "gabber-supervisor", project_dir: "/projects/gabber", workers: ["voice-worker"], liveness: "live" as const },
+      ] };
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, workers: ["builder", "reviewer"] })) };
+      const statusReads: string[] = [];
+      page.on("request", request => { const match = /\/v1\/sessions\/([^/]+)\/status$/.exec(new URL(request.url()).pathname); if (match) statusReads.push(decodeURIComponent(match[1]!)); });
+      await journey.hub({ machines: [machine, remote], paired: [ATLAS.id, remote.id], fleet: { [PELICAN]: local, "remote-session": follow, "gabber-session": foreign } });
+      const status = page.locator("#status-view");
+      const epics = status.locator(".live-epics");
+      await journey.stage("Read the project's live epics in Tasks & progress, with nothing above the conversation", async () => {
+        await journey.open();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src on Atlas/ }).click();
+        await expect(page.locator("#epic-tabs")).toHaveCount(0);
+        // Only the hidden Team panel sits between the view tabs and the conversation.
+        expect(await page.evaluate(() => {
+          const between: string[] = [];
+          for (let node = document.querySelector(".conversation-tabs")?.nextElementSibling; node && node.id !== "conversation-pane-slot"; node = node.nextElementSibling) if (!(node as HTMLElement).hidden) between.push(node.id || node.className);
+          return between;
+        })).toEqual([]);
+        const tabs = (await page.locator(".conversation-tabs").boundingBox())!;
+        expect(tabs.y + tabs.height).toBeLessThanOrEqual((await page.locator("#conversation-pane-slot").boundingBox())!.y);
+        if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
+        await expectNumbers(epics.getByRole("heading", { level: 3 }).first(), [3]);
+        expect(await status.evaluate(root => Boolean(root.querySelector(".release-progress")!.compareDocumentPosition(root.querySelector(".live-epics")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+        await expectRun(status.locator(".release-progress"), [1, 5]);
+        await expectRun(status.locator(".release-progress"), [3, 1, 1]);
+        await expectRun(status.locator(".release-progress"), [4]);
+        await expectRun(status.locator(".release-progress"), [1, 1]);
+        const rail = epics.getByRole("button", { name: /Commander progress rail/ });
+        await expect(rail).toContainText("6/12");
+        await expectRun(rail, [4, 2, 6, 1]);
+        await expect(rail.getByRole("img", { name: "Commander progress rail: 4 open · 2 in progress · 6 merged" })).toBeVisible();
+        // Blocked work leads; the train, untitled and foreign epics never appear.
+        expect(await epics.locator(".live-epic-toggle").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.fleetFocus))).toEqual(["epic:rail", "epic:follow-ups", "epic:quiet"]);
+        await expect(status).not.toContainText("Gabber voice");
+        await expect(status).not.toContainText("EPIC");
+        await expect(status).not.toContainText("—/—");
+        await expect(epics.locator(".live-epics-footer")).toHaveCount(0);
+        // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.
+        expect(statusReads).toContain("gabber-session");
+        expect(statusReads).toContain("remote-session");
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
+        if (process.env.EPIC_PROGRESS_QA) {
+          mkdirSync(process.env.EPIC_PROGRESS_QA, { recursive: true });
+          await page.screenshot({ path: `${process.env.EPIC_PROGRESS_QA}/epic-progress-${width}-${colorScheme}.png` });
+          writeFileSync(`${process.env.EPIC_PROGRESS_QA}/epic-progress-${width}-${colorScheme}.html`, await page.evaluate(async () => {
+            const css = await Promise.all([...document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')].map(async link => {
+              let text = await (await fetch(link.href)).text();
+              for (const asset of [...text.matchAll(/url\(["']?([^)'"\s]+\.woff2)["']?\)/g)]) {
+                const bytes = new Uint8Array(await (await fetch(new URL(asset[1]!, link.href))).arrayBuffer());
+                let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
+                text = text.replace(asset[0], `url(data:font/woff2;base64,${btoa(binary)})`);
+              }
+              return text;
+            }));
+            const root = document.documentElement.cloneNode(true) as HTMLElement;
+            root.querySelectorAll("script, link").forEach(node => node.remove());
+            return `<!doctype html>${root.outerHTML}`.replace("</head>", `<style>${css.join("\n")}</style></head>`)
+              .replace("</body>", '<script>document.querySelectorAll("dialog[open]").forEach(dialog => { dialog.removeAttribute("open"); dialog.showModal(); });</script></body>');
+          }));
+        }
+      });
+      await journey.stage("Open the peer epic in place and watch a merge update its split", async () => {
+        const peer = epics.getByRole("button", { name: /Follow-ups/ });
+        const tasks = page.locator(`#${await peer.getAttribute("aria-controls")}`);
+        await expect(tasks).toBeHidden();
+        await peer.focus(); await page.keyboard.press("Enter");
+        await expect(peer).toHaveAttribute("aria-expanded", "true");
+        await expect(tasks).toContainText("Follow up on the release");
+        await expect(tasks).not.toContainText("follow-1");
+        const parked = tasks.locator(".live-epic-task").filter({ hasText: "Follow up on the release" });
+        await expect(parked.locator(".live-epic-task-machine")).toHaveText("prowl");
+        await expect(parked.locator(".live-epic-chip")).toHaveClass(/live-epic-chip--parked/);
+        await expect.poll(async () => (await tasks.locator(".live-epic-group-label").allTextContents()).map(text => Number(text.match(/\d+/)?.[0]))).toEqual([1, 2, 2]);
+        await expectRun(peer, [2, 1, 2]);
+        // The delivery merges while its task is still parked and its worker still live:
+        // the row moves to Merged and the split moves with it.
+        follow.tasks[0].delivery_state = "merged";
+        await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["prowl.test", "remote-session"]);
+        await expectRun(peer, [2, 0, 3]);
+        await expect(peer).toContainText("3/5");
+        await expect(tasks.locator(".live-epic-group-label")).toHaveText(["Open · 2", "Merged · 3"]);
+        await tasks.locator(".live-epic-merged summary").click();
+        await expect(tasks.locator(".live-epic-merged")).toContainText("Follow up on the release");
+        await expect(peer).toHaveAttribute("aria-expanded", "true");
+        // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.
+        expect(statusReads).toContain("gabber-session");
+        if (process.env.EPIC_PROGRESS_QA) await page.screenshot({ path: `${process.env.EPIC_PROGRESS_QA}/epic-progress-${width}-${colorScheme}-expanded.png` });
+        if (width === 390) {
+          await page.keyboard.press("Escape");
+          await expect(page.locator("#conversation-more")).toBeFocused();
+        }
+      });
+      await journey.stage("Read Live epics with forced colors and reduced motion", async () => {
+        await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
+        if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
+        await expect(epics.getByRole("button", { name: /Follow-ups/ })).toBeVisible();
+        const opening = epics.locator(".live-epic").filter({ hasText: "Follow-ups" });
+        await opening.evaluate(node => node.classList.add("is-opening"));
+        expect(await opening.locator(".live-epic-tasks").evaluate(node => getComputedStyle(node).animationName)).toBe("none");
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
       });
     });
   });

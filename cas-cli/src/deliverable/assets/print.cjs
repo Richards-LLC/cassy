@@ -1,28 +1,58 @@
 // Print a single-file deliverable HTML to PDF, one file per paper format.
 // Lifted from the release report's renderer, with the SOW print-pdf.mjs
 // author metadata and blocked-request refusal. Run by `cas deliverable finalize`:
-//   node print.cjs REPORT.html OUTPUT_DIR FORMATS [AUTHOR]
+//   node print.cjs REPORT.html OUTPUT_DIR FORMATS [AUTHOR] [PROJECT_ROOT]
 // FORMATS is a comma list such as A4,Letter; each writes
 // OUTPUT_DIR/<name>-<format>.pdf. Print media, light scheme, network blocked,
 // disclosures expanded, 15 mm margins, backgrounds printed, a token folio.
 // Exit 2: Playwright missing. Exit 3: the page asked the network for something,
 // so the HTML is not self-contained.
 const fs = require('node:fs/promises');
+const { existsSync } = require('node:fs');
+const { createRequire } = require('node:module');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 (async () => {
+  const [input, output, formats, author, root = process.cwd()] = process.argv.slice(2);
+  if (!input || !output || !formats) throw new Error('expected REPORT.html OUTPUT_DIR FORMATS [AUTHOR] [PROJECT_ROOT]');
+  const load = createRequire(path.join(path.resolve(root), 'package.json'));
+  let module;
   let playwright;
-  try { playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
-  catch (error) {
-    console.error('Playwright is not installed:', error.message);
+  try {
+    if (process.env.PLAYWRIGHT_MODULE) module = load.resolve(process.env.PLAYWRIGHT_MODULE);
+    else {
+      // The printer lives in a temporary directory. Resolve the repository's
+      // pinned installation, never an unpinned npm download or an npx cache.
+      for (let dir = path.resolve(root);; dir = path.dirname(dir)) {
+        const local = path.join(dir, 'hub-web/node_modules/playwright');
+        if (existsSync(path.join(local, 'package.json'))) { module = load.resolve(local); break; }
+        if (dir === path.dirname(dir)) break;
+      }
+      module ??= load.resolve('playwright');
+    }
+    playwright = require(module);
+  } catch (error) {
+    console.error(`Playwright module unavailable: ${error.message}\nRemedy: install the repository's Node dependencies or set PLAYWRIGHT_MODULE to an installed Playwright package.`);
     process.exitCode = 2;
     return;
   }
-  const [input, output, formats, author] = process.argv.slice(2);
-  if (!input || !output || !formats) throw new Error('expected REPORT.html OUTPUT_DIR FORMATS [AUTHOR]');
   await fs.mkdir(output, { recursive: true });
-  const browser = await playwright.chromium.launch({ headless: true });
+  const launchFailure = error => {
+    const [first, ...rest] = String(error.message || error).split('\n');
+    const cli = path.join(path.dirname(module), 'cli.js');
+    return new Error(`${first}\nPlaywright module: ${module}\nRemedy: node ${JSON.stringify(cli)} install chromium-headless-shell\n${rest.join('\n')}`);
+  };
+  let browser;
+  try { browser = await playwright.chromium.launch({ headless: true }); }
+  catch (error) {
+    const full = playwright.chromium.executablePath();
+    if (String(error.message).includes("Executable doesn't exist") && existsSync(full)) {
+      // Use only this module's matching full Chromium when its shell is absent.
+      try { browser = await playwright.chromium.launch({ headless: true, executablePath: full }); }
+      catch (fallback) { throw launchFailure(fallback); }
+    } else throw launchFailure(error);
+  }
   const blocked = [];
   const written = [];
   try {

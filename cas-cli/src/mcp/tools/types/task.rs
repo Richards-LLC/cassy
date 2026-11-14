@@ -97,6 +97,10 @@ pub fn parse_proof_targets(value: Option<&str>) -> Vec<String> {
 /// Validate a task's declared risk and proof-target contract at a write
 /// boundary. `risk` is required for code-bearing task/bug/feature creates;
 /// the supervisor override is explicit and audited by the caller.
+// gate[G-129 create]: Task risk declaration required
+// gate-audit[supervisor_override]: bypass G-129 Create/proposal producer tags accepted missing-risk declarations.
+// gate-audit[is_supervisor]: input Authenticated role used for the G-129 waiver; accepted creation response carries the tag.
+// gate-audit[accepted_by]: cas_task_create_with_delivery_mode,cas_task_proposal_create_with_delivery_mode
 pub fn validate_task_risk_declaration(
     task_type: TaskType,
     risk: Option<&str>,
@@ -130,10 +134,10 @@ pub fn validate_task_risk_declaration(
             Vec::new()
         }
         None => {
-            return Err(
+            return Err(crate::gates::tag("G-129",
                 "TASK CREATE REJECTED: risk is required for task, bug, and feature tasks. Declare risk=blast-radius,platform,concurrency, or none; a registered supervisor may use supervisor_override=true with a non-empty reason."
                     .to_string(),
-            )
+            ))
         }
     };
     let targets = parse_proof_targets(proof_targets);
@@ -396,7 +400,7 @@ pub struct TaskRequestChangesRequest {
 
     /// Required supervisor verdict and branch-handling instruction
     #[schemars(
-        description = "Required supervisor review reason. State what prior work may remain and what must be corrected or reverted before re-delivery."
+        description = "Required supervisor review reason. State what prior work may remain and what must be corrected or reverted before re-delivery. To authorize an upstream release or sibling import, include merge_source=<full immutable commit SHA>; the grant stays bound to this task's declared target."
     )]
     pub reason: String,
 }
@@ -422,14 +426,14 @@ pub struct TaskUpdateRequest {
     #[serde(default)]
     pub priority: Option<u8>,
 
-    /// Add labels
-    #[schemars(description = "Comma-separated labels to add")]
+    /// Replace user labels; retain finding provenance and omitted triage axes.
+    #[schemars(description = "Comma-separated replacement labels, trimmed and deduplicated. Omitted leaves labels unchanged. Findings retain provenance and omitted severity:, reach: and journey: axes. Empty clears user labels; findings reset to broken/theoretical.")]
     #[serde(default)]
     pub labels: Option<String>,
 
     /// Add blocking dependencies (cas-d45f / GH #98).
     ///
-    /// Additive, like `labels`: each listed task becomes a blocker of this
+    /// Additive: each listed task becomes a blocker of this
     /// task (`this blocked_by that`). Existing blockers are left in place;
     /// use `dep_remove` to drop one.
     #[schemars(
@@ -594,7 +598,7 @@ pub struct DependencyRequest {
     /// Dependency type: blocks close-gates and warn on start; requires_start
     /// remains a hard start gate.
     #[schemars(
-        description = "Type: 'blocks' (default; close-gates and warns on start), 'requires_start' (hard start gate), 'related', 'parent', or 'duplicate'"
+        description = "Type: 'blocks' (default; close-gates and warns on start), 'requires_start' (hard start gate), 'related', 'parent', 'discovered', or 'extracted'. Unsupported types are rejected."
     )]
     #[serde(default = "default_dep_type")]
     pub dep_type: String,

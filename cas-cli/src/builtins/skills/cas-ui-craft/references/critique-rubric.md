@@ -6,6 +6,16 @@ session will see — merges only when **distinctiveness, fit, and hierarchy are 
 **no dimension is 0**. Craft and accessibility between 1 and 3 are defects to fix in the same
 change, not floor failures.
 
+## Report substance before form
+
+For a report, first complete the [plan alignment review](../../cas-html-reports/references/review-checklist.md#0-plan-alignment-concept-brief-and-critique):
+name the originating goal and criteria, map evidence to each, and check the verdict against those
+assessments. Keep author-added bars and recommendations separate; a stricter extra bar cannot
+silently reverse the plan verdict. Record this in the brief before scoring the five dimensions.
+Unverified or contradictory alignment blocks report approval even when every visual score passes.
+Fit to argument still judges the figure against the claim; it does not establish that the claim
+answers the originating plan.
+
 ## Mechanical defects score 0
 
 Any one of these sets craft (or accessibility, where named) to 0 and blocks merge regardless of
@@ -76,6 +86,8 @@ still needs a supervisor override for that.
 | **Accessibility** — contrast, semantics, keyboard, print, reduced motion | fails a contrast pair or loses content without JS | passes checks with one caveat noted in the brief | passes light, dark, print, JS-off, keyboard, and 390px with no caveat |
 
 ## Procedure
+
+For reports, resolve the substance review above before step 1.
 
 1. Render, then open the artifact at 1280×800, 390×844, print preview, and with JS disabled, in
    light and in dark; run the visual-QA script above.

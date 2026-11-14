@@ -212,7 +212,7 @@ async function reset({ messageControl = false, newSession = false, nativeCommand
     `#!/usr/bin/python3\nimport sys,time\nif sys.argv[1:3] == ['auth','status']: print('{\"loggedIn\":true}');sys.exit(0)\nif '--version' in sys.argv: print('2.1.316');sys.exit(0)\nif '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)\nprint('Claude Code disposable test supervisor\\n> ',flush=True)\nwhile True:\n sys.stdin.readline()\n time.sleep(.1)\n`,
     { mode: 0o700 },
   );
-  if (newSession) await writeFile(join(bin, "claude"), realHubProviderScript(cli), { mode: 0o700 });
+  if (newSession || messageControl) await writeFile(join(bin, "claude"), realHubProviderScript(cli), { mode: 0o700 });
   await mkdir(join(home, ".claude"));
   // The user-service manager is the sole host boundary: retain this fixture's
   // HOME and containment instead of asking the real login manager to launch
@@ -402,6 +402,16 @@ print(json.dumps([dict(row) for row in rows]))
 `, join(state.project, ".cas", "cas.db"), String(notificationId)], { timeout: 5000 });
   return JSON.parse(stdout);
 }
+async function messages() {
+  const { stdout } = await run("python3", ["-c", `
+import sqlite3,json,sys
+c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+c.row_factory=sqlite3.Row
+rows=c.execute("select id,operator_verified,created_at,transport_delivered_at from prompt_queue where source like 'commander:%' order by id desc limit 5")
+print(json.dumps([dict(row) for row in rows]))
+`, join(state.project, ".cas", "cas.db")], { timeout: 5000 });
+  return JSON.parse(stdout);
+}
 async function readLogs(directory) {
   if (!existsSync(directory)) return "";
   const files = (await readdir(directory))
@@ -523,6 +533,14 @@ const server = createServer(async (req, res) => {
           await stop(daemon);
           return { daemonPid: daemon.pid };
         }
+        case "/daemon-reexec": {
+          const daemonPid = state.daemon.pid;
+          const { stdout } = await cas(["--json", "factory", "reexec", "--session", state.session]);
+          const receipt = JSON.parse(stdout);
+          if (receipt.pid !== daemonPid || receipt.fallback)
+            throw Error("owned fixture daemon did not adopt in place");
+          return { daemonPid, receipt };
+        }
         case "/daemon-start": {
           const daemon = startDaemon(data.session);
           return { daemonPid: daemon.pid };
@@ -538,6 +556,8 @@ const server = createServer(async (req, res) => {
           return ask();
         case "/answers":
           return answers(data.notificationId);
+        case "/messages":
+          return messages();
         case "/queue":
           return queue(data.message);
         case "/evidence":

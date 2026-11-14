@@ -18,19 +18,19 @@ type Answer = { outcome?: Record<string, unknown> };
 
 describe("fleet async selection/request ownership (cas-5bef0)", () => {
   it.each([
-    [403, "permission_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
-    [403, "scope_denied", "this pairing does not allow the action. Check its permissions in Paired machines."],
-    [401, "revoked", "the pairing is no longer accepted. Pair the machine again."],
-    [401, "expired", "the pairing is no longer accepted. Pair the machine again."],
-  ])("explains the actual connection request's auth refusal (%s %s)", async (status, reason, detail) => {
+    [403, "permission_denied"],
+    [403, "scope_denied"],
+    [401, "revoked"],
+    [401, "expired"],
+  ])("explains the actual connection request's auth refusal (%s %s)", async (status, reason) => {
     const connection = new HubConnectionSupervisor({ expiresAt: "2099-01-01T00:00:00Z" } as StoredMachine, {} as HubCallbacks);
     // Stub the authenticated transport, preserving request's real error class.
     Object.assign(connection, { authorizedFetch: vi.fn().mockResolvedValue({ response: new Response(null, { status }), refusal: { reason, retryable: false } }) });
     const state = new FleetOpsState(); state.select("atlas:PELICAN");
     await runFleetOperation(state, row, holdAction(agent), (request) => connection.request("POST", "/v1/sessions/PELICAN/operations", request), vi.fn());
-    const text = `Could not pause swift-lark-3: ${detail}`;
-    expect(state.notes.get(row)).toEqual({ text, tone: "error" });
-    expect(state.announcement).toBe(text);
+    expect(state.notes.get(row)).toMatchObject({ tone: "error" });
+    expect(state.notes.get(row)?.text).toContain(agent.name);
+    expect(state.announcement).toBe(state.notes.get(row)?.text);
     expect(state.pending.size).toBe(0); expect(state.currentUndo(Date.now())).toBeUndefined();
   });
 
@@ -38,28 +38,33 @@ describe("fleet async selection/request ownership (cas-5bef0)", () => {
     const state = new FleetOpsState(); state.select("atlas:PELICAN");
     const action = assignAction({ id: "cas-2001", assignee: null }, worker);
     await runFleetOperation(state, "task:cas-2001", action, async () => { throw new HubRequestError("POST /private failed (500)", 500); }, vi.fn());
-    const text = `Could not ${worker ? `assign cas-2001 to ${worker}` : "unassign cas-2001"}: the machine returned an error. Try again.`;
-    expect(state.notes.get("task:cas-2001")).toEqual({ text, tone: "error" });
-    expect(state.announcement).toBe(text);
+    const note = state.notes.get("task:cas-2001");
+    expect(note).toMatchObject({ tone: "error" });
+    expect(note?.text).toContain("cas-2001");
+    if (worker) expect(note?.text).toContain(worker);
+    expect(state.announcement).toBe(note?.text);
   });
 
   it.each([
-    [new HubRequestError("POST /v1/sessions/private-session/operations failed (500)", 500), "the machine returned an error. Try again."],
-    [new TypeError("Failed to fetch https://private-machine/v1/sessions/private-session/operations"), "the machine could not be reached. Check its connection and try again."],
-    [new HubRequestError("POST /v1/sessions/private-session/operations failed (403)", 403), "this pairing does not allow the action. Check its permissions in Paired machines."],
-  ])("keeps transport diagnostics out of fleet feedback (cas-a348): %s", async (error, detail) => {
+    new HubRequestError("POST /v1/sessions/private-session/operations failed (500)", 500),
+    new TypeError("Failed to fetch https://private-machine/v1/sessions/private-session/operations"),
+    new HubRequestError("POST /v1/sessions/private-session/operations failed (403)", 403),
+  ])("keeps transport diagnostics out of fleet feedback (cas-a348): %s", async (error) => {
     const state = new FleetOpsState(); state.select("atlas:PELICAN");
     expect(await runFleetOperation(state, row, stopAction(agent), async () => { throw error; }, vi.fn())).toBe("failed");
-    const text = `Could not stop swift-lark-3: ${detail}`;
-    expect(state.notes.get(row)).toEqual({ text, tone: "error" });
-    expect(state.announcement).toBe(text);
+    const note = state.notes.get(row);
+    expect(note).toMatchObject({ tone: "error" });
+    expect(note?.text).toContain(agent.name);
+    expect(note?.text).not.toContain("private-session");
+    expect(note?.text).not.toContain("private-machine");
+    expect(state.announcement).toBe(note?.text);
     expect(state.pending.size).toBe(0); expect(state.currentUndo(Date.now())).toBeUndefined();
   });
 
   it("preserves actionable hub detail rather than replacing it with transport copy", async () => {
     const state = new FleetOpsState(); state.select("atlas:PELICAN");
     await runFleetOperation(state, row, holdAction(agent), async () => { throw new HubRequestError("POST /private failed (500)", 500, "audit", "Audit log unavailable. No worker was paused."); }, vi.fn());
-    expect(state.announcement).toBe("Could not pause: Audit log unavailable. No worker was paused.");
+    expect(state.announcement).toContain("Audit log unavailable. No worker was paused.");
   });
 
   for (const answer of ["success", "409"] as const) {
@@ -95,7 +100,8 @@ describe("fleet async selection/request ownership (cas-5bef0)", () => {
     expect(state.selectionEpoch).toBe(epoch); expect(state.pending.get(row)).toBe(action);
     response.reject(stale()); expect(await run).toBe("failed");
     expect(state.pending.size).toBe(0);
-    expect(state.notes.get(row)).toEqual({ text: "swift-lark-3 already restarted.", tone: "stale" });
+    expect(state.notes.get(row)).toMatchObject({ tone: "stale" });
+    expect(state.notes.get(row)?.text).toContain(agent.name);
   });
 
   it("an earlier request cannot consume a newer slot even in the same selection with the same action object", async () => {

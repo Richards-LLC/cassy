@@ -379,6 +379,16 @@ impl RuleStore for SyncingRuleStore {
         self.after_write(&rule.id, new_projection)
     }
 
+    fn retire_expired_drafts(
+        &self, cutoff: chrono::DateTime<chrono::Utc>, change_note: &str,
+    ) -> Result<Vec<Rule>> {
+        let retired = self.inner.retire_expired_drafts(cutoff, change_note)?;
+        for rule in &retired {
+            self.after_write(&rule.id, false)?;
+        }
+        Ok(retired)
+    }
+
     fn increment_surface_count(&self, id: &str) -> Result<()> {
         self.inner.increment_surface_count(id)
     }

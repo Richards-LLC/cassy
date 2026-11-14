@@ -559,7 +559,16 @@ fn json_timestamp(value: &Value) -> Option<DateTime<Utc>> {
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
-fn claude_user_text(value: &Value) -> Option<&str> {
+/// A top-level textual user record: the Claude turn-start boundary. Local
+/// commands never reach the model, and an interrupt record ends a turn.
+pub(crate) fn claude_user_text(value: &Value) -> Option<&str> {
+    claude_text(value).filter(|text| !text.trim_start().starts_with(CLAUDE_INTERRUPT))
+}
+
+/// Claude records Esc as this user text and writes no turn_duration after it.
+const CLAUDE_INTERRUPT: &str = "[Request interrupted by user";
+
+fn claude_text(value: &Value) -> Option<&str> {
     if value.get("type").and_then(Value::as_str) != Some("user")
         || value.pointer("/message/role").and_then(Value::as_str) != Some("user")
         || value.get("isSidechain").and_then(Value::as_bool) == Some(true)
@@ -567,14 +576,16 @@ fn claude_user_text(value: &Value) -> Option<&str> {
         return None;
     }
     let content = value.pointer("/message/content")?;
+    let local_command = |text: &str| ["<command-name>", "<local-command-stdout>", "<local-command-caveat>"]
+        .iter().any(|prefix| text.trim_start().starts_with(prefix));
     if let Some(text) = content.as_str() {
-        return (!text.trim().is_empty()).then_some(text);
+        return (!text.trim().is_empty() && !local_command(text)).then_some(text);
     }
     content.as_array()?.iter().find_map(|part| {
         (part.get("type").and_then(Value::as_str) == Some("text"))
             .then(|| part.get("text").and_then(Value::as_str))
             .flatten()
-            .filter(|text| !text.trim().is_empty())
+            .filter(|text| !text.trim().is_empty() && !local_command(text))
     })
 }
 
@@ -584,9 +595,10 @@ fn claude_is_assistant(value: &Value) -> bool {
         && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
 }
 
-fn claude_is_turn_end(value: &Value) -> bool {
+pub(crate) fn claude_is_turn_end(value: &Value) -> bool {
     (value.get("type").and_then(Value::as_str) == Some("system")
         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"))
+        || claude_text(value).is_some_and(|text| text.trim_start().starts_with(CLAUDE_INTERRUPT))
         || (claude_is_assistant(value)
             && value
                 .pointer("/message/stop_reason")
@@ -854,6 +866,9 @@ mod tests {
                 r#"{"timestamp":"2026-07-31T20:01:02Z","type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1"}]}}"#,
                 r#"{"timestamp":"2026-07-31T20:01:03Z","type":"assistant","isSidechain":false,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
                 r#"{"timestamp":"2026-07-31T20:01:04Z","type":"system","subtype":"turn_duration"}"#,
+                r#"{"timestamp":"2026-07-31T20:01:05Z","type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code</local-command-caveat>"}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:06Z","type":"user","message":{"role":"user","content":"<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>reconnect cas</command-args>"}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:07Z","type":"user","message":{"role":"user","content":"<local-command-stdout>Successfully reconnected to cas</local-command-stdout>"}}"#,
             ],
         );
 
@@ -861,6 +876,12 @@ mod tests {
         assert_eq!(got.wake.unwrap().at, ts("2026-07-31T20:01:00Z"));
         assert_eq!(got.reaction.unwrap().at, ts("2026-07-31T20:01:03Z"));
         assert_eq!(got.completion.unwrap().at, ts("2026-07-31T20:01:04Z"));
+        let mut rows = std::fs::read_to_string(&transcript).unwrap();
+        rows.push_str("\n{\"timestamp\":\"2026-07-31T20:01:08Z\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Please explain <command-name>/mcp</command-name>\"}}\n");
+        std::fs::write(&transcript, rows).unwrap();
+        let active = latest_turn_observations(&transcript, cas_mux::SupervisorCli::Claude);
+        assert_eq!(active.wake.unwrap().at, ts("2026-07-31T20:01:08Z"));
+        assert!(active.completion.is_none(), "a genuine later user turn remains busy");
     }
 
     #[test]

@@ -877,22 +877,32 @@ async fn test_follow_up_citing_code_its_epic_lacks_is_warned_at_create_cas_1630(
     .expect("should have epic ID")
     .to_string();
 
-    let mut follow_up = epic_create_request("Follow up on the v56 fix");
-    follow_up.task_type = "task".to_string();
-    follow_up.epic = Some(v57.clone());
-    follow_up.description = Some(format!("Verifier follow-up on {} (run 39694702194).", &v56_tip[..9]));
-    let text = extract_text(
-        service
-            .cas_task_create(Parameters(follow_up))
-            .await
-            .expect("task create should succeed"),
-    );
-    assert!(text.contains("CITED CODE NOT ON THIS EPIC"), "{text}");
-    assert!(
-        text.contains(&format!("{} is not on epic/burn-down-v57-{v57}; it is on open epic {v56} ({v56_branch})", &v56_tip[..9])),
-        "{text}"
-    );
-    assert!(!text.contains("39694702194 is not on"), "a run id is not a commit: {text}");
+    let tree = git_in(repo, &["rev-parse", &format!("{v56_tip}^{{tree}}")]);
+    let candidate = git_in(repo, &["commit-tree", &tree, "-p", &v56_tip, "-m", "verifier candidate"]);
+    assert!(git_in(repo, &["for-each-ref", "--contains", &candidate]).is_empty());
+    for (description, dependency) in [
+        (format!("Repro evidence: verifier merge candidate {candidate} (run 39694702194)."), false),
+        (format!("Depends on code in {} (run 39694702194).", &v56_tip[..9]), true),
+    ] {
+        let mut follow_up = epic_create_request("Follow up on the v56 fix");
+        follow_up.task_type = "bug".to_string();
+        follow_up.epic = Some(v57.clone());
+        follow_up.description = Some(description);
+        let text = extract_text(service.cas_task_create(Parameters(follow_up)).await.unwrap());
+        assert_eq!(text.contains("CITED_CODE_NOT_ON_EPIC"), dependency, "{text}");
+        let id = extract_task_id(&text).unwrap().to_string();
+        if dependency {
+            assert!(text.contains(&v56_tip[..9]), "{text}");
+            assert!(text.contains(&v56), "{text}");
+            assert!(text.contains(&v56_branch), "{text}");
+        } else {
+            service.cas_task_start(Parameters(IdRequest { id: id.clone() })).await.unwrap();
+            assert_eq!(
+                cas::store::open_task_store(&repo.join(".cas")).unwrap().get(&id).unwrap().status,
+                cas::types::TaskStatus::InProgress,
+            );
+        }
+    }
 }
 
 #[tokio::test]

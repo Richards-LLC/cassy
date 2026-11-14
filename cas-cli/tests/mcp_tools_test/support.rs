@@ -33,6 +33,15 @@ fn scrub_factory_identity_env(env: &mut TestEnvGuard) {
 /// Register the test session agent with the requested role, borrowing the
 /// test's environment owner for setup and every later handler call.
 pub(crate) fn setup_cas_as(env: &mut TestEnvGuard, role: AgentRole) -> (TempDir, CasCore) {
+    setup_cas_fixture(env, role)
+}
+
+/// Repository-less lifecycle cases must not silently bind to a parent checkout.
+pub(crate) fn setup_cas_without_git(env: &mut TestEnvGuard) -> (TempDir, CasCore) {
+    setup_cas_fixture(env, AgentRole::Standard)
+}
+
+fn setup_cas_fixture(env: &mut TestEnvGuard, role: AgentRole) -> (TempDir, CasCore) {
     let xdg = env.home().join(".config");
     std::fs::create_dir_all(&xdg).expect("sandbox XDG_CONFIG_HOME should be created");
     env.set("XDG_CONFIG_HOME", &xdg);
@@ -46,6 +55,9 @@ pub(crate) fn setup_cas_as(env: &mut TestEnvGuard, role: AgentRole) -> (TempDir,
     }
 
     let temp = TempDir::new().expect("temp dir should be created");
+    // Keep ancestor discovery out of the host checkout without creating Git
+    // state that repository-owning tests must initialize themselves.
+    env.set("GIT_CEILING_DIRECTORIES", temp.path().parent().unwrap());
     let cas_dir = temp.path().join(".cas");
     std::fs::create_dir_all(&cas_dir).expect(".cas dir should be created");
     env.set("CAS_ROOT", &cas_dir);
@@ -186,6 +198,30 @@ pub(crate) fn extract_skill_id(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{ScopedFactoryEnv, TestEnvGuard, extract_skill_id, setup_cas};
+
+    #[test]
+    fn setup_cas_does_not_inherit_repository_under_a_nested_temp_root() {
+        let mut env = TestEnvGuard::temp_home();
+        let outer = tempfile::tempdir().unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(outer.path())
+            .output()
+            .unwrap();
+        assert!(initialized.status.success(), "{initialized:?}");
+        for key in ["TMPDIR", "TMP", "TEMP"] {
+            env.set(key, outer.path());
+        }
+
+        let (fixture, _core) = setup_cas(&mut env);
+        assert!(!fixture.path().join(".git").exists());
+        let root = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(fixture.path())
+            .output()
+            .unwrap();
+        assert!(!root.status.success(), "{root:?}");
+    }
 
     #[test]
     fn setup_owner_restores_environment_and_removes_home_on_unwind() {

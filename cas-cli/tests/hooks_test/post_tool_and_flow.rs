@@ -600,7 +600,7 @@ fn test_hook_status_command() {
         .args(["hook", "status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("PostModelSwitch: configured"));
+        .stdout(predicate::str::contains("PostModelSwitch"));
 
     let output = cas_cmd(&temp)
         .args(["hook", "status", "--json"])

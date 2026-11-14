@@ -1,10 +1,12 @@
 import type { FleetAgent, FleetTask } from "./fleet-ops";
+import type { ConversationHistory } from "./conversation-history";
+import type { OperatorReply } from "./types";
 
 const LABELS: Readonly<Record<string, string>> = {
   inprogress: "In progress", awaitingmerge: "Awaiting merge", open: "Open", ready: "Ready",
   blocked: "Blocked", closed: "Closed", cancelled: "Cancelled", canceled: "Cancelled",
   active: "Active", idle: "Idle", held: "Paused", paused: "Paused", stopped: "Stopped",
-  working: "Working", offline: "Offline", awaitingverification: "Awaiting verification",
+  planned: "Planned", working: "Working", offline: "Offline", awaitingverification: "Awaiting verification",
 };
 
 /** One wire state has the same human label in CamelCase, snake_case or uppercase. */
@@ -46,21 +48,73 @@ export function workerProgress(roster: readonly string[] | undefined, agents: re
 export interface ReleaseEpic {
   readonly id: string;
   readonly title?: string;
+  readonly priority?: number;
+  readonly branch?: string | null;
   readonly focused?: boolean;
   readonly status?: string;
   readonly assignee?: string | null;
   readonly epic_verification_owner?: string | null;
   readonly progress?: { readonly total: number; readonly merged: number; readonly merges_per_hour: number; readonly last_merged_at?: string | null };
+  /** The factory TUI's child split: open (open or blocked), in progress (in progress or parked), merged (delivered closures). */
+  readonly counts?: EpicCounts;
+  /** cas-2f4d: a frozen train's measured line, "Frozen 2:05 PM ET · ETA 2:50 PM ET". */
+  readonly freeze?: { readonly frozen_at: string; readonly eta?: string | null; readonly summary: string } | null;
+  /** cas-e060: whether the operator paused this train's automatic cut; absent on other epics. */
+  readonly auto_cut_paused?: boolean;
+}
+export interface EpicCounts { readonly open: number; readonly in_progress: number; readonly merged: number }
+
+/** "EPIC: Release train" reads "Release train"; a title that is only a prefix is no title. */
+export function epicTitle(epic: Pick<ReleaseEpic, "title"> | undefined): string {
+  return (epic?.title ?? "").replace(/^\s*epic\s*(?::|—|–|-)\s*/i, "").trim();
+}
+
+/** Only a complete, non-negative split is drawn; anything else is unreported. */
+export function epicCounts(epic: ReleaseEpic | undefined): (EpicCounts & { total: number }) | undefined {
+  const counts = epic?.counts;
+  if (!counts || ![counts.open, counts.in_progress, counts.merged].every(value => Number.isSafeInteger(value) && value >= 0)) return undefined;
+  return { open: counts.open, in_progress: counts.in_progress, merged: counts.merged, total: counts.open + counts.in_progress + counts.merged };
 }
 export type ProgressTask = FleetTask & { readonly epic_id?: string | null; readonly delivery_state?: string | null };
 
+/** Explicit operator-channel requests retain their conversation identity and resolution. */
+export interface OperatorAction {
+  readonly owner: "operator";
+  readonly request_id: number;
+  readonly task_id?: string;
+  readonly request: OperatorReply;
+}
+
+export function operatorActions(history: ConversationHistory | undefined): OperatorAction[] {
+  const pinned = history?.pinnedAsk()?.notification_id;
+  return [...new Map((history?.waiting() ?? [])
+    .filter(request => !request.notice && request.notification_id !== pinned)
+    .map(request => [request.notification_id, { owner: "operator" as const, request_id: request.notification_id, task_id: request.task_id, request }])).values()];
+}
+
+const LIVE_EPIC = ["Open", "Ready", "In progress", "Blocked", "Awaiting merge", "Awaiting verification", "Paused", "Planned"];
+
+/** Shared status/ownership rules for progress and the focus picker. */
+export function isLiveEpic(epic: ReleaseEpic): boolean {
+  return LIVE_EPIC.includes(statusLabel(epic.status));
+}
+export function ownsEpic(epic: ReleaseEpic, supervisors: readonly string[]): boolean {
+  return (epic.assignee != null && supervisors.includes(epic.assignee))
+    || (epic.epic_verification_owner != null && supervisors.includes(epic.epic_verification_owner));
+}
+
+/** The project/session's available focus targets, with the release lane first. */
+export function focusEpicChoices(epics: readonly ReleaseEpic[], supervisors: readonly string[], current: string | null): ReleaseEpic[] {
+  const train = (epic: ReleaseEpic) => epic.auto_cut_paused != null || epic.freeze != null || epic.branch?.includes("release-train") === true;
+  return epics.filter(epic => epic.id !== current && isLiveEpic(epic) && ownsEpic(epic, supervisors) && epicTitle(epic))
+    .sort((a, b) => Number(train(b)) - Number(train(a)) || (a.priority ?? 2) - (b.priority ?? 2) || epicTitle(a).localeCompare(epicTitle(b)) || a.id.localeCompare(b.id));
+}
+
 /** Status epics are a project catalog, never a session ownership list. */
 function supervisorEpics(epics: readonly ReleaseEpic[], focused: string | null, supervisors: readonly string[]): ReleaseEpic[] {
-  const open = epics.filter(epic => ["Open", "Ready", "In progress", "Blocked", "Awaiting merge"].includes(statusLabel(epic.status)));
+  const open = epics.filter(isLiveEpic);
   const pinned = open.find(epic => epic.id === focused) ?? open.find(epic => epic.focused);
-  return pinned ? [pinned] : open.filter(epic =>
-    (epic.assignee != null && supervisors.includes(epic.assignee))
-    || (epic.epic_verification_owner != null && supervisors.includes(epic.epic_verification_owner)));
+  return pinned ? [pinned] : open.filter(epic => ownsEpic(epic, supervisors));
 }
 
 export function releaseProgress(epics: readonly ReleaseEpic[], focused: string | null, tasks: readonly ProgressTask[], supervisors: readonly string[] = []): ReleaseEpic | undefined {
@@ -73,17 +127,32 @@ export function releaseProgress(epics: readonly ReleaseEpic[], focused: string |
 export function taskGroups(tasks: readonly ProgressTask[], epics: readonly ReleaseEpic[], workers: readonly string[], all: boolean, supervisors: readonly string[] = [], focused: string | null = null): { label: string; tasks: ProgressTask[] }[] {
   const epicIds = new Set(supervisorEpics(epics, focused, supervisors).map(epic => epic.id));
   const scoped = tasks.filter(task => all || (task.epic_id ? epicIds.has(task.epic_id) : (task.assignee != null && workers.includes(task.assignee))));
-  const needs = (task: ProgressTask) => task.delivery_state !== "merged" && ["Awaiting merge", "Blocked", "Ask"].includes(statusLabel(task.status));
   const ready = (task: ProgressTask) => ["Open", "Ready"].includes(statusLabel(task.status));
   const done = (task: ProgressTask) => ["Closed", "Cancelled"].includes(statusLabel(task.status));
   return [
-    { label: "Needs you", tasks: scoped.filter(needs) },
-    { label: "In progress", tasks: scoped.filter(task => !needs(task) && !ready(task) && !done(task)) },
+    { label: "In progress", tasks: scoped.filter(task => !ready(task) && !done(task)) },
     { label: "Ready", tasks: scoped.filter(ready) },
     ...(all ? [{ label: "Finished", tasks: scoped.filter(done) }] : []),
   ];
 }
 
+
+/** A running `cas hub preview` window, as /v1/machine announces it (cas-93d1). */
+export interface PreviewWindow { origin: string; task?: string; until: string }
+
+/**
+ * The candidate Commander a parked task's row links to: a running preview
+ * window named for that task, on a loopback http origin other than this page's.
+ */
+export function deliveryPreview(task: ProgressTask, previews: readonly PreviewWindow[] | undefined, now: number, pageOrigin: string): string | undefined {
+  if (task.delivery_state === "merged" || statusLabel(task.status) !== "Awaiting merge") return undefined;
+  const window = previews?.find(item => item.task === task.id && Date.parse(item.until) > now && item.origin !== pageOrigin);
+  if (!window) return undefined;
+  try {
+    const url = new URL(window.origin);
+    return url.protocol === "http:" && url.hostname === "127.0.0.1" && url.origin === window.origin ? `${url.origin}/` : undefined;
+  } catch { return undefined; }
+}
 
 /** The rail and Team use the same lifecycle/liveness precedence. */
 export function workerState(worker: WorkerProgress, tasks: readonly FleetTask[]): string {
@@ -95,4 +164,151 @@ export function workerState(worker: WorkerProgress, tasks: readonly FleetTask[])
   if (statusLabel(task?.status) === "Awaiting merge") return "Parked for merge";
   const live: Record<string, string> = { executing: "Executing", waiting_for_input: "Waiting", awaiting_first_prompt: "Waiting", budget_aborted: "Budget stopped", stalled: "Stalled" };
   return live[agent?.liveness ?? ""] ?? statusLabel(agent?.status);
+}
+
+/** Existing status snapshots from the running sessions on paired machines. */
+export interface EpicSessionProgress {
+  /** The conversation list's project key (sessionProjectKey). */
+  readonly project: string;
+  readonly machine: string;
+  readonly machineLabel: string;
+  readonly session: string;
+  readonly supervisor: string;
+  readonly roster: readonly string[];
+  readonly agents: readonly FleetAgent[];
+  readonly tasks: readonly ProgressTask[];
+  readonly epics: readonly ReleaseEpic[];
+  readonly stale: boolean;
+  readonly received: number;
+  /** Only completed reconciliation populates this optional bridge seam. */
+  readonly release_scope?: ReconciledReleaseScope;
+  /** The selected conversation supplies the current reconciliation identity. */
+  readonly authoritative?: boolean;
+}
+export interface ReconciledReleaseScope { readonly release_id: string; readonly final_release_sha: string }
+
+/** Missing peer proof is unknown; a reported older pair is last-known. */
+export function releaseSnapshots(sources: readonly EpicSessionProgress[]): EpicSessionProgress[] {
+  const current = new Map<string, ReconciledReleaseScope>();
+  for (const source of [...sources].sort((a, b) => Number(b.authoritative === true) - Number(a.authoritative === true) || b.received - a.received)) {
+    if (!source.stale && source.release_scope && !current.has(source.project)) current.set(source.project, source.release_scope);
+  }
+  return sources.map(source => {
+    const scope = current.get(source.project), peer = source.release_scope;
+    const mismatch = scope && peer && (scope.release_id !== peer.release_id || scope.final_release_sha !== peer.final_release_sha);
+    return mismatch ? { ...source, stale: true } : source;
+  });
+}
+
+export type EpicTaskGroup = "In progress" | "Open" | "Merged";
+
+/** One task-state source for an epic's sections and its split: a merged
+ * delivery is Merged whatever its parked status or worker activity says. */
+export function epicTaskGroup(task: ProgressTask): EpicTaskGroup | undefined {
+  if (task.delivery_state === "merged") return "Merged";
+  const label = statusLabel(task.status);
+  if (["In progress", "Awaiting merge", "Awaiting verification"].includes(label)) return "In progress";
+  return ["Open", "Ready", "Blocked"].includes(label) ? "Open" : undefined;
+}
+
+/** The split as drawn: open and in progress counted from the very task rows
+ * the sections list, merged as the producer's delivered closures plus any
+ * listed task whose delivery has merged. Undefined when unreported. */
+export function displayCounts(epic: ReleaseEpic | undefined, tasks: readonly ProgressTask[]): (EpicCounts & { total: number }) | undefined {
+  const base = epicCounts(epic);
+  if (!base) return undefined;
+  const count = (group: EpicTaskGroup) => tasks.filter(task => epicTaskGroup(task) === group).length;
+  const split = { open: count("Open"), in_progress: count("In progress"), merged: base.merged + count("Merged") };
+  return { ...split, total: split.open + split.in_progress + split.merged };
+}
+export interface EpicTaskRow { readonly task: ProgressTask; readonly worker?: string; readonly machine: string; readonly state: string; readonly group: EpicTaskGroup }
+export interface ProjectEpic {
+  readonly key: string;
+  readonly epic: ReleaseEpic;
+  readonly title: string;
+  readonly counts?: EpicCounts & { total: number };
+  readonly machines: readonly string[];
+  readonly workers: readonly { name: string; machine: string; state: string }[];
+  readonly rows: readonly EpicTaskRow[];
+  readonly building: number;
+  readonly parked: number;
+  readonly blocked: number;
+  readonly stale: boolean;
+}
+
+/** Display the task's delivery truth before worker liveness; never infer a merge from closure. */
+function epicTaskState(task: ProgressTask, worker: WorkerProgress | undefined): string {
+  if (task.delivery_state === "merged") return "Merged";
+  if (statusLabel(task.status) === "Awaiting merge") return "Parked";
+  if (statusLabel(task.status) === "Blocked") return "Blocked";
+  if (["Open", "Ready"].includes(statusLabel(task.status))) return "Ready";
+  const state = worker ? workerState(worker, [task]) : statusLabel(task.status);
+  return state === "Executing" ? "Building" : state;
+}
+
+/** The selected session's project only, joined across machines by epic id.
+ * The release train has its own header. Planned and paused work remains
+ * visible; terminal catalogs cannot be resurrected by a stale peer. */
+export function projectEpics(sources: readonly EpicSessionProgress[], project: string, train?: string): { live: ProjectEpic[]; quiet: number } {
+  const epics = new Map<string, { epic: ReleaseEpic; machines: Set<string>; workers: Map<string, ProjectEpic["workers"][number]>; rows: Map<string, EpicTaskRow>; stale: boolean }>();
+  const latest = new Map<string, ReleaseEpic>();
+  // Prefer the newest authoritative task/progress snapshot when sessions overlap.
+  for (const source of releaseSnapshots(sources).filter(source => source.project === project).sort((a, b) => Number(a.stale) - Number(b.stale) || Number(b.authoritative === true) - Number(a.authoritative === true) || b.received - a.received)) {
+    const workers = workerProgress(source.roster, source.agents, source.tasks, source.supervisor);
+    for (const epic of source.epics) {
+      if (!latest.has(epic.id)) latest.set(epic.id, epic);
+      if (epic.id === train || !epicTitle(latest.get(epic.id)) || !isLiveEpic(latest.get(epic.id)!)) continue;
+      let entry = epics.get(epic.id);
+      if (!entry) epics.set(epic.id, entry = { epic, machines: new Set(), workers: new Map(), rows: new Map(), stale: true });
+      else if (!epicCounts(entry.epic) && epicCounts(epic)) entry.epic = { ...entry.epic, counts: epic.counts };
+      if (source.stale && !entry.stale) continue;
+      entry.machines.add(source.machineLabel);
+      entry.stale &&= source.stale;
+      const tasks = source.tasks.filter(task => task.epic_id === epic.id);
+      for (const task of tasks) {
+        const group = epicTaskGroup(task);
+        if (!group || entry.rows.has(task.id)) continue;
+        const worker = workers.find(item => item.currentTask === task.id)
+          ?? (task.assignee ? workers.find(item => item.name === task.assignee || item.agent?.id === task.assignee) : undefined);
+        entry.rows.set(task.id, { task, worker: worker?.name ?? task.assignee ?? undefined, machine: source.machineLabel, state: epicTaskState(task, worker), group });
+      }
+      for (const worker of workers.filter(item => tasks.some(task => task.id === item.currentTask))) {
+        const agent = worker.agent;
+        const live = agent && !["dead", "offline"].includes(agent.liveness ?? "")
+          && !["Stopped", "Offline"].includes(statusLabel(agent.status))
+          && (agent.liveness !== undefined || ["Active", "Idle", "Paused"].includes(statusLabel(agent.status)));
+        if (!source.stale && live) entry.workers.set(`${source.machine}:${worker.name}`, { name: worker.name, machine: source.machineLabel, state: workerState(worker, tasks) });
+      }
+    }
+  }
+  const all = [...epics].map(([key, entry]): ProjectEpic => {
+    const rows = [...entry.rows.values()];
+    const count = (state: string) => rows.filter(row => row.state === state).length;
+    const blocked = count("Blocked");
+    const parked = count("Parked");
+    return { key, epic: entry.epic, title: epicTitle(entry.epic), counts: displayCounts(entry.epic, rows.map(row => row.task)), machines: [...entry.machines], workers: [...entry.workers.values()], rows, stale: entry.stale,
+      blocked, parked, building: rows.filter(row => row.group === "In progress").length - parked };
+  });
+  const live = all;
+  return {
+    live: live.sort((a, b) => Number(b.blocked > 0) - Number(a.blocked > 0)
+      || (b.building + b.parked + b.blocked) - (a.building + a.parked + a.blocked)
+      || b.workers.length - a.workers.length || a.title.localeCompare(b.title) || a.key.localeCompare(b.key)),
+    quiet: all.length - live.length,
+  };
+}
+
+/** What a project card's status line needs from one session's status: the
+ * release train's split, as Tasks & progress draws it, and how many of the
+ * reported tasks are blocked. Undefined when the status carries no tasks or epics. */
+export interface ProjectStatusLine { readonly train?: EpicCounts & { total: number }; readonly blocked: number }
+export function projectStatusLine(status: Record<string, unknown> | undefined, supervisors: readonly string[]): ProjectStatusLine | undefined {
+  if (!status) return undefined;
+  const epics = ((status.epics as ReleaseEpic[] | undefined) ?? []).filter(epic => typeof epic?.id === "string");
+  const tasks = [...new Map([...((status.tasks_in_progress as ProgressTask[] | undefined) ?? []), ...((status.tasks_ready as ProgressTask[] | undefined) ?? [])].map(task => [task.id, task])).values()];
+  const train = releaseProgress(epics, typeof status.focused_epic === "string" ? status.focused_epic : null, tasks, supervisors);
+  return {
+    train: train ? displayCounts(train, tasks.filter(task => task.epic_id === train.id)) : undefined,
+    blocked: tasks.filter(task => task.delivery_state !== "merged" && statusLabel(task.status) === "Blocked").length,
+  };
 }

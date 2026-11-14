@@ -117,6 +117,7 @@ fn render_knowledge_index(ks: &dyn KnowledgeStore, token_budget: usize) -> (Stri
         return (String::new(), 0);
     }
 
+    // gate[N-47 notice]: Project Knowledge context section
     let header = if lines.len() < total_pages {
         format!(
             "## 📚 Project Knowledge ({}/{} pages indexed)",
@@ -224,11 +225,13 @@ pub fn build_context_with_stores(
     let mut available_memories_tokens = 0usize;
 
     // Add CAS usage reminder at the top
+    // gate[N-37 notice]: CAS Context header
     let usage_reminder = USAGE_REMINDER.trim().to_string();
     total_tokens += estimate_tokens(&usage_reminder);
     context_parts.push(usage_reminder);
 
     // Add session ID info (auto-registration handles the rest)
+    // gate[N-38 notice]: Session id line
     if mcp_enabled && !input.session_id.is_empty() {
         let session_info = format!(
             "\n**Session:** `{}` (auto-registers on first CAS tool use)",
@@ -246,6 +249,7 @@ pub fn build_context_with_stores(
                 .filter(|(task, _)| task.status == TaskStatus::InProgress)
                 .collect();
 
+            // gate[N-39 notice]: Blocked Tasks (Action Required)
             if !blocked_in_progress.is_empty() {
                 context_parts.push("## ⚠️ Blocked Tasks (Action Required)".to_string());
                 context_parts.push(String::new());
@@ -311,6 +315,7 @@ pub fn build_context_with_stores(
 
         // Show agent section if there's multi-agent activity OR we're in factory mode
         // Factory mode via env var should always show coordination context
+        // gate[N-40 notice]: Agent Coordination and role guidance
         if all_agents.len() > 1 || current_agent.is_some() || is_factory_mode {
             if !context_parts.is_empty() {
                 context_parts.push(String::new());
@@ -353,6 +358,7 @@ pub fn build_context_with_stores(
                 .filter(|entry| !entry.is_expired())
                 .filter(|entry| !handoff::is_handoff(entry))
                 .collect();
+            // gate[N-41 notice]: Pinned Memories
             if !pinned_entries.is_empty() {
                 if !context_parts.is_empty() {
                     context_parts.push(String::new());
@@ -377,7 +383,7 @@ pub fn build_context_with_stores(
         }
     }
 
-    // The current handoff for this project and role (GH #992, cas-0339): only
+    // The current handoff for this project, role and local lineage (GH #1661): only
     // the newest handoff of the session's role, never an older or superseded
     // one. Handoffs are left out of Helpful Memories, so a stale "CURRENT
     // handoff" cannot rank there either. Shown in minimal mode too: it is the
@@ -388,9 +394,19 @@ pub fn build_context_with_stores(
         .filter(|role| !role.trim().is_empty())
         .or_else(|| crate::env_overlay::var("CAS_AGENT_ROLE").ok());
     let session_role = handoff::normalize_role(role_hint.as_deref());
+    let handoff_agent = stores.agent_store.and_then(|store| {
+        stores.agent_id.as_deref()
+            .and_then(|id| store.get(id).ok())
+            .or_else(|| store.get(&input.session_id).ok())
+            .or_else(|| store.get_by_cc_session_id(&input.session_id).ok().flatten())
+    });
+    let lineage = handoff_agent.as_ref()
+        .map(handoff::HandoffLineage::for_agent)
+        .unwrap_or_else(handoff::HandoffLineage::for_local_machine);
+    // gate[N-42 notice]: Current Handoff (role)
     if let Some(store) = stores.primary_store()
         && let Ok(project_entries) = store.list()
-        && let Some(current) = handoff::current_handoff(&project_entries, &session_role)
+        && let Some(current) = handoff::current_handoff(&project_entries, &session_role, Some(&lineage))
     {
         if !context_parts.is_empty() {
             context_parts.push(String::new());
@@ -450,6 +466,7 @@ pub fn build_context_with_stores(
     }
 
     // Show ALL in-progress tasks
+    // gate[N-43 notice]: In Progress and Ready Tasks
     if let Some(ts) = stores.task_store {
         if let Ok(tasks) = ts.list(Some(TaskStatus::InProgress)) {
             let in_progress: Vec<_> = tasks.iter().take(5).collect();
@@ -583,6 +600,7 @@ pub fn build_context_with_stores(
             .copied()
             .collect();
 
+        // gate[N-44 notice]: Critical and Active Rules
         if !critical_rules.is_empty() {
             if !context_parts.is_empty() {
                 context_parts.push(String::new());
@@ -734,6 +752,7 @@ pub fn build_context_with_stores(
                     .len()
                     .min(limit)
                     .saturating_sub(skills_to_show.len());
+                // gate[N-45 notice]: Available Skills
                 let header = if omitted > 0 {
                     format!(
                         "## Available Skills ({}/{} shown, {} if expanded)",
@@ -781,6 +800,7 @@ pub fn build_context_with_stores(
     // was measured unopened, so a one-line pointer replaces it and the scorer
     // never runs. Every other caller (`search action=context`) still lists.
     let list_memories = input.hook_event_name != "SessionStart" || config.session_start_memories();
+    // gate[N-46 notice]: Memories pointer, Helpful Memories, Related to Current Work
     if !list_memories && !minimal_start {
         if !context_parts.is_empty() {
             context_parts.push(String::new());
@@ -1017,6 +1037,7 @@ pub fn build_context_with_stores(
     if minimal_start {
         let has_available =
             available_ready_tasks > 0 || available_memories > 0 || available_skills > 0;
+        // gate[N-48 notice]: More Context Available and token footer
         if has_available {
             if !context_parts.is_empty() {
                 context_parts.push(String::new());

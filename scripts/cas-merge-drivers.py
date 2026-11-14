@@ -3,7 +3,7 @@
 
     cas-merge-drivers.py install [<repo>]
         Register the drivers for every merge in the repository: git config
-        `merge.cas-generated.*` and `merge.cas-changelog.*`, plus matching
+        `merge.cas-generated.*`, `merge.cas-changelog.*`, and `merge.cas-journeys.*`, plus matching
         lines in `$GIT_COMMON_DIR/info/attributes`. `info/attributes` applies
         to every merge in the clone, including `git merge-tree --write-tree`,
         whatever `.gitattributes` the checked-out tree has. That matters while
@@ -17,19 +17,28 @@
         section, or a hunk that carries a `## ` heading, such as a release
         cut) stays a conflict.
 
+    cas-merge-drivers.py journeys <base> <ours> <theirs> [<marker-size>]
+        Merge disjoint keyed entries and take the newest ISO updated date.
+        Competing edits to an entry stay conflicts. Other fields and unsupported
+        YAML layouts use Git's ordinary merge.
+
 `merge=cas-generated` (hub-web/dist and the builtin reference-history ledger)
 keeps ours with no conflict; the merge then rebuilds both with
 scripts/regenerate-generated-artifacts.sh.
 """
 
+import datetime
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ATTRIBUTES = (
     "CHANGELOG.md merge=cas-changelog",
+    "docs/qa/journeys.yaml merge=cas-journeys",
     "hub-web/dist/** merge=cas-generated",
     "cas-cli/src/builtins/reference-history.json merge=cas-generated",
 )
@@ -53,6 +62,8 @@ def install(repo):
     if source != driver.resolve():
         shutil.copyfile(source, driver)
     for key, value in (
+        ("merge.cas-journeys.name", "journey registry: merge independent entries and newest updated date"),
+        ("merge.cas-journeys.driver", f"python3 '{driver}' journeys %O %A %B %L"),
         ("merge.cas-generated.name", "generated build output: keep ours, regenerate after the merge"),
         ("merge.cas-generated.driver", "true"),
         ("merge.cas-changelog.name", "CHANGELOG: union [Unreleased] additions, conflict elsewhere"),
@@ -131,12 +142,149 @@ def changelog(base, ours, theirs, marker=7):
     return 1 if unresolved else 0
 
 
+REGISTRY_ENTRY_SECTIONS = (
+    "bug_families", "owner_groups", "invariants", "manual_checks", "fixtures", "journeys",
+)
+REGISTRY_FIELD = re.compile(r"([A-Za-z_][A-Za-z0-9_]*):(.*)")
+REGISTRY_MAP_ENTRY = re.compile(r"  ([A-Za-z0-9_.-]+):(?:[ \t].*)?")
+REGISTRY_JOURNEY_ENTRY = re.compile(r"(  )?- id: ([A-Za-z0-9][A-Za-z0-9._-]*)(?:[ \t]+(?:#.*)?)?")
+
+
+def registry_parts(text):
+    """Separate the registry's entry blocks from its ordinary YAML fields.
+
+    Keep source bytes and comments. Unsupported YAML layouts and duplicate
+    keys fall back to Git's normal merge rather than guessing at boundaries.
+    """
+    if re.search(r"(?:^|[\s\[,{])(?:[&*][\w-]+|<<:)", text):
+        raise ValueError("unsupported registry YAML")
+    lines = text.splitlines(keepends=True)
+    header, sections = [], {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        field = REGISTRY_FIELD.fullmatch(line.rstrip("\n"))
+        if field is None or field[1] not in REGISTRY_ENTRY_SECTIONS:
+            if field is None and line.strip() and not line.startswith((" ", "#", "- ")):
+                raise ValueError("unsupported top-level registry field")
+            header.append(line)
+            continue
+        name, value = field[1], field[2].strip()
+        sequence = name == "journeys"
+        if name in sections or value not in ("", "[]" if sequence else "{}"):
+            raise ValueError(f"unsupported registry section {name}")
+        entries = sections[name] = {}
+        header.append(f"{name}:\n")
+        if value:
+            continue
+        end = index
+        while end < len(lines) and (not lines[end].strip()
+                                    or lines[end].startswith((" ", "#"))
+                                    or (sequence and lines[end].startswith("- "))):
+            end += 1
+        body_end = end
+        while body_end > index and (not lines[body_end - 1].strip()
+                                    or lines[body_end - 1].startswith("#")):
+            body_end -= 1
+        key = None
+        indent = None
+        entry_pattern = REGISTRY_JOURNEY_ENTRY if sequence else REGISTRY_MAP_ENTRY
+        for row in lines[index:body_end]:
+            entry = entry_pattern.fullmatch(row.rstrip("\n"))
+            if entry:
+                key = entry[2] if sequence else entry[1]
+                if key in entries:
+                    raise ValueError(f"duplicate registry entry {name}.{key}")
+                row_indent = len(entry[1] or "") + 2 if sequence else 4
+                if indent is not None and indent != row_indent:
+                    raise ValueError(f"mixed registry entry indentation in {name}")
+                indent = row_indent
+                entries[key] = ""
+            elif key is None or (row.strip() and not row.startswith((" " * indent, "#", "  #"))):
+                raise ValueError(f"unsupported registry entry in {name}")
+            entries[key] += row
+        header.extend(lines[body_end:end])
+        index = end
+    return "".join(header), sections
+
+
+def merge_registry_entries(base, ours, theirs, marker):
+    merged = []
+    conflict = False
+    # Preserve the ancestor's order. Sort new IDs so branch order cannot
+    # change the merged registry or the candidate tree it produces.
+    for key in [*base, *sorted((ours.keys() | theirs.keys()) - base.keys())]:
+        ancestor, left, right = (entries.get(key, "") for entries in (base, ours, theirs))
+        if left == right or right == ancestor:
+            merged.append(left)
+        elif left == ancestor:
+            merged.append(right)
+        else:
+            conflict = True
+            merged.append(f"{'<' * marker} ours\n{left}{'=' * marker}\n{right}{'>' * marker} theirs\n")
+    return "".join(merged), conflict
+
+
+def journeys(base, ours, theirs, marker=7):
+    originals = [Path(path).read_text() for path in (base, ours, theirs)]
+    try:
+        parts = [registry_parts(text) for text in originals]
+        dates = []
+        for text, _ in parts:
+            matches = re.findall(r"(?m)^updated: ['\"]?(\d{4}-\d{2}-\d{2})['\"]?[ \t]*$", text)
+            if len(matches) != 1 or len(re.findall(r"(?m)^updated:", text)) != 1:
+                raise ValueError("unsupported updated date")
+            dates.append(datetime.date.fromisoformat(matches[0]))
+    except ValueError:
+        return ordinary_merge(base, ours, theirs, marker)
+
+    newest = max(dates).isoformat()
+    with tempfile.TemporaryDirectory() as temporary:
+        inputs = []
+        for i, (text, _) in enumerate(parts):
+            path = Path(temporary) / str(i)
+            path.write_text(re.sub(r"(?m)^updated:.*$", f"updated: '{newest}'", text))
+            inputs.append(str(path))
+        result = ordinary_merge(*inputs, marker)
+        text = Path(inputs[1]).read_text()
+    # Header policy stays on Git's ordinary three-way path. Only keyed
+    # entry sections use semantic merge, and competing changes still conflict.
+    for name in REGISTRY_ENTRY_SECTIONS:
+        entries, conflict = merge_registry_entries(
+            *(sections.get(name, {}) for _, sections in parts), marker,
+        )
+        if not any(name in sections for _, sections in parts):
+            continue
+        header = f"{name}:\n"
+        empty = "[]" if name == "journeys" else "{}"
+        body = header + entries if entries else f"{name}: {empty}\n"
+        text, count = re.subn(rf"(?m)^{name}:\n", lambda _: body, text)
+        if count > 1 or (entries and count == 0):
+            # A competing structural change moved or removed the section.
+            # Leave it to Git rather than silently losing merged entries.
+            return ordinary_merge(base, ours, theirs, marker)
+        result = result or int(conflict)
+    Path(ours).write_text(text)
+    return result
+
+
+def ordinary_merge(base, ours, theirs, marker=7):
+    result = subprocess.run(
+        ["git", "merge-file", f"--marker-size={marker}",
+         "-L", "ours", "-L", "base", "-L", "theirs", ours, base, theirs],
+        capture_output=True,
+    )
+    return 0 if result.returncode == 0 else 1
+
+
 def main(argv):
     if len(argv) >= 2 and argv[1] == "install":
         return install(argv[2] if len(argv) > 2 else os.getcwd())
-    if len(argv) >= 5 and argv[1] == "changelog":
+    if len(argv) >= 5 and argv[1] in ("changelog", "journeys"):
         marker = int(argv[5]) if len(argv) > 5 and argv[5].isdigit() else 7
-        return changelog(argv[2], argv[3], argv[4], marker)
+        driver = changelog if argv[1] == "changelog" else journeys
+        return driver(argv[2], argv[3], argv[4], marker)
     print(__doc__, file=sys.stderr)
     return 2
 

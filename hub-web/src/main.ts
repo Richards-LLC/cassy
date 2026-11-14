@@ -9,27 +9,30 @@ import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
-import { releaseHeader } from "./progress-view";
+import { releaseHeader, workerTaskLine } from "./progress-view";
+import { deliveryPreview, displayCounts, projectEpics, projectStatusLine, operatorActions, releaseSnapshots, type ReconciledReleaseScope, type EpicSessionProgress } from "./progress-model";
+import { liveEpicsSection, projectSessions } from "./epic-progress";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
-import { pendingSessionLabel, reconcileCatalog, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
+import { pendingSessionLabel, reconcileCatalog, sessionReachable, sessionRunning, sessionStopped, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
 import { activityTime, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
-import { ProjectNavigation } from "./project-navigation";
+import { ProjectNavigation, sessionProjectKey } from "./project-navigation";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
-import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
+import { HistoryPageState, ConversationHistory, supervisorWorking, waitingQuestion } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { drainHeld, HeldSendFlushes } from "./held-send-flush";
 import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
-import { ConversationView, emptyActivityText, type TurnRenderContext } from "./conversation-view";
+import { ConversationView, emptyActivityText, registerReplyImageResolver, type TurnRenderContext } from "./conversation-view";
+import type { ArtifactViewResult } from "./artifact-open";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { NoticePersistence, isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
@@ -38,7 +41,7 @@ import { clearTransientAttachmentNotes, installAttachmentSheet, isVisualPage, re
 import { inlineAttachment, retryAttachmentPreviews } from "./rich-attachment";
 import { sentAttachments } from "./sent-attachments";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
-import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
+import { focusConversationAction, applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail, waitingOnOperator } from "./context-rail";
 import { applyScheme, markAppearanceCommands, schemePreference, setScheme, type SchemePreference } from "./scheme";
@@ -70,7 +73,7 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { relativeTimestamp } from "./time";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
-import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, trainControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
 import { WriteGrantState, focusAfterResult, sendWriteGrant } from "./write-grant";
 import { announceTo, type AnnounceOptions } from "./live-region";
 import { runFleetOperation } from "./fleet-ops-request";
@@ -97,7 +100,7 @@ import { operatorOrigin } from "./inbox/wire";
 import { bindRichInspectionUsage, countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
 import { WorkPicture } from "./work-picture";
 import { livePhase } from "./live-phase";
-import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
+import { renderWorkerTimeline, workerTimelineDialog, workerTimelineButton } from "./worker-timeline";
 import type { ArtifactRef, AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
@@ -150,6 +153,7 @@ const pairingOperations = new PairingOperationCoordinator();
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const supervisorCommands = new Map<string, SupervisorCommandSession>();
+let pendingReload: { machineId: string; session: string; birth?: string } | undefined;
 let slashCommands: { input: HTMLTextAreaElement; thread: string; palette: SlashCommands } | undefined;
 function supervisorCommandSession(machineId: string, session: string): SupervisorCommandSession {
   const key = sessionKey(machineId, session);
@@ -165,7 +169,8 @@ function supervisorCommandSession(machineId: string, session: string): Superviso
         }
       },
       send: message => connections.get(machineId)?.send(session, message) ?? false,
-      changed: () => updateConversationViews(),
+      changed: () => { updateConversationViews(); renderConversationList(); },
+      settled: receipt => toast(receipt.detail, { thread: key }),
     });
     supervisorCommands.set(key, commands);
   }
@@ -179,6 +184,35 @@ function supervisorCommandUnavailable(machineId: string, session: string): strin
   if (!machine.scopes.includes("pane-input")) return "This browser was paired without command control. Pair again with pane:input.";
   if (conversationConnection(machineId, session)?.phase !== "live") return "Commands work once the conversation is connected.";
   return undefined;
+}
+/** A card click attaches its own supervisor, then uses the existing command
+ * controller. A new selection or session birth cannot inherit that intent. */
+async function reloadCassy(row: ConversationRow): Promise<void> {
+  const item = sessions.get(row.machineId)?.find(item => item.name === row.session);
+  if (!item || item.ended) return;
+  pendingReload = { machineId: row.machineId, session: row.session, birth: item.started_at };
+  renderConversationList();
+  try {
+    if (selectedMachineId !== row.machineId || selectedSession !== row.session || conversationConnection(row.machineId, row.session)?.phase !== "live") await openSession(row.machineId, row.session);
+    runPendingReload(row.machineId, row.session);
+  } catch (error) {
+    if (pendingReload?.machineId === row.machineId && pendingReload.session === row.session) pendingReload = undefined;
+    toast(String(error)); renderConversationList();
+  }
+}
+function runPendingReload(machineId: string, session: string): void {
+  const intent = pendingReload;
+  if (!intent || intent.machineId !== machineId || intent.session !== session) return;
+  const current = sessions.get(machineId)?.find(item => item.name === session);
+  if (selectedMachineId !== machineId || selectedSession !== session || !current || current.ended || current.started_at !== intent.birth) {
+    pendingReload = undefined; renderConversationList(); return;
+  }
+  if (conversationConnection(machineId, session)?.phase !== "live") return;
+  pendingReload = undefined;
+  if (current.harness !== "claude") { toast("Reload Cassy requires Claude Code."); renderConversationList(); return; }
+  void supervisorCommandSession(machineId, session).run("mcp", false)
+    .then(() => countUsage("supervisor.command"))
+    .catch(error => { toast(String(error)); renderConversationList(); });
 }
 function bindSlashCommands(input: HTMLTextAreaElement): void {
   const machineId = selectedMachineId; const session = selectedSession;
@@ -221,6 +255,8 @@ const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairin
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const statusReceivedAt = new Map<string, number>();
+/** Wall-clock receipt, for a peer's "last known" time. */
+const statusReceivedWall = new Map<string, number>();
 /** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
 const statusPending = new Set<string>();
 const statusFailures = new Set<string>();
@@ -250,6 +286,24 @@ installAttachmentSheet((sheet, file, context) => {
 }, async (artifactId, context) => {
   const thread = threadOf(context);
   return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;
+});
+// cas-85bfb: a reply's inline images come from the machine that published
+// the reply, through its media ticket; a view is reused until it expires.
+const replyImageViews = new Map<string, { view: Promise<ArtifactViewResult | undefined>; until: number }>();
+registerReplyImageResolver((reference, context) => {
+  const thread = threadOf(context);
+  const connection = thread && connectionStates.get(thread.machineId)?.phase === "live" ? connections.get(thread.machineId) : undefined;
+  if (!thread || !connection) return Promise.resolve(undefined);
+  const key = JSON.stringify([thread.machineId, thread.session, reference]);
+  const cached = replyImageViews.get(key);
+  if (cached && cached.until > Date.now()) return cached.view;
+  const entry = { view: connection.artifactPreview(thread.session, reference).catch(() => undefined), until: Date.now() + 60_000 };
+  replyImageViews.set(key, entry);
+  void entry.view.then(result => {
+    if (!result?.ok) replyImageViews.delete(key);
+    else if (result.view.expires_at) entry.until = Date.parse(result.view.expires_at) - 5_000;
+  });
+  return entry.view;
 });
 const conversationHistories = new Map<string, ConversationHistory>();
 /**
@@ -301,11 +355,11 @@ function dismissedAskStorage(): DismissedAsksStorage | undefined {
  * `unavailable`: the session attached without durable history (a daemon
  * from before conversation_history), so no first page will ever arrive.
  */
-const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean }>();
-function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean } {
+const conversationHistoryPages = new Map<string, HistoryPageState>();
+function conversationHistoryPage(key: string): HistoryPageState {
   let page = conversationHistoryPages.get(key);
   if (!page) {
-    page = { hasEarlier: false, loading: false, loaded: false };
+    page = new HistoryPageState();
     conversationHistoryPages.set(key, page);
   }
   return page;
@@ -523,6 +577,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
       project: hubSession?.project_name?.trim() || projectTitle(hubSession?.project_dir),
+      harness: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.harness,
       header: false,
       sessionEnd: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.ended,
       // Older daemons can establish activity but cannot name its phase/time.
@@ -531,6 +586,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
         connected: conversationConnection(threadMachineId, threadSession)?.phase === "live" && !conversationConnection(threadMachineId, threadSession)?.authFailure,
         stale: statusFailures.has(threadKey) || conversationConnection(threadMachineId, threadSession)?.degraded === true,
         waiting: waitingOnOperator(history) > 0,
+        daemonRunning: (statuses.get(threadKey)?.session as { is_running?: boolean } | undefined)?.is_running,
         working: working(),
         now: performance.now(), receivedAt: statusReceivedAt.get(threadKey),
       }),
@@ -583,7 +639,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // The header's own state: a send that expired waiting for the session
       // says Retry will go through once this reads live (cas-d15c).
       sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
-      commandReceipts: () => [...supervisorCommandSession(threadMachineId, threadSession).receipts.values()],
+      commandReceipts: () => supervisorCommandSession(threadMachineId, threadSession).visibleReceipts,
+      commandDismiss: ref => { void supervisorCommandSession(threadMachineId, threadSession).dismiss(ref).catch(error => toast(String(error), { thread: threadKey })); },
       commandStep: (ref, key) => { void supervisorCommandSession(threadMachineId, threadSession).step(ref, key).catch(error => toast(String(error), { thread: threadKey })); },
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device
@@ -617,7 +674,12 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // session whose daemon keeps no history resolves on attach.
       loadingHistory: () => {
         const page = conversationHistoryPage(threadKey);
-        return !page.loaded && !page.unavailable;
+        return !page.loaded && !page.unavailable && !page.failure;
+      },
+      historyError: () => conversationHistoryPage(threadKey).failure,
+      retryHistory: () => {
+        const page = conversationHistoryPage(threadKey);
+        if (page.failure) connections.get(threadMachineId)?.requestConversationHistory(threadSession, page.failure.before);
       },
       openingSince: () => conversationOpenedAt.get(threadKey),
       historyEnd: () => {
@@ -724,6 +786,7 @@ function selectionStorage(): SelectionStorage | undefined {
 }
 
 function applySelection(next: SessionSelection | undefined): void {
+  if (pendingReload && (next?.machineId !== pendingReload.machineId || next.session !== pendingReload.session)) pendingReload = undefined;
   if (selectedMachineId && selectedSession && (next?.machineId !== selectedMachineId || next.session !== selectedSession)) {
     releasePaneControl(selectedMachineId, selectedSession);
   }
@@ -855,7 +918,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // Native lifecycle changes need no fleet mutation or Show work reader.
       // The existing health heartbeat refreshes the open session's status,
       // independently of a slow catalog read and without subscribing to output.
-      if (state.phase === "live" && selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
+      if (state.phase === "live") refreshEpicSessions(machine.id);
       // A refused pairing is terminal truth, even between animation frames.
       // Clear stale working ink with the same state change as Needs pairing.
       if (state.authFailure) {
@@ -948,6 +1011,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase !== "live") liveSendApprovals.delete(key);
       const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
+      if (state.phase === "live") queueMicrotask(() => runPendingReload(machine.id, session));
+      else if ((state.phase === "failed" || state.phase === "backoff") && pendingReload?.machineId === machine.id && pendingReload.session === session) {
+        pendingReload = undefined; toast("Reload Cassy was not sent. Try again once connected."); renderConversationList();
+      }
       // cas-ff22: answers in flight on the old socket never come; a live
       // attach re-reads the newest work of whatever shows it.
       if (attachWasLive && state.phase !== "live") workPicture.disconnected(machine.id, session);
@@ -996,7 +1063,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (listed, freshnessThresholdSecs, stopped) => {
-      const items = reconcileCatalog(sessions.get(machine.id) ?? [], listed, stopped);
+      const previous = new Map((sessions.get(machine.id) ?? []).map(item => [item.name, item]));
+      const items = reconcileCatalog([...previous.values()], listed, stopped);
       fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
       // cas-9846: the machine answered; its cached catalog gives way, and the
       // live one is kept for the next reload during an outage.
@@ -1015,6 +1083,18 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       retireEndedSessionNotices(machine.id, items);
       settleSendsForStoppedSessions(machine, items);
       sessions.set(machine.id, items);
+      refreshCardStatuses(machine.id, items);
+      // A peer's retained events refresh the catalog too (cas-c4b7). Only a
+      // new or revived destination needs status here; existing sessions keep
+      // their own event invalidations and the independent health heartbeat.
+      // Only the selected project's sessions feed Live epics (cas-9b99).
+      const project = epicSessions().filter(entry => entry.machineId === machine.id).map(entry => entry.session.name);
+      for (const item of items) {
+        const before = previous.get(item.name);
+        if (project.includes(item.name) && sessionReachable(item) && (!before || !sessionReachable(before) || before.started_at !== item.started_at)) {
+          void loadStatus(machine.id, item.name);
+        }
+      }
       const stoppedSelection = selectedMachineId === machine.id && selectedSession !== undefined
         && !items.some(item => item.name === selectedSession && sessionRunning(item));
       if (stoppedSelection) commitSelection({ machineId: machine.id });
@@ -1033,12 +1113,18 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         && machineEventRaisesAttention(kind, event.payload ?? event.diagnostic)) {
         void upsertMachineEventAttention(machine, event);
       }
+      // Live epics read the selected project's peer sessions without
+      // attaching their output. Only the event's session is invalidated, other
+      // projects' sessions are never read, and overlapping reads coalesce.
+      if (typeof event.session === "string" && epicSessions().some(item => item.machineId === machine.id && item.session.name === event.session)) {
+        void loadStatus(machine.id, event.session);
+      }
       // A retained peer-session burst does not change this conversation's
       // controls. Reading them for each peer event floods the signed HTTP lane
       // (cas-c971). Events without a session still invalidate machine-wide state.
       if (selectedMachineId === machine.id && selectedSession &&
           (typeof event.session !== "string" || event.session === selectedSession)) {
-        void loadStatus(machine.id, selectedSession);
+        if (typeof event.session !== "string") refreshEpicSessions(machine.id);
         void loadLease(machine.id, selectedSession);
       }
     },
@@ -1113,7 +1199,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onSupervisorCommandSupport: (session, supported) => { supervisorCommandSession(machine.id, session).supported = supported; slashCommands?.palette.sync(); },
-    onSupervisorCommandReceipt: (session, receipt) => supervisorCommandSession(machine.id, session).receive(receipt),
+    onSupervisorCommandReceipt: (session, receipt) => {
+      const commands = supervisorCommandSession(machine.id, session);
+      const requested = commands.receipts.get(receipt.client_ref)?.command === "mcp";
+      commands.receive(receipt);
+      if (requested && receipt.command === "mcp" && receipt.phase === "observed") void connections.get(machine.id)?.refreshSessions();
+    },
     onOperatorReply: (session, reply, frameFence) => {
       // A notice belongs only to attention, including its durable resolution.
       if (isOperatorNotice(reply)) { void applyOperatorNotice(machine, session, reply, frameFence); return; }
@@ -1123,12 +1214,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       scheduleReceiptCheck(sessionKey(machine.id, session));
       scheduleReplyPresentation();
     },
-    onConversationHistoryRequested: (session) => {
+    onConversationHistoryRequested: (session, before, requestId) => {
       const cursor = conversationHistoryPage(sessionKey(machine.id, session));
-      if (cursor.loaded) return;
-      // The first page, not an earlier one: the thread shows its own loading
-      // line, and the "Load earlier" control stays out of it.
-      cursor.requested = true;
+      cursor.request(requestId, before);
+      updateConversationViews();
+    },
+    onConversationHistoryFailed: (session, detail, before, requestId) => {
+      const cursor = conversationHistoryPage(sessionKey(machine.id, session));
+      cursor.fail(requestId, detail, before);
       updateConversationViews();
     },
     onConversationHistoryUnavailable: (session) => {
@@ -1144,8 +1237,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
       // Only "Load earlier" sets loading; the first page is not a look back.
-      if (cursor.loading) countUsage("history.older");
-      applyHistoryCursor(cursor, page);
+      if (cursor.receive(page)) countUsage("history.older");
       const history = conversationHistory(key, session);
       if (page.open_attention !== undefined) {
         const through = Math.max(0, ...page.messages.map(row => row.notification_id), ...page.replies.map(row => row.notification_id), ...page.open_attention.map(row => row.notification_id));
@@ -1327,6 +1419,23 @@ function openAccounts(): void {
     toast("Could not open Accounts. Try again or reload Commander.");
   });
 }
+
+let qualitySheet: Promise<import("./quality-panel").QualitySheet> | undefined;
+/** The selected conversation's project, release over release (cas-3dd7). */
+function openQuality(): void {
+  const machineId = selectedMachineId, session = selectedSession;
+  if (!machineId || !session) return;
+  qualitySheet ??= import("./quality-panel").then(({ QualitySheet }) => new QualitySheet({
+    load: () => launchConnection(qualityTarget!.machineId).quality(qualityTarget!.session),
+    returnFocus: () => document.querySelector<HTMLButtonElement>("#command-palette-toggle")?.focus(),
+  }));
+  qualityTarget = { machineId, session };
+  void qualitySheet.then(sheet => sheet.open(conversationLabel(machineId, session))).catch(() => {
+    qualitySheet = undefined;
+    toast("Could not open Quality. Try again or reload Commander.");
+  });
+}
+let qualityTarget: { machineId: string; session: string } | undefined;
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
   return ensureMachineConnection(machine, connections, createConnection);
@@ -1927,6 +2036,8 @@ async function attachSelectedSession(machineId: string, session: string): Promis
   render();
   if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return;
   renderTerminalConnecting(machineId, session);
+  // The project's peer sessions feed Live epics beside this conversation.
+  for (const id of machines.keys()) refreshEpicSessions(id, true);
   await Promise.all([loadStatus(machineId, session), loadLease(machineId, session)]);
   // cas-4646: a newer tap has moved on while these loaded; this open is stale
   // and must not attach over the conversation now showing.
@@ -2195,6 +2306,45 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
 }
 
 const statusRefresh = new StatusRefresh();
+// One in-flight status read plus one trailing invalidation per session. A peer
+// event burst must not recreate the old unbounded signed HTTP fan-out.
+const epicStatusReads = new Map<string, Promise<void>>();
+const epicStatusAgain = new Set<string>();
+/** The selected conversation's project key, as the conversation list groups it. */
+function selectedProjectKey(): string | undefined {
+  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
+  return session && selectedMachineId ? epicProjectKey(selectedMachineId, session) : undefined;
+}
+function epicProjectKey(machineId: string, session: HubSession): string {
+  return sessionProjectKey({ project: session.project, projectDir: session.project_dir, key: sessionKey(machineId, session.name) });
+}
+/** Running sessions of the selected project on every machine: Live epics' only sources. */
+function epicSessions(): { machineId: string; session: HubSession }[] {
+  const running = new Map([...sessions].map(([machineId, roster]) => [machineId, roster.filter(item => sessionRunning(item) && !item.dormant)] as const));
+  return projectSessions(running, selectedProjectKey(), epicProjectKey);
+}
+function refreshEpicSessions(machineId: string, peersOnly = false): void {
+  for (const { session } of epicSessions().filter(item => item.machineId === machineId)) {
+    if (peersOnly && machineId === selectedMachineId && session.name === selectedSession) continue;
+    if (!session.unreachable) void loadStatus(machineId, session.name);
+  }
+}
+
+/** cas-da546: every project card's status line (train, blocked) reads its
+ * running sessions' status. Catalog ticks refresh it at most once a minute a
+ * session; the selected project keeps its own event-driven reads. */
+const CARD_STATUS_MS = 60_000;
+const cardStatusAt = new Map<string, number>();
+function refreshCardStatuses(machineId: string, items: readonly HubSession[]): void {
+  const now = Date.now();
+  for (const item of items) {
+    if (!sessionRunning(item) || item.dormant || !sessionReachable(item)) continue;
+    const key = sessionKey(machineId, item.name);
+    if (now - (cardStatusAt.get(key) ?? -Infinity) < CARD_STATUS_MS) continue;
+    cardStatusAt.set(key, now);
+    void loadStatus(machineId, item.name);
+  }
+}
 
 async function loadStatus(machineId: string, session: string): Promise<void> {
   const connection = connections.get(machineId);
@@ -2202,13 +2352,18 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
   const key = sessionKey(machineId, session);
   if (!connection || !machine) { if (statusPending.delete(key)) render(); return; }
   if (!statuses.has(key)) statusPending.add(key);
-  await statusRefresh.request(key, () => connection.status(session), (status) => {
+  if (epicStatusReads.has(key)) {
+    epicStatusAgain.add(key);
+    return epicStatusReads.get(key);
+  }
+  const read = statusRefresh.request(key, () => connection.status(session), (status) => {
     // cas-0546: a task waiting to merge, or blocked, is progress, not
     // something waiting on the operator. Tasks & progress shows its state;
     // only the supervisor's own asks and blockers wait on the operator.
     statusFailures.delete(key);
     statuses.set(sessionKey(machineId, session), status);
     statusReceivedAt.set(key, performance.now());
+    statusReceivedWall.set(key, Date.now());
     statusPending.delete(key);
     render();
   }, () => {
@@ -2217,7 +2372,12 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     statusFailures.add(key);
     statusPending.delete(key);
     render();
+  }).finally(() => {
+    epicStatusReads.delete(key);
+    if (epicStatusAgain.delete(key)) void loadStatus(machineId, session);
   });
+  epicStatusReads.set(key, read);
+  await read;
 }
 
 async function loadLease(machineId: string, session: string): Promise<void> {
@@ -2593,6 +2753,7 @@ function syncWorkerTimeline(): void {
   const unavailable = workPicture.timelineSupported(machineId, session) ? undefined : "This machine's Cassy does not serve worker timelines yet. Update Cassy there, or read the worker's terminal on the machine.";
   renderWorkerTimeline(dialog, {
     worker,
+    stateLabel: workerState(workerProgress([worker], agent ? [agent] : [], tasks)[0]!, tasks),
     ...(agent?.status ? { status: agent.status } : {}),
     ...(task ? { task } : {}),
     ...(task && tasks.find((candidate) => candidate.id === task)?.title ? { taskTitle: String(tasks.find((candidate) => candidate.id === task)!.title) } : {}),
@@ -4489,6 +4650,9 @@ function render(captureDraft = true, stoppedSelection = false): void {
   const attentionFocus = preservedAttention?.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
   preservedAttention?.remove();
   const currentGrid = document.querySelector<HTMLElement>("#conversation-stage");
+  const priorHeaderMenu = document.querySelector<HTMLElement>("#conversation-more-menu");
+  const keepHeaderMenu = Boolean(typeof priorHeaderMenu?.showPopover === "function" && selectedThreadKey
+    && currentGrid?.dataset.sessionKey === selectedThreadKey && priorHeaderMenu.matches(":popover-open"));
   const machineDialog = document.querySelector<HTMLDialogElement>("#paired-machines-dialog");
   const pairedDialogWasOpen = machineDialog?.open === true;
   if (pairedDialogWasOpen) machineDialog!.remove();
@@ -4522,6 +4686,7 @@ function render(captureDraft = true, stoppedSelection = false): void {
             <h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>
             ${launchAvailability() === "ready" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>New session</span><small>Start a supervisor on a project</small></button>' : ""}
             <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
+            ${selectedMachineId && selectedSession ? `<button type="button" class="palette-command" data-palette-action="quality"><span>Quality</span><small>${escapeHtml(conversationLabel(selectedMachineId, selectedSession))}, release over release</small></button>` : ""}
             ${launchAvailability() === "grant" ? '<button type="button" class="palette-command" data-palette-action="new-session" data-launch-grant="true"><span>New session</span><small>Asks this browser\'s permission first</small></button>' : ""}
             ${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info"><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>` : ""}
           </section>
@@ -4546,7 +4711,7 @@ function render(captureDraft = true, stoppedSelection = false): void {
   // Only what the conversation shell shows is built (cas-0546): the thread's
   // grid, the composer, the session's status and its own attention.
   const regions = selectedSession ? conversationRegions(preservedGrid, selectedThreadKey, supervisor) : {};
-  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, harness: selectedHubSession?.harness, model: selectedHubSession?.model, effort: selectedHubSession?.effort, ended: selectedHubSession?.ended, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
+  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, harness: selectedHubSession?.harness, model: selectedHubSession?.model, effort: selectedHubSession?.effort, ended: selectedHubSession?.ended, connectionLabel: selectedMachineId ? conversationHeaderLabel(selectedMachineId, selectedSession) : undefined, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
   if (preservedAttention) document.querySelector<HTMLElement>("#attention-panel")?.replaceWith(preservedAttention);
   // A toast raised before the shell changed (a conversation opening while
   // "connected" is up) follows the new layout rather than covering a heading.
@@ -4571,6 +4736,9 @@ function render(captureDraft = true, stoppedSelection = false): void {
     if (pairingFeedbackWasFocused) focusPairingFeedback(dialog);
   }
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
+  if (keepHeaderMenu && phoneLayout() && !contextSheetOpen()) {
+    document.getElementById("conversation-more")?.click();
+  }
   if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
   // markup until its region shows it (the phone Attention badge, cas-a5c6),
@@ -4838,15 +5006,14 @@ function renderConversationList(): void {
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
     const summary = sessionSummaries.get(key);
-    const merge = attention.find((item) => item.machineId === machine.id && item.session === session.name && !item.acknowledgedAt && item.kind === "awaiting_merge");
-    const needsYou = waiting > 0 || Boolean(merge);
+    const needsYou = waiting > 0;
     // A kept catalog can still carry yesterday's positive online bit.
     const machineState = connectionStates.get(machine.id);
     const machineOnline = machineState?.phase === "live" && session.machine_online !== false;
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: waiting > 0 ? "Waiting for your answer" : undefined, operatorQuestion: waiting > 0 ? waitingQuestion(history) : undefined, statusLine: projectStatusLine(statuses.get(key), [session.supervisor, ...((statuses.get(key)?.agents as FleetAgent[] | undefined) ?? []).filter(agent => agent.name === session.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))),  supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4862,7 +5029,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { reload: row => { void reloadCassy(row); }, machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, installed: machineInfo.get(machine.id)?.installed_version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
   renderStoppedMessageNotices(container);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
@@ -4878,17 +5045,19 @@ function renderConversationList(): void {
   }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
   if (state && selectedMachineId) {
+    const observedConnection = conversationConnection(selectedMachineId, selectedSession);
+    state.dataset.phase = observedConnection?.phase ?? "unknown";
+    state.dataset.degraded = String(observedConnection?.phase === "live" && observedConnection.degraded === true);
     const label = conversationHeaderLabel(selectedMachineId, selectedSession);
-    // The dot separates it from the codename on screen; the status reads just
-    // the state ("Live", not "· Live") (cas-17e3).
+    // The observed state is a pill beside the project title.
     // Journey F42: while the reconnect banner says what happened (in its own
     // live region), the header's one word is not a second announcement of
     // the same outage. It speaks again for the return to Live.
     state.setAttribute("aria-live", bannerStatesConnection(selectedMachineId, selectedSession) ? "off" : "polite");
     if (state.dataset.label !== label) {
       state.dataset.label = label;
-      const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
-      state.replaceChildren(separator, label);
+      state.textContent = label;
+      state.hidden = !label;
     }
   }
   // The state's width changes the room the machine · codename line has.
@@ -5029,6 +5198,10 @@ function syncConversationAttention(count: number): void {
     badge.setAttribute("aria-expanded", String(attentionSheetOpen && count > 0));
     const text = badge.querySelector(".conversation-attention-count");
     if (text && text.textContent !== view.text) text.textContent = view.text;
+    const more = document.querySelector<HTMLButtonElement>("#conversation-more");
+    const moreCount = more?.querySelector<HTMLElement>(".conversation-more-count");
+    if (moreCount) { moreCount.hidden = view.hidden; moreCount.textContent = view.text; }
+    more?.setAttribute("aria-label", view.hidden ? "More conversation actions" : `More conversation actions; ${view.label}`);
   }
   // Nothing left (the last item dismissed in the sheet) closes it with focus
   // back in the conversation; leaving the conversation, or the viewport
@@ -5169,7 +5342,7 @@ function closeContextSheet(): void {
   progressSheetSession = undefined;
   syncConversationContext();
   applyAttentionSheet();
-  document.querySelector<HTMLButtonElement>("#conversation-fleet")?.focus();
+  focusConversationAction(document, "conversation-fleet");
 }
 
 function closeAttentionSheet(): void {
@@ -5178,7 +5351,7 @@ function closeAttentionSheet(): void {
   applyAttentionSheet();
   const badge = document.querySelector<HTMLButtonElement>("#conversation-attention");
   badge?.setAttribute("aria-expanded", "false");
-  if (badge && !badge.hidden) badge.focus(); else landFocus([focusTargets.thread]);
+  if (badge && !badge.hidden) focusConversationAction(document, "conversation-attention"); else landFocus([focusTargets.thread]);
 }
 
 /**
@@ -5320,7 +5493,10 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   if (!machine || !selectedSession) return undefined;
   const rerender = (focus?: string) => { fleetFocusNext = focus; renderStatus(status); };
-  const epics = ((status.epics as any[]) ?? []).map((epic) => String(epic?.id ?? epic)).filter(Boolean);
+  const epics = (status.epics as ReleaseEpic[] | undefined) ?? [];
+  const session = sessions.get(machine.id)?.find(session => session.name === selectedSession);
+  const agents = (status.agents as FleetAgent[] | undefined) ?? [];
+  const supervisors = [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name));
   const currentEpic = typeof status.focused_epic === "string" ? status.focused_epic : (((status.epics as any[]) ?? []).find((epic) => epic?.focused)?.id ?? null);
   const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])] as FleetTask[];
   return {
@@ -5332,6 +5508,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     agents: ((status.agents as any[]) ?? []) as FleetAgent[],
     tasks,
     epics,
+    supervisors,
     currentEpic,
     asked: fleetAskedFor(selectedMachineId, selectedSession),
     relative: (at) => { const label = relativeTimestamp(at); return label === "now" ? "just now" : `${label} ago`; },
@@ -5479,11 +5656,14 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
     roster: session?.workers, supervisor: session?.supervisor, agents, tasks,
     epics: (status?.epics as ReleaseEpic[]) ?? [], focused: typeof status?.focused_epic === "string" ? status.focused_epic : null,
     supervisors: [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name)),
-    asks: key ? waitingOnOperator(conversationHistories.get(key)) : 0,
-    askLabel: key ? conversationHistories.get(key)?.waiting()[0]?.summary : undefined,
+    actions: operatorActions(key ? conversationHistories.get(key) : undefined),
     stale: statusFailures.has(key!) ? "Staffing update failed. Showing the last state received." : stale,
     unavailable: session?.ended ? "This session has ended." : !status ? statusFailures.has(key!) ? "Couldn’t load staffing." : "Waiting for project status…" : undefined,
-  }, () => select(false), openProgressSheet);
+  }, requestId => {
+    select(false);
+    const history = key ? conversationHistories.get(key) : undefined;
+    for (const thread of document.querySelectorAll(".conversation-reading.thread")) thread.dispatchEvent(new CustomEvent("conversation-reveal-turn", { detail: { history, notificationId: requestId } }));
+  });
   if (statusFailures.has(key!)) {
     const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Retry staffing";
     retry.onclick = () => { if (selectedMachineId && selectedSession) void loadStatus(selectedMachineId, selectedSession); };
@@ -5492,12 +5672,53 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
   teamClock = window.setInterval(() => { if (panel.isConnected && !panel.hidden) teamModule?.updateTeamElapsed(panel); }, 30_000);
 }
 
+/** Live epics: the selected project's epics from its sessions on every machine. */
+function liveEpicsModel(train: string | undefined) {
+  const project = selectedProjectKey();
+  const sources: EpicSessionProgress[] = [];
+  const pending = new Set<string>();
+  const failed = new Map<string, number | undefined>();
+  const labels = new Set<string>();
+  for (const { machineId, session } of epicSessions()) {
+    const machine = machines.get(machineId);
+    if (!machine) continue;
+    labels.add(machine.label);
+    const key = sessionKey(machineId, session.name);
+    const status = statuses.get(key);
+    const stale = statusFailures.has(key) || session.stale === true || session.unreachable === true
+      || connectionStates.get(machineId)?.phase !== "live" || connectionStates.get(machineId)?.degraded === true;
+    // The selected conversation's own state is the rail's; only peers get notices.
+    const peer = machineId !== selectedMachineId;
+    if (peer && !status && statusPending.has(key)) pending.add(machine.label);
+    if (peer && stale) failed.set(machine.label, Math.max(failed.get(machine.label) ?? 0, statusReceivedWall.get(key) ?? 0) || undefined);
+    if (!status) continue;
+    sources.push({ project: epicProjectKey(machineId, session),
+      machine: machineId, machineLabel: machine.label, session: session.name, supervisor: session.supervisor,
+      roster: session.workers, agents: (status.agents as FleetAgent[]) ?? [],
+      tasks: [...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])],
+      authoritative: machineId === selectedMachineId && session.name === selectedSession,
+      release_scope: status.release_scope as ReconciledReleaseScope | undefined,
+      epics: (status.epics as ReleaseEpic[]) ?? [], received: statusReceivedAt.get(key) ?? 0, stale,
+    });
+  }
+  const reconciled = releaseSnapshots(sources);
+  for (const source of reconciled) if (source.stale && source.machine !== selectedMachineId) failed.set(source.machineLabel, statusReceivedWall.get(sessionKey(source.machine, source.session)));
+  const { live, quiet } = project ? projectEpics(reconciled, project, train) : { live: [], quiet: 0 };
+  return { project: project ?? "", live, quiet, multiMachine: labels.size > 1, pending: [...pending], failed: [...failed].map(([label, at]) => ({ label, at })) };
+}
+
 function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector<HTMLElement>("#status-view");
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
-  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.ended, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, allProgressTasks.has(`${selectedMachineId}:${selectedSession}`), fleetOpsSignature()]);
+  const statusEpics = ((status?.epics as ReleaseEpic[]) ?? []).filter(epic => typeof epic?.id === "string");
+  const statusAgents = (status?.agents as FleetAgent[]) ?? [];
+  const statusTasks = [...new Map([...((status?.tasks_in_progress as ProgressTask[]) ?? []), ...((status?.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
+  const train = status ? releaseProgress(statusEpics, typeof status.focused_epic === "string" ? status.focused_epic : null, statusTasks,
+    [session?.supervisor, ...statusAgents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))) : undefined;
+  const liveEpics = liveEpicsModel(train?.id);
+  const signature = JSON.stringify([liveEpics, phoneLayout(), selectedMachineId, selectedSession, session?.ended, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, allProgressTasks.has(`${selectedMachineId}:${selectedSession}`), fleetOpsSignature(), selectedMachineId ? machineInfo.get(selectedMachineId)?.previews ?? null : null]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.
@@ -5546,7 +5767,7 @@ function renderStatus(status?: Record<string, unknown>): void {
       const fallback = progressSheetOpen() || !phoneLayout() ? container.querySelector<HTMLElement>('[data-fleet-focus="header:add"]') : document.querySelector<HTMLElement>("#conversation-fleet");
       fallback?.focus(); return;
     }
-    if (phoneLayout() && !progressSheetOpen()) { document.querySelector<HTMLElement>("#conversation-fleet")?.focus(); return; }
+    if (phoneLayout() && !progressSheetOpen()) { focusConversationAction(document, "conversation-fleet"); return; }
     // Its row is gone: the next row's ⋯, else the list itself.
     const at = priorTriggers.indexOf(`${want.slice(0, want.lastIndexOf(":"))}:trigger`);
     if (at < 0) return;
@@ -5592,14 +5813,26 @@ function renderStatus(status?: Record<string, unknown>): void {
     row.innerHTML = `<span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description">${escapeHtml(summary.description)}</small>`;
     container.append(row);
   }
-  const agents = ((status.agents as FleetAgent[]) ?? []);
-  const tasks = [...new Map([...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
-  const epics = ((status.epics as ReleaseEpic[]) ?? []).filter(epic => typeof epic?.id === "string");
+  const agents = statusAgents;
+  const tasks = statusTasks;
+  const epics = statusEpics;
   const focusedEpic = typeof status.focused_epic === "string" ? status.focused_epic : null;
   const supervisorNames = [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name));
-  const release = releaseProgress(epics, focusedEpic, tasks, supervisorNames);
-  container.prepend(releaseHeader(document, release));
+  const release = train;
   const workers = workerProgress(session?.workers, agents, tasks, session?.supervisor);
+  // Release train, then Live epics, then Workers and the task groups.
+  const trainTasks = release ? tasks.filter(task => task.epic_id === release.id && task.delivery_state !== "merged") : [];
+  const trainState = (label: string) => trainTasks.filter(task => statusLabel(task.status) === label).length;
+  // The header's split comes from the same task rows the sections use.
+  const trainCounts = release ? displayCounts(release, tasks.filter(task => task.epic_id === release.id)) : undefined;
+  const lead: HTMLElement[] = [releaseHeader(document, release && trainCounts ? { ...release, counts: trainCounts } : release, release ? { building: trainState("In progress"), parked: trainState("Awaiting merge"), blocked: trainState("Blocked"),
+    workers: workers.filter(worker => trainTasks.some(task => task.id === worker.currentTask)).length } : undefined)];
+  const ops = fleetOpsContext(status);
+  if (ops && release) lead[0]!.append(trainControls(document, ops, release));
+  const epicSection = liveEpicsSection(document, { ...liveEpics, explorerHref: explorerBase ? explorerUrl(explorerBase, session?.cloud_project_id) : null,
+    retry: () => { for (const id of machines.keys()) refreshEpicSessions(id, true); } });
+  if (epicSection) lead.push(epicSection);
+  container.prepend(...lead);
   const identifier = (value: unknown): HTMLSpanElement => {
     const span = document.createElement("span");
     span.className = "status-identifier";
@@ -5622,7 +5855,6 @@ function renderStatus(status?: Record<string, unknown>): void {
   // activity reads as prose, instead of one grey mono line per agent where the
   // eye had to find the dots to tell name from state from task.
   let revealPhoneNotice = false;
-  const ops = fleetOpsContext(status);
   if (ops) {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();
@@ -5654,22 +5886,15 @@ function renderStatus(status?: Record<string, unknown>): void {
     const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
     const avatar = document.createElement("template");
     avatar.innerHTML = providerAvatarMarkup({ harness: metadata?.harness, fallback: avatarLetters(worker.name), size: "lane" });
-    line.append(avatar.content, identifier(worker.name), chip(workerState(worker, tasks)));
+    const name = identifier(worker.name);
+    line.append(avatar.content, name, chip(workerState(worker, tasks)));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
       const machineId = selectedMachineId, sessionName = selectedSession;
-      const open = document.createElement("button");
-      open.type = "button"; open.className = "status-timeline"; open.dataset.worker = worker.name;
-      open.setAttribute("aria-haspopup", "dialog");
-      open.setAttribute("aria-label", `${worker.name} timeline`);
-      open.textContent = "Activity";
-      open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
-      line.append(open);
+      name.replaceWith(workerTimelineButton(document, worker.name, () => openWorkerTimeline(machineId, sessionName, worker.name)));
     }
-    const work = document.createElement("p"); work.className = "status-activity";
-    if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");
-    work.append(document.createTextNode(worker.work)); row.append(work);
+    row.append(workerTaskLine(document, worker));
     const activity = document.createElement("small"); activity.className = "status-last-activity";
     const at = metadata?.latest_activity?.created_at_rfc3339 ? Date.parse(metadata.latest_activity.created_at_rfc3339) : NaN;
     activity.textContent = Number.isFinite(at) ? `Last activity ${new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : "Last activity not reported";
@@ -5695,6 +5920,12 @@ function renderStatus(status?: Record<string, unknown>): void {
       line.append(identifier(task.id), taskChip);
       const title = document.createElement("p"); title.className = "status-task-title"; title.textContent = String(task.title ?? "");
       row.append(line, title);
+      const previewUrl = deliveryPreview(task, selectedMachineId ? machineInfo.get(selectedMachineId)?.previews : undefined, Date.now(), location.origin);
+      if (previewUrl) {
+        const link = document.createElement("a"); link.className = "status-preview-link"; link.href = previewUrl;
+        link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Preview this delivery";
+        row.append(link);
+      }
       const controls = task.delivery_state === "merged" ? undefined : ops ? taskControls(document, ops, task) : undefined;
       if (controls) row.append(controls);
       container.append(row);
@@ -5777,10 +6008,14 @@ function bindEvents(): void {
     render();
     queueMicrotask(() => returnToConversationRow(opened));
   };
+  const moreMenu = document.querySelector<HTMLElement>("#conversation-more-menu");
+  moreMenu?.addEventListener("click", (event) => {
+    if ((event.target as Element).closest("button") && moreMenu.matches(":popover-open")) moreMenu.hidePopover();
+  }, { capture: true });
   const commands = document.querySelector<HTMLButtonElement>("#conversation-commands");
   if (commands) commands.onclick = () => {
     const input = document.querySelector<HTMLTextAreaElement>("#message-text");
-    if (input) { bindSlashCommands(input); slashCommands?.palette.show(); }
+    if (input) { bindSlashCommands(input); slashCommands?.palette.show(commands); }
   };
   const interrupt = document.querySelector<HTMLButtonElement>("#conversation-interrupt");
   if (interrupt) interrupt.onclick = () => { void interruptSupervisor(); };
@@ -5978,6 +6213,8 @@ function bindEvents(): void {
   }
   const paletteDormant = palette.querySelector<HTMLButtonElement>("[data-palette-action='dormant']");
   if (paletteDormant) paletteDormant.onclick = () => { closePalette(); setDormantRevealed(!revealDormant); };
+  const paletteQuality = palette.querySelector<HTMLButtonElement>("[data-palette-action='quality']");
+  if (paletteQuality) paletteQuality.onclick = () => { closePalette(); openQuality(); };
   const paletteLaunch = palette.querySelector<HTMLButtonElement>("[data-palette-action='new-session']");
   if (paletteLaunch) paletteLaunch.onclick = () => { closePalette(); launchSheet.open(); };
   const accountsToggle = document.querySelector<HTMLButtonElement>("#accounts-toggle");

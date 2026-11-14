@@ -225,14 +225,24 @@ pub(crate) fn claim_with(
         .and_then(|store| store.get(agent_id).ok())
         .and_then(|agent| agent.factory_session)
         .filter(|session| !session.is_empty());
+    let claimed_task = |other_id: &str| {
+        let ledger = load(cas_root, other_id);
+        let task_id = ledger.leases.get(&id)?.task_id.as_deref()?;
+        crate::store::open_task_store_local(cas_root).ok()?.get(task_id).ok()
+    };
     let local_holder = |other_id: &str| -> Option<FileHolder> {
         let agent = agents.as_ref()?.get(other_id).ok()?;
         // The file ledger identifies the task this particular edit belongs to.
         let other_ledger = load(cas_root, other_id);
-        let worker = match other_ledger.leases.get(&id).and_then(|entry| entry.task_id.as_deref()) {
+        let mut worker = match other_ledger.leases.get(&id).and_then(|entry| entry.task_id.as_deref()) {
             Some(task) => format!("{}, task {task}", agent.name),
             None => agent.name,
         };
+        if let Some(task) = claimed_task(other_id)
+            && let Some(branch) = task.deliverables.parked_branch.as_ref().or(task.branch.as_ref())
+        {
+            worker.push_str(&format!(", branch {branch}"));
+        }
         let other_session = agent.factory_session.as_deref().filter(|s| !s.is_empty());
         Some(match (session.as_deref(), other_session) {
             (Some(ours), Some(theirs)) if ours == theirs => FileHolder::SameSession(worker),
@@ -245,6 +255,24 @@ pub(crate) fn claim_with(
     let is_local = |id: &str| {
         id != agent_id && agents.as_ref().is_some_and(|store| store.get(id).is_ok())
     };
+    // A reset or queued successor changes the harness/task, not this worker.
+    let same_owner = |other: &str| {
+        agents.as_ref().and_then(|store| store.get(other).ok()).map(|agent| agent.name)
+                .or_else(|| super::peer_claims::retired_local_agents(cas_root).get(other)
+                    .map(|agent| agent.name.clone()))
+                .is_some_and(|name| name.eq_ignore_ascii_case(agent_name))
+    };
+    let retired_claim = |other: &str| {
+        let retired_agent = agents.as_ref().is_some_and(|store| {
+            matches!(store.get(other), Err(cas_store::StoreError::NotFound(_)))
+        }) && super::peer_claims::retired_local_agents(cas_root).contains_key(other);
+        retired_agent || claimed_task(other).is_some_and(|task| {
+            task.is_terminal()
+                || (task.status == cas_types::TaskStatus::AwaitingMerge
+                    && (task.deliverables.green_merge_commit.is_some()
+                        || task.deliverables.delivery_pr_merged_at.is_some()))
+        })
+    };
     let answer = claims.acquire_within(
         &id,
         ClaimKind::File,
@@ -256,6 +284,10 @@ pub(crate) fn claim_with(
     );
     let (lease, record) = match answer {
         Acquire::Claimed => (FileLease::Mine, Some(true)),
+        Acquire::LocalHolder(other) if same_owner(&other) => (FileLease::Mine, Some(true)),
+        // This is only an advisory filter: no stale peer's Cloud lock is
+        // released or adopted without the existing claim protocol.
+        Acquire::LocalHolder(other) if retired_claim(&other) => (FileLease::Unchecked, Some(false)),
         Acquire::LocalHolder(other) => (
             FileLease::HeldBy(local_holder(&other).unwrap_or(FileHolder::UnknownSession(other))),
             None,
@@ -295,7 +327,23 @@ pub(crate) fn claim_with(
     lease
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollisionAdvice {
+    SeparateEntries,
+    Coordinate,
+}
+
+fn collision_advice(relative_path: &str) -> CollisionAdvice {
+    match relative_path {
+        "docs/PRODUCT_OVERVIEW.md" | ".claude/CODEMAP.md" | "docs/qa/journeys.yaml" => {
+            CollisionAdvice::SeparateEntries
+        }
+        _ => CollisionAdvice::Coordinate,
+    }
+}
+
 /// The advisory a worker sees before editing a file another agent holds.
+// gate[N-96 notice]: Shared-file lease advisory
 pub fn collision_note(relative_path: &str, holder: &FileHolder) -> String {
     let (who, handoff) = match holder {
         FileHolder::SameSession(worker) => (
@@ -308,6 +356,13 @@ pub fn collision_note(relative_path: &str, holder: &FileHolder) -> String {
         ),
         FileHolder::UnknownSession(worker) => (worker.clone(), ""),
     };
+    if collision_advice(relative_path) == CollisionAdvice::SeparateEntries {
+        return format!(
+            "⚠️ SHARED FILE: {relative_path} is being edited by {who}. Separate entries need no coordination. \
+             Rebase onto the updated target if the other delivery lands first. If both edits touch the same entry, \
+             coordinate through your supervisor{handoff}."
+        );
+    }
     format!(
         "⚠️ SHARED FILE: {relative_path} is being edited by {who}. Before you change it, \
          coordinate through your supervisor (`coordination action=message target=supervisor summary=\"shared file {relative_path}\" message=\"<what you need to change>\"`){handoff}, \
@@ -354,6 +409,14 @@ pub fn notify_worker_of_holder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_entry_documents_use_advice_without_required_coordination() {
+        for path in ["docs/PRODUCT_OVERVIEW.md", ".claude/CODEMAP.md", "docs/qa/journeys.yaml"] {
+            assert_eq!(collision_advice(path), CollisionAdvice::SeparateEntries, "{path}");
+        }
+        assert_eq!(collision_advice("src/lib.rs"), CollisionAdvice::Coordinate);
+    }
 
     /// cas-a30e9: a Codex worker cannot be given PreToolUse context, so it is
     /// messaged who holds a contended file, once per file per window.

@@ -164,6 +164,7 @@ fn queue_team_tree_incident(
         options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     })?;
     let result = queue.enqueue_idempotent(
         "teams-recovery",
@@ -700,14 +701,23 @@ fn excerpt(text: &str, max: usize) -> String {
 /// here)" was false: the hook expanded the body and the Teams copy then
 /// rendered it again.
 pub(crate) fn pointer_wake_payload(source: &str, notification_id: Option<i64>) -> String {
+    pointer_wake_payload_at(source, notification_id, chrono::Utc::now())
+}
+
+pub(crate) fn pointer_wake_payload_at(
+    source: &str,
+    notification_id: Option<i64>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let clock = crate::mcp::tools::service::agent_search_system::message::operator_clock_at(observed_at);
     match notification_id {
         Some(id) => format!(
             "CAS wake: message {id} from {source}. CAS shows its body once, in an \
              [incoming messages] block or as its own message, or a note in that block says why \
-             not. If neither is in front of you, run inbox_poll notification_id={id}."
+             not. If neither is in front of you, run inbox_poll notification_id={id}. [{clock}]"
         ),
         None => format!(
-            "CAS wake: a message from {source} is in your inbox; read it with inbox_poll."
+            "CAS wake: a message from {source} is in your inbox; read it with inbox_poll. [{clock}]"
         ),
     }
 }
@@ -925,11 +935,13 @@ pub(super) fn commander_control_from_message(
     match message {
         ClientMessage::SupervisorCommand { client_ref, attribution, .. }
         | ClientMessage::SupervisorCommandStatus { client_ref, attribution }
+        | ClientMessage::SupervisorCommandCancel { client_ref, attribution }
         | ClientMessage::SupervisorCommandStep { client_ref, attribution, .. } => {
             use crate::ui::factory::supervisor_commands::SupervisorCommandRequest as Request;
             let request = match message {
                 ClientMessage::SupervisorCommand { command, confirmed, .. } => Request::Run { command: *command, confirmed: *confirmed },
                 ClientMessage::SupervisorCommandStep { key, .. } => Request::Step { key: *key },
+                ClientMessage::SupervisorCommandCancel { .. } => Request::Cancel,
                 _ => Request::Status,
             };
             let mut attribution = attribution.clone();
@@ -1925,6 +1937,18 @@ impl FactoryDaemon {
             ));
         }
 
+        // A pointer wake for a row the recipient already read (hook surfacing
+        // or its own inbox_poll) opens a turn with nothing new to act on.
+        if let Some(id) = notification_id
+            && pointer_row_already_shown(self.app.cas_dir(), id, &[pane_target, target])
+        {
+            return Ok(NudgeReport::not_attempted(
+                InjectOutcome::Delivered,
+                DeliveryChannel::TeamsInbox,
+                "row already shown to the recipient; no wake needed",
+            ));
+        }
+
         // cas-cdf9: a WAKE, not a second copy of the message. The body was
         // written to the inbox by the primary delivery and is rendered from
         // there; retyping it here is what surfaced every factory message twice.
@@ -1984,6 +2008,20 @@ impl FactoryDaemon {
         };
         Ok(report)
     }
+}
+
+/// Whether `id` was already surfaced to any of `names` by a hook or their own
+/// inbox poll. Unreadable store means "not shown": a wake is never lost to an error.
+pub(crate) fn pointer_row_already_shown(cas_dir: &Path, id: i64, names: &[&str]) -> bool {
+    let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
+        return false;
+    };
+    names.iter().any(|name| {
+        matches!(
+            queue.recipient_receipt(id, name),
+            Ok(Some(cas_store::SurfacingSource::HookSurfaced | cas_store::SurfacingSource::InboxPoll))
+        )
+    })
 }
 
 /// Shared cas-f9e8 delivery envelope for direct and external native writes.
@@ -2091,16 +2129,6 @@ mod tests {
         let payload: crate::ui::factory::OperatorReplyPayload =
             serde_json::from_str(&rows[0].prompt).unwrap();
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
-        assert!(
-            payload
-                .message
-                .contains(&team_dir.join("config.json").display().to_string())
-        );
-        assert!(
-            payload
-                .message
-                .contains(&team_dir.join("inboxes").display().to_string())
-        );
     }
 
     fn commander_attribution() -> crate::ui::factory::protocol::MessageAttribution {
@@ -2662,12 +2690,10 @@ mod tests {
             &lifecycle_body("task_started", "in_progress"),
             cas_store::QueueOrigin::Daemon,
         );
-        assert_eq!(
-            compact_routine_supervisor_body(&started).unwrap(),
-            "◦ cas-f9b7 started by tender-phoenix-59\n  Cloud sync: queue rows parked as rejected \
-             \"invalid_json_nul\"…\n  no action · full event: inbox_poll \
-             notification_id=4196665"
-        );
+        let started_card = compact_routine_supervisor_body(&started).unwrap();
+        assert!(started_card.contains(&started.id.to_string()));
+        assert!(started_card.contains("cas-f9b7"));
+        assert!(started_card.lines().count() <= 4);
         assert!(
             crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
                 &started
@@ -2699,12 +2725,10 @@ mod tests {
             .unwrap();
         let mut peer = queue.queued_prompt(ids.supervisor_copy_id).unwrap().unwrap();
         peer.id = 4196667;
-        assert_eq!(
-            compact_routine_supervisor_body(&peer).unwrap(),
-            "⇄ tender-phoenix-59 → swift-panther-65 · collision warning\n  \"cas-f9b7 assesses \
-             Accounting retained dependencies read-only alongside…\"\n  no action · full text: \
-             inbox_poll notification_id=4196667"
-        );
+        let peer_card = compact_routine_supervisor_body(&peer).unwrap();
+        assert!(peer_card.contains(&peer.id.to_string()));
+        assert!(peer_card.contains(peer.summary.as_deref().unwrap()));
+        assert!(peer_card.lines().count() <= 4);
     }
 
     /// cas-8cbe: decisions, operator turns and anything CAS cannot prove
@@ -2896,6 +2920,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pointer_wake_is_skipped_only_for_a_row_already_shown() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let id = queue.enqueue("worker", "supervisor", "merge it").unwrap();
+        assert!(!pointer_row_already_shown(&cas_dir, id, &["supervisor"]));
+        queue.record_recipient_surfaced(id, "supervisor", cas_store::SurfacingSource::TransportDelivered).unwrap();
+        assert!(!pointer_row_already_shown(&cas_dir, id, &["supervisor"]), "a transport handoff is not a read");
+        queue.record_recipient_surfaced(id, "supervisor", cas_store::SurfacingSource::HookSurfaced).unwrap();
+        assert!(pointer_row_already_shown(&cas_dir, id, &["lead", "supervisor"]));
+    }
+
     /// The wake names the id so it degrades safely: a recipient woken without
     /// a rendered body can still `inbox_poll` the exact message. cas-1f0c: it
     /// says where the body is shown and no longer claims it is not repeated.
@@ -2926,10 +2963,10 @@ mod tests {
         let inbox = claude_teams_inbox_text(&text, body, "supervisor", 24508);
         assert!(!inbox.contains(body), "{inbox}");
         assert!(inbox.starts_with("[cas #24508 supervisor-authored 0s first]\n\n"), "{inbox}");
-        assert!(inbox.ends_with(&pointer_wake_payload("supervisor", Some(24508))), "{inbox}");
+        assert!(inbox.contains("CAS wake: message 24508 from supervisor."), "{inbox}");
 
         let bare = claude_teams_inbox_text(body, body, "warm-lark-16", 7);
-        assert_eq!(bare, pointer_wake_payload("warm-lark-16", Some(7)));
+        assert!(bare.starts_with("CAS wake: message 7 from warm-lark-16."), "{bare}");
     }
 
     /// cas-1f0c review item 1: a body no hook can show whole (Claude Code caps

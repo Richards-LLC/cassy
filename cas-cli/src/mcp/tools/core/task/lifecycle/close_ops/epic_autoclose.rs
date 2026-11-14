@@ -179,6 +179,61 @@ pub(crate) fn children_prove_delivery(children: &[cas_types::Task]) -> bool {
             .all(|child| !super::has_recorded_code_delivery(child) || anchored(child))
 }
 
+/// Select a published proof commit for an epic whose origin branch is gone.
+/// A local remainder is stale only if origin's default contains it. The
+/// chosen commit must carry every recorded child anchor, even when the
+/// caller supplies an older receipt for the review boundary.
+pub(super) fn published_retired_epic_target(
+    repo: &Path,
+    epic_branch: &str,
+    receipt: Option<&str>,
+    children: &[cas_types::Task],
+) -> Option<(String, String)> {
+    use super::{fetch_parent_branch_best_effort, git_commit_is_ancestor, git_stdout_lines,
+        resolve_branch_sha, resolve_close_gate_default_branch, resolve_task_commit_receipt_sha};
+
+    if !children_prove_delivery(children) {
+        return None;
+    }
+    let default = resolve_close_gate_default_branch(repo).ok()?;
+    let remote_epic = format!("refs/remotes/origin/{epic_branch}");
+    if default == epic_branch || resolves(repo, &remote_epic) {
+        return None;
+    }
+    fetch_parent_branch_best_effort(repo, epic_branch);
+    if resolves(repo, &remote_epic) {
+        return None;
+    }
+    fetch_parent_branch_best_effort(repo, &default);
+    let default_tip = resolve_branch_sha(repo, &format!("refs/remotes/origin/{default}^{{commit}}"))?;
+    if let Some(local_tip) = resolve_branch_sha(repo, &format!("refs/heads/{epic_branch}^{{commit}}"))
+        && !git_commit_is_ancestor(repo, &local_tip, &default_tip)
+    {
+        return None;
+    }
+    let proof = match receipt {
+        Some(receipt) => resolve_task_commit_receipt_sha(repo, receipt).ok()?,
+        None => default_tip.clone(),
+    };
+    if !git_commit_is_ancestor(repo, &proof, &default_tip) {
+        return None;
+    }
+    let exclude = format!("^{proof}");
+    let mut args = vec!["rev-list", "--max-count=1", &exclude];
+    for child in children {
+        for anchor in child.deliverables.factory_branch_anchor.iter()
+            .chain(&child.deliverables.historical_factory_branch_anchors)
+        {
+            if !matches!(anchor.len(), 40 | 64) || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return None;
+            }
+            args.push(anchor);
+        }
+    }
+    args.push("--");
+    git_stdout_lines(repo, &args).ok()?.is_empty().then_some((default, proof))
+}
+
 /// `children` with every work target naming the gone `epic_branch` pointed
 /// at `default_branch`, so each child's delivery is proven there.
 pub(crate) fn retarget_children(

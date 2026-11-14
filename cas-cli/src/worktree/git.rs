@@ -17,6 +17,7 @@ mod rescue;
 pub use branch_ops::{TargetPushOutcome, TargetReconcile};
 pub use rescue::RescuedWork;
 
+pub(crate) const MANAGED_SYNC_SUBJECT: &str = concat!("chore(cas): sync managed files to v", env!("CARGO_PKG_VERSION"));
 pub(crate) const MANAGED_RECONCILE_SUBJECT: &str = "chore(cassy): reconcile managed project files";
 
 pub(crate) struct ReconcileCommits {
@@ -162,13 +163,15 @@ pub const GENERATED_MERGE_ATTRIBUTE: &str = "merge=cas-generated";
 pub const REGENERATE_ARTIFACTS_SCRIPT: &str = "scripts/regenerate-generated-artifacts.sh";
 /// cas-7aa5: the `.gitattributes` value for CHANGELOG.md's [Unreleased] union driver.
 pub const CHANGELOG_MERGE_ATTRIBUTE: &str = "merge=cas-changelog";
+/// Registry driver: independent entries merge; competing edits conflict.
+pub const JOURNEYS_MERGE_ATTRIBUTE: &str = "merge=cas-journeys";
 /// cas-7aa5: Cassy's merge drivers, embedded so a merge on any tree (or in
 /// `merge-tree`) runs the same driver whatever the checkout carries.
 const MERGE_DRIVERS_PY: &str = include_str!("../../../scripts/cas-merge-drivers.py");
 
 /// cas-0c988, cas-7aa5: register Cassy's merge drivers for every merge in
-/// the repository at `dir` when the checkout or the `incoming` revision opts
-/// in through `.gitattributes` (`merge=cas-changelog`, `merge=cas-generated`).
+/// the repository at `dir` when the checkout or the incoming revisions opt
+/// in through `.gitattributes` (`merge=cas-changelog`, `merge=cas-generated`, `merge=cas-journeys`).
 ///
 /// The embedded `cas-merge-drivers.py` is written to the git common dir and
 /// its `install` registers `merge.cas-*` in git config and the attributes in
@@ -177,13 +180,15 @@ const MERGE_DRIVERS_PY: &str = include_str!("../../../scripts/cas-merge-drivers.
 /// checked-out tree has not received the `.gitattributes` line yet: the
 /// 2026-10-11 sweep met the opt-in on the second epic it merged. Best effort:
 /// without python3 the generated-output driver is still configured, and
-/// CHANGELOG conflicts stay ordinary conflicts.
-pub(crate) fn ensure_merge_drivers(dir: &Path, incoming: Option<&str>) {
+/// CHANGELOG and registry conflicts stay ordinary conflicts.
+pub(crate) fn ensure_merge_drivers(dir: &Path, incoming: &[&str]) {
     let marks = |text: &str| {
-        text.contains(GENERATED_MERGE_ATTRIBUTE) || text.contains(CHANGELOG_MERGE_ATTRIBUTE)
+        text.contains(GENERATED_MERGE_ATTRIBUTE)
+            || text.contains(CHANGELOG_MERGE_ATTRIBUTE)
+            || text.contains(JOURNEYS_MERGE_ATTRIBUTE)
     };
     let opted = std::fs::read_to_string(dir.join(".gitattributes")).is_ok_and(|text| marks(&text))
-        || incoming.is_some_and(|revision| {
+        || incoming.iter().any(|revision| {
             Command::new("git")
                 .args(["show", &format!("{revision}:.gitattributes")])
                 .current_dir(dir)
@@ -512,6 +517,35 @@ pub struct GitOperations {
     stale_checkout_notes: std::sync::Mutex<Vec<String>>,
 }
 
+pub(crate) type MergePublication<'a> = dyn FnMut(&str, &str) -> Result<String> + 'a;
+
+/// `rev-parse --show-toplevel` answers in milliseconds. A Git child that blocks
+/// (a LaunchAgent reading ~/Documents) held `cas release installed` for 4h40m.
+const REPO_ROOT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn toplevel_within(mut command: Command, from: &Path, timeout: std::time::Duration) -> Result<PathBuf> {
+    use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
+    command.args(["rev-parse", "--show-toplevel"]).current_dir(from);
+    let output = match run_command(&mut command, Deadline::after(timeout), timeout) {
+        Ok(output) => output,
+        Err(BoundedCommandError::TimedOut) => {
+            return Err(GitError::CommandFailed(format!(
+                "git rev-parse --show-toplevel in {} timed out after {}s",
+                from.display(),
+                timeout.as_secs_f32()
+            )));
+        }
+        Err(BoundedCommandError::Io) => {
+            return Err(GitError::GitNotAvailable("could not run git rev-parse".into()));
+        }
+    };
+    if !output.status.success() {
+        return Err(GitError::NotAGitRepo);
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(PathBuf::from(path))
+}
+
 impl GitOperations {
     /// Create a new GitOperations instance for a repository
     pub fn new(repo_root: PathBuf) -> Self {
@@ -523,17 +557,7 @@ impl GitOperations {
 
     /// Detect the repository root from a path
     pub fn detect_repo_root(from: &Path) -> Result<PathBuf> {
-        let output = Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(from)
-            .output()?;
-
-        if !output.status.success() {
-            return Err(GitError::NotAGitRepo);
-        }
-
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(PathBuf::from(path))
+        toplevel_within(Command::new("git"), from, REPO_ROOT_PROBE_TIMEOUT)
     }
 
     /// Check if git is available
@@ -1091,6 +1115,7 @@ impl GitOperations {
     }
 
     /// Remove a worktree
+    // gate-audit[force]: selector Selects Git removal opcode after the caller preservation guard; does not grant policy authority.
     pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         if !path.exists() {
             return Err(GitError::WorktreeNotFound(path.to_path_buf()));
@@ -1127,6 +1152,7 @@ impl GitOperations {
     }
 
     /// Delete a branch
+    // gate-audit[force]: selector Selects Git deletion opcode after caller preservation policy; does not grant factory authority.
     pub fn delete_branch(&self, branch: &str, force: bool) -> Result<()> {
         let flag = if force { "-D" } else { "-d" };
 
@@ -1232,6 +1258,10 @@ impl GitOperations {
     /// refuse to run the real merge when this returns any paths, so the
     /// failing case never enters the working tree at all.
     pub fn preflight_merge_conflicts(&self, target: &str, source: &str) -> Result<Vec<String>> {
+        // The preflight must use the same drivers as the eventual merge,
+        // including when only either endpoint carries the opt-in attribute.
+        ensure_merge_drivers(&self.repo_root, &[target, source]);
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("merge-tree");
         let output = Command::new("git")
             .args(["merge-tree", "--write-tree", target, source])
             .current_dir(&self.repo_root)
@@ -1329,7 +1359,7 @@ impl GitOperations {
         // cas-0c988: committed build output (hub-web/dist) is regenerated
         // after the merge, never hand-merged. Register the driver its
         // `.gitattributes` names before git needs it.
-        ensure_merge_drivers(dir, Some(branch));
+        ensure_merge_drivers(dir, &[branch]);
         let pre_merge_head = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(dir)
@@ -1448,6 +1478,28 @@ impl GitOperations {
         notes.push(note);
     }
 
+    /// Run the real merge's regeneration step in an isolated checkout before
+    /// sealing a review candidate. A stale or uncommitted result cannot be reviewed.
+    pub(crate) fn regenerated_candidate_tree(
+        &self,
+        merged_head: &str,
+        pre_merge_head: &str,
+    ) -> Result<String> {
+        let worktree = self.add_temp_worktree(merged_head)?;
+        let operations = Self::new(worktree.path().to_path_buf());
+        operations.regenerate_generated_artifacts(worktree.path(), pre_merge_head);
+        let failures = operations.take_stale_checkout_notes();
+        if !failures.is_empty() {
+            return Err(GitError::CommandFailed(failures.join("\n")));
+        }
+        if operations.has_uncommitted_changes(worktree.path())? {
+            return Err(GitError::CommandFailed(
+                "candidate regeneration left uncommitted output".into(),
+            ));
+        }
+        operations.ref_sha("HEAD^{tree}")
+    }
+
     /// Paths a merge of `source` into `target` would actually touch
     /// (cas-4702 / GH #73).
     ///
@@ -1503,7 +1555,21 @@ impl GitOperations {
     ) -> Result<Option<String>> {
         self.advance_via_temp_worktree(target_branch, |dir| {
             self.merge_branch_in_dir(dir, None, source_branch, no_ff)
-        })
+        }, None)
+    }
+
+    /// The manager validates scoped residue in the primary checkout before
+    /// using this publication path. Other linked checkouts retain their
+    /// existing clean-tree guard.
+    pub(crate) fn merge_branch_with_publication(
+        &self,
+        target_branch: &str,
+        source_branch: &str,
+        publication: &mut MergePublication<'_>,
+    ) -> Result<Option<String>> {
+        self.advance_via_temp_worktree(target_branch, |dir| {
+            self.merge_branch_in_dir(dir, None, source_branch, true)
+        }, Some(publication))
     }
 
     /// cas-dcc9: revert merge commits (`-m 1`, their mainline parent) on
@@ -1547,7 +1613,7 @@ impl GitOperations {
                 git(&["commit", "-q", "-m", message])?;
             }
             git(&["rev-parse", "HEAD"]).map(Some)
-        })
+        }, None)
     }
 
     /// Run `step` in a detached worktree at `target_branch`'s tip, then
@@ -1556,6 +1622,7 @@ impl GitOperations {
         &self,
         target_branch: &str,
         step: impl FnOnce(&Path) -> Result<Option<String>>,
+        publication: Option<&mut MergePublication<'_>>,
     ) -> Result<Option<String>> {
         let old_tip = self
             .resolve_commit(target_branch)
@@ -1567,6 +1634,9 @@ impl GitOperations {
         // the ref is still where that checkout expects it.
         let checkouts = self.linked_checkouts_of(target_branch)?;
         for checkout in &checkouts {
+            if publication.is_some() && checkout.path == self.repo_root {
+                continue;
+            }
             if let Some((change_count, first_change)) = dirty_summary(&checkout.path) {
                 return Err(GitError::TargetCheckedOutDirty {
                     branch: target_branch.to_string(),
@@ -1581,12 +1651,23 @@ impl GitOperations {
         let guard = self.add_temp_worktree(&old_tip)?;
         let merged = step(guard.path())?;
 
-        let new_tip = match merged {
+        let mut new_tip = match merged {
             Some(ref tip) if *tip != old_tip => tip.clone(),
             // "Already up to date" — nothing to advance, and nothing to
             // compare-and-swap.
             _ => return Ok(Some(old_tip)),
         };
+
+        if let Some(publish) = publication {
+            let actual = self.resolve_commit(target_branch);
+            if actual.as_deref() != Some(old_tip.as_str()) {
+                return Err(GitError::TargetTipChanged {
+                    branch: target_branch.to_string(), expected: old_tip,
+                    actual: actual.unwrap_or_else(|| "<unresolvable>".into()),
+                });
+            }
+            new_tip = publish(&new_tip, &old_tip)?;
+        }
 
         if self
             .compare_and_swap_ref(target_branch, &new_tip, &old_tip)
@@ -2018,6 +2099,7 @@ impl GitOperations {
 
     /// Checkout a branch in the main repo
     pub fn checkout(&self, branch: &str) -> Result<()> {
+        self.clear_clean_codemap_skip_worktree(&self.repo_root)?;
         let output = Command::new("git")
             .args(["checkout", branch])
             .current_dir(&self.repo_root)

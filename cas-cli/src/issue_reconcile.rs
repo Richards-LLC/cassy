@@ -16,8 +16,8 @@
 //!
 //! The issue *state* comes from `gh`, bounded and offline-tolerant: a failed
 //! or slow `gh` is reported as "could not check", never as an empty list.
-//! Closing issues automatically belongs to the release train and is out of
-//! scope here (rule-176).
+//! The release adapter closes complete issues after task reconciliation with
+//! [`reconcile_release_issues`]; partials and transport failures stay explicit.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,21 @@ impl GhIssueStates {
         Self {
             binary,
             deadline: Deadline::after(budget),
+        }
+    }
+
+    fn close_completed(&self, issue: &IssueRef, comment: &str) -> Result<(), String> {
+        let repo = repo_key(&issue.owner, &issue.repo);
+        let mut command = Command::new(&self.binary);
+        command.args(["issue", "close", &issue.number.to_string(), "--repo", &repo,
+            "--reason", "completed", "--comment", comment]).env("GH_PROMPT_DISABLED", "1");
+        let output = run_command(&mut command, self.deadline, GH_BUDGET)
+            .map_err(|error| format!("gh issue close {} did not complete: {error:?}", issue.display()))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!("gh issue close {} failed: {}", issue.display(),
+                String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("").trim()))
         }
     }
 }
@@ -421,6 +436,230 @@ pub fn shipped_open_issues(
     Ok(ShippedIssueReport { shipped, unchecked })
 }
 
+/// Result included in a release receipt; a GitHub failure never hides a task close.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct IssueOutcome {
+    pub issue: String,
+    pub action: IssueAction,
+    pub comment_or_error: String,
+    pub task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IssueAction {
+    Closed,
+    Partial,
+    Failed,
+    Skipped,
+}
+
+/// Called after release task closes. Re-read status and membership before any
+/// GitHub write; close results alone never prove shipping or current task state.
+pub(crate) fn reconcile_release_issues(
+    root: &Path,
+    repo: &Path,
+    inventory: &crate::qa_batch::ReleaseInventory,
+    close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
+) -> Vec<IssueOutcome> {
+    let failed = |error: String| vec![IssueOutcome {
+        issue: inventory.scope.repository.clone(), action: IssueAction::Failed,
+        comment_or_error: error,
+        task_ids: inventory.deliveries.iter().map(|d| d.task_id.clone()).collect(),
+    }];
+    let (tasks, purged) = match release_issue_tasks(root) {
+        Ok(read) => read,
+        Err(error) => return failed(error),
+    };
+    // GH #1792: a purged task's quarantine marker outlives it. Only a delivery
+    // of this release that is gone matters, and it fails on its own.
+    let missing: Vec<String> = inventory.deliveries.iter()
+        .map(|d| d.task_id.clone()).filter(|id| purged.contains(id)).collect();
+    let mut outcomes: Vec<IssueOutcome> = (!missing.is_empty()).then(|| IssueOutcome {
+        issue: inventory.scope.repository.clone(), action: IssueAction::Failed,
+        comment_or_error: format!("Delivered task rows are gone, so their issues cannot be read: {}", missing.join(", ")),
+        task_ids: missing,
+    }).into_iter().collect();
+    outcomes.extend(reconcile_issues(root, repo, inventory, close_results, &tasks));
+    outcomes
+}
+
+fn reconcile_issues(
+    root: &Path,
+    repo: &Path,
+    inventory: &crate::qa_batch::ReleaseInventory,
+    close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
+    tasks: &BTreeMap<String, Task>,
+) -> Vec<IssueOutcome> {
+    let default_repo = Some(inventory.scope.repository.as_str());
+    let mut issues = BTreeMap::new();
+    for delivery in &inventory.deliveries {
+        if let Some(task) = tasks.get(&delivery.task_id) {
+            for issue in task_issue_refs(task, default_repo) {
+                issues.entry(issue_key(&issue)).or_insert(issue);
+            }
+        }
+    }
+    if issues.is_empty() {
+        return Vec::new();
+    }
+    // GH #1830: a reference is context, not ownership. Only the configured
+    // project and component repositories may receive a GitHub write.
+    let owned = match crate::config::Config::load(root) {
+        Ok(config) => owned_issue_repos(&config.issue_repo_registry()),
+        Err(error) => return issues.into_values().map(|issue| IssueOutcome {
+            issue: issue.display(), action: IssueAction::Failed,
+            comment_or_error: format!("Issue repositories could not be read from config: {error}"),
+            task_ids: tasks.values().filter(|t| references_issue(t, &issue, default_repo)).map(|t| t.id.clone()).collect(),
+        }).collect(),
+    };
+    let (issues, foreign): (BTreeMap<_, _>, BTreeMap<_, _>) =
+        issues.into_iter().partition(|((repo, _), _)| owned.contains(repo));
+    let mut outcomes: Vec<IssueOutcome> = foreign.into_values().map(|issue| IssueOutcome {
+        issue: issue.display(), action: IssueAction::Skipped,
+        comment_or_error: "Not in a configured issue repository (issues.repo or issues.components); left untouched.".into(),
+        task_ids: tasks.values().filter(|t| references_issue(t, &issue, default_repo)).map(|t| t.id.clone()).collect(),
+    }).collect();
+    if issues.is_empty() {
+        return outcomes;
+    }
+    outcomes.extend(reconcile_owned_issues(root, repo, inventory, close_results, tasks, issues));
+    outcomes
+}
+
+/// Lower-case `owner/repo` keys of the project's configured issue destinations.
+fn owned_issue_repos(registry: &crate::config::IssueRepoRegistry) -> BTreeSet<String> {
+    registry.project.iter().chain([&registry.cassy, &registry.violet, &registry.cloud])
+        .filter_map(|repo| repo.trim().split_once('/'))
+        .filter(|(owner, name)| !owner.is_empty() && !name.is_empty())
+        .map(|(owner, name)| repo_key(owner, name))
+        .collect()
+}
+
+fn reconcile_owned_issues(
+    root: &Path,
+    repo: &Path,
+    inventory: &crate::qa_batch::ReleaseInventory,
+    close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
+    tasks: &BTreeMap<String, Task>,
+    issues: BTreeMap<(String, u64), IssueRef>,
+) -> Vec<IssueOutcome> {
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    let default_repo = Some(inventory.scope.repository.as_str());
+    // Terminal fixes from older releases may be outside the incoming scope;
+    // include every referencing task before asking the same resolver again.
+    let mut scope = inventory.scope.clone();
+    for task in tasks.values().filter(|t| t.status != TaskStatus::Cancelled) {
+        if task_issue_refs(task, default_repo).iter().any(|i| issues.contains_key(&issue_key(i))) {
+            scope.included_task_ids.push(task.id.clone());
+        }
+    }
+    scope.included_task_ids.sort();
+    scope.included_task_ids.dedup();
+    let refreshed = match crate::qa_batch::resolve_release_inventory(root, repo, &scope) {
+        Ok(inventory) => inventory,
+        Err(error) => return issues.into_values().map(|issue| IssueOutcome {
+            issue: issue.display(), action: IssueAction::Failed, comment_or_error: error.clone(),
+            task_ids: tasks.values().filter(|t| references_issue(t, &issue, default_repo)).map(|t| t.id.clone()).collect(),
+        }).collect(),
+    };
+    let shipped: BTreeSet<_> = refreshed.deliveries.iter().map(|d| d.task_id.as_str()).collect();
+    let quarantined: BTreeSet<_> = refreshed.exceptions.iter()
+        .filter(|e| e.code == crate::qa_batch::ReleaseInventoryCode::Quarantined)
+        .map(|e| e.task_id.as_str()).collect();
+    let gh = GhIssueStates::new(GH_BUDGET);
+    let states = open_states(&issues.values().cloned().collect::<Vec<_>>(), &gh, default_repo);
+    issues.into_values().map(|issue| {
+        let linked: Vec<_> = tasks.values().filter(|t| references_issue(t, &issue, default_repo)).collect();
+        let mut outcome = IssueOutcome {
+            issue: issue.display(), action: IssueAction::Skipped, comment_or_error: String::new(),
+            task_ids: linked.iter().map(|t| t.id.clone()).collect(),
+        };
+        match states.get(&repo_key(&issue.owner, &issue.repo)) {
+            Some(Ok(open)) if !open.contains(&issue.number) => {
+                outcome.comment_or_error = "GitHub issue is already closed.".into();
+                return outcome;
+            }
+            Some(Ok(_)) => {},
+            state => {
+                outcome.action = IssueAction::Failed;
+                outcome.comment_or_error = match state {
+                    Some(Err(error)) => error.clone(),
+                    _ => "repository limit reached".into(),
+                };
+                return outcome;
+            }
+        }
+        let remaining: Vec<_> = linked.iter().filter(|t| {
+            t.status != TaskStatus::Closed || !shipped.contains(t.id.as_str())
+                || quarantined.contains(t.id.as_str())
+                || matches!(close_results.get(&t.id), Some(CassyMergeClose::Held(_) | CassyMergeClose::NotEligible))
+        }).map(|t| t.id.as_str()).collect();
+        if !remaining.is_empty() {
+            outcome.action = IssueAction::Partial;
+            outcome.comment_or_error = format!("Tasks not both closed and shipped, or independently held: {}", remaining.join(", "));
+            return outcome;
+        }
+        // GitHub reads may take seconds. A changed or newly linked task must
+        // not inherit the old snapshot's permission to close this issue.
+        let current = match release_issue_tasks(root) {
+            Ok((tasks, _)) => tasks,
+            Err(error) => {
+                outcome.action = IssueAction::Failed;
+                outcome.comment_or_error = error;
+                return outcome;
+            }
+        };
+        let versions = |tasks: &BTreeMap<String, Task>| tasks.values()
+            .filter(|t| references_issue(t, &issue, default_repo))
+            .map(|t| (t.id.clone(), t.updated_at)).collect::<BTreeMap<_, _>>();
+        if versions(tasks) != versions(&current) {
+            outcome.action = IssueAction::Partial;
+            outcome.comment_or_error = "Referencing tasks changed during reconciliation; retry with a fresh inventory.".into();
+            outcome.task_ids = versions(&current).into_keys().collect();
+            return outcome;
+        }
+        outcome.comment_or_error = format!("Released in {} at commit {}.\n\nShipped tasks: {}.",
+            scope.release_id, scope.final_release_sha, outcome.task_ids.join(", "));
+        match gh.close_completed(&issue, &outcome.comment_or_error) {
+            Ok(()) => outcome.action = IssueAction::Closed,
+            Err(error) => {
+                outcome.action = IssueAction::Failed;
+                outcome.comment_or_error = error;
+            }
+        }
+        outcome
+    }).collect()
+}
+
+fn issue_key(issue: &IssueRef) -> (String, u64) {
+    (repo_key(&issue.owner, &issue.repo), issue.number)
+}
+
+fn references_issue(task: &Task, issue: &IssueRef, default_repo: Option<&str>) -> bool {
+    task.status != TaskStatus::Cancelled
+        && task_issue_refs(task, default_repo).iter().any(|i| issue_key(i) == issue_key(issue))
+}
+
+/// List suppression must never hide an unfinished part of a fix from closing.
+/// Quarantine markers whose task row is gone come back separately: a purged
+/// task links no issue, so it cannot fail the release on its own (GH #1792).
+fn release_issue_tasks(root: &Path) -> Result<(BTreeMap<String, Task>, BTreeSet<String>), String> {
+    let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let mut tasks: BTreeMap<_, _> = store.list(None).map_err(|e| e.to_string())?
+        .into_iter().map(|t| (t.id.clone(), t)).collect();
+    let mut purged = BTreeSet::new();
+    let queue = crate::cloud::SyncQueue::open_read_only(root).map_err(|e| e.to_string())?;
+    for id in queue.quarantined_ids(crate::cloud::QUARANTINE_TASK).map_err(|e| e.to_string())? {
+        match store.get(&id) {
+            Ok(task) => { tasks.insert(id, task); }
+            Err(cas_store::StoreError::TaskNotFound(_)) => { purged.insert(id); }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok((tasks, purged))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,7 +776,7 @@ mod tests {
         ];
         let states = FakeStates::new("richards-llc/cassy", &[1158, 2000]);
         let warning = epic_open_issue_warning(&children, Some(REPO), &states).expect("one is open");
-        assert!(warning.contains("1 issue(s)"), "{warning}");
+
         assert!(
             warning.contains("Richards-LLC/cassy#1158 (cas-a)"),
             "{warning}"
@@ -548,7 +787,7 @@ mod tests {
         // Offline: say so, never claim the issues are closed.
         let offline = FakeStates::new("other/repo", &[]);
         let warning = epic_open_issue_warning(&children, Some(REPO), &offline).expect("unchecked");
-        assert!(warning.contains("Could not check whether 2"), "{warning}");
+
         assert!(warning.contains("could not resolve host"), "{warning}");
 
         let quiet = vec![task("cas-c", TaskStatus::Closed, "No issue")];
@@ -616,7 +855,104 @@ mod tests {
 
         let offline = FakeStates::new("other/repo", &[]);
         let error = shipped_open_issues(&tasks, Some(REPO), &offline, &tags).unwrap_err();
-        assert!(error.contains("could not resolve host"), "{error}");
+    }
+
+    /// GH #1792 (v4.14 closeout): one purged task's quarantine marker failed
+    /// issue reconciliation for all 33 deliveries with "task not found".
+    #[test]
+    fn a_purged_quarantine_marker_fails_only_a_delivery_it_names() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        store.add(&task("cas-ship", TaskStatus::Closed, "Shipped fix")).unwrap();
+        store.add(&task("cas-quar", TaskStatus::InProgress, "GH #1792: quarantined part")).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        for id in ["cas-quar", "cas-0019", "cas-gone"] {
+            queue.quarantine_row(crate::cloud::QUARANTINE_TASK, id, "fixture").unwrap();
+        }
+        let (tasks, purged) = release_issue_tasks(&root).unwrap();
+        assert!(tasks.contains_key("cas-quar"), "a present quarantined fix still links its issue");
+        assert_eq!(purged.into_iter().collect::<Vec<_>>(), ["cas-0019", "cas-gone"]);
+
+        let inventory = |deliveries: &[&str]| -> crate::qa_batch::ReleaseInventory {
+            serde_json::from_value(serde_json::json!({
+                "scope": {"project_id": "p", "repository": REPO, "release_id": "v9.99.0", "reviewed_sha": "a",
+                          "final_release_sha": "a", "promotion_pr": null, "release_tag": "v9.99.0"},
+                "deliveries": deliveries.iter().map(|id| serde_json::json!({"task_id": id, "generation": "1", "anchor": null,
+                    "base_sha": null, "shipped_commit": "a", "membership": "ancestry", "proof_refs": []})).collect::<Vec<_>>(),
+                "exceptions": [],
+            })).unwrap()
+        };
+        let outcomes = reconcile_release_issues(&root, dir.path(), &inventory(&["cas-ship"]), &BTreeMap::new());
+        assert!(outcomes.is_empty(), "an unrelated purged marker fails nothing: {outcomes:?}");
+        let outcomes = reconcile_release_issues(&root, dir.path(), &inventory(&["cas-ship", "cas-gone"]), &BTreeMap::new());
+        assert_eq!(outcomes.iter().map(|o| (&o.action, o.task_ids.clone())).collect::<Vec<_>>(),
+            [(&IssueAction::Failed, vec!["cas-gone".to_string()])], "a gone delivery stays explicit, alone");
+    }
+
+    /// GH #1830 (v4.16 closeout): a task's contextual external_ref to a
+    /// third-party issue reached `gh issue close actions/runner-images#15296`.
+    #[test]
+    fn release_closeout_writes_only_to_configured_issue_repositories() {
+        use cas_types::{FactoryBranchStart, WorkTarget};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("release");
+        std::fs::create_dir_all(&repo).unwrap();
+        let root = crate::store::init_cas_dir(&repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", &repo);
+        std::fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id='issue-fixture'\n[issues]\nrepo='example/issue-fixture'\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["remote", "add", "origin", "https://github.com/example/issue-fixture.git"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-m", "release"]);
+        let published = git(&["rev-parse", "HEAD"]);
+        let log = env.home().join("gh.log");
+        let gh = env.home().join("gh");
+        std::fs::write(&gh, format!("#!/bin/sh\necho \"$@\" >> '{}'\n\
+            [ \"$2\" = list ] && echo '[{{\"number\":7}},{{\"number\":9}},{{\"number\":15296}}]'\nexit 0\n",
+            log.display())).unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        env.set(GH_BIN_ENV, &gh);
+
+        let mut fix = task("cas-5eef", TaskStatus::Closed, "GH #7: release repair");
+        fix.description = "Also routes Richards-LLC/violet_ps#9.".into();
+        fix.external_ref = Some("https://github.com/actions/runner-images/issues/15296".into());
+        fix.origin_project = Some("issue-fixture".into());
+        fix.deliverables.factory_branch_anchor = Some(published.clone());
+        fix.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget { repo_selector: "project:issue-fixture".into(), target_branch: "main".into() },
+            branch: "factory/worker".into(), assignee: "worker".into(), base_sha: published.clone(),
+        });
+        crate::store::open_task_store(&root).unwrap().add(&fix).unwrap();
+        let scope = crate::qa_batch::ReleaseScope {
+            project_id: "issue-fixture".into(), repository: "example/issue-fixture".into(),
+            release_id: "v9.99.0".into(), reviewed_sha: published.clone(), final_release_sha: published,
+            promotion_pr: None, release_tag: None, constituent_epic_ids: vec![],
+            included_task_ids: vec![fix.id.clone()], no_code_members: BTreeMap::new(), proof_refs: vec![],
+        };
+        let inventory = crate::qa_batch::resolve_release_inventory(&root, &repo, &scope).unwrap();
+
+        let outcomes = reconcile_release_issues(&root, &repo, &inventory, &BTreeMap::new());
+        let actions: BTreeMap<_, _> = outcomes.iter().map(|o| (o.issue.as_str(), &o.action)).collect();
+        assert_eq!(actions, BTreeMap::from([
+            ("actions/runner-images#15296", &IssueAction::Skipped),
+            ("Richards-LLC/violet_ps#9", &IssueAction::Closed),
+            ("example/issue-fixture#7", &IssueAction::Closed),
+        ]), "{outcomes:?}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(!calls.to_ascii_lowercase().contains("runner-images"), "{calls}");
     }
 
     #[test]

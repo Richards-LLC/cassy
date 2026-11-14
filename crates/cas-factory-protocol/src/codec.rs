@@ -201,6 +201,8 @@ mod tests {
                     focused: false,
                     title: "Worker 2".to_string(),
                     exited: false,
+                    input_bytes_received: 42,
+                    input_bytes_written: 14,
                 },
             },
             ServerMessage::PaneRemoved {

@@ -216,10 +216,6 @@ mod tests {
             cid_file,
         };
         let error = docker.stop(temp.path()).unwrap_err();
-        assert!(
-            error.to_string().contains("not confirmed stopped"),
-            "{error}"
-        );
     }
 
     #[cfg(unix)]

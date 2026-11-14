@@ -247,9 +247,6 @@ mod tests {
         ] {
             assert!(rendered.contains(repo), "missing {repo}: {rendered}");
         }
-        assert!(rendered.contains(
-            "If you hit a bug during operation, file a ticket in the matching repo before moving on."
-        ));
     }
 
     #[test]

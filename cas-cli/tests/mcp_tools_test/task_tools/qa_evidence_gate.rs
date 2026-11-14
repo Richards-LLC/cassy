@@ -110,6 +110,12 @@ fn fixture(test_env: &mut TestEnvGuard, delivered: &[(&str, &str)], demo: &str) 
 }
 
 impl Fx {
+    fn task_artifacts(&self) -> PathBuf {
+        cas::config::factory_task_artifact_dirs(
+            &self.repo.join(".cas"), &self.artifacts, TASK,
+        )[0].clone()
+    }
+
     fn status(&self) -> TaskStatus {
         open_task_store(&self.repo.join(".cas"))
             .unwrap()
@@ -128,7 +134,7 @@ impl Fx {
 
     /// A complete contract-v1 bundle for `head`, cited by a platform_proof note.
     fn write_bundle(&self, head: &str) -> PathBuf {
-        let dir = self.artifacts.join(TASK).join("qa");
+        let dir = self.task_artifacts().join("qa");
         std::fs::create_dir_all(dir.join("visual-qa")).unwrap();
         let file = std::fs::File::create(dir.join("trace.zip")).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -231,7 +237,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source
     let canonical_producer = producer.canonicalize().unwrap();
     // Real cas-qa-craft/journey bundles mix path fields with descriptive
     // metadata in files.parts. Shared pairs live alongside qa/, inside task.
-    let pairs_dir = fx.artifacts.join(TASK).join("pairs");
+    let pairs_dir = fx.task_artifacts().join("pairs");
     std::fs::create_dir_all(&pairs_dir).unwrap();
     for name in ["before.png", "before.jpg", "after.png", "after.jpg"] {
         std::fs::write(pairs_dir.join(name), name).unwrap();
@@ -687,7 +693,7 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
         });
         task.deliverables.factory_branch_anchor = Some(reviewed.clone());
         task.deliverables.parked_branch = Some("factory/test-agent".into());
-        let round = fx.artifacts.join(TASK).join("independent-qa/round-1");
+        let round = fx.task_artifacts().join("independent-qa/round-1");
         std::fs::create_dir_all(&round).unwrap();
         let ledger = round.join("LEDGER.md");
         std::fs::write(&ledger, "# Independent real-build QA\n").unwrap();
@@ -975,7 +981,7 @@ async fn request_changes_accepts_only_pushed_correction_api_evidence_cas_9e60() 
     );
     git(&fx.repo, &["push", "-q", "origin", "main", &branch]);
     let original = git(&fx.repo, &["rev-parse", "HEAD"]);
-    let artifacts = fx.artifacts.join(TASK);
+    let artifacts = fx.task_artifacts();
     std::fs::create_dir_all(&artifacts).unwrap();
     let write_ledger = |head: &str| {
         std::fs::write(artifacts.join("LEDGER.md"), format!(
@@ -1313,9 +1319,9 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
         "{refused}"
     );
 
-    std::fs::create_dir_all(fx.artifacts.join(TASK).join("qa")).unwrap();
-    std::fs::write(fx.artifacts.join(TASK).join("qa/M01.txt"), "captured output").unwrap();
-    let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
+    std::fs::create_dir_all(fx.task_artifacts().join("qa")).unwrap();
+    std::fs::write(fx.task_artifacts().join("qa/M01.txt"), "captured output").unwrap();
+    let ledger = fx.task_artifacts().join("LEDGER.md");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     std::fs::write(
         &ledger,
@@ -1334,9 +1340,9 @@ async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
         &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
         "Run cas report; it prints totals",
     );
-    std::fs::create_dir_all(fx.artifacts.join(TASK).join("qa")).unwrap();
-    std::fs::write(fx.artifacts.join(TASK).join("qa/M01.txt"), "captured output").unwrap();
-    let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
+    std::fs::create_dir_all(fx.task_artifacts().join("qa")).unwrap();
+    std::fs::write(fx.task_artifacts().join("qa/M01.txt"), "captured output").unwrap();
+    let ledger = fx.task_artifacts().join("LEDGER.md");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     std::fs::write(
         &ledger,
@@ -1426,7 +1432,7 @@ async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() 
             &[(surface, "pub fn draw() {}\n")],
             "Run cas status; the table fits 80 columns",
         );
-        let task_dir = fx.artifacts.join(TASK);
+        let task_dir = fx.task_artifacts();
         std::fs::create_dir_all(&task_dir).unwrap();
         std::fs::create_dir_all(task_dir.join("qa")).unwrap();
         std::fs::write(task_dir.join("qa/M01.txt"), "captured output").unwrap();
@@ -1482,7 +1488,7 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
             &delivered,
             "Run the real factory; click and resize a pane",
         );
-        let task_dir = fx.artifacts.join(TASK);
+        let task_dir = fx.task_artifacts();
         std::fs::create_dir_all(&task_dir).unwrap();
         std::fs::create_dir_all(task_dir.join("qa")).unwrap();
         std::fs::write(task_dir.join("qa/M01.txt"), "captured output").unwrap();
@@ -1527,7 +1533,7 @@ async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
         ],
         "Run the factory and cas status",
     );
-    let task_dir = fx.artifacts.join(TASK);
+    let task_dir = fx.task_artifacts();
     std::fs::create_dir_all(&task_dir).unwrap();
     std::fs::write(task_dir.join("capture.txt"), "captured output").unwrap();
     std::fs::write(
@@ -1849,7 +1855,7 @@ async fn cas_6f10_exact_waiver_satisfies_worker_real_build_ledger_gate() {
     let mut worker = agents.get(&worker_id).unwrap();
     worker.role = cas::types::AgentRole::Worker;
     agents.update(&worker).unwrap();
-    let dir = fx.artifacts.join(TASK);
+    let dir = fx.task_artifacts();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(dir.join("qa")).unwrap();
     std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
@@ -1895,7 +1901,7 @@ async fn cas_6f10_deferred_deployed_row_parks_with_named_obligation() {
     );
     let _supervisor = cas_6f10_supervisor(&fx);
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
-    let dir = fx.artifacts.join(TASK);
+    let dir = fx.task_artifacts();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(dir.join("qa")).unwrap();
     std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();
@@ -1919,7 +1925,7 @@ async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
         &[("src/feature.rs", "pub fn feature() {}\n")],
         "Verify deployed endpoint",
     );
-    let dir = fx.artifacts.join(TASK);
+    let dir = fx.task_artifacts();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(dir.join("qa")).unwrap();
     std::fs::write(dir.join("qa/fixture.txt"), "fixture output").unwrap();

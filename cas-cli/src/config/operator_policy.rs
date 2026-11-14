@@ -713,6 +713,9 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     "qa.evidence_gate",
     "qa.independent_pass",
     "release.claude_account_allowlist",
+    // cas-e060: release cadence is the operator's call.
+    "release.auto_cut_max_per_day",
+    "release.auto_cut_min_interval_hours",
     // cas-ae37c: both the destination and the hook-event switches can send
     // notification text to an external webhook.
     "notifications.webhook_url",
@@ -823,6 +826,7 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
     match cli.command? {
         Commands::Hub(hub) => match hub.command? {
             HubCommands::Pair(_) => Some("Pairing a Commander device (`cas hub pair`)"),
+            HubCommands::Preview(_) => Some("Pairing a Commander preview (`cas hub preview`)"),
             HubCommands::Authorize(_) => {
                 Some("Authorizing a Commander pairing (`cas hub authorize`)")
             }
@@ -893,6 +897,7 @@ fn context_refusal(context: &InvocationContext, subject: &str, remedy: &str) -> 
 /// cas-1b94: shared by the MCP `proxy_add`/`proxy_remove` tools, the `cas mcp`
 /// CLI and the PreToolUse hook, so the three apply one rule.
 #[cfg(feature = "mcp-proxy")]
+// gate-audit[forward]: H-45 Returned by the common MCP role-policy guard; it never accepts a bypass.
 pub fn supervisor_only_mcp_refusal(
     name: &str,
     added: Option<&cmcp_core::config::ServerConfig>,
@@ -1448,7 +1453,6 @@ mod tests {
     fn cas_3147_config_set_refuses_write_roots() {
         let mut config = crate::config::Config::default();
         let error = config.set("factory.write_roots", "/tmp").unwrap_err().to_string();
-        assert!(error.contains("operator"), "{error}");
     }
 
     /// GH #1182: setting project roots refuses only a factory worker or

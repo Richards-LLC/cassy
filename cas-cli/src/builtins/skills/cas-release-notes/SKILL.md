@@ -7,6 +7,21 @@ metadata:
 
 # Release Notes
 
+Before drafting Cassy runtime announcements, check the lint rules:
+
+<!-- release-lint:begin -->
+User-thread words the lint refuses (whole words/phrases, case-insensitive):
+`watermark`, `metadata`, `ingest`, `upsert`, `envelope`,
+`scope stamp`, `canonical id`, `team pull`, `purge-foreign`, `cloud identity`,
+`registration`, `harness`, `agent`, `factory`, `worker`,
+`supervisor`, `daemon`, `epic`, `lane`.
+
+Plural forms are refused too, including `registrations`.
+
+Top-level punch: at most 25 words.
+Visible line: at most 300 characters; a `<url|label>` link counts as its label.
+<!-- release-lint:end -->
+
 Use the project's release rubric as the contract. The procedure is:
 
 1. **Ensure the rubric exists.** Check `docs/release-notes/RUBRIC.md`. If it is

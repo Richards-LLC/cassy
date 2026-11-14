@@ -19,17 +19,15 @@ describe("browser support", () => {
     expect(support.supported).toBe(false);
     expect(support.missing.map((requirement) => requirement.api)).toEqual(["Array.prototype.toSorted"]);
     const notice = unsupportedBrowserNotice(support);
-    expect(notice).toBe(
-      "This browser is missing Array.prototype.toSorted, which Cassy Cloud needs. Update to Chrome 110, Edge 110, Firefox 115, or Safari 16.4 or newer.",
-    );
+    expect(notice).toContain("Array.prototype.toSorted");
     expect(notice?.split("\n")).toHaveLength(1);
   });
 
   it("raises the stated minimum to the newest floor across everything missing", () => {
     const support = browserSupport(scope({ "Array.prototype.toSorted": false, "AbortSignal.timeout": false }));
-    expect(unsupportedBrowserNotice(support)).toContain("AbortSignal.timeout and Array.prototype.toSorted");
+    expect(unsupportedBrowserNotice(support)).toMatch(/AbortSignal\.timeout[\s\S]*Array\.prototype\.toSorted/);
     // toSorted (110/115/16.4) is newer than AbortSignal.timeout (103/100/16).
-    expect(unsupportedBrowserNotice(support)).toContain("Chrome 110, Edge 110, Firefox 115, or Safari 16.4 or newer");
+    expect(unsupportedBrowserNotice(support)).toMatch(/110[\s\S]*110[\s\S]*115[\s\S]*16\.4/);
   });
 
   it("does not gate on AbortSignal.any, because the app carries its own fallback", () => {

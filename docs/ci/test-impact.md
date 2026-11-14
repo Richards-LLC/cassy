@@ -19,6 +19,15 @@ stem-to-harness map; `--check` rejects unregistered source suites before compila
 Consolidated suites use `binary(integration_...) and test(original_stem::)`.
 Opaque integration imports and subprocess entry points stay selected.
 
+Any change under `cas-cli/src/` also retains the mechanically discovered
+subprocess suites, regardless of their linked library imports. The source scan
+follows literal `#[path]`, module and `include!` helpers and conservatively retains
+`assert_cmd`, `Command`, binary-path helpers and `command()` callers. It can
+include tests that spawn other tools; uncertainty must not omit a binary contract.
+The sorted `subprocess_stems` list is printed by lane planning and stored in the
+existing plan/run receipt, including when other changes widen to the workspace.
+This adds no job or stage; own-module tests still run before the selected ring.
+
 Ambiguous module roots retain all affected library tests. Crate consumers run
 unfiltered. Missing/deleted roots, unsupported manifests, unknown changed paths,
 build/test policy changes and malformed/unavailable history widen to crate or
@@ -53,4 +62,4 @@ and failure-weighted recall per role. Compare workflow/job wall times over equal
 factory/PR sample windows to evaluate the CI-time acceptance criterion; fixture
 runtime or fewer selected modules alone is not evidence of a faster CI median.
 Run `python3 scripts/test-ci-test-impact.py` and `scripts/test-ci-test-tiers.sh`
-for Git/transport/execution fixtures and policy pins without compiling Rust.
+for Git/transport/execution fixtures without compiling Rust.

@@ -597,6 +597,8 @@ pub struct EmbeddedDaemon {
     cloud_coordinator: RwLock<Option<CloudCoordinator>>,
     /// Code watcher (if code indexing is enabled)
     code_watcher: Option<Arc<std::sync::Mutex<CodeWatcher>>>,
+    #[cfg(test)]
+    code_index_started: tokio::sync::Notify,
     /// MCP proxy engine for hot-reload (set after server startup)
     #[cfg(feature = "mcp-proxy")]
     proxy: RwLock<Option<Arc<cmcp_core::ProxyEngine>>>,
@@ -660,6 +662,8 @@ impl EmbeddedDaemon {
             cloud_syncer: std::sync::RwLock::new(cloud_syncer),
             cloud_coordinator: RwLock::new(cloud_coordinator),
             code_watcher,
+            #[cfg(test)]
+            code_index_started: tokio::sync::Notify::new(),
             #[cfg(feature = "mcp-proxy")]
             proxy: RwLock::new(None),
             #[cfg(feature = "mcp-proxy")]
@@ -1162,10 +1166,7 @@ impl EmbeddedDaemon {
         // Check if agent was already registered directly (fallback path in SessionStart hook)
         // This happens when the hook runs before the daemon socket exists
         // The agent's PID is Claude Code's PID (our parent), not the MCP server's PID
-        #[cfg(unix)]
-        let cc_pid = std::os::unix::process::parent_id();
-        #[cfg(not(unix))]
-        let cc_pid = std::process::id();
+        let cc_pid = crate::agent_id::get_cc_pid_for_mcp();
 
         let expected_owner = self.agent_id.read().await.clone();
         if let Ok(store) = open_agent_store(&self.config.cas_root)
@@ -1214,6 +1215,21 @@ impl EmbeddedDaemon {
             }
         }
 
+        // Own this task so cancelling the daemon also cancels its scheduler.
+        // The per-store entity lease still excludes competing serve/hub jobs.
+        let mut cloud_worker = tokio::task::JoinSet::new();
+        let daemon = Arc::clone(&self);
+        let cloud_shutdown = shutdown_rx.clone();
+        cloud_worker.spawn(async move {
+            daemon.run_cloud_sync_worker(cloud_sync_interval, cloud_shutdown).await;
+        });
+        let period = Duration::from_secs(self.config.cloud_sync_interval_secs.max(1));
+        let mut quality_sync_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + period, period,
+        );
+        quality_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        self.run_cloud_quality_sync().await;
+
         loop {
             tokio::select! {
                 // Shutdown signal
@@ -1223,29 +1239,10 @@ impl EmbeddedDaemon {
                     }
                 }
 
-                // Cloud sync is a bounded background push/pull. Unlike full
-                // maintenance, it must not require an idle window: a busy
-                // factory keeps receiving MCP requests often enough to reset
-                // ActivityTracker forever, which used to leave its local
-                // queue wedged despite the configured 60-second cadence.
-                _ = cloud_sync_interval.tick() => {
-                    if self.fresh_cloud_syncer().is_some() {
-                        match self.run_cloud_sync().await {
-                            Ok(result) => {
-                                let mut status = self.status.write().await;
-                                status.cloud_items_pushed += result.total_pushed();
-                                status.cloud_items_pulled += result.total_pulled();
-                                status.last_cloud_sync = Some(Utc::now());
-                                if result.has_errors() {
-                                    status.last_error = result.errors.first().cloned();
-                                }
-                            }
-                            Err(e) => {
-                                let mut status = self.status.write().await;
-                                status.last_error = Some(format!("Cloud sync failed: {e}"));
-                            }
-                        }
-                    }
+                // Quality telemetry is best-effort maintenance. Its network
+                // work must not delay the independent entity-sync worker.
+                _ = quality_sync_interval.tick() => {
+                    self.run_cloud_quality_sync().await;
                 }
 
                 // Full maintenance - only when idle
@@ -1304,21 +1301,6 @@ impl EmbeddedDaemon {
                     // both-binaries data read as post-fix.
                     self.touch_binary_epoch();
                     self.send_agent_heartbeat().await;
-                    #[cfg(feature = "mcp-proxy")]
-                    if let Some(proxy) = self.proxy.read().await.clone() {
-                        if let Err(error) = crate::mcp::viktor_watch::poll_due_watches(
-                            &self.config.cas_root,
-                            &proxy,
-                        ).await {
-                            tracing::warn!(error = %error, "Viktor inbound watch tick failed");
-                        }
-                        if let Err(error) = crate::mcp::viktor_watch::discover_originated_messages(
-                            &self.config.cas_root,
-                            &proxy,
-                        ).await {
-                            tracing::warn!(error = %error, "Viktor originated-thread discovery tick failed");
-                        }
-                    }
                 }
 
                 // Code indexing - idle-PREFERRED, with a max-staleness override.
@@ -1447,10 +1429,12 @@ impl EmbeddedDaemon {
             }
         }
 
+        cloud_worker.shutdown().await;
+
         // Final cloud sync: drain any pending items before shutdown
         if self.fresh_cloud_syncer().is_some() {
             eprintln!("[Cassy] Running final cloud sync before shutdown...");
-            match tokio::time::timeout(Duration::from_secs(10), self.run_cloud_sync()).await {
+            match tokio::time::timeout(Duration::from_secs(10), self.trigger_cloud_sync()).await {
                 Ok(Ok(result)) => {
                     let pushed = result.total_pushed();
                     let pulled = result.total_pulled();
@@ -1672,6 +1656,8 @@ impl EmbeddedDaemon {
         };
         let cas_root = self.config.cas_root.clone();
 
+        #[cfg(test)]
+        self.code_index_started.notify_one();
         // Run in blocking task since it's CPU intensive
         let result = tokio::task::spawn_blocking(move || {
             let watcher_guard = watcher
@@ -2130,11 +2116,8 @@ impl EmbeddedDaemon {
         // In factory mode, all agents share .cas/daemon.sock — only the first
         // daemon to start owns the socket, so it receives SessionStart events
         // from ALL agents. We must only set self.agent_id for our own agent
-        // (matching parent PID) to avoid one daemon stealing another's heartbeat.
-        #[cfg(unix)]
-        let our_cc_pid = std::os::unix::process::parent_id();
-        #[cfg(not(unix))]
-        let our_cc_pid = std::process::id();
+        // (matching the validated harness PID) to avoid stealing another's heartbeat.
+        let our_cc_pid = crate::agent_id::get_cc_pid_for_mcp();
         let is_our_agent = cc_pid == our_cc_pid;
 
         // Quick check: already registered with same ID
@@ -2240,10 +2223,7 @@ impl EmbeddedDaemon {
             // shared socket and received our SessionStart event — the agent
             // was registered in the DB but this daemon never got notified.
             if self.agent_id.read().await.is_none() {
-                #[cfg(unix)]
-                let our_cc_pid = std::os::unix::process::parent_id();
-                #[cfg(not(unix))]
-                let our_cc_pid = std::process::id();
+                let our_cc_pid = crate::agent_id::get_cc_pid_for_mcp();
 
                 if let Ok(Some(agent)) = store.get_by_pid(our_cc_pid) {
                     eprintln!(
@@ -2478,6 +2458,48 @@ impl EmbeddedDaemon {
         self.kick_cloud_presence(presence_id).await;
     }
 
+    /// Entity sync has its own scheduler: indexing, maintenance and telemetry
+    /// may await slow work without consuming its timer. One cycle at a time.
+    async fn run_cloud_sync_worker(
+        self: Arc<Self>,
+        mut interval: tokio::time::Interval,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = interval.tick() => {
+                    if self.fresh_cloud_syncer().is_none() { continue; }
+                    match self.run_cloud_sync().await {
+                        Ok(result) => {
+                            let mut status = self.status.write().await;
+                            status.cloud_items_pushed += result.total_pushed();
+                            status.cloud_items_pulled += result.total_pulled();
+                            status.last_cloud_sync = Some(Utc::now());
+                            if result.has_errors() { status.last_error = result.errors.first().cloned(); }
+                        }
+                        Err(error) => {
+                            self.status.write().await.last_error = Some(format!("Cloud sync failed: {error}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_cloud_quality_sync(&self) {
+        let Some(syncer) = self.fresh_cloud_syncer() else { return; };
+        match tokio::task::spawn_blocking(move || syncer.sync_quality_events(false)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(target: "cas::sync", %error, "quality events sync failed (non-fatal)"),
+            Err(error) => tracing::warn!(target: "cas::sync", %error, "quality events worker failed (non-fatal)"),
+        }
+    }
+
     /// Run cloud sync cycle
     async fn run_cloud_sync(&self) -> Result<SyncResult, CasError> {
         let syncer = self
@@ -2538,7 +2560,7 @@ impl EmbeddedDaemon {
             // Get sessions to sync (sessions are stored directly, not queued)
             let sessions = get_sessions_for_sync(&cas_root, syncer.queue());
 
-            let result = syncer.sync_with_sessions(
+            syncer.sync_with_sessions(
                 store.as_ref(),
                 task_store.as_ref(),
                 rule_store.as_ref(),
@@ -2549,13 +2571,7 @@ impl EmbeddedDaemon {
                 file_change_store.as_ref(),
                 commit_link_store.as_ref(),
                 &sessions,
-            );
-            // Paced inside: at most one bounded round per interval. The ledger
-            // is an enhancement, so its failure never fails entity sync.
-            if let Err(error) = syncer.sync_quality_events(false) {
-                tracing::warn!(target: "cas::sync", %error, "quality events sync failed (non-fatal)");
-            }
-            result
+            )
         })
         .await
         .map_err(|e| CasError::Other(format!("Task join error: {e}")))?
@@ -2563,7 +2579,9 @@ impl EmbeddedDaemon {
 
     /// Trigger immediate cloud sync (ignores idle check)
     pub async fn trigger_cloud_sync(&self) -> Result<SyncResult, CasError> {
-        self.run_cloud_sync().await
+        let result = self.run_cloud_sync().await;
+        self.run_cloud_quality_sync().await;
+        result
     }
 }
 

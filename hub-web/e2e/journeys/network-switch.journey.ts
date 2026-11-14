@@ -22,6 +22,9 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await journey.open();
     await chooseConversation(page);
     await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    // The header can be Live before the double observes the machine socket.
+    // Count opens only after that wire event, not after the rendered label.
+    await hub.waitFor(() => hub.machineSocketOpens.has("atlas"));
     expect(hub.machineSocketOpens.get("atlas")).toBe(1);
   });
   await journey.stage("The route changes under the page", async () => {

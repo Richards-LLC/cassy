@@ -301,6 +301,11 @@ pub struct TaskRequest {
     )]
     pub door: Option<String>,
 
+    /// Exact dispatch under review; ordinary workers cannot accept this task.
+    /// Omit to preserve on update; an empty string clears the target.
+    #[serde(default)]
+    pub review_dispatch_id: Option<String>,
+
     /// Test modules/targets required by blast-radius close proof.
     #[schemars(
         description = "JSON array, JSON-array string, or comma-separated test modules or targets required to cover the task's complete delivery diff"

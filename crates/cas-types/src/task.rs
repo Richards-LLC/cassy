@@ -1415,6 +1415,11 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
 
+    /// Exact verification dispatch this task reviews. This names evidence,
+    /// never grants verdict authority. Ordinary workers cannot accept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_dispatch_id: Option<String>,
+
     /// Optional labels for categorization
     #[serde(default)]
     pub labels: Vec<String>,
@@ -1548,6 +1553,7 @@ impl Task {
             task_type: TaskType::Task,
             risk: Vec::new(),
             door: None,
+            review_dispatch_id: None,
             proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
@@ -1693,6 +1699,7 @@ impl Default for Task {
             task_type: TaskType::Task,
             risk: Vec::new(),
             door: None,
+            review_dispatch_id: None,
             proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),

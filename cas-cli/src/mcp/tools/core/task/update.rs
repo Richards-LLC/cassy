@@ -112,6 +112,7 @@ fn requested_update_fields(
     supplied!(acceptance_criteria);
     supplied!(demo_statement);
     supplied!(execution_note);
+    supplied!(review_dispatch_id);
     supplied!(risk);
     supplied!(proof_targets);
     supplied!(door);
@@ -843,6 +844,10 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let review_dispatch_update = req.review_dispatch_id.as_deref().map(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        });
         // An older target clear reopened the task but left its source bound.
         // Only that reviewed no-code state may repeat the clear to repair it.
         let artifact_scope_repair = target_repo.is_some_and(|repo| repo.trim().is_empty())
@@ -1775,8 +1780,12 @@ impl CasCore {
             })?
         } else { None };
         let prior_assignee = task.assignee.clone();
-
         let mut changes = Vec::new();
+        if let Some(review_dispatch_id) = review_dispatch_update {
+            task.review_dispatch_id = review_dispatch_id;
+            changes.push("review_dispatch_id");
+        }
+
         if let Some(origin_project) = origin_project {
             if task.origin_project.as_deref() != Some(origin_project.as_str()) {
                 let previous = task

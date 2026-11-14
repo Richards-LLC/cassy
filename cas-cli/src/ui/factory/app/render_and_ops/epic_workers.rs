@@ -4449,6 +4449,7 @@ mod spawn_base_tests {
                 task_type: task_type.to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

@@ -744,6 +744,7 @@ mod tests {
             task_type: "task".into(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

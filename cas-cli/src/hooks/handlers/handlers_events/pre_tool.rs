@@ -11495,7 +11495,8 @@ mod worker_commit_guard_tests {
             "if true; then { printf safe; }; elif false; then :; else (printf fallback); fi",
             "for x in if then do; do while false; do :; done; done",
             "f() { case x in x) printf safe ;; *) : ;; esac; }; f",
-            "function f { until true; do :; done; }; f",
+            "printf '%s' \"$(f() { case x in x) printf safe ;; *) : ;; esac; }; f)\"",
+            "function f { case x in x) until true; do :; done ;; esac; }; f",
             "printf '%s' 'if' 'then' '{' '}'",
             // Case patterns and test brackets are grammar/data, not dynamic executables.
             "case x in x|y) printf safe ;; *) printf fallback ;; esac; [ -f README.md ] || true",

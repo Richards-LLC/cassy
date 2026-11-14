@@ -1127,6 +1127,21 @@ pub(super) fn backquote_body(source: &str) -> String {
 }
 
 
+/// Reserved prefixes keep the next word in command position. A function name
+/// occupies its own slot before its compound body; quoting stays source data.
+fn continues_command_prefix(word: &str, raw: &str, command_start: bool, function_name: &mut bool) -> bool {
+    if *function_name {
+        *function_name = false;
+        return true;
+    }
+    if !command_start || raw != word { return false; }
+    if word == "function" {
+        *function_name = true;
+        return true;
+    }
+    matches!(word, "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{")
+}
+
 /// Resolve a substitution with the ordinary shell lexer. Only real operator
 /// tokens can close it: quoted/comment text and case-pattern ')' are data.
 pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Option<usize> {
@@ -1151,6 +1166,7 @@ fn substitution_boundary(bytes: &[u8], index: usize, depth: usize) -> Result<usi
     let mut level = 0;
     let mut arithmetic = vec![false];
     let mut command_start = true;
+    let mut function_name = false;
     let mut previous_operator = None;
     let mut start = 0;
     for (token, &end) in lexed.tokens.iter().zip(&lexed.ends) {
@@ -1215,11 +1231,10 @@ fn substitution_boundary(bytes: &[u8], index: usize, depth: usize) -> Result<usi
         if handled { continue; }
         match token {
             ShellToken::Word(word) => {
-                if command_start && !arithmetic[level] && word == "case" && keyword(word) {
+                if command_start && !function_name && !arithmetic[level] && word == "case" && keyword(word) {
                     cases.push(Case { level, phase: Phase::Word });
                 }
-                command_start = command_start && keyword(word)
-                    && matches!(word.as_str(), "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{");
+                command_start = continues_command_prefix(word, raw, command_start, &mut function_name);
             }
             ShellToken::Operator('(') => {
                 let at = end - 1;
@@ -1233,7 +1248,7 @@ fn substitution_boundary(bytes: &[u8], index: usize, depth: usize) -> Result<usi
             ShellToken::Operator(')') if level > 0 => {
                 arithmetic.pop();
                 level -= 1;
-                command_start = false;
+                command_start = previous.is_some_and(|(ch, _)| ch == '(');
             }
             ShellToken::Operator(')') => {
                 if let Some(mut error) = lexed.refusal.clone().filter(|error| error.offset < end) {
@@ -1554,6 +1569,7 @@ pub(super) fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSy
     let mut cases: Vec<Case> = Vec::new();
     let mut level = 0;
     let mut command_start = true;
+    let mut function_name = false;
     let mut previous_operator = None;
     let mut start = 0;
     for (index, (token, &end)) in lexed.tokens.iter().zip(&lexed.ends).enumerate() {
@@ -1637,12 +1653,10 @@ pub(super) fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSy
         }
         match token {
             ShellToken::Word(word) => {
-                if command_start && word == "case" && raw == word {
+                if command_start && !function_name && word == "case" && raw == word {
                     cases.push(Case { level, phase: Phase::Subject });
                 }
-                command_start = command_start
-                    && raw == word
-                    && matches!(word.as_str(), "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{");
+                command_start = continues_command_prefix(word, raw, command_start, &mut function_name);
             }
             ShellToken::Operator('(') => {
                 level += 1;
@@ -1651,7 +1665,7 @@ pub(super) fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSy
             ShellToken::Operator(')') => {
                 // A stray close stays for the caller's scope check to refuse.
                 level = level.saturating_sub(1);
-                command_start = false;
+                command_start = previous.is_some_and(|(ch, _)| ch == '(');
             }
             ShellToken::Operator('<' | '>') => command_start = false,
             ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),

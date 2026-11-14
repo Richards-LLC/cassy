@@ -1773,34 +1773,80 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
 #[tokio::test]
 async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env, "main");
-    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
-    config.set("verification.enabled", "true").unwrap();
-    config.save(&f.cas_dir()).unwrap();
-    env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
-    let id = "cas-ea5d";
-    let mut task = assigned(id, TaskType::Spike, "main");
-    task.execution_note = Some("no-code".into());
-    task.external_ref = Some(PROOF.into());
-    f.put(&task);
-    claim(&f, id);
-    let pending = call(&f.worker, serde_json::json!({
-        "action":"close", "id":id, "reason":"Portable investigation report published",
-    })).await;
-    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
-        .unwrap().unwrap_or_else(|| panic!("{pending}"));
-    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{pending}");
-    assert!(open_agent_store(&f.cas_dir()).unwrap().get_lease(id).unwrap().is_some());
-    let result = f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
-        "action":"add", "task_id":id, "dispatch_id":dispatch.id,
-        "status":"approved", "summary":"Portable report reviewed",
-    })).unwrap())).await.unwrap();
-    let closed = f.task(id);
-    assert_eq!(closed.status, TaskStatus::Closed, "{result:?}");
-    assert!(!closed.pending_verification);
-    assert!(open_agent_store(&f.cas_dir()).unwrap().get_lease(id).unwrap().is_none());
-    assert!(closed.deliverables.factory_branch_anchor.is_none());
-    assert_eq!(git(f.dir.path(), &["rev-parse", LANE]), f.foreign_tip);
+    for case in ["approved", "inline", "rejected", "foreign", "stale", "changed-proof"] {
+        let f = fixture(&mut env, "main");
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+        let id = "cas-ea5d";
+        let mut task = assigned(id, TaskType::Spike, "main");
+        if case != "inline" {
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some(PROOF.into());
+        }
+        f.put(&task);
+        claim(&f, id);
+        let mut request = serde_json::json!({
+            "action":"close", "id":id, "reason":"Portable investigation report published",
+        });
+        if case == "inline" {
+            request["execution_note"] = "no-code".into();
+            request["external_ref"] = PROOF.into();
+        }
+        let pending = call(&f.worker, request.clone()).await;
+        let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
+            .unwrap().unwrap_or_else(|| panic!("{case}: {pending}"));
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{case}: {pending}");
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        assert!(agents.get_lease(id).unwrap().is_some());
+        let foreign = assigned("cas-other", TaskType::Spike, "main");
+        f.put(&foreign);
+        if case == "stale" {
+            cas_store::timeout_verification_dispatch(&f.cas_dir(), id, dispatch.deadline_at).unwrap();
+            let renewed = call(&f.worker, request).await;
+            assert_ne!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap().id,
+                dispatch.id, "{renewed}");
+        } else if case == "changed-proof" {
+            let mut changed = f.task(id);
+            changed.external_ref = Some("artifact:replacement-report".into());
+            f.put(&changed);
+        }
+        let latest = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap();
+        let approval = serde_json::json!({
+            "action":"add", "task_id":if case == "foreign" { "cas-other" } else { id },
+            "dispatch_id":dispatch.id,
+            "status":if case == "rejected" { "rejected" } else { "approved" },
+            "summary":"Portable report reviewed",
+        });
+        let result = f.supervisor.verification(Parameters(serde_json::from_value(approval.clone()).unwrap())).await;
+        let closed = f.task(id);
+        if matches!(case, "foreign" | "stale") {
+            assert!(result.is_err() || result.as_ref().unwrap().is_error == Some(true), "{case}: {result:?}");
+            assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap(), latest);
+        } else {
+            assert!(!result.as_ref().unwrap().is_error.unwrap_or(false), "{case}: {result:?}");
+        }
+        if matches!(case, "approved" | "inline") {
+            assert_eq!(closed.status, TaskStatus::Closed, "{case}: {result:?}");
+            assert!(!closed.pending_verification);
+            assert!(agents.get_lease(id).unwrap().is_none());
+            assert!(closed.deliverables.no_delivery_close_intent.is_none());
+            let history = agents.get_lease_history(id, None).unwrap();
+            let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+            let notices = queue.peek_all(50).unwrap().len();
+            f.supervisor.verification(Parameters(serde_json::from_value(approval).unwrap())).await.unwrap();
+            assert_eq!(f.task(id).closed_at, closed.closed_at);
+            assert_eq!(agents.get_lease_history(id, None).unwrap().len(), history.len());
+            assert_eq!(queue.peek_all(50).unwrap().len(), notices);
+        } else {
+            assert_ne!(closed.status, TaskStatus::Closed, "{case}: {result:?}");
+            assert!(agents.get_lease(id).unwrap().is_some());
+        }
+        assert!(closed.deliverables.factory_branch_anchor.is_none());
+        assert_eq!(serde_json::to_value(f.task("cas-other")).unwrap(), serde_json::to_value(&foreign).unwrap());
+        assert_eq!(git(f.dir.path(), &["rev-parse", LANE]), f.foreign_tip);
+    }
 }
 
 /// A reset starts at the target tip, without inheriting target history as

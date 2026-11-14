@@ -2289,7 +2289,7 @@ mod tests {
         task.notes = format!("[{}] 🚫 BLOCKER {}", Utc::now().format("%Y-%m-%d %H:%M"),
             crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id));
         task.deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
-            dispatch_id:dispatch.id.clone(), reason:"No source change".into(), assignee:Some("previous-worker".into()),
+            dispatch_id:dispatch.id.clone(), reason:"No source change".into(), assignee:Some("previous-worker".into()), no_code_proof: None,
         });
         tasks.update(&task).unwrap();
         let core = CasCore::with_daemon(root.to_path_buf(), None, None);

@@ -775,12 +775,16 @@ pub struct TaskDeliverables {
     pub merge_ci_admission: Option<MergeCiAdmission>,
 }
 
-/// An explicit no-delivery close waiting on one exact verdict, not a sticky methodology.
+/// A no-delivery or portable no-code close waiting on one exact verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoDeliveryCloseIntent {
     pub dispatch_id: String,
     pub reason: String,
     pub assignee: Option<String>,
+    /// Present for an ordinary no-code close; absent retains the explicit
+    /// no_delivery declaration used by older intents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_code_proof: Option<String>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -1899,8 +1903,13 @@ mod tests {
                         serde_json::Value::String(serde_json::json!({"no_delivery_close_intent":intent}).to_string())] {
             let parsed: TaskDeliverables = serde_json::from_value(payload).unwrap();
             assert_eq!(parsed.no_delivery_close_intent.as_ref().unwrap().dispatch_id, "dispatch-1");
+            assert!(parsed.no_delivery_close_intent.as_ref().unwrap().no_code_proof.is_none());
             assert_eq!(serde_json::to_value(parsed).unwrap()["no_delivery_close_intent"], intent);
         }
+        let mut no_code = serde_json::from_value::<NoDeliveryCloseIntent>(intent).unwrap();
+        no_code.no_code_proof = Some("artifact:portable-report".into());
+        let encoded = serde_json::to_value(&no_code).unwrap();
+        assert_eq!(serde_json::from_value::<NoDeliveryCloseIntent>(encoded).unwrap(), no_code);
         assert_eq!(deliverables.effective_merge_ci_admission(), MergeCiAdmission::Green);
         let eval = serde_json::json!({"target":{"dataset":"reader-v1","thresholds":{"accuracy":{"min":95}}},"receipt":null,"artifact":null});
         let parsed: TaskDeliverables = serde_json::from_value(serde_json::json!({"model_eval":eval})).unwrap();

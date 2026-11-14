@@ -185,7 +185,8 @@ pub(in crate::hooks::handlers::handlers_events) fn shell_input(args: &[String]) 
         let takes_value = matches!(arg.as_str(), "--rcfile" | "--init-file")
             || short.is_some_and(|flags| flags.contains(['o', 'O']));
         if arg == "--command" || (arg.starts_with('-') && short.is_some_and(|flags| flags.contains('c'))) {
-            return ShellInput::Command(at + 1 + usize::from(takes_value));
+            let payload = at + 1 + usize::from(takes_value);
+            return ShellInput::Command(payload + usize::from(args.get(payload).is_some_and(|arg| arg == "--")));
         }
         if arg.starts_with('-') && !arg.starts_with("--") && arg.contains('s') { stdin = true; }
         if takes_value { at += 1; }

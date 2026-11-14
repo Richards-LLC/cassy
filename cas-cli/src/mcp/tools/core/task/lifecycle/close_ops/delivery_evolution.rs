@@ -552,7 +552,70 @@ fn additive_import_union(base: &str, prior: &str, other: &str, merged: &str) -> 
 
 type ParallelEdits = std::collections::HashMap<usize, std::collections::HashMap<String, String>>;
 
+// Different deliveries walk overlapping suffixes of the same history. The
+// owner identity is irrelevant here: only its live positions affect the proof.
+// Full immutable edge ids bind both the hunks and their merge-base context.
+type ParallelProofKey = (std::path::PathBuf, String, String, String, String, String, Vec<usize>);
+#[derive(Default)]
+struct ParallelProofCache {
+    entries: std::collections::HashMap<ParallelProofKey, ParallelEdits>,
+    bytes: usize,
+}
+static PARALLEL_PROOFS: std::sync::OnceLock<std::sync::Mutex<ParallelProofCache>> =
+    std::sync::OnceLock::new();
+const PARALLEL_PROOF_BYTES: usize = 16 * 1024 * 1024;
+
 fn parallel_edit_proofs(
+    repo: &Path,
+    merge: &str,
+    prior: &str,
+    base: &str,
+    other: &str,
+    path: &str,
+    context: &MergeUnionContext<'_>,
+    changes: &[Hunk],
+    previous: &[Option<OwnedLines>],
+) -> Result<ParallelEdits, String> {
+    #[cfg(test)]
+    if !USE_PARALLEL_PROOF_CACHE.load(std::sync::atomic::Ordering::Relaxed) {
+        return parallel_edit_proofs_uncached(repo, base, other, path, context, changes, previous);
+    }
+    let mut positions: Vec<_> = previous.iter().flatten()
+        .flat_map(|owner| owner.positions.iter().copied()).collect();
+    positions.sort_unstable();
+    positions.dedup();
+    let key = (repo.to_path_buf(), merge.to_string(), prior.to_string(), base.to_string(),
+        other.to_string(), path.to_string(), positions);
+    let cache = PARALLEL_PROOFS.get_or_init(Default::default);
+    if let Some(proofs) = cache.lock().ok().and_then(|cache| cache.entries.get(&key).cloned()) {
+        return Ok(proofs);
+    }
+    // Errors (including exhausted measurement budgets) must remain retryable.
+    let proofs = parallel_edit_proofs_uncached(repo, base, other, path, context, changes, previous)?;
+    // Account for retained strings, positions and map buckets conservatively;
+    // an oversized proof is returned without retaining it. Also bound entries.
+    let bytes = std::mem::size_of::<ParallelProofKey>() + key.0.as_os_str().len()
+        + key.1.len() + key.2.len() + key.3.len() + key.4.len() + key.5.len()
+        + key.6.len() * std::mem::size_of::<usize>()
+        + proofs.capacity() * 2 * std::mem::size_of::<(usize, std::collections::HashMap<String, String>)>()
+        + proofs.values().map(|lines| {
+            lines.capacity() * 2 * std::mem::size_of::<(String, String)>()
+                + lines.iter().map(|(line, author)| line.len() + author.len()).sum::<usize>()
+        }).sum::<usize>();
+    if bytes <= PARALLEL_PROOF_BYTES && let Ok(mut cache) = cache.lock() {
+        if cache.bytes + bytes > PARALLEL_PROOF_BYTES || cache.entries.len() >= WALK_CACHE_LIMIT {
+            cache.entries.clear();
+            cache.bytes = 0;
+        }
+        if !cache.entries.contains_key(&key) {
+            cache.entries.insert(key, proofs.clone());
+            cache.bytes += bytes;
+        }
+    }
+    Ok(proofs)
+}
+
+fn parallel_edit_proofs_uncached(
     repo: &Path,
     base: &str,
     other: &str,
@@ -1774,7 +1837,7 @@ fn walk_owners(
                 } else {
                     fields[1]
                 };
-                parallel_edit_proofs(repo, base, other, path, context, &changes, previous)?
+                parallel_edit_proofs(repo, commit, prior, base, other, path, context, &changes, previous)?
             } else {
                 ParallelEdits::new()
             };

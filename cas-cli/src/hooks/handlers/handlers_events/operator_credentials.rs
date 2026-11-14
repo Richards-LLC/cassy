@@ -93,10 +93,12 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
     }
 }
 
+/// A command whose working directories cannot be resolved is refused: no
+/// weaker reading stands in for the per-statement projection.
 fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
-    if depth > 3 { return false; }
+    if depth > 3 { return true; }
     let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
-        return legacy_shell_references_store(command, initial_cwd, depth);
+        return true;
     };
     let names_inert = depth == 0 && listed_names_stay_inert(command);
     for context in contexts {
@@ -121,89 +123,6 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
         }) { return true; }
     }
     false
-}
-
-fn legacy_shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
-    if depth > 3 {
-        return false;
-    }
-    let mut cwd = initial_cwd.to_path_buf();
-    let mut directory_stack = Vec::new();
-    // Nested shells are not standalone listings, so their payloads never
-    // reach here with inert names.
-    let names_inert = depth == 0 && listed_names_stay_inert(command);
-    let statements = super::pre_tool::shell_statement_words(command);
-    let arguments = super::pre_tool::shell_statement_arguments(command);
-    for (statement_index, words) in statements.iter().enumerate() {
-        let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
-            continue;
-        };
-        let executable = Path::new(&words[command_index])
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&words[command_index])
-            .to_ascii_lowercase();
-        let args = &words[command_index + 1..];
-
-        // Inspect shell payloads as nested statement lists so a `cd` inside a
-        // `sh -c` or `bash -c` does not leak into the caller's working dir.
-        if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-            for payload in shell_command_payloads(args) {
-                if shell_references_store(payload, &cwd, depth + 1) {
-                    return true;
-                }
-            }
-            continue;
-        }
-        if executable == "eval" && shell_references_store(&args.join(" "), &cwd, depth + 1) {
-            return true;
-        }
-
-        if matches!(executable.as_str(), "cd" | "pushd") {
-            if let Some(target) = cd_target(args) {
-                if path_references_store(target, &cwd, false) {
-                    return true;
-                }
-                if let Some(next_cwd) = resolve_path(target, &cwd) {
-                    if executable == "pushd" {
-                        directory_stack.push(cwd.clone());
-                    }
-                    cwd = next_cwd;
-                }
-            } else if let Some(home) = std::env::var_os("HOME") {
-                if executable == "pushd" {
-                    directory_stack.push(cwd.clone());
-                }
-                cwd = PathBuf::from(home);
-            }
-            continue;
-        }
-        if executable == "popd" {
-            if let Some(previous) = directory_stack.pop() {
-                cwd = previous;
-            }
-            continue;
-        }
-
-        // Parse actual argv, without `2>/dev/null`, but retain raw words for
-        // protected redirect targets below. Ambiguous statement alignment
-        // keeps the conservative read classification.
-        let names_only = names_inert
-            && statements.len() == arguments.len()
-            && arguments.get(statement_index).is_some_and(|argv| {
-                super::pre_tool::unwrapped_command_index(argv).is_some_and(|index| {
-                    argv[index] == words[command_index]
-                        && lists_names_only(&executable, &argv[index + 1..])
-                })
-            });
-        if statement_references_store(words, &cwd, depth, names_only) {
-            return true;
-        }
-    }
-
-    super::pre_tool::shell_heredoc_bodies(command)
-        .iter()
-        .any(|body| script_constructs_store_path(body, &cwd))
 }
 
 fn statement_references_store(
@@ -442,12 +361,6 @@ fn shell_command_payloads(args: &[String]) -> Vec<&str> {
         .filter(|arg| !arg.starts_with('-'))
         .map(String::as_str)
         .collect()
-}
-
-fn cd_target(args: &[String]) -> Option<&str> {
-    args.iter()
-        .find(|arg| !matches!(arg.as_str(), "-L" | "-P" | "--"))
-        .map(String::as_str)
 }
 
 fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool {

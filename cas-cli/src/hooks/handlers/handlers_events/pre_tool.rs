@@ -11515,6 +11515,9 @@ mod worker_commit_guard_tests {
         env.set("CAS_FACTORY_MODE", "1");
         let mut failures = Vec::new();
         for (command, rule) in [
+            ("select x in safe; do printf safe; done", "shell.unknown_syntax"),
+            ("printf safe ||| printf safe", "shell.unknown_syntax"),
+            ("then printf safe", "shell.unknown_syntax"),
             ("coproc printf safe", "shell.coproc"),
             ("if true; then coproc { printf safe; }; fi", "shell.coproc"),
             ("bash <<'EOF'\nprintf safe\nEOF", "shell.stdin_interpreter"),
@@ -11584,6 +11587,7 @@ mod worker_commit_guard_tests {
         for command in ["printf 'unfinished", "printf \"unfinished", "printf unfinished\\", "printf \"$(printf x)", "printf ${x:-unfinished",
             "if true; then printf safe", "while false; do printf safe",
             "for x in safe; do printf safe", "{ printf safe;", "( printf safe",
+            "printf safe &&", "printf safe |", "printf safe >", "f()", "function f",
         ] {
             let input = hook_git_write_input("/worktree", command);
             let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
@@ -11606,10 +11610,14 @@ mod worker_commit_guard_tests {
         for _ in 0..7 {
             command = format!("bash -c '{}'", command.replace('\'', "'\\''"));
         }
-        let input = hook_git_write_input("/worktree", &command);
-        let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
-        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{value}");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("shell.depth"), "{value}");
+        let mut groups = "printf safe".to_string();
+        for _ in 0..7 { groups = format!("{{ {groups}; }}"); }
+        for command in [command, groups] {
+            let input = hook_git_write_input("/worktree", &command);
+            let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
+            assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{value}");
+            assert!(value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("shell.depth"), "{value}");
+        }
     }
 
     #[test]

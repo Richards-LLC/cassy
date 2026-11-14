@@ -4,7 +4,8 @@
 # those pushes directly. With CAS_LANE_SLIM=true a slim lane runs only the jobs
 # that still do work: classify with no-build fast rows, the two "Scoped
 # Validation" checks (Docs Lint for a docs-only diff) and, for a Rust diff, the
-# impact-selected tests (cas-2e1b). Their job names match ci.yml's, so worktree_merge's
+# impact-selected tests (cas-2e1b), plus the Commander journeys a hub-web
+# delivery affects (cas-6a42). Their job names match ci.yml's, so worktree_merge's
 # admission and the CI watchers read them unchanged. Skipped ci.yml jobs used
 # to resolve one by one (~30 s each, 13.3 min for run 39285508460 that did 21 s
 # of work); this workflow has none to wait for.
@@ -36,6 +37,11 @@ permissions:
   contents: read
   actions: read
 
+env:
+  # Factory refs can reuse main objects without filling the shared quota with
+  # objects that other branches and the release queue cannot read.
+  SCCACHE_GHA_RW_MODE: READ_ONLY
+
 jobs:
   full:
     name: Full lane
@@ -64,6 +70,8 @@ jobs:
       fast-admission: ${{ steps.classify-diff.outputs.fast-admission }}
       fast-admission-reason: ${{ steps.classify-diff.outputs.fast-admission-reason }}
       script-tests-needed: ${{ steps.script-tests.outputs.needed }}
+      journey-shards: ${{ steps.journeys.outputs.shards }}
+      journey-shard-total: ${{ steps.journeys.outputs.total }}
     steps:
       # Classification needs the merge base with the epic parent, so history
       # stays complete; a warm self-hosted workspace fetches incrementally.
@@ -77,6 +85,55 @@ jobs:
         with:
           base-sha: ${{ github.event.before }}
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
+
+      # cas-6a42: a delivery touching Commander's src, e2e or dist runs the
+      # journeys scripts/journeys-for-diff.py selects for its range (job
+      # lane-journeys), so a UI regression reddens the lane before park
+      # instead of the frozen train's full run. Other deliveries select none;
+      # an unknown base selects every journey. Shards hold whole journeys,
+      # balanced by their test count, so none is ever empty.
+      # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+      - id: journeys
+        name: Select affected Commander journeys
+        env:
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
+        run: |
+          python3 - <<'PY'
+          import json, math, os, re, subprocess
+          from pathlib import Path
+          base = os.environ.get('BASE_SHA', '')
+          if base:
+              changed = subprocess.run(['git', 'diff', '--name-only', base, 'HEAD'], check=True,
+                                       capture_output=True, text=True).stdout.split()
+              touched = any(p.startswith(('hub-web/src/', 'hub-web/e2e/', 'hub-web/dist/')) for p in changed)
+              command = [base, 'HEAD']
+          else:
+              print('::warning title=Commander journeys::Unknown comparison base; selecting every journey')
+              touched, command = True, ['--all']
+          ids = []
+          if touched:
+              out = subprocess.run(['python3', 'scripts/journeys-for-diff.py', *command], check=True,
+                                   capture_output=True, text=True).stdout
+              ids = sorted(j['id'] for j in json.loads(out)['journeys'])
+          weight = dict.fromkeys(ids, 1)
+          for spec in Path('hub-web/e2e/journeys').glob('*.journey.ts'):
+              titles = re.findall(r'\btest(?:\.(?:only|skip|fixme|fail|slow))?\(\s*(["\'`])(.*?)\1', spec.read_text(), re.S)
+              for _, title in titles:
+                  for ident in set(re.findall(r'\b[A-Z]+-J\d+\b', title)) & weight.keys():
+                      weight[ident] += 1
+          total = min(6, len(ids), math.ceil(sum(weight.values()) / 40))
+          shards, load = [[] for _ in range(total)], [0] * total
+          for ident in sorted(ids, key=lambda i: (-weight[i], i)):
+              slot = load.index(min(load))
+              shards[slot].append(ident)
+              load[slot] += weight[ident]
+          matrix = [{'shard': n + 1, 'journeys': ' '.join(sorted(s)),
+                     'grep': r'\b(?:' + '|'.join(re.escape(i) for i in sorted(s)) + r')\b'}
+                    for n, s in enumerate(shards)]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'shards={json.dumps(matrix)}\ntotal={total}\n')
+          print(f"Commander journeys: {' '.join(ids) or 'none'} ({total} shard(s))")
+          PY
 
       - id: script-tests
         name: Classify script suite inputs
@@ -451,6 +508,8 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      - uses: ./.github/actions/setup-native-test-deps
+
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
@@ -502,3 +561,71 @@ jobs:
           name: lane-impact-${{ github.run_id }}-ring-${{ matrix.shard }}
           path: lane-impact/
           if-no-files-found: ignore
+
+  # cas-6a42: the journeys the ci-diff job selected, headless on the Chromium
+  # @playwright/test pins, as ci.yml's queue journeys run them. A failing
+  # journey turns the lane red with its ID in an error annotation.
+  # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
+  lane-journeys:
+    name: Scoped Validation — Commander journeys ${{ matrix.shard }}/${{ needs.ci-diff.outputs.journey-shard-total }}
+    if: >-
+      vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.journey-shards != '' && needs.ci-diff.outputs.journey-shards != '[]'
+    needs: ci-diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.ci-diff.outputs.journey-shards) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+
+      - name: Run Commander journeys ${{ matrix.journeys }}
+        working-directory: hub-web
+        env:
+          GREP: ${{ matrix.grep }}
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+        run: |
+          npm ci
+          npx playwright install --no-shell chromium
+          browser="$(node -p 'require("@playwright/test").chromium.executablePath()')"
+          libraries="$(ldd "$browser")"
+          if grep -q 'not found' <<< "$libraries"; then
+            npx playwright install-deps chromium
+          else
+            echo "Chromium libraries present; skipping apt dependencies"
+          fi
+          status=0
+          npm run journeys -- --workers=2 --retries=0 --grep "$GREP" || status=$?
+          python3 - "$status" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          status, report, failed = int(sys.argv[1]), Path('e2e/.results/report.json'), []
+          def walk(suites):
+              for suite in suites:
+                  for spec in suite.get('specs', []):
+                      if any(t.get('status') in ('unexpected', 'flaky') for t in spec.get('tests', [])):
+                          failed.append(spec)
+                  walk(suite.get('suites', []))
+          if report.is_file():
+              walk(json.loads(report.read_text()).get('suites', []))
+          for spec in failed:
+              for ident in sorted(set(re.findall(r'\b[A-Z]+-J\d+\b', spec['title']))) or ['unnamed']:
+                  print(f"::error title=Commander journey {ident} failed::{spec['file']}:{spec['line']} {spec['title']}")
+          if status and not failed:
+              print(f'::error title=Commander journeys::run exited {status} before any journey reported a failure')
+          sys.exit(1 if failed or status else 0)
+          PY
+
+      - name: Upload Commander journey evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-journeys-${{ matrix.shard }}
+          path: hub-web/e2e/.results/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14

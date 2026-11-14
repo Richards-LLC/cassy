@@ -125,8 +125,10 @@ async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_rep
         let elapsed = sent.elapsed();
         let at = Utc::now();
         let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
-        writeln!(file, "{}\n{}", serde_json::json!({"type":"user","uuid":"terminal-checkpoint","timestamp":at,"message":{"role":"user","content":"Terminal checkpoint"}}),
-            serde_json::json!({"type":"assistant","timestamp":at+chrono::Duration::milliseconds(1),"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Fixture supervisor answer"}]}})).unwrap();
+        // Real Claude settles every answer with Stop-hook verdict records.
+        writeln!(file, "{}\n{}\n{}", serde_json::json!({"type":"user","uuid":"terminal-checkpoint","timestamp":at,"message":{"role":"user","content":"Terminal checkpoint"}}),
+            serde_json::json!({"type":"assistant","timestamp":at+chrono::Duration::milliseconds(1),"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Fixture supervisor answer"}]}}),
+            serde_json::json!({"type":"system","subtype":"turn_duration","timestamp":at+chrono::Duration::milliseconds(2)})).unwrap();
         let reply = loop {
             if let DaemonMessage::OperatorReply { notification_id, device_id, message, .. } = next(&mut socket).await {
                 assert_eq!(device_id, "*");

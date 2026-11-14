@@ -2678,6 +2678,14 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         mut req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        let tasks = self.inner.open_task_store()?;
+        for id in req.task_ids.as_deref().unwrap_or_default().iter().map(String::as_str)
+            .chain(req.task_id.as_deref())
+        {
+            let task = tasks.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), None)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
         if let Some(ids) = req.task_ids.as_ref() {
             let distinct = ids.iter().collect::<std::collections::HashSet<_>>();
             if req.task_id.is_some() || ids.is_empty() || distinct.len() != ids.len()
@@ -3150,11 +3158,9 @@ impl CasService {
         // so a request cannot bypass the fleet cap by queueing four workers at
         // once. `force=true` is an explicit operator override and remains
         // visible in the queued receipt.
-        let factory_config = {
-            use crate::config::Config;
-            Config::load(&self.inner.cas_root)
-                .unwrap_or_default()
-                .factory()
+        let (factory_config, max_workers_source) = {
+            let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+            (config.factory(), config.max_workers_source())
         };
         let build_guard = crate::factory_build_guard::inspect_for_task(
             &self.inner.cas_root,
@@ -3197,12 +3203,12 @@ impl CasService {
                 crate::gates::tag("G-135", build_guard.refusal_message()),
             ));
         }
-        let live_workers = crate::factory_build_routing::live_worker_count(&self.inner.cas_root)
+        let live_workers = crate::factory_build_routing::live_workers(&self.inner.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
-        if live_workers.saturating_add(slots) > factory_config.max_workers && !force_build_guard {
+        if live_workers.total().saturating_add(slots) > factory_config.max_workers() && !force_build_guard {
             return Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
-                "Worker capacity: {live_workers}/{} live on this machine; {slots} requested",
-                factory_config.max_workers,
+                "Worker capacity: {}; {slots} requested (factory.max_workers source: {max_workers_source})",
+                live_workers.render(factory_config.max_workers()),
             )));
         }
         let mut build_guard_notice = build_guard.receipt_notice(force_build_guard);
@@ -4815,6 +4821,12 @@ impl CasService {
             .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
             .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
         if !qa_progress.is_empty() { binary_versions.push_str(&format!("\n{qa_progress}")); }
+        // The same machine-wide census spawn admission refuses against.
+        let max_workers = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default().factory().max_workers();
+        binary_versions.push_str(&match crate::factory_build_routing::live_workers(&self.inner.cas_root) {
+            Ok(live) => format!("\nWorker capacity: {}", live.render(max_workers)),
+            Err(error) => format!("\nWorker capacity unavailable: {error}"),
+        });
         match cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.inner.cas_root) {
             Ok(queues) => for worker in store.list(None).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))? {
                 if worker.role != AgentRole::Worker || !worker.visible_to_factory_session(factory_session.as_deref()) { continue; }

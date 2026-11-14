@@ -1701,6 +1701,31 @@ bug_families:
     title: Supervisor launches and epic pushes must retain working Git hook checks
     tasks: [cas-1efb]
     journeys: [HUB-J13]
+  commander-activity-without-phase:
+    title: Fresh supervisor output shows working without requiring a named phase
+    found: '2026-11-13'
+    tasks: [cas-af35]
+    journeys: [HUB-J12, HUB-J4]
+    invariants: [HUB-J12-GOAL, HUB-J4-GOAL]
+  commander-history-writer-contention:
+    title: Commander history stays readable while a daemon writer owns the shared SQLite connection
+    found: '2026-11-13'
+    tasks: [cas-cab9]
+    journeys: [HUB-J4, HUB-J12, HUB-J23]
+    invariants: [HUB-J4-GOAL, HUB-J12-GOAL, HUB-J23-GOAL]
+  release-reverted-members:
+    title: Release inventory and closeout hold reverted deliveries and bound ledger exclusions while independently shipped members close
+    tasks: [cas-aeb3]
+    journeys: [CLI-RELEASE, FACTORY-CLOSE]
+    invariants: [FACTORY-RELEASE-CLOSEOUT]
+  review-assignment-authority:
+    title: Independent verdict work is refused before ordinary worker assignment accepts it
+    tasks: [cas-8dab]
+    journeys: [FACTORY-SUPERVISE, FACTORY-SPAWN, FACTORY-CLOSE]
+  verifier-namespace-error-recovery:
+    title: Verifier infrastructure errors preserve exact-dispatch recovery and daemon launches retain read-only containment
+    tasks: [cas-343d]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

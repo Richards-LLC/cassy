@@ -1352,6 +1352,24 @@ pub fn resolve_verification_dispatch_with_conn(
     capability_id: Option<&str>,
     supervisor_direct: bool,
 ) -> Result<Option<VerificationDispatch>> {
+    finish_verification_dispatch_with_conn(conn, dispatch_id, verifier_agent_id, capability_id, supervisor_direct, true)
+}
+
+/// An infrastructure failure consumes the failed child's authority, not the review.
+pub fn retry_verification_dispatch_after_error_with_conn(
+    conn: &Connection, dispatch_id: &str, verifier_agent_id: &str,
+    capability_id: Option<&str>, supervisor_direct: bool,
+) -> Result<Option<VerificationDispatch>> {
+    if latest_dispatch_status(conn, dispatch_id)? != Some(VerificationStatus::Error) {
+        return Err(StoreError::Parse("only an infrastructure ERROR can release review authority".into()));
+    }
+    finish_verification_dispatch_with_conn(conn, dispatch_id, verifier_agent_id, capability_id, supervisor_direct, false)
+}
+
+fn finish_verification_dispatch_with_conn(
+    conn: &Connection, dispatch_id: &str, verifier_agent_id: &str,
+    capability_id: Option<&str>, supervisor_direct: bool, terminal: bool,
+) -> Result<Option<VerificationDispatch>> {
     let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
     let now = Utc::now();
     // A server handoff consumed by the same atomic verdict transaction has
@@ -1394,12 +1412,15 @@ pub fn resolve_verification_dispatch_with_conn(
             "verification dispatch is owned by another verifier".to_string(),
         ));
     }
-    let resolved_at = now;
+    if !terminal { retire_dispatch_claim(conn, &dispatch)?; }
     let changed = conn.execute(
         "UPDATE verification_dispatches
-         SET state = 'resolved', resolved_at = ?2
+         SET state = ?2, resolved_at = ?3,
+             verifier_agent_id = CASE WHEN ?4 THEN verifier_agent_id ELSE NULL END,
+             capability_id = CASE WHEN ?4 THEN capability_id ELSE NULL END
          WHERE id = ?1 AND state IN ('pending', 'claimed', 'timed_out')",
-        params![dispatch.id, resolved_at.to_rfc3339()],
+        params![dispatch.id, if terminal { "resolved" } else { "pending" },
+            terminal.then(|| now.to_rfc3339()), terminal],
     )?;
     if changed != 1 {
         return Err(StoreError::Parse(
@@ -1407,6 +1428,37 @@ pub fn resolve_verification_dispatch_with_conn(
         ));
     }
     get_verification_dispatch_with_conn(conn, dispatch_id).map(Some)
+}
+
+fn latest_dispatch_status(conn: &Connection, id: &str) -> Result<Option<VerificationStatus>> {
+    let row: Option<(String, Option<String>)> = conn.query_row(
+        "SELECT status,status_detail FROM verifications WHERE dispatch_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1",
+        [id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    Ok(row.map(|(status, detail)| VerificationStatus::from_storage(&status, detail.as_deref())))
+}
+
+fn retire_dispatch_claim(conn: &Connection, dispatch: &VerificationDispatch) -> Result<()> {
+    if let Some(capability) = &dispatch.capability_id {
+        let now = Utc::now().to_rfc3339();
+        conn.execute("UPDATE verification_capabilities SET consumed_at=COALESCE(consumed_at,?2) WHERE id=?1", params![capability,now])?;
+        conn.execute("UPDATE verification_handoffs SET state='consumed',consumed_at=COALESCE(consumed_at,?2) WHERE capability_id=?1 AND state IN ('pending','bound')", params![capability,now])?;
+    }
+    Ok(())
+}
+
+/// Repair the old writer's resolved ERROR only at an authorized write boundary.
+/// A real terminal verdict or a newer dispatch can never be reopened here.
+pub fn recover_errored_verification_dispatch_with_conn(conn: &Connection, id: &str) -> Result<()> {
+    let dispatch = get_verification_dispatch_with_conn(conn, id)?;
+    if dispatch.state == VerificationDispatchState::Resolved
+        && latest_dispatch_status(conn, id)? == Some(VerificationStatus::Error)
+        && get_latest_verification_dispatch_with_conn(conn, &dispatch.task_id)?.is_some_and(|d| d.id == id)
+    {
+        retire_dispatch_claim(conn, &dispatch)?;
+        conn.execute("UPDATE verification_dispatches SET state='pending',resolved_at=NULL,verifier_agent_id=NULL,capability_id=NULL WHERE id=?1 AND state='resolved'", [id])?;
+    }
+    Ok(())
 }
 
 /// Current dispatches awaiting expiry recovery (pending, claimed or timed out)
@@ -1633,99 +1685,6 @@ pub fn extend_verification_dispatch_deadline(
     Ok(extended)
 }
 
-/// cas-d4b7: carry one exact approved verdict to a new candidate proof whose
-/// delivered patch the caller proved identical. In one transaction the prior
-/// cycle is retired, a new dispatch is bound to `boundary` and resolved, and a
-/// system-provenance approval naming the prior verdict (the `receipt`) is
-/// recorded on it. No verifier is dispatched. Only the latest task-only
-/// repository cycle, resolved with that exact approval, can be rebound.
-pub fn rebind_approved_verification_dispatch(
-    cas_dir: &Path,
-    prior_dispatch_id: &str,
-    prior_verdict_id: &str,
-    requester_agent_id: &str,
-    owner_agent_id: &str,
-    boundary: &VerificationProofBoundary,
-    receipt: &str,
-    approved_anchor: &str,
-) -> Result<(VerificationDispatch, Verification)> {
-    let store = SqliteVerificationStore::open(cas_dir)?;
-    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
-    let prior = get_verification_dispatch_with_conn(&tx, prior_dispatch_id)?;
-    let latest = get_latest_verification_dispatch_with_conn(&tx, &prior.task_id)?;
-    let verdict: Option<(String, String)> = tx
-        .query_row(
-            "SELECT id, status FROM verifications WHERE dispatch_id = ?1
-             ORDER BY created_at DESC, id DESC LIMIT 1",
-            params![prior.id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let prior_receipt = prior.receipt().map_err(StoreError::Parse)?;
-    let next_receipt = boundary.receipt().map_err(StoreError::Parse)?;
-    if latest.as_ref().map(|latest| latest.id.as_str()) != Some(prior.id.as_str())
-        || prior_receipt != next_receipt
-        || prior.state != VerificationDispatchState::Resolved
-        || prior_receipt.transaction().is_some()
-        || prior.repository.is_none()
-        || boundary.repository.is_none()
-        || verdict.as_ref().map(|(id, status)| (id.as_str(), status.as_str()))
-            != Some((prior_verdict_id, VerificationStatus::Approved.storage_status()))
-    {
-        return Err(StoreError::Parse(
-            "verdict rebind requires the latest task-only dispatch resolved with this exact approval"
-                .to_string(),
-        ));
-    }
-    let now = Utc::now();
-    tx.execute(
-        "UPDATE verification_dispatches SET state = 'invalidated' WHERE id = ?1 AND state = 'resolved'",
-        params![prior.id],
-    )?;
-    let mut dispatch = create_verification_dispatch_bound_in_transaction(
-        &tx,
-        &prior.task_id,
-        requester_agent_id,
-        owner_agent_id,
-        boundary,
-        now,
-        false,
-    )?;
-    tx.execute(
-        "UPDATE verification_dispatches SET state = 'resolved', resolved_at = ?2 WHERE id = ?1",
-        params![dispatch.id, now.to_rfc3339()],
-    )?;
-    dispatch.state = VerificationDispatchState::Resolved;
-    dispatch.resolved_at = Some(now);
-    let mut verification = Verification::new(store.generate_id()?, prior.task_id.clone());
-    verification.agent_id = Some(owner_agent_id.to_string());
-    verification.issuer_agent_id = Some(requester_agent_id.to_string());
-    verification.provenance = VerificationProvenance::System;
-    verification.dispatch_id = Some(dispatch.id.clone());
-    verification.status = VerificationStatus::Approved;
-    verification.summary = receipt.to_string();
-    verification.created_at = now;
-    insert_verification_with_conn(&tx, &verification)?;
-    // Carry the original approval stamp, including a legacy missing version.
-    // No new registry snapshot is taken when the same approval carries.
-    let metadata: Option<String> = if tx.table_exists(None, "events")? {
-        tx.query_row("SELECT metadata FROM events WHERE event_type='verification_added'
-            AND entity_type='verification' AND entity_id=?1 ORDER BY id LIMIT 1",
-            [prior_verdict_id], |r| r.get(0)).optional()?.flatten()
-    } else { None };
-    if let Some(metadata) = metadata {
-        let mut metadata: serde_json::Value = serde_json::from_str(&metadata)?;
-        metadata["approved_anchor"] = approved_anchor.into();
-        metadata["verdict_id"] = verification.id.clone().into();
-        metadata["dispatch_id"] = dispatch.id.clone().into();
-        let event = Event::new(EventType::VerificationAdded, EventEntityType::Verification,
-            &verification.id, "Carried approval").with_metadata(metadata);
-        record_event_with_conn(&tx, &event)?;
-    }
-    tx.commit()?;
-    Ok((dispatch, verification))
-}
-
 /// Release only the exact failed child's current claim for a supported retry.
 /// Revocation, claim reset and failure audit share the verdict transaction lock:
 /// a late verdict, replacement claim or settled task can never be overwritten.
@@ -1743,11 +1702,8 @@ pub fn release_failed_verifier_dispatch(
         "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1 AND status NOT IN ('closed', 'cancelled'))",
         params![dispatch.task_id], |row| row.get(0),
     )?;
-    let has_verdict: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM verifications WHERE dispatch_id = ?1)",
-        params![dispatch_id],
-        |row| row.get(0),
-    )?;
+    let has_verdict = latest_dispatch_status(&tx, dispatch_id)?
+        .is_some_and(|status| !matches!(status, VerificationStatus::Error | VerificationStatus::Pending));
     if dispatch.state != VerificationDispatchState::Claimed
         || dispatch.verifier_agent_id.as_deref() != Some(verifier_agent_id)
         || dispatch.deadline_at <= Utc::now()
@@ -1758,18 +1714,7 @@ pub fn release_failed_verifier_dispatch(
         tx.commit()?;
         return Ok(false);
     }
-    let now = Utc::now().to_rfc3339();
-    if let Some(capability) = &dispatch.capability_id {
-        tx.execute(
-            "UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2) WHERE id = ?1",
-            params![capability, now],
-        )?;
-        tx.execute(
-            "UPDATE verification_handoffs SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
-             WHERE capability_id = ?1 AND state IN ('pending', 'bound')",
-            params![capability, now],
-        )?;
-    }
+    retire_dispatch_claim(&tx, &dispatch)?;
     tx.execute(
         "UPDATE verification_dispatches SET state = 'pending', verifier_agent_id = NULL, capability_id = NULL
          WHERE id = ?1 AND state = 'claimed' AND verifier_agent_id = ?2",

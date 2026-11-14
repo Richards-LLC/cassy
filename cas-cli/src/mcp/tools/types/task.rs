@@ -187,6 +187,11 @@ pub struct TaskCreateRequest {
     )]
     pub door: Option<String>,
 
+    /// Exact dispatch under review; ordinary workers cannot accept this task.
+    /// Omit to preserve on update; an empty string clears the target.
+    #[serde(default)]
+    pub review_dispatch_id: Option<String>,
+
     /// Test modules/targets that must be covered by close-time proof for a
     /// blast-radius task.
     #[schemars(
@@ -484,6 +489,11 @@ pub struct TaskUpdateRequest {
         description = "Recorded only: one-way or two-way; pass an empty string on update to clear. Does not affect merge policy."
     )]
     pub door: Option<String>,
+
+    /// Exact dispatch under review; ordinary workers cannot accept this task.
+    /// Omit to preserve on update; an empty string clears the target.
+    #[serde(default)]
+    pub review_dispatch_id: Option<String>,
 
     /// Update the test modules/targets required by blast-radius proof.
     #[schemars(

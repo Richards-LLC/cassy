@@ -69,6 +69,17 @@ alongside the existing text receipt.
 
 ## Native Codex verifier identity
 
+Independent review tasks declare `review_dispatch_id` on task create/update.
+This nullable field names the exact dispatch being reviewed and grants no
+authority. Ordinary worker assignment, spawn, queue admission and start refuse
+it before accepting work, even with a supervisor override. Use the daemon-owned
+verifier or a registered supervisor's `verification action=add` for that dispatch.
+Unassigned review requests may be retained for a supervisor. Omit the field on
+update to preserve it; pass an empty string to clear it. Free-text dispatch
+mentions remain evidence and do not declare a review target. Task CRUD is
+MCP-only; the shared Task wire representation carries the field through Cloud
+sync, and migration m299 adds it to existing task databases.
+
 An MCP caller belongs to its connection. Native Codex children share the
 parent's connection; choosing a role or receiving a dispatch ID does not create
 independent reviewer authority. `coordination whoami` shows the caller's type,
@@ -2790,6 +2801,18 @@ runs as `worker-check --detach` in its own session, since Codex `exec_command`
 kills the shell's process group, including any `&` job, when the shell exits
 (cas-3d04); without a log redirect it is refused. Compile checks execute no tests.
 
+The existing focused-proof park gate also requires five consecutive passes for
+the delivery's new or changed test functions, including test-only deliveries. The capped Rust
+runner repeats only owned functions in its requested selection; unchanged tests
+retain one-pass crate coverage. Vitest, Jest and Playwright use
+`cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`.
+Stability receipts share the worker-check store and include runner, source test
+identities, consecutive pass count and elapsed time. Park only reads them.
+Stability uses the same receipt carry-forward as crate proof: documentation or
+changelog commits preserve it when no test/build inputs change. Target merges
+use the shared input/resolution checks. A changed test needs fresh stability
+even when its name is unchanged or its product change is already on the target.
+
 Detached capped runs register their worker/task, output log and PID incarnation
 before returning. Their existing worker-check command inherits a hidden
 `--completion-id`; after its capped producer returns, it records the original
@@ -5028,9 +5051,9 @@ and `worktree_merge`; resume those calls after the run. This manual wait does
 not enforce a shared hold across machines.
 
 Auto-cut (`workflow/release_auto_cut.rs`) runs inside the daemon's cut-notice
-poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip
-has a green train-suite receipt, it acts when the tip holds `changelog.d/`
-fragments, no merge-queue run is in flight, the operator has not paused it
+poll (`train_guardrails::notify_train_cuts`). For an uncut train it may freeze
+when the tip holds `changelog.d/` fragments, its declared must-land scope has
+landed, no merge-queue run is in flight, the operator has not paused it
 (Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
 label), the train's supervisor is registered on this machine and the cadence
 allows it: fewer than `release.auto_cut_max_per_day` (default 4) other trains
@@ -5044,6 +5067,16 @@ supervisor once. `release.sh` arms landing and publication reminders, and the
 post-publish notice has the supervisor post the approved notes. Cassy never
 writes or posts notes. Declined trains get the ordinary ready-to-cut notice,
 which names the reason.
+
+Record a required delivery with
+`task action=dep_add id=<train> to_id=<delivery> dep_type=blocks`.
+Auto-cut names unresolved blocking tasks and waits before freezing. Ordinary
+closure after merge or cancellation clears a blocker; moving a delivery to
+another target also removes it from this train's cut scope. Other dependency
+types and optional children do not hold the cut. Without Blocks dependencies,
+the existing fragment, queue and cadence rules apply. Free-text decision notes
+do not define machine scope; record the required IDs as dependencies. An
+explicit release cut remains available to the operator.
 
 ## Ordered train merge queue
 

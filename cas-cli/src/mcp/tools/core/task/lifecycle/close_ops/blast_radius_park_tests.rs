@@ -5,6 +5,7 @@
 //! reopening it for a fresh verification round.
 use super::*;
 use crate::mcp::CasService;
+use crate::factory_worker_check::stability;
 use crate::store::{open_agent_store, open_store, open_task_store, open_worktree_store};
 use crate::test_support::TestEnvGuard;
 use cas_types::{Agent, AgentRole, TaskRisk, WorkTarget};
@@ -68,6 +69,9 @@ impl Fixture {
 /// A workspace with crate `widget`; the worker's pushed, unmerged lane
 /// changes `widget::gear`; its task declares only an unrelated target.
 fn fixture(env: &mut TestEnvGuard) -> Fixture {
+    // Task identity precedes its delivery; store setup can exceed the
+    // attribution clock-skew allowance on a busy disk.
+    let mut task = Task::new(ID.into(), "turn the gear".into());
     let origin = tempfile::tempdir().unwrap();
     git(origin.path(), &["init", "-q", "--bare"]);
     let dir = tempfile::tempdir().unwrap();
@@ -123,7 +127,6 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("br-supervisor-session".into());
 
-    let mut task = Task::new(ID.into(), "turn the gear".into());
     task.status = TaskStatus::InProgress;
     task.assignee = Some(WORKER.into());
     task.risk = vec![TaskRisk::BlastRadius];
@@ -326,6 +329,14 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
         "widget",
         "test(gear::tests)",
     );
+    // Crate coverage and the mounted test's exact-tip stability are separate.
+    stability::record(&f.cas_dir(), &f.worker_path, &head, stability::Proof {
+        runner: "nextest".into(),
+        tests: vec![stability::Identity {
+            path: "crates/widget/src/gear_tests.rs".into(), name: "gear::tests::turns".into(),
+        }],
+        consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 0,
+    }).unwrap();
     let parked = call(&f.worker, serde_json::json!({
         "action": "close", "id": ID, "reason": "parent tests cover delivery",
     })).await;
@@ -752,6 +763,14 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     git(&f.worker_path, &["push", "-q", "origin", LANE]);
     let delivered_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     assert_ne!(tested_tip, delivered_tip);
+    // The crate receipt still rebounds across docs; the new test needs exact-tip proof.
+    stability::record(&f.cas_dir(), &f.worker_path, &delivered_tip, stability::Proof {
+        runner: "nextest".into(),
+        tests: vec![stability::Identity {
+            path: "crates/widget/tests/gear.rs".into(), name: "gear_turns".into(),
+        }],
+        consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 0,
+    }).unwrap();
     let parked = call(&f.worker, close.clone()).await;
     assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);

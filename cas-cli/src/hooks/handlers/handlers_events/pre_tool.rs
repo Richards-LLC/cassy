@@ -3036,10 +3036,10 @@ fn collect_git_write_targets(
                     && path_word(script).literal == Some(true)
             };
             // Syntax checks require exact raw noexec flags followed by raw
-            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Redirects
-            // and expansions can supply +n/-c and execute a payload.
+            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Its own
+            // argument projection must match; another statement's redirect
+            // does not change this invocation's mode or operands.
             let syntax_check = command_index == 0
-                && !lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('<' | '>')))
                 && shell_statement_arguments(command).iter().any(|statement| {
                     if statement != &words { return false; }
                     let flags = statement[1..].iter()
@@ -6513,6 +6513,12 @@ fn operator_policy_command_denial(command: &str) -> Option<String> {
                 "🚫 OPERATOR-ONLY (cas-3c26): {action} is the operator's to do, from their own terminal, never an agent's. Ask the supervisor to request it from the operator."
             ));
         }
+        // Clap stops at help/version before dispatching a command. Keep the
+        // fallback word-position checks from treating that output path as a
+        // policy mutation.
+        if cas_invocation_displays_help(&args) {
+            continue;
+        }
         // cas-b181: config writes judged by the CLI parser, so options and
         // their values (`set --store here <key>`) cannot hide the key. The
         // word-position checks below remain for argv the parser rejects.
@@ -6554,6 +6560,17 @@ fn operator_policy_command_denial(command: &str) -> Option<String> {
         }
     }
     operator_policy_command_textual(command).then(|| OPERATOR_POLICY_COMMAND_DENIAL.to_string())
+}
+
+/// Whether the real CLI parser handles this invocation by displaying help
+/// or version output before dispatching any command.
+fn cas_invocation_displays_help(args: &[String]) -> bool {
+    use clap::{error::ErrorKind, Parser};
+
+    let argv = std::iter::once("cas".to_string()).chain(args.iter().cloned());
+    crate::cli::Cli::try_parse_from(argv).is_err_and(|error| {
+        matches!(error.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion)
+    })
 }
 
 /// An operator-only `cas config` write, as the CLI parser reads `args` (the
@@ -6806,8 +6823,15 @@ fn read_only_statement(words: &[String]) -> bool {
         "git" => index == 0 && policy_git_flags(args),
         "cas" => {
             index == 0
-                && matches!(args, [verb, action, key]
-            if verb == "config" && action == "get" && !key.is_empty() && !key.starts_with('-'))
+                && (cas_invocation_displays_help(args)
+                    || matches!(
+                        args,
+                        [verb, action, key]
+                            if verb == "config"
+                                && action == "get"
+                                && !key.is_empty()
+                                && !key.starts_with('-')
+                    ))
         }
         // cas-b7b2: searches that cas-1768 QA found refused, judged by
         // POSITIVE allowlists that fail closed. No environment assignment or
@@ -9475,6 +9499,20 @@ EOF
                     .to_string(),
             )
         };
+        // H-11 classifies the Bash command itself: searches, help and quoted
+        // command text are data, while an actual policy command is refused.
+        for (command, expected) in [
+            (r#"grep -rn "grant-write\|GrantWrite" cas-cli/src/cli/config/mod.rs"#, "allow"),
+            ("cas config grant-write --help", "allow"),
+            (r#"printf '%s\n' 'cas config grant-write --task cas-1234 --path /x --reason r'"#, "allow"),
+            ("cas config grant-write --task cas-1234 --path /x --reason r", "deny"),
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, expected, "{command}: {reason}");
+            if expected == "deny" {
+                assert!(reason.contains("[H-11]"), "{reason}");
+            }
+        }
         // cas-9685: each independent spelling/command-position bypass must
         // reach the real hook; collect failures so RED proves every vector.
         let mut bypasses = Vec::new();
@@ -9490,7 +9528,7 @@ EOF
             ("named coproc if", "coproc NAME if cas config gr''ant-write --task cas-1234 --path /x --reason r; then :; fi"),
         ] {
             let (status, reason) = decision(command);
-            if status != "deny" || !reason.contains("operator") {
+            if status != "deny" || !reason.contains("[H-11]") {
                 bypasses.push(format!("{vector}: {status}: {reason}"));
             }
         }
@@ -13096,6 +13134,12 @@ mod worker_commit_guard_tests {
         env.set("CAS_FACTORY_MODE", "1");
         env.set("CAS_AGENT_NAME", "syntax-worker");
         env.set("CAS_CLONE_PATH", &linked_path);
+        std::fs::create_dir_all(linked.path().join("scripts")).unwrap();
+        for script in ["release.sh", "test-release.sh"] {
+            std::fs::write(linked.path().join("scripts").join(script), "# before\n").unwrap();
+        }
+
+        let owned_edit = "python3 - <<'PY'\nfrom pathlib import Path\np = Path('scripts/release.sh')\np.write_text(p.read_text().replace('# before', '# after'))\nPY\n";
 
         for (command, denied) in [
             (format!("bash -n {{+n,-c,'cd \"{repo_path}\"; git commit -m probe'}}"), true),
@@ -13105,6 +13149,13 @@ mod worker_commit_guard_tests {
             ("bash --noexec scripts/release.sh".into(), false),
             ("bash -n --noexec -n scripts/release.sh".into(), false),
             ("sh -n scripts/release.sh".into(), false),
+            // GH #1885/#1816: syntax validation is not shell execution.
+            ("bash -n host/disk-guard/disk-guard.sh && shellcheck host/disk-guard/disk-guard.sh && plutil -lint host/disk-guard/com.prowl.disk-guard.plist".into(), false),
+            // GH #1909: another statement's owned edit/redirection must not
+            // make a following raw, unredirected syntax check indeterminate.
+            (format!("{owned_edit}bash -n scripts/release.sh scripts/test-release.sh\ngit status --short\ngit log -1 --oneline"), false),
+            (format!("{owned_edit}bash -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            (format!("python3 - <<'PY'\nfrom pathlib import Path\nPath('{repo_path}/f.txt').write_text('outside')\nPY\nbash -n scripts/release.sh"), true),
             ("bash -n 'scripts/release.sh'".into(), true),
             ("bash -n 'scripts/release check.sh'".into(), true),
             ("bash -n $VAR".into(), true),

@@ -1,0 +1,4 @@
+id: history-wheel-queued-tail
+tasks: [cas-c389]
+journeys: [HUB-J23]
+description: An upward reading gesture at the history edge must survive a tail scroll already queued for the same animation frame.

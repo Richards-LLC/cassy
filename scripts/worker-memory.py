@@ -319,6 +319,9 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
+    except host_memory.NotStarted as exc:
+        print('worker memory admission: ' + str(exc), file=sys.stderr)
+        sys.exit(host_memory.NOT_STARTED_EXIT)
     except (OSError, ValueError, InterruptedError) as exc:
         print('worker memory admission: ' + str(exc), file=sys.stderr)
         sys.exit(1)

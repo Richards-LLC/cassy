@@ -90,6 +90,26 @@ def verify_build(repo: Path, build: dict, source: str) -> dict:
     return build
 
 
+# scripts/host_memory.py NOT_STARTED_EXIT: worker memory admission refused, so
+# the build never ran (cas-40d4).
+NOT_STARTED_EXIT = 75
+ADMISSION_PREFIX = 'worker memory admission: '
+
+
+class NotStarted(ValueError):
+    """The snapshot build was refused by memory admission before it started."""
+
+
+def admission_refusal(log: Path) -> str | None:
+    """The admission refusal a build log records, if the build never started."""
+    try:
+        lines = log.read_text(errors='replace').splitlines()
+    except OSError:
+        return None
+    return next((line[len(ADMISSION_PREFIX):] for line in reversed(lines)
+                 if line.startswith(ADMISSION_PREFIX)), None)
+
+
 def build_snapshot(repo: Path, source: str, artifacts: Path, compared: dict | None = None) -> dict:
     check_source(repo, source, compared)
     artifacts = artifacts.resolve()
@@ -114,6 +134,9 @@ def build_snapshot(repo: Path, source: str, artifacts: Path, compared: dict | No
     with log.open('w') as output:
         result = subprocess.run(command, cwd=repo / 'hub-web', env=build_env,
                                 stdout=output, stderr=subprocess.STDOUT)
+    refusal = admission_refusal(log) if result.returncode == NOT_STARTED_EXIT else None
+    if refusal:
+        raise NotStarted(f'journey snapshot build not started: memory admission: {refusal}; see {log}')
     if result.returncode:
         raise ValueError(f'journey snapshot build failed (exit {result.returncode}); see {log}')
     check_source(repo, source, compared)
@@ -153,6 +176,9 @@ def main() -> int:
 if __name__ == '__main__':
     try:
         sys.exit(main())
+    except NotStarted as error:
+        print(f'journey-dist: {error}', file=sys.stderr)
+        sys.exit(NOT_STARTED_EXIT)
     except (ValueError, KeyError, TypeError, OSError, subprocess.CalledProcessError) as error:
         print(f'journey-dist: {error}', file=sys.stderr)
         sys.exit(2)

@@ -63,6 +63,67 @@ async fn review_assignment_refuses_worker_before_acceptance_gh1908() {
     let unchanged = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
     assert_eq!(unchanged.state, cas::types::VerificationDispatchState::Pending);
     assert_eq!(unchanged.verifier_agent_id, None);
+
+    // A review request may exist without promising an ordinary worker a
+    // verdict route. The typed target survives the real store/wire roundtrip.
+    service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "create", "title": "Read the candidate",
+        "task_type": "chore", "execution_note": "no-code",
+        "review_dispatch_id": dispatch.id,
+    })).unwrap())).await.unwrap();
+    let review = tasks.list(None).unwrap().into_iter()
+        .find(|task| task.id != delivery.id).unwrap();
+    assert_eq!(review.review_dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+    let wire: cas::types::Task = serde_json::from_value(serde_json::to_value(&review).unwrap()).unwrap();
+    assert_eq!(wire.review_dispatch_id, review.review_dispatch_id);
+    for request in [
+        serde_json::json!({"action":"update", "id":review.id,
+            "assignee":reviewer.name, "notes":"must stay unapplied"}),
+        serde_json::json!({"action":"update", "id":review.id,
+            "assignee":reviewer.id, "supervisor_override":true,
+            "reason":"an override cannot grant verdict authority"}),
+    ] {
+        let error = service.task(Parameters(serde_json::from_value(request).unwrap()))
+            .await.unwrap_err();
+        assert_eq!(cas::gates::codes_in(&error.message), ["G-156"]);
+        let after = tasks.get(&review.id).unwrap();
+        assert_eq!(after.assignee, None);
+        assert_eq!(after.notes, review.notes);
+        assert_eq!(after.updated_at, review.updated_at);
+    }
+    let error = service.factory(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"spawn_workers", "task_id":review.id, "count":1,
+    })).unwrap())).await.unwrap_err();
+    assert_eq!(cas::gates::codes_in(&error.message), ["G-156"]);
+    let error = worker.cas_task_start_with_options(Parameters(TaskStartRequest {
+        id: review.id.clone(), brief: None, force: None,
+    })).await.unwrap_err();
+    assert_eq!(cas::gates::codes_in(&error.message), ["G-156"]);
+    assert_eq!(tasks.get(&review.id).unwrap().status, TaskStatus::Open);
+    assert!(agents.list_active_leases().unwrap().is_empty());
+
+    // Free text remains evidence, not a role declaration. Setting a review
+    // target on an already assigned task must refuse the whole update too.
+    service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"create", "title":format!("Investigate dispatch {}", dispatch.id),
+        "task_type":"chore", "execution_note":"no-code", "assignee":reviewer.name,
+    })).unwrap())).await.unwrap();
+    let ordinary = tasks.list(None).unwrap().into_iter()
+        .find(|task| task.assignee.as_deref() == Some(reviewer.name.as_str())).unwrap();
+    assert_eq!(ordinary.review_dispatch_id, None);
+    let error = service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"update", "id":ordinary.id, "review_dispatch_id":dispatch.id,
+        "notes":"must stay unapplied",
+    })).unwrap())).await.unwrap_err();
+    assert_eq!(cas::gates::codes_in(&error.message), ["G-156"]);
+    assert_eq!(tasks.get(&ordinary.id).unwrap().review_dispatch_id, None);
+    assert_eq!(tasks.get(&ordinary.id).unwrap().notes, ordinary.notes);
+    service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"update", "id":review.id, "review_dispatch_id":"",
+        "assignee":reviewer.name,
+    })).unwrap())).await.unwrap();
+    assert_eq!(tasks.get(&review.id).unwrap().review_dispatch_id, None);
+    assert_eq!(tasks.get(&review.id).unwrap().assignee, Some(reviewer.name));
 }
 
 #[path = "../../fixtures/ci_check_run.rs"]

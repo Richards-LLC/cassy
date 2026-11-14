@@ -391,14 +391,14 @@ pub(crate) fn resolve_release_inventory(
             } else if !valid_base(&anchor) {
                 issue(ReleaseInventoryCode::InvalidBase);
             }
-            let Some((shipped, membership)) = mapped else {
-                issue(ReleaseInventoryCode::MissingMapping);
-                continue;
-            };
             if review.ledger_reverts(&id, Some(&anchor)) {
                 issue(ReleaseInventoryCode::Reverted);
                 continue;
             }
+            let Some((shipped, membership)) = mapped else {
+                issue(ReleaseInventoryCode::MissingMapping);
+                continue;
+            };
             if let Err(code) = release_delivery_effect(
                 repo, base.as_deref(), &anchor, &scope.final_release_sha, &id,
             ) {
@@ -1058,11 +1058,22 @@ pub(crate) fn release_delivery_effect(
     repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
 ) -> Result<(), ReleaseInventoryCode> {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{self, DeliveryContentPresence};
+    // A squash has the reviewed source tree but different commit identity.
+    // Continuity starts at its actual integration, then follows later edits.
+    let mapped = if ancestor(repo, anchor, target) == Some(true) { None } else {
+        Some(close_ops::find_squash_tree_match(repo, anchor, target)
+            .filter(|mapped| ancestor(repo, mapped, target) == Some(true))
+            .ok_or(ReleaseInventoryCode::UnprovenContent)?)
+    };
+    let shipped = mapped.as_deref().unwrap_or(anchor);
+    // A reused lane can record a newer start than the preserved delivery.
+    // Such a start cannot define this delivery's forward content range.
+    let base = base.filter(|base| ancestor(repo, base, anchor) == Some(true));
     // An explicitly empty delivery has no content that can be reverted.
     if base == Some(anchor) { return Ok(()); }
     let presence = match base {
-        Some(base) => close_ops::delivery_content_presence_from_base_on_target_for_task(repo, base, anchor, target, task_id),
-        None => close_ops::delivery_content_presence_on_target_for_task(repo, anchor, target, task_id),
+        Some(base) => close_ops::delivery_content_presence_from_base_on_target_for_task(repo, base, shipped, target, task_id),
+        None => close_ops::delivery_content_presence_on_target_for_task(repo, shipped, target, task_id),
     };
     match presence {
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => Ok(()),

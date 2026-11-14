@@ -669,11 +669,10 @@ fn collect_script(
         return Err("[shell.depth] a shell payload beyond the resolution limit");
     }
     check_heredoc_boundaries(script)?;
-    let projected = shell_command_without_heredoc_bodies(script);
-    let mut lexed = factory_shell_lex(&projected, false, 0);
-    if lexed.unresolved_at.is_some() {
-        return Err("an unresolved shell payload");
-    }
+    let parsed = shell_admission::parse(script, depth)
+        .map_err(|_| "an unresolved shell payload")?;
+    let projected = parsed.projected;
+    let mut lexed = parsed.lexed;
     let numeric = &shell_admission::numeric_bindings(&lexed, &projected);
     conditional_arithmetic(&projected, &lexed, numeric)?;
     for &(start, end) in &lexed.parameters {

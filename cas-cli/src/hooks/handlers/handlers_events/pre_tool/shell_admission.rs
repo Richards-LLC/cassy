@@ -133,6 +133,12 @@ pub(super) fn shell_ansi_c_word(command: &str, start: usize) -> Option<(String, 
 /// The same lexer backs ordinary commands and substitution boundaries. Source
 /// positions avoid recovering syntax from cooked words or quoted/comment text.
 pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usize) -> ShellLexed {
+    lex_source(command, command, arguments_only, depth)
+}
+
+/// The projection hides heredoc data from tokenization while source offsets
+/// and substitution boundaries still refer to the complete original script.
+fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usize) -> ShellLexed {
     let mut tokens = Vec::new();
     let mut literals = Vec::new();
     let mut ends = Vec::new();
@@ -168,7 +174,7 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
                      ends: &mut Vec<usize>,
                      end: usize| {
         // Argument consumers must preserve quoted empty values (e.g. --shuffle '').
-        if !word.is_empty() || (arguments_only && *word_quoted) {
+        if !word.is_empty() || *word_quoted {
             tokens.push(ShellToken::Word(std::mem::take(word)));
             literals.push(*literal);
             ends.push(end);
@@ -176,7 +182,7 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
         }
         *word_quoted = false;
     };
-    let mut chars = command.char_indices().peekable();
+    let mut chars = projection.char_indices().peekable();
     while let Some((index, ch)) = chars.next() {
         if comment {
             if matches!(ch, '\n' | '\r') {
@@ -206,7 +212,7 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
         if quote == Some('"')
             && expansions.is_empty()
             && ch == '\\'
-            && command.as_bytes().get(index + 1..index + 3) == Some(b"${")
+            && command.as_bytes().get(index + 1) == Some(&b'$')
         {
             word.push_str("\\$");
             chars.next();
@@ -298,7 +304,7 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
                 }
                 let substitution = &command[index..=end];
                 word.push_str(substitution);
-                for _ in 1..substitution.chars().count() { chars.next(); }
+                while chars.peek().is_some_and(|(at, _)| *at <= end) { chars.next(); }
                 literal = false;
                 continue;
             }
@@ -322,7 +328,7 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
                     // unquoted substitutions retain their ordinary scope tokens.
                     if quote == Some('"') || !expansions.is_empty() {
                         word.push_str(&command[index..=end]);
-                        for _ in 1..command[index..=end].chars().count() { chars.next(); }
+                        while chars.peek().is_some_and(|(at, _)| *at <= end) { chars.next(); }
                         literal = false;
                         continue;
                     }
@@ -952,7 +958,7 @@ fn substitution_boundary(bytes: &[u8], index: usize, depth: usize) -> Result<usi
     let source = std::str::from_utf8(bytes.get(index..).ok_or_else(incomplete)?)
         .map_err(|_| incomplete())?;
     let projected = shell_command_projection(source, true);
-    let lexed = factory_shell_lex(&projected, false, depth);
+    let lexed = lex_source(source, &projected, false, depth);
     enum Phase {
         Word,
         In,
@@ -1087,7 +1093,7 @@ pub(super) struct ParsedShell {
 pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsupported> {
     if depth > MAX_DEPTH { return Err(Unsupported::depth(0)); }
     let projected = shell_command_projection(command, true);
-    let lexed = factory_shell_lex(&projected, false, depth);
+    let lexed = lex_source(command, &projected, false, depth);
     if let Some(error) = lexed.refusal.clone() { return Err(error); }
     let mut found = ShellSubstitutions::default();
     let mut bodies = shell_heredoc_bodies(command).into_iter();

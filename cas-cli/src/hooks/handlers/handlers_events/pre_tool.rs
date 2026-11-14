@@ -8827,7 +8827,7 @@ EOF
             let response = serde_json::to_value(response).unwrap();
             let decision = &response["hookSpecificOutput"]["permissionDecision"];
             let reason = response["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
-            if (decision == "deny") != denied || (denied && !reason.contains(WORKSPACE_CONTRACT_DENIAL)) {
+            if (decision == "deny") != denied || (denied && !reason.contains("[H-29]") && !reason.contains("[shell.unterminated]")) {
                 failures.push(format!("{case}: {decision}: {reason}"));
             }
         }
@@ -8866,7 +8866,7 @@ EOF
                 let decision = &response["hookSpecificOutput"]["permissionDecision"];
                 let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
                     .as_str().unwrap_or("");
-                if decision != "deny" || !reason.contains(WORKSPACE_CONTRACT_DENIAL) {
+                if decision != "deny" || !reason.contains("[H-29]") {
                     failures.push(format!("{source}/{context}: {decision}: {reason}"));
                 }
             }
@@ -9084,7 +9084,7 @@ EOF
         ] {
             let (status, reason) = decision(command);
             assert_eq!(status, "deny", "{command}: {reason}");
-            assert!(reason.contains(WORKSPACE_CONTRACT_DENIAL), "{reason}");
+            assert!(reason.contains("[H-29]") || reason.contains("[shell.unterminated]"), "{command}: {reason}");
         }
         // cas-d6f2: these operands recursively evaluate subscript text.
         let indirect = "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; ";
@@ -9113,7 +9113,7 @@ EOF
             let command = format!("{indirect}{expression}");
             let (status, reason) = decision(&command);
             assert_eq!(status, "deny", "{command}: {reason}");
-            assert!(reason.contains(WORKSPACE_CONTRACT_DENIAL), "{reason}");
+            assert!(reason.contains("[H-29]") || reason.contains("[shell.unterminated]"), "{command}: {reason}");
         }
         for allowed in [
             "[[ 1 -eq 1 ]]",

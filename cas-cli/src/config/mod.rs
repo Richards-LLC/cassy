@@ -136,6 +136,11 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory: Option<FactoryConfig>,
 
+    /// `factory.max_workers` from `~/.cas/config.toml`, applied by `factory()`
+    /// only when the project leaves it unset; never serialized.
+    #[serde(skip)]
+    pub(crate) user_max_workers: Option<usize>,
+
     /// `[staging]` — durable staging, configured agent scratch paths, and
     /// tmpfs/ramfs warning thresholds for hook-side write guardrails.
     #[serde(default, skip_serializing_if = "Option::is_none")]

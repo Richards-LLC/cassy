@@ -3976,6 +3976,8 @@ mod tests {
             if case == "missing-child" { agents.unregister(&child.id).unwrap(); }
             if case == "terminal-task" { task.status = TaskStatus::Closed; tasks.update(&task).unwrap(); }
             if case == "superseded" {
+                // A newer dispatch can only exist once the old one has expired.
+                timeout_verification_dispatch(dir.path(), &task.id, start + Duration::minutes(11)).unwrap();
                 create_verification_dispatch_bound(dir.path(), &task.id, &next.id, &next.id,
                     &VerificationProofBoundary::task(), start + Duration::minutes(10), true).unwrap();
             }

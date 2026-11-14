@@ -41,7 +41,13 @@ pub struct PreviewArgs {
     train: Option<String>,
 }
 
-/// No store, receipt, ledger-cache or notification writes.
+/// Writes no task, receipt, operation, sync-queue, ledger-cache or notification
+/// row and leaves every existing store file byte-identical. The store is read
+/// through ordinary SQLite read-only connections with normal locking (never
+/// `immutable`, which is unsafe on a changing live database), so SQLite may
+/// create its `cas.db-shm`/`cas.db-wal` coordination sidecars when they are
+/// absent and the directory is writable (sqlite.org/wal.html#read_only_databases;
+/// GH #1859, cas-632d evidence: only a new 32 KiB SHM and an empty WAL).
 pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
     println!("{}", serde_json::to_string(&preview_release_close(args, root)?)?);
     Ok(())

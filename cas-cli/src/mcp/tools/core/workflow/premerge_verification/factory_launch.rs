@@ -82,8 +82,7 @@ pub(crate) fn launch(
     session: &str,
     dispatch_id: &str,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
-    let dispatch =
-        cas_store::get_verification_dispatch(root, dispatch_id).map_err(|e| e.to_string())?;
+    let dispatch = super::automatic::launch_dispatch(root, dispatch_id, Some(session))?;
     let owner = crate::store::open_agent_store(root)
         .map_err(|e| e.to_string())?
         .get(&dispatch.owner_agent_id)
@@ -166,6 +165,9 @@ mod tests {
         let handoffs = agents.claim_supervisor_handoffs(&successor).unwrap();
         assert!(handoffs.iter().any(|handoff| handoff.agent_id == previous.id));
         assert!(agents.get(&previous.id).is_err());
+        assert!(super::super::automatic::recovery_retry(&root, &dispatch).is_none());
+        assert!(launch(&root, "unrelated-factory", &dispatch.id).is_err());
+        assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().owner_agent_id, previous.id);
         let launched = launch(&root, "successor-factory", &dispatch.id)
             .expect("retired owner must resolve through its claimed handoff")
             .expect("an unresolved dispatch must launch once");
@@ -175,6 +177,7 @@ mod tests {
         assert_eq!(current.requester_agent_id, previous.id);
         assert_eq!(current.repository, dispatch.repository);
         assert!(current.deadline_at > chrono::Utc::now());
+        assert!(super::super::automatic::recovery_retry(&root, &dispatch).is_some());
         let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         let metadata: String = conn.query_row(
             "SELECT metadata FROM events WHERE json_extract(metadata,'$.code') = 'verification_owner_adopted' AND json_extract(metadata,'$.dispatch_id') = ?1",

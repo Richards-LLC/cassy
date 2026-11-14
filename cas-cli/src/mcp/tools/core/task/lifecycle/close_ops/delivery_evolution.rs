@@ -330,7 +330,104 @@ fn meaningful(line: &str) -> bool {
 struct OwnedLines {
     positions: Vec<usize>,
     commits: Vec<String>,
-    baseline: Vec<String>,
+    baseline: std::sync::Arc<Baseline>,
+}
+
+/// The meaningful lines a delivery hunk replaced. Every line owner of that
+/// hunk shares one copy and its lookup set (cas-0e29e: a per-owner copy was
+/// O(owners x baseline) per walked edge).
+#[derive(Default)]
+struct Baseline {
+    lines: Vec<String>,
+    set: std::collections::HashSet<String>,
+}
+
+impl Baseline {
+    fn new(lines: Vec<String>) -> Self {
+        Self { set: lines.iter().cloned().collect(), lines }
+    }
+}
+
+/// cas-0e29e: every owner of an edge asks which added lines of its changed
+/// hunk retain its owned line. Re-tokenizing each (owned, added) pair made a
+/// hunk cost O(owned x added) tokenizations per owner. Each hunk touched by
+/// an owner is tokenized once per edge instead, and only added lines holding
+/// every token of the owned line (its rarest token's postings) are checked.
+struct EdgeIndex<'a> {
+    changes: &'a [Hunk],
+    resolution_parent_lines: Option<&'a std::collections::HashSet<String>>,
+    hunks: Vec<std::cell::OnceCell<HunkIndex<'a>>>,
+}
+
+struct HunkIndex<'a> {
+    removed: Vec<Vec<&'a str>>,
+    added: Vec<Vec<&'a str>>,
+    /// Ascending added-line indices containing each token.
+    by_token: std::collections::HashMap<&'a str, Vec<usize>>,
+    /// Ascending added-line indices of each exact line.
+    by_line: std::collections::HashMap<&'a str, Vec<usize>>,
+    /// Earlier removed lines equal to each removed line.
+    occurrence: Vec<usize>,
+    meaningful_added: Vec<&'a String>,
+    /// Some added line is meaningful and absent from the resolution parents.
+    novel_resolution_line: bool,
+}
+
+impl<'a> EdgeIndex<'a> {
+    fn new(changes: &'a [Hunk], resolution_parent_lines: Option<&'a std::collections::HashSet<String>>) -> Self {
+        let hunks = changes.iter().map(|_| std::cell::OnceCell::new()).collect();
+        Self { changes, resolution_parent_lines, hunks }
+    }
+
+    fn hunk(&self, index: usize) -> &HunkIndex<'a> {
+        self.hunks[index].get_or_init(|| {
+            let hunk = &self.changes[index];
+            let added: Vec<_> = hunk.added.iter().map(|line| tokens(line)).collect();
+            let mut by_token: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+            for (position, line) in added.iter().enumerate() {
+                for token in line {
+                    let postings = by_token.entry(*token).or_default();
+                    if postings.last() != Some(&position) {
+                        postings.push(position);
+                    }
+                }
+            }
+            let mut by_line: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+            for (position, line) in hunk.added.iter().enumerate() {
+                by_line.entry(line.as_str()).or_default().push(position);
+            }
+            let mut seen: std::collections::HashMap<&str, usize> = Default::default();
+            let occurrence = hunk.removed.iter().map(|line| {
+                let count = seen.entry(line.as_str()).or_default();
+                *count += 1;
+                *count - 1
+            }).collect();
+            let meaningful_added: Vec<_> = hunk.added.iter().filter(|line| meaningful(line)).collect();
+            let novel_resolution_line = self.resolution_parent_lines.is_some_and(|parents| {
+                meaningful_added.iter().any(|line| !parents.contains(*line))
+            });
+            HunkIndex {
+                removed: hunk.removed.iter().map(|line| tokens(line)).collect(),
+                added, by_token, by_line, occurrence, meaningful_added, novel_resolution_line,
+            }
+        })
+    }
+}
+
+impl HunkIndex<'_> {
+    /// Ascending added lines that may retain removed line `old`: each holds
+    /// every token of it, or equals it when it has none.
+    fn token_candidates(&self, old: usize, line: &str) -> &[usize] {
+        let wanted = &self.removed[old];
+        if wanted.is_empty() {
+            return self.by_line.get(line).map_or(&[], Vec::as_slice);
+        }
+        wanted
+            .iter()
+            .map(|token| self.by_token.get(token).map_or(&[][..], Vec::as_slice))
+            .min_by_key(|postings| postings.len())
+            .unwrap_or(&[])
+    }
 }
 
 pub(super) fn is_revert_message(message: &str) -> bool {
@@ -342,7 +439,14 @@ pub(super) fn is_revert_message(message: &str) -> bool {
             .any(|line| line.trim_start().starts_with("this reverts commit "))
 }
 
+#[cfg(test)]
+thread_local! {
+    static TOKENIZED_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn tokens(line: &str) -> Vec<&str> {
+    #[cfg(test)]
+    TOKENIZED_LINES.with(|count| count.set(count.get() + 1));
     line.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|token| !token.is_empty())
         .collect()
@@ -818,7 +922,7 @@ impl MergeUnionContext<'_> {
 // Only ordinary edits may retain a generic line's symbols in a changed hunk.
 // Merge text requires exact equality; separately proven list unions use
 // MergeUnionContext, never this token-subsequence heuristic.
-fn retains_line(old: &str, new: &str, ordinary: bool) -> bool {
+fn retains_line(old: &str, new: &str, ordinary: bool, old_tokens: &[&str], new_tokens: &[&str]) -> bool {
     if old == new {
         return true;
     }
@@ -832,14 +936,12 @@ fn retains_line(old: &str, new: &str, ordinary: bool) -> bool {
     {
         return false;
     }
-    let old = tokens(old);
-    let new = tokens(new);
-    if old.is_empty() {
+    if old_tokens.is_empty() {
         return false;
     }
     let mut cursor = 0;
-    old.into_iter().all(|token| {
-        let Some(offset) = new[cursor..]
+    old_tokens.iter().all(|token| {
+        let Some(offset) = new_tokens[cursor..]
             .iter()
             .position(|candidate| *candidate == token)
         else {
@@ -852,16 +954,17 @@ fn retains_line(old: &str, new: &str, ordinary: bool) -> bool {
 
 fn advance(
     owner: &OwnedLines,
-    changes: &[Hunk],
+    edge: &EdgeIndex<'_>,
     ordinary: bool,
     merge_union: Option<&MergeUnionContext<'_>>,
     parallel_edits: &ParallelEdits,
-    resolution_parent_lines: Option<&std::collections::HashSet<String>>,
     retire_draft: bool,
     internal_resolution: bool,
     reverted: bool,
     commit: &str,
 ) -> Option<OwnedLines> {
+    let changes = edge.changes;
+    let resolution_parent_lines = edge.resolution_parent_lines;
     if reverted && owner.positions.is_empty() && !changes.is_empty() {
         return None;
     }
@@ -872,7 +975,7 @@ fn advance(
         && changes
             .iter()
             .flat_map(|hunk| &hunk.added)
-            .any(|line| meaningful(line) && owner.baseline.contains(line))
+            .any(|line| meaningful(line) && owner.baseline.set.contains(line))
     {
         return None;
     }
@@ -884,47 +987,51 @@ fn advance(
     // An owned QA merge may evolve into its own novel line. Imported parent
     // text still requires exact equality; task ownership cannot make a stale
     // expanded parent line carry a restricted delivery's ownership.
-    let retains_owned_line = |old: &str, new: &str| {
+    let retains_owned_line = |old: &str, new: &str, old_tokens: &[&str], new_tokens: &[&str]| {
         let novel_internal = internal_resolution
             && resolution_parent_lines.is_some_and(|parents| !parents.contains(new));
-        retains_line(old, new, ordinary || novel_internal)
+        retains_line(old, new, ordinary || novel_internal, old_tokens, new_tokens)
     };
     for line in &owner.positions {
         let mut offset = 0isize;
         let mut changed = false;
-        for hunk in changes {
+        for (hunk_index, hunk) in changes.iter().enumerate() {
             if hunk.old_count > 0
                 && (hunk.old_start..hunk.old_start + hunk.old_count).contains(line)
             {
                 if reverted {
                     return None;
                 }
-                let added: Vec<_> = hunk
-                    .added
-                    .iter()
-                    .filter(|line| meaningful(line))
-                    .cloned()
-                    .collect();
-                if !owner.baseline.is_empty()
-                    && (added == owner.baseline
+                let index = edge.hunk(hunk_index);
+                if !owner.baseline.lines.is_empty()
+                    && (index.meaningful_added.iter().copied().eq(owner.baseline.lines.iter())
                         || internal_resolution
-                            && added.iter().any(|line| owner.baseline.contains(line)))
+                            && index.meaningful_added.iter().any(|line| owner.baseline.set.contains(*line)))
                 {
                     // Unlabeled inverse patches also restore pre-delivery content.
                     return None;
                 }
                 let removed_index = *line - hunk.old_start;
                 let old = hunk.removed.get(removed_index)?;
-                let occurrence = hunk.removed[..removed_index]
-                    .iter()
-                    .filter(|previous| *previous == old)
-                    .count();
-                let retained: Vec<_> = hunk
-                    .added
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, new)| {
-                        retains_owned_line(old, new)
+                let old_tokens = &index.removed[removed_index];
+                let occurrence = index.occurrence[removed_index];
+                // Only these added lines can satisfy any retention rule:
+                // token retention needs every owned token, a parallel edit
+                // names its exact line, and a list union needs a list.
+                let mut candidates = index.token_candidates(removed_index, old).to_vec();
+                if let Some(edits) = parallel_edits.get(line) {
+                    candidates.extend(edits.keys().flat_map(|new| index.by_line.get(new.as_str())).flatten());
+                }
+                if merge_union.is_some() && identifier_list(old).is_some() {
+                    candidates = (0..hunk.added.len()).collect();
+                }
+                candidates.sort_unstable();
+                candidates.dedup();
+                let retained: Vec<_> = candidates
+                    .into_iter()
+                    .map(|position| (position, &hunk.added[position]))
+                    .filter(|(position, new)| {
+                        retains_owned_line(old, new, old_tokens, &index.added[*position])
                             || merge_union.is_some_and(|union| union.retains_list(*line, old, new))
                             || parallel_edits
                                 .get(line)
@@ -951,24 +1058,14 @@ fn advance(
                     // parent. Its resolution cannot invent ownership.
                     // Duplicate removal is loss, not a novel replacement.
                     let novel_resolution = resolution_parent_lines.is_some_and(|parents| {
-                        hunk.added
-                            .iter()
-                            .any(|line| meaningful(line) && !parents.contains(line))
-                            && !hunk
-                                .added
-                                .iter()
-                                .any(|line| parents.contains(line) && retains_line(old, line, true))
+                        index.novel_resolution_line
+                            && !index.token_candidates(removed_index, old).iter().any(|position| {
+                                let new = &hunk.added[*position];
+                                parents.contains(new)
+                                    && retains_line(old, new, true, old_tokens, &index.added[*position])
+                            })
                     });
-                    if (!ordinary && !novel_resolution)
-                        || hunk.added.iter().any(|new| {
-                            retains_owned_line(old, new)
-                                || merge_union
-                                    .is_some_and(|union| union.retains_list(*line, old, new))
-                                || parallel_edits
-                                    .get(line)
-                                    .is_some_and(|edits| edits.contains_key(new.as_str()))
-                        })
-                    {
+                    if (!ordinary && !novel_resolution) || !retained.is_empty() {
                         return None;
                     }
                     let replacement: Vec<_> = hunk
@@ -1546,6 +1643,9 @@ fn line_content_presence_uncached(
     let mut owners: Vec<_> = initial
         .iter()
         .flat_map(|hunk| {
+            let baseline = std::sync::Arc::new(Baseline::new(
+                hunk.removed.iter().filter(|line| meaningful(line)).cloned().collect(),
+            ));
             hunk.added
                 .iter()
                 .enumerate()
@@ -1554,12 +1654,7 @@ fn line_content_presence_uncached(
                     Some(OwnedLines {
                         positions: vec![hunk.new_start + index],
                         commits: Vec::new(),
-                        baseline: hunk
-                            .removed
-                            .iter()
-                            .filter(|line| meaningful(line))
-                            .cloned()
-                            .collect(),
+                        baseline: baseline.clone(),
                     })
                 })
         })
@@ -1613,7 +1708,7 @@ fn line_content_presence_uncached(
             owners.push(Some(OwnedLines {
                 positions: Vec::new(),
                 commits: vec![delivery.to_string()],
-                baseline: Vec::new(),
+                baseline: Default::default(),
             }));
         }
     }
@@ -1841,17 +1936,17 @@ fn walk_owners(
             } else {
                 ParallelEdits::new()
             };
+            let edge = EdgeIndex::new(&changes, resolution_parent_lines.as_ref());
             let advanced: Vec<_> = previous
                 .iter()
                 .map(|owner| {
                     owner.as_ref().and_then(|owner| {
                         advance(
                             owner,
-                            &changes,
+                            &edge,
                             ordinary,
                             merge_union.as_ref(),
                             &parallel_edits,
-                            resolution_parent_lines.as_ref(),
                             ordinary && cycle.iter().any(|owned| owned == commit),
                             !ordinary
                                 && resolution_parent_lines.is_some()
@@ -1955,17 +2050,17 @@ fn follow_rename(
         let reverted = is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
         let retire_draft = cycle.iter().any(|owned| owned == commit);
         let no_parallel_edits = ParallelEdits::new();
+        let edge = EdgeIndex::new(&changes, None);
         let carried = previous
             .iter()
             .map(|owner| {
                 owner.as_ref().and_then(|owner| {
                     advance(
                         owner,
-                        &changes,
+                        &edge,
                         true,
                         None,
                         &no_parallel_edits,
-                        None,
                         retire_draft,
                         false,
                         reverted,

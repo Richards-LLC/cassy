@@ -6789,6 +6789,18 @@ fn read_only_awk(args: &[String]) -> bool {
             .all(|operand| operand == "-" || !operand.starts_with('-'))
 }
 
+/// Find expression values are data, including option-looking patterns.
+fn find_value_option(word: &str) -> bool {
+    const WITH_VALUE: &[&str] = &[
+        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname",
+        "-ilname", "-regex", "-iregex", "-regextype", "-type", "-xtype", "-maxdepth",
+        "-mindepth", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin",
+        "-newer", "-anewer", "-cnewer", "-user", "-group", "-uid", "-gid", "-perm",
+        "-links", "-inum", "-samefile", "-used", "-printf", "-fstype",
+    ];
+    WITH_VALUE.contains(&word)
+}
+
 /// cas-b7b2: a find that only lists, by a POSITIVE allowlist of options,
 /// tests and output actions. Start paths come first; every later word must
 /// be a recognised expression token or the value of one. Anything else
@@ -6801,13 +6813,6 @@ fn read_only_find(args: &[String]) -> bool {
         "-depth", "-xdev", "-mount", "-empty", "-readable", "-writable", "-executable",
         "-nouser", "-nogroup", "-true", "-false", "-quit", "-ls", "-follow", "-daystart",
         "-noleaf", "-ignore_readdir_race", "-noignore_readdir_race",
-    ];
-    const WITH_VALUE: &[&str] = &[
-        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname",
-        "-ilname", "-regex", "-iregex", "-regextype", "-type", "-xtype", "-maxdepth",
-        "-mindepth", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin",
-        "-newer", "-anewer", "-cnewer", "-user", "-group", "-uid", "-gid", "-perm",
-        "-links", "-inum", "-samefile", "-used", "-printf", "-fstype",
     ];
     let mut words = args.iter().peekable();
     while let Some(word) = words.peek() {
@@ -6829,7 +6834,7 @@ fn read_only_find(args: &[String]) -> bool {
         if BARE.contains(&word) {
             continue;
         }
-        if WITH_VALUE.contains(&word) {
+        if find_value_option(word) {
             if words.next().is_none() {
                 return false;
             }
@@ -9143,6 +9148,15 @@ EOF
             "test 1 -eq 1",
             // Bash test operands are integer data, unlike [[ expressions.
             "test x -eq 0",
+            // Consumer modes are recognized only in effective option positions.
+            "sort -- --files0-from=- --compress-program=helper",
+            "wc -- --files0-from=-",
+            "sort -k --files0-from=-",
+            "sort -rk --compress-program=helper",
+            "sort --field-separator --files0-from=-",
+            "sort --sort --compress-program=helper",
+            "find . -name -files0-from -print",
+            "find . -exec printf '%s' -files0-from +",
             "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; test \"$x\" -eq 0",
             "bash -c 'test x -eq 0'",
             "test -n -eq",
@@ -11637,6 +11651,9 @@ mod worker_commit_guard_tests {
             // GNU long-option abbreviations must retain the same effect.
             ("sort --files0=-", "shell.dynamic_command"),
             ("wc --files0=-", "shell.dynamic_command"),
+            ("sort -k 1 names.txt --files0-from=-", "shell.dynamic_command"),
+            ("env /usr/bin/wc --files0-from=-", "shell.dynamic_command"),
+            ("bash -c 'sort --files0-from=-'", "shell.dynamic_command"),
             ("sort --compress-prog=helper", "shell.dynamic_command"),
             ("$cmd safe", "shell.dynamic_command"),
             ("env \"$cmd\" safe", "shell.dynamic_command"),

@@ -134,6 +134,12 @@ impl Statement {
                 "runtime input supplies filenames or arguments whose effects cannot be resolved",
                 "use explicit literal operands or a data-only consumer"));
         }
+        if let Some(at) = runtime_consumer_input(name, args) {
+            return Some(Unsupported::execution("shell.dynamic_command", offset(index + 1 + at),
+                "runtime filename source or consumer helper",
+                "the consumer obtains unknown filenames or executes a helper outside the command projection",
+                "use literal file operands or run the helper directly"));
+        }
         if matches!(name, "export" | "declare" | "typeset" | "local" | "readonly") {
             for (at, word) in args.iter().enumerate() {
                 if assignment_name(word).is_some_and(|name| matches!(name, "PS4" | "PROMPT_COMMAND")) {
@@ -167,6 +173,61 @@ impl Statement {
 }
 
 pub(in crate::hooks::handlers::handlers_events) enum ShellInput { Command(usize), Script(usize), Stdin, Display }
+
+/// A literal path to a list file does not prove the filenames stored inside.
+/// Inspect option positions, not token presence: option values and operands
+/// after -- remain data. GNU long-option prefixes select the same modes.
+fn runtime_consumer_input(name: &str, args: &[String]) -> Option<usize> {
+    if !matches!(name, "sort" | "wc" | "find") { return None; }
+    let mut at = 0;
+    while let Some(word) = args.get(at).map(String::as_str) {
+        if name != "find" && word == "--" { break; }
+        let flag = word.split_once('=').map_or(word, |(flag, _)| flag);
+        let filename_source = if name == "find" {
+            word == "-files0-from"
+        } else {
+            flag.starts_with("--") && "--files0-from".starts_with(flag)
+        };
+        let helper = name == "sort" && flag.starts_with("--")
+            && "--compress-program".starts_with(flag);
+        if filename_source || helper { return Some(at); }
+        if name == "find" {
+            if matches!(word, "-exec" | "-execdir" | "-ok" | "-okdir") {
+                // The action's argv is a child invocation, not find options.
+                at += 1;
+                while args.get(at).is_some_and(|word| !matches!(word.as_str(), ";" | "+")) { at += 1; }
+            } else if super::find_value_option(word)
+                || (word.len() == 8 && word.starts_with("-newer"))
+                || matches!(word, "-fprint" | "-fprint0" | "-fprintf" | "-fls" | "-D" | "-O")
+            {
+                at += 1;
+                // -fprintf consumes both an output path and a format.
+                if word == "-fprintf" { at += 1; }
+            }
+        } else if name == "sort" {
+            const VALUES: &[&str] = &[
+                "--key", "--field-separator", "--output", "--sort", "--batch-size",
+                "--buffer-size", "--temporary-directory", "--parallel", "--random-source",
+            ];
+            if word.starts_with("--") && !word.contains('=')
+                && VALUES.iter().any(|value| value.starts_with(word))
+            {
+                at += 1;
+            } else if word.starts_with('-') && !word.starts_with("--") {
+                // In a short cluster the first value option consumes the
+                // suffix, or the next argv word when the suffix is empty.
+                for (offset, flag) in word[1..].char_indices() {
+                    if "kotsSTy".contains(flag) {
+                        if offset + flag.len_utf8() == word.len() - 1 { at += 1; }
+                        break;
+                    }
+                }
+            }
+        }
+        at += 1;
+    }
+    None
+}
 
 /// The name bound by scalar, append or array-element assignment syntax. A
 /// declaration builtin interprets its cooked argv; command prefixes additionally

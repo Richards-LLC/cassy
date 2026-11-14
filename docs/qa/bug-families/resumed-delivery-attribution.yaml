@@ -1,0 +1,3 @@
+title: Resumed delivery scope retains implementation and ignores restored journeys
+tasks: [cas-ded9]
+journeys: [FACTORY-CLOSE, FACTORY-SPAWN]

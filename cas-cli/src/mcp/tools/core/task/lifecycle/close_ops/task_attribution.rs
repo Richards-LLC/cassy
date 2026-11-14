@@ -418,7 +418,7 @@ fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> 
 
 /// GH #1151: whether `commit` is another task's work under the subject rule
 /// above. An unreadable commit is not shown to be foreign.
-pub(super) fn commit_claims_another_task(
+pub(crate) fn commit_claims_another_task(
     repo: &Path,
     commit: &str,
     identity: &TaskCommitIdentity,

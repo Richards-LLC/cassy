@@ -102,132 +102,153 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    let _env = crate::test_support::TestEnvGuard::temp_home();
-    let project = "artifact-race-project";
-    let team = "artifact-race-team";
-    let prior_cursor = "2026-11-14T09:20:00Z";
-    let mut original = Task::new("cas-artifact-race".into(), "Concurrent notes".into());
-    original.origin_project = Some(project.into());
-    original.updated_at = prior_cursor.parse().unwrap();
-    original.notes = "[2026-11-14 09:16] shared history".into();
-    let server = MockServer::start().await;
-    let remote = Arc::new(Mutex::new((serde_json::to_value(&original).unwrap(), 7i64)));
-    let writing = Arc::clone(&remote);
-    Mock::given(method("POST"))
-        .and(path(format!("/api/teams/{team}/sync/push")))
-        .respond_with(move |request: &wiremock::Request| {
-            let mut task = decode_push_body(request)["tasks"][0].clone();
-            let mut state = writing.lock().unwrap();
-            // The real CAS predicate includes timestamp compatibility when
-            // a client omits its observed revision.
-            let accepted = task.get("revision").is_none()
-                || crate::cloud::wire_revision(&task) == Some(state.1);
-            let id = task["id"].as_str().unwrap().to_string();
-            if accepted {
-                state.1 += 1;
-                task.as_object_mut().unwrap().remove("revision");
-                state.0 = task;
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "synced": {"tasks": {"inserted":0,"updated":1,"skipped":0,
-                        "accepted": {id.clone(): {"revision":state.1.to_string()}}}},
-                    "rows":[{"entity_type":"tasks","id":id,"outcome":"updated"}]
-                }))
-            } else {
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "synced": {"tasks": {"inserted":0,"updated":0,"skipped":1,
+    for team_scope in [true, false] {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = "artifact-race-project";
+        let team = "artifact-race-team";
+        let prior_cursor = "2026-11-14T09:20:00Z";
+        let mut original = Task::new("cas-artifact-race".into(), "Concurrent notes".into());
+        original.origin_project = Some(project.into());
+        original.updated_at = prior_cursor.parse().unwrap();
+        original.notes = "[2026-11-14 09:16] shared history".into();
+        let server = MockServer::start().await;
+        let remote = Arc::new(Mutex::new((serde_json::to_value(&original).unwrap(), 7i64)));
+        let writing = Arc::clone(&remote);
+        Mock::given(method("POST"))
+            .and(path(if team_scope { format!("/api/teams/{team}/sync/push") } else { "/api/sync/push".into() }))
+            .respond_with(move |request: &wiremock::Request| {
+                let mut task = decode_push_body(request)["tasks"][0].clone();
+                let mut state = writing.lock().unwrap();
+                // The real CAS predicate includes timestamp compatibility when
+                // a client omits its observed revision.
+                let accepted = task.get("revision").is_none()
+                    || crate::cloud::wire_revision(&task) == Some(state.1);
+                let id = task["id"].as_str().unwrap().to_string();
+                if accepted {
+                    state.1 += 1;
+                    task.as_object_mut().unwrap().remove("revision");
+                    state.0 = task;
+                    let detail = serde_json::json!({"inserted":0,"updated":1,"skipped":0,
+                        "accepted": {id.clone(): {"revision":state.1.to_string()}}});
+                    let rows = serde_json::json!([{"entity_type":"tasks","id":id,"outcome":"updated"}]);
+                    ResponseTemplate::new(200).set_body_json(if team_scope {
+                        serde_json::json!({"synced":{"tasks":detail},"rows":rows})
+                    } else { serde_json::json!({"tasks":detail,"rows":rows}) })
+                } else {
+                    let detail = serde_json::json!({"inserted":0,"updated":0,"skipped":1,
                         "rejected":[{"id":id,"reason":"revision_conflict",
-                            "current_revision":state.1.to_string()}]}},
-                    "rows":[{"entity_type":"tasks","id":id,"outcome":"rejected",
-                        "reason":"revision_conflict"}]
+                            "current_revision":state.1.to_string()}]});
+                    let rows = serde_json::json!([{"entity_type":"tasks","id":id,
+                        "outcome":"rejected","reason":"revision_conflict"}]);
+                    ResponseTemplate::new(200).set_body_json(if team_scope {
+                        serde_json::json!({"synced":{"tasks":detail},"rows":rows})
+                    } else { serde_json::json!({"tasks":detail,"rows":rows}) })
+                }
+            }).mount(&server).await;
+        let reading = Arc::clone(&remote);
+        Mock::given(method("GET"))
+            .and(path(if team_scope { format!("/api/teams/{team}/sync/pull") } else { "/api/sync/pull".into() }))
+            .respond_with(move |_: &wiremock::Request| {
+                let state = reading.lock().unwrap();
+                let mut task = state.0.clone();
+                task["revision"] = serde_json::json!(state.1.to_string());
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tasks":[task],"task_dependencies":[],"team_id":team,
+                    "pulled_at":"2026-11-14T09:40:00Z","status":"ok"
                 }))
+            }).mount(&server).await;
+        let mut machines = Vec::new();
+        for _ in 0..2 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(temp.path()).unwrap();
+            std::fs::write(root.join("config.toml"),
+                format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+            let tasks = crate::store::open_task_store_local(&root).unwrap();
+            tasks.add(&original).unwrap();
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            queue.record_revision(EntityType::Task, &original.id, 7).unwrap();
+            queue.set_metadata(&if team_scope { format!("last_team_pull_at_{team}_{project}") } else { "last_pull_at".into() }, prior_cursor).unwrap();
+            let syncer = CloudSyncer::new_for_project(Arc::clone(&queue), CloudConfig {
+                endpoint:server.uri(),token:Some("test-token".into()),..Default::default()
+            }, CloudSyncerConfig::default(), project.into(), &root);
+            machines.push((temp, root, tasks, queue, syncer));
+        }
+        let (_, publisher_root, publisher, publisher_queue, publisher_sync) = &machines[0];
+        let artifacts = cas_store::SqliteArtifactStore::open(publisher_root).unwrap();
+        artifacts.record_local(&cas_store::NewArtifact {
+            id:"art-concurrent-proof".into(),task_id:original.id.clone(),name:"release-inputs.json".into(),
+            mime:"application/json".into(),size_bytes:11,
+            sha256:"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9".into(),
+        }).unwrap();
+        artifacts.mark_uploaded("art-concurrent-proof", "cloud-concurrent-proof").unwrap();
+        artifacts.mark_committed("art-concurrent-proof", None).unwrap();
+        let proof = artifacts.get("art-concurrent-proof").unwrap().unwrap();
+        crate::artifacts::proof::record_published(publisher_root, &proof).unwrap();
+        let mut published = publisher.get(&original.id).unwrap();
+        published.status = TaskStatus::Closed;
+        published.updated_at = "2026-11-14T09:32:32Z".parse().unwrap();
+        publisher.update(&published).unwrap();
+        let (_, receiver_root, receiver, receiver_queue, receiver_sync) = &machines[1];
+        let mut concurrent = original.clone();
+        concurrent.status = TaskStatus::InProgress;
+        concurrent.updated_at = "2026-11-14T09:35:00Z".parse().unwrap();
+        concurrent.notes.push_str("\n\n[2026-11-14 09:35] receiver's independent append");
+        receiver.update(&concurrent).unwrap();
+        for (queue, task) in [(publisher_queue, &published), (receiver_queue, &concurrent)] {
+            let payload = serde_json::to_string(task).unwrap();
+            if team_scope {
+                queue.enqueue_for_team(EntityType::Task, &task.id, SyncOperation::Upsert, Some(&payload), team).unwrap();
+            } else { queue.enqueue(EntityType::Task, &task.id, SyncOperation::Upsert, Some(&payload)).unwrap(); }
+        }
+        let push = |syncer: &CloudSyncer| if team_scope { syncer.push_team(team) } else { syncer.push() };
+        assert_eq!(push(publisher_sync).unwrap().pushed_tasks, 1);
+        let rejected = push(receiver_sync).unwrap();
+        // A retry before the pull must not fall back to unguarded timestamp LWW.
+        let retried = push(receiver_sync).unwrap();
+        assert!(crate::artifacts::lookup_metadata(receiver_root, None, &proof.id)
+            .unwrap_err().downcast_ref::<crate::artifacts::MetadataUnavailable>().is_some());
+        let entries = crate::store::open_store_local(receiver_root).unwrap();
+        let rules = crate::store::open_rule_store_local(receiver_root).unwrap();
+        let skills = crate::store::open_skill_store_local(receiver_root).unwrap();
+        let result = if team_scope {
+            receiver_sync.pull_team(team, project, &*entries, &**receiver, &*rules, &*skills)
+        } else {
+            receiver_sync.pull(&*entries, &**receiver, &*rules, &*skills,
+                &*crate::store::open_spec_store(receiver_root).unwrap(),
+                &*crate::store::open_event_store(receiver_root).unwrap(),
+                &*crate::store::open_prompt_store(receiver_root).unwrap(),
+                &*crate::store::open_file_change_store(receiver_root).unwrap(),
+                &*crate::store::open_commit_link_store(receiver_root).unwrap())
+        }.unwrap();
+        assert!(result.conflicts_resolved > 0);
+        let retained = receiver.get(&original.id).unwrap();
+        assert_eq!(retained.status, concurrent.status);
+        assert!(retained.notes.contains(&concurrent.notes));
+        let recovered = crate::artifacts::lookup_metadata(receiver_root, None, &proof.id).unwrap();
+        assert_eq!(recovered.cloud_artifact_id, proof.cloud_artifact_id);
+        assert_eq!(recovered.sha256, proof.sha256);
+        assert_eq!(publisher_queue.revision(EntityType::Task, &original.id).unwrap(), Some(8));
+        let delivered = push(receiver_sync).unwrap();
+        assert_eq!(delivered.pushed_tasks, 1, "{delivered:?}");
+        assert!(receiver_queue.pending_for_team(team, 10, 5).unwrap().is_empty());
+        assert!(receiver_queue.pending(10, 5).unwrap().is_empty());
+        assert_eq!(receiver_queue.revision(EntityType::Task, &original.id).unwrap(), Some(9));
+        let state = remote.lock().unwrap();
+        let delivered_task: Task = serde_json::from_value(state.0.clone()).unwrap();
+        assert_eq!(delivered_task.status, concurrent.status);
+        assert!(delivered_task.notes.contains(&concurrent.notes));
+        for notes in [&published.notes, &concurrent.notes] {
+            for block in cas_store::task_note_markers::note_blocks(notes) {
+                assert!(cas_store::task_note_markers::contains_complete_lines(&delivered_task.notes, &block));
             }
-        }).mount(&server).await;
-    let reading = Arc::clone(&remote);
-    Mock::given(method("GET"))
-        .and(path(format!("/api/teams/{team}/sync/pull")))
-        .respond_with(move |_: &wiremock::Request| {
-            let state = reading.lock().unwrap();
-            let mut task = state.0.clone();
-            task["revision"] = serde_json::json!(state.1.to_string());
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "tasks":[task],"task_dependencies":[],"team_id":team,
-                "pulled_at":"2026-11-14T09:40:00Z","status":"ok"
-            }))
-        }).mount(&server).await;
-    let mut machines = Vec::new();
-    for _ in 0..2 {
-        let temp = tempfile::tempdir().unwrap();
-        let root = crate::store::init_cas_dir(temp.path()).unwrap();
-        std::fs::write(root.join("config.toml"),
-            format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
-        let tasks = crate::store::open_task_store_local(&root).unwrap();
-        tasks.add(&original).unwrap();
-        let queue = Arc::new(SyncQueue::open(&root).unwrap());
-        queue.init().unwrap();
-        queue.record_revision(EntityType::Task, &original.id, 7).unwrap();
-        queue.set_metadata(&format!("last_team_pull_at_{team}_{project}"), prior_cursor).unwrap();
-        let syncer = CloudSyncer::new_for_project(Arc::clone(&queue), CloudConfig {
-            endpoint:server.uri(),token:Some("test-token".into()),..Default::default()
-        }, CloudSyncerConfig::default(), project.into(), &root);
-        machines.push((temp, root, tasks, queue, syncer));
+        }
+        drop(state);
+        assert_eq!(rejected.pushed_tasks, 0);
+        assert_eq!(retried.pushed_tasks, 0);
+        assert!(server.received_requests().await.unwrap().iter().any(|request|
+            request.url.query_pairs().any(|(key, value)| key == "since" && value == prior_cursor)));
     }
-    let (_, publisher_root, publisher, publisher_queue, publisher_sync) = &machines[0];
-    let artifacts = cas_store::SqliteArtifactStore::open(publisher_root).unwrap();
-    artifacts.record_local(&cas_store::NewArtifact {
-        id:"art-concurrent-proof".into(),task_id:original.id.clone(),name:"release-inputs.json".into(),
-        mime:"application/json".into(),size_bytes:11,
-        sha256:"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9".into(),
-    }).unwrap();
-    artifacts.mark_uploaded("art-concurrent-proof", "cloud-concurrent-proof").unwrap();
-    artifacts.mark_committed("art-concurrent-proof", None).unwrap();
-    let proof = artifacts.get("art-concurrent-proof").unwrap().unwrap();
-    crate::artifacts::proof::record_published(publisher_root, &proof).unwrap();
-    let mut published = publisher.get(&original.id).unwrap();
-    published.status = TaskStatus::Closed;
-    published.updated_at = "2026-11-14T09:32:32Z".parse().unwrap();
-    publisher.update(&published).unwrap();
-    let (_, receiver_root, receiver, receiver_queue, receiver_sync) = &machines[1];
-    let mut concurrent = original.clone();
-    concurrent.status = TaskStatus::InProgress;
-    concurrent.updated_at = "2026-11-14T09:35:00Z".parse().unwrap();
-    concurrent.notes.push_str("\n\n[2026-11-14 09:35] receiver's independent append");
-    receiver.update(&concurrent).unwrap();
-    for (queue, task) in [(publisher_queue, &published), (receiver_queue, &concurrent)] {
-        queue.enqueue_for_team(EntityType::Task, &task.id, SyncOperation::Upsert,
-            Some(&serde_json::to_string(task).unwrap()), team).unwrap();
-    }
-    assert_eq!(publisher_sync.push_team(team).unwrap().pushed_tasks, 1);
-    let rejected = receiver_sync.push_team(team).unwrap();
-    // A retry before the pull must not fall back to unguarded timestamp LWW.
-    let retried = receiver_sync.push_team(team).unwrap();
-    assert!(crate::artifacts::lookup_metadata(receiver_root, None, &proof.id)
-        .unwrap_err().downcast_ref::<crate::artifacts::MetadataUnavailable>().is_some());
-    let result = receiver_sync.pull_team(team, project,
-        &*crate::store::open_store_local(receiver_root).unwrap(), &**receiver,
-        &*crate::store::open_rule_store_local(receiver_root).unwrap(),
-        &*crate::store::open_skill_store_local(receiver_root).unwrap()).unwrap();
-    assert!(result.conflicts_resolved > 0);
-    let retained = receiver.get(&original.id).unwrap();
-    assert_eq!(retained.status, concurrent.status);
-    assert!(retained.notes.contains(&concurrent.notes));
-    let recovered = crate::artifacts::lookup_metadata(receiver_root, None, &proof.id).unwrap();
-    assert_eq!(recovered.cloud_artifact_id, proof.cloud_artifact_id);
-    assert_eq!(recovered.sha256, proof.sha256);
-    assert_eq!(publisher_queue.revision(EntityType::Task, &original.id).unwrap(), Some(8));
-    let delivered = receiver_sync.push_team(team).unwrap();
-    assert_eq!(delivered.pushed_tasks, 1, "{delivered:?}");
-    assert!(receiver_queue.pending_for_team(team, 10, 5).unwrap().is_empty());
-    assert_eq!(receiver_queue.revision(EntityType::Task, &original.id).unwrap(), Some(9));
-    let state = remote.lock().unwrap();
-    let delivered_task: Task = serde_json::from_value(state.0.clone()).unwrap();
-    assert_eq!(delivered_task.status, concurrent.status);
-    assert!(delivered_task.notes.contains(&concurrent.notes));
-    assert!(delivered_task.notes.contains(&published.notes));
-    drop(state);
-    assert_eq!(rejected.pushed_tasks, 0);
-    assert_eq!(retried.pushed_tasks, 0);
-    assert!(server.received_requests().await.unwrap().iter().any(|request|
-        request.url.query_pairs().any(|(key, value)| key == "since" && value == prior_cursor)));
 }
 
 #[tokio::test]
@@ -4642,7 +4663,7 @@ async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
 }
 
 #[tokio::test]
-async fn a_rejected_stale_base_is_forgotten_rather_than_replaced() {
+async fn a_rejected_stale_base_remains_guarded_until_reconciliation() {
     use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4703,15 +4724,13 @@ async fn a_rejected_stale_base_is_forgotten_rather_than_replaced() {
         .await
         .unwrap();
 
-    // The proven-stale base is dropped, NOT replaced with the server's current
-    // revision: adopting a revision whose body we have never seen would let the
-    // next push overwrite a change this machine never looked at.
-    assert_eq!(
-        queue.revision(EntityType::Task, "cas-c32f-lost").unwrap(),
-        None
-    );
-    // The edit itself stays queued for the next cycle rather than being parked.
-    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+    // A rejected write cannot authorize timestamp LWW or a fabricated base.
+    assert_eq!(queue.revision(EntityType::Task, "cas-c32f-lost").unwrap(), Some(4));
+    assert!(queue.pending(10, 5).unwrap().is_empty());
+    let parked = queue.pending(10, i32::MAX).unwrap();
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0].last_reason.as_deref(), Some("revision_conflict"));
+
 }
 
 /// The comparison has to fire on a REAL pull, not only through the unit-level

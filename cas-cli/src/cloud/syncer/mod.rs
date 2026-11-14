@@ -1105,7 +1105,7 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
             "the cloud row belongs to a different sync scope (personal vs team); push it from the owning scope, then `cas cloud queue --retry-reason scope_mismatch`"
         }
         "revision_conflict" | "invalid_revision" => {
-            "the cloud holds a newer revision; run `cas cloud pull`, then `cas cloud queue --retry`"
+            "revision_reconciliation_required: the cloud holds a newer revision; pull to reconcile the row and rebuild its queued payload before retrying"
         }
         "invalid_json_nul" => {
             "U+0000 in task notes now round-trips losslessly; queued payload retained unchanged. Retry with `cas cloud queue --retry --retry-reason invalid_json_nul`"

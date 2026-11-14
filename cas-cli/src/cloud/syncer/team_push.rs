@@ -663,7 +663,8 @@ impl CloudSyncer {
                                         raw_response
                                     ),
                                 };
-                                if matches!(failure, PushItemizedFailure::Rejection(rejection) if rejection.reason.is_permanent())
+                                let _ = self.queue.record_row_outcome(item.id, "rejected", Some(&reason));
+                                if reason == "revision_conflict" || matches!(failure, PushItemizedFailure::Rejection(rejection) if rejection.reason.is_permanent())
                                 {
                                     let _ = self.queue.park_failed(
                                         item.id,
@@ -767,7 +768,7 @@ impl CloudSyncer {
             let _ = self
                 .queue
                 .record_row_outcome(item.id, "rejected", Some(reason));
-            if row.rejection_is_retryable() {
+            if row.rejection_is_retryable() && reason != "revision_conflict" {
                 let _ = self.queue.mark_failed(item.id, &diagnostic);
             } else {
                 let _ = self

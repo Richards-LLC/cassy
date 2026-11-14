@@ -514,9 +514,9 @@ print(json.dumps(state))\n");
         };
         git(&["init", "-q", "-b", "main"]);
         std::fs::create_dir_all(repo.join("scripts")).unwrap();
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/train-ci.py"),
+        std::fs::write(
             repo.join("scripts/train-ci.py"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/train-ci.py")),
         )
         .unwrap();
         git(&["add", "."]);

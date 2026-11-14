@@ -1879,6 +1879,18 @@ pub(crate) fn assign_task_to_new_worker(
     assign_unassigned_task(&*store, task, task_id, worker_name)
 }
 
+/// A block belongs to the worker that made it. Once its task is reopened for
+/// someone else, the hold (with its timestamp) and any answer to it are the
+/// departed worker's and must not outlive the binding (cas-a706).
+fn clear_departed_block(store: &dyn cas_store::TaskStore, task_id: &str) {
+    if let Err(error) = store.patch_execution_state(
+        task_id,
+        &serde_json::json!({"blocked_hold": null, "answered_blocker": null}),
+    ) {
+        tracing::warn!(task_id, %error, "cas-a706: could not clear the departed worker's block");
+    }
+}
+
 fn assign_unassigned_task(
     store: &dyn cas_store::TaskStore,
     task: cas_types::Task,
@@ -1962,6 +1974,7 @@ fn reset_stale_preassign_holder(
     reset.updated_at = chrono::Utc::now();
     store.update(&reset)
         .map_err(|e| format!("could not persist stale-holder reset: {e}"))?;
+    clear_departed_block(&*store, &task.id);
     // Reset settles only the retired identities captured above. A replacement
     // that wins between persistence and this cloud call must keep its claim.
     let retired_ids: std::collections::HashSet<_> = registered_agents.iter()
@@ -2373,6 +2386,7 @@ fn release_worker_task_bindings_tasks_only(
         t.updated_at = chrono::Utc::now();
         match task_store.update(&t) {
             Ok(_) => {
+                clear_departed_block(task_store, &t.id);
                 released += 1;
                 tracing::info!(
                     task_id = %t.id,
@@ -2440,6 +2454,7 @@ pub(crate) fn release_preassign_if_bound(
             "cas-7a94: failed to release pre-assign after aborted spawn"
         );
     } else {
+        clear_departed_block(&*store, task_id);
         tracing::info!(
             task_id,
             worker_name,
@@ -8685,6 +8700,47 @@ while True:
         let unchanged = store.get("cas-live-holder").unwrap();
         assert_eq!(unchanged.assignee.as_deref(), Some(holder));
         assert_eq!(unchanged.status, TaskStatus::InProgress);
+    }
+
+    /// A worker's block belongs to that worker. Retiring it and pre-assigning a
+    /// replacement must leave an Open task with no hold, or the replacement
+    /// inherits a block (and its old timestamp) it never made.
+    #[test]
+    fn shutdown_then_preassign_drops_departed_workers_block() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        store
+            .add(&task_with("cas-blk1", Some("wise-raven"), TaskStatus::Blocked))
+            .unwrap();
+        store
+            .patch_execution_state(
+                "cas-blk1",
+                &serde_json::json!({
+                    "blocked_hold": {"reason": "needs input", "who": "raven-old-session",
+                        "when": "2026-11-12T18:11:16.986803Z"},
+                    "answered_blocker": {"worker": "raven-old-session", "supervisor": "lead",
+                        "reason": "needs input", "ask": null, "message_id": 1},
+                }),
+            )
+            .unwrap();
+        let agent = retired_worker(&cas_dir);
+        let agent_store = crate::store::open_agent_store(&cas_dir).unwrap();
+
+        settle_retired_worker_bindings(
+            &cas_dir,
+            agent_store.as_ref(),
+            &agent,
+            &["cas-blk1".to_string()],
+            WorkerRetirement::Shutdown,
+        );
+        assert!(assign_task_to_new_worker(&cas_dir, "cas-blk1", "calm-leopard"));
+
+        let task = store.get("cas-blk1").unwrap();
+        assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.assignee.as_deref(), Some("calm-leopard"));
+        let state = store.get_execution_state("cas-blk1").unwrap().unwrap_or_default();
+        assert!(state.get("blocked_hold").is_none(), "{state}");
+        assert!(state.get("answered_blocker").is_none(), "{state}");
     }
 
     /// Closed tasks must never be reopened by shutdown release.

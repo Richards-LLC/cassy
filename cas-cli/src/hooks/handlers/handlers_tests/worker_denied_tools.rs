@@ -486,6 +486,49 @@ fn worker_shell_cd_relative_reads_cannot_reach_operator_credentials_cas_da9a() {
     }
 }
 
+/// Directory changes the shell may not make, or makes differently than they
+/// read, and reads inside quoted substitutions. Each must be refused by some
+/// rule; none may leave a credential read admitted.
+#[test]
+fn worker_unproven_directory_changes_cannot_reach_operator_credentials_cas_24f2() {
+    let (_env, _config_home) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let mut allowed = Vec::new();
+    for command in [
+        // A cd that fails leaves the previous directory in place.
+        "cd ~; cd missing-dir; cat .config/neonctl/credentials.json",
+        "cd ~ && pushd missing-dir; cat .config/neonctl/credentials.json",
+        // An empty or unset target changes to HOME.
+        "D=; cd $D; cat .config/neonctl/credentials.json",
+        "unset D; cd $D; cat .config/neonctl/credentials.json",
+        // Assignments that never reach this shell, and writers that do.
+        "cd ~; D=missing-dir true; cd $D; cat .config/neonctl/credentials.json",
+        "cd ~; D=missing-dir | :; cd $D; cat .config/neonctl/credentials.json",
+        "cd ~; D=missing-dir & cd $D; cat .config/neonctl/credentials.json",
+        "for D in ~; do :; done; cd \"$D\"; cat .config/neonctl/credentials.json",
+        "read -r D <<< \"$HOME\"; cd \"$D\"; cat .config/neonctl/credentials.json",
+        "declare D=~; cd \"$D\"; cat .config/neonctl/credentials.json",
+        "printf -v D %s ~; cd \"$D\"; cat .config/neonctl/credentials.json",
+        // Directory-stack targets.
+        "cd ~; cd /tmp; cd ~-; cat .config/neonctl/credentials.json",
+        "pushd ~; pushd /tmp; cd ~1; cat .config/neonctl/credentials.json",
+        "pushd ~; pushd /tmp; pushd +1; cat .config/neonctl/credentials.json",
+        // A wrapped cd runs as a separate program and moves nothing.
+        "cd ~; nice cd missing-dir; cat .config/neonctl/credentials.json",
+        "cd ~; timeout 5 cd missing-dir; cat .config/neonctl/credentials.json",
+        "cd ~; env cd missing-dir; cat .config/neonctl/credentials.json",
+        // Reads inside quoted substitutions.
+        "echo \"$(cat ~/.config/neonctl/credentials.json)\"",
+        "x=`cd ~; cat .config/neonctl/credentials.json`",
+        "cat \"$(cd ~; pwd)/.config/neonctl/credentials.json\"",
+    ] {
+        let output = handle_pre_tool_use(&bash(command, project.path()), Some(&cas_root)).unwrap();
+        if denial(output).is_none() { allowed.push(command); }
+    }
+    assert!(allowed.is_empty(), "admitted: {allowed:#?}");
+}
+
 #[test]
 fn worker_recursive_copies_cannot_export_operator_config_cas_da9a() {
     let (_env, _config_home) = role_env("worker");

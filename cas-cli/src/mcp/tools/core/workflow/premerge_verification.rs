@@ -713,11 +713,15 @@ impl Candidate {
             .collect::<Vec<_>>();
         let reviewed_changes = |paths: Vec<String>| paths.into_iter()
             .filter(|path| !unchanged_upkeep.contains(&path.as_str())).collect::<Vec<_>>();
+        // cas-c5db (cas-c9ec): commits the target gained that the source
+        // already carries are reviewed content, not target changes. Judge
+        // only the target progress the source lacks, from their merge base.
+        let progress = git(&self.repository, &["merge-base", target, &self.source_sha])?;
         let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
             &base,
             &self.source_sha,
-            &self.target_sha,
+            &progress,
             target,
         )?);
         if !changed.is_empty() {

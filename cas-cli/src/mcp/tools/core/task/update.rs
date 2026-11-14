@@ -4244,13 +4244,14 @@ mod epic_move_work_target_tests {
         store.add(&epic("cas-c85e-old", "epic/old")).unwrap();
         store.add(&epic("cas-c85e-new", "epic/new")).unwrap();
 
-        for (id, lane, delivered) in [
-            ("cas-c85e-empty-start", empty_lane, false),
-            ("cas-c85e-nonempty-start", nonempty_lane, true),
+        for (id, lane, delivered, assignee) in [
+            ("cas-c85e-empty-start", empty_lane, false, Some("real-worker")),
+            ("cas-c85e-nonempty-start", nonempty_lane, true, Some("real-worker")),
+            ("cas-c85e-unassigned-empty-start", empty_lane, false, None),
         ] {
-            let mut task = Task::new(id.into(), "assigned started retarget".into());
+            let mut task = Task::new(id.into(), "started retarget".into());
             task.status = TaskStatus::InProgress;
-            task.assignee = Some("real-worker".into());
+            task.assignee = assignee.map(str::to_string);
             task.deliverables.work_target = Some(target("epic/old"));
             let original_start = cas_types::FactoryBranchStart {
                 work_target: target("epic/old"),
@@ -4268,8 +4269,8 @@ mod epic_move_work_target_tests {
             let moved = store.get(id).unwrap();
             assert_eq!(branch_of(&store, id), "epic/new");
             let start = moved.deliverables.factory_branch_start.as_ref().unwrap();
-            if delivered {
-                assert_eq!(start, &original_start, "non-empty source keeps its original start");
+            if delivered || assignee.is_none() {
+                assert_eq!(start, &original_start, "source without eligible rebinding keeps its original start");
                 assert!(!moved.notes.contains("DELIVERY BRANCH REBOUND"));
             } else {
                 assert_eq!(start.work_target, target("epic/new"));

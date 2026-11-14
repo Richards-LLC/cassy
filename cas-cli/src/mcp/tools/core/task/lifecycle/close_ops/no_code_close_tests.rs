@@ -833,6 +833,10 @@ async fn epic_retarget_rebinds_unchanged_started_source_before_no_delivery_close
         "action":"update", "id":id, "epic":"cas-aac3-new",
     })).unwrap())).await;
     assert!(refused.is_err(), "mismatched assignee must refuse the retarget");
+    assert!(
+        refused.as_ref().unwrap_err().message.contains("rebind_branch"),
+        "mismatched source guidance names the supervisor recovery action: {refused:?}"
+    );
     assert_eq!(tasks.get_parent_epic(id).unwrap().unwrap().id, "cas-aac3-old", "{refused:?}");
     assert_eq!(f.task(id).deliverables.work_target, Some(target("main")), "{refused:?}");
     let mut restored = f.task(id);

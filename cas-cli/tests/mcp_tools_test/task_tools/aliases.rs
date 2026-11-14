@@ -12,6 +12,7 @@ async fn create_task(service: &CasService, title: &str) -> String {
         task_type: Some("task".to_string()),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         ..serde_json::from_value(serde_json::json!({"action":"create"})).unwrap()
     };
     let text = extract_text(service.task(Parameters(request)).await.unwrap());

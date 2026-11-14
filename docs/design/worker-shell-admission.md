@@ -290,6 +290,23 @@ HOME, which no factory worktree layout allows. The final replay uses a v3
 fixture with HOME outside the worker's parent and reruns BASE on that fixture
 too. Earlier fixture versions stay immutable.
 
+The v3 fixture mirrors the factory layout. The repository lives under HOME and
+the worker is a linked worktree under the repository's `.cas/worktrees`. BASE
+replayed all 97,765 inputs on it. Against v2, 50 BASE denies became allows
+(32 Claude, 18 Codex), none were added, and no labelled input changed, so the
+sampling frames still apply. The interim candidate `6aaa14c` on v3 (receipt
+`art-5ab39769`, final candidate pending the credential-context fix):
+
+| Harness | BASE v3 false denies | Candidate v3 false denies | Net change (simultaneous 95% interval) |
+| --- | --- | --- | --- |
+| Claude | 298.07 | 424.50 | +126.43 (−34 to +217) |
+| Codex | 411.00 | 336.74 | −74.26 (−102 to +32) |
+
+All 250 independently TRUE_DENY inputs still deny, including the seven
+credential-flow denies, and no candidate deny falls outside the labelled
+frames. The H-09 fixture artifact no longer denies. The Claude increase is
+the runtime-derived classes above.
+
 ## Filename-list consumers
 
 This is the admission contract for the consumer migration, not a claim that the

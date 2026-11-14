@@ -134,188 +134,351 @@ fn numeric_arithmetic(expression: &str, inert: &InertNames) -> Result<(), &'stat
     }
 }
 
-/// Builtins that can give a name an unknown value or an integer/nameref
-/// attribute, or unset it so `${name:=…}` can rebind it. Their presence
-/// anywhere disables inert tracking for the script.
+/// Builtins that can bind a name to an unknown value, give it an integer or
+/// nameref attribute, unset it, alias a command, or run code that does. Any
+/// of them anywhere, in any position, disables inert tracking for the script.
 const VALUE_MUTATORS: &[&str] = &[
     "read", "declare", "typeset", "local", "export", "readonly", "let", "integer", "mapfile",
-    "readarray", "getopts", "eval", "source", "coproc", "trap", "enable", "case", "select", "unset",
+    "readarray", "getopts", "eval", "source", "coproc", "trap", "enable", "case", "select",
+    "unset", "alias", "shopt",
 ];
 
+/// Commands that run another command named by a later word.
+const COMMAND_WRAPPERS: &[&str] = &[
+    "env", "exec", "command", "builtin", "nohup", "nice", "timeout", "sudo", "xargs",
+    "stdbuf", "setsid", "time",
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum SpanKind {
+    /// `((…))`, including `for ((…))`.
+    ArithmeticCommand,
+    /// `$((…))`, `$[…]`, `[…]`, `[[…]]` and `${…}` interiors.
+    Evaluated,
+}
+
+/// Every region bash may evaluate arithmetically, found without regard to
+/// quoting so that no quoted or nested form escapes classification.
+fn evaluated_spans(text: &str) -> Vec<(usize, usize, SpanKind)> {
+    let bytes = text.as_bytes();
+    let close = |from: usize, open: u8, shut: u8, mut balance: usize| {
+        let mut at = from;
+        while at < bytes.len() {
+            if bytes[at] == open {
+                balance += 1;
+            } else if bytes[at] == shut {
+                balance -= 1;
+                if balance == 0 {
+                    return at;
+                }
+            }
+            at += 1;
+        }
+        bytes.len()
+    };
+    let mut spans = Vec::new();
+    for at in 0..bytes.len() {
+        let rest = &bytes[at..];
+        if rest.starts_with(b"$((") {
+            let end = close(at + 3, b'(', b')', 2);
+            spans.push((at + 3, end.saturating_sub(1).max(at + 3), SpanKind::Evaluated));
+        } else if rest.starts_with(b"((") && (at == 0 || bytes[at - 1] != b'$') {
+            let end = close(at + 2, b'(', b')', 2);
+            spans.push((at + 2, end.saturating_sub(1).max(at + 2), SpanKind::ArithmeticCommand));
+        } else if rest.starts_with(b"${") {
+            spans.push((at + 2, close(at + 2, b'{', b'}', 1), SpanKind::Evaluated));
+        } else if rest[0] == b'[' {
+            spans.push((at + 1, close(at + 1, b'[', b']', 1), SpanKind::Evaluated));
+        }
+    }
+    spans
+}
+
+fn identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Every identifier-bounded occurrence of `name` in `text`.
+fn occurrences(text: &str, name: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = text[at..].find(name) {
+        let start = at + offset;
+        let end = start + name.len();
+        if !(start > 0 && identifier_byte(bytes[start - 1]))
+            && !bytes.get(end).is_some_and(|byte| identifier_byte(*byte))
+        {
+            found.push(start);
+        }
+        at = end;
+    }
+    found
+}
+
+/// A shell assignment's value is inert when it is a bare digit literal, a bare
+/// literal variable name, or exactly `$((expr))`. Quoted values never are.
+#[derive(Clone)]
+enum Binding {
+    Digits,
+    Word,
+    Arithmetic(String),
+    Unknown,
+}
+
+fn binding_of(value: &str, literal: bool) -> Binding {
+    if literal && !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        Binding::Digits
+    } else if literal && is_shell_variable_name(value) {
+        Binding::Word
+    } else if let Some(expression) = value.strip_prefix("$((").and_then(|rest| rest.strip_suffix("))"))
+        && !expression.contains("((") && !expression.contains("))")
+    {
+        Binding::Arithmetic(expression.to_string())
+    } else {
+        Binding::Unknown
+    }
+}
+
+/// cas-e197: default-deny classification of every occurrence of every name.
+/// A name is inert only if its first occurrence is a top-level, unconditional,
+/// literal binding and every other occurrence is a read or an inert binding.
 fn inert_names(script: &str, projected: &str, lexed: &ShellLexed, parent: &InertNames) -> InertNames {
     let tokens = &lexed.tokens;
     let word = |index: usize| match tokens.get(index) {
         Some(ShellToken::Word(word)) => Some(word.as_str()),
         _ => None,
     };
-    let mutator = tokens.iter().enumerate().any(|(index, token)| match token {
-        ShellToken::Word(text) => {
-            let value = text.split_once('=').filter(|(name, _)| is_shell_variable_name(name))
-                .map_or(text.as_str(), |(_, value)| value);
-            VALUE_MUTATORS.contains(&value)
-                || (matches!(value, "printf" | "wait") && word(index + 1).is_some_and(|next| next.starts_with("-v") || next.starts_with("-p")))
-                // `.` sources a file only in command position; `find .` is data.
-                || (value == "." && (index == 0 || matches!(tokens[index - 1], ShellToken::Operator(_))))
-        }
-        _ => false,
-    });
-    if mutator {
-        return InertNames::default();
-    }
-    let raw = |index: usize| {
+    let raw_start = |index: usize| {
         let start = if index == 0 { 0 } else { lexed.ends[index - 1] };
-        projected[start..lexed.ends[index]].trim()
+        start + projected[start..lexed.ends[index]].len()
+            - projected[start..lexed.ends[index]].trim_start().len()
     };
-    // Every value each name receives, and the token that first binds it.
-    let mut assigned: HashMap<String, Vec<(String, bool)>> = HashMap::new();
-    let mut defined: HashMap<String, usize> = HashMap::new();
+    let raw = |index: usize| projected[raw_start(index)..lexed.ends[index]].trim_end();
+    let assignment_name = |index: usize| {
+        let raw = raw(index);
+        let len = raw.bytes().take_while(|byte| identifier_byte(*byte)).count();
+        let name = &raw[..len];
+        (is_shell_variable_name(name) && raw[len..].starts_with(['=', '+', '[']))
+            .then_some((name, &raw[len..]))
+    };
+    // Bindings keyed by source offset of the bound name.
+    let mut bindings: HashMap<usize, (Binding, bool)> = HashMap::new();
+    let mut invalid: HashSet<String> = HashSet::new();
+    let mut disabled = false;
     let mut depth = 0usize;
     let mut statement_start = true;
-    // `env NAME=VALUE cmd` hands NAME to a new process: never trust NAME.
-    let mut after_env = false;
+    let mut expect_command = true;
+    let mut wrapped = false;
     let mut index = 0;
     while index < tokens.len() {
-        if matches!(tokens[index], ShellToken::Operator(_)) {
-            after_env = false;
-        }
-        match &tokens[index] {
-            ShellToken::Operator(';') => statement_start = true,
-            ShellToken::Operator('(') => { depth += 1; statement_start = true; }
-            ShellToken::Operator(')') => { depth = depth.saturating_sub(1); statement_start = false; }
-            ShellToken::Operator(_) => statement_start = false,
-            ShellToken::Word(text) if text == "for" => {
-                let mut cursor = index + 1;
-                if let Some(name) = word(index + 1).filter(|name| is_shell_variable_name(name)) {
-                    // Without `in`, the loop reads the positional parameters.
-                    let mut values = Vec::new();
-                    if word(index + 2) == Some("in") {
-                        cursor = index + 3;
-                        while let Some(value) = word(cursor).filter(|value| *value != "do") {
-                            values.push((value.to_string(), lexed.literals[cursor]));
-                            cursor += 1;
-                        }
-                    }
-                    if depth == 0 && statement_start && !values.is_empty() {
-                        defined.entry(name.to_string()).or_insert(index + 1);
-                    }
-                    if values.is_empty() {
-                        values.push((String::new(), false));
-                    }
-                    assigned.entry(name.to_string()).or_default().extend(values);
+        let text = match &tokens[index] {
+            ShellToken::Operator(ch) => {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    _ => {}
                 }
-                depth += 1;
-                statement_start = false;
-                index = cursor;
+                // Redirections keep the current command; separators start one.
+                if matches!(ch, ';' | '&' | '|' | '(' | ')') {
+                    statement_start = matches!(ch, ';' | '(');
+                    expect_command = true;
+                    wrapped = false;
+                }
+                index += 1;
                 continue;
             }
-            ShellToken::Word(text) => {
-                if matches!(text.as_str(), "if" | "while" | "until" | "{") {
-                    depth += 1;
-                } else if matches!(text.as_str(), "fi" | "done" | "}") {
-                    depth = depth.saturating_sub(1);
-                }
-                let keyword = matches!(text.as_str(), "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "{" | "!");
-                // Assignments are only the unquoted `name=` prefix words of a
-                // command; `echo "n=$n"` or `env n=1 cmd` leave the shell's n alone.
-                if after_env && let Some((name, _)) = text.split_once('=').filter(|(name, _)| is_shell_variable_name(name)) {
-                    assigned.entry(name.to_string()).or_default().push((String::new(), false));
-                }
-                if text == "env" {
-                    after_env = true;
-                }
-                let prefix = text.split_once('=').map(|(name, _)| name)
-                    .filter(|name| statement_start && is_shell_variable_name(name)
-                        && raw(index).strip_prefix(*name).is_some_and(|rest| rest.starts_with('=')));
-                if let Some(name) = prefix {
-                    let value = raw(index)[name.len() + 1..].to_string();
-                    assigned.entry(name.to_string()).or_default().push((value, lexed.literals[index]));
-                    // Only a whole assignment statement, at top level and not behind
-                    // && / ||, binds the shell's own variable on every run.
-                    let operator = (index + 1..tokens.len())
-                        .find(|at| matches!(tokens[*at], ShellToken::Operator(_)));
-                    let whole = (index + 1..operator.unwrap_or(tokens.len()))
-                        .all(|at| word(at).is_some_and(|w| w.split_once('=').is_some_and(|(n, _)| is_shell_variable_name(n))));
-                    // A pipeline element or background job assigns in a subshell.
-                    let current_shell = operator.is_none_or(|at| match tokens[at] {
-                        ShellToken::Operator(';') => true,
-                        ShellToken::Operator(ch @ ('&' | '|')) => tokens.get(at + 1) == Some(&ShellToken::Operator(ch)),
-                        _ => false,
-                    });
-                    if depth == 0 && statement_start && whole && current_shell {
-                        defined.entry(name.to_string()).or_insert(index);
+            ShellToken::Word(text) => text.as_str(),
+        };
+        let literal = lexed.literals[index];
+        let value = text.split_once('=').filter(|(name, _)| is_shell_variable_name(name))
+            .map_or(text, |(_, value)| value);
+        if VALUE_MUTATORS.contains(&value)
+            || (matches!(value, "printf" | "wait") && word(index + 1).is_some_and(|next| next.starts_with("-v") || next.starts_with("-p")))
+            || (value == "." && expect_command)
+            || (wrapped && !literal)
+        {
+            disabled = true;
+        }
+        if text == "for" {
+            let mut cursor = index + 1;
+            if word(index + 1).is_some_and(is_shell_variable_name) {
+                let mut words = Vec::new();
+                if word(index + 2) == Some("in") {
+                    cursor = index + 3;
+                    while let Some(value) = word(cursor).filter(|value| *value != "do") {
+                        words.push(binding_of(value, lexed.literals[cursor]));
+                        cursor += 1;
                     }
-                } else {
-                    statement_start = keyword;
                 }
+                let kind = if !words.is_empty() && words.iter().all(|w| matches!(w, Binding::Digits)) {
+                    Binding::Digits
+                } else if !words.is_empty() && words.iter().all(|w| matches!(w, Binding::Word)) {
+                    Binding::Word
+                } else {
+                    Binding::Unknown
+                };
+                bindings.insert(raw_start(index + 1), (kind, depth == 0 && statement_start && expect_command));
             }
+            depth += 1;
+            statement_start = false;
+            expect_command = false;
+            index = cursor;
+            continue;
+        }
+        if let Some((name, rest)) = assignment_name(index) {
+            let binding = match rest.strip_prefix('=') {
+                Some(value) => binding_of(value, literal),
+                None => Binding::Unknown, // `+=` and `name[…]=`
+            };
+            // A defining binding is a whole assignment statement at top level,
+            // run in this shell: not behind && || ! time, a pipe or `&`.
+            let operator = (index + 1..tokens.len()).find(|at| matches!(tokens[*at], ShellToken::Operator(_)));
+            let whole = (index + 1..operator.unwrap_or(tokens.len())).all(|at| assignment_name(at).is_some());
+            let current_shell = operator.is_none_or(|at| match tokens[at] {
+                ShellToken::Operator(';') => true,
+                ShellToken::Operator(ch @ ('&' | '|')) => tokens.get(at + 1) == Some(&ShellToken::Operator(ch)),
+                _ => false,
+            });
+            let defining = depth == 0 && statement_start && expect_command && whole && current_shell
+                && !wrapped;
+            if !matches!(rest.chars().next(), Some('=')) {
+                invalid.insert(name.to_string());
+            }
+            bindings.insert(raw_start(index), (binding, defining));
+        } else if matches!(text, "fi" | "done" | "}") && expect_command {
+            depth = depth.saturating_sub(1);
+            expect_command = false;
+            statement_start = false;
+        } else if expect_command {
+            let keyword = matches!(text, "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "{" | "!" | "time");
+            if matches!(text, "if" | "while" | "until" | "{") {
+                depth += 1;
+            }
+            if !keyword {
+                if !literal {
+                    disabled = true; // An unknown command may bind anything.
+                }
+                wrapped = COMMAND_WRAPPERS.contains(&text);
+                expect_command = false;
+            }
+            statement_start = false;
         }
         index += 1;
     }
-    let bytes = projected.as_bytes();
-    let first_occurrence = |name: &str| {
-        let mut at = 0;
-        while let Some(found) = projected[at..].find(name) {
-            let start = at + found;
-            let end = start + name.len();
-            let before = start.checked_sub(1).map(|p| bytes[p]);
-            let boundary = !before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
-                && !bytes.get(end).is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == b'_');
-            if boundary {
-                return Some(start);
-            }
-            at = end;
-        }
-        None
-    };
-    let mutated = |name: &str| {
-        let mut at = 0;
-        while let Some(found) = projected[at..].find(name) {
-            let start = at + found;
-            let end = start + name.len();
-            let before = start.checked_sub(1).map(|p| bytes[p]);
-            if !before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
-                && (bytes.get(end) == Some(&b'[') || projected[end..].starts_with("+="))
-            {
-                return true;
-            }
-            at = end;
-        }
-        false
-    };
+    if disabled {
+        return InertNames::default();
+    }
+    let spans = evaluated_spans(projected);
+    let innermost = |at: usize| spans.iter().filter(|(start, end, _)| *start <= at && at < *end)
+        .min_by_key(|(start, end, _)| end - start).copied();
     let bodies = if script == projected { Vec::new() } else { shell_heredoc_bodies(script) };
-    let candidate = |name: &String| {
-        // Bash itself rewrites its uppercase variables (BASH_REMATCH, PWD, _ …).
-        if !name.bytes().any(|ch| ch.is_ascii_lowercase())
-            || mutated(name) || bodies.iter().any(|body| body.contains(name.as_str()))
-        {
-            return false;
-        }
-        if parent.numeric.contains(name) || parent.identifier.contains(name) {
-            return true;
-        }
-        let Some(&token) = defined.get(name) else { return false };
-        let span_start = if token == 0 { 0 } else { lexed.ends[token - 1] };
-        first_occurrence(name).is_some_and(|at| at >= span_start && at < lexed.ends[token])
-    };
-    let identifier: HashSet<String> = assigned.iter()
-        .filter(|(name, values)| candidate(name) && !parent.numeric.contains(*name)
-            && values.iter().all(|(value, literal)| *literal && is_shell_variable_name(value)))
-        .map(|(name, _)| name.clone())
-        .chain(parent.identifier.iter().filter(|name| !assigned.contains_key(*name) && !mutated(name)).cloned())
+    // name -> (defining binding, other bindings), or None when invalid.
+    let mut names: HashMap<String, (Binding, Vec<Binding>)> = HashMap::new();
+    let mut candidates: HashSet<String> = bindings.keys()
+        .map(|at| {
+            let len = projected[*at..].bytes().take_while(|byte| identifier_byte(*byte)).count();
+            projected[*at..*at + len].to_string()
+        })
         .collect();
-    // Greatest fixed point: each name starts from a numeric literal and only
-    // ever receives arithmetic over names that stay numeric.
-    let mut numeric: HashSet<String> = assigned.keys().filter(|name| candidate(name)).cloned()
-        .chain(parent.numeric.iter().filter(|name| !mutated(name)).cloned())
+    candidates.extend(parent.numeric.iter().cloned());
+    candidates.extend(parent.identifier.iter().cloned());
+    'names: for name in candidates {
+        // Bash itself rewrites its uppercase variables (BASH_REMATCH, PWD, _ …).
+        if invalid.contains(&name) || !name.bytes().any(|byte| byte.is_ascii_lowercase())
+            || bodies.iter().any(|body| body.contains(name.as_str()))
+        {
+            continue;
+        }
+        let inherited = parent.numeric.contains(&name) || parent.identifier.contains(&name);
+        let mut defining = None;
+        let mut others = Vec::new();
+        for (position, at) in occurrences(projected, &name).into_iter().enumerate() {
+            if let Some((binding, eligible)) = bindings.get(&at) {
+                if position == 0 && !inherited {
+                    if !eligible || !matches!(binding, Binding::Digits | Binding::Word) {
+                        continue 'names;
+                    }
+                    defining = Some(binding.clone());
+                } else {
+                    others.push(binding.clone());
+                }
+                continue;
+            }
+            if position == 0 && !inherited {
+                continue 'names; // Read before any binding: an inherited value.
+            }
+            let end = at + name.len();
+            let before = &projected[..at];
+            if before.ends_with("${") || before.ends_with("${!") || before.ends_with("${#") {
+                let after = &projected[end..];
+                if after.starts_with('=') || after.starts_with(":=") {
+                    continue 'names; // `${name=…}` / `${name:=…}`
+                }
+                continue;
+            }
+            if before.ends_with('$') {
+                continue;
+            }
+            if before.ends_with('{') && projected[end..].starts_with('}')
+                && projected[end + 1..].trim_start().starts_with(['<', '>'])
+            {
+                continue 'names; // `{name}>file` binds a file descriptor number.
+            }
+            if let Some((start, stop, kind)) = innermost(at) {
+                let after = projected[end..].trim_start();
+                let preceding = before.trim_end();
+                let binds = (after.starts_with('=') && !after.starts_with("=="))
+                    || ["+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "<<=", ">>=", "++", "--"]
+                        .iter().any(|op| after.starts_with(op))
+                    || preceding.ends_with("++") || preceding.ends_with("--");
+                if binds {
+                    // Only `((name++))`, `((name--))` and `((name+=expr))` are inert.
+                    let content = projected[start..stop].trim();
+                    let step = content.strip_prefix(name.as_str()).map(str::trim_start);
+                    let expression = match step {
+                        Some("++") | Some("--") => Some(String::new()),
+                        Some(rest) => rest.strip_prefix("+=").map(|expr| expr.to_string()),
+                        None => None,
+                    };
+                    match expression {
+                        Some(expression) if kind == SpanKind::ArithmeticCommand => {
+                            others.push(Binding::Arithmetic(expression));
+                        }
+                        _ => continue 'names,
+                    }
+                }
+                continue;
+            }
+            // Plain data: an argument or quoted text, never a binding target
+            // once every binding builtin and unknown command is excluded above.
+        }
+        let defining = match (defining, inherited) {
+            (Some(binding), _) => binding,
+            (None, true) if parent.numeric.contains(&name) => Binding::Digits,
+            (None, true) => Binding::Word,
+            (None, false) => continue,
+        };
+        names.insert(name, (defining, others));
+    }
+    let identifier: HashSet<String> = names.iter()
+        .filter(|(_, (defining, others))| matches!(defining, Binding::Word)
+            && others.iter().all(|binding| matches!(binding, Binding::Word)))
+        .map(|(name, _)| name.clone())
+        .collect();
+    // Greatest fixed point: names validate each other only when all are
+    // consistent, and every value starts from a digit literal.
+    let mut numeric: HashSet<String> = names.iter()
+        .filter(|(_, (defining, _))| matches!(defining, Binding::Digits))
+        .map(|(name, _)| name.clone())
         .collect();
     loop {
         let keep: HashSet<String> = numeric.iter().filter(|name| {
-            assigned.get(*name).is_none_or(|values| values.iter().all(|(value, literal)| {
-                (*literal && !value.is_empty() && value.bytes().all(|ch| ch.is_ascii_digit()))
-                    || value.strip_prefix("$((").and_then(|rest| rest.strip_suffix("))"))
-                        .or_else(|| value.strip_prefix("\"$((").and_then(|rest| rest.strip_suffix("))\"")))
-                        .is_some_and(|expression| arithmetic_over(expression, &numeric))
-            }))
+            names[*name].1.iter().all(|binding| match binding {
+                Binding::Digits => true,
+                Binding::Arithmetic(expression) => expression.is_empty() || arithmetic_over(expression, &numeric),
+                _ => false,
+            })
         }).cloned().collect();
         if keep.len() == numeric.len() {
             break;
@@ -1582,10 +1745,11 @@ fn collect_script(
                 if !payload_literal {
                     return Err("an unresolved shell payload");
                 }
-                // cas-e197: only `eval` runs in this shell. A `-c`, `env -S`, su,
-                // runuser or script payload is a new process whose variables come
-                // from its environment, which this command may have rewritten.
-                let payload_inert = if name == Some("eval") { inert.clone() } else { InertNames::default() };
+                // cas-e197: a `-c`, `env -S`, su, runuser or script payload is a new
+                // process whose variables come from an environment this command may
+                // rewrite. `eval` disables inert tracking (VALUE_MUTATORS), so every
+                // payload starts with no inert names.
+                let payload_inert = InertNames::default();
                 let nested = collect_script(
                     &payload,
                     statement_dirs,

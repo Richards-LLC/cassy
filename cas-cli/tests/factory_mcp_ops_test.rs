@@ -1811,6 +1811,9 @@ async fn spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_
     env.create_epic("Shared machine capacity Epic");
     env.register_worker_with_metadata("local-live", HashMap::new());
     let other = TempDir::new().unwrap();
+    // Its own Git root, so store discovery cannot climb into an enclosing repo.
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(other.path())
+        .status().unwrap().success());
     let other_root = init_cas_dir(other.path()).unwrap();
     let other_agents = open_agent_store(&other_root).unwrap();
     for index in 0..7 {

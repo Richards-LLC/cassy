@@ -10228,6 +10228,21 @@ EOF
         env.set("CAS_CLONE_PATH", &worktree);
         let mut mismatches = Vec::new();
         for (command, denied) in [
+            // Consumer destinations are writes even without a shell redirect.
+            ("sort -o ../../ordinary-data.txt names.txt", true),
+            ("sort --output=../../ordinary-data.txt names.txt", true),
+            ("sort --out ../../ordinary-data.txt names.txt", true),
+            ("sort -T ../../operator names.txt", true),
+            ("sort --temporary-directory=../../operator names.txt", true),
+            ("TMPDIR=../../operator sort names.txt", true),
+            ("uniq names.txt ../../ordinary-data.txt", true),
+            ("cd src && uniq ../names.txt ../../../ordinary-data.txt", true),
+            ("sort -o sorted.txt names.txt", false),
+            ("sort -T src names.txt", false),
+            ("TMPDIR=src sort names.txt", false),
+            ("uniq names.txt unique.txt", false),
+            ("sort -- --output=../../ordinary-data.txt", false),
+            ("uniq -f 2 -s 1 names.txt unique.txt", false),
             ("cd ../../operator && printf x > write-policy.toml", true),
             ("cd ../.. && printf x > config.toml", true),
             ("sh -c 'printf x > ../../operator/write-policy.toml'", true),

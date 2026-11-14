@@ -93,15 +93,20 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
     }
 }
 
-/// A command whose working directories cannot be resolved is refused: no
-/// weaker reading stands in for the per-statement projection.
+/// A command that cannot be projected is refused: no weaker reading stands in
+/// for the per-statement projection. An unresolved directory may be any
+/// directory, so its statements are judged from every one that could matter.
 fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
     if depth > 3 { return true; }
     let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
         return true;
     };
     let names_inert = depth == 0 && listed_names_stay_inert(command);
-    for context in contexts {
+    for mut context in contexts {
+        let parents = context.command.matches("..").count().min(16);
+        let directories: Vec<PathBuf> = std::mem::take(&mut context.directories).into_iter()
+            .flat_map(|cwd| cwd_candidates(cwd, parents))
+            .collect();
         let statements = super::pre_tool::shell_statement_words(&context.command);
         let arguments = super::pre_tool::shell_statement_arguments(&context.command);
         for (at, words) in statements.iter().enumerate() {
@@ -114,15 +119,60 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
                         argv[other] == words[index] && lists_names_only(&executable, &argv[other + 1..])
                     })
                 });
-            if context.directories.iter().any(|cwd| statement_references_store(words, cwd, depth, names_only)) {
+            if directories.iter().any(|cwd| statement_references_store(words, cwd, depth, names_only)) {
                 return true;
             }
         }
         if super::pre_tool::shell_heredoc_bodies(&context.command).iter().any(|body| {
-            context.directories.iter().any(|cwd| script_constructs_store_path(body, cwd))
+            directories.iter().any(|cwd| script_constructs_store_path(body, cwd))
         }) { return true; }
     }
     false
+}
+
+/// The directories that stand for `cwd`. Each unknown entry takes, per store,
+/// the store's own component at that depth (or a stand-in below the store),
+/// the only spelling under which the directory could reach that store.
+fn cwd_candidates(cwd: Option<PathBuf>, parents: usize) -> Vec<PathBuf> {
+    let Some(cwd) = cwd else {
+        return unresolved_cwd_candidates(parents);
+    };
+    let unknown = std::ffi::OsStr::new(super::pre_tool::UNKNOWN_DIRECTORY);
+    if !cwd.components().any(|part| part.as_os_str() == unknown) {
+        return vec![cwd];
+    }
+    store_roots(Path::new("/"))
+        .iter()
+        .map(|root| {
+            let root: Vec<_> = root.components().collect();
+            cwd.components()
+                .enumerate()
+                .map(|(at, part)| match part.as_os_str() == unknown {
+                    true => root.get(at).map_or(std::ffi::OsStr::new("unresolved-cwd"), |part| part.as_os_str()),
+                    false => part.as_os_str(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Lexically, a relative path from an unknown directory reaches a store only
+/// from inside it or from one of its ancestors, after any parent traversal.
+/// Each such directory, with up to `parents` stand-in children, covers it.
+fn unresolved_cwd_candidates(parents: usize) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for root in store_roots(Path::new("/")) {
+        for ancestor in root.ancestors() {
+            let mut candidate = ancestor.to_path_buf();
+            for _ in 0..=parents {
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate.clone());
+                }
+                candidate.push("unresolved-cwd");
+            }
+        }
+    }
+    candidates
 }
 
 fn statement_references_store(

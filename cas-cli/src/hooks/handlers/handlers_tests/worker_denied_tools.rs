@@ -461,8 +461,9 @@ fn worker_unresolved_credential_cwd_is_refused_cas_707a2() {
         &[
             "cd ~; (cd {p}; cd \"$UNSET_DIR\"; :); cat .config/neonctl/credentials.json",
             "cd ~; if false; then cd {p}; cd \"$UNSET_DIR\"; fi; cat .config/neonctl/credentials.json",
+            "cd \"$UNSET_DIR\"; cat .config/neonctl/credentials.json",
         ],
-        &[],
+        &["cd \"$UNSET_DIR\" && git status", "cd ~/.cas/*/x && grep -rn needle ."],
     );
 }
 

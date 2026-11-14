@@ -359,6 +359,42 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(line.locator(".phase-clock")).toHaveText("0:42");
         await expect(line).toHaveAttribute("data-active", "false");
       });
+      // cas-c3377: one Nov 13 turn ran release.sh for minutes between short
+      // tools. The daemon reports that turn, its running tool and last record;
+      // the double advances its observation time as the daemon's reads would.
+      const turnStart = Date.parse(journeyStamp());
+      let observed = turnStart;
+      const daemonReads = async (ms: number) => {
+        for (let spent = 0; spent < ms; spent += 5_000) {
+          observed += 5_000; world.supervisor_phase!.observed_at = new Date(observed).toISOString();
+          await page.clock.runFor(5_000);
+        }
+      };
+      await journey.stage("A two-minute command keeps the turn busy, named and timed", async () => {
+        world.session = { is_running: true };
+        world.supervisor_phase = { event_id: "turn-2", kind: "notice", lifecycle: { id: "turn-2", stage: "start", started_at: new Date(turnStart).toISOString() },
+          step: "Bash", last_activity_at: new Date(turnStart).toISOString(), observed_at: new Date(turnStart).toISOString(), stale: false };
+        await daemonReads(5_000);
+        await expect(line).toHaveAttribute("data-state", "busy");
+        await expect(line.locator(".phase-step")).toHaveText("Bash");
+        await expect(line.locator("time")).toHaveAttribute("datetime", world.supervisor_phase.last_activity_at!);
+        await daemonReads(120_000);
+        await expect(line).toHaveAttribute("data-state", "busy");
+        await expect(line.locator(".phase-clock")).toHaveText(/^2:\d{2}$/);
+      });
+      await journey.stage("The turn's end reads idle within five seconds", async () => {
+        world.supervisor_phase!.lifecycle = { ...world.supervisor_phase!.lifecycle, stage: "end", ended_at: new Date(observed).toISOString() };
+        delete world.supervisor_phase!.step;
+        await daemonReads(5_000);
+        await expect(line).toHaveAttribute("data-state", "idle");
+        await expect(line.locator(".phase-step")).toHaveCount(0);
+      });
+      await journey.stage("A stopped daemon reads unknown, never idle", async () => {
+        world.session = { is_running: false };
+        await daemonReads(5_000);
+        await expect(line).toHaveAttribute("data-state", "unknown");
+        world.session = { is_running: true };
+      });
       await journey.stage("A completed boundary and a disconnected machine never look active", async () => {
         world.supervisor_phase!.stale = false;
         world.supervisor_phase!.lifecycle = { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" };

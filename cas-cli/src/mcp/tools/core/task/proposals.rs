@@ -220,6 +220,7 @@ impl CasCore {
             "delivery_mode": delivery_mode,
             "risk": risk,
             "door": door,
+            "review_dispatch_id": self.normalize_review_dispatch_id(req.review_dispatch_id.as_deref())?,
             "proof_targets": proof_targets,
         });
         let client_request_id = validate_proposal_attempt_id(proposal_attempt_id)?;
@@ -744,6 +745,7 @@ mod tests {
             task_type: "task".into(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

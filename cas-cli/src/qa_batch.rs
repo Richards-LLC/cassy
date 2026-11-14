@@ -96,8 +96,8 @@ pub(crate) struct ReleaseInventory {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReleaseDelivery {
     pub task_id: String,
-    /// Conservative task snapshot token. ANY intervening task mutation means
-    /// the consumer must re-evaluate; this is not a lease generation number.
+    /// The member's delivery cycle (`delivery_generation`). A new cycle is a
+    /// new delivery; an anchor change inside a cycle is checked at close.
     pub generation: String,
     pub anchor: Option<String>,
     pub base_sha: Option<String>,
@@ -128,6 +128,18 @@ pub(crate) enum ReleaseInventoryCode {
     MissingMapping,
     MissingNoCodeProof,
     Quarantined,
+    Reverted,
+    UnprovenContent,
+}
+
+impl ReleaseInventoryCode {
+    pub(crate) fn close_gate(&self) -> String {
+        match self {
+            Self::Reverted => "RELEASE_MEMBER_REVERTED".into(),
+            Self::UnprovenContent => "RELEASE_CONTENT_UNPROVEN".into(),
+            other => format!("RELEASE_MEMBER_HELD: {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -218,6 +230,7 @@ pub(crate) fn resolve_release_inventory(
         deliveries: Vec::new(),
         exceptions: Vec::new(),
     };
+    let review = release_close::ReleaseClose::prepare(root, repo, &inventory)?;
     let expected: BTreeSet<String> = scope
         .included_task_ids
         .iter()
@@ -293,14 +306,10 @@ pub(crate) fn resolve_release_inventory(
         let d = &t.deliverables;
         let base = d.factory_branch_start.as_ref()
             .and_then(|start| recorded_commit(&start.base_sha));
-        let recorded = d.factory_branch_anchor.as_ref()
-            .or(d.green_merge_commit.as_ref())
-            .or(d.delivery_pr_merge_commit.as_ref())
-            .or(d.merge_commit.as_ref());
-        let anchor = recorded.and_then(|sha| recorded_commit(sha));
+        let anchor = resolved_delivery_anchor(repo, t, &scope.final_release_sha);
         let valid_base = |anchor: &str| base.as_deref()
             .is_some_and(|base| ancestor(repo, base, anchor) == Some(true));
-        let shipped_mapping = |anchor: &str| {
+        let release_mapping = |anchor: &str| {
             if ancestor(repo, anchor, &scope.final_release_sha) == Some(true) {
                 Some((anchor.to_string(), ReleaseMembership::Ancestry))
             } else {
@@ -311,11 +320,11 @@ pub(crate) fn resolve_release_inventory(
                     .map(|mapped| (mapped, ReleaseMembership::SquashTree))
             }
         };
-        let shipped = anchor.as_deref().and_then(&shipped_mapping);
-        if !expected.contains(&id) && shipped.is_none()
+        let mapped = anchor.as_deref().and_then(&release_mapping);
+        if !expected.contains(&id) && mapped.is_none()
             && !d.historical_factory_branch_anchors.iter()
                 .filter_map(|sha| recorded_commit(sha))
-                .any(|historical| shipped_mapping(&historical).is_some())
+                .any(|historical| release_mapping(&historical).is_some())
         {
             continue;
         }
@@ -378,16 +387,26 @@ pub(crate) fn resolve_release_inventory(
             } else if !valid_base(&anchor) {
                 issue(ReleaseInventoryCode::InvalidBase);
             }
-            let Some((shipped, membership)) = shipped else {
+            if review.ledger_reverts(&id, Some(&anchor)) {
+                issue(ReleaseInventoryCode::Reverted);
+                continue;
+            }
+            let Some((shipped, membership)) = mapped else {
                 issue(ReleaseInventoryCode::MissingMapping);
                 continue;
             };
+            if let Err(code) = release_delivery_effect(
+                repo, base.as_deref(), &anchor, &scope.final_release_sha, &id,
+            ) {
+                issue(code);
+                continue;
+            }
             let proofs = release_proof_refs(&receipts, &id, &anchor);
             (Some(anchor), Some(shipped), membership, proofs)
         };
         inventory.deliveries.push(ReleaseDelivery {
             task_id: id,
-            generation: t.updated_at.to_rfc3339(),
+            generation: delivery_generation(t),
             anchor,
             base_sha: base,
             shipped_commit,
@@ -449,13 +468,14 @@ pub(crate) fn commit(repo: &Path, rev: &str) -> Option<String> {
 /// Recovery retires the active merge authority, but retains delivery identity.
 /// QA may attest that same immutable delivery after an evidence-only restart.
 /// Prefer an active anchor; otherwise use only the latest recorded history.
-/// An unresolvable newer anchor must never resurrect an older reviewed tip.
+/// An unresolvable newer anchor must never resurrect an older reviewed tip,
+/// and a recorded anchor is a commit id, never a ref name.
 pub(crate) fn delivery_anchor(repo: &Path, task: &Task) -> Option<String> {
     task.deliverables
         .factory_branch_anchor
         .as_ref()
         .or_else(|| task.deliverables.historical_factory_branch_anchors.last())
-        .and_then(|head| commit(repo, head))
+        .and_then(|head| commit(repo, head).filter(|resolved| resolved.eq_ignore_ascii_case(head)))
 }
 
 /// GH #1641: a task merged through a GitHub PR has no recorded anchor. Resolve
@@ -508,6 +528,11 @@ fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String
     None
 }
 
+/// A release member's generation: its delivery cycle (design rev 3.1 §2.5).
+pub(crate) fn delivery_generation(task: &Task) -> String {
+    format!("cycle:{}", task.deliverables.delivery_cycle)
+}
+
 /// The delivery identity every receipt consumer shares: the recorded anchor, or,
 /// when none was ever recorded (PR merge), the merged branch tip. Invalid
 /// recorded anchors never fall back.
@@ -515,7 +540,11 @@ pub(crate) fn resolved_delivery_anchor(repo: &Path, task: &Task, target: &str) -
     delivery_anchor(repo, task).or_else(|| {
         let d = &task.deliverables;
         (d.factory_branch_anchor.is_none() && d.historical_factory_branch_anchors.is_empty())
-            .then(|| merged_branch_anchor(repo, task, target))
+            .then(|| merged_branch_anchor(repo, task, target).or_else(|| {
+                [&d.green_merge_commit, &d.delivery_pr_merge_commit, &d.merge_commit]
+                    .into_iter().flatten()
+                    .find_map(|sha| commit(repo, sha).filter(|resolved| resolved.eq_ignore_ascii_case(sha)))
+            }))
             .flatten()
     })
 }
@@ -998,7 +1027,9 @@ pub(crate) fn prepare_release_tag_receipt(
         tag_sha.get_or_insert(candidate.clone());
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| crate::gates::tag("G-117", format!("task {id} has no resolvable delivery anchor")))?;
-        if !release_tag_ships_delivery(&repo, &anchor, &candidate, &task.id) {
+        if release_delivery_effect(&repo,
+            task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
+            &anchor, &candidate, &task.id).is_err() {
             return Err(crate::gates::tag("G-117", format!("release tag {tag} does not contain task {id}'s delivery tree effect")));
         }
         heads.insert(id.clone(), anchor);
@@ -1023,17 +1054,38 @@ pub(crate) fn prepare_release_tag_receipt(
     })
 }
 
-/// A release tag contains a delivery when it carries the delivery commit or
-/// preserves the delivery's tree effect, including a later edit to its files.
-pub(crate) fn release_tag_ships_delivery(repo: &Path, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
-    ancestor(repo, anchor, tag_sha) == Some(true)
-        || matches!(
-            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
-                repo, anchor, tag_sha, task_id,
-            ),
-            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
-                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
-        )
+/// History membership cannot prove shipment: a later revert retains ancestry.
+/// The final tree must preserve the delivery's effect, including ordinary edits.
+pub(crate) fn release_tag_ships_delivery(repo: &Path, base: Option<&str>, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
+    release_delivery_effect(repo, base, anchor, tag_sha, task_id).is_ok()
+}
+
+pub(crate) fn release_delivery_effect(
+    repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
+) -> Result<(), ReleaseInventoryCode> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::{self, DeliveryContentPresence};
+    // A squash has the reviewed source tree but different commit identity.
+    // Continuity starts at its actual integration, then follows later edits.
+    let mapped = if ancestor(repo, anchor, target) == Some(true) { None } else {
+        Some(close_ops::find_squash_tree_match(repo, anchor, target)
+            .filter(|mapped| ancestor(repo, mapped, target) == Some(true))
+            .ok_or(ReleaseInventoryCode::UnprovenContent)?)
+    };
+    let shipped = mapped.as_deref().unwrap_or(anchor);
+    // A reused lane can record a newer start than the preserved delivery.
+    // Such a start cannot define this delivery's forward content range.
+    let base = base.filter(|base| ancestor(repo, base, anchor) == Some(true));
+    // An explicitly empty delivery has no content that can be reverted.
+    if base == Some(anchor) { return Ok(()); }
+    let presence = match base {
+        Some(base) => close_ops::delivery_content_presence_from_base_on_target_for_task(repo, base, anchor, shipped, target, task_id),
+        None => close_ops::delivery_content_presence_on_target_for_task(repo, shipped, target, task_id),
+    };
+    match presence {
+        DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => Ok(()),
+        DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
+        DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
+    }
 }
 
 /// The QA receipt covering this delivery.
@@ -1106,7 +1158,7 @@ fn covering_receipt(
             if !known
                 || ![anchor.as_str(), head].contains(&reviewed.as_str())
                 || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
-                || !release_tag_ships_delivery(repo, reviewed, &receipt.staging_sha, &task.id)
+                || !release_tag_ships_delivery(repo, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), reviewed, &receipt.staging_sha, &task.id)
             {
                 continue;
             }

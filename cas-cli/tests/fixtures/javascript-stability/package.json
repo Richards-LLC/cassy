@@ -1,0 +1,11 @@
+{
+  "name": "cassy-stability-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {},
+  "devDependencies": {
+    "vitest": "3.2.4",
+    "@playwright/test": "1.64.1",
+    "jest": "30.2.0"
+  }
+}

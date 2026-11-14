@@ -15243,6 +15243,87 @@ fn without_promoted_changelog_fragments(
     )
 }
 
+/// The release compiler consumes owned overview/bug-family fragments just as
+/// it consumes changelog fragments. Prove the actual folded bytes at both the
+/// deleting release and the current target; a path or release subject alone
+/// cannot excuse a deletion.
+fn without_promoted_doc_fragments(
+    repo: &std::path::Path, anchor: &str, target: &str, paths: Vec<String>, owners: &[&str],
+) -> (Option<String>, Vec<String>) {
+    fn sections(text: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut sections = std::collections::BTreeMap::<String, Vec<String>>::new();
+        let mut heading = None;
+        for line in text.lines() {
+            if let Some(title) = line.strip_prefix("## ") {
+                heading = Some(title.trim().to_string());
+            } else if line.starts_with("# ") || line.starts_with("<!-- cas:") {
+                heading = None;
+            } else if let Some(heading) = &heading {
+                if !line.trim().is_empty() {
+                    sections.entry(heading.clone()).or_default().push(line.trim_end().to_string());
+                }
+            }
+        }
+        sections
+    }
+    let text = |rev: &str, path: &str| {
+        std::process::Command::new("git").args(["show", &format!("{rev}:{path}")])
+            .current_dir(repo).measurement_output().ok()
+            .filter(|out| out.status.success()).and_then(|out| String::from_utf8(out.stdout).ok())
+    };
+    let mut promoted = Vec::new();
+    let remaining = paths.into_iter().filter(|path| {
+        let overview = path.strip_prefix("docs/product-overview.d/")
+            .and_then(|name| name.strip_suffix(".md"))
+            .is_some_and(|owner| owners.contains(&owner));
+        let family = path.strip_prefix("docs/qa/bug-families/")
+            .filter(|name| !name.contains('/'))
+            .and_then(|name| name.strip_suffix(".yaml").or_else(|| name.strip_suffix(".yml")));
+        if (!overview && family.is_none()) || text(target, path).is_some() { return true; }
+        let Some(body) = text(anchor, path) else { return true; };
+        let value = serde_yaml::from_str::<serde_yaml::Value>(&body).ok();
+        if !overview && !value.as_ref().is_some_and(|value| {
+            ["tasks", "fixed_by"].iter().any(|field| value.get(*field).and_then(serde_yaml::Value::as_sequence)
+                .is_some_and(|ids| ids.iter().filter_map(serde_yaml::Value::as_str).any(|id| owners.contains(&id))))
+        }) { return true; }
+        let Ok(deletions) = git_stdout_lines(repo, &["log", "--full-history", "-1", "--format=%H", "--diff-filter=D", target, "--", path]) else { return true; };
+        let Some(release) = deletions.first().filter(|sha| !sha.is_empty()) else { return true; };
+        let subject = git_stdout_lines(repo, &["show", "-s", "--format=%s", release]).ok();
+        let is_release = subject.as_ref().and_then(|lines| lines.first()).and_then(|s| s.strip_prefix("release: v"))
+            .is_some_and(|version| {
+                let parts: Vec<_> = version.split('.').collect();
+                parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            });
+        if !is_release || !git_commit_is_ancestor(repo, anchor, release) { return true; }
+        let aggregate = if overview { "docs/PRODUCT_OVERVIEW.md" } else { "docs/qa/journeys.yaml" };
+        let (Some(folded), Some(current)) = (text(release, aggregate), text(target, aggregate)) else { return true; };
+        let folded = if overview {
+            let (expected, folded, current) = (sections(&body), sections(&folded), sections(&current));
+            let Ok(diff) = git_stdout_lines(repo, &["diff", "--no-color", "--unified=0", &format!("{release}^1"), release, "--", aggregate]) else { return true; };
+            let diff = diff.join("\n");
+            let added: std::collections::HashSet<_> = task_attribution::hunk_lines(&diff)
+                .filter_map(|(_, line)| line.strip_prefix('+')).map(str::trim_end).collect();
+            !expected.is_empty() && expected.iter().all(|(heading, lines)| {
+                !lines.is_empty() && lines.iter().all(|line| added.contains(line.as_str()))
+                    && [&folded, &current].iter().all(|sections| sections.get(heading)
+                        .is_some_and(|actual| actual.windows(lines.len()).any(|window| window == lines.as_slice())))
+            })
+        } else {
+            let key = family.unwrap();
+            let value = value.unwrap();
+            let yaml = |body: &str| serde_yaml::from_str::<serde_yaml::Value>(body).ok();
+            let at_key = |body: &str| yaml(body).and_then(|v| v.get("bug_families").and_then(|v| v.get(key)).cloned());
+            at_key(&folded).as_ref() == Some(&value) && at_key(&current).as_ref() == Some(&value)
+                && text(&format!("{release}^1"), aggregate).and_then(|before| at_key(&before)).as_ref() != Some(&value)
+        };
+        if !folded { return true; }
+        promoted.push(path.to_string());
+        false
+    }).collect();
+    let note = (!promoted.is_empty()).then(|| format!("Owned doc fragments folded by a release and retained on {target}: {}", promoted.join(", ")));
+    (note, remaining)
+}
+
 fn released_version_heading(line: &str) -> bool {
     let Some(version) = line
         .strip_prefix("## [")
@@ -16169,10 +16250,8 @@ fn anchored_delivery_content_gate_unbounded(
     // task-attributed content remains Unknown and therefore fail-closed.
     // cas-01dc: an ordinary empty checkpoint also carries its preceding
     // task delivery. Prove that attributed range, never emptiness itself.
-    let presence = if crate::qa_batch::release_close::delivery_base(repo_path, anchor, parent_branch).is_some() {
-        // Release membership owns the entire recorded start→anchor effect,
-        // including earlier commits and deletions, rather than just its tip.
-        delivery_content_presence_on_target_for_task(repo_path, anchor, parent_branch, task_id)
+    let presence = if let Some(base) = crate::qa_batch::release_close::delivery_base(repo_path, anchor, parent_branch) {
+        delivery_content_presence_from_base_on_target_for_task(repo_path, &base, anchor, anchor, parent_branch, task_id)
     } else if git_commit_parent_count(repo_path, anchor) >= 2
         || task_attribution::has_first_parent_tree_effect(repo_path, anchor) == Some(false)
     {
@@ -16661,6 +16740,10 @@ fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
             .into_iter()
             .map(|holder| format!("factory/{holder}")),
     );
+    // cas-d9d38: an approved rebind records its lane only as the start
+    // boundary (for example a `-redelivery` suffix). Last, so earlier
+    // candidates keep their precedence.
+    candidates.extend(task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.clone()));
     let mut unique: Vec<String> = Vec::new();
     for candidate in candidates {
         if is_safe_git_refname(&candidate) && !unique.contains(&candidate) {
@@ -25435,6 +25518,7 @@ pub(crate) fn validate_pushed_task_receipt(
         if own_task.as_deref() != Some(branch.as_str())
             && task.deliverables.parked_branch.as_deref() != Some(branch.as_str())
             && !task.deliverables.handoff_branches.contains(&branch)
+            && task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()) != Some(branch.as_str())
         {
             continue;
         }
@@ -25467,7 +25551,13 @@ pub(crate) fn validate_pushed_task_receipt(
             parked_anchor_advance_with_target_is_attributable(
                 &context.repo_root, anchor, &tip, &task.id, None, &target)
         });
-        if !attributed && !correction {
+        // cas-d9d38: a rebound lane is attributed the way rebind approved it,
+        // by its validated start-to-tip delivery, not a parked anchor.
+        let started = !attributed && !correction
+            && task.deliverables.factory_branch_start.as_ref().is_some_and(|start| start.branch == branch)
+            && task_attribution::started_delivery(&context.repo_root, task).ok().flatten()
+                .is_some_and(|delivery| resolve_branch_sha(&context.repo_root, &delivery.branch).as_deref() == Some(tip.as_str()));
+        if !attributed && !correction && !started {
             return Err(format!("PUSHED TASK RECEIPT REJECTED: {tip} is not attributable to task {}", task.id));
         }
         return Ok((branch, tip));
@@ -26284,7 +26374,7 @@ pub(crate) fn delivery_content_presence_on_target(
     delivery_commit: &str,
     target_ref: &str,
 ) -> DeliveryContentPresence {
-    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false, &[])
+    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false, &[], None)
 }
 
 pub(crate) fn delivery_content_presence_on_target_for_task(
@@ -26293,9 +26383,30 @@ pub(crate) fn delivery_content_presence_on_target_for_task(
     target_ref: &str,
     task_id: &str,
 ) -> DeliveryContentPresence {
+    if let Some(base) = crate::qa_batch::release_close::delivery_base(repo_path, delivery_commit, target_ref) {
+        return delivery_content_presence_from_base_on_target_for_task(
+            repo_path, &base, delivery_commit, delivery_commit, target_ref, task_id,
+        );
+    }
     delivery_content_presence_on_target_for_paths(
-        repo_path, delivery_commit, target_ref, None, false, &[task_id],
+        repo_path, delivery_commit, target_ref, None, false, &[task_id], None,
     )
+}
+
+/// A release inventory binds the whole parked delivery range, including work
+/// before its last commit. Reuse the verifier's content-continuity proof.
+pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
+    repo: &std::path::Path,
+    base: &str,
+    anchor: &str,
+    shipped: &str,
+    target: &str,
+    task_id: &str,
+) -> DeliveryContentPresence {
+    task_attribution::first_parent_delivery_content_presence(repo, base, anchor, shipped, target, task_id)
+        .unwrap_or_else(|| DeliveryContentPresence::Unknown {
+            reason: "delivery has no measurable task-owned first-parent content".into(),
+        })
 }
 
 fn delivery_content_presence_on_target_for_paths(
@@ -26305,6 +26416,7 @@ fn delivery_content_presence_on_target_for_paths(
     selected_paths: Option<&[String]>,
     resolution_only: bool,
     owners: &[&str],
+    base: Option<&str>,
 ) -> DeliveryContentPresence {
     let presence = delivery_content_presence_on_target_for_paths_raw(
         repo_path,
@@ -26312,6 +26424,7 @@ fn delivery_content_presence_on_target_for_paths(
         target_ref,
         selected_paths,
         resolution_only,
+        base,
     );
     let DeliveryContentPresence::Dropped { paths } = presence else {
         return presence;
@@ -26332,6 +26445,12 @@ fn delivery_content_presence_on_target_for_paths(
     if let Some(note) = note {
         PromotionAudit::record(note);
     }
+    let (note, remaining) = without_promoted_doc_fragments(
+        repo_path, delivery_commit, target_ref, remaining, owners,
+    );
+    if let Some(note) = note {
+        PromotionAudit::record(note);
+    }
     if remaining.is_empty() {
         DeliveryContentPresence::Present { paths }
     } else {
@@ -26345,10 +26464,12 @@ fn delivery_content_presence_on_target_for_paths_raw(
     target_ref: &str,
     selected_paths: Option<&[String]>,
     resolution_only: bool,
+    base: Option<&str>,
 ) -> DeliveryContentPresence {
     use std::process::Command;
 
-    if !is_safe_git_refname(delivery_commit) || !is_safe_git_refname(target_ref) {
+    if !is_safe_git_refname(delivery_commit) || !is_safe_git_refname(target_ref)
+        || base.is_some_and(|base| !is_safe_git_refname(base)) {
         return DeliveryContentPresence::Unknown {
             reason: "delivery commit or target ref is not safe to pass to Git".to_string(),
         };
@@ -26369,7 +26490,7 @@ fn delivery_content_presence_on_target_for_paths_raw(
     };
     let delivery_commit = delivery.as_str();
 
-    let Some(delivery_parent) = crate::qa_batch::release_close::delivery_base(repo_path, delivery_commit, target_ref)
+    let Some(delivery_parent) = base.map(str::to_string)
         .or_else(|| resolve_branch_sha(repo_path, &format!("{delivery_commit}^1")))
     else {
         return DeliveryContentPresence::Unknown {
@@ -26382,6 +26503,8 @@ fn delivery_content_presence_on_target_for_paths_raw(
         };
     };
 
+    // Match repository_proof: lifecycle-owned .cas metadata is outside the
+    // repository delivery boundary, including when accidentally tracked.
     let names = Command::new("git")
         .args([
             "diff",
@@ -26391,6 +26514,9 @@ fn delivery_content_presence_on_target_for_paths_raw(
             &delivery_parent,
             delivery_commit,
             "--",
+            ".",
+            ":(exclude).cas",
+            ":(exclude).cas/**",
         ])
         .current_dir(repo_path)
         .measurement_output();
@@ -26673,6 +26799,7 @@ fn delivery_content_presence_in_parent_for_paths(
         selected_paths,
         resolution_only,
         owners,
+        None,
     )
 }
 
@@ -37011,7 +37138,7 @@ esac
         std::fs::write(&trace, "").unwrap();
         let first_path = vec![files[0].to_string()];
         assert_eq!(
-            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false, &[]),
+            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false, &[], None),
             DeliveryContentPresence::Present { paths: first_path },
         );
         let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");
@@ -37355,10 +37482,10 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         };
         let refused = |dir: &TempDir, task: &Task, fragment: &str, case: &str| {
             match run_factory_branch_merge_gate(task, &base_req(&task.id), "main", dir.path()) {
-                MergeStateGateOutcome::Reject(message) => assert!(
-                    message.contains("DELIVERY CONTENT DROPPED") && message.contains(fragment),
-                    "{case}: {message}"
-                ),
+                MergeStateGateOutcome::Reject(_) => assert!(matches!(
+                    delivery_content_presence_on_target_for_task(dir.path(), task.deliverables.factory_branch_anchor.as_deref().unwrap(), "main", &task.id),
+                    DeliveryContentPresence::Dropped { paths } if paths.iter().any(|path| path == fragment)
+                ), "{case}"),
                 other => panic!("{case} must still refuse: {other:?}"),
             }
         };

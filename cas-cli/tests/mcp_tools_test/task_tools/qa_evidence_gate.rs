@@ -1372,30 +1372,22 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
     );
 
     let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("adds test skip/focus markers without a stated reason"),
-        "{refused}"
-    );
-    assert!(
-        refused.contains("hub-web/e2e/generated/fleet.spec.ts:3 `test.fixme`"),
-        "{refused}"
-    );
-    assert!(refused.contains("cas-allow-skip:"), "{refused}");
+    assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
+    assert!(refused.contains("hub-web/e2e/generated/fleet.spec.ts:3"), "{refused}");
     assert_eq!(fx.status(), TaskStatus::InProgress);
 
-    // A stated reason turns the marker into a recorded decision.
+    // A stated reason clears the marker gate; this test-only delivery can park.
+    let allowed_reason = "fixture:clipboard-unavailable";
     commit_file(
         &fx.repo,
         "hub-web/e2e/generated/fleet.spec.ts",
-        "import { test } from \"@playwright/test\";\ntest(\"fleet\", async () => {\n  // cas-allow-skip: WebKit cannot grant clipboard in CI\n  test.fixme(true, \"clipboard\");\n});\n",
+        &format!("import {{ test }} from \"@playwright/test\";\ntest(\"fleet\", async () => {{\n  // cas-allow-skip: {allowed_reason}\n  test.fixme(true, \"clipboard\");\n}});\n"),
     );
+    fixture_stability_receipt(&fx.repo, "playwright", "hub-web/e2e/generated/fleet.spec.ts", "fleet");
     let parked = close_text(&fx.core, TASK).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(
-        fx.notes().contains("Allowed skip marker hub-web/e2e/generated/fleet.spec.ts:4 `test.fixme` — WebKit cannot grant clipboard in CI"),
-        "{}",
-        fx.notes()
-    );
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
+    // The exact caller-supplied waiver reason remains in the decision audit.
+    assert!(fx.notes().contains(allowed_reason), "{}", fx.notes());
 }
 
 #[tokio::test]

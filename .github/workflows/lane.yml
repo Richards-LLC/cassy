@@ -37,6 +37,11 @@ permissions:
   contents: read
   actions: read
 
+env:
+  # Factory refs can reuse main objects without filling the shared quota with
+  # objects that other branches and the release queue cannot read.
+  SCCACHE_GHA_RW_MODE: READ_ONLY
+
 jobs:
   full:
     name: Full lane
@@ -502,6 +507,8 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
+
+      - uses: ./.github/actions/setup-native-test-deps
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest

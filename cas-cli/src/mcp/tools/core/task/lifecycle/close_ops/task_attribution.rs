@@ -764,8 +764,14 @@ fn task_delivery_selection(
             }
             let sha = fields[0].to_string();
             let message = fields[3];
+            let parents: Vec<&str> = fields[1].split_whitespace().collect();
             let owned = (historical_receipt && sha == tip)
                 || window.identity.matches_known_commit(&sha)
+                // A replacement can merge the recorded earlier delivery before
+                // its latest lease. That merge still carries this task's work,
+                // even when its subject only names the worker branches. Keep
+                // the target-sync and foreign-import checks below (cas-2a80).
+                || parents.iter().skip(1).any(|parent| window.identity.matches_known_commit(parent))
                 || (window
                     .identity
                     .task_id
@@ -785,7 +791,6 @@ fn task_delivery_selection(
                                     && id.bytes().all(|byte| byte.is_ascii_hexdigit())
                             })
                     });
-            let parents: Vec<&str> = fields[1].split_whitespace().collect();
             Some(Commit {
                 sha,
                 parent: parents.first().copied().unwrap_or("").into(),

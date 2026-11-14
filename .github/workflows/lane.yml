@@ -411,6 +411,8 @@ jobs:
           shared-key: fast-validation-suite-build
           cache-save-if: "false"
 
+      - uses: ./.github/actions/setup-native-test-deps
+
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 

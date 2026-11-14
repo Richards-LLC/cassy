@@ -147,23 +147,16 @@ fn request_close_verification_dispatch(
             if already_active {
                 return Err(cas_store::StoreError::Other("Active no-code proof cannot be changed by another close".into()));
             }
+            // A close audit may already have saved this same inline pair.
+            // Accept that pair or the original snapshot, never another proof.
             let changed = tx.execute(
                 "UPDATE tasks SET execution_note=?1, external_ref=?2, updated_at=?3
-                 WHERE id=?4 AND execution_note IS ?5 AND external_ref IS ?6",
+                 WHERE id=?4 AND ((execution_note IS ?5 AND external_ref IS ?6)
+                     OR (execution_note IS ?1 AND external_ref IS ?2))",
                 rusqlite::params![closing.execution_note, closing.external_ref,
                     chrono::Utc::now().to_rfc3339(), task_id, before.execution_note, before.external_ref],
             )?;
             if changed != 1 {
-                #[cfg(test)]
-                {
-                    // [DEBUG-ea5d] Temporary predicate capture for inline metadata.
-                    let stored: (Option<String>, Option<String>) = tx.query_row(
-                        "SELECT execution_note, external_ref FROM tasks WHERE id=?1", [task_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )?;
-                    eprintln!("[DEBUG-ea5d] before={:?} closing={:?} stored={stored:?}",
-                        (&before.execution_note, &before.external_ref), (&closing.execution_note, &closing.external_ref));
-                }
                 return Err(cas_store::StoreError::Other("No-code proof changed before verification renewal; retry close".into()));
             }
         }

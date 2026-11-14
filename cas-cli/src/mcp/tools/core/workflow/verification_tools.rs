@@ -904,6 +904,15 @@ impl CasCore {
                     data: None,
                 })?;
 
+            // A late verdict cannot clear another close cycle's pending flag
+            // or advance its ownership. Check under the same write transaction;
+            // same-proof aliases and identical verdict retries resolved above.
+            let current = cas_store::get_latest_verification_dispatch_with_conn(&tx, &req.task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            if current.as_ref().is_none_or(|dispatch| dispatch.id != requested_dispatch_id) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "Verification rejected: named dispatch is no longer the current task proof cycle."));
+            }
             if supervisor_direct {
                 cas_store::recover_errored_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
                     .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;

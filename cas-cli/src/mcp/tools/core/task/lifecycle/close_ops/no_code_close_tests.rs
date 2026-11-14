@@ -1794,9 +1794,7 @@ async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
             request["execution_note"] = "no-code".into();
             request["external_ref"] = PROOF.into();
         }
-        let pending = f.worker.task(Parameters(serde_json::from_value(request.clone()).unwrap())).await
-            .unwrap_or_else(|error| panic!("{case}: {error:?}; stored={:?}", f.task(id)));
-        let pending = format!("{pending:?}");
+        let pending = call(&f.worker, request.clone()).await;
         let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
             .unwrap().unwrap_or_else(|| panic!("{case}: {pending}"));
         assert_eq!(f.task(id).status, TaskStatus::InProgress, "{case}: {pending}");
@@ -1827,6 +1825,7 @@ async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
         if matches!(case, "foreign" | "stale") {
             assert!(result.is_err() || result.as_ref().unwrap().is_error == Some(true), "{case}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap(), latest);
+            assert!(closed.pending_verification);
         } else {
             assert!(!result.as_ref().unwrap().is_error.unwrap_or(false), "{case}: {result:?}");
         }

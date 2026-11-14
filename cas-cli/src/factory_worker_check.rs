@@ -4397,7 +4397,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         // cas-7b2d: inspect receipt data independently of display provenance.
         passing_test_records(root, repo, head, None)
             .into_iter()
-            .map(|(head, package, test)| (head, package, test.filter, test.count))
+            .map(|(head, package, test)| (head, package.expect("fixture records a Rust package"), test.filter, test.count))
             .collect()
     }
 

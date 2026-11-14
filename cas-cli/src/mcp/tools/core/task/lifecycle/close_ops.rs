@@ -7582,6 +7582,31 @@ impl CasCore {
         Some(audit)
     }
 
+    /// cas-a844: refresh `merge_conflicted` on an already-parked task when a
+    /// retried close now shows a genuine conflict that wasn't flagged (or
+    /// didn't exist) at first park. Deliberately does NOT touch `notes` —
+    /// the audit note is written once, at park time; this only keeps the
+    /// status-output flag truthful on later retries. No-op if the task
+    /// isn't (or is no longer) `AwaitingMerge`, or is already flagged.
+    fn mark_awaiting_merge_conflicted(&self, task_store: &dyn cas_store::TaskStore, task_id: &str) {
+        let Ok(mut task) = task_store.get(task_id) else {
+            return;
+        };
+        if task.status != TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted {
+            return;
+        }
+        let expected = task.clone();
+        task.deliverables.merge_conflicted = true;
+        task.updated_at = chrono::Utc::now();
+        if let Err(e) = task_store.update_if_current(&task, &expected) {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "failed to refresh merge_conflicted flag on retried awaiting_merge close"
+            );
+        }
+    }
+
     /// Reject direct `task update status=closed` while an immutable delivery
     /// transaction still owns the task's close lifecycle.
     ///
@@ -9497,8 +9522,8 @@ impl CasCore {
                             close_measured_factory_branch(&close_project_root, &task, assignee)
                         }).or_else(|| task_delivery_branch(&close_project_root, &task))
                     });
-                    if let Some(branch) = measured_branch.as_deref() {
-                        let refusal = match factory_branch_merge_conflict_paths(
+                    let conflict_refusal = measured_branch.as_deref().and_then(|branch| {
+                        match factory_branch_merge_conflict_paths(
                             &close_project_root, &resolved_parent_branch, branch,
                         ) {
                             Ok(paths) if paths.is_empty() => None,
@@ -9509,12 +9534,9 @@ impl CasCore {
                             Err(error) => Some(format!(
                                 "PARK REFUSED: cannot prove {branch} merges into {resolved_parent_branch}: {error}. No park was recorded.",
                             )),
-                        };
-                        if let Some(refusal) = refusal {
-                            gate_refusals.push(crate::gates::tag("G-55", refusal));
-                            return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                         }
-                    }
+                    });
+                    let merge_conflicted = conflict_refusal.is_some();
 
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
@@ -9658,9 +9680,24 @@ impl CasCore {
                         )).unwrap_or_else(||
                             "Ask the supervisor to request changes and review the replacement delivery.".to_string()
                         );
+                        if merge_conflicted && !task.deliverables.merge_conflicted {
+                            self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
+                        }
                         gate_refusals.push(crate::gates::tag("G-60", format!(
                             "PARK REFUSED: cannot attribute the advance at commit {offending}. Kept delivery anchor {recorded}; ignored locally measured delivery tip {tip}. No anchor or QA round changed. {remedy}",
                         )));
+                        return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
+                    }
+                    // Attribution owns a refused continuation: keep its recorded
+                    // boundary, first foreign commit and next-task remedy. Only
+                    // an attributable delivery can reach merge admission.
+                    if let Some(refusal) = conflict_refusal {
+                        if task.status == TaskStatus::AwaitingMerge
+                            && !task.deliverables.merge_conflicted
+                        {
+                            self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
+                        }
+                        gate_refusals.push(crate::gates::tag("G-55", refusal));
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
                     // Focused-test receipts at this

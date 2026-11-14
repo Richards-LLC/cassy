@@ -1265,11 +1265,128 @@ impl ShellSubstitutions {
     pub(super) fn unresolved(&self) -> bool { self.refusal.is_some() }
 }
 
+/// Validate compound boundaries from the same source tokens used by policy.
+/// Heredoc bodies, case patterns and arithmetic are already classified data;
+/// cooked quoted words never open or close a shell construct.
+fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax]) -> Option<Unsupported> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind { IfCondition, IfBody, IfElse, LoopCondition, ForHeader, LoopBody, Brace, Paren, Conditional, Case }
+    let mut stack: Vec<(Kind, usize, usize)> = Vec::new();
+    let mut command_start = true;
+    let mut case_header = false;
+    let mut function_name = false;
+    let arithmetic = lexed.arithmetic_spans().unwrap_or_default();
+    let indices = lexed.argument_indices(source);
+    for &at in &indices {
+        if arithmetic.iter().any(|(span, _)| span.contains(&at)) {
+            command_start = false;
+            continue;
+        }
+        let start = if at == 0 { 0 } else { lexed.ends[at - 1] };
+        let raw = source.get(start..lexed.ends[at]).unwrap_or("").trim();
+        let offset = start + source[start..lexed.ends[at]].len()
+            - source[start..lexed.ends[at]].trim_start().len();
+        let invalid = || Unsupported::execution("shell.unknown_syntax", offset, "compound boundary",
+            "the boundary does not match an open shell construct", "use complete matching shell constructs");
+        match syntax[at] {
+            CaseSyntax::FirstArm | CaseSyntax::NextArm => {
+                if !stack.last().is_some_and(|(kind, _, _)| *kind == Kind::Case) { return Some(invalid()); }
+                case_header = false;
+                command_start = true;
+                continue;
+            }
+            CaseSyntax::Esac => {
+                if !stack.last().is_some_and(|(kind, _, _)| *kind == Kind::Case) { return Some(invalid()); }
+                stack.pop();
+                case_header = false;
+                command_start = false;
+                continue;
+            }
+            CaseSyntax::Hidden => {
+                if raw == "esac" && stack.last().is_some_and(|(kind, _, _)| *kind == Kind::Case) {
+                    stack.pop();
+                    command_start = false;
+                }
+                case_header = false;
+                continue;
+            }
+            CaseSyntax::Code => {}
+        }
+        if case_header { continue; }
+        if stack.last().is_some_and(|(kind, _, _)| *kind == Kind::Conditional) {
+            if raw == "]]" {
+                stack.pop();
+                command_start = false;
+            }
+            continue;
+        }
+        match &lexed.tokens[at] {
+            ShellToken::Operator(';' | '|' | '&') => command_start = true,
+            ShellToken::Operator('(') => {
+                stack.push((Kind::Paren, offset, at));
+                command_start = true;
+            }
+            ShellToken::Operator(')') => {
+                let Some((Kind::Paren, _, open)) = stack.pop() else { return Some(invalid()); };
+                // Empty () is the function declarator; its compound body follows.
+                command_start = at == open + 1;
+            }
+            ShellToken::Word(word) => {
+                if function_name {
+                    function_name = false;
+                    command_start = true;
+                    continue;
+                }
+                let keyword = raw == word;
+                if stack.last().is_some_and(|(kind, _, _)| *kind == Kind::ForHeader)
+                    && !(command_start && keyword && word == "do")
+                {
+                    command_start = false;
+                    continue;
+                }
+                if !command_start || !keyword {
+                    command_start = false;
+                    continue;
+                }
+                let transition = match word.as_str() {
+                    "if" => { stack.push((Kind::IfCondition, offset, at)); None }
+                    "while" | "until" => { stack.push((Kind::LoopCondition, offset, at)); None }
+                    "for" => { stack.push((Kind::ForHeader, offset, at)); None }
+                    "case" => { stack.push((Kind::Case, offset, at)); case_header = true; None }
+                    "{" => { stack.push((Kind::Brace, offset, at)); None }
+                    "[[" => { stack.push((Kind::Conditional, offset, at)); None }
+                    "then" => Some((vec![Kind::IfCondition], Some(Kind::IfBody))),
+                    "elif" => Some((vec![Kind::IfBody], Some(Kind::IfCondition))),
+                    "else" => Some((vec![Kind::IfBody], Some(Kind::IfElse))),
+                    "fi" => Some((vec![Kind::IfBody, Kind::IfElse], None)),
+                    "do" => Some((vec![Kind::LoopCondition, Kind::ForHeader], Some(Kind::LoopBody))),
+                    "done" => Some((vec![Kind::LoopBody], None)),
+                    "}" => Some((vec![Kind::Brace], None)),
+                    "function" => { function_name = true; None }
+                    "!" | "time" | "coproc" => None,
+                    _ => { command_start = false; None }
+                };
+                if let Some((allowed, next)) = transition {
+                    let Some((kind, _, _)) = stack.last_mut() else { return Some(invalid()); };
+                    if !allowed.contains(kind) { return Some(invalid()); }
+                    if let Some(next) = next { *kind = next; } else {
+                        stack.pop();
+                        command_start = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    stack.first().map(|(_, at, _)| Unsupported::unterminated(*at, "compound command"))
+}
+
 pub(super) struct ParsedShell {
     pub(super) projected: String,
     pub(super) lexed: ShellLexed,
     pub(super) bodies: Vec<String>,
     pub(super) syntax: Vec<CaseSyntax>,
+    pub(super) compound_refusal: Option<Unsupported>,
 }
 
 pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsupported> {
@@ -1288,7 +1405,8 @@ pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsuppor
     }
     if let Some(error) = found.refusal { return Err(error); }
     found.bodies.extend(lexed.substitutions.iter().cloned());
-    Ok(ParsedShell { projected, lexed, bodies: found.bodies, syntax })
+    let compound_refusal = compound_refusal(&projected, &lexed, &syntax);
+    Ok(ParsedShell { projected, lexed, bodies: found.bodies, syntax, compound_refusal })
 }
 
 pub(super) fn shell_substitutions(command: &str) -> ShellSubstitutions {

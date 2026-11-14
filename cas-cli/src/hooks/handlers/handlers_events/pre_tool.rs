@@ -5873,6 +5873,9 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
             collect_shell_invocations(&payload, depth + 1, found);
         }
     }
+    if let Some(refusal) = parsed.compound_refusal {
+        found.worker_refusal.get_or_insert(refusal);
+    }
     for body in &parsed.bodies {
         collect_shell_invocations(body, depth + 1, found);
     }
@@ -11488,6 +11491,12 @@ mod worker_commit_guard_tests {
             "cat > inventory_controls.py <<'PY'\nfrom pathlib import Path\nsource = Path('pre_tool.rs').read_text()\ncontrols = ('factory.write_roots', 'cas config set factory.write_roots /x')\nprint(source.count(controls[0]))\nPY",
             // GH #1816 exact interpreter list, previously unverified.
             "python3 -I tests/soundwave-desktop-test.py\npython3 -I tests/system-capture-test.py\nbash tests/install-zram-topology-test.sh\nbash tests/restore-soundwave-resilience-test.sh",
+            // Complete compounds share boundary facts with unsupported-input checks.
+            "if true; then { printf safe; }; elif false; then :; else (printf fallback); fi",
+            "for x in if then do; do while false; do :; done; done",
+            "f() { case x in x) printf safe ;; *) : ;; esac; }; f",
+            "function f { until true; do :; done; }; f",
+            "printf '%s' 'if' 'then' '{' '}'",
             // Case patterns and test brackets are grammar/data, not dynamic executables.
             "case x in x|y) printf safe ;; *) printf fallback ;; esac; [ -f README.md ] || true",
             "printf '%s' 'PS4+=example' 'PROMPT_COMMAND[0]=example'",

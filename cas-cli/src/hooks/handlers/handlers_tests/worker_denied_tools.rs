@@ -299,6 +299,13 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
         "find ~ -path '*cas-worker/references/discipline.md' | head -3",
         "rg --files ~ | grep -e . | head -n 3 | tail -n 2 | sort | uniq -c | cut -c 1-8 | tr a-z A-Z | wc -l",
         "rg --files ~ | xargs printf '%s\\n'",
+        // Pattern/rule files consume data, not a list of filenames to open.
+        "rg --files ~ | grep -f -",
+        "rg --files ~ | egrep --file=-",
+        "rg --files ~ | fgrep -f patterns.txt",
+        "rg --files ~ | rg --file=-",
+        "rg --files ~ | rg --ignore-file ignore.txt -e .",
+        "rg --files ~ | grep --exclude-from=exclude.txt -e .",
     ] {
         for redirect in ["", " > discovery.txt"] {
             let command = format!("{listing}{redirect}");
@@ -312,6 +319,11 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
         "find ~ -name credentials.json -print0 | sort --files0-from=-",
         "rg --files ~ | wc --files0-from=-",
         "rg --files ~ | grep -f ~/.config/neonctl/credentials.json",
+        "rg --files ~ | grep --file=~/.config/neonctl/credentials.json",
+        "rg --files ~ | rg --ignore-file=~/.config/neonctl/credentials.json -e .",
+        "rg --files ~ | grep --exclude-from=~/.config/neonctl/credentials.json -e .",
+        // Attached short-option values remain outside the admitted projection.
+        "rg --files ~ | grep -f~/.config/neonctl/credentials.json",
         "find ~ -name credentials.json | xargs cat",
         "find ~ -name auth.json -exec cat {} +",
         "cat $(rg --files ~ | rg credentials.json)",

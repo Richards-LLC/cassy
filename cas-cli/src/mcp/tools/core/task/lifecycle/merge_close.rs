@@ -802,7 +802,7 @@ impl CasCore {
                     hold("the release verdict has no delivery anchor for this task");
                     continue;
                 };
-                if !crate::qa_batch::release_tag_ships_delivery(&repo, anchor, &receipt.staging_sha, &task.id) {
+                if !crate::qa_batch::release_tag_ships_delivery(&repo, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), anchor, &receipt.staging_sha, &task.id) {
                     hold("the release tag no longer contains this delivery");
                     continue;
                 }

@@ -617,7 +617,7 @@ fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> b
     let Some(anchor) = crate::qa_batch::delivery_anchor(repo, child) else {
         return false;
     };
-    crate::qa_batch::release_tag_ships_delivery(repo, &anchor, tag_sha, &child.id)
+    crate::qa_batch::release_tag_ships_delivery(repo, child.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), &anchor, tag_sha, &child.id)
 }
 
 fn published_later_tags(repo: &Path, tag: &str) -> Result<Vec<(String, String)>> {
@@ -1388,10 +1388,17 @@ pub(super) mod tests {
         assert_eq!(shipped.base_sha.as_deref(), Some(base.as_str()));
         assert_eq!(shipped.shipped_commit.as_deref(), Some(mapped.as_str()));
         assert_eq!(shipped.membership, Membership::SquashTree);
-        assert_eq!(
-            shipped.generation,
-            store.get(&code.id).unwrap().updated_at.to_rfc3339()
-        );
+        let mut current = store.get(&code.id).unwrap();
+        assert_eq!(shipped.generation, format!("cycle:{}", current.deliverables.delivery_cycle));
+        current.notes.push_str("Administrative note after inventory");
+        current.updated_at += chrono::Duration::seconds(1);
+        store.update(&current).unwrap();
+        let after_note = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        assert_eq!(after_note.deliveries[0].generation, shipped.generation);
+        current.deliverables.delivery_cycle += 1;
+        store.update(&current).unwrap();
+        let after_cycle = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        assert_ne!(after_cycle.deliveries[0].generation, shipped.generation);
         assert_eq!(shipped.proof_refs.len(), 2);
         assert!(
             shipped

@@ -1062,16 +1062,23 @@ fn test_task_door_roundtrips_and_clears_without_changing_status() {
     let (_temp, store) = create_test_store();
     let mut task = Task::new("door-task".into(), "record reversibility".into());
     task.door = Some(cas_types::TaskDoor::OneWay);
+    task.review_dispatch_id = Some("vdispatch-first".into());
     store.add(&task).unwrap();
     assert_eq!(store.get(&task.id).unwrap().door, task.door);
     assert_eq!(store.list(None).unwrap()[0].door, task.door);
+    assert_eq!(store.get(&task.id).unwrap().review_dispatch_id.as_deref(), Some("vdispatch-first"));
+    assert_eq!(store.list_ready().unwrap()[0].review_dispatch_id, task.review_dispatch_id);
     task.door = Some(cas_types::TaskDoor::TwoWay);
+    task.review_dispatch_id = Some("vdispatch-second".into());
     store.update(&task).unwrap();
     assert_eq!(store.get(&task.id).unwrap().door, task.door);
+    assert_eq!(store.get(&task.id).unwrap().review_dispatch_id.as_deref(), Some("vdispatch-second"));
     task.door = None;
+    task.review_dispatch_id = None;
     store.update(&task).unwrap();
     let retrieved = store.get(&task.id).unwrap();
     assert_eq!(retrieved.door, None);
+    assert_eq!(retrieved.review_dispatch_id, None);
     assert_eq!(retrieved.status, TaskStatus::Open);
 }
 

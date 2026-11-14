@@ -409,9 +409,10 @@ impl SearchIndex {
 
     /// Refresh task documents from the canonical store in one batch.
     /// The shared snapshot avoids rewriting unchanged documents, while a new
-    /// process always performs an initial reconciliation before returning task
-    /// search results. Returns the number of task documents added, updated, or
-    /// removed.
+    /// process performs an initial reconciliation when the writer is available.
+    /// A concurrent writer defers refresh so readers can use the last committed
+    /// index; the snapshot stays unchanged for the next refresh. Returns the
+    /// number of task documents added, updated, or removed, or zero if deferred.
     pub fn refresh_tasks(&self, tasks: &[Task]) -> Result<usize, MemError> {
         let mut snapshot = tasks
             .iter()
@@ -430,7 +431,14 @@ impl SearchIndex {
 
         #[cfg(test)]
         let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
-        let mut writer = self.writer()?;
+        let mut writer = match self.writer() {
+            Ok(writer) => writer,
+            Err(MemError::Search(tantivy::TantivyError::LockFailure(
+                tantivy::directory::error::LockError::LockBusy,
+                _,
+            ))) => return Ok(0),
+            Err(error) => return Err(error),
+        };
         let previous = indexed_snapshot.as_ref();
         let full_rebuild = match previous {
             None => true,

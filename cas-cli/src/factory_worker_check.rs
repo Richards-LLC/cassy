@@ -4848,6 +4848,80 @@ PY"#);
         assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
     }
 
+    /// Nov 13 replay: load falls between load refusals and then below the
+    /// limit. Each refusal, worker_status and the 20-minute notice report the
+    /// load measured when they are produced, not the first or last refusal's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capacity_wait_reports_load_measured_at_each_report_cas_243a() {
+        use crate::mcp::{CasCore, CasService};
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+        use rmcp::handler::server::wrapper::Parameters;
+        use rmcp::model::RawContent;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // The guard is the subject here; the host fixture below supplies load.
+        env.remove("CAS_FACTORY_BUILD_GUARD");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "capacity-fixture");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        env.set("CAS_ROOT", &root);
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        for (id, name, role) in [
+            ("capacity-worker", "worker", AgentRole::Worker),
+            ("capacity-supervisor", "capacity-lead", AgentRole::Supervisor),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("capacity-fixture".into());
+            agents.register(&agent).unwrap();
+        }
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-243a".into(), "wait for load".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, "capacity-worker", 3600, Some("working")).unwrap();
+        let proc = dir.path().join("proc");
+        std::fs::create_dir_all(&proc).unwrap();
+        let _host = crate::factory_build_guard::host_fixture::HostFixture::new(&root, &proc);
+        let cpus = std::thread::available_parallelism().unwrap().get() as f64;
+        let set_load = |load: f64| std::fs::write(proc.join("loadavg"), format!("{load:.2} 0 0 1/1 1\n")).unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+
+        let (first, second, live) = (cpus * 3.0 + 0.36, cpus * 2.0 + 0.64, cpus * 0.25);
+        set_load(first);
+        let refused = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(refused.contains(&format!("load {first:.2}")), "{refused}");
+        set_load(second);
+        let refused = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(refused.contains(&format!("load {second:.2}")) && !refused.contains(&format!("{first:.2}")), "{refused}");
+
+        set_load(live);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("capacity-supervisor".into());
+        let result = CasService::new(core, None).factory(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "worker_status", "summary_mode": true,
+        })).unwrap())).await.unwrap();
+        let status = result.content.into_iter().filter_map(|content| match content.raw {
+            RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(status.contains(&format!("load_1m={live:.2}")), "{status}");
+        let wait = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"),
+            wait.since + chrono::Duration::minutes(20)).unwrap();
+        let notices = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap();
+        let notice = notices.iter().find(|row| row.source.starts_with("supervisor-notice:")).expect("20-minute notice");
+        assert!(notice.prompt.contains(&format!("load_1m={live:.2}")), "{}", notice.prompt);
+    }
+
     #[cfg(unix)]
     #[test]
     fn higher_priority_capacity_waiter_gets_next_slot_and_lower_priority_progresses() {

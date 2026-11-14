@@ -1012,8 +1012,9 @@ pub struct FactoryConfig {
     pub max_concurrent_builders: usize,
 
     /// Machine-wide live worker cap used by local admission and peer routing.
-    #[serde(default = "default_max_workers")]
-    pub max_workers: usize,
+    /// Unset inherits `~/.cas/config.toml`, then 8; read it via `max_workers()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<usize>,
 
     /// Route spawned build tasks to a fresh same-account, same-repository
     /// peer when local admission is saturated. Disable to release routes.
@@ -1203,6 +1204,11 @@ pub struct FactoryConfig {
 }
 
 impl FactoryConfig {
+    /// Effective machine-wide live worker cap.
+    pub fn max_workers(&self) -> usize {
+        self.max_workers.unwrap_or_else(default_max_workers)
+    }
+
     /// Retired `[factory]` keys this config file still carries.
     pub(crate) fn retired_keys(&self) -> Vec<&'static str> {
         [
@@ -1403,7 +1409,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
-            max_workers: default_max_workers(),
+            max_workers: None,
             auto_route_builds: true,
             build_guard: BuildGuardConfig::default(),
             worker_memory_high_gib: 0,

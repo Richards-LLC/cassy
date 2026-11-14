@@ -1077,7 +1077,8 @@ mod tests {
         let (temp, store) = create_test_store();
         let queue = SyncQueue::open(temp.path()).unwrap();
 
-        let task = Task::new("task-001".to_string(), "Test task".to_string());
+        let mut task = Task::new("task-001".to_string(), "Test task".to_string());
+        task.review_dispatch_id = Some("vdispatch-e17ce9129b337ebcc86c8a0383080009".into());
         store.add(&task).unwrap();
 
         let pending = queue.pending(10, 5).unwrap();
@@ -1085,6 +1086,8 @@ mod tests {
         assert_eq!(pending[0].entity_type, EntityType::Task);
         assert_eq!(pending[0].entity_id, task.id);
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
+        let pulled: Task = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(pulled.review_dispatch_id, task.review_dispatch_id);
     }
 
     #[tokio::test]

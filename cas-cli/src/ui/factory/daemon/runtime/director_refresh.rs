@@ -88,6 +88,8 @@ struct ReadHook {
     #[cfg(test)]
     gate: Option<Arc<ReadGate>>,
     #[cfg(test)]
+    delivery_entered: Option<std::sync::mpsc::SyncSender<()>>,
+    #[cfg(test)]
     panics: bool,
     /// Only the idle-worker liveness job dies (cas-4491f).
     #[cfg(test)]
@@ -106,6 +108,11 @@ impl ReadHook {
         }
         #[cfg(test)]
         {
+            if what == "delivery read"
+                && let Some(entered) = &self.delivery_entered
+            {
+                entered.send(()).unwrap();
+            }
             if let Some(gate) = &self.gate {
                 gate.wait();
             }

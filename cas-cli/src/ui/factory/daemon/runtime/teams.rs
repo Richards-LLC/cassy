@@ -5139,6 +5139,8 @@ mod tests {
             ("foreign task owner", cas_types::TaskStatus::InProgress, 0, true, true, false, false),
             ("missing start binding", cas_types::TaskStatus::InProgress, 0, false, false, false, false),
             ("stale lease", cas_types::TaskStatus::InProgress, 0, false, true, true, false),
+            // cas-c730 / GH #1912: a parked delivery returned on a merge conflict, then restarted.
+            ("conflict-returned delivery", cas_types::TaskStatus::AwaitingMerge, 5, false, true, false, false),
         ] {
             let (_repo_tmp, worker_tmp, remote_tmp, cas_root) = make_parked_delivery_push_fixture();
             let repo = worker_tmp.path().join("worker");
@@ -5168,14 +5170,22 @@ mod tests {
             }
             if reviewed == 1 { task.deliverables.review_envelope = Some("reviewed".into()); }
             store.add(&task).unwrap();
-            if reviewed == 2 {
+            if reviewed == 2 || reviewed == 5 {
                 let receipt = cas_store::build_worker_completion_receipt(&cas_types::WorkerCompletionReceiptInput {
                     task_id: task.id.clone(), worker_agent_id: "w".into(), repo_selector: "project:fixture".into(),
                     source_branch: branch.into(), commit_sha: checkpoint.clone(), merge_base_sha: base.clone(),
                     target_branch: "main".into(), target_sha: git(&repo, &["rev-parse", "origin/main"]),
                     proof_reference: "fixture".into(), scope_summary: "ef33 checkpoint".into(), artifact_path: None,
                 }, "w", chrono::Utc::now());
-                cas_store::create_worker_delivery(cas_root.path(), &receipt, cas_types::WorkerDeliveryState::AwaitingVerification, "w").unwrap();
+                let state = if reviewed == 5 { cas_types::WorkerDeliveryState::AwaitingMerge } else { cas_types::WorkerDeliveryState::AwaitingVerification };
+                cas_store::create_worker_delivery(cas_root.path(), &receipt, state, "w").unwrap();
+            }
+            if reviewed == 5 {
+                cas_store::request_changes_for_parked_delivery(cas_root.path(), &task.id, "sup", "merge_conflicted").unwrap();
+                let mut returned = store.get(&task.id).unwrap();
+                assert_eq!(returned.status, cas_types::TaskStatus::Open);
+                returned.status = cas_types::TaskStatus::InProgress;
+                store.update(&returned).unwrap();
             }
             if reviewed == 3 {
                 cas_store::open_qa_pass(cas_root.path(), &cas_store::NewQaPass {

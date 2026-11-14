@@ -64,6 +64,7 @@ chmod +x "$tmp/bin/gh"
 cat >"$tmp/bin/cas" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${FAKE_CAS_LOG:?}"
+[[ "$1" == release ]] && printf 'CAS_ROOT=%s release %s\n' "${CAS_ROOT:-}" "$2" >>"$FAKE_CAS_LOG"
 case "$1 $2" in
   "release context")
     case "${FAKE_CONTEXT_MODE:-}" in
@@ -85,6 +86,8 @@ esac
 EOF
 chmod +x "$tmp/bin/cas"
 export CAS_BIN="$tmp/bin/cas" FAKE_CAS_LOG="$tmp/cas.log"
+# The cut derives the live store root itself (cas-8e1b); never inherit one.
+unset CAS_ROOT
 
 export GH_BIN="$tmp/bin/gh"
 export FAKE_GH_LOG="$tmp/gh.log"
@@ -749,7 +752,9 @@ cut_preview_gate() {
     [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/preview-cut)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
         [[ "$(grep -c '^qa candidate build ' "$FAKE_CAS_LOG")" == 1 ]] &&
         grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
-        grep -q '^release track .* --first-child ' "$FAKE_CAS_LOG"
+        grep -q '^release track .* --first-child ' "$FAKE_CAS_LOG" &&
+        grep -q '^CAS_ROOT=/[^ ]*/\.cas release preview$' "$FAKE_CAS_LOG" &&
+        grep -q '^CAS_ROOT=/[^ ]*/\.cas release track$' "$FAKE_CAS_LOG"
 }
 check 'cut_preview_gate' 'cut refuses all-held members, permits all-already-closed members and keeps older-release residuals nonblocking'
 

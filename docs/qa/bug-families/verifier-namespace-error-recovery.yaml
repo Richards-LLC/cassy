@@ -1,3 +1,0 @@
-title: Verifier infrastructure errors preserve exact-dispatch recovery and daemon launches retain read-only containment
-tasks: [cas-343d]
-journeys: [FACTORY-CLOSE, FACTORY-MERGE]

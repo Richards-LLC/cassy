@@ -1,0 +1,4 @@
+title: The image-viewer failure note is asserted after the lazy chunk rejection settles, not by a one-shot count
+tasks: [cas-be19]
+journeys: [HUB-J4]
+invariants: [HUB-J4-IMAGE-INSPECTION]

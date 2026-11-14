@@ -357,6 +357,7 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
     for command in [
         format!("sh -c 'cat {}/.config/neonctl/credentials.json'", home.display()),
         "bash -c 'cat ~/.local/share/com.vercel.cli/auth.json'".to_string(),
+        "bash -c -- 'cat ~/.local/share/com.vercel.cli/auth.json'".to_string(),
     ] {
         let output = handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, &command);

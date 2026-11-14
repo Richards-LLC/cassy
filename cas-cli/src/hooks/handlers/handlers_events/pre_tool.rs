@@ -11760,6 +11760,7 @@ mod worker_commit_guard_tests {
             "env -u UNUSED env CAS_AGENT_ROLE=supervisor printf x",
             "command export CAS_FACTORY_MODE=0",
             "builtin unset CAS_AGENT_ROLE",
+            "bash -c -- 'CAS_AGENT_ROLE=supervisor printf x'",
         ] {
             let input = hook_git_write_input("/worktree", command);
             let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();

@@ -7820,7 +7820,9 @@ impl CasCore {
             MergeStateGateOutcome::Reject(message) if !gate_preflight::is_merge_handoff(&message) => {
                 Err(TaskLifecycleGateError::UnmergedChildBranch { message })
             }
-            MergeStateGateOutcome::Reject(message) | MergeStateGateOutcome::Unresolved(message) => {
+            MergeStateGateOutcome::Reject(message)
+            | MergeStateGateOutcome::HistoricalDeliveryRejection(message)
+            | MergeStateGateOutcome::Unresolved(message) => {
                 Err(TaskLifecycleGateError::UnmergedChildBranch { message: crate::gates::tag("G-55", message) })
             }
         }
@@ -9508,6 +9510,13 @@ impl CasCore {
                     gate_refusals.push(crate::gates::tag("G-55", message));
                     return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                 }
+                MergeStateGateOutcome::HistoricalDeliveryRejection(message) => {
+                    // A reverted or unproven batch remains a historical
+                    // reconciliation failure. Keep its existing lifecycle;
+                    // its worker branch is not a new merge candidate.
+                    gate_refusals.push(crate::gates::tag("G-55", message));
+                    return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
+                }
                 MergeStateGateOutcome::Reject(msg) => {
                     // MERGE REQUIRED is the park these refusals stand in front
                     // of; anything else this outcome carries is another refusal.
@@ -9528,8 +9537,9 @@ impl CasCore {
                         ) {
                             Ok(paths) if paths.is_empty() => None,
                             Ok(paths) => Some(format!(
-                                "PARK REFUSED: {branch} conflicts with {resolved_parent_branch}; conflicting paths: {}. Merge the target into the delivery branch, resolve, and re-deliver.",
+                                "PARK REFUSED: {branch} conflicts with {resolved_parent_branch}; conflicting paths: {}.\n\nAlternative: run `git merge {}` on {branch}, resolve and commit the conflicts, then close task {} again.",
                                 paths.iter().map(|path| crate::worktree::GitOperations::visible_git_label(path)).collect::<Vec<_>>().join(", "),
+                                freshest_target_ref(&close_project_root, &resolved_parent_branch), task.id,
                             )),
                             Err(error) => Some(format!(
                                 "PARK REFUSED: cannot prove {branch} merges into {resolved_parent_branch}: {error}. No park was recorded.",
@@ -14815,8 +14825,11 @@ pub(crate) enum MergeStateGateOutcome {
     /// tasks. Carries the audit note the caller records on the task, so
     /// the residue is logged rather than fatal.
     ProceedWithNote(String),
-    /// Close must be rejected with this user-facing error message.
+    /// A new merge candidate is not yet delivered.
     Reject(String),
+    /// Historical delivery evidence failed reconciliation. This is not an
+    /// instruction to merge the current worker branch or mint a new park.
+    HistoricalDeliveryRejection(String),
     /// The delivery branch cannot be resolved. Return the evidence error
     /// without a merge preflight or AwaitingMerge projection.
     Unresolved(String),
@@ -17283,7 +17296,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         }
         let batch = task.deliverables.integration_batch.as_ref().expect("checked above");
         if !commit_is_merged_into_parent(repo_path, &batch.tip, parent_branch) {
-            return MergeStateGateOutcome::Reject(format!(
+            return MergeStateGateOutcome::HistoricalDeliveryRejection(format!(
                 "⚠️ MERGE REQUIRED\n\nintegration batch {}@{} is staged but not proven on {}. A squash must carry exactly the batch's changed paths, final blobs and modes; extra or missing paths are refused. Publish the complete batch, then retry close (or a registered supervisor can clear merged_into to choose a different integration path).",
                 batch.branch, batch.tip, parent_branch
             ));

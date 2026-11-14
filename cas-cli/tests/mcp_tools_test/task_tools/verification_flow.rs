@@ -4016,6 +4016,7 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
     }
 
     let repo = temp.path();
+    let merge_target = "epic/cas-a844";
     let git = |args: &[&str]| {
         let ok = Command::new("git")
             .args(args)
@@ -4035,14 +4036,14 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
     std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
     git(&["add", "seed.txt"]);
     git(&["commit", "-q", "-m", "seed"]);
-    git(&["checkout", "-q", "-b", "epic/cas-a844"]);
+    git(&["checkout", "-q", "-b", merge_target]);
     git(&["checkout", "-q", "-b", "factory/test-agent"]);
     // Worker edits seed.txt on its factory branch.
     std::fs::write(repo.join("seed.txt"), "worker's edit\n").unwrap();
     git(&["commit", "-q", "-am", "worker edits seed"]);
     // The epic branch picks up a CONFLICTING edit to the same file
     // underneath the worker (e.g. another task landed and touched it).
-    git(&["checkout", "-q", "epic/cas-a844"]);
+    git(&["checkout", "-q", merge_target]);
     std::fs::write(repo.join("seed.txt"), "epic's conflicting edit\n").unwrap();
     git(&["commit", "-q", "-am", "epic edits seed differently"]);
     git(&["checkout", "-q", "factory/test-agent"]);
@@ -4080,7 +4081,7 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
     .to_string();
     {
         let mut epic = task_store.get(&epic_id).expect("epic exists");
-        epic.branch = Some("epic/cas-a844".to_string());
+        epic.branch = Some(merge_target.to_string());
         task_store.update(&epic).expect("update epic branch");
     }
 
@@ -4105,71 +4106,34 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
         task_store.update(&task_a).expect("set A assignee");
     }
 
-    let close_text = extract_text(
-        service
-            .cas_task_close(Parameters(TaskCloseRequest {
-                no_delivery: None,
-                stranded_branch_override: None,
-                id: id_a.clone(),
-                reason: Some("ready for merge".to_string()),
-                supervisor_override: None,
-                search_manifest: None,
-                commit_receipt: None,
-            }))
-            .await
-            .expect("close A returns"),
-    );
-    assert!(
-        close_text.contains("MERGE REQUIRED"),
-        "close must still reject on stranded factory branch: {close_text}"
-    );
-    assert!(
-        close_text.to_lowercase().contains("conflict"),
-        "refusal must say this is a genuine conflict, not just unmerged commits: {close_text}"
-    );
-    assert!(
-        close_text.contains("task action=start") || close_text.contains("action=start"),
-        "refusal must name the worker task-start alternative: {close_text}"
-    );
-    assert!(
-        close_text.contains("seed.txt"),
-        "refusal must name the actual conflicting file(s), not just say 'conflict': {close_text}"
-    );
-
-    let parked = task_store.get(&id_a).expect("A exists");
-    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
-    assert!(
-        parked.deliverables.merge_conflicted,
-        "a genuine conflict must be flagged on the parked task"
-    );
-    assert_eq!(
-        parked.deliverables.parked_branch.as_deref(),
-        Some("factory/test-agent")
-    );
-
-    service
-        .cas_task_start(Parameters(IdRequest { id: id_a.clone() }))
+    let before_close = task_store.get(&id_a).expect("A exists before close");
+    let close_result = service
+        .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
+            stranded_branch_override: None,
+            id: id_a.clone(),
+            reason: Some("ready for merge".to_string()),
+            supervisor_override: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
         .await
-        .expect("assigned worker can resume conflicted park");
-    let resumed = task_store.get(&id_a).expect("A exists after resume");
-    assert_eq!(resumed.status, TaskStatus::InProgress);
-    assert!(
-        resumed.deliverables.factory_branch_anchor.is_none(),
-        "conflict rework must invalidate the anchor captured by MERGE REQUIRED"
-    );
-    assert!(
-        resumed.deliverables.parked_branch.is_none(),
-        "conflict rework must clear the parked branch receipt"
-    );
-    assert!(
-        !resumed.deliverables.merge_conflicted,
-        "conflict rework must clear the prior close cycle's conflict flag"
-    );
-    assert!(
-        resumed.notes.to_lowercase().contains("merge conflict"),
-        "resume must record a decision note naming the conflict: {}",
-        resumed.notes
-    );
+        .expect("close A returns");
+    assert_eq!(close_result.is_error, Some(true));
+    let close_text = extract_text(close_result);
+    assert!(close_text.contains("[G-55]"), "{close_text}");
+    assert!(close_text.contains("seed.txt"), "{close_text}");
+    let merge_alternative = format!("git merge {merge_target}");
+    assert!(close_text.contains(&merge_alternative), "{close_text}");
+
+    // Approved c05a policy: a genuinely conflicting delivery stays with
+    // its worker instead of minting the former park-then-flag record.
+    let refused = task_store.get(&id_a).expect("A exists after refusal");
+    assert_eq!(refused.status, TaskStatus::InProgress);
+    assert_eq!(refused.deliverables.factory_branch_anchor, before_close.deliverables.factory_branch_anchor);
+    assert_eq!(refused.deliverables.parked_branch, before_close.deliverables.parked_branch);
+    assert!(!refused.deliverables.merge_conflicted);
+
 }
 
 /// cas-a844 negative control: unmerged-but-cleanly-mergeable commits must

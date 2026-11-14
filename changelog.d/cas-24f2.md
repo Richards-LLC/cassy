@@ -13,3 +13,9 @@ words. Build and signal guards consume the common bounded execution walk;
 input-derived xargs filenames require explicit operands.
 Role checks use the same executing prefixes and wrapper traversal, retaining
 the distinction between shell syntax and literal arguments.
+
+Compound boundaries, list operands and redirect targets receive grammar
+refusals when incomplete, and compound nesting uses the shared depth limit.
+Literal filename-list pipelines through proven text filters retain metadata
+classification; filename-opening consumers and protected inputs keep their
+credential checks. Ripgrep text mode works for policy-documentation searches.

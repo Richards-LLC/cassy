@@ -10,3 +10,7 @@ rule identifier, source position and supported alternative. The shared execution
 walk supplies command scopes to operator, role, browser, build and signal checks.
 Filename consumers retain credential and write-root policy; a listing does not
 authorize reading the files it names.
+
+Complete compound commands, pipelines and redirects share admission boundaries.
+Known text-only filename-list pipelines keep names as data; unknown options,
+dynamic arguments and filename-opening modes do not inherit that exemption.

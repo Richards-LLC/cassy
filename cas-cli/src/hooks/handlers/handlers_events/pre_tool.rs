@@ -5833,7 +5833,7 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     let command_start = found.commands.len();
     let mut statements = parsed.lexed.statements(&parsed.projected, &parsed.syntax);
     let bindings = shell_admission::flat_literal_bindings(&parsed.lexed, &statements, &parsed.projected);
-    for statement in &mut statements { statement.resolve_literals(&bindings); }
+    for (at, statement) in statements.iter_mut().enumerate() { statement.resolve_literals(&parsed.projected, &bindings, at); }
     found.arguments.extend(statements.iter().map(|statement| statement.words.clone()));
     for statement in statements {
         collect_statement_invocations(&statement, depth, false, found);

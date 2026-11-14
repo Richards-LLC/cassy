@@ -68,6 +68,8 @@ pub(super) struct Statement {
     pub(super) raw_argv: bool,
     /// Reserved syntax is recognized from raw source, never a cooked word.
     prefix: usize,
+    /// Control operators that end this statement, e.g. ";", "&&" or "|".
+    after: String,
 }
 
 impl Statement {
@@ -81,15 +83,24 @@ impl Statement {
             assignments: self.assignments[range].to_vec(),
             raw_argv: false,
             prefix: 0,
+            after: String::new(),
         }
     }
 
-    pub(super) fn resolve_literals(&mut self, values: &std::collections::HashMap<String, String>) {
+    /// Substitute a binding made by an earlier statement for a word that
+    /// starts with an active expansion of its name. The rest of the word must
+    /// hold no other expansion; a glob remainder keeps the word non-literal.
+    pub(super) fn resolve_literals(&mut self, source: &str, bindings: &FlatBindings, statement: usize) {
         for at in 0..self.words.len() {
             if self.literals[at] { continue; }
-            let Some(value) = literal_variable_name(&self.words[at]).and_then(|name| values.get(name)) else { continue; };
-            self.words[at] = value.clone();
-            self.literals[at] = true;
+            let raw = source[self.offsets[at]..self.ends[at]].trim();
+            let raw = raw.strip_prefix('"').unwrap_or(raw);
+            let Some((name, spelled)) = leading_parameter(raw) else { continue; };
+            let Some(rest) = self.words[at].strip_prefix(spelled) else { continue; };
+            if rest.contains(['$', '`']) { continue; }
+            let Some((value, _)) = bindings.get(name).filter(|(_, from)| *from < statement) else { continue; };
+            self.words[at] = format!("{value}{rest}");
+            self.literals[at] = !rest.contains(['*', '?', '[', '{']);
             self.non_options[at] = !value.starts_with('-');
             self.raw_argv = false;
         }
@@ -153,7 +164,11 @@ impl Statement {
                     "unsupported find expression", "the expression has an unknown option or incomplete action",
                     "use a supported find expression with complete literal operands")),
                 Ok(find) => {
-                    if let Some(at) = find.roots.into_iter().find(|at| dynamic(index + 1 + at)) {
+                    // Every match of a fixed path prefix keeps that prefix, so
+                    // it cannot become a find operator or action.
+                    let root = |at: usize| self.non_options[at]
+                        && !words[at].starts_with(['!', '(', ')', ',']);
+                    if let Some(at) = find.roots.into_iter().find(|at| dynamic(index + 1 + at) && !root(index + 1 + at)) {
                         return Some(Unsupported::execution("shell.dynamic_command", offset(index + 1 + at),
                             "dynamic find starting point", "an unresolved word can supply an executing find expression",
                             "use literal starting points and options"));
@@ -654,8 +669,10 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
             // A pathname glob preserves its literal prefix in every match.
             // An unquoted parameter/substitution can instead create later
             // argv words, including options, so a prefix alone cannot admit it.
-            non_options.push(!*splits && word.chars().next().is_some_and(|ch|
-                !matches!(ch, '-' | '$' | '`' | '*' | '?' | '[' | '{' | '~')));
+            // A leading `~/` expands to the same home path its literal spelling
+            // names, so it is a fixed prefix too.
+            non_options.push(!*splits && (word.starts_with("~/") || word.chars().next().is_some_and(|ch|
+                !matches!(ch, '-' | '$' | '`' | '*' | '?' | '[' | '{' | '~'))));
             tokens.push(ShellToken::Word(std::mem::take(word)));
             literals.push(constant);
             ends.push(end);
@@ -1150,6 +1167,8 @@ impl ShellLexed {
             _ => self.tokens[at].clone(),
         }).collect();
         statement_indices(&tokens).into_iter().map(|statement| {
+            let after = statement.last().map_or_else(String::new, |&last| tokens[last + 1..].iter()
+                .map_while(|token| match token { ShellToken::Operator(ch) => Some(*ch), _ => None }).collect());
             let originals: Vec<_> = statement.into_iter().map(|at| indices[at]).collect();
             let mut prefix = 0;
             while let Some(&at) = originals.get(prefix) {
@@ -1164,6 +1183,7 @@ impl ShellLexed {
             }
             Statement {
                 prefix,
+                after,
                 raw_argv: raw_statements.iter().any(|raw| raw == &originals),
                 assignments: originals.iter().map(|&at| {
                     let ShellToken::Word(word) = &self.tokens[at] else { return false; };
@@ -1194,47 +1214,61 @@ pub(super) fn literal_variable_name(word: &str) -> Option<&str> {
     super::is_shell_variable_name(name).then_some(name)
 }
 
-/// Finite entry bindings for a flat shell scope. Unknown writers, child
-/// scopes and conditional grammar discard the proof rather than guessing.
+/// `$NAME` or `${NAME}` at the start of raw word text, with its spelling.
+fn leading_parameter(raw: &str) -> Option<(&str, &str)> {
+    if let Some(tail) = raw.strip_prefix("${") {
+        let name = &tail[..tail.find('}')?];
+        return super::is_shell_variable_name(name).then(|| (name, &raw[..name.len() + 3]));
+    }
+    let tail = raw.strip_prefix('$')?;
+    let name = &tail[..tail.find(|ch: char| ch != '_' && !ch.is_ascii_alphanumeric()).unwrap_or(tail.len())];
+    super::is_shell_variable_name(name).then(|| (name, &raw[..name.len() + 1]))
+}
+
+/// Literal bindings with the statement that makes each one.
+pub(super) type FlatBindings = std::collections::HashMap<String, (String, usize)>;
+
+/// Literal bindings of a flat shell scope. A binding holds from its own
+/// statement on when that statement always runs in the current shell: it
+/// starts a list and is not piped, backgrounded or after `&&`/`||`. A second
+/// writer anywhere, a child scope or conditional grammar discards the proof
+/// rather than guessing.
 pub(super) fn flat_literal_bindings(
     lexed: &ShellLexed,
     statements: &[Statement],
     source: &str,
-) -> std::collections::HashMap<String, String> {
+) -> FlatBindings {
     use super::{is_shell_variable_name, shell_word_basename, unwrapped_command_index};
-    use std::collections::HashMap;
-    let mut values = HashMap::new();
+    let mut values = FlatBindings::new();
     if lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('(' | ')')))
         || statements.iter().any(|statement| statement.prefix != 0)
     { return values; }
-    let mut prefix = 0;
-    for statement in statements {
+    let mut writes = std::collections::HashMap::<&str, usize>::new();
+    for word in statements.iter().flat_map(|statement| &statement.words) {
+        if let Some(name) = assignment_name(word) { *writes.entry(name).or_default() += 1; }
+    }
+    for (at, statement) in statements.iter().enumerate() {
+        let before = at.checked_sub(1).map_or("", |previous| statements[previous].after.as_str());
         if statement.words.is_empty() || !statement.assignments.iter().all(|assigned| *assigned)
             || !statement.literals.iter().all(|literal| *literal)
-        { break; }
+            || !matches!(before, "" | ";" | "&") || !matches!(statement.after.as_str(), "" | ";" | "&&" | "||")
+        { continue; }
         for word in &statement.words {
             let Some((name, value)) = word.split_once('=') else { continue; };
-            if !is_shell_variable_name(name) || value.is_empty()
+            if !is_shell_variable_name(name) || value.is_empty() || writes.get(name) != Some(&1)
                 || value.chars().any(|ch| ch.is_whitespace() || "$`*?[]{}~;|&<>()=!\\\"'".contains(ch))
                 || name.starts_with("BASH") || name.starts_with("EPOCH")
-                || matches!(name, "IFS" | "PWD" | "OLDPWD" | "RANDOM" | "SRANDOM" | "SECONDS" | "LINENO" | "_" | "OPTIND" | "PIPESTATUS" | "DIRSTACK" | "FUNCNAME")
+                || matches!(name, "IFS" | "PWD" | "OLDPWD" | "RANDOM" | "SRANDOM" | "SECONDS" | "LINENO" | "_" | "OPTIND" | "PIPESTATUS" | "DIRSTACK" | "FUNCNAME"
+                    | "UID" | "EUID" | "PPID" | "GROUPS" | "SHELLOPTS" | "HISTCMD")
             { continue; }
-            values.insert(name.to_string(), value.to_string());
+            values.insert(name.to_string(), (value.to_string(), at));
         }
-        prefix += 1;
     }
     if values.is_empty() { return values; }
     for (at, statement) in statements.iter().enumerate() {
-        for word in &statement.words {
-            if word.starts_with("IFS=") { return HashMap::new(); }
-            values.retain(|name, _| {
-                !(at >= prefix && assignment_name(word) == Some(name.as_str()))
-                    && !word.starts_with(&format!("{name}["))
-                    && !word.starts_with(&format!("{name}+="))
-            });
-        }
+        if statement.words.iter().any(|word| word.starts_with("IFS=")) { return FlatBindings::new(); }
         let mut invocation = statement.slice(0..statement.words.len());
-        invocation.resolve_literals(&values);
+        invocation.resolve_literals(source, &values, at);
         let Some(index) = unwrapped_command_index(&invocation.words) else { continue; };
         let name = shell_word_basename(&invocation.words[index]);
         let args = &invocation.words[index + 1..];
@@ -1245,7 +1279,8 @@ pub(super) fn flat_literal_bindings(
             | "alias" | "trap" | "shopt" | "function" | "fc" | "history" | "enable"
             | "bind" | "complete" | "compgen")
             || (name == "printf" && args.first().is_some_and(|arg| arg.starts_with("-v")))
-        { return HashMap::new(); }
+            || (name == "wait" && args.iter().any(|arg| arg.starts_with('-') && arg.contains('p')))
+        { return FlatBindings::new(); }
     }
     for &(start, end) in &lexed.parameters {
         let body = &source[start..end];
@@ -1254,6 +1289,16 @@ pub(super) fn flat_literal_bindings(
             values.remove(&body[..name_end]);
         }
     }
+    // Arithmetic and `{NAME}>` redirects assign numbers to names.
+    let arithmetic: Vec<&str> = lexed.inline_arithmetic.iter().map(|span| &source[span.clone()])
+        .chain(lexed.parameters.iter().map(|&(start, end)| &source[start..end]).filter(|body| body.contains('[')))
+        .filter(|body| body.contains('=') || body.contains("++") || body.contains("--")).collect();
+    values.retain(|name, _| {
+        let descriptor = format!("{{{name}}}");
+        !lexed.tokens.iter().any(|token| matches!(token, ShellToken::Word(word) if *word == descriptor))
+            && !arithmetic.iter().any(|body| body
+                .split(|ch: char| ch != '_' && !ch.is_ascii_alphanumeric()).any(|part| part == name))
+    });
     values
 }
 

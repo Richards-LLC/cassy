@@ -4,6 +4,13 @@ use std::path::Path;
 use std::process::Command;
 use super::epic_measurement::CommandExt as _;
 
+#[cfg(test)]
+static USE_PARALLEL_PROOF_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(test)]
+#[path = "delivery_evolution_tests.rs"]
+mod tests;
+
 #[derive(Default, Clone)]
 struct Hunk {
     old_start: usize,

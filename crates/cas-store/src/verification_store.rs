@@ -3945,7 +3945,7 @@ mod tests {
             let dispatch = create_verification_dispatch_bound(dir.path(), &task.id, &old.id, &old.id,
                 &VerificationProofBoundary::task(), start + Duration::minutes(10), false).unwrap();
             let claimed = case.ends_with("child");
-            let mut child = Agent::new_sub_agent("old-child".into(), "verifier".into(), old.id.clone());
+            let mut child = Agent::new_sub_agent("old-child".into(), "task-verifier".into(), old.id.clone());
             child.machine_id = old.machine_id.clone();
             child.pid = Some(std::process::id());
             if claimed {

@@ -24,6 +24,7 @@ pub(super) fn collect(command: &str, cwd: &Path) -> Result<ShellEffects, &'stati
         cwd,
         &HashMap::new(),
         0,
+        false,
         &mut effects,
     )?;
     Ok(effects)
@@ -93,10 +94,8 @@ fn numeric_arithmetic(expression: &str, numeric: &HashSet<String>) -> Result<(),
     }
 }
 
-/// `test` receives expanded arguments as data; a captured shell exit status is
-/// a known integer even though the token is a variable reference. Keep other
-/// unknown operands conservative so `[[ ]]` and arithmetic evaluation still
-/// fail closed.
+/// Shell dialects outside Bash's integer-data test retain conservative operand
+/// checks. A captured exit status is numeric even without a local initializer.
 fn numeric_test_operand(
     operand: &str,
     captured_status: &HashSet<String>,
@@ -527,6 +526,7 @@ fn collect_script(
     original: &Path,
     inherited: &HashMap<String, Vec<String>>,
     depth: usize,
+    test_uses_arithmetic: bool,
     effects: &mut ShellEffects,
 ) -> Result<Directories, &'static str> {
     if depth > shell_admission::MAX_DEPTH {
@@ -694,7 +694,10 @@ fn collect_script(
             };
             let name = index.map(|index| shell_word_basename(&words[index]));
             let args = index.map(|index| &words[index + 1..]).unwrap_or(&[]);
-            if matches!(name, Some("test" | "[")) {
+            // Bash's test/[ does not recursively evaluate integer operands.
+            // Actual substitutions and [[ arithmetic keep their checks;
+            // other shell dialects retain the conservative operand rule.
+            if test_uses_arithmetic && matches!(name, Some("test" | "[")) {
                 let args = if name == Some("[") && args.last().is_some_and(|arg| arg == "]") {
                     &args[..args.len() - 1]
                 } else { args };
@@ -761,6 +764,7 @@ fn collect_script(
                     original,
                     &directory_values,
                     depth + 1,
+                    test_uses_arithmetic,
                     effects,
                 )?;
             }
@@ -783,6 +787,7 @@ fn collect_script(
                             original,
                             &directory_values,
                             depth + 1,
+                            test_uses_arithmetic,
                             effects,
                         )?;
                     }
@@ -987,6 +992,11 @@ fn collect_script(
                     original,
                     &directory_values,
                     depth + 1,
+                    match name {
+                        Some("bash") => false,
+                        Some("sh" | "dash" | "ksh" | "zsh" | "script" | "su" | "runuser") => true,
+                        _ => test_uses_arithmetic,
+                    },
                     effects,
                 )?;
                 if name == Some("eval") {

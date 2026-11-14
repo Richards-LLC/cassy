@@ -9139,7 +9139,7 @@ EOF
             "coproc { [[ x -eq 0 ]]; }",
             "echo [[ x -eq 0 ]]",
             "echo \"$(function f { [[ x -eq 0 ]]; }; f)\"",
-            "test x -eq 0",
+            "ksh -c 'test x -eq 0'",
             "echo \"${b[x]}\"",
             "echo \"${s:x}\"",
             "echo \"${s:0:x}\"",
@@ -9157,6 +9157,10 @@ EOF
         for allowed in [
             "[[ 1 -eq 1 ]]",
             "test 1 -eq 1",
+            // Bash test operands are integer data, unlike [[ expressions.
+            "test x -eq 0",
+            "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; test \"$x\" -eq 0",
+            "bash -c 'test x -eq 0'",
             "test -n -eq",
             "echo '[[ x -eq 0 ]]'",
             "echo \"${b[0]}\"",

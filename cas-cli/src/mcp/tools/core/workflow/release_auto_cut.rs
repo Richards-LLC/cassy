@@ -148,6 +148,22 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: b
     if queue_busy {
         return Ok(Outcome::Declined("a merge-queue run is in flight".into()));
     }
+    // A train's Blocks dependencies are its declared must-land scope. Ordinary
+    // task closure resolves landed work; a delivery retargeted off this train
+    // no longer holds its cut. Read this before applying the release freeze.
+    let target = crate::mcp::tools::core::task::repo_context::effective_epic_ref(root, lane);
+    let mut pending: Vec<_> = crate::store::open_task_store(root)?
+        .get_blockers(&train.id)?
+        .into_iter()
+        .filter(|member| member.deliverables.work_target.as_ref().is_none_or(|work| {
+            crate::mcp::tools::core::task::repo_context::effective_epic_ref(root, &work.target_branch) == target
+        }))
+        .map(|member| member.id)
+        .collect();
+    pending.sort();
+    if !pending.is_empty() {
+        return Ok(Outcome::Declined(format!("must-land deliveries are still pending: {}", pending.join(", "))));
+    }
     if release_freeze::active(root, train).is_none() {
         if let Some(reason) = cadence(root, train, now)? {
             return Ok(Outcome::Declined(reason));

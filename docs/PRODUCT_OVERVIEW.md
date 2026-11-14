@@ -291,6 +291,21 @@ changed delivery content and merge conflicts keep their existing review checks.
 
 Factory and supervisor-authored epic pushes require local fast checks, including changed release-note drafts. A push changing `hub-web/` also proves committed dist matches a fresh build. The integration engine reuses already checked delivery content with a marker bound to the exact pushed head and observed remote base; a later supervisor commit cannot reuse that exemption. Supervisor startup and doctor verify the main checkout's configured hook directory and name its repair.
 
+A release train records its must-land scope with Blocks dependencies on required deliveries. Auto-cut waits for those deliveries to close after merge, be cancelled or move to another target before freezing the train. It names unresolved deliveries; optional children and prose notes do not define the scope. Trains without Blocks dependencies retain the existing auto-cut rules.
+
+Commander shows a working indicator from fresh supervisor activity independently
+of named lifecycle phases. When no phase is known, recent output still indicates
+work without a phase label or clock. A delivery receipt alone does not indicate
+execution, and losing the live connection clears the activity indicator.
+
+Commander history reads use an independent read-only SQLite connection, including
+earlier sessions, open questions and delivery receipts. A daemon writer holding the
+shared connection no longer prevents those reads. The conversation shows measured
+phase status or a known waiting question; absent or unrecognized phases add no
+placeholder phase label or timer. Fresh unanswered activity independently shows
+working. An older-page error becomes the reading position when revealed, so a
+pending tail pin cannot scroll its Retry control away.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

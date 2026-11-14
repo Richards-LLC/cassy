@@ -791,13 +791,27 @@ fn collect_script(
                 dirs.clone()
             };
 
+            // A single preceding binding resolves this operand without
+            // reinterpreting quoted literal markers or changing argv roles.
+            let read_operand = |word: &String, literal: bool| {
+                if !literal && let Some(value) = shell_admission::literal_variable_name(word)
+                    .and_then(|name| directory_values.get(name))
+                    .filter(|values| values.len() == 1).and_then(|values| values.first())
+                    .filter(|value| !value.contains(['$', '`']))
+                { return value.clone(); }
+                word.clone()
+            };
+            let read_words: Vec<String> = words.iter().zip(&word_literals)
+                .map(|(word, literal)| read_operand(word, *literal)).collect();
             let opened: Vec<String> = visible.iter().filter(|at| opened_files.contains(at))
-                .filter_map(|&at| match &tokens[at] { ShellToken::Word(word) => Some(word.clone()), _ => None }).collect();
+                .filter_map(|&at| match &tokens[at] {
+                    ShellToken::Word(word) => Some(read_operand(word, literal_words[at])), _ => None,
+                }).collect();
             // Redirects open before wrapper-local chdir. The policy applies
             // wrapper input-file and final argv cwd roles independently.
             for directory in &dirs {
                 effects.reads.push(ShellReadContext {
-                    words: words.clone(), opened: opened.clone(), cwd: directory.clone(), bodies: script_bodies.clone(),
+                    words: read_words.clone(), opened: opened.clone(), cwd: directory.clone(), bodies: script_bodies.clone(),
                 });
             }
 

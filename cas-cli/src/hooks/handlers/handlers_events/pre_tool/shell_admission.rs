@@ -84,6 +84,17 @@ impl Statement {
         }
     }
 
+    pub(super) fn resolve_literals(&mut self, values: &std::collections::HashMap<String, String>) {
+        for at in 0..self.words.len() {
+            if self.literals[at] { continue; }
+            let Some(value) = literal_variable_name(&self.words[at]).and_then(|name| values.get(name)) else { continue; };
+            self.words[at] = value.clone();
+            self.literals[at] = true;
+            self.non_options[at] = !value.starts_with('-');
+            self.raw_argv = false;
+        }
+    }
+
     pub(super) fn path_word(&self, source: &str, at: usize) -> super::WorkerPathWord {
         let raw = source[self.offsets[at]..self.ends[at]].trim();
         super::WorkerPathWord {
@@ -1175,6 +1186,75 @@ impl ShellLexed {
         }).collect()
     }
 
+}
+
+pub(super) fn literal_variable_name(word: &str) -> Option<&str> {
+    let name = word.strip_prefix("${").and_then(|tail| tail.strip_suffix('}'))
+        .or_else(|| word.strip_prefix('$'))?;
+    super::is_shell_variable_name(name).then_some(name)
+}
+
+/// Finite entry bindings for a flat shell scope. Unknown writers, child
+/// scopes and conditional grammar discard the proof rather than guessing.
+pub(super) fn flat_literal_bindings(
+    lexed: &ShellLexed,
+    statements: &[Statement],
+    source: &str,
+) -> std::collections::HashMap<String, String> {
+    use super::{is_shell_variable_name, shell_word_basename, unwrapped_command_index};
+    use std::collections::HashMap;
+    let mut values = HashMap::new();
+    if lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('(' | ')')))
+        || statements.iter().any(|statement| statement.prefix != 0)
+    { return values; }
+    let mut prefix = 0;
+    for statement in statements {
+        if statement.words.is_empty() || !statement.assignments.iter().all(|assigned| *assigned)
+            || !statement.literals.iter().all(|literal| *literal)
+        { break; }
+        for word in &statement.words {
+            let Some((name, value)) = word.split_once('=') else { continue; };
+            if !is_shell_variable_name(name) || value.is_empty()
+                || value.chars().any(|ch| ch.is_whitespace() || "$`*?[]{}~;|&<>()=!\\\"'".contains(ch))
+                || name.starts_with("BASH") || name.starts_with("EPOCH")
+                || matches!(name, "IFS" | "PWD" | "OLDPWD" | "RANDOM" | "SRANDOM" | "SECONDS" | "LINENO" | "_" | "OPTIND" | "PIPESTATUS" | "DIRSTACK" | "FUNCNAME")
+            { continue; }
+            values.insert(name.to_string(), value.to_string());
+        }
+        prefix += 1;
+    }
+    if values.is_empty() { return values; }
+    for (at, statement) in statements.iter().enumerate() {
+        for word in &statement.words {
+            if word.starts_with("IFS=") { return HashMap::new(); }
+            values.retain(|name, _| {
+                !(at >= prefix && assignment_name(word) == Some(name.as_str()))
+                    && !word.starts_with(&format!("{name}["))
+                    && !word.starts_with(&format!("{name}+="))
+            });
+        }
+        let mut invocation = statement.slice(0..statement.words.len());
+        invocation.resolve_literals(&values);
+        let Some(index) = unwrapped_command_index(&invocation.words) else { continue; };
+        let name = shell_word_basename(&invocation.words[index]);
+        let args = &invocation.words[index + 1..];
+        if name.contains(['$', '`']) || matches!(name,
+            "for" | "select" | "while" | "until" | "case" | "if" | "then" | "else" | "elif" | "fi" | "do" | "done" | "esac" | "coproc" | "eval" | "source" | "."
+            | "declare" | "typeset" | "local" | "integer" | "read" | "readarray" | "mapfile"
+            | "getopts" | "unset" | "export" | "readonly" | "set" | "shift" | "let" | "builtin"
+            | "alias" | "trap" | "shopt" | "function" | "fc" | "history" | "enable"
+            | "bind" | "complete" | "compgen")
+            || (name == "printf" && args.first().is_some_and(|arg| arg.starts_with("-v")))
+        { return HashMap::new(); }
+    }
+    for &(start, end) in &lexed.parameters {
+        let body = &source[start..end];
+        let name_end = body.bytes().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == b'_').count();
+        if body[name_end..].starts_with('=') || body[name_end..].starts_with(":=") {
+            values.remove(&body[..name_end]);
+        }
+    }
+    values
 }
 
 /// A shell arithmetic name is safe only after an unconditional local numeric

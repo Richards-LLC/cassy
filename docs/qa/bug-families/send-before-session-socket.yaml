@@ -1,0 +1,4 @@
+title: A journey sends a supervisor message before the hub double holds the conversation's session socket
+tasks: [cas-9d2c]
+journeys: [HUB-J4, HUB-J22, HUB-J9]
+invariants: [HUB-J4-IMAGE-INSPECTION, HUB-J22-GOAL, HUB-J9-GOAL]

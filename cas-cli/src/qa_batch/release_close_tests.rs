@@ -477,7 +477,7 @@ fn published_train_closes_members_independently_cas_734b() {
     assert!(!complete.exceptions.is_empty());
 }
 
-/// cas-692a7: cas-23a6 shipped in v4.27.0 holding an approved, receipt-less
+/// cas-692a7: cas-23a6 shipped in a release holding an approved, receipt-less
 /// verdict at its exact anchor (2026-11-10), but backfill minted its cycles on
 /// 2026-11-12 and release close then read it as REVIEW_MISSING.
 #[test]

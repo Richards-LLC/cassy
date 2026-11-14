@@ -4,6 +4,7 @@ import copy
 import itertools
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -483,11 +484,12 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             {job['name'] for job in slim_jobs.values()},
             {'Classify CI diff', 'Docs Lint', 'Scoped Validation (fast)', 'Scoped Validation (factory/PR)',
              'Scoped Validation — impact own tests',
-             'Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}'},
+             'Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}',
+             'Scoped Validation — Commander journeys ${{ matrix.shard }}/${{ needs.ci-diff.outputs.journey-shard-total }}'},
             'merge admission and the CI watchers read these exact check names')
         # cas-2e1b: the train's impact selection runs on hosted runners for a
         # Rust diff, own tests first; ring shards wait for them (fail fast).
-        impact = {name: slim_jobs.pop(name) for name in ('lane-impact', 'lane-impact-ring')}
+        impact = {name: slim_jobs.pop(name) for name in ('lane-impact', 'lane-impact-ring', 'lane-journeys')}
         self.assertEqual(impact['lane-impact-ring']['needs'], 'lane-impact')
         self.assertEqual({job['runs-on'] for job in impact.values()}, {'ubuntu-latest'})
         for slim, unaffected in itertools.product(('true', ''), ('true', 'false')):
@@ -508,6 +510,81 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         for name, job in ci['jobs'].items():
             if name != 'fast-validation-runner-route':
                 self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
+
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+    def test_lane_runs_only_selected_commander_journeys_and_names_failures_cas_6a42(self):
+        """cas-6a42: cas-cab9 broke HUB-J12 yet passed its lane; the frozen
+        train's full run found it. A delivery touching hub-web src, e2e or dist
+        now runs the journeys journeys-for-diff.py selects, and a red one is named."""
+        jobs = policy.load(self.root / '.github/workflows/lane.yml')['jobs']
+        plan = next(s for s in jobs['ci-diff']['steps'] if s.get('id') == 'journeys')
+        job = jobs['lane-journeys']
+        self.assertEqual(job['strategy']['matrix']['include'], '${{ fromJSON(needs.ci-diff.outputs.journey-shards) }}')
+        for slim, shards, expected in [('true', '[{"shard": 1}]', True), ('true', '[]', False),
+                                       ('true', '', False), ('', '[{"shard": 1}]', False)]:
+            self.assertEqual(self.gh_expr(job['if'], {'vars.CAS_LANE_SLIM': slim,
+                             'needs.ci-diff.outputs.journey-shards': shards}), expected)
+        environment = os.environ.copy()
+        for key in subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).splitlines():
+            environment.pop(key, None)
+        git = lambda *args: subprocess.check_output(['git', '-C', str(self.root), *args], env=environment, text=True).strip()
+        calls, output = self.root / 'selector-calls', self.root / 'github-output'
+        files = {'scripts/journeys-for-diff.py': 'import json, os, sys\n'
+                 'open(os.environ["CALLS"], "a").write(" ".join(sys.argv[1:]) + "\\n")\n'
+                 'print(json.dumps({"journeys": [{"id": i} for i in os.environ["SELECTED"].split()]}))\n',
+                 'hub-web/e2e/journeys/network-switch.journey.ts': 'test("HUB-J12 a", f);\ntest("HUB-J12 b", f);\n',
+                 'hub-web/e2e/journeys/reply-typed.journey.ts': 'test("HUB-J5 typed", f);\n'}
+        for name, text in files.items():
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_text(text)
+        git('init', '-q'); git('config', 'user.name', 'CI fixture'); git('config', 'user.email', 'fixture@example.test')
+        git('add', '.'); git('commit', '-qm', 'base')
+        def select(changed, base=True):
+            start = git('rev-parse', 'HEAD')
+            (self.root / changed).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / changed).write_text('change\n')
+            git('add', '.'); git('commit', '-qm', changed)
+            calls.write_text(''); output.write_text('')
+            result = subprocess.run([shutil.which('bash'), '-euo', 'pipefail', '-c', plan['run']], cwd=self.root,
+                                    env={**environment, 'BASE_SHA': start if base else '', 'CALLS': str(calls),
+                                         'SELECTED': 'HUB-J12 HUB-J5', 'GITHUB_OUTPUT': str(output)},
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            return start, calls.read_text().splitlines(), json.loads(values['shards']), int(values['total'])
+        self.assertEqual(select('cas-cli/src/lib.rs')[1:], ([], [], 0), 'a non-web delivery runs no journeys')
+        start, argv, shards, total = select('hub-web/src/view.ts')
+        self.assertEqual((argv, total, [s['journeys'] for s in shards]), ([f'{start} HEAD'], 1, ['HUB-J12 HUB-J5']))
+        self.assertEqual(select('docs/notes.md', base=False)[1], ['--all'], 'an unknown base runs every journey')
+        # The run step passes the shard's filter and names each failing journey.
+        hub = self.root / 'hub-web'
+        bin_dir = self.root / 'bin'; bin_dir.mkdir()
+        for name, body in {'npx': ':', 'node': 'echo /fixture/chrome', 'ldd': 'echo libfixture.so',
+                           'npm': '[[ "$1" == run ]] || exit 0\nprintf "%s\\n" "$@" > "$CALLS"\nmkdir -p e2e/.results\n'
+                                  '[[ -z "$REPORT" ]] || printf %s "$REPORT" > e2e/.results/report.json\nexit "$STATUS"'}.items():
+            (bin_dir / name).write_text('#!/bin/bash\n' + body + '\n'); (bin_dir / name).chmod(0o755)
+        spec = lambda line, status: {'title': f'HUB-J12 part {line}', 'file': 'network-switch.journey.ts',
+                                     'line': line, 'tests': [{'status': status}]}
+        # Each failure is a GitHub ::error annotation: journey IDs in its title,
+        # spec location first in its message. A run without a report is red too.
+        for status, specs, red, named in [
+            (1, [spec(19, 'expected'), spec(593, 'unexpected')], True, [(['HUB-J12'], 'network-switch.journey.ts:593')]),
+            (0, [spec(19, 'expected')], False, []),
+            (1, None, True, [([], None)])]:
+            with self.subTest(status=status, specs=specs):
+                shutil.rmtree(hub / 'e2e/.results', ignore_errors=True)
+                report = json.dumps({'suites': [{'title': 'journeys', 'specs': [], 'suites': [{'specs': specs}]}]}) if specs else ''
+                result = subprocess.run([shutil.which('bash'), '-euo', 'pipefail', '-c', job['steps'][1]['run']], cwd=hub,
+                                        env={**environment, 'PATH': f'{bin_dir}:{environment["PATH"]}', 'CALLS': str(calls),
+                                             'GREP': shards[0]['grep'], 'REPORT': report, 'STATUS': str(status)},
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode != 0, red, result.stdout + result.stderr)
+                argv = calls.read_text().splitlines()
+                self.assertEqual(argv[argv.index('--grep') + 1], shards[0]['grep'])
+                errors = [line[len('::error title='):].split('::', 1) for line in result.stdout.splitlines()
+                          if line.startswith('::error ')]
+                ids = [re.findall(r'\b[A-Z]+-J\d+\b', title) for title, _ in errors]
+                self.assertEqual([(i, message.split()[0] if i else None) for i, (_, message) in zip(ids, errors)], named)
 
     def test_suite_fanin_reuses_classification_without_source_checkout(self):
         job = self.ci()['jobs']['fast-validation-suite']
@@ -838,11 +915,12 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         bodies = [next(s['run'] for s in jobs['fast-validation-web']['steps']
                        if s.get('env', {}).get('VISUAL_QA_ARTIFACT_DIR')),
                   next(s['run'] for s in jobs['fast-validation-journeys']['steps']
-                       if s.get('working-directory') == 'hub-web')]
+                       if s.get('working-directory') == 'hub-web'),
+                  policy.load(self.root / '.github/workflows/lane.yml')['jobs']['lane-journeys']['steps'][1]['run']]
         for body, missing in itertools.product(bodies, (False, True)):
             with self.subTest(missing=missing, body=body[:25]):
                 calls = Path(values['CALLS']); calls.write_text('')
-                result = self.run_body(body, {**values, 'LIBRARY': 'not found' if missing else '/lib/libfixture.so'})
+                result = self.run_body(body, {**values, 'GREP': 'HUB-J1', 'LIBRARY': 'not found' if missing else '/lib/libfixture.so'})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 argv = [shlex.split(line) for line in calls.read_text().splitlines()]
                 self.assertEqual(['playwright', 'install-deps', 'chromium'] in argv, missing)

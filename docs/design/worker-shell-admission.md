@@ -208,6 +208,37 @@ binaries in the same deterministic disposable owned-worktree fixture.
 - **Output:** fixture-context numerator, denominator and rate at base and at candidate. Each
   candidate deny that the base allowed is listed separately.
 
+### BASE measurement receipt (candidate pending)
+
+The frozen observed cohort contains 97,765 distinct harness/command inputs:
+33,333 Claude and 64,432 Codex. Every BASE hook request returned a valid
+decision; 18,368 denied. Supervisor decision #4248985 replaces exhaustive deny
+labeling with a fixed-seed, proportional stratified sample of 300 BASE denies
+across 24 harness/rule strata, with at least one row per stratum. The independent
+local model labeled 242 TRUE_DENY, 55 FALSE_DENY and three UNCLEAR. Candidate
+decisions were excluded from its packet. Exact commands and labels stay local.
+
+| Harness | Estimated false denies / all inputs | Fixture-context rate | Simultaneous 95% interval | Point rate if all UNCLEAR are false |
+| --- | --- | --- | --- | --- |
+| Claude | 858.071 / 33,333 | 2.574% | 0.651–5.661% | 2.766% |
+| Codex | 2,766 / 64,432 | 4.293% | 3.098–5.100% | 4.341% |
+
+Aggregate receipt `art-fc999b05` records inverse-probability weighted estimates
+and exact finite-population hypergeometric intervals, using Bonferroni across
+the 24 strata. The intervals include UNCLEAR as nonfalse at the lower bound
+and false at the upper bound. Seeds are 2402 for sampling and 2403 for the
+operator's random 20-row subset; operator agreement remains pending.
+
+The fixture assigns a different worktree from the historical workers. Thus many
+originally legitimate writes receive TRUE_DENY labels for leaving the fixture's
+roots, biasing the historical comparison downward. These figures cannot prove a
+historical rate or a formal historical lower bound. Commit-scope labels assume
+the fixture has no `.gitignore`; an ignored `target/` makes those false denials
+clearer. The three UNCLEAR rows concern two single-file rustfmt invocations with
+unknown child-module effects and one candidate-binary invocation with unknown
+effects. The final candidate must replay the same cohort and labeled sample;
+new candidate-denied inputs require independent classification too.
+
 ## Filename-list consumers
 
 This is the admission contract for the consumer migration, not a claim that the

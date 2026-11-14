@@ -21,8 +21,9 @@ Three facts decide the design:
 
 1. The merge queue already proves the exact tree that lands on `main`. Any
    later check of that tree re-checks it.
-2. macOS ARM64 is the slowest build (609-1,108 s measured with LTO off), and
-   there is no Mac in the fleet. It has to overlap other work, not follow it.
+2. macOS ARM64 is the slowest build (609-1,108 s measured with LTO off, 30.7
+   min cold). It has to overlap other work, not follow it, and runs warm on
+   the self-hosted Mac when that runner is online.
 3. Every hand-off to an agent cost minutes to tens of minutes.
 
 So the version bump rides in the epic PR, the release builds run once on the
@@ -40,7 +41,9 @@ merge queue (merge_group)
   ci.yml                 Fast Validation (sole required check; no macOS Check)
   release-prebuild.yml   pending-release: did this entry change the version?
                          build        Linux x86_64 release-fast   (hosted)
-                         build-macos  macOS ARM64, LTO off, signed (hosted)
+                         macos-route  probe the self-hosted Mac release runner
+                         build-macos  macOS ARM64, LTO off, signed (Mac runner,
+                                      else hosted)
         |  the queue lands its tested merge commit as main
         v
 push to main touching cas-cli/Cargo.toml
@@ -155,9 +158,33 @@ request/cut metrics, which measured narrower spans.
 
 ## Self-hosted routing
 
-None. Every release lane runs on GitHub-hosted runners; the
-`CASSY_RELEASE_SELF_HOSTED` variable and the release routing jobs are gone, and
-the publishing job is the only one holding a `contents: write` token.
+One lane. Hosted macOS compiles every dependency cold (Build step 30.7 min on
+run 43486486286), so trusted macOS prebuilds run on the operator's Apple
+Silicon Mac (cas-195e). Its runner keeps a persistent `CARGO_TARGET_DIR`, so a
+release recompiles only what changed. Everything else, including the
+publishing job (the only one holding a `contents: write` token), stays hosted.
+
+- Trusted means a merge-queue ref of `main` or a direct push to `main`.
+  `macos-route` decides this before assignment, and the build job checks it
+  again on the machine.
+- GitHub never reassigns a job queued on an offline self-hosted runner. So
+  `macos-route` dispatches a no-op probe run (`platform=mac-runner-probe`) and
+  routes to the Mac only if its runner starts the probe within 90 s. If the
+  Mac is offline or busy, or the API fails, the probe is cancelled and the
+  build runs on `macos-26`. The fallback build that `release.yml` calls always
+  runs hosted.
+- The runner is a launchd user agent with labels `self-hosted`, `macOS`,
+  `ARM64` and `cas-mac-release`. It runs one job at a time, under a private
+  `HOME`, with its own rustup, cargo registry and target under
+  `~/.cassy-mac-release`. It never runs as root.
+
+```bash
+scripts/install-mac-release-runner.sh              # install or repair
+scripts/install-mac-release-runner.sh --uninstall  # deregister and remove
+launchctl kickstart -k gui/$(id -u)/dev.cassy.mac-release-runner  # restart
+```
+
+Delete `~/.cassy-mac-release/cargo-target` to reset the incremental state.
 
 ## Dry runs and recovery
 

@@ -436,6 +436,61 @@ fn worker_skipped_branch_preserves_credential_cwd_cas_707a2() {
     }
 }
 
+/// Each command runs from the project; `{p}` names it. Refusals first, then
+/// controls that must stay allowed.
+fn assert_credential_cwd_cases(refused: &[&str], allowed: &[&str]) {
+    let (_env, _config_home) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let spell = |command: &str| command.replace("{p}", &format!("'{}'", project.path().display()));
+    for command in refused.iter().map(|command| spell(command)) {
+        assert_operator_credential_refusal(
+            handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap(),
+            &command,
+        );
+    }
+    for command in allowed.iter().map(|command| spell(command)) {
+        let output = handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap();
+        assert!(denial(output).is_none(), "control was refused: {command}");
+    }
+}
+
+#[test]
+fn worker_unresolved_credential_cwd_is_refused_cas_707a2() {
+    assert_credential_cwd_cases(
+        &[
+            "cd ~; (cd {p}; cd \"$UNSET_DIR\"; :); cat .config/neonctl/credentials.json",
+            "cd ~; if false; then cd {p}; cd \"$UNSET_DIR\"; fi; cat .config/neonctl/credentials.json",
+        ],
+        &[],
+    );
+}
+
+#[test]
+fn worker_piped_or_background_cd_keeps_credential_cwd_cas_707a2() {
+    assert_credential_cwd_cases(
+        &[
+            "cd ~; cd {p} | :; cat .config/neonctl/credentials.json",
+            "cd ~; cd {p} & cat .config/neonctl/credentials.json",
+            "cd ~; true | cd {p} && cat .config/neonctl/credentials.json",
+            "cd ~; { cd {p}; } & cat .config/neonctl/credentials.json",
+        ],
+        &["cd ~ && cat README.md | head -1"],
+    );
+}
+
+#[test]
+fn worker_function_body_cd_is_not_executed_cas_707a2() {
+    assert_credential_cwd_cases(
+        &[
+            "cd ~; f() { cd {p}; }; cat .config/neonctl/credentials.json",
+            "cd ~; function f { cd {p}; }; cat .config/neonctl/credentials.json",
+            "f() { cat .config/neonctl/credentials.json; }; cd ~; f",
+        ],
+        &["f() { cat README.md; }; cd ~; f"],
+    );
+}
+
 #[test]
 fn worker_recursive_copies_cannot_export_operator_config_cas_da9a() {
     let (_env, _config_home) = role_env("worker");

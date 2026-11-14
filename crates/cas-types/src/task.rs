@@ -2106,9 +2106,15 @@ mod tests {
 
         let encoded = serde_json::to_value(&task).unwrap();
         assert!(encoded.get("origin_project").is_none());
+        assert!(encoded.get("review_dispatch_id").is_none());
 
         let decoded: Task = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.origin_project, None);
+        assert_eq!(decoded.review_dispatch_id, None);
+        let mut review = decoded;
+        review.review_dispatch_id = Some("vdispatch-e17ce9129b337ebcc86c8a0383080009".into());
+        let decoded: Task = serde_json::from_value(serde_json::to_value(&review).unwrap()).unwrap();
+        assert_eq!(decoded.review_dispatch_id, review.review_dispatch_id);
     }
 
     #[test]

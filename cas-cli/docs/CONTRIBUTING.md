@@ -69,6 +69,17 @@ alongside the existing text receipt.
 
 ## Native Codex verifier identity
 
+Independent review tasks declare `review_dispatch_id` on task create/update.
+This nullable field names the exact dispatch being reviewed and grants no
+authority. Ordinary worker assignment, spawn, queue admission and start refuse
+it before accepting work, even with a supervisor override. Use the daemon-owned
+verifier or a registered supervisor's `verification action=add` for that dispatch.
+Unassigned review requests may be retained for a supervisor. Omit the field on
+update to preserve it; pass an empty string to clear it. Free-text dispatch
+mentions remain evidence and do not declare a review target. Task CRUD is
+MCP-only; the shared Task wire representation carries the field through Cloud
+sync, and migration m299 adds it to existing task databases.
+
 An MCP caller belongs to its connection. Native Codex children share the
 parent's connection; choosing a role or receiving a dispatch ID does not create
 independent reviewer authority. `coordination whoami` shows the caller's type,

@@ -6413,6 +6413,36 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn review_dispatch_schema_bootstrap_and_reconciliation_gh1908() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let legacy = cas_types::Task::new("cas-legacy-review".into(), "legacy".into());
+        tasks.add(&legacy).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute_batch("ALTER TABLE tasks DROP COLUMN review_dispatch_id;
+            DELETE FROM cas_migrations WHERE id=299;").unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Warning));
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        assert_eq!(tasks.get(&legacy.id).unwrap().review_dispatch_id, None);
+        // A recorded-but-missing additive column is repaired, with its
+        // reconciliation receipt, rather than trusted from the ledger alone.
+        conn.execute_batch("ALTER TABLE tasks DROP COLUMN review_dispatch_id;").unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Warning));
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        assert_eq!(tasks.get(&legacy.id).unwrap().title, legacy.title);
+        assert_eq!(conn.query_row(
+            "SELECT count(*) FROM cas_migration_reconciliations WHERE migration_id=299",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+    }
+
+    #[test]
     fn cas_4d39_unlinked_personal_backlog_is_visible_without_mutation() {
         let temp = TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();

@@ -1852,6 +1852,11 @@ pub(crate) fn assign_task_to_new_worker(
         return false;
     }
 
+    if let Err(error) = crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), None) {
+        tracing::warn!(task_id, %error, "refused worker review assignment");
+        return false;
+    }
+
     if let Some(ref existing) = task.assignee {
         if existing == worker_name {
             // Early-assign already pinned this worker (cas-7a94 isolate path).
@@ -2520,6 +2525,11 @@ fn shutdown_scope(count: Option<usize>, names: &[String]) -> &'static str {
 
 impl WorkerSpawnContext {
     pub(crate) fn resolve(mut self) -> anyhow::Result<WorkerSpawnPrep> {
+        if let Some(id) = self.task_id.as_deref() {
+            let task = open_task_store_cached(&self.cas_dir)?.get(id)?;
+            crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), None)
+                .map_err(anyhow::Error::msg)?;
+        }
         if self.isolate {
             match DirectorData::load_fast(&self.cas_dir) {
                 Ok(data) => {

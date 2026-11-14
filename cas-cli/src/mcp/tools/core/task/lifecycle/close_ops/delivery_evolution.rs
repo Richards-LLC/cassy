@@ -1252,11 +1252,17 @@ fn commit_of(repo: &Path, reference: &str) -> Option<String> {
     super::resolve_branch_sha(repo, &format!("{reference}^{{commit}}"))
 }
 
-/// Forget every memoized walk answer, so a test can walk again.
+/// Forget every memoized walk answer and parallel-edit proof, so a test
+/// can walk again from scratch.
 #[cfg(test)]
 pub(super) fn forget_walks() {
     if let Some(walks) = WALKS.get() {
         walks.lock().unwrap().clear();
+    }
+    if let Some(proofs) = PARALLEL_PROOFS.get() {
+        let mut proofs = proofs.lock().unwrap();
+        proofs.entries.clear();
+        proofs.bytes = 0;
     }
 }
 

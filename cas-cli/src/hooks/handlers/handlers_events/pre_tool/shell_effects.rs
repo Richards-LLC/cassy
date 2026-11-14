@@ -11,6 +11,7 @@ pub(super) struct ShellEffects {
     pub edits: Vec<String>,
     pub deletes: Vec<(String, bool)>,
     pub links: Vec<(ShellLink, PathBuf)>,
+    read_contexts: Option<Vec<ShellReadContext>>,
 }
 
 type Directories = Vec<Option<PathBuf>>;
@@ -26,6 +27,14 @@ pub(super) fn collect(command: &str, cwd: &Path) -> Result<ShellEffects, &'stati
         &mut effects,
     )?;
     Ok(effects)
+}
+
+/// Opt-in read projection: failure retains the existing credential fallback,
+/// and collecting workspace write effects keeps its current behavior.
+pub(super) fn read_contexts(command: &str, cwd: &Path) -> Option<Vec<ShellReadContext>> {
+    let mut effects = ShellEffects { read_contexts: Some(Vec::new()), ..Default::default() };
+    collect_script(command, vec![Some(cwd.to_path_buf())], cwd, &HashMap::new(), 0, &mut effects).ok()?;
+    effects.read_contexts
 }
 
 fn quote(word: &str) -> String {
@@ -935,6 +944,7 @@ fn collect_script(
     }
     let mut heredocs = delimiters.into_iter().zip(bodies);
     let mut scopes = Vec::new();
+    let mut directory_stack = Vec::new();
     // The directories on entry to each open `case`. Only one arm runs, so no arm
     // sees a `cd` from an earlier one and any of them may be the one that ran.
     let mut case_entries: Vec<Directories> = Vec::new();
@@ -970,6 +980,7 @@ fn collect_script(
         let visible: Vec<usize> =
             (start..end).filter(|index| case_tokens[*index] == CaseSyntax::Code).collect();
         let visible_tokens: Vec<ShellToken> = visible.iter().map(|&index| tokens[index].clone()).collect();
+        let mut read_command = render(&visible_tokens);
         let mut statement = visible_tokens.as_slice();
         let mut skipped_keywords = 0;
         start = end + 1;
@@ -1006,6 +1017,10 @@ fn collect_script(
                 if expected.value != delimiter.value || expected.strip_leading_tabs != delimiter.strip_leading_tabs {
                     return Err("an unresolved shell payload");
                 }
+                read_command.push('\n');
+                read_command.push_str(&body);
+                read_command.push_str(&delimiter.value);
+                read_command.push('\n');
                 command.push('\n');
                 command.push_str(&body);
                 command.push_str(&delimiter.value);
@@ -1184,7 +1199,20 @@ fn collect_script(
                 }
             }
 
-            if name == Some("cd") {
+            if depth == 0 && let Some(contexts) = &mut effects.read_contexts {
+                if dirs.is_empty() { return Err("an unresolved credential working directory"); }
+                contexts.push(ShellReadContext {
+                    command: read_command,
+                    directories: dirs.iter().cloned().collect::<Option<Vec<_>>>()
+                        .ok_or("an unresolved credential working directory")?,
+                });
+            }
+            let read_stack = effects.read_contexts.is_some();
+            if read_stack && name == Some("popd") {
+                if let Some(previous) = directory_stack.pop() { dirs = previous; }
+            }
+            if name == Some("cd") || (read_stack && name == Some("pushd")) {
+                if name == Some("pushd") { directory_stack.push(dirs.clone()); }
                 let mut cdpath = directory_values.get("CDPATH").cloned().unwrap_or_default();
                 for word in &words[..index.unwrap_or(0)] {
                     if let Some(value) = word.strip_prefix("CDPATH=") {
@@ -1255,7 +1283,7 @@ fn collect_script(
                 }
             }
 
-            if name == Some("cd") {
+            if name == Some("cd") || (read_stack && matches!(name, Some("pushd" | "popd"))) {
                 directory_values.insert("PWD".into(), pwd_values(&dirs));
             }
             let assignments = if continuation {
@@ -1373,6 +1401,7 @@ fn collect_script(
                     alternatives.clone(),
                     directory_values.clone(),
                     substitution_scope,
+                    directory_stack.clone(),
                 ));
                 continuation = false;
             }
@@ -1382,6 +1411,7 @@ fn collect_script(
                 alternatives = parent.1;
                 directory_values = parent.2;
                 continuation = parent.3;
+                directory_stack = parent.4;
             }
             Some('&') if and_then => {
                 continuation = false;

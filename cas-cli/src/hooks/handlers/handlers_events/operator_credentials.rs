@@ -94,6 +94,36 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
 }
 
 fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
+    if depth > 3 { return false; }
+    let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
+        return legacy_shell_references_store(command, initial_cwd, depth);
+    };
+    let names_inert = depth == 0 && listed_names_stay_inert(command);
+    for context in contexts {
+        let statements = super::pre_tool::shell_statement_words(&context.command);
+        let arguments = super::pre_tool::shell_statement_arguments(&context.command);
+        for (at, words) in statements.iter().enumerate() {
+            let Some(index) = super::pre_tool::unwrapped_command_index(words) else { continue; };
+            let executable = Path::new(&words[index]).file_name().and_then(|name| name.to_str())
+                .unwrap_or(&words[index]).to_ascii_lowercase();
+            let names_only = names_inert && statements.len() == arguments.len()
+                && arguments.get(at).is_some_and(|argv| {
+                    super::pre_tool::unwrapped_command_index(argv).is_some_and(|other| {
+                        argv[other] == words[index] && lists_names_only(&executable, &argv[other + 1..])
+                    })
+                });
+            if context.directories.iter().any(|cwd| statement_references_store(words, cwd, depth, names_only)) {
+                return true;
+            }
+        }
+        if super::pre_tool::shell_heredoc_bodies(&context.command).iter().any(|body| {
+            context.directories.iter().any(|cwd| script_constructs_store_path(body, cwd))
+        }) { return true; }
+    }
+    false
+}
+
+fn legacy_shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
     if depth > 3 {
         return false;
     }

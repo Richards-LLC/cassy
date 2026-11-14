@@ -1,0 +1,6 @@
+# docs/qa/bug-families/launch-sheet-scroll-frost.yaml
+title: Launch sheet footer frost follows scroll after project accounts load
+found: cas-d76e
+fixed_by: [cas-1a92]
+tasks: [cas-1a92]
+journeys: [HUB-J13]

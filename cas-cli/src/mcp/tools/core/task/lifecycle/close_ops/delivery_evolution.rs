@@ -374,6 +374,10 @@ struct HunkIndex<'a> {
     meaningful_added: Vec<&'a String>,
     /// Some added line is meaningful and absent from the resolution parents.
     novel_resolution_line: bool,
+    /// Added lines retaining each removed line, without and with merge-union
+    /// context. Every owner of a removed line, in every walked owner group,
+    /// gets the same answer on one edge, so it is computed once (cas-0e29e).
+    retained: [Vec<std::cell::OnceCell<Vec<usize>>>; 2],
 }
 
 impl<'a> EdgeIndex<'a> {
@@ -409,9 +413,10 @@ impl<'a> EdgeIndex<'a> {
             let novel_resolution_line = self.resolution_parent_lines.is_some_and(|parents| {
                 meaningful_added.iter().any(|line| !parents.contains(*line))
             });
+            let retained = [0, 1].map(|_| hunk.removed.iter().map(|_| std::cell::OnceCell::new()).collect());
             HunkIndex {
                 removed: hunk.removed.iter().map(|line| tokens(line)).collect(),
-                added, by_token, by_line, occurrence, meaningful_added, novel_resolution_line,
+                added, by_token, by_line, occurrence, meaningful_added, novel_resolution_line, retained,
             }
         })
     }
@@ -1013,31 +1018,35 @@ fn advance(
                 let old = hunk.removed.get(removed_index)?;
                 let old_tokens = &index.removed[removed_index];
                 let occurrence = index.occurrence[removed_index];
-                // Only these added lines can satisfy any retention rule:
-                // token retention needs every owned token, a parallel edit
-                // names its exact line, and a list union needs a list.
-                let mut candidates = index.token_candidates(removed_index, old).to_vec();
-                if let Some(edits) = parallel_edits.get(line) {
-                    candidates.extend(edits.keys().flat_map(|new| index.by_line.get(new.as_str())).flatten());
-                }
-                if merge_union.is_some() && identifier_list(old).is_some() {
-                    candidates = (0..hunk.added.len()).collect();
-                }
-                candidates.sort_unstable();
-                candidates.dedup();
-                let retained: Vec<_> = candidates
-                    .into_iter()
-                    .map(|position| (position, &hunk.added[position]))
-                    .filter(|(position, new)| {
-                        retains_owned_line(old, new, old_tokens, &index.added[*position])
-                            || merge_union.is_some_and(|union| union.retains_list(*line, old, new))
-                            || parallel_edits
-                                .get(line)
-                                .is_some_and(|edits| edits.contains_key(new.as_str()))
-                    })
-                    .collect();
-                if let Some((index, new)) = retained.get(occurrence) {
-                    next.positions.push(hunk.new_start + *index);
+                // The answer depends only on this removed line, the edge and
+                // whether the owner's group uses merge-union context.
+                let retained = index.retained[usize::from(merge_union.is_some())][removed_index].get_or_init(|| {
+                    // Only these added lines can satisfy any retention rule:
+                    // token retention needs every owned token, a parallel edit
+                    // names its exact line, and a list union needs a list.
+                    let mut candidates = index.token_candidates(removed_index, old).to_vec();
+                    if let Some(edits) = parallel_edits.get(line) {
+                        candidates.extend(edits.keys().flat_map(|new| index.by_line.get(new.as_str())).flatten());
+                    }
+                    if merge_union.is_some() && identifier_list(old).is_some() {
+                        candidates = (0..hunk.added.len()).collect();
+                    }
+                    candidates.sort_unstable();
+                    candidates.dedup();
+                    candidates
+                        .into_iter()
+                        .filter(|position| {
+                            let new = &hunk.added[*position];
+                            retains_owned_line(old, new, old_tokens, &index.added[*position])
+                                || merge_union.is_some_and(|union| union.retains_list(*line, old, new))
+                                || parallel_edits
+                                    .get(line)
+                                    .is_some_and(|edits| edits.contains_key(new.as_str()))
+                        })
+                        .collect()
+                });
+                if let Some((index, new)) = retained.get(occurrence).map(|position| (*position, &hunk.added[*position])) {
+                    next.positions.push(hunk.new_start + index);
                     if (ordinary || internal_resolution)
                         && old != *new
                         && !next.commits.iter().any(|known| known == commit)
@@ -2200,9 +2209,13 @@ fn walk_owner_groups(
                 ParallelEdits::new()
             };
             let edge = EdgeIndex::new(&changes, resolution_parent_lines.as_ref());
+            let no_edits = ParallelEdits::new();
             for &group in &live {
                 let previous = previous[group].as_ref().expect("live group state");
                 let merge_union = merge_union.as_ref().filter(|_| union_used[group]);
+                // As in a walk of this group alone, only a group using the
+                // merge context reads its parallel-edit proofs.
+                let parallel_edits = if union_used[group] { &parallel_edits } else { &no_edits };
                 let advanced: Vec<_> = previous
                     .iter()
                     .map(|owner| {
@@ -2212,7 +2225,7 @@ fn walk_owner_groups(
                                 &edge,
                                 ordinary,
                                 merge_union,
-                                &parallel_edits,
+                                parallel_edits,
                                 ordinary && cycle.iter().any(|owned| owned == commit),
                                 !ordinary
                                     && resolution_parent_lines.is_some()

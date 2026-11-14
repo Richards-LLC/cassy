@@ -36,11 +36,11 @@ pub(crate) fn publish_capacity(root: &Path, agent: &mut cas_types::Agent) {
         .factory();
     let guard = crate::factory_build_guard::inspect_capacity(root, &config);
     let mut sample = guard.build_capacity(Utc::now());
-    sample.max_workers = Some(config.max_workers);
+    sample.max_workers = Some(config.max_workers());
     match live_worker_count(root) {
         Ok(workers) => {
             sample.live_workers = Some(workers);
-            sample.free_slots = sample.free_slots.min(config.max_workers.saturating_sub(workers));
+            sample.free_slots = sample.free_slots.min(config.max_workers().saturating_sub(workers));
         }
         Err(_) => sample.free_slots = 0,
     }
@@ -343,7 +343,7 @@ fn prepare(
         return Ok(None);
     }
     let local_ready = guard.violations().is_empty()
-        && live_worker_count(root)? < config.max_workers;
+        && live_worker_count(root)? < config.max_workers();
     // Only unsent routes reach this point. Recheck local capacity before discovery.
     if has_route(task) {
         let plan = task.notes.lines().find_map(|line| {

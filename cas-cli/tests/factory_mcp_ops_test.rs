@@ -1747,6 +1747,51 @@ async fn test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolat
     assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
 }
 
+/// GH #1921 replay: user `max_workers = 20`, no project override, 9 live
+/// workers. Admission must use the inherited limit, a project override must
+/// still win, and with no user value the built-in 8 applies.
+#[test]
+fn spawn_workers_admits_against_inherited_user_max_workers_cas_65b9() {
+    run_isolated_codex_test(
+        "spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child",
+    );
+    env.create_epic("Inherited worker limit Epic");
+    for index in 0..9 {
+        env.register_worker_with_metadata(&format!("live-{index}"), HashMap::new());
+    }
+    let user = std::path::PathBuf::from(std::env::var_os("HOME").expect("child HOME")).join(".cas");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("config.toml"), "[factory]\nmax_workers = 20\n").unwrap();
+    let spawn = || {
+        let mut req = factory_req("spawn_workers");
+        req.count = Some(1);
+        env.service.factory_request(Parameters(req))
+    };
+
+    spawn().await.expect("inherited user limit 20 admits a 10th worker");
+    assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
+
+    let project = env.cas_root.join("config.toml");
+    let original = std::fs::read_to_string(&project).unwrap_or_default();
+    std::fs::write(&project, format!("{original}\n[factory]\nmax_workers = 9\n")).unwrap();
+    let refused = spawn().await.unwrap_err().message;
+    assert!(refused.contains("9/9") && refused.contains("source: project"), "{refused}");
+
+    std::fs::write(&project, original).unwrap();
+    std::fs::remove_file(user.join("config.toml")).unwrap();
+    let refused = spawn().await.unwrap_err().message;
+    assert!(refused.contains("9/8") && refused.contains("source: default"), "{refused}");
+}
+
 #[tokio::test]
 async fn test_spawn_workers_requires_epic() {
     let env = FactoryTestEnv::new();

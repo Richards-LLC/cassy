@@ -3150,11 +3150,9 @@ impl CasService {
         // so a request cannot bypass the fleet cap by queueing four workers at
         // once. `force=true` is an explicit operator override and remains
         // visible in the queued receipt.
-        let factory_config = {
-            use crate::config::Config;
-            Config::load(&self.inner.cas_root)
-                .unwrap_or_default()
-                .factory()
+        let (factory_config, max_workers_source) = {
+            let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+            (config.factory(), config.max_workers_source())
         };
         let build_guard = crate::factory_build_guard::inspect_for_task(
             &self.inner.cas_root,
@@ -3199,10 +3197,11 @@ impl CasService {
         }
         let live_workers = crate::factory_build_routing::live_worker_count(&self.inner.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
-        if live_workers.saturating_add(slots) > factory_config.max_workers && !force_build_guard {
+        if live_workers.saturating_add(slots) > factory_config.max_workers() && !force_build_guard {
             return Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
-                "Worker capacity: {live_workers}/{} live on this machine; {slots} requested",
-                factory_config.max_workers,
+                "Worker capacity: {live_workers}/{} live on this machine; {slots} requested \
+                 (factory.max_workers source: {max_workers_source})",
+                factory_config.max_workers(),
             )));
         }
         let mut build_guard_notice = build_guard.receipt_notice(force_build_guard);

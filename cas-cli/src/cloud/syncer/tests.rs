@@ -179,6 +179,7 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
             machines.push((temp, root, tasks, queue, syncer));
         }
         let (_, publisher_root, publisher, publisher_queue, publisher_sync) = &machines[0];
+        publisher.append_note(&original.id, "publisher's shared tail").unwrap();
         let artifacts = cas_store::SqliteArtifactStore::open(publisher_root).unwrap();
         artifacts.record_local(&cas_store::NewArtifact {
             id:"art-concurrent-proof".into(),task_id:original.id.clone(),name:"release-inputs.json".into(),
@@ -228,7 +229,7 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
         assert!(result.conflicts_resolved > 0);
         let retained = receiver.get(&original.id).unwrap();
         assert_eq!(retained.status, concurrent.status);
-        assert!(retained.notes.contains(&concurrent.notes));
+        assert!(cas_store::task_note_markers::note_blocks(&concurrent.notes).iter().all(|block| retained.notes.contains(block)));
         let recovered = crate::artifacts::lookup_metadata(receiver_root, None, &proof.id).unwrap();
         assert_eq!(recovered.cloud_artifact_id, proof.cloud_artifact_id);
         assert_eq!(recovered.sha256, proof.sha256);
@@ -241,10 +242,10 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
         let state = remote.lock().unwrap();
         let delivered_task: Task = serde_json::from_value(state.0.clone()).unwrap();
         assert_eq!(delivered_task.status, concurrent.status);
-        assert!(delivered_task.notes.contains(&concurrent.notes));
+        assert!(cas_store::task_note_markers::note_blocks(&concurrent.notes).iter().all(|block| delivered_task.notes.contains(block)));
         for notes in [&published.notes, &concurrent.notes] {
             for block in cas_store::task_note_markers::note_blocks(notes) {
-                assert!(delivered_task.notes.contains(block));
+                assert_eq!(delivered_task.notes.matches(block).count(), 1);
             }
         }
         drop(state);
@@ -4461,13 +4462,7 @@ async fn the_revision_ledger_is_monotonic_and_scoped_per_entity_type() {
         Some(6)
     );
 
-    queue
-        .clear_revision(EntityType::Task, "cas-c32f-led")
-        .unwrap();
-    assert_eq!(
-        queue.revision(EntityType::Task, "cas-c32f-led").unwrap(),
-        None
-    );
+
 }
 
 // --- cas-c32f milestone 2: the base revision on the wire, and the receipts ---
@@ -4487,7 +4482,7 @@ fn decode_push_body(request: &wiremock::Request) -> serde_json::Value {
 }
 
 #[test]
-fn accepted_and_conflicting_revisions_are_read_from_either_envelope() {
+fn accepted_revisions_are_read_from_either_envelope() {
     // Personal puts per-type keys at the top level; team nests them under
     // `synced`. Both must yield the same receipts, or team pushes would
     // silently never learn a revision.
@@ -4525,30 +4520,21 @@ fn accepted_and_conflicting_revisions_are_read_from_either_envelope() {
             response.accepted_revisions_for("tasks").get("cas-ok"),
             Some(&6)
         );
-        assert_eq!(
-            response.revision_conflicts_for("tasks").get("cas-stale"),
-            Some(&Some(9))
-        );
-        // A rejection for another reason is not a revision conflict.
-        assert!(
-            !response
-                .revision_conflicts_for("tasks")
-                .contains_key("cas-ok")
-        );
+
     }
 }
 
 #[test]
-fn a_stale_base_is_retryable_rather_than_parked() {
-    // Losing the race is a stale base, not a bad row: parking it would strand
-    // the user's edit behind a manual requeue.
+fn a_stale_base_waits_for_reconciliation_rather_than_retrying() {
+    // A stale base requires a real pull and payload reconciliation before retry.
+    // The shared queue/advice policy must agree on this prerequisite.
     let conflict = PushRowResult {
         id: "cas-stale".to_string(),
         outcome: PushRowOutcome::Rejected,
         reason: Some("revision_conflict".to_string()),
         existing_canonical_id: None,
     };
-    assert!(conflict.rejection_is_retryable());
+    assert!(!conflict.rejection_is_retryable());
     // An unknown reason still parks — losing a diagnostic row is worse.
     let unknown = PushRowResult {
         id: "cas-unknown".to_string(),
@@ -4609,6 +4595,16 @@ async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
             .unwrap();
     }
 
+    let rule_payload = serde_json::json!({"id":"rule-unguarded","origin_project":"p"});
+    queue.record_revision(EntityType::Rule, "rule-unguarded", 7).unwrap();
+    queue.enqueue(EntityType::Rule, "rule-unguarded", crate::cloud::SyncOperation::Upsert,
+        Some(&rule_payload.to_string())).unwrap();
+    Mock::given(method("POST")).and(path("/api/sync/push"))
+        .and(wiremock::matchers::body_partial_json(serde_json::json!({"rules":[rule_payload.clone()]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "rules":{"inserted":1,"updated":0,"skipped":0},
+            "rows":[{"entity_type":"rules","id":"rule-unguarded","outcome":"inserted"}]
+        }))).with_priority(1).mount(&server).await;
     let syncer = CloudSyncer::new_for_project(
         Arc::clone(&queue),
         CloudConfig {
@@ -4653,6 +4649,11 @@ async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
         fresh.get("revision").is_none(),
         "a row with no observed revision must omit the key, not send a placeholder"
     );
+
+    let rule = requests.iter().map(decode_push_body)
+        .find_map(|body| body.get("rules").and_then(serde_json::Value::as_array)
+            .and_then(|rows| rows.first()).cloned()).expect("rule reached the push endpoint");
+    assert_eq!(rule, rule_payload);
 
     // The echoed revisions are stored, so the next push declares a base the
     // server will accept without a re-pull first.

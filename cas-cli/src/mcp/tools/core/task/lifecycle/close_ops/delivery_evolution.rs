@@ -5,7 +5,7 @@ use std::process::Command;
 use super::epic_measurement::CommandExt as _;
 
 #[cfg(test)]
-static USE_SHARED_WALK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub(super) static USE_SHARED_WALK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 #[cfg(test)]
 static USE_PARALLEL_PROOF_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -1243,6 +1243,14 @@ fn commit_of(repo: &Path, reference: &str) -> Option<String> {
     super::resolve_branch_sha(repo, &format!("{reference}^{{commit}}"))
 }
 
+/// Forget every memoized walk answer, so a test can walk again.
+#[cfg(test)]
+pub(super) fn forget_walks() {
+    if let Some(walks) = WALKS.get() {
+        walks.lock().unwrap().clear();
+    }
+}
+
 fn remember_walk(key: WalkKey, answer: Option<super::DeliveryContentPresence>) {
     if let Ok(mut cache) = WALKS.get_or_init(Default::default).lock() {
         if cache.len() >= WALK_ANSWER_LIMIT {
@@ -1961,7 +1969,7 @@ fn walk_owners(
 }
 
 #[cfg(test)]
-static EDGE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(super) static EDGE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// One owner group's state on a commit, per walked group; `None` where the
 /// commit is not on that group's `start..target` ancestry path.

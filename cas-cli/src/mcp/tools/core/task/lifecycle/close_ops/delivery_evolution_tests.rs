@@ -77,7 +77,7 @@ fn release_preview_reuses_parallel_proofs_with_identical_outcomes_cas_b7be() {
         // Per-member walks are the reference outcome for the shared walk.
         for (shared, enabled) in [(false, true), (true, false), (true, true)] {
             // A whole-walk hit must not conceal the edge cache under test.
-            if let Some(walks) = WALKS.get() { walks.lock().unwrap().clear(); }
+            forget_walks();
             USE_PARALLEL_PROOF_CACHE.store(enabled, Ordering::Relaxed);
             USE_SHARED_WALK.store(shared, Ordering::Relaxed);
             EDGE_READS.store(0, Ordering::Relaxed);

@@ -1751,6 +1751,9 @@ fn merge_tip_content_presence_selected(
     }
     // cas-18aa: every commit is measured first, so an earlier draft can be
     // judged against the later task commit that replaced it.
+    if explicit_commits.is_none() {
+        super::prewalk_in_parent_deliveries(repo, &commits, target, merge_tip, &carries_source);
+    }
     let measurements: Vec<_> = commits
         .iter()
         .map(|commit| {
@@ -3113,6 +3116,58 @@ mod tests {
                 commits: vec![tip]
             })
         );
+    }
+
+    /// cas-0e29e (cas-c5db's close timed out at 35 s): a close measured each
+    /// attributed task commit with its own walk through the same target
+    /// history, O(commits x edges) edge reads. One walk serves them all.
+    #[test]
+    fn close_reads_each_target_edge_once_for_every_task_commit_cas_0e29e() {
+        use super::super::delivery_evolution::{EDGE_READS, USE_SHARED_WALK, forget_walks};
+        use std::sync::atomic::Ordering;
+        const COMMITS: usize = 6;
+        let dir = fixture();
+        let repo = dir.path();
+        let body = |progress: usize, delivered: usize| {
+            let mut lines = vec![format!("let target_progress = {progress};")];
+            lines.extend((0..4).map(|i| format!("let spacer_{i} = {i};")));
+            lines.extend((1..=COMMITS).map(|i| match i <= delivered {
+                true => format!("let owned_{i} = delivered_{i}(input);"),
+                false => format!("let owned_{i} = base_{i}();"),
+            }));
+            lines.join("\n") + "\n"
+        };
+        commit(repo, "copy.txt", &body(0, 0), "baseline");
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        for i in 1..=COMMITS {
+            commit(repo, "copy.txt", &body(0, i), &format!("cas-taskb: deliver {i}"));
+        }
+        git(repo, &["checkout", "-q", "main"]);
+        commit(repo, "copy.txt", &body(1, 0), "target progress 1");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["merge", "--no-ff", "main", "-m", "cas-taskb: sync main"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "--no-ff", "factory/worker", "-m", "integrate"]);
+        for progress in 2..12 {
+            commit(repo, "copy.txt", &body(progress, COMMITS), &format!("target progress {progress}"));
+        }
+        let edges: usize = git(repo, &["rev-list", "--parents", "main"]).lines()
+            .map(|record| record.split_whitespace().count() - 1).sum();
+        let mut window = window();
+        window.identity.known_commits.push(tip.clone());
+        let mut outcomes = Vec::new();
+        for shared in [false, true] {
+            forget_walks();
+            USE_SHARED_WALK.store(shared, Ordering::Relaxed);
+            EDGE_READS.store(0, Ordering::Relaxed);
+            outcomes.push(merge_tip_content_presence(repo, "main", &tip, Some(&window), &window.identity, None));
+            let reads = EDGE_READS.load(Ordering::Relaxed);
+            // Per-commit walks exceed the bound, so the bound tests the sharing.
+            assert_eq!(shared, reads <= edges, "shared={shared}: {reads} edge reads for {edges} edges");
+        }
+        assert!(matches!(outcomes[1], Some(DeliveryContentPresence::Present { .. })), "{outcomes:?}");
+        assert_eq!(outcomes[0], outcomes[1]);
     }
 
     #[test]

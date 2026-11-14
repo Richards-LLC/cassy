@@ -29,13 +29,45 @@ fn javascript(path: &str) -> bool {
     )
 }
 
-pub(super) fn allowed_args(args: &[String]) -> bool {
-    args.len() > 1
-        && matches!(args[0].as_str(), "vitest" | "jest" | "playwright")
-        && args[1..]
-            .iter()
-            .all(|path| safe_path(path) && javascript(path))
+/// The runner and its test files: `vitest|jest|playwright <files>`, or
+/// `node --test <files>` for Node's built-in runner (cas-a4c3).
+fn runner_files(args: &[String]) -> Option<(&str, &[String])> {
+    let (runner, files) = match args {
+        [node, flag, files @ ..] if node == "node" && flag == "--test" => ("node", files),
+        [runner, files @ ..] if matches!(runner.as_str(), "vitest" | "jest" | "playwright") => {
+            (runner.as_str(), files)
+        }
+        _ => return None,
+    };
+    (!files.is_empty() && files.iter().all(|path| safe_path(path) && javascript(path)))
+        .then_some((runner, files))
 }
+
+pub(super) fn allowed_args(args: &[String]) -> bool {
+    runner_files(args).is_some()
+}
+
+/// A `node --test` reporter emitting the Vitest/Jest JSON shape that
+/// `validate_report` reads. Suite names join a test's own name with spaces,
+/// as `--test-name-pattern` matches them.
+const NODE_TEST_REPORTER: &str = r#"export default async function* (source) {
+  const names = [], files = new Map();
+  let success = true;
+  for await (const { type, data } of source) {
+    if (type === 'test:start') names[data.nesting] = data.name;
+    if (type !== 'test:pass' && type !== 'test:fail') continue;
+    const file = files.get(data.file) ?? { name: data.file, status: 'passed', assertionResults: [] };
+    files.set(data.file, file);
+    if (type === 'test:fail') { success = false; file.status = 'failed'; }
+    if (data.details?.type === 'suite') continue;
+    file.assertionResults.push({
+      fullName: [...names.slice(0, data.nesting), data.name].join(' '),
+      status: type === 'test:fail' ? 'failed' : data.skip ? 'skipped' : data.todo ? 'todo' : 'passed',
+    });
+  }
+  yield JSON.stringify({ success, testResults: [...files.values()] });
+}
+"#;
 
 /// Only hunks intersecting a test function (or its suite title) select it.
 /// Dynamic titles cannot safely become a runtime selector and fail closed.
@@ -690,9 +722,11 @@ fn walk(
 }
 
 pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()> {
-    if !allowed_args(args) {
-        bail!("expected vitest|jest|playwright followed by repository-relative test files");
-    }
+    let Some((runner, files)) = runner_files(args) else {
+        bail!(
+            "expected vitest|jest|playwright or node --test, followed by repository-relative test files"
+        );
+    };
     let repo = PathBuf::from(super::git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     let cas_root = cas_root.canonicalize()?;
     if !repo.starts_with(cas_root.join("worktrees"))
@@ -704,7 +738,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
     let head = super::clean_head(&repo)?;
     let config = crate::config::Config::load(cas_root)?.factory();
     let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
-    let tests = changed_tests(&repo, &base, &head, &args[1..])?;
+    let tests = changed_tests(&repo, &base, &head, files)?;
     if tests.is_empty() {
         bail!(crate::gates::tag(
             "G-61",
@@ -727,7 +761,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         )
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
-    let proof = execute_tests(cas_root, &repo, &head, &args[0], &tests)?;
+    let proof = execute_tests(cas_root, &repo, &head, runner, &tests)?;
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -790,7 +824,11 @@ fn execute_tests(
     let reports = tempfile::tempdir()?;
     for (path, names) in by_file {
         let package = package_root(repo, path)?;
-        let executable = runner_path(repo, &package, runner)?;
+        let executable = if runner == "node" {
+            PathBuf::from("node")
+        } else {
+            runner_path(repo, &package, runner)?
+        };
         let source = std::fs::read_to_string(repo.join(path))?;
         let sites = declared_sites(path, &source)?;
         if !sites.is_empty() {
@@ -892,6 +930,17 @@ fn execute_tests(
                         .arg(&pattern)
                         .arg(regex::escape(&file.to_string_lossy()))
                         .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
+                }
+                "node" => {
+                    let reporter = reports.path().join("node-test-reporter.mjs");
+                    std::fs::write(&reporter, NODE_TEST_REPORTER)?;
+                    command
+                        .args(["--test", "--test-concurrency=1", "--test-reporter=spec"])
+                        .arg("--test-reporter-destination=stdout")
+                        .arg(format!("--test-reporter={}", reporter.display()))
+                        .arg(format!("--test-reporter-destination={}", report.display()))
+                        .arg(format!("--test-name-pattern={pattern}"))
+                        .arg(&file);
                 }
                 _ => bail!("unsupported stability runner: {runner}"),
             }
@@ -1328,6 +1377,60 @@ mod tests {
             path: path.into(),
             name: name.into(),
         }
+    }
+
+    /// cas-a4c3: park demanded five capped passes for hub-web's `node:test`
+    /// files while worker-check refused `node --test`. The changed case runs
+    /// five times alone; its unchanged neighbour would fail the proof if run.
+    #[test]
+    fn node_test_files_get_five_capped_passes_cas_a4c3() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                ])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let file = "e2e/serve.test.mjs";
+        std::fs::create_dir_all(repo.path().join("e2e")).unwrap();
+        let source = "import { describe, test } from 'node:test';\n\
+            describe('server', () => {\n  test('unchanged', () => { throw new Error('ran'); });\n\
+            test('changed', () => {});\n});\n";
+        std::fs::write(
+            repo.path().join(file),
+            source.replace("=> {});", "=> { throw 0; });"),
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(file), source).unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let args: Vec<String> = ["node", "--test", file].map(String::from).into();
+        let (runner, files) = runner_files(&args).expect("node --test is a capped runner");
+        let tests = changed_tests(repo.path(), &base, &head, files).unwrap();
+        assert_eq!(tests, [id(file, "server changed")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, runner, &tests).unwrap();
+        assert_eq!(
+            (proof.runner.as_str(), proof.consecutive_passes),
+            ("node", 5)
+        );
     }
 
     #[test]

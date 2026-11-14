@@ -2805,7 +2805,9 @@ The existing focused-proof park gate also requires five consecutive passes for
 the delivery's new or changed test functions, including test-only deliveries. The capped Rust
 runner repeats only owned functions in its requested selection; unchanged tests
 retain one-pass crate coverage. Vitest, Jest and Playwright use
-`cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`.
+`cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`;
+Node's built-in runner uses `-- node --test path/to/test-file`, five serial runs
+of the changed tests alone, which `node:test` cannot retry.
 Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
 Stability uses the same receipt carry-forward as crate proof: documentation or

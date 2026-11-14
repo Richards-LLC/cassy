@@ -1011,6 +1011,51 @@ mod tests {
     }
 
     #[test]
+    fn shared_paste_callback_selects_declared_expanded_cases_cas_13c9() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let path = "paste-content.journey.ts";
+        let source = r#"import { test, expect } from '@playwright/test';
+for (const [width, height, colorScheme] of [[1440, 800, 'light'], [1440, 800, 'dark'], [390, 844, 'light'], [390, 844, 'dark']] as const) {
+  test.describe(`composer paste ${width} ${colorScheme}`, () => {
+    const run: Parameters<typeof test>[2] = async () => {
+      expect(1 + 1).toBe(2);
+    };
+    if (width === 1440 && colorScheme === 'light') {
+      // cas-stability-identities: ["composer paste 1440 light HUB-J24 paste content into the composer"]
+      test('HUB-J24 paste content into the composer', run);
+    } else {
+      // cas-stability-identities: ["composer paste 1440 dark HUB-J24 paste content 1440 dark", "composer paste 390 light HUB-J24 paste content 390 light", "composer paste 390 dark HUB-J24 paste content 390 dark"]
+      test(`HUB-J24 paste content ${width} ${colorScheme}`, { tag: '@part' }, run);
+    }
+  });
+}
+test('unrelated', () => { throw new Error('must remain unselected'); });
+"#;
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join(path), source).unwrap();
+        git(&["add", path]); git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(path), source.replace("expect(1 + 1).toBe(2)", "expect(1 + 2).toBe(3)")).unwrap();
+        git(&["add", path]); git(&["commit", "--quiet", "-m", "shared body changed"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let expected = [
+            id(path, "composer paste 1440 dark HUB-J24 paste content 1440 dark"),
+            id(path, "composer paste 1440 light HUB-J24 paste content into the composer"),
+            id(path, "composer paste 390 dark HUB-J24 paste content 390 dark"),
+            id(path, "composer paste 390 light HUB-J24 paste content 390 light"),
+        ];
+        assert_eq!(changed_tests(repo.path(), &base, &head, &[path.into()]).unwrap(), expected);
+    }
+
+    #[test]
     fn javascript_reports_require_every_selected_test_and_reject_failure_or_extra_execution() {
         let repo = Path::new("/project");
         let selected = [id("a.test.js", "group changed")];

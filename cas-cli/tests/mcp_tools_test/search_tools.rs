@@ -308,6 +308,42 @@ async fn cas_57e5_colon_bearing_free_text_queries_return_results() {
 }
 
 #[tokio::test]
+async fn conceptual_shell_flag_query_returns_results_cas_6c1a() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
+    let query = "cas-47e1 consumer inventory --files0-from grep -f xargs";
+    let entries = [
+        Entry::new("flags-search".into(), format!("---\nmodule: cas-search\n---\n{query}")),
+        Entry::new("flags-cli".into(), format!("---\nmodule: cas-cli\n---\n{query}")),
+    ];
+    let root = temp.path().join(".cas");
+    let store = cas::store::open_store(&root).unwrap();
+    for entry in &entries {
+        store.add(entry).unwrap();
+    }
+    cas::hybrid_search::SearchIndex::open(&cas::hybrid_search::tantivy_index_dir(&root))
+        .unwrap().index_entries_batch(&entries).unwrap();
+    let service = CasService::new(core, None);
+
+    for (query, expected) in [
+        (query, vec!["flags-cli", "flags-search"]),
+        ("--files0-from", vec!["flags-cli", "flags-search"]),
+        ("-f", vec!["flags-cli", "flags-search"]),
+        ("module:cas-search --files0-from -f", vec!["flags-search"]),
+        ("module:cas-cli --files0-from -f", vec!["flags-cli"]),
+        ("\"consumer -f xargs\"", vec![]),
+    ] {
+        let envelope = provenance_search(&service, query, Some("entry"), 1)
+            .await.unwrap_or_else(|error| panic!("{query:?}: {error}"));
+        assert_eq!(envelope["schema"], "cas.retrieval.provenance.v1");
+        let mut ids: Vec<_> = envelope["hits"].as_array().unwrap().iter()
+            .map(|hit| hit["id"].as_str().unwrap()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, expected, "{query:?}");
+    }
+}
+
+#[tokio::test]
 async fn artifact_fixture_content_is_searchable_after_backfill() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);

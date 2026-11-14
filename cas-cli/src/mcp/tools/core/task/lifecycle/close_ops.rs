@@ -16661,6 +16661,10 @@ fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
             .into_iter()
             .map(|holder| format!("factory/{holder}")),
     );
+    // cas-d9d38: an approved rebind records its lane only as the start
+    // boundary (for example a `-redelivery` suffix). Last, so earlier
+    // candidates keep their precedence.
+    candidates.extend(task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.clone()));
     let mut unique: Vec<String> = Vec::new();
     for candidate in candidates {
         if is_safe_git_refname(&candidate) && !unique.contains(&candidate) {
@@ -25435,6 +25439,7 @@ pub(crate) fn validate_pushed_task_receipt(
         if own_task.as_deref() != Some(branch.as_str())
             && task.deliverables.parked_branch.as_deref() != Some(branch.as_str())
             && !task.deliverables.handoff_branches.contains(&branch)
+            && task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()) != Some(branch.as_str())
         {
             continue;
         }

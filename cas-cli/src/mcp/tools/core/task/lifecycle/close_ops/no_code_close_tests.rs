@@ -826,6 +826,16 @@ async fn epic_retarget_rebinds_unchanged_started_source_before_no_delivery_close
     let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
     let original = f.task(id).deliverables.factory_branch_start.unwrap();
     assert_eq!(original.work_target, target("main"), "{started}");
+    let mut reassigned = f.task(id);
+    reassigned.assignee = Some("another-worker".into());
+    f.put(&reassigned);
+    let refused = call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "epic":"cas-aac3-new"})).await;
+    assert_eq!(tasks.get_parent_epic(id).unwrap().unwrap().id, "cas-aac3-old", "{refused}");
+    assert_eq!(f.task(id).deliverables.work_target, Some(target("main")), "{refused}");
+    let mut restored = f.task(id);
+    restored.assignee = Some(WORKER.into());
+    f.put(&restored);
+
     let moved = call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "epic":"cas-aac3-new"})).await;
     let rebound = f.task(id);
     assert_eq!(tasks.get_parent_epic(id).unwrap().unwrap().id, "cas-aac3-new", "{moved}");

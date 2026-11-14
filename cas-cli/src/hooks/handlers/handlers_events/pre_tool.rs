@@ -2,10 +2,15 @@ mod shell_effects;
 
 /// Commands remain paired with the cwd alternatives from their own source
 /// statement; callers never align duplicate argv from independent projections.
+/// `None` is a directory the recognizer could not resolve; an
+/// [`UNKNOWN_DIRECTORY`] component is one unknown entry (never `.` or `..`).
 pub(super) struct ShellReadContext {
     pub command: String,
-    pub directories: Vec<std::path::PathBuf>,
+    pub directories: Vec<Option<std::path::PathBuf>>,
 }
+
+/// Not a valid file name, so no real directory entry has this spelling.
+pub(super) const UNKNOWN_DIRECTORY: &str = "\u{0}";
 
 pub(super) fn shell_read_contexts(command: &str, cwd: &std::path::Path) -> Option<Vec<ShellReadContext>> {
     shell_effects::read_contexts(command, cwd)
@@ -541,8 +546,18 @@ fn handle_pre_tool_use_checked(
     }
 
     // gate[H-09 pre-tool]: Worker operator-credential store read
-    if let Some(reason) =
-        super::worker_denied_tools::credential_store_access_denial(input, tool_name)
+    // The credential gate refuses a shell command it cannot project. With a
+    // Cassy root, the workspace contract below refuses one the shell-effects
+    // recognizer cannot resolve, with that specific reason.
+    let workspace_refuses_unresolved = cas_root.is_some()
+        && tool_name == "Bash"
+        && crate::harness_policy::is_factory_agent(input)
+        && input.tool_input.as_ref().and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .is_some_and(|command| shell_effects::collect(command, Path::new(&input.cwd)).is_err());
+    if !workspace_refuses_unresolved
+        && let Some(reason) =
+            super::worker_denied_tools::credential_store_access_denial(input, tool_name)
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-09", reason)));
     }

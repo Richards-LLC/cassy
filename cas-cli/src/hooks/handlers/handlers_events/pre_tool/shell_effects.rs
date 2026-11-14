@@ -31,7 +31,7 @@ pub(super) fn collect(command: &str, cwd: &Path) -> Result<ShellEffects, &'stati
     Ok(effects)
 }
 
-/// Opt-in read projection; `None` when any working directory is unresolved.
+/// Opt-in read projection; `None` when the command cannot be projected.
 /// Collecting workspace write effects keeps its current behavior.
 pub(super) fn read_contexts(command: &str, cwd: &Path) -> Option<Vec<ShellReadContext>> {
     let mut effects = ShellEffects { read_contexts: Some(Vec::new()), ..Default::default() };
@@ -1268,11 +1268,7 @@ fn collect_script(
                 && effects.read_contexts.as_ref().is_some_and(Vec::is_empty);
             if depth == 0 && let Some(contexts) = &mut effects.read_contexts {
                 if dirs.is_empty() { return Err("an unresolved credential working directory"); }
-                contexts.push(ShellReadContext {
-                    command: read_command,
-                    directories: dirs.iter().cloned().collect::<Option<Vec<_>>>()
-                        .ok_or("an unresolved credential working directory")?,
-                });
+                contexts.push(ShellReadContext { command: read_command, directories: dirs.clone() });
             }
             let read_stack = effects.read_contexts.is_some();
             let read_unconditional =
@@ -1315,6 +1311,23 @@ fn collect_script(
                 let mut changed = Vec::new();
                 for directory in &dirs {
                     for target in &targets {
+                        // Credential reads only: a glob component names one
+                        // unknown entry, so the directory keeps its literal
+                        // ancestors. A dot-glob may match `..` and stays unresolved.
+                        let masked;
+                        let target = match read_mode && !target.contains(['$', '`']) {
+                            true => match target.split('/').map(|part| match part.contains(['*', '?', '[']) {
+                                false => Some(part),
+                                true => (!part.starts_with('.')).then_some(UNKNOWN_DIRECTORY),
+                            }).collect::<Option<Vec<_>>>() {
+                                Some(parts) => {
+                                    masked = parts.join("/");
+                                    masked.as_str()
+                                }
+                                None => target.as_str(),
+                            },
+                            false => target.as_str(),
+                        };
                         let path = if target.contains(['$', '`', '*', '?', '['])
                             || (searches_directory
                                 && !Path::new(target).is_absolute()

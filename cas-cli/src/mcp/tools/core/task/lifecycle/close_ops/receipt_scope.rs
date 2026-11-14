@@ -961,26 +961,14 @@ mod tests {
             task.notes = "[2026-11-13 10:00] ✅ DECISION no changelog: test-only stability fixture".into();
             let paths = vec![identity.path.clone(), "hub-web/src/app.ts".into()];
             if rust { crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(child)"); }
-            let started = std::time::Instant::now();
             let held = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None).unwrap();
-            let missing_us = started.elapsed().as_micros();
             assert!(held.contains(&identity.path) && held.contains(&identity.name), "{runner}: {held}");
             assert!(!held.contains("untouched"));
             stability::record(root.path(), repo.path(), &head, Proof { runner: runner.into(),
                 tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
             let packages = crate::factory_worker_check::passing_test_packages(root.path(), repo.path(), &head);
             assert_eq!(packages, if rust { vec!["fixture".to_string()] } else { vec![] });
-            let started = std::time::Instant::now();
             let admitted = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None);
-            let present_us = started.elapsed().as_micros();
-            eprintln!("stability park read: runner={runner} missing_us={missing_us} present_us={present_us}");
-            // Keep measurements even when nextest hides successful output.
-            let evidence = crate::test_paths::workspace_root().join("target/stability-park-read.jsonl");
-            std::fs::create_dir_all(evidence.parent().unwrap()).unwrap();
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(evidence).unwrap();
-            writeln!(file, "{}", serde_json::json!({"runner":runner,"missing_us":missing_us,
-                "present_us":present_us,"fixture_head":head})).unwrap();
             assert!(admitted.is_none(), "{runner}: {admitted:?}");
             std::fs::write(repo.path().join("README.md"), "new delivery tip\n").unwrap();
             let moved = commit_changelog_fixture(repo.path(), "move source tip");

@@ -1373,6 +1373,7 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
 
     let refused = close_text(&fx.core, TASK).await;
     assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
+    assert!(refused.contains("hub-web/e2e/generated/fleet.spec.ts:3"), "{refused}");
     assert_eq!(fx.status(), TaskStatus::InProgress);
 
     // A stated reason clears the marker gate; this test-only delivery can park.

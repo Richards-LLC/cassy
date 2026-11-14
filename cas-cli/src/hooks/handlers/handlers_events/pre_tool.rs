@@ -6353,6 +6353,8 @@ fn policy_reader_flags(name: &str, args: &[String]) -> bool {
         ),
         "rg" => (
             &[
+                "-a",
+                "--text",
                 "-n",
                 "-i",
                 "-l",

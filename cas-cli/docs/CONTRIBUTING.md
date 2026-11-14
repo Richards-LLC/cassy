@@ -5039,9 +5039,9 @@ and `worktree_merge`; resume those calls after the run. This manual wait does
 not enforce a shared hold across machines.
 
 Auto-cut (`workflow/release_auto_cut.rs`) runs inside the daemon's cut-notice
-poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip
-has a green train-suite receipt, it acts when the tip holds `changelog.d/`
-fragments, no merge-queue run is in flight, the operator has not paused it
+poll (`train_guardrails::notify_train_cuts`). For an uncut train it may freeze
+when the tip holds `changelog.d/` fragments, its declared must-land scope has
+landed, no merge-queue run is in flight, the operator has not paused it
 (Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
 label), the train's supervisor is registered on this machine and the cadence
 allows it: fewer than `release.auto_cut_max_per_day` (default 4) other trains
@@ -5055,6 +5055,16 @@ supervisor once. `release.sh` arms landing and publication reminders, and the
 post-publish notice has the supervisor post the approved notes. Cassy never
 writes or posts notes. Declined trains get the ordinary ready-to-cut notice,
 which names the reason.
+
+Record a required delivery with
+`task action=dep_add id=<train> to_id=<delivery> dep_type=blocks`.
+Auto-cut names unresolved blocking tasks and waits before freezing. Ordinary
+closure after merge or cancellation clears a blocker; moving a delivery to
+another target also removes it from this train's cut scope. Other dependency
+types and optional children do not hold the cut. Without Blocks dependencies,
+the existing fragment, queue and cadence rules apply. Free-text decision notes
+do not define machine scope; record the required IDs as dependencies. An
+explicit release cut remains available to the operator.
 
 ## Ordered train merge queue
 

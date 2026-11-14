@@ -204,6 +204,36 @@ fn sandbox_preflight() -> Result<(), String> {
     Ok(())
 }
 
+const LAUNCH_ATTEMPTS: u32 = 4;
+const LAUNCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// cas-d824: a failed start is re-attempted here, on the thread that already
+/// owns the request, rather than waiting for an operator to repeat the merge.
+/// Scope and terminal-task refusals are permanent; anything else (a spent
+/// store wait budget, a busy daemon) is retried with a growing delay. Returns
+/// the attempt number that failed last with its error.
+fn request_with_retry(
+    attempts: u32,
+    delay: std::time::Duration,
+    mut request: impl FnMut() -> Result<(), String>,
+) -> Result<(), (u32, String)> {
+    let mut attempt = 1;
+    loop {
+        match request() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let permanent = error.contains("verifier_factory_scope")
+                    || error.contains("verifier_factory_task_terminal");
+                if permanent || attempt >= attempts {
+                    return Err((attempt, error));
+                }
+                std::thread::sleep(delay * attempt);
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Claim synchronously, then do provider work off the MCP/control loop. The
 /// existing dispatch claim prevents a second launch, including manual races.
 pub(super) fn launch(
@@ -219,8 +249,12 @@ pub(super) fn launch(
         let dispatch = dispatch.clone();
         return std::thread::Builder::new().name(format!("verifier-request-{}", task.id))
             .spawn(move || {
-                if let Err(error) = super::factory_launch::request(&session, &dispatch.id) {
-                    let _ = attention(&worker, &dispatch, &error);
+                if let Err((attempts, error)) = request_with_retry(
+                    LAUNCH_ATTEMPTS,
+                    LAUNCH_RETRY_DELAY,
+                    || super::factory_launch::request(&session, &dispatch.id),
+                ) {
+                    let _ = attention(&worker, &dispatch, &format!("{error} (launch attempt {attempts} of {LAUNCH_ATTEMPTS})"));
                 }
             }).map(Some).map_err(|e| e.to_string());
     }
@@ -587,6 +621,54 @@ pub(super) async fn approved(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_launch_is_retried_unless_permanent_cas_d824() {
+        let calls = std::cell::Cell::new(0);
+        let transient = request_with_retry(4, std::time::Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 { Err("verifier_factory_launch: store wait budget spent".into()) } else { Ok(()) }
+        });
+        assert_eq!((transient, calls.get()), (Ok(()), 3));
+        calls.set(0);
+        let permanent = request_with_retry(4, std::time::Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Err("verifier_factory_scope: not this session".into())
+        });
+        assert_eq!((permanent.is_err(), calls.get()), (true, 1));
+        calls.set(0);
+        let exhausted = request_with_retry(4, std::time::Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Err("verifier_factory_launch: busy".into())
+        });
+        assert_eq!((exhausted.map_err(|(attempts, _)| attempts), calls.get()), (Err(4), 4));
+    }
+
+    #[test]
+    fn daemon_bound_owner_is_a_live_supervisor_even_when_its_process_is_another_harness_cas_d824() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        // The supervisor's own harness process, alive and not this daemon.
+        let mut harness = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut owner = cas_types::Agent::new("supervisor-owner-d824".into(), "supervisor-owner".into());
+        owner.role = cas_types::AgentRole::Supervisor;
+        owner.pid = Some(harness.id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut owner, harness.id());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let bound = CasCore::with_daemon(root.clone(), None, None);
+        bound.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+        let resolved = bound.resolve_live_supervisor_authority();
+        // An identity inherited from the environment is still refused.
+        let inherited = CasCore::with_daemon(root.clone(), None, None);
+        env.set("CAS_SESSION_ID", &owner.id);
+        let refused = inherited.resolve_live_supervisor_authority();
+        harness.kill().unwrap();
+        harness.wait().unwrap();
+        assert_eq!(resolved.map(|agent| agent.id).ok(), Some(owner.id));
+        assert!(refused.is_err());
+    }
 
     #[test]
     fn automatic_context_carries_configured_qa_mode_cas_8f8b() {

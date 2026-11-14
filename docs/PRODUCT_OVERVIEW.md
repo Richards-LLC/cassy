@@ -289,6 +289,8 @@ that candidate exceeds the response deadline, the merge stays held with its
 approval intact until preparation finishes. A retry reuses that preparation;
 changed delivery content and merge conflicts keep their existing review checks.
 
+Factory and supervisor-authored epic pushes require local fast checks, including changed release-note drafts. A push changing `hub-web/` also proves committed dist matches a fresh build. The integration engine reuses already checked delivery content with a marker bound to the exact pushed head and observed remote base; a later supervisor commit cannot reuse that exemption. Supervisor startup and doctor verify the main checkout's configured hook directory and name its repair.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

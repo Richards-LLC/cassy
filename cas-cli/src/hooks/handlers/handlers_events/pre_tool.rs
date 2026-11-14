@@ -11701,6 +11701,9 @@ mod worker_commit_guard_tests {
             // Text-mode searches read policy documentation as ordinary data.
             "rg -a 'cas config set factory.write_roots' README.md",
             "rg --text 'cas config set factory.write_roots' README.md",
+            "rg -e --pre README.md",
+            "rg --pre-glob --pre pattern README.md",
+            "rg -- --hostname-bin README.md",
             // Single-bracket/test operands are expanded data in Bash. Unlike
             // [[ arithmetic, a non-integer produces an error without eval.
             "for f in README.md; do c=$(git rev-list --count HEAD -- \"$f\"); if [ \"$c\" -gt 0 ]; then printf '%s\\n' \"$f\"; fi; done",
@@ -11780,6 +11783,16 @@ mod worker_commit_guard_tests {
             ("env /usr/bin/wc --files0-from=-", "shell.dynamic_command"),
             ("bash -c 'sort --files0-from=-'", "shell.dynamic_command"),
             ("sort --compress-prog=helper", "shell.dynamic_command"),
+            ("rg --pre helper pattern README.md", "shell.dynamic_command"),
+            ("rg --pre=helper pattern README.md", "shell.dynamic_command"),
+            ("rg --hostname-bin helper pattern README.md", "shell.dynamic_command"),
+            ("rg --hostname-bin=helper pattern README.md", "shell.dynamic_command"),
+            ("sort \"$MODE\" names.txt", "shell.dynamic_command"),
+            ("wc \"$MODE\" names.txt", "shell.dynamic_command"),
+            ("uniq \"$MODE\" names.txt", "shell.dynamic_command"),
+            ("sort --future-mode names.txt", "shell.unknown_syntax"),
+            ("wc --future-mode names.txt", "shell.unknown_syntax"),
+            ("uniq --future-mode names.txt", "shell.unknown_syntax"),
             ("$cmd safe", "shell.dynamic_command"),
             ("env \"$cmd\" safe", "shell.dynamic_command"),
         ] {

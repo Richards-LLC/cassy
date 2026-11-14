@@ -6545,6 +6545,13 @@ pub(super) fn filename_pipeline_is_data_only(command: &str) -> bool {
     let Ok(parsed) = shell_admission::parse(command, 0) else { return false; };
     if parsed.compound_refusal.is_some() || !parsed.bodies.is_empty() { return false; }
     let tokens = parsed.lexed.argument_tokens(&parsed.projected);
+    let statements = parsed.lexed.statements(&parsed.projected, &parsed.syntax);
+    if statements.is_empty() { return false; }
+    // Preserve standalone listings (including separators, known HOME prefixes
+    // and executable paths). Process/group scopes never acquire this exemption.
+    if statements.len() == 1
+        && !tokens.iter().any(|token| matches!(token, ShellToken::Operator('(' | ')')))
+    { return true; }
     if tokens.iter().any(|token| matches!(token, ShellToken::Operator(ch) if *ch != '|')) {
         return false;
     }
@@ -6552,12 +6559,6 @@ pub(super) fn filename_pipeline_is_data_only(command: &str) -> bool {
     if parsed.lexed.tokens.windows(2).zip(parsed.lexed.ends.windows(2)).any(|(tokens, ends)| {
         tokens == [ShellToken::Operator('|'), ShellToken::Operator('|')] && ends[1] == ends[0] + 1
     }) { return false; }
-    let statements = parsed.lexed.statements(&parsed.projected, &parsed.syntax);
-    if statements.is_empty() { return false; }
-    // Keep the existing standalone listing contract, including known HOME
-    // prefixes and literal executable paths. Its producer options are checked
-    // independently by the credential guard.
-    if statements.len() == 1 { return true; }
     // No expansion may manufacture an option or executable after classification.
     if !parsed.lexed.literals.iter().all(|literal| *literal) { return false; }
     statements.iter().enumerate().all(|(at, statement)| {

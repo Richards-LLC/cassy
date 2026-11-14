@@ -120,6 +120,13 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             .to_ascii_lowercase();
         let args = &words[command_index + 1..];
 
+        if executable == "find" {
+            let child_cwd = wrapper_cwd(&words[..command_index], &cwd);
+            if super::pre_tool::find_child_commands(args).iter()
+                .any(|child| shell_references_store(child, &child_cwd, depth + 1))
+            { return true; }
+        }
+
         // Inspect shell payloads as nested statement lists so a `cd` inside a
         // `sh -c` or `bash -c` does not leak into the caller's working dir.
         if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {

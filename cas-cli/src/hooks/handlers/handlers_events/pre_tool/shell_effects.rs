@@ -831,6 +831,22 @@ fn collect_script(
                 }
             }
             let consumer = shell_admission::consumer_files(name.unwrap_or(""), args);
+            if name == Some("find") {
+                let find = shell_admission::find_arguments(args)
+                    .map_err(|_| "[shell.unknown_syntax] an unsupported find expression")?;
+                for action in find.actions {
+                    let child = args[action.argv].iter().map(|word| ShellToken::Word(word.clone())).collect::<Vec<_>>();
+                    collect_script(
+                        &render(&child),
+                        if action.directory { vec![None] } else { statement_dirs.clone() },
+                        original,
+                        &directory_values,
+                        depth + 1,
+                        test_uses_arithmetic,
+                        effects,
+                    )?;
+                }
+            }
             // Explicit temp selection has the same authority as an output
             // path. Only preceding shell bindings and this invocation's
             // assignment prefix apply; future assignments cannot grant it.
@@ -845,6 +861,11 @@ fn collect_script(
             }
             for directory in &statement_dirs {
                 let base = directory.as_deref();
+                for target in &consumer.deletes {
+                    for target in expand_factory_shell_word(target, &directory_values) {
+                        effects.deletes.push((rooted(&target, base, original)?, true));
+                    }
+                }
                 let consumer_targets = consumer.outputs.iter().map(|path| (*path, false))
                     .chain(consumer.temporaries.iter().map(|path| (*path, true)));
                 for (target, temporary) in consumer_targets {

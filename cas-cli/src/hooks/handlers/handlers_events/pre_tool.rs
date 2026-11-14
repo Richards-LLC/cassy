@@ -3033,16 +3033,13 @@ fn collect_git_write_targets(
             else { base.map(|base| resolve_git_option_path(base, &value)) }
         };
         if shell_word_basename(&words[command_index]) == "find" {
-            // find runs each -exec/-execdir payload as a command. Inspect
-            // these scopes before later statements can change shell_cwd.
-            for (index, word) in words.iter().enumerate().rev() {
-                if matches!(word.as_str(), "-exec" | "-execdir") {
-                    let payload = &words[index + 1..];
-                    let end = payload.iter()
-                        .position(|word| word == ";" || word == "+")
-                        .unwrap_or(payload.len());
-                    let start = range.start + index + 1;
-                    pending_statements.push_front((statement, start..start + end));
+            // Consume typed action positions, never option-looking patterns
+            // or formats. All four find command actions execute child argv.
+            if let Ok(find) = shell_admission::find_arguments(args) {
+                for action in find.actions.into_iter().rev() {
+                    let start = range.start + command_index + 1;
+                    pending_statements.push_front((statement,
+                        start + action.argv.start..start + action.argv.end));
                 }
             }
             continue;
@@ -5771,6 +5768,16 @@ pub(super) fn shell_statement_io(command: &str, depth: usize) -> Vec<(Vec<String
     parsed.lexed.statement_io(&parsed.projected, &parsed.syntax)
 }
 
+/// Literal child argv is quoted as data when a policy needs to recurse into
+/// its interpreter payload. Command/argument provenance remains with the
+/// Statement used by admission and Git collection.
+pub(super) fn find_child_commands(args: &[String]) -> Vec<String> {
+    shell_admission::find_arguments(args).map(|find| find.actions.into_iter().map(|action| {
+        args[action.argv].iter().map(|word| format!("'{}'", word.replace('\'', "'\\''")))
+            .collect::<Vec<_>>().join(" ")
+    }).collect()).unwrap_or_default()
+}
+
 pub(super) fn executing_shell_arguments(command: &str) -> Result<Vec<Vec<String>>, String> {
     let scan = scan_shell_invocations(command);
     if let Some(error) = scan.refusal { return Err(error.to_string()); }
@@ -5808,6 +5815,29 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     let statements = parsed.lexed.statements(&parsed.projected, &parsed.syntax);
     found.arguments.extend(statements.iter().map(|statement| statement.words.clone()));
     for statement in statements {
+        collect_statement_invocations(&statement, depth, false, found);
+    }
+    if let Some(refusal) = parsed.compound_refusal {
+        found.worker_refusal.get_or_insert(refusal);
+    }
+    for body in &parsed.bodies {
+        collect_shell_invocations(body, depth + 1, found);
+    }
+    let statements = shell_statements_from_tokens(parsed.lexed.tokens.clone());
+    found.scopes.push(ShellScope { lexed: parsed.lexed, statements,
+        commands: command_start..found.commands.len() });
+}
+
+fn collect_statement_invocations(
+    statement: &shell_admission::Statement,
+    depth: usize,
+    runtime_args: bool,
+    found: &mut ShellInvocationScan,
+) {
+        if depth > SHELL_MAX_DEPTH {
+            found.worker_refusal.get_or_insert(shell_admission::Unsupported::depth(0));
+            return;
+        }
         let words = &statement.words;
         if found.role_denial.is_none() {
             found.role_denial = role_env_tampering_in_words(statement.policy_words());
@@ -5815,7 +5845,7 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
         let mut pending = vec![words.len() - statement.policy_words().len()];
         let mut visited = vec![false; words.len()];
         let mut indices = Vec::new();
-        let mut xargs = false;
+        let mut xargs = runtime_args;
         while let Some(start) = pending.pop() {
             if start >= words.len() || visited[start] { continue; }
             visited[start] = true;
@@ -5846,6 +5876,17 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
             let args = &words[index + 1..];
             let name = shell_word_basename(&words[index]);
             match name {
+                "find" => {
+                    if let Ok(find) = shell_admission::find_arguments(args) {
+                        for action in find.actions {
+                            let derived = action.directory || args[action.argv.clone()].iter().any(|word| word.contains("{}"));
+                            let range = index + 1 + action.argv.start..index + 1 + action.argv.end;
+                            let child = statement.slice(range);
+                            found.arguments.push(child.words.clone());
+                            collect_statement_invocations(&child, depth + 1, derived, found);
+                        }
+                    }
+                }
                 // Wrappers whose option value is itself a shell command.
                 "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
                     if let Some(payload) = shell_payload_index(name, args).and_then(|at| args.get(at)) {
@@ -5860,16 +5901,6 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
         if let Some(payload) = env_split_string_payload(words) {
             collect_shell_invocations(&payload, depth + 1, found);
         }
-    }
-    if let Some(refusal) = parsed.compound_refusal {
-        found.worker_refusal.get_or_insert(refusal);
-    }
-    for body in &parsed.bodies {
-        collect_shell_invocations(body, depth + 1, found);
-    }
-    let statements = shell_statements_from_tokens(parsed.lexed.tokens.clone());
-    found.scopes.push(ShellScope { lexed: parsed.lexed, statements,
-        commands: command_start..found.commands.len() });
 }
 
 /// Heading of every factory workspace contract refusal; tests name the

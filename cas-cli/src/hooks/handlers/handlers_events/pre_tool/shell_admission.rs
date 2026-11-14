@@ -70,6 +70,18 @@ pub(super) struct Statement {
 }
 
 impl Statement {
+    pub(super) fn slice(&self, range: std::ops::Range<usize>) -> Self {
+        Self {
+            words: self.words[range.clone()].to_vec(),
+            literals: self.literals[range.clone()].to_vec(),
+            offsets: self.offsets[range.clone()].to_vec(),
+            ends: self.ends[range.clone()].to_vec(),
+            assignments: self.assignments[range].to_vec(),
+            raw_argv: false,
+            prefix: 0,
+        }
+    }
+
     pub(super) fn path_word(&self, source: &str, at: usize) -> super::WorkerPathWord {
         let raw = source[self.offsets[at]..self.ends[at]].trim();
         super::WorkerPathWord {
@@ -122,6 +134,11 @@ impl Statement {
         }
         let name = shell_word_basename(&words[index]);
         let args = &words[index + 1..];
+        if name == "find" && let Err(at) = find_arguments(args) {
+            return Some(Unsupported::execution("shell.unknown_syntax", offset(index + 1 + at),
+                "unsupported find expression", "the expression has an unknown option or incomplete action",
+                "use a supported find expression with complete literal operands"));
+        }
         // xargs appends runtime input to argv. Only data-only consumers and
         // process-signal consumers with their own existing policy can accept
         // that unknown input. Filename readers/writers and unknown programs
@@ -179,7 +196,76 @@ pub(in crate::hooks::handlers::handlers_events) enum ShellInput { Command(usize)
 pub(super) struct ConsumerFiles<'a> {
     pub(super) outputs: Vec<&'a str>,
     pub(super) temporaries: Vec<&'a str>,
+    pub(super) deletes: Vec<&'a str>,
     runtime: Option<usize>,
+}
+
+pub(super) struct FindAction {
+    pub(super) argv: std::ops::Range<usize>,
+    pub(super) directory: bool,
+}
+
+#[derive(Default)]
+pub(super) struct FindArguments {
+    pub(super) roots: Vec<usize>,
+    outputs: Vec<usize>,
+    pub(super) actions: Vec<FindAction>,
+    delete: bool,
+    runtime: Option<usize>,
+}
+
+/// Parse option positions before assigning effects. Patterns, output formats
+/// and child argv cannot manufacture find expressions. Indices preserve the
+/// caller's word provenance; no child shell text is reconstructed here.
+pub(super) fn find_arguments(args: &[String]) -> Result<FindArguments, usize> {
+    let mut found = FindArguments::default();
+    let mut at = 0;
+    while let Some(word) = args.get(at).map(String::as_str) {
+        if matches!(word, "-H" | "-L" | "-P" | "--")
+            || word.strip_prefix("-O").is_some_and(|level| !level.is_empty() && level.bytes().all(|b| b.is_ascii_digit()))
+        { at += 1; }
+        else if word == "-D" {
+            if args.get(at + 1).is_none() { return Err(at); }
+            at += 2;
+        } else { break; }
+    }
+    while let Some(word) = args.get(at).map(String::as_str) {
+        if word.starts_with('-') || matches!(word, "!" | "(" | ")" | ",") { break; }
+        found.roots.push(at);
+        at += 1;
+    }
+    while let Some(word) = args.get(at).map(String::as_str) {
+        if matches!(word, "!" | "(" | ")" | "," | "-not" | "-o" | "-or" | "-a" | "-and"
+            | "-print" | "-print0" | "-prune" | "-depth" | "-xdev" | "-mount" | "-empty"
+            | "-readable" | "-writable" | "-executable" | "-nouser" | "-nogroup" | "-true"
+            | "-false" | "-quit" | "-ls" | "-follow" | "-daystart" | "-noleaf" | "-warn" | "-nowarn"
+            | "-ignore_readdir_race" | "-noignore_readdir_race" | "--help" | "--version")
+        { at += 1; continue; }
+        if word == "-delete" { found.delete = true; at += 1; continue; }
+        if matches!(word, "-exec" | "-execdir" | "-ok" | "-okdir") {
+            let start = at + 1;
+            let end = (start..args.len()).find(|&at| matches!(args[at].as_str(), ";" | "+"))
+                .ok_or(at)?;
+            if start == end { return Err(at); }
+            found.actions.push(FindAction { argv: start..end, directory: word.ends_with("dir") });
+            at = end + 1;
+            continue;
+        }
+        let output = matches!(word, "-fprint" | "-fprint0" | "-fprintf" | "-fls");
+        let newer = word.as_bytes();
+        let reference = newer.len() == 8 && word.starts_with("-newer")
+            && b"aBcm".contains(&newer[6]) && b"aBcmt".contains(&newer[7]);
+        if output || super::find_value_option(word) || reference || word == "-context" || word == "-files0-from" {
+            let count = if word == "-fprintf" { 2 } else { 1 };
+            if args.get(at + count).is_none() { return Err(at); }
+            if output { found.outputs.push(at + 1); }
+            if word == "-files0-from" { found.runtime = Some(at); }
+            at += 1 + count;
+            continue;
+        }
+        return Err(at);
+    }
+    Ok(found)
 }
 
 #[derive(Clone, Copy)]
@@ -191,12 +277,26 @@ enum ConsumerValue { Data, Output, Temporary, Runtime }
 pub(super) fn consumer_files<'a>(name: &str, args: &'a [String]) -> ConsumerFiles<'a> {
     use ConsumerValue::*;
     let mut files = ConsumerFiles::default();
-    if !matches!(name, "sort" | "wc" | "uniq" | "find") { return files; }
+    if name == "find" {
+        match find_arguments(args) {
+            Ok(find) => {
+                files.outputs.extend(find.outputs.iter().map(|&at| args[at].as_str()));
+                files.runtime = find.runtime;
+                if find.delete {
+                    files.deletes.extend(find.roots.iter().map(|&at| args[at].as_str()));
+                    if files.deletes.is_empty() { files.deletes.push("."); }
+                }
+            }
+            Err(at) => files.runtime = Some(at),
+        }
+        return files;
+    }
+    if !matches!(name, "sort" | "wc" | "uniq") { return files; }
     let mut at = 0;
     let mut operands = 0;
     let mut options = true;
     while let Some(word) = args.get(at).map(String::as_str) {
-        if name != "find" && options && word == "--" {
+        if options && word == "--" {
             options = false;
             at += 1;
             continue;
@@ -238,19 +338,6 @@ pub(super) fn consumer_files<'a>(name: &str, args: &'a [String]) -> ConsumerFile
                     option = Some((role, (!suffix.is_empty()).then_some(suffix)));
                     break;
                 }
-            }
-        }
-        if name == "find" {
-            if word == "-files0-from" { option = Some((Runtime, None)); }
-            else if matches!(word, "-exec" | "-execdir" | "-ok" | "-okdir") {
-                // Action argv is a child invocation, not find options.
-                at += 1;
-                while args.get(at).is_some_and(|word| !matches!(word.as_str(), ";" | "+")) { at += 1; }
-            } else if super::find_value_option(word)
-                || (word.len() == 8 && word.starts_with("-newer"))
-                || matches!(word, "-fprint" | "-fprint0" | "-fprintf" | "-fls" | "-D" | "-O")
-            {
-                at += 1 + usize::from(word == "-fprintf");
             }
         }
         if let Some((role, attached)) = option {

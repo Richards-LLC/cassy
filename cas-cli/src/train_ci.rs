@@ -260,6 +260,7 @@ fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &st
     // The marker below knows only this daemon's own dispatch, so on Nov 13 a
     // supervisor's run at the frozen tip got a duplicate one scan later.
     if state["outcome"] != "PENDING"
+        || state["pending_run_id"].is_string()
         || crate::mcp::tools::core::workflow::release_freeze::active(root, epic).is_none()
     {
         return Ok(());

@@ -1,7 +1,7 @@
 mod shell_admission;
 mod shell_effects;
 
-use shell_admission::{ShellLexed, ShellToken, factory_shell_lex, shell_payload_index};
+use shell_admission::{ShellLexed, ShellToken, factory_shell_lex, shell_ansi_c_word, shell_payload_index};
 
 use crate::hooks::handlers::*;
 

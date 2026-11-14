@@ -22,7 +22,7 @@ pub(super) struct ShellLexed {
 /// ANSI-C quoting is a constant word part, not a parameter or command
 /// substitution. Unsupported escapes, NULs and non-UTF8 bytes stay unresolved
 /// so the effect guard refuses them rather than matching a different word.
-fn shell_ansi_c_word(command: &str, start: usize) -> Option<(String, usize)> {
+pub(super) fn shell_ansi_c_word(command: &str, start: usize) -> Option<(String, usize)> {
     let bytes = command.as_bytes();
     if bytes.get(start..start + 2) != Some(b"$'") {
         return None;

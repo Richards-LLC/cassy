@@ -1433,7 +1433,7 @@ fn merge_tip_content_presence_selected(
     window: Option<&TaskCommitReceiptWindow>,
     identity: &TaskCommitIdentity,
     validated_receipt: Option<&str>,
-    selected: Option<&[String]>,
+    explicit_commits: Option<&[String]>,
 ) -> Option<DeliveryContentPresence> {
     let full_tip = git_text(repo, &["rev-parse", &format!("{merge_tip}^{{commit}}")])?;
     let merge_tip = full_tip.as_str();
@@ -1455,7 +1455,7 @@ fn merge_tip_content_presence_selected(
         .filter(|commit| !commit.is_empty())
         .collect::<Vec<_>>();
 
-    let mut commits = match selected {
+    let mut commits = match explicit_commits {
         Some(commits) => commits.to_vec(),
         None => {
             let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
@@ -1681,7 +1681,7 @@ fn merge_tip_content_presence_selected(
             // minified bundle through every rebuilt epic commit. In the
             // cas-cee5 replay this loop spent 295 bundle diffs and 77 blames
             // reaching the same "dropped" the rule decides on.
-            let artifact = selected.is_none()
+            let artifact = explicit_commits.is_none()
                 && super::artifact_left_to_regeneration_rule(repo, merge_tip, &path, &carries_source);
             plan.push((resolution.clone(), path, artifact));
         }
@@ -1725,7 +1725,7 @@ fn merge_tip_content_presence_selected(
     let measurements: Vec<_> = commits
         .iter()
         .map(|commit| {
-            if selected.is_some() {
+            if explicit_commits.is_some() {
                 return super::delivery_content_presence_on_target_for_task(
                     repo, commit, target, identity.task_id.as_deref().unwrap_or(""),
                 );
@@ -1750,7 +1750,7 @@ fn merge_tip_content_presence_selected(
             }
             DeliveryContentPresence::Dropped { paths } => {
                 for path in paths {
-                    if selected.is_none() && super::artifact_left_to_regeneration_rule(
+                    if explicit_commits.is_none() && super::artifact_left_to_regeneration_rule(
                         repo,
                         merge_tip,
                         &path,

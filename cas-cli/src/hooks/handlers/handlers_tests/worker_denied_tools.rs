@@ -349,6 +349,28 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
         let output = handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, &command);
     }
+    // Every admitted literal shell scope must retain the credential check.
+    // Feed requests to the hook only; none of these programs is executed.
+    let mut command = "cat ~/.config/neonctl/credentials.json".to_string();
+    let mut failures = Vec::new();
+    for depth in 1..=6 {
+        command = format!("sh -c '{}'", command.replace('\'', "'\\''"));
+        let reason = denial(handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap());
+        if !reason.as_ref().is_some_and(|reason| reason.contains("[H-09]")) {
+            failures.push(format!("credential read at depth {depth}: {reason:?}"));
+        }
+    }
+    // After the script operand or command string, remaining argv is data.
+    for command in [
+        "bash fixture.sh -c 'cat ~/.config/neonctl/credentials.json'",
+        "bash -c true fixture-name 'cat ~/.config/neonctl/credentials.json'",
+    ] {
+        let reason = denial(handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap());
+        if reason.is_some() {
+            failures.push(format!("literal script argument: {reason:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

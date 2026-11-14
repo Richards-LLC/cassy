@@ -82,16 +82,256 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
     }
 }
 
+/// cas-e197: names whose every value in this command is known. Numeric names
+/// hold only digits or arithmetic over numeric names; identifier names hold
+/// only literal variable names. Anything inherited, read or substituted is
+/// absent, so arithmetic and `${!name}` over it stay refused.
+#[derive(Clone, Default)]
+struct InertNames {
+    numeric: HashSet<String>,
+    identifier: HashSet<String>,
+}
+
+thread_local! {
+    static INERT: std::cell::RefCell<Vec<InertNames>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct InertScope;
+
+impl InertScope {
+    fn enter(names: InertNames) -> Self {
+        INERT.with(|stack| stack.borrow_mut().push(names));
+        Self
+    }
+}
+
+impl Drop for InertScope {
+    fn drop(&mut self) {
+        INERT.with(|stack| stack.borrow_mut().pop());
+    }
+}
+
+fn inert_current() -> InertNames {
+    INERT.with(|stack| stack.borrow().last().cloned().unwrap_or_default())
+}
+
+fn identifier_run(bytes: &[u8], at: usize) -> usize {
+    bytes[at..].iter().take_while(|ch| ch.is_ascii_alphanumeric() || **ch == b'_').count()
+}
+
+/// Arithmetic over digits, operators and the given numeric names only.
+fn arithmetic_over(expression: &str, numeric: &HashSet<String>) -> bool {
+    let bytes = expression.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let ch = bytes[at];
+        if ch.is_ascii_alphabetic() || ch == b'_' || (ch == b'$' && bytes.get(at + 1)
+            .is_some_and(|next| next.is_ascii_alphabetic() || *next == b'_'))
+        {
+            let start = at + usize::from(ch == b'$');
+            let len = identifier_run(bytes, start);
+            if !numeric.contains(&expression[start..start + len]) {
+                return false;
+            }
+            at = start + len;
+        } else if ch.is_ascii_digit() || ch.is_ascii_whitespace() || b"()+-*/%<>=!&|^~?:,".contains(&ch) {
+            at += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 /// Only numeric source is inert under arithmetic's recursive evaluation. Even
-/// a bare variable can contain an array subscript that executes a substitution.
+/// a bare variable can contain an array subscript that executes a substitution,
+/// unless every value the command gives it is numeric (cas-e197).
 fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
-    if expression.bytes().all(|ch| ch.is_ascii_digit() || ch.is_ascii_whitespace()
-        || b"()+-*/%<>=!&|^~?:,".contains(&ch))
-    {
+    if arithmetic_over(expression, &inert_current().numeric) {
         Ok(())
     } else {
         Err("an unresolved arithmetic operand")
     }
+}
+
+/// Builtins that can give a name an unknown value or an integer/nameref
+/// attribute, or unset it so `${name:=…}` can rebind it. Their presence
+/// anywhere disables inert tracking for the script.
+const VALUE_MUTATORS: &[&str] = &[
+    "read", "declare", "typeset", "local", "export", "readonly", "let", "integer", "mapfile",
+    "readarray", "getopts", "eval", "source", "coproc", "trap", "enable", "case", "select", "unset",
+];
+
+fn inert_names(script: &str, projected: &str, lexed: &ShellLexed, parent: &InertNames) -> InertNames {
+    let tokens = &lexed.tokens;
+    let word = |index: usize| match tokens.get(index) {
+        Some(ShellToken::Word(word)) => Some(word.as_str()),
+        _ => None,
+    };
+    let mutator = tokens.iter().enumerate().any(|(index, token)| match token {
+        ShellToken::Word(text) => {
+            let value = text.split_once('=').filter(|(name, _)| is_shell_variable_name(name))
+                .map_or(text.as_str(), |(_, value)| value);
+            VALUE_MUTATORS.contains(&value)
+                || (matches!(value, "printf" | "wait") && word(index + 1).is_some_and(|next| next.starts_with(["-v", "-p"])))
+                // `.` sources a file only in command position; `find .` is data.
+                || (value == "." && (index == 0 || matches!(tokens[index - 1], ShellToken::Operator(_))))
+        }
+        _ => false,
+    });
+    if mutator {
+        return InertNames::default();
+    }
+    let raw = |index: usize| {
+        let start = if index == 0 { 0 } else { lexed.ends[index - 1] };
+        projected[start..lexed.ends[index]].trim()
+    };
+    // Every value each name receives, and the token that first binds it.
+    let mut assigned: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    let mut defined: HashMap<String, usize> = HashMap::new();
+    let mut depth = 0usize;
+    let mut statement_start = true;
+    let mut index = 0;
+    while index < tokens.len() {
+        match &tokens[index] {
+            ShellToken::Operator(';') => statement_start = true,
+            ShellToken::Operator('(') => { depth += 1; statement_start = true; }
+            ShellToken::Operator(')') => { depth = depth.saturating_sub(1); statement_start = false; }
+            ShellToken::Operator(_) => statement_start = false,
+            ShellToken::Word(text) if text == "for" => {
+                let mut cursor = index + 1;
+                if let Some(name) = word(index + 1).filter(|name| is_shell_variable_name(name)) {
+                    // Without `in`, the loop reads the positional parameters.
+                    let mut values = Vec::new();
+                    if word(index + 2) == Some("in") {
+                        cursor = index + 3;
+                        while let Some(value) = word(cursor).filter(|value| *value != "do") {
+                            values.push((value.to_string(), lexed.literals[cursor]));
+                            cursor += 1;
+                        }
+                    }
+                    if depth == 0 && statement_start && !values.is_empty() {
+                        defined.entry(name.to_string()).or_insert(index + 1);
+                    }
+                    if values.is_empty() {
+                        values.push((String::new(), false));
+                    }
+                    assigned.entry(name.to_string()).or_default().extend(values);
+                }
+                depth += 1;
+                statement_start = false;
+                index = cursor;
+                continue;
+            }
+            ShellToken::Word(text) => {
+                if matches!(text.as_str(), "if" | "while" | "until" | "{") {
+                    depth += 1;
+                } else if matches!(text.as_str(), "fi" | "done" | "}") {
+                    depth = depth.saturating_sub(1);
+                }
+                let keyword = matches!(text.as_str(), "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "{" | "!");
+                // Assignments are only the unquoted `name=` prefix words of a
+                // command; `echo "n=$n"` or `env n=1 cmd` leave the shell's n alone.
+                let prefix = text.split_once('=').map(|(name, _)| name)
+                    .filter(|name| statement_start && is_shell_variable_name(name)
+                        && raw(index).strip_prefix(*name).is_some_and(|rest| rest.starts_with('=')));
+                if let Some(name) = prefix {
+                    let value = raw(index)[name.len() + 1..].to_string();
+                    assigned.entry(name.to_string()).or_default().push((value, lexed.literals[index]));
+                    // Only a whole assignment statement, at top level and not behind
+                    // && / ||, binds the shell's own variable on every run.
+                    let operator = (index + 1..tokens.len())
+                        .find(|at| matches!(tokens[*at], ShellToken::Operator(_)));
+                    let whole = (index + 1..operator.unwrap_or(tokens.len()))
+                        .all(|at| word(at).is_some_and(|w| w.split_once('=').is_some_and(|(n, _)| is_shell_variable_name(n))));
+                    // A pipeline element or background job assigns in a subshell.
+                    let current_shell = operator.is_none_or(|at| match tokens[at] {
+                        ShellToken::Operator(';') => true,
+                        ShellToken::Operator(ch @ ('&' | '|')) => tokens.get(at + 1) == Some(&ShellToken::Operator(ch)),
+                        _ => false,
+                    });
+                    if depth == 0 && statement_start && whole && current_shell {
+                        defined.entry(name.to_string()).or_insert(index);
+                    }
+                } else {
+                    statement_start = keyword;
+                }
+            }
+        }
+        index += 1;
+    }
+    let bytes = projected.as_bytes();
+    let first_occurrence = |name: &str| {
+        let mut at = 0;
+        while let Some(found) = projected[at..].find(name) {
+            let start = at + found;
+            let end = start + name.len();
+            let before = start.checked_sub(1).map(|p| bytes[p]);
+            let boundary = !before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+                && !bytes.get(end).is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == b'_');
+            if boundary {
+                return Some(start);
+            }
+            at = end;
+        }
+        None
+    };
+    let mutated = |name: &str| {
+        let mut at = 0;
+        while let Some(found) = projected[at..].find(name) {
+            let start = at + found;
+            let end = start + name.len();
+            let before = start.checked_sub(1).map(|p| bytes[p]);
+            if !before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+                && (bytes.get(end) == Some(&b'[') || projected[end..].starts_with("+="))
+            {
+                return true;
+            }
+            at = end;
+        }
+        false
+    };
+    let bodies = if script == projected { Vec::new() } else { shell_heredoc_bodies(script) };
+    let candidate = |name: &String| {
+        // Bash itself rewrites its uppercase variables (BASH_REMATCH, PWD, _ …).
+        if !name.bytes().any(|ch| ch.is_ascii_lowercase())
+            || mutated(name) || bodies.iter().any(|body| body.contains(name.as_str()))
+        {
+            return false;
+        }
+        if parent.numeric.contains(name) || parent.identifier.contains(name) {
+            return true;
+        }
+        let Some(&token) = defined.get(name) else { return false };
+        let span_start = if token == 0 { 0 } else { lexed.ends[token - 1] };
+        first_occurrence(name).is_some_and(|at| at >= span_start && at < lexed.ends[token])
+    };
+    let identifier: HashSet<String> = assigned.iter()
+        .filter(|(name, values)| candidate(name) && !parent.numeric.contains(*name)
+            && values.iter().all(|(value, literal)| *literal && is_shell_variable_name(value)))
+        .map(|(name, _)| name.clone())
+        .chain(parent.identifier.iter().filter(|name| !assigned.contains_key(*name) && !mutated(name)).cloned())
+        .collect();
+    // Greatest fixed point: each name starts from a numeric literal and only
+    // ever receives arithmetic over names that stay numeric.
+    let mut numeric: HashSet<String> = assigned.keys().filter(|name| candidate(name)).cloned()
+        .chain(parent.numeric.iter().filter(|name| !mutated(name)).cloned())
+        .collect();
+    loop {
+        let keep: HashSet<String> = numeric.iter().filter(|name| {
+            assigned.get(*name).is_none_or(|values| values.iter().all(|(value, literal)| {
+                (*literal && !value.is_empty() && value.bytes().all(|ch| ch.is_ascii_digit()))
+                    || value.strip_prefix("$((").and_then(|rest| rest.strip_suffix("))"))
+                        .or_else(|| value.strip_prefix("\"$((").and_then(|rest| rest.strip_suffix("))\"")))
+                        .is_some_and(|expression| arithmetic_over(expression, &numeric))
+            }))
+        }).cloned().collect();
+        if keep.len() == numeric.len() {
+            break;
+        }
+        numeric = keep;
+    }
+    InertNames { numeric, identifier }
 }
 
 /// `test` receives expanded arguments as data; a captured shell exit status is
@@ -244,6 +484,11 @@ fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'stat
 fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
     if matches!(body, "!" | "#") { return Ok(()); } // PID/count, not indirection.
     if let Some(target) = body.strip_prefix('!') {
+        // cas-e197: a name whose every value is a literal variable name reads
+        // that variable as data; nothing in it is evaluated as syntax.
+        if inert_current().identifier.contains(target) {
+            return Ok(());
+        }
         numeric_arithmetic(target)?;
         // Even a numeric parameter name reads an unknown value as syntax.
         return Err("an unresolved indirect parameter");
@@ -893,6 +1138,7 @@ fn collect_script(
     if lexed.unresolved_at.is_some() {
         return Err("an unresolved shell payload");
     }
+    let _inert = InertScope::enter(inert_names(script, &projected, &lexed, &inert_current()));
     conditional_arithmetic(&projected, &lexed)?;
     for &(start, end) in &lexed.parameters {
         parameter_arithmetic(&projected[start..end])?;

@@ -2700,8 +2700,12 @@ function rawOutputDialog(): HTMLDialogElement {
   const opened = dialog;
   opened.querySelector<HTMLButtonElement>(".raw-output-close")!.onclick = () => opened.close();
   // Escape and Close both land here: focus goes back to the header's Raw
-  // output, the one a shell rebuild may have replaced since it opened.
+  // output, the one a shell rebuild may have replaced since it opened. The
+  // close event fires a task after the dialog closed and the browser already
+  // returned focus, so a control the operator moved to in between keeps it.
   opened.addEventListener("close", () => {
+    const active = document.activeElement;
+    const focusLost = !active || active === document.body || !active.isConnected || opened.contains(active);
     if (selectedMachineId && selectedSession && rawOutputThread === sessionKey(selectedMachineId, selectedSession)) {
       releasePaneControl(selectedMachineId, selectedSession);
     }
@@ -2709,7 +2713,7 @@ function rawOutputDialog(): HTMLDialogElement {
     rawOutputThread = undefined;
     const toggle = document.querySelector<HTMLButtonElement>("#conversation-raw-output");
     toggle?.setAttribute("aria-expanded", "false");
-    toggle?.focus();
+    if (focusLost) toggle?.focus();
   });
   return opened;
 }

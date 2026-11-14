@@ -37304,10 +37304,18 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             git(&p, &["checkout", "-q", "main"]);
             write("CHANGELOG.md", &format!("# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-11-01\n\n- The base release.\n{older}"));
             write("scripts/release_changelog.py", PROMOTER);
+            // cas-799e5: the cas-af35 shape also ships overview and bug-family
+            // fragments plus rebuilt dist, which the release consolidates.
+            write("docs/PRODUCT_OVERVIEW.md", "# Product overview\n\n## Factory\n\n- Existing capability.\n");
+            write("docs/qa/journeys.yaml", "bug_families: {}\n");
+            write("hub-web/dist/app.js", "bundle(1);\n");
             git(&p, &["add", "-A"]);
             git(&p, &["commit", "-q", "-m", "changelog"]);
             git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
             write(&fragment, &format!("### Fixed — Factory\n\n{ENTRY}\n"));
+            write(&format!("docs/product-overview.d/{owner}.md"), "## Factory\n\n- Fresh activity shows without a phase.\n");
+            write(&format!("docs/qa/bug-families/{owner}-activity.yaml"), &format!("tasks:\n  - {owner}\nsummary: activity without a phase\n"));
+            write("hub-web/dist/app.js", "bundle(2);\n");
             write("src/feature.rs", "pub fn feature() {}\n");
             git(&p, &["add", "-A"]);
             git(&p, &["commit", "-q", "-m", "cas-test1: feature and changelog fragment"]);
@@ -37324,6 +37332,11 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
                         .unwrap();
                     assert!(promoted.status.success(), "{}", String::from_utf8_lossy(&promoted.stderr));
                     assert!(!p.join(&fragment).exists(), "the release promotion deletes the fragment");
+                    let overview = std::fs::read_to_string(p.join("docs/PRODUCT_OVERVIEW.md")).unwrap();
+                    write("docs/PRODUCT_OVERVIEW.md", &format!("{overview}- Fresh activity shows without a phase.\n"));
+                    write("docs/qa/journeys.yaml", &format!("bug_families:\n  {owner}-activity:\n    tasks:\n      - {owner}\n    summary: activity without a phase\n"));
+                    git(&p, &["rm", "-q", &format!("docs/product-overview.d/{owner}.md"), &format!("docs/qa/bug-families/{owner}-activity.yaml")]);
+                    write("hub-web/dist/app.js", "bundle(3);\n");
                     git(&p, &["add", "-A"]);
                     git(&p, &["commit", "-q", "-m", "release: v1.0.1"]);
                 }

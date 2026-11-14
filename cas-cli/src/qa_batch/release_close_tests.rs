@@ -146,7 +146,15 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == id));
     }
     assert_eq!(tasks.get("cas-retained").unwrap().status, TaskStatus::Closed);
-    for id in ["cas-reverted", "cas-partial"] {
+    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained"] {
+        let task = tasks.get(id).unwrap();
+        assert_eq!(release_tag_ships_delivery(&repo,
+            task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
+            task.deliverables.factory_branch_anchor.as_deref().unwrap(), &scope.final_release_sha, id),
+            id == "cas-retained");
+    }
+    assert!(prepare_release_tag_receipt(&root, &["cas-retained".into()], &tag).is_ok());
+    for id in ["cas-reverted", "cas-partial", "cas-unfolded"] {
         assert!(prepare_release_tag_receipt(&root, &[id.into()], &tag).is_err());
     }
     assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());

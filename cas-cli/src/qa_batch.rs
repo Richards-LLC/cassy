@@ -1050,8 +1050,8 @@ pub(crate) fn prepare_release_tag_receipt(
 
 /// History membership cannot prove shipment: a later revert retains ancestry.
 /// The final tree must preserve the delivery's effect, including ordinary edits.
-pub(crate) fn release_tag_ships_delivery(repo: &Path, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
-    release_delivery_effect(repo, None, anchor, tag_sha, task_id).is_ok()
+pub(crate) fn release_tag_ships_delivery(repo: &Path, base: Option<&str>, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
+    release_delivery_effect(repo, base, anchor, tag_sha, task_id).is_ok()
 }
 
 pub(crate) fn release_delivery_effect(
@@ -1072,7 +1072,7 @@ pub(crate) fn release_delivery_effect(
     // An explicitly empty delivery has no content that can be reverted.
     if base == Some(anchor) { return Ok(()); }
     let presence = match base {
-        Some(base) => close_ops::delivery_content_presence_from_base_on_target_for_task(repo, base, shipped, target, task_id),
+        Some(base) => close_ops::delivery_content_presence_from_base_on_target_for_task(repo, base, anchor, shipped, target, task_id),
         None => close_ops::delivery_content_presence_on_target_for_task(repo, shipped, target, task_id),
     };
     match presence {
@@ -1152,7 +1152,7 @@ fn covering_receipt(
             if !known
                 || ![anchor.as_str(), head].contains(&reviewed.as_str())
                 || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
-                || !release_tag_ships_delivery(repo, reviewed, &receipt.staging_sha, &task.id)
+                || !release_tag_ships_delivery(repo, task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), reviewed, &receipt.staging_sha, &task.id)
             {
                 continue;
             }

@@ -617,7 +617,7 @@ fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> b
     let Some(anchor) = crate::qa_batch::delivery_anchor(repo, child) else {
         return false;
     };
-    crate::qa_batch::release_tag_ships_delivery(repo, &anchor, tag_sha, &child.id)
+    crate::qa_batch::release_tag_ships_delivery(repo, child.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), &anchor, tag_sha, &child.id)
 }
 
 fn published_later_tags(repo: &Path, tag: &str) -> Result<Vec<(String, String)>> {

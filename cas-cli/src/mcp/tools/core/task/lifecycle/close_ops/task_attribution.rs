@@ -1364,6 +1364,42 @@ pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<
     }
 }
 
+/// Measure a parked delivery using only its own first-parent content commits.
+/// Target-sync imports never become delivery obligations.
+pub(super) fn first_parent_delivery_content_presence(
+    repo: &Path, base: &str, anchor: &str, shipped: &str, target: &str, task_id: &str,
+) -> Option<DeliveryContentPresence> {
+    if [base, anchor, shipped, target].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
+    let history = git_text(repo, &["rev-list", "--first-parent", "--no-merges", "--reverse", &format!("{base}..{anchor}")])?;
+    let mut identity = TaskCommitIdentity {
+        task_id: Some(task_id.into()), start_base: Some(base.into()), ..Default::default()
+    };
+    let mut commits = Vec::new();
+    for commit in history.lines().filter(|commit| !commit.is_empty()) {
+        let message = git_text(repo, &["show", "-s", "--format=%B", commit])?;
+        let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
+        let paths = git_text(repo, &["diff", "--name-only", &parent, commit, "--", ".", ":(exclude).cas", ":(exclude).cas/**"])?;
+        if !paths.is_empty() && !subject_claims_another_task(&message, &identity) { commits.push(commit.to_string()); }
+    }
+    if commits.is_empty() { return None; }
+    identity.known_commits = commits.clone();
+    identity.known_commits.push(anchor.into());
+    if anchor != shipped {
+        // The squash has the exact source snapshot. Limit its comparison to
+        // the task's own first-parent paths, excluding target-sync imports.
+        let mut paths = Vec::new();
+        for commit in &commits {
+            let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
+            let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", &parent, commit, "--"])?;
+            append_unique(&mut paths, changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect());
+        }
+        return Some(super::delivery_content_presence_on_target_for_paths(
+            repo, shipped, target, Some(&paths), false, &[task_id], Some(base),
+        ));
+    }
+    merge_tip_content_presence_selected(repo, target, anchor, None, &identity, None, Some(&commits))
+}
+
 /// Prove a merge or empty checkpoint delivery from the task's attributed
 /// content commits rather than from the tip itself.
 ///
@@ -1387,6 +1423,18 @@ pub(super) fn merge_tip_content_presence(
     identity: &TaskCommitIdentity,
     validated_receipt: Option<&str>,
 ) -> Option<DeliveryContentPresence> {
+    merge_tip_content_presence_selected(repo, target, merge_tip, window, identity, validated_receipt, None)
+}
+
+fn merge_tip_content_presence_selected(
+    repo: &Path,
+    target: &str,
+    merge_tip: &str,
+    window: Option<&TaskCommitReceiptWindow>,
+    identity: &TaskCommitIdentity,
+    validated_receipt: Option<&str>,
+    selected: Option<&[String]>,
+) -> Option<DeliveryContentPresence> {
     let full_tip = git_text(repo, &["rev-parse", &format!("{merge_tip}^{{commit}}")])?;
     let merge_tip = full_tip.as_str();
     let has_work_window = window.is_some();
@@ -1407,8 +1455,13 @@ pub(super) fn merge_tip_content_presence(
         .filter(|commit| !commit.is_empty())
         .collect::<Vec<_>>();
 
-    let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
-    let mut commits = attributed_content_commits(repo, merge_tip, window, identity, &ranges)?;
+    let mut commits = match selected {
+        Some(commits) => commits.to_vec(),
+        None => {
+            let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
+            attributed_content_commits(repo, merge_tip, window, identity, &ranges)?
+        }
+    };
 
     if let Some(receipt) = validated_receipt
         .and_then(|receipt| super::resolve_task_commit_receipt_sha(repo, receipt).ok())
@@ -1628,8 +1681,8 @@ pub(super) fn merge_tip_content_presence(
             // minified bundle through every rebuilt epic commit. In the
             // cas-cee5 replay this loop spent 295 bundle diffs and 77 blames
             // reaching the same "dropped" the rule decides on.
-            let artifact =
-                super::artifact_left_to_regeneration_rule(repo, merge_tip, &path, &carries_source);
+            let artifact = selected.is_none()
+                && super::artifact_left_to_regeneration_rule(repo, merge_tip, &path, &carries_source);
             plan.push((resolution.clone(), path, artifact));
         }
     }
@@ -1672,6 +1725,11 @@ pub(super) fn merge_tip_content_presence(
     let measurements: Vec<_> = commits
         .iter()
         .map(|commit| {
+            if selected.is_some() {
+                return super::delivery_content_presence_on_target_for_task(
+                    repo, commit, target, identity.task_id.as_deref().unwrap_or(""),
+                );
+            }
             super::delivery_content_presence_in_parent_leaving_artifacts(
                 repo,
                 commit,
@@ -1692,7 +1750,7 @@ pub(super) fn merge_tip_content_presence(
             }
             DeliveryContentPresence::Dropped { paths } => {
                 for path in paths {
-                    if super::artifact_left_to_regeneration_rule(
+                    if selected.is_none() && super::artifact_left_to_regeneration_rule(
                         repo,
                         merge_tip,
                         &path,

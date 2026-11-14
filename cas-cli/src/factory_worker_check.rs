@@ -2378,10 +2378,10 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     drop(worker_signals);
     drop(slot);
     if !status.success() {
-        bail!(
+        bail!(crate::gates::tag("G-61", format!(
             "{}: FAIL {head} ({status})",
             if test.is_some() { "test" } else { "check" }
-        );
+        )));
     }
     if clean_head(&repo)? != head {
         bail!("Worker tree changed during check; no PASS receipt recorded");

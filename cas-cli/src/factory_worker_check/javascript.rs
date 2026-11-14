@@ -333,6 +333,7 @@ fn reject_retry_configuration(
     Ok(())
 }
 
+// gate-audit[force]: Suite-header changes include descendant tests in the selected proof; this broadens test coverage and never bypasses a refusal.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     node: Node<'_>,
@@ -450,7 +451,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
     let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
     let tests = changed_tests(&repo, &base, &head, &args[1..])?;
     if tests.is_empty() {
-        bail!("no changed JavaScript tests matched the supplied files");
+        bail!(crate::gates::tag("G-61", "no changed JavaScript tests matched the supplied files"));
     }
     let _lane =
         super::try_lock_lane_with_command(cas_root, &repo, &super::worker_check_command(args))?

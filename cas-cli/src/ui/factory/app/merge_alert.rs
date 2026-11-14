@@ -201,6 +201,10 @@ pub(super) fn read_delivery(
     let wait = read_worker_wait(event, data, &cas_dir, repo, supervisor);
     let mut ci = wait.as_ref().map(|(_, wait)| wait.ci).unwrap_or("unknown");
     let ready = read(event, data, repo, wait.as_ref().map(|(_, wait)| wait), &mut ci);
+    #[cfg(test)]
+    if task == "cas-9efb-test" {
+        eprintln!("[DEBUG-a706] merge read: ci={ci} ready={ready:?} wait={wait:?}");
+    }
     if (ci == "unknown" || ready.as_ref().is_some_and(|ready| ready.ci == "unknown"))
         && suppress_unknown_ci(repo, data, &task, &tip)
     {

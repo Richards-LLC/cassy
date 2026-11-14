@@ -40,6 +40,27 @@ class PolicyTests(unittest.TestCase):
     def ci(self):
         return copy.deepcopy(policy.load(self.root / '.github/workflows/ci.yml'))
 
+    def test_compiler_cache_writes_seed_main_without_branch_quota_churn(self):
+        writers = []
+        for name in ('ci', 'lane', 'release-prebuild'):
+            workflow = policy.load(self.root / f'.github/workflows/{name}.yml')
+            for job_id, job in workflow['jobs'].items():
+                for step in job.get('steps', []):
+                    if step.get('uses') not in ('mozilla-actions/sccache-action@v0.0.11',
+                                                './.github/actions/setup-rust-linux'):
+                        continue
+                    writers.append((name, job_id))
+                    env = {**workflow.get('env', {}), **job.get('env', {}), **step.get('env', {})}
+                    for ref in ('refs/heads/main', 'refs/heads/factory/test', 'refs/heads/epic/test',
+                                'refs/heads/gh-readonly-queue/main/pr-1', 'refs/pull/1/merge', 'refs/tags/v1.2.3'):
+                        with self.subTest(workflow=name, job=job_id, ref=ref):
+                            self.assertEqual(self.gh_value(env.get('SCCACHE_GHA_RW_MODE', 'READ_WRITE'),
+                                                          {'github.ref': ref}),
+                                             'READ_WRITE' if ref == 'refs/heads/main' and name != 'lane' else 'READ_ONLY')
+        self.assertIn(('release-prebuild', 'build-macos'), writers)
+        self.assertIn(('release-prebuild', 'build'), writers)
+        self.assertIn(('lane', 'lane-impact'), writers)
+
     def test_hosted_precheck_selects_queue_jobs_without_advisory_builds(self):
         jobs = self.ci()['jobs']
         common = {'needs.ci-diff.outputs.class':'rust-touched',

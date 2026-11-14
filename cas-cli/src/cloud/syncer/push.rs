@@ -504,22 +504,15 @@ impl CloudSyncer {
         payload
     }
 
-    pub(super) fn record_accepted_revisions(&self, entity_type: &str, response: &super::PushResponse) {
+    /// Store the revisions the server echoed for accepted rows, and drop a base
+    /// this push proved stale.
+    fn settle_revision_receipts(&self, entity_type: &str, response: &super::PushResponse) {
         let Some(entity) = crate::cloud::EntityType::from_collection_key(entity_type) else {
             return;
         };
         for (id, revision) in response.accepted_revisions_for(entity_type) {
             let _ = self.queue.record_revision(entity, &id, revision);
         }
-    }
-
-    /// Store the revisions the server echoed for accepted rows, and drop a base
-    /// this personal push proved stale.
-    fn settle_revision_receipts(&self, entity_type: &str, response: &super::PushResponse) {
-        let Some(entity) = crate::cloud::EntityType::from_collection_key(entity_type) else {
-            return;
-        };
-        self.record_accepted_revisions(entity_type, response);
         for (id, current_revision) in response.revision_conflicts_for(entity_type) {
             // Our base lost the race. Forget it rather than replacing it with
             // the server's current revision: pretending we have seen that row

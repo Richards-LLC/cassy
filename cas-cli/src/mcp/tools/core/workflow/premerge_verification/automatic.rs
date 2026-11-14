@@ -806,6 +806,15 @@ mod tests {
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
         let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // cas-3f0a: the review broker binds the real GUI socket path,
+        // HOME/.cas/factory-<session>.gui.sock (ui/factory/session.rs:252).
+        // Production refuses an over-long one at startup (validate_daemon_start,
+        // session.rs:238); the fixture's HOME under the capped runner's deep
+        // TMPDIR exceeds macOS SUN_LEN, so HOME is a short alias of it.
+        let socket_home = crate::test_paths::short_socket_tempdir();
+        let home_alias = socket_home.path().join("h");
+        std::os::unix::fs::symlink(env.home(), &home_alias).unwrap();
+        env.set("HOME", &home_alias);
         let bin = env.home().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         env.set("CAS_TEST_HUB_PATH", &bin);

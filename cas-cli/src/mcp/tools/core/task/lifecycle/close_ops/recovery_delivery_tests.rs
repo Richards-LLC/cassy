@@ -2148,7 +2148,9 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
         work_target: task.deliverables.work_target.clone().unwrap(),
         assignee: WORKER.into(), branch: BRANCH.into(), base_sha: base.clone(),
     });
-    tasks.update(&task).unwrap();
+    // Creation time is immutable on update; seed the older task through add.
+    tasks.delete(TASK).unwrap();
+    tasks.add(&task).unwrap();
     std::fs::write(f.worker_path.join(journey), original.replace("shared callback", "temporary callback")).unwrap();
     git(&f.worker_path, &["add", journey]);
     git(&f.worker_path, &["commit", "-qm", &format!("test({TASK}): temporary journey edit")]);

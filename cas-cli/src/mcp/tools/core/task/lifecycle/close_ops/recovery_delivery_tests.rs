@@ -2159,7 +2159,7 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
     let supervisor = CasCore::with_daemon(root.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     env.set("CAS_AGENT_ROLE", "supervisor");
-    // Exercise e5c1's real cross-target rebinding, not a hand-edited start.
+    // e5c1 rebinds empty sources; this nonempty retarget retains its audit.
     supervisor.cas_task_update_with_target(
         serde_json::from_value(serde_json::json!({"id": TASK})).unwrap(),
         None, Some("main"), true,
@@ -2169,8 +2169,8 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
     status(&f.core, "open").await;
     start(&f.core).await;
     let resumed = tasks.get(TASK).unwrap();
-    assert_eq!(resumed.deliverables.factory_branch_start.as_ref().unwrap().work_target,
-        resumed.deliverables.work_target.clone().unwrap());
+    assert_eq!(resumed.deliverables.factory_branch_start.as_ref().unwrap().work_target.target_branch, "epic/old");
+    assert_eq!(resumed.deliverables.work_target.as_ref().unwrap().target_branch, "main");
     // A target-sync merge imports a sibling, splitting attribution ranges.
     std::fs::write(repo.join("sibling.py"), "sibling = True\n").unwrap();
     git(&repo, &["add", "sibling.py"]);

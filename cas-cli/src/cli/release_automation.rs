@@ -48,6 +48,8 @@ pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
 }
 
 fn preview_release_close(args: &PreviewArgs, root: &Path) -> Result<ReleasePreview> {
+    let store = PreviewStore::open(root)?;
+    let root = store.root.as_path();
     let repo = PathBuf::from(git(&std::env::current_dir()?, &["rev-parse", "--show-toplevel"])?);
     let mut scope = if let Some(path) = &args.scope {
         serde_json::from_slice(&fs::read(path)?)?
@@ -57,6 +59,83 @@ fn preview_release_close(args: &PreviewArgs, root: &Path) -> Result<ReleasePrevi
     };
     if args.scope.is_some() { scope.bind_reports(root).map_err(anyhow::Error::msg)?; }
     preview_scope(root, &repo, scope)
+}
+
+/// cas-8e1b: a candidate reads with its own schema. When the live store's
+/// applied migrations lag the candidate's, preview reads a private SQLite
+/// backup migrated to that schema; the live store is only read.
+struct PreviewStore {
+    root: PathBuf,
+    _snapshot: Option<tempfile::TempDir>,
+}
+
+impl PreviewStore {
+    fn open(live: &Path) -> Result<Self> {
+        if !crate::migration::check_migrations_read_only(live)?.has_pending() {
+            return Ok(Self { root: live.to_path_buf(), _snapshot: None });
+        }
+        let config = crate::config::Config::load(live)?;
+        let parent = crate::config::resolved_factory_artifact_paths(
+            live, config.factory().artifacts_root.as_deref()).project_root;
+        fs::create_dir_all(&parent)?;
+        let snapshot = tempfile::Builder::new().prefix("release-preview-").tempdir_in(&parent)?;
+        let root = snapshot.path().join(".cas");
+        fs::create_dir(&root)?;
+        // Other store files stay the live ones; only the database is private.
+        for entry in fs::read_dir(live)? {
+            let name = entry?.file_name();
+            if ["cas.db", "cas.db-wal", "cas.db-shm", "cas.db-journal"].iter().any(|db| name == *db) { continue; }
+            if name == "verification-candidates" {
+                relocate_candidates(&live.join(&name), &root.join(&name), live, &root)?;
+            } else {
+                link(&live.join(&name), &root.join(&name))?;
+            }
+        }
+        rusqlite::Connection::open_with_flags(live.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+            .backup(rusqlite::MAIN_DB, root.join("cas.db"), None)?;
+        crate::migration::run_migrations(&root, false)?;
+        ensure!(crate::cloud::resolve_canonical_id(&root) == crate::cloud::resolve_canonical_id(live),
+            "release preview snapshot does not resolve the live project identity; pin [project] canonical_id");
+        Ok(Self { root, _snapshot: Some(snapshot) })
+    }
+}
+
+/// A candidate manifest binds the store it was prepared in (cas-afdf replay
+/// contract); rebind only that path so the snapshot validates it unchanged.
+fn relocate_candidates(from: &Path, to: &Path, live: &Path, snapshot: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let name = entry?.file_name();
+        let (source, target) = (from.join(&name), to.join(&name));
+        if source.is_dir() {
+            relocate_candidates(&source, &target, live, snapshot)?;
+            continue;
+        }
+        let mut manifest = fs::read(&source)?;
+        if name == "candidate.json"
+            && let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&manifest)
+            && value["cas_root"] == serde_json::json!(live)
+        {
+            value["cas_root"] = serde_json::json!(snapshot);
+            manifest = serde_json::to_vec(&value)?;
+        }
+        fs::write(target, manifest)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn link(target: &Path, path: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, path)
+}
+
+#[cfg(not(unix))]
+fn link(target: &Path, path: &Path) -> std::io::Result<()> {
+    if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, path)
+    } else {
+        std::os::windows::fs::symlink_file(target, path)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -344,6 +423,10 @@ pub fn track(args: &TrackArgs, root: &Path) -> Result<()> {
 }
 
 fn track_with_preview(args: &TrackArgs, root: &Path, preview: ReleasePreview) -> Result<()> {
+    // cas-8e1b: track is the cut's first store write. Bring the store to the
+    // candidate's schema first, as the MCP runtime does; a failure stops the cut.
+    crate::migration::run_migrations(root, false)
+        .context("release track could not apply the candidate's migrations; nothing tracked")?;
     let (repo, train) = open_train(root)?;
     track_on_train(args, root, &repo, &train, preview)
 }
@@ -1610,6 +1693,7 @@ pub(super) mod tests {
 
     /// cas-8e1b: `release track` is the cut's first store write; on a lagging
     /// store it applies the candidate's migrations before reading the train.
+    /// The cut runs in a Cassy worktree and names the live store by CAS_ROOT.
     #[test]
     fn candidate_track_migrates_a_lagging_store_cas_8e1b() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -1617,9 +1701,13 @@ pub(super) mod tests {
         let (temp, root, train, _owner, args) = fixture();
         fs::write(root.join("config.toml"),
             "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nrelease_train = true\n").unwrap();
-        let _cwd = env.enter_dir(temp.path());
-        let scope = cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap();
-        let preview = preview_scope(&root, temp.path(), scope).unwrap();
+        let worktree = root.join("worktrees").join("cut");
+        git(temp.path(), &["checkout", "main"]).unwrap();
+        git(temp.path(), &["worktree", "add", worktree.to_str().unwrap(), train.branch.as_deref().unwrap()]).unwrap();
+        env.set("CAS_ROOT", &root);
+        let _cwd = env.enter_dir(&worktree);
+        let scope = cut_scope(&root, &worktree, &args.commit, &args.version, Some(&train.id), None).unwrap();
+        let preview = preview_scope(&root, &worktree, scope).unwrap();
         lag_one_column(&root);
         track_with_preview(&args, &root, preview).unwrap();
         let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();

@@ -371,25 +371,27 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
     // open for its rewrite; stop_hook_summary or turn_duration settles it.
     let stop_verdicts = cli == cas_mux::SupervisorCli::Claude
         && values.iter().any(claude_stop_settled);
-    let mut held = false;
+    // The held answer's record uuid: its Stop-hook feedback is its child.
+    let mut held: Option<String> = None;
     for value in values {
         let Some(at) = timestamp(value) else { continue };
         match cli {
             cas_mux::SupervisorCli::Claude => {
                 let input = claude_prompt(value).or_else(|| claude_commander_hook(value));
-                if held {
+                if let Some(answer) = &held {
                     if claude_stop_blocked(value) {
-                        held = false;
+                        held = None;
                         continue;
                     }
-                    let human = human_provenance(value)
-                        && value.get("attachment").is_none_or(human_provenance);
-                    if input.is_some() && !human {
+                    if input.is_some() && !answer.is_empty()
+                        && value.get("parentUuid").and_then(Value::as_str) == Some(answer.as_str()) {
                         // Stop-hook feedback is machine input inside this turn.
                         continue;
                     }
+                    // Any other input proves the turn ended, even when its
+                    // verdict was never written, so no answer stays unmirrored.
                     if claude_stop_settled(value) || input.is_some() {
-                        held = false;
+                        held = None;
                         if let Some(text) = final_text.take() {
                             settle_claude_turn(&mut turns, &mut claude_inputs, &mut claude_status, text, at);
                         }
@@ -460,7 +462,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         || api_error)
                     && answered;
                 if ended && stop_verdicts && !api_error {
-                    held = true;
+                    held = Some(value.get("uuid").and_then(Value::as_str).unwrap_or("").to_owned());
                     continue;
                 }
                 let finished = ended
@@ -1907,6 +1909,21 @@ mod tests {
         let answers: Vec<_> = operator_replies(&queue).into_iter()
             .filter(|reply| reply.reply_to == Some(asked)).map(|reply| reply.message).collect();
         assert_eq!(answers, [rewrite], "only the reply the Stop hooks accepted reaches Commander");
+    }
+
+    /// cas-2a95: an answer whose Stop verdict was never written (the harness
+    /// died mid-hook) still settles when the next input, even a machine
+    /// wake, proves its turn ended.
+    #[test]
+    fn verdictless_answer_settles_at_the_next_input_cas_2a95() {
+        let values = vec![
+            serde_json::json!({"timestamp":"2026-11-14T03:00:00Z","type":"system","subtype":"turn_duration"}),
+            serde_json::json!({"timestamp":"2026-11-14T03:00:01Z","type":"user","uuid":"question","message":{"content":"status?"}}),
+            serde_json::json!({"timestamp":"2026-11-14T03:00:02Z","type":"assistant","uuid":"answer","message":{"role":"assistant","content":[{"type":"text","text":"Answer"}],"stop_reason":"end_turn"}}),
+            serde_json::json!({"timestamp":"2026-11-14T03:00:09Z","type":"user","uuid":"wake","isMeta":true,"message":{"content":"Background job finished"}}),
+        ];
+        let turns = completed_turns(&values, cas_mux::SupervisorCli::Claude);
+        assert_eq!(turns.iter().map(|turn| (turn.key.as_str(), turn.text.as_str())).collect::<Vec<_>>(), [("question", "Answer")]);
     }
 
     #[test]

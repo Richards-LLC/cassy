@@ -6513,6 +6513,12 @@ fn operator_policy_command_denial(command: &str) -> Option<String> {
                 "🚫 OPERATOR-ONLY (cas-3c26): {action} is the operator's to do, from their own terminal, never an agent's. Ask the supervisor to request it from the operator."
             ));
         }
+        // Clap stops at help/version before dispatching a command. Keep the
+        // fallback word-position checks from treating that output path as a
+        // policy mutation.
+        if cas_invocation_displays_help(&args) {
+            continue;
+        }
         // cas-b181: config writes judged by the CLI parser, so options and
         // their values (`set --store here <key>`) cannot hide the key. The
         // word-position checks below remain for argv the parser rejects.
@@ -6554,6 +6560,17 @@ fn operator_policy_command_denial(command: &str) -> Option<String> {
         }
     }
     operator_policy_command_textual(command).then(|| OPERATOR_POLICY_COMMAND_DENIAL.to_string())
+}
+
+/// Whether the real CLI parser handles this invocation by displaying help
+/// or version output before dispatching any command.
+fn cas_invocation_displays_help(args: &[String]) -> bool {
+    use clap::{error::ErrorKind, Parser};
+
+    let argv = std::iter::once("cas".to_string()).chain(args.iter().cloned());
+    crate::cli::Cli::try_parse_from(argv).is_err_and(|error| {
+        matches!(error.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion)
+    })
 }
 
 /// An operator-only `cas config` write, as the CLI parser reads `args` (the
@@ -6806,8 +6823,15 @@ fn read_only_statement(words: &[String]) -> bool {
         "git" => index == 0 && policy_git_flags(args),
         "cas" => {
             index == 0
-                && matches!(args, [verb, action, key]
-            if verb == "config" && action == "get" && !key.is_empty() && !key.starts_with('-'))
+                && (cas_invocation_displays_help(args)
+                    || matches!(
+                        args,
+                        [verb, action, key]
+                            if verb == "config"
+                                && action == "get"
+                                && !key.is_empty()
+                                && !key.starts_with('-')
+                    ))
         }
         // cas-b7b2: searches that cas-1768 QA found refused, judged by
         // POSITIVE allowlists that fail closed. No environment assignment or
@@ -9504,7 +9528,7 @@ EOF
             ("named coproc if", "coproc NAME if cas config gr''ant-write --task cas-1234 --path /x --reason r; then :; fi"),
         ] {
             let (status, reason) = decision(command);
-            if status != "deny" || !reason.contains("operator") {
+            if status != "deny" || !reason.contains("[H-11]") {
                 bypasses.push(format!("{vector}: {status}: {reason}"));
             }
         }

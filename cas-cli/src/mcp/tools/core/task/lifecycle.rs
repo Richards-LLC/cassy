@@ -1404,6 +1404,8 @@ impl CasCore {
         confirm_warning: bool,
         delivery_mode: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        let review_dispatch_id = self.normalize_review_dispatch_id(req.review_dispatch_id.as_deref())?;
+        self.ensure_review_assignee(review_dispatch_id.as_deref(), req.assignee.as_deref())?;
         if let Some(message) = [req.notes.as_deref(), req.reason.as_deref()]
             .into_iter()
             .flatten()
@@ -1872,6 +1874,7 @@ impl CasCore {
             task_type,
             risk,
             door,
+            review_dispatch_id,
             proof_targets,
             assignee: req.assignee,
             labels,
@@ -2557,6 +2560,11 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        crate::task_assignment::ensure_review_assignment(
+            task.review_dispatch_id.as_deref(),
+            agents.get(&agent_id).ok().filter(|agent| agent.is_alive()).map(|agent| agent.role),
+        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         let mut queued_start_snapshot = queued_start.then(|| task.clone());
         let branch_start_snapshot = task.clone();
@@ -4673,6 +4681,7 @@ mod related_recall_response_tests {
             task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4698,6 +4707,7 @@ mod related_recall_response_tests {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4723,6 +4733,7 @@ mod related_recall_response_tests {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

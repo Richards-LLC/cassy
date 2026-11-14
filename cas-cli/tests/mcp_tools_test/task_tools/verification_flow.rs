@@ -13,6 +13,119 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::process::Command;
 use tempfile::TempDir;
 
+#[tokio::test]
+async fn review_assignment_refuses_worker_before_acceptance_gh1908() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, supervisor) = setup_cas_as(&mut env, AgentRole::Supervisor);
+    let root = temp.path().join(".cas");
+    env.set("CAS_FACTORY_MODE", "1");
+    let agents = open_agent_store(&root).unwrap();
+    let implementer = cas::types::Agent::new_with_role(
+        "rapid-lion".into(), "rapid-lion".into(), AgentRole::Worker,
+    );
+    let reviewer = cas::types::Agent::new_with_role(
+        "solid-jaguar".into(), "solid-jaguar".into(), AgentRole::Worker,
+    );
+    agents.register(&implementer).unwrap();
+    agents.register(&reviewer).unwrap();
+    let tasks = open_task_store(&root).unwrap();
+    let mut delivery = cas::types::Task::new("cas-delivery".into(), "No-code delivery".into());
+    delivery.assignee = Some(implementer.name.clone());
+    tasks.add(&delivery).unwrap();
+    let supervisor_id = format!("test-session-{}", std::process::id());
+    let dispatch = cas_store::create_verification_dispatch(
+        &root, &delivery.id, &implementer.id, &supervisor_id,
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    ).unwrap();
+    let worker = cas::mcp::CasCore::with_daemon(root.clone(), None, None);
+    worker.set_agent_id_for_testing(reviewer.id.clone());
+    let verdict = serde_json::from_value(serde_json::json!({
+        "task_id": delivery.id, "dispatch_id": dispatch.id,
+        "status": "approved", "summary": "Independent read-only review",
+    })).unwrap();
+    let error = worker.cas_verification_add(Parameters(verdict)).await.unwrap_err();
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
+
+    let service = CasService::new(supervisor, None);
+    // The incident's separate worker and exact dispatch, through the real MCP
+    // router. The review target is data; title/description grant no authority.
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "create", "title": "Independent candidate review",
+        "task_type": "chore", "execution_note": "no-code",
+        "assignee": reviewer.name, "review_dispatch_id": dispatch.id,
+    })).unwrap();
+    let error = service.task(Parameters(request)).await
+        .expect_err("a worker cannot accept a review requiring verifier authority");
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert_eq!(tasks.list(None).unwrap().len(), 1);
+    assert!(agents.list_active_leases().unwrap().is_empty());
+    let unchanged = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+    assert_eq!(unchanged.state, cas::types::VerificationDispatchState::Pending);
+    assert_eq!(unchanged.verifier_agent_id, None);
+
+    // A review request may exist without promising an ordinary worker a
+    // verdict route. The typed target survives the real store/wire roundtrip.
+    service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "create", "title": "Read the candidate",
+        "task_type": "chore", "execution_note": "no-code",
+        "review_dispatch_id": dispatch.id,
+    })).unwrap())).await.unwrap();
+    let review = tasks.list(None).unwrap().into_iter()
+        .find(|task| task.id != delivery.id).unwrap();
+    assert_eq!(review.review_dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+    let wire: cas::types::Task = serde_json::from_value(serde_json::to_value(&review).unwrap()).unwrap();
+    assert_eq!(wire.review_dispatch_id, review.review_dispatch_id);
+    for request in [
+        serde_json::json!({"action":"update", "id":review.id,
+            "assignee":reviewer.name, "notes":"must stay unapplied"}),
+        serde_json::json!({"action":"update", "id":review.id,
+            "assignee":reviewer.id, "supervisor_override":true,
+            "reason":"an override cannot grant verdict authority"}),
+    ] {
+        let error = service.task(Parameters(serde_json::from_value(request).unwrap()))
+            .await.unwrap_err();
+        assert_eq!(cas::gates::codes_in(&error.message), ["G-156"]);
+        let after = tasks.get(&review.id).unwrap();
+        assert_eq!(after.assignee, None);
+        assert_eq!(after.notes, review.notes);
+        assert_eq!(after.updated_at, review.updated_at);
+    }
+    let error = service.factory(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"spawn_workers", "task_id":review.id, "count":1,
+    })).unwrap())).await.unwrap_err();
+    assert_eq!(cas::gates::codes_in(&error.message), ["G-156"]);
+    let error = worker.cas_task_start_with_options(Parameters(TaskStartRequest {
+        id: review.id.clone(), brief: None, force: None,
+    })).await.unwrap_err();
+    assert_eq!(cas::gates::codes_in(&error.message), ["G-156"]);
+    assert_eq!(tasks.get(&review.id).unwrap().status, TaskStatus::Open);
+    assert!(agents.list_active_leases().unwrap().is_empty());
+
+    // Free text remains evidence, not a role declaration. Setting a review
+    // target on an already assigned task must refuse the whole update too.
+    service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"create", "title":format!("Investigate dispatch {}", dispatch.id),
+        "task_type":"chore", "execution_note":"no-code", "assignee":reviewer.name,
+    })).unwrap())).await.unwrap();
+    let ordinary = tasks.list(None).unwrap().into_iter()
+        .find(|task| task.assignee.as_deref() == Some(reviewer.name.as_str())).unwrap();
+    assert_eq!(ordinary.review_dispatch_id, None);
+    let error = service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"update", "id":ordinary.id, "review_dispatch_id":dispatch.id,
+        "notes":"must stay unapplied",
+    })).unwrap())).await.unwrap_err();
+    assert_eq!(cas::gates::codes_in(&error.message), ["G-156"]);
+    assert_eq!(tasks.get(&ordinary.id).unwrap().review_dispatch_id, None);
+    assert_eq!(tasks.get(&ordinary.id).unwrap().notes, ordinary.notes);
+    service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"update", "id":review.id, "review_dispatch_id":"",
+        "assignee":reviewer.name,
+    })).unwrap())).await.unwrap();
+    assert_eq!(tasks.get(&review.id).unwrap().review_dispatch_id, None);
+    assert_eq!(tasks.get(&review.id).unwrap().assignee, Some(reviewer.name));
+}
+
 #[path = "../../fixtures/ci_check_run.rs"]
 mod ci_check_run;
 
@@ -2947,6 +3060,7 @@ fn task_status_update(id: &str, status: Option<&str>, notes: Option<&str>) -> Ta
         execution_note: None,
         risk: None,
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         external_ref: None,
         assignee: None,
@@ -3187,6 +3301,7 @@ async fn test_task_close_blocked_without_verification() {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -3284,6 +3399,7 @@ require_merge_on_epic_close = true
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -3373,6 +3489,7 @@ fn simple_task_req(title: &str) -> TaskCreateRequest {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -3803,6 +3920,7 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -4060,6 +4178,7 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -4195,6 +4314,7 @@ async fn test_a844_clean_divergence_not_flagged_as_conflict() {
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -4338,6 +4458,7 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -4545,6 +4666,7 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -4744,6 +4866,7 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -4980,6 +5103,7 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -5147,6 +5271,7 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -5384,6 +5509,7 @@ async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -5494,6 +5620,7 @@ async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64()
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -5606,6 +5733,7 @@ async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() 
         task_type: "chore".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -5686,6 +5814,7 @@ async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64()
         task_type: "chore".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -5825,6 +5954,7 @@ enabled = false
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -6013,6 +6143,7 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -6169,6 +6300,7 @@ async fn test_task_close_resolves_configured_staging_system_b_target_cas_113f() 
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -6333,6 +6465,7 @@ enabled = false
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -6596,6 +6729,7 @@ enabled = false
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -6668,6 +6802,7 @@ enabled = false
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -6752,6 +6887,7 @@ enabled = false
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -6832,6 +6968,7 @@ enabled = false
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -7064,6 +7201,7 @@ async fn test_0447_halted_inprogress_with_merged_receipt_closes_without_restart(
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -7227,6 +7365,7 @@ async fn test_epic_close_requires_epic_verification_type() {
         task_type: "epic".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -7607,6 +7746,7 @@ async fn test_task_lifecycle_with_verification() {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -7697,6 +7837,7 @@ async fn test_task_close_reopens_after_rejected_verification() {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -7800,6 +7941,7 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -8033,6 +8175,7 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -8179,6 +8322,7 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -9677,6 +9821,7 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -9851,6 +9996,7 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
         door: None,
+        review_dispatch_id: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,
@@ -10824,6 +10970,7 @@ async fn supervisor_self_assignee_close_guidance(
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -10933,6 +11080,7 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -11054,6 +11202,7 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
                 task_type: "task".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -11185,6 +11334,7 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,
@@ -11384,6 +11534,7 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 task_type: "epic".to_string(),
                 risk: Some("none".to_string()),
                 door: None,
+                review_dispatch_id: None,
                 proof_targets: None,
                 supervisor_override: None,
                 reason: None,

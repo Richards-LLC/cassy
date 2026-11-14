@@ -1,6 +1,11 @@
 /** A presentation of daemon facts; never an elapsed estimate from history. */
 export interface PhaseLine {
   readonly label: string;
+  /** Idle only from a fresh, reported turn end; missing or old facts are unknown. */
+  readonly state: "busy" | "idle" | "waiting" | "unknown";
+  /** The open turn's running tool name. */
+  readonly step?: string;
+  readonly lastActivityAt?: string;
   readonly elapsed?: string;
   readonly active: boolean;
   readonly unavailable: boolean;
@@ -10,10 +15,14 @@ export interface PhaseContext {
   stale?: boolean;
   waiting?: boolean;
   working?: boolean;
+  /** The session's daemon: a stopped one leaves the transcript's last turn open. */
+  daemonRunning?: boolean;
   /** Browser monotonic clock, paired with the moment status arrived. */
   now: number;
   receivedAt?: number;
 }
+/** Status follows each machine heartbeat (5 s); three missed reads may be a stuck daemon. */
+export const PHASE_FRESH_MS = 15_000;
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" ? value as Record<string, unknown> : undefined;
 }
@@ -41,7 +50,9 @@ export function livePhase(value: unknown, context: PhaseContext): PhaseLine | un
     running = !ended && (lifecycle.stage === "start" || lifecycle.stage === "phase");
   }
   if (label === undefined) return undefined;
-  const unavailable = !context.connected || context.stale === true || snapshot?.stale === true;
+  const expired = reported && (context.daemonRunning === false
+    || (context.receivedAt !== undefined && context.now - context.receivedAt > PHASE_FRESH_MS));
+  const unavailable = !context.connected || context.stale === true || snapshot?.stale === true || expired;
   const active = running && !waiting && !unavailable;
   const start = reported ? instant(lifecycle.started_at) : undefined;
   const observed = instant(snapshot?.observed_at);
@@ -49,6 +60,10 @@ export function livePhase(value: unknown, context: PhaseContext): PhaseLine | un
     : observed + (active ? Math.max(0, context.now - (context.receivedAt ?? context.now)) : 0);
   const seconds = start !== undefined && end !== undefined && end >= start && !waiting ? Math.floor((end - start) / 1000) : undefined;
   const elapsed = seconds === undefined ? undefined : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-  if (unavailable) label = `${context.connected ? "Update stale" : "Disconnected"} · ${label} (last known)`;
-  return { label, ...(elapsed === undefined ? {} : { elapsed }), active, unavailable };
+  const state = unavailable ? "unknown" : waiting ? "waiting" : active ? "busy"
+    : ended && snapshot?.kind === "notice" && phase === undefined ? "idle" : "unknown";
+  if (unavailable) label = `${context.connected ? "Activity unknown, possibly stuck" : "Disconnected"} · ${label} (last known)`;
+  const step = active && typeof snapshot?.step === "string" ? snapshot.step : undefined;
+  const lastActivityAt = instant(snapshot?.last_activity_at) === undefined ? undefined : snapshot!.last_activity_at as string;
+  return { label, state, ...(step ? { step } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), ...(elapsed === undefined ? {} : { elapsed }), active, unavailable };
 }

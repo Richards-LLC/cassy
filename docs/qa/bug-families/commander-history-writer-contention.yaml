@@ -1,5 +1,0 @@
-title: Commander history stays readable while a daemon writer owns the shared SQLite connection
-found: '2026-11-13'
-tasks: [cas-cab9]
-journeys: [HUB-J4]
-invariants: [HUB-J4-GOAL]

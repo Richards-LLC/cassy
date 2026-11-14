@@ -43,6 +43,11 @@ pub struct PreviewArgs {
 
 /// No store, receipt, ledger-cache or notification writes.
 pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
+    println!("{}", serde_json::to_string(&preview_release_close(args, root)?)?);
+    Ok(())
+}
+
+fn preview_release_close(args: &PreviewArgs, root: &Path) -> Result<ReleasePreview> {
     let repo = PathBuf::from(git(&std::env::current_dir()?, &["rev-parse", "--show-toplevel"])?);
     let mut scope = if let Some(path) = &args.scope {
         serde_json::from_slice(&fs::read(path)?)?
@@ -51,9 +56,7 @@ pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
             args.version.as_deref().context("version required")?, args.train.as_deref(), args.inputs.as_deref())?
     };
     if args.scope.is_some() { scope.bind_reports(root).map_err(anyhow::Error::msg)?; }
-    let preview = preview_scope(root, &repo, scope)?;
-    println!("{}", serde_json::to_string(&preview)?);
-    Ok(())
+    preview_scope(root, &repo, scope)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1559,6 +1562,43 @@ pub(super) mod tests {
         assert!(installed(&InstalledArgs {
             receipt: publication_path, repo: "example/repo".into(), failed_attempts: None,
         }, Some(&root)).is_err());
+    }
+
+    /// cas-8e1b: a candidate one additive column ahead of the live store, as in
+    /// the 4.28 cut, previews exactly what it previews on a current store and
+    /// leaves the live store byte-identical.
+    #[test]
+    fn candidate_preview_of_a_lagging_store_leaves_it_unchanged_cas_8e1b() {
+        use sha2::{Digest, Sha256};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, train, _owner, track) = fixture();
+        let mut child = Task::new("cas-a002".into(), "Child".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.deliverables.factory_branch_anchor = Some(track.commit.clone());
+        let tasks = open_task_store(&root).unwrap();
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&Dependency::new(child.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
+        let args = PreviewArgs { scope: None, commit: Some(track.commit.clone()),
+            version: Some(track.version.clone()), inputs: None, train: Some(train.id.clone()) };
+        let _cwd = env.enter_dir(temp.path());
+        let current = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
+        // The store as the installed CLI left it: m299's column not yet added.
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+            "ALTER TABLE tasks DROP COLUMN review_dispatch_id; DELETE FROM cas_migrations WHERE id = 299;
+             PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        let live = || {
+            let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let schema: Vec<String> = conn.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+                .unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+            (schema, format!("{:x}", Sha256::digest(fs::read(root.join("cas.db")).unwrap())))
+        };
+        let before = live();
+        assert!(!before.0.iter().any(|sql| sql.contains("review_dispatch_id")));
+        let lagging = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
+        assert_eq!(lagging, current);
+        assert_eq!(live(), before);
     }
 
     #[test]

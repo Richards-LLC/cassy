@@ -16,10 +16,16 @@ class ReleaseCacheKeyTest(unittest.TestCase):
     def test_cache_saves_stay_in_main_scope_without_dispatch_writes(self):
         workflow = yaml.safe_load((Path(__file__).resolve().parent.parent /
                                    ".github/workflows/release-prebuild.yml").read_text())
-        saves = [step for job in workflow["jobs"].values() for step in job.get("steps", [])
-                 if step.get("uses") == "actions/cache/save@v4"]
+        # env.SELF_HOSTED exists only where a job declares it (build-macos); elsewhere
+        # Actions reads the unset property as empty. The self-hosted target dir is its
+        # own cache, so that path never uploads target to the Actions cache.
+        saves = [(step, sh) for job in workflow["jobs"].values() for step in job.get("steps", [])
+                 if step.get("uses") == "actions/cache/save@v4"
+                 for sh in (["true", "false"] if "SELF_HOSTED" in job.get("env", {}) else [""])]
         self.assertTrue(saves, "release prebuild must still seed caches on main")
-        for step in saves:
+        self.assertIn("true", {sh for _, sh in saves}, "the self-hosted macOS path must be checked")
+        for step, self_hosted in saves:
+            saves_target = "target" in step["with"]["path"].split()
             for event, ref, needed, hit, expected in [
                 ("push", "refs/heads/main", "true", "false", True),
                 ("push", "refs/heads/main", "false", "true", False),
@@ -33,10 +39,12 @@ class ReleaseCacheKeyTest(unittest.TestCase):
                 values = {"github.event_name": event, "github.ref": ref,
                           "steps.compile.outputs.needed": needed,
                           "steps.cache-lookup.outputs.cache-hit": hit,
-                          "steps.zig-cache.outputs.cache-hit": hit}
+                          "steps.zig-cache.outputs.cache-hit": hit,
+                          "env.SELF_HOSTED": self_hosted}
+                expected = expected and not (self_hosted == "true" and saves_target)
                 expression = re.sub(r"[\w-]+(?:\.[\w-]+)+", lambda m: repr(values[m[0]]), step["if"])
                 expression = expression.replace("&&", " and ").replace("||", " or ")
-                with self.subTest(step=step["name"], event=event, ref=ref, needed=needed, hit=hit):
+                with self.subTest(step=step["name"], self_hosted=self_hosted, event=event, ref=ref, needed=needed, hit=hit):
                     self.assertEqual(eval(expression, {"__builtins__": {}}), expected)
 
     def test_workspace_version_churn_and_build_compatibility(self):

@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn park_requires_owned_test_stability_at_the_exact_tip_cas_9e02e() {
+    fn park_requires_owned_test_stability_with_shared_carry_forward_cas_9e02e() {
         use crate::factory_worker_check::stability::{self, Identity, Proof};
         for runner in ["nextest", "vitest", "jest", "playwright"] {
             let repo = changelog_fixture();
@@ -995,9 +995,30 @@ mod tests {
             assert!(admitted.is_none(), "{runner}: {admitted:?}");
             std::fs::write(repo.path().join("README.md"), "new delivery tip\n").unwrap();
             let moved = commit_changelog_fixture(repo.path(), "move source tip");
-            if rust { crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &moved, "fixture", "test(child)"); }
-            assert!(park_refusal(root.path(), repo.path(), &task, &paths, &moved, "main", None)
-                .unwrap().contains(&identity.name));
+            assert!(park_refusal(root.path(), repo.path(), &task, &paths, &moved, "main", None).is_none(),
+                "{runner}: a docs-only commit must carry the tested input proof forward");
+            // The product work is now on the target. A test-only correction
+            // still owes stability, including when the test name is unchanged.
+            assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &moved])
+                .current_dir(repo.path()).status().unwrap().success());
+            let edited = if rust { "#[test]\nfn owned() { assert_eq!(1, 1); }\n" }
+                else { "test('owned', () => { expect(1).toBe(1); });\n" };
+            std::fs::write(repo.path().join(path), format!("{old}{edited}")).unwrap();
+            let changed = commit_changelog_fixture(repo.path(), "edit only the owned test");
+            let test_paths = vec![identity.path.clone()];
+            if rust { crate::factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &changed, "fixture", "test(child)"); }
+            let held = park_refusal(root.path(), repo.path(), &task, &test_paths, &changed, "main", None).unwrap();
+            assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains(&identity.name), "{held}");
+            stability::record(root.path(), repo.path(), &changed, Proof { runner: runner.into(),
+                tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+            assert!(park_refusal(root.path(), repo.path(), &task, &test_paths, &changed, "main", None).is_none());
+            std::fs::write(repo.path().join("README.md"), "after corrected test proof\n").unwrap();
+            let retry = commit_changelog_fixture(repo.path(), "docs after corrected test proof");
+            // A failed overlapping rerun at this docs tip may not resurrect
+            // its carried ancestor proof on the next park attempt.
+            stability::invalidate(root.path(), repo.path(), &retry, &[identity.clone()]).unwrap();
+            let held = park_refusal(root.path(), repo.path(), &task, &test_paths, &retry, "main", None).unwrap();
+            assert!(crate::gates::codes_in(&held).contains(&"G-61") && held.contains(&identity.name), "{held}");
         }
     }
 

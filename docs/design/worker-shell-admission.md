@@ -202,42 +202,66 @@ binaries in the same deterministic disposable owned-worktree fixture.
   on exact command text.
 - **Numerator (false denies):** denied commands that a reviewer judges
   admissible under the policy, meaning read-only or inside the worker's write
-  roots, and not operator-only, role, commit-scope or build-cap. Every deny is
-  listed in a labeled CSV, together with the labeling rule. That CSV is the
-  receipt.
+  roots, and not operator-only, role, commit-scope or build-cap. The approved
+  stratified sample below estimates the numerator; it is not an exhaustive
+  classification of every denied command.
 - **Output:** fixture-context numerator, denominator and rate at base and at candidate. Each
   candidate deny that the base allowed is listed separately.
 
-### BASE measurement receipt (candidate pending)
+### Corrected fixture measurement (final candidate pending)
 
 The frozen observed cohort contains 97,765 distinct harness/command inputs:
-33,333 Claude and 64,432 Codex. Every BASE hook request returned a valid
-decision; 18,368 denied. Supervisor decision #4248985 replaces exhaustive deny
-labeling with a fixed-seed, proportional stratified sample of 300 BASE denies
-across 24 harness/rule strata, with at least one row per stratum. The independent
-local model labeled 242 TRUE_DENY, 55 FALSE_DENY and three UNCLEAR. Candidate
-decisions were excluded from its packet. Exact commands and labels stay local.
+33,333 Claude and 64,432 Codex. Supervisor decision #4248985 replaces exhaustive
+deny labeling with a fixed-seed, proportional stratified sample of 300 original
+BASE denies across 24 harness/rule strata, with at least one row per stratum.
+The independent local model labeled 242 TRUE_DENY, 55 FALSE_DENY and three
+UNCLEAR. Candidate decisions were excluded from its packet; exact commands and
+labels stay local. Sampling seeds are 2402 and 2403 for the operator's random
+20-row subset. Operator agreement remains pending.
 
-| Harness | Estimated false denies / all inputs | Fixture-context rate | Simultaneous 95% interval | Point rate if all UNCLEAR are false |
+Supervisor decision #4249274 corrects the fixture to include the repository's
+real `.gitignore`, committed and verified byte-for-byte in both linked trees.
+Both BASE and the pre-repair `d3a01fc` candidate replayed all 97,765 inputs
+successfully in that corrected fixture. Of the 55 original FALSE_DENY labels,
+44 ignored-log commands now allow on both binaries; one improves only on the
+candidate, and ten still deny. The earlier BASE-only receipt `art-fc999b05`
+uses the superseded fixture and cannot supply the corrected-context rate.
+
+The pre-repair candidate added 4,778 denies. A separate blind stratified sample
+of 200 across seven harness/rule strata (seed 2404) received 197 FALSE_DENY,
+two TRUE_DENY and one UNCLEAR labels after every row was read. The initial
+low-confidence label file is excluded. All 244 independently TRUE_DENY inputs
+remain denied. The corrected paired aggregate receipt is `art-82f84c5f`:
+
+| Harness | BASE estimated false denies / all inputs | BASE rate | Pre-repair candidate estimate / all inputs | Pre-repair rate |
 | --- | --- | --- | --- | --- |
-| Claude | 858.071 / 33,333 | 2.574% | 0.651–5.661% | 2.766% |
-| Codex | 2,766 / 64,432 | 4.293% | 3.098–5.100% | 4.341% |
+| Claude | 298.071 / 33,333 | 0.89422% | 881.071 / 33,333 | 2.64324% |
+| Codex | 411 / 64,432 | 0.63788% | 4,476.598 / 64,432 | 6.94779% |
 
-Aggregate receipt `art-fc999b05` records inverse-probability weighted estimates
-and exact finite-population hypergeometric intervals, using Bonferroni across
-the 24 strata. The intervals include UNCLEAR as nonfalse at the lower bound
-and false at the upper bound. Seeds are 2402 for sampling and 2403 for the
-operator's random 20-row subset; operator agreement remains pending.
+The pre-repair candidate fails acceptance: it adds an estimated 583 Claude
+false denies (simultaneous 95% interval 310–584) and 4,065.598 Codex false denies
+(interval 3,834–4,191). Estimates use inverse sampling weights. Intervals invert
+finite-population hypergeometric tails, use Bonferroni over 31 strata and four
+estimands, cap by full-census eligibility, and retain UNCLEAR as upper bounds.
+These intervals describe a fixed candidate and do not account for selecting a
+new candidate in response to sampled diagnoses.
 
-The fixture assigns a different worktree from the historical workers. Thus many
-originally legitimate writes receive TRUE_DENY labels for leaving the fixture's
-roots, biasing the historical comparison downward. These figures cannot prove a
-historical rate or a formal historical lower bound. Commit-scope labels assume
-the fixture has no `.gitignore`; an ignored `target/` makes those false denials
-clearer. The three UNCLEAR rows concern two single-file rustfmt invocations with
-unknown child-module effects and one candidate-binary invocation with unknown
-effects. The final candidate must replay the same cohort and labeled sample;
-new candidate-denied inputs require independent classification too.
+The final candidate must show a net reduction in fixture-context false denies
+against BASE while retaining every independently TRUE_DENY refusal. Replaying
+fixed independent-label frames can measure a changed candidate's contributions;
+any denials outside the sampled frames require independent labels before a
+total-rate claim. Source inspection repairs admit fixed-prefix glob and quoted
+operands while retaining refusals for unquoted expansion that can split argv.
+Final candidate replay, operator agreement and integration of the separately
+owned credential-context fix remain pending.
+
+The fixture assigns a different worktree from historical workers, so many
+originally legitimate writes receive TRUE_DENY labels for leaving its roots.
+That biases the historical comparison downward; these figures prove neither a
+historical rate nor a formal historical lower bound. The UNCLEAR inputs concern
+single-file rustfmt child effects, a candidate binary with unknown effects,
+and a process-group signal without ownership evidence. No historical or security
+payload executes during any replay.
 
 ## Filename-list consumers
 

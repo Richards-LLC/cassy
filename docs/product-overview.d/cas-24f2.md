@@ -35,3 +35,8 @@ Child execution retains separate directory and binding state. Coreutils options
 use a positive grammar, and search-helper modes require resolved execution.
 Credential checks consume the shared filesystem walk's directory alternatives,
 opened files and receiving heredoc bodies rather than a flattened cwd walk.
+
+Inspection operands retain their literal non-option prefix through globbing
+and quoting; unquoted expansion that can split argv still refuses. Executing
+substitutions carry original source spans and backquote quote context into
+filesystem checks, preserving inert quoted markers and scoped effects.

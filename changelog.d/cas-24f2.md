@@ -39,3 +39,8 @@ execution preserves its parent's directory and bindings. Unknown consumer
 options, unresolved option positions and explicit search helpers receive named
 refusals. Credential reads use the filesystem walk's scoped directories and
 opened-file facts, including conditional alternatives and subprocess returns.
+
+Inspection operands retain their literal non-option prefix through globbing
+and quoting; unquoted expansion that can split argv still refuses. Executing
+substitutions carry original source spans and backquote quote context into
+filesystem checks, preserving inert quoted markers and scoped effects.

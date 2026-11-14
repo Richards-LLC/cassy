@@ -2162,7 +2162,7 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
     // Exercise e5c1's real cross-target rebinding, not a hand-edited start.
     supervisor.cas_task_update_with_target(
         serde_json::from_value(serde_json::json!({"id": TASK})).unwrap(),
-        Some("project:cas-c6e1-fixture-project"), Some("main"), true,
+        None, Some("main"), true,
         Some("Retarget the resumed delivery to the current train"), None,
     ).await.unwrap();
     env.set("CAS_AGENT_ROLE", "worker");

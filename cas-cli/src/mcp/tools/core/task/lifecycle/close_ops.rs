@@ -28947,6 +28947,85 @@ mod merge_state_gate_tests {
         (response.is_error, text)
     }
 
+    fn conflict_train_fixture(status: TaskStatus) -> UnpushedAnchorFixture {
+        let f = unpushed_anchor_fixture(status, AnchorChoice::Local);
+        let p = f.dir.path();
+        git(p, &["push", "-q", "origin", &f.branch]);
+        git(p, &["branch", "epic/conflict-train", "main"]);
+        git(p, &["push", "-q", "origin", "epic/conflict-train"]);
+        let mut task = f.store.get(&f.task_id).unwrap();
+        task.deliverables.work_target.as_mut().unwrap().target_branch = "epic/conflict-train".into();
+        f.store.update(&task).unwrap();
+        let agents = crate::store::open_agent_store(&p.join(".cas")).unwrap();
+        let mut worker = agents.get("anchor-worker-id").unwrap();
+        worker.factory_session = Some("conflict-scan".into());
+        agents.update(&worker).unwrap();
+        f
+    }
+
+    fn advance_conflicting_train(f: &UnpushedAnchorFixture) {
+        // Another delivery lands through a separate checkout. The local train
+        // branch remains at its old tip; only origin has the conflicting file.
+        let checkout = tempfile::tempdir().unwrap();
+        git(f.dir.path(), &["worktree", "add", "-q", "--detach", checkout.path().to_str().unwrap(), "main"]);
+        std::fs::write(checkout.path().join("delivery.rs"), "// sibling delivery\n").unwrap();
+        git(checkout.path(), &["add", "delivery.rs"]);
+        git(checkout.path(), &["commit", "-q", "-m", "fix: landed sibling"]);
+        git(checkout.path(), &["push", "-q", "origin", "HEAD:epic/conflict-train"]);
+        git(f.dir.path(), &["worktree", "remove", "--force", checkout.path().to_str().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn park_refuses_conflict_with_live_train_cas_c05a() {
+        let f = conflict_train_fixture(TaskStatus::InProgress);
+        advance_conflicting_train(&f);
+        let (error, message) = close_text(&f).await;
+        assert_eq!(error, Some(true), "{message}");
+        assert_eq!(f.store.get(&f.task_id).unwrap().status, TaskStatus::InProgress, "{message}");
+        assert!(message.contains("delivery.rs"), "{message}");
+        assert!(cas_store::get_latest_verification_dispatch(&f.dir.path().join(".cas"), &f.task_id).unwrap().is_none());
+        assert_eq!(rev_parse_local(f.dir.path(), "HEAD"), f.local);
+        assert!(git_command(f.dir.path(), &["status", "--porcelain"]).output().unwrap().stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn daemon_scan_returns_conflicted_parked_siblings_cas_c05a() {
+        use cas_store::PromptQueueStore;
+        let f = conflict_train_fixture(TaskStatus::InProgress);
+        let (_, message) = close_text(&f).await;
+        assert_eq!(f.store.get(&f.task_id).unwrap().status, TaskStatus::AwaitingMerge, "{message}");
+        let parked = f.store.get(&f.task_id).unwrap();
+        let mut second = parked.clone();
+        second.id = "cas-second".into();
+        second.deliverables.parked_branch = Some("factory/second".into());
+        git(f.dir.path(), &["branch", "factory/second", &f.local]);
+        git(f.dir.path(), &["push", "-q", "origin", "factory/second"]);
+        f.store.add(&second).unwrap();
+        let mut contained = parked.clone();
+        contained.id = "cas-contained".into();
+        contained.deliverables.parked_branch = Some("main".into());
+        contained.deliverables.factory_branch_anchor = Some(rev_parse_local(f.dir.path(), "main"));
+        f.store.add(&contained).unwrap();
+        advance_conflicting_train(&f);
+        let root = f.dir.path().join(".cas");
+        crate::mcp::tools::core::workflow::train_merge::resume_pending(&root, "conflict-scan").await.unwrap();
+        for id in [&f.task_id, &second.id] {
+            let returned = f.store.get(id).unwrap();
+            assert_eq!(returned.status, TaskStatus::Open, "{}", returned.notes);
+            assert_eq!(returned.assignee, parked.assignee);
+            assert!(returned.deliverables.factory_branch_anchor.is_none());
+            assert!(returned.notes.contains("delivery.rs"), "{}", returned.notes);
+        }
+        assert_eq!(f.store.get(&contained.id).unwrap().status, TaskStatus::AwaitingMerge);
+        let queue = cas_store::SqlitePromptQueueStore::open(&root).unwrap();
+        let notices = queue.peek_all(100).unwrap();
+        for id in [&f.task_id, &second.id] {
+            assert!(notices.iter().any(|row| row.prompt.contains(id) && row.prompt.contains("delivery.rs")));
+        }
+        crate::mcp::tools::core::workflow::train_merge::resume_pending(&root, "conflict-scan").await.unwrap();
+        assert_eq!(queue.peek_all(100).unwrap().len(), notices.len());
+    }
+
     #[tokio::test]
     async fn close_requires_every_declared_rule_site_before_park_cas_4f87() {
         let fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);

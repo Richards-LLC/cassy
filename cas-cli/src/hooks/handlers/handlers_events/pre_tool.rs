@@ -10323,6 +10323,8 @@ EOF
         let mut mismatches = Vec::new();
         for (command, denied) in [
             ("rg -n \"needle$\" src/*.rs", false),
+            ("sort src/*.rs | wc -l", false),
+            ("rg -n \"needle$\" \"src/${FILE}\"", false),
             ("sed -n '1,20p' src/new.rs; rg -n needle src/*.rs", false),
             ("rg -n needle src/*.rs; touch ../../ordinary-data.txt", true),
             ("CAS_AGENT_ROLE=supervisor rg -n needle src/*.rs", true),
@@ -11816,6 +11818,8 @@ mod worker_commit_guard_tests {
             ("rg --pre=helper pattern README.md", "shell.dynamic_command"),
             ("rg --hostname-bin helper pattern README.md", "shell.dynamic_command"),
             ("rg --hostname-bin=helper pattern README.md", "shell.dynamic_command"),
+            ("rg needle src$MODE", "shell.dynamic_command"),
+            ("sort src$MODE", "shell.dynamic_command"),
             ("sort \"$MODE\" names.txt", "shell.dynamic_command"),
             ("wc \"$MODE\" names.txt", "shell.dynamic_command"),
             ("uniq \"$MODE\" names.txt", "shell.dynamic_command"),

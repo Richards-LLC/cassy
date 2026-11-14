@@ -60,6 +60,7 @@ pub(super) enum ShellToken {
 pub(super) struct Statement {
     pub(super) words: Vec<String>,
     literals: Vec<bool>,
+    non_options: Vec<bool>,
     offsets: Vec<usize>,
     ends: Vec<usize>,
     assignments: Vec<bool>,
@@ -74,6 +75,7 @@ impl Statement {
         Self {
             words: self.words[range.clone()].to_vec(),
             literals: self.literals[range.clone()].to_vec(),
+            non_options: self.non_options[range.clone()].to_vec(),
             offsets: self.offsets[range.clone()].to_vec(),
             ends: self.ends[range.clone()].to_vec(),
             assignments: self.assignments[range].to_vec(),
@@ -161,7 +163,10 @@ impl Statement {
                 "use explicit literal operands or a data-only consumer"));
         }
         let consumer = consumer_files(name, args);
-        if let Some(at) = consumer.option_words.iter().copied().find(|at| dynamic(index + 1 + at)) {
+        if let Some(at) = consumer.option_words.iter().copied().find(|at| {
+            let word = index + 1 + at;
+            dynamic(word) && !self.non_options[word]
+        }) {
             return Some(Unsupported::execution("shell.dynamic_command", offset(index + 1 + at),
                 "dynamic consumer option position", "an unresolved word can select a filename source, output or helper",
                 "use literal options and put data operands after --"));
@@ -502,6 +507,8 @@ pub(in crate::hooks::handlers::handlers_events) fn shell_input(args: &[String]) 
 pub(super) struct ShellLexed {
     pub(super) tokens: Vec<ShellToken>,
     pub(super) literals: Vec<bool>,
+    /// Fixed non-option prefix, with no unquoted expansion that can split argv.
+    non_options: Vec<bool>,
     /// Byte after each token in the original source, including removed quotes.
     pub(super) ends: Vec<usize>,
     pub(super) unresolved_at: Option<usize>,
@@ -586,6 +593,8 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
 fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usize) -> ShellLexed {
     let mut tokens = Vec::new();
     let mut literals = Vec::new();
+    let mut non_options = Vec::new();
+    let mut splits = false;
     let mut ends = Vec::new();
     let mut unresolved_at = None;
     let mut parameters = Vec::new();
@@ -613,6 +622,8 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
     let mut expansions: Vec<Expansion> = Vec::new();
     let push_word = |tokens: &mut Vec<ShellToken>,
                      literals: &mut Vec<bool>,
+                     non_options: &mut Vec<bool>,
+                     splits: &mut bool,
                      word: &mut String,
                      literal: &mut bool,
                      word_quoted: &mut bool,
@@ -621,12 +632,18 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
         // Argument consumers must preserve quoted empty values (e.g. --shuffle '').
         if !word.is_empty() || *word_quoted {
             let constant = *literal || matches!(word.as_str(), "[" | "[[");
+            // A pathname glob preserves its literal prefix in every match.
+            // An unquoted parameter/substitution can instead create later
+            // argv words, including options, so a prefix alone cannot admit it.
+            non_options.push(!*splits && word.chars().next().is_some_and(|ch|
+                !matches!(ch, '-' | '$' | '`' | '*' | '?' | '[' | '{' | '~')));
             tokens.push(ShellToken::Word(std::mem::take(word)));
             literals.push(constant);
             ends.push(end);
             *literal = true;
         }
         *word_quoted = false;
+        *splits = false;
     };
     let mut chars = projection.char_indices().peekable();
     while let Some((index, ch)) = chars.next() {
@@ -636,6 +653,8 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
                 push_word(
                     &mut tokens,
                     &mut literals,
+                    &mut non_options,
+                    &mut splits,
                     &mut word,
                     &mut literal,
                     &mut word_quoted,
@@ -644,6 +663,7 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
                 );
                 tokens.push(ShellToken::Operator(';'));
                 literals.push(true);
+                non_options.push(false);
                 ends.push(index + ch.len_utf8());
             }
             continue;
@@ -672,6 +692,9 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
             continue;
         }
         let active_quote = expansions.last().map_or(quote, |expansion| expansion.quote);
+        if quote.is_none() && expansions.is_empty() && matches!(ch, '$' | '`') {
+            splits = true;
+        }
         // Single quotes inside a double-quoted parameter default differ
         // across Bash modes. Retain potentially active nested operands too.
         if quote == Some('"')
@@ -865,6 +888,8 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
                     push_word(
                         &mut tokens,
                         &mut literals,
+                        &mut non_options,
+                        &mut splits,
                         &mut word,
                         &mut literal,
                         &mut word_quoted,
@@ -873,12 +898,15 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
                     );
                     tokens.push(ShellToken::Operator(ch));
                     literals.push(true);
+                    non_options.push(false);
                     ends.push(index + ch.len_utf8());
                 }
                 '\n' | '\r' => {
                     push_word(
                         &mut tokens,
                         &mut literals,
+                        &mut non_options,
+                        &mut splits,
                         &mut word,
                         &mut literal,
                         &mut word_quoted,
@@ -887,11 +915,14 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
                     );
                     tokens.push(ShellToken::Operator(';'));
                     literals.push(true);
+                    non_options.push(false);
                     ends.push(index + ch.len_utf8());
                 }
                 ch if ch.is_whitespace() => push_word(
                     &mut tokens,
                     &mut literals,
+                    &mut non_options,
+                    &mut splits,
                     &mut word,
                     &mut literal,
                     &mut word_quoted,
@@ -922,6 +953,8 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
     push_word(
         &mut tokens,
         &mut literals,
+        &mut non_options,
+        &mut splits,
         &mut word,
         &mut literal,
         &mut word_quoted,
@@ -931,6 +964,7 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
     ShellLexed {
         tokens,
         literals,
+        non_options,
         ends,
         unresolved_at,
         parameters,
@@ -1011,6 +1045,7 @@ impl ShellLexed {
         self.tokens
             .splice(tokens.clone(), [ShellToken::Word("true".into())]);
         self.literals.splice(tokens.clone(), [true]);
+        self.non_options.splice(tokens.clone(), [true]);
         self.ends.splice(tokens, [offset]);
     }
 
@@ -1113,6 +1148,7 @@ impl ShellLexed {
                     ShellToken::Word(word) => word.clone(), _ => unreachable!(),
                 }).collect(),
                 literals: originals.iter().map(|&at| self.literals[at]).collect(),
+                non_options: originals.iter().map(|&at| self.non_options[at]).collect(),
                 ends: originals.iter().map(|&at| self.ends[at]).collect(),
                 offsets: originals.iter().map(|&at| {
                     let start = if at == 0 { 0 } else { self.ends[at - 1] };

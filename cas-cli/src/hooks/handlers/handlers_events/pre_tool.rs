@@ -9475,6 +9475,20 @@ EOF
                     .to_string(),
             )
         };
+        // H-11 classifies the Bash command itself: searches, help and quoted
+        // command text are data, while an actual policy command is refused.
+        for (command, expected) in [
+            (r#"grep -rn "grant-write\|GrantWrite" cas-cli/src/cli/config/mod.rs"#, "allow"),
+            ("cas config grant-write --help", "allow"),
+            (r#"printf '%s\n' 'cas config grant-write --task cas-1234 --path /x --reason r'"#, "allow"),
+            ("cas config grant-write --task cas-1234 --path /x --reason r", "deny"),
+        ] {
+            let (status, reason) = decision(command);
+            assert_eq!(status, expected, "{command}: {reason}");
+            if expected == "deny" {
+                assert!(reason.contains("[H-11]"), "{reason}");
+            }
+        }
         // cas-9685: each independent spelling/command-position bypass must
         // reach the real hook; collect failures so RED proves every vector.
         let mut bypasses = Vec::new();

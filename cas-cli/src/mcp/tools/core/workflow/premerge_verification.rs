@@ -272,6 +272,10 @@ fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>
     Ok(Some(key.to_string()))
 }
 
+/// Recovery step appended to every failed candidate Git command (cas-c5db).
+const CANDIDATE_GIT_NEXT_STEP: &str =
+    "Next step: fetch origin, reconcile the source and target refs, then retry worktree_merge.";
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     if args.first() == Some(&"merge-tree") {
         // Candidate preparation precedes the manager's merge preflight.
@@ -298,7 +302,10 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         } else {
             stderr
         };
-        return Err(format!("candidate `git {}`: {detail}. Next step: fetch origin, reconcile the source and target refs, then retry worktree_merge.", args.join(" ")));
+        return Err(format!(
+            "candidate `git {}`: {detail}. {CANDIDATE_GIT_NEXT_STEP}",
+            args.join(" ")
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -2016,7 +2023,7 @@ mod tests {
 
         // pin: an empty-stderr ancestry refusal must tell the caller how to recover (cas-c5db).
         let error = candidate.verify_landing(&candidate.target_sha).unwrap_err();
-        assert!(error.contains("Next step: fetch origin, reconcile the source and target refs, then retry worktree_merge"), "{error}");
+        assert!(error.ends_with(CANDIDATE_GIT_NEXT_STEP), "{error}");
     }
     #[test]
     fn slow_candidate_build_returns_hold_and_reuses_cache_cas_352b() {

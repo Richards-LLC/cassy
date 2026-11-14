@@ -1,4 +1,0 @@
-title: Release inventory and closeout hold reverted deliveries and bound ledger exclusions while independently shipped members close
-tasks: [cas-aeb3]
-journeys: [CLI-RELEASE, FACTORY-CLOSE]
-invariants: [FACTORY-RELEASE-CLOSEOUT]

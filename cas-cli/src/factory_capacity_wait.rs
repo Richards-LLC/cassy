@@ -435,9 +435,20 @@ pub(crate) fn view(root: &Path, worker: &str, now: DateTime<Utc>) -> Result<Opti
     }
 }
 
+/// Host admission measured now. A wait's stored cause is only what its last
+/// refusal measured; every later report pairs it with this reading.
+fn live_admission(root: &Path) -> String {
+    let config = crate::config::Config::load(root).unwrap_or_default().factory();
+    crate::factory_build_guard::inspect_capacity(root, &config)
+        .receipt_notice(false)
+        .trim_start()
+        .to_owned()
+}
+
 pub(crate) fn render(root: &Path, session: Option<&str>, now: DateTime<Utc>) -> String {
     let result = (|| -> Result<String> {
         let mut lines = Vec::new();
+        let mut live = None;
         for (_, wait) in entries(root)? {
             if session.is_some() && wait.session.as_deref() != session {
                 continue;
@@ -445,8 +456,9 @@ pub(crate) fn render(root: &Path, session: Option<&str>, now: DateTime<Utc>) -> 
             if !admission_current(root, &wait, now)? {
                 continue;
             }
+            let live = live.get_or_insert_with(|| live_admission(root));
             lines.push(format!(
-                "Capacity wait: {} ({})\n  cause: {}\n  next retry: {}\n  waiting since: {}{}",
+                "Capacity wait: {} ({})\n  cause at last refusal: {}\n  now: {live}\n  next retry: {}\n  waiting since: {}{}",
                 wait.worker_name,
                 wait.task_id,
                 wait.cause,
@@ -539,10 +551,11 @@ fn reconcile_with_inventory(
         let agents = open_agent_store(root)?.list(None)?;
         let recipient = crate::supervisor_notices::resolve(&agents, None, wait.session.as_deref());
         let detail = format!(
-            "Worker {} has waited for build capacity on {} for at least 20 minutes.\nCause: {}\nNext retry: {}. Check capacity or help the worker resume; its task and lease remain active.",
+            "Worker {} has waited for build capacity on {} for at least 20 minutes.\nCause at last refusal: {}\nNow: {}\nNext retry: {}. Check capacity or help the worker resume; its task and lease remain active.",
             wait.worker_name,
             wait.task_id,
             wait.cause,
+            live_admission(root),
             wait.next_retry.to_rfc3339()
         );
         crate::supervisor_notices::enqueue(

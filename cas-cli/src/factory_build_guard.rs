@@ -545,6 +545,14 @@ fn inspect_task(
         snapshot.disabled = true;
         return snapshot;
     }
+    // Real admission-path tests supply a /proc fixture at the OS boundary.
+    // Production has no request, environment or global override.
+    #[cfg(test)]
+    let fixture = host_fixture::proc_root(cas_root);
+    #[cfg(test)]
+    let proc_root = fixture.as_deref().unwrap_or(Path::new("/proc"));
+    #[cfg(not(test))]
+    let proc_root = Path::new("/proc");
     let mut snapshot = evaluate_for_task(
         cpu_count,
         None,
@@ -553,7 +561,7 @@ fn inspect_task(
         config.max_concurrent_builders,
         task,
     )
-    .with_host(Path::new("/proc"), config);
+    .with_host(proc_root, config);
     if reclaim {
         snapshot.with_disk_probe(cas_root, config, crate::factory_target_cache::capacity_status)
     } else {
@@ -562,6 +570,39 @@ fn inspect_task(
             &filesystem, TargetCachePolicy::from(config),
         ).map_err(|error| format!("disk capacity unavailable: {error}")));
         snapshot
+    }
+}
+
+/// Thread-scoped host fixture for one store, cleared when the guard drops.
+#[cfg(test)]
+pub(crate) mod host_fixture {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static FIXTURE: RefCell<Option<(PathBuf, PathBuf)>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct HostFixture;
+
+    impl HostFixture {
+        pub(crate) fn new(cas_root: &Path, proc_root: &Path) -> Self {
+            let root = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+            FIXTURE.with(|fixture| *fixture.borrow_mut() = Some((root, proc_root.to_path_buf())));
+            Self
+        }
+    }
+
+    impl Drop for HostFixture {
+        fn drop(&mut self) {
+            FIXTURE.with(|fixture| *fixture.borrow_mut() = None);
+        }
+    }
+
+    pub(super) fn proc_root(cas_root: &Path) -> Option<PathBuf> {
+        let root = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+        FIXTURE.with(|fixture| fixture.borrow().as_ref()
+            .filter(|(fixture_root, _)| *fixture_root == root).map(|(_, proc)| proc.clone()))
     }
 }
 

@@ -777,7 +777,7 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
             if let Some(end) = backquote_end(command.as_bytes(), index) {
                 if index >= substitution_until {
                     substitutions.push(ExecutingSubstitution {
-                        source: index..end + 1, body: backquote_body(&command[index + 1..end]),
+                        source: index..end + 1, body: backquote_body_in_context(&command[index + 1..end], quote == Some('"')),
                     });
                     substitution_until = end + 1;
                 }
@@ -1490,10 +1490,14 @@ pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
 /// Backquotes remove one escape layer before parsing their command, even
 /// inside its quotes. Other backslashes must survive for the inner parser.
 pub(super) fn backquote_body(source: &str) -> String {
+    backquote_body_in_context(source, false)
+}
+
+fn backquote_body_in_context(source: &str, double_quoted: bool) -> String {
     let mut body = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\\' && chars.peek().is_some_and(|next| matches!(next, '`' | '\\' | '$')) {
+        if ch == '\\' && chars.peek().is_some_and(|next| matches!(next, '`' | '\\' | '$') || (double_quoted && *next == '"')) {
             body.push(chars.next().unwrap());
         } else {
             body.push(ch);

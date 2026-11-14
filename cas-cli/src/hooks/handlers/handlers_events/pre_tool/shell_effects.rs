@@ -713,6 +713,14 @@ fn collect_script(
                     _ => None,
                 })
                 .collect();
+            let word_literals: Vec<bool> = statement
+                .iter()
+                .enumerate()
+                .filter_map(|(index, token)| {
+                    (matches!(token, ShellToken::Word(_)) && !redirects[index])
+                        .then_some(statement_literals[index])
+                })
+                .collect();
             let index = if continuation {
                 None
             } else {

@@ -10332,6 +10332,7 @@ EOF
             (r#"echo "`echo \"'\"$(touch /outside/X)\"'\"`""#, true),
             (r"echo \``touch /outside/X`\`", true),
             (r"printf '%s' '\``touch /outside/X`\`'", false),
+            (r#"echo `echo \"'\"$(touch /outside/X)\"'\"`"#, false),
             ("find . -fprint ../../ordinary-data.txt", true),
             ("find . -fprint0 ../../ordinary-data.txt", true),
             ("find . -fprintf ../../ordinary-data.txt '%p'", true),

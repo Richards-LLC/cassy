@@ -135,6 +135,7 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
     command.envs(environment.set);
     match cli {
         cas_mux::SupervisorCli::Codex => {
+            sandbox_preflight()?;
             command
                 .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"])
                 .arg("--model")
@@ -165,9 +166,68 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
     Ok((command, notice))
 }
 
+/// Probe the same namespace primitive before paying for a model that cannot read.
+fn sandbox_preflight() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::bounded_process::{Deadline, run_command};
+        let output = run_command(
+            Command::new("bwrap").args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--", "/bin/true"]),
+            Deadline::after(std::time::Duration::from_secs(5)), std::time::Duration::from_secs(5),
+        ).map_err(|e| format!("verifier_bwrap_preflight: probe_start_failed: {e:?}; install bubblewrap and inspect the launch context"))?;
+        if !output.status.success() {
+            let read = |path| std::fs::read_to_string(path).ok().map(|s| s.trim().to_string());
+            let uid_map = read("/proc/self/uid_map");
+            let initial = uid_map.as_deref().is_some_and(|map| {
+                map.split_whitespace().eq(["0", "0", "4294967295"])
+            });
+            let status = read("/proc/self/status").unwrap_or_default().lines()
+                .filter(|line| line.starts_with("NoNewPrivs:") || line.starts_with("Seccomp:") || line.starts_with("CapBnd:"))
+                .map(str::to_string).collect::<Vec<_>>();
+            return Err(format!("verifier_bwrap_preflight: {}", serde_json::json!({
+                "cause": if initial { "host_namespace_policy" } else { "nested_user_namespace_context" },
+                "pid": std::process::id(), "status": status, "uid_map": uid_map,
+                "user_namespace": std::fs::read_link("/proc/self/ns/user").ok(),
+                "apparmor_profile": read("/proc/self/attr/current"),
+                "max_user_namespaces": read("/proc/sys/user/max_user_namespaces"),
+                "kernel.unprivileged_userns_clone": read("/proc/sys/kernel/unprivileged_userns_clone"),
+                "kernel.apparmor_restrict_unprivileged_userns": read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"),
+                "stderr": tail(&output.stderr),
+                "remedy": if initial {
+                    "Inspect the named host user-namespace limits and AppArmor policy; keep the read-only sandbox enabled"
+                } else {
+                    "Launch the verifier from the factory daemon outside worker store isolation; do not disable either sandbox or change host policy"
+                }
+            })));
+        }
+    }
+    Ok(())
+}
+
 /// Claim synchronously, then do provider work off the MCP/control loop. The
 /// existing dispatch claim prevents a second launch, including manual races.
 pub(super) fn launch(
+    core: &CasCore, task: &Task, dispatch: &VerificationDispatch,
+) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    #[cfg(unix)]
+    if let Some(session) = core.open_agent_store().map_err(|e| e.to_string())?
+        .get(&dispatch.owner_agent_id).map_err(|e| e.to_string())?.factory_session
+    {
+        // The MCP backend may inherit the worker's userns. Only the factory
+        // daemon owns the context from which the harness sandbox can start.
+        let worker = core.clone();
+        let dispatch = dispatch.clone();
+        return std::thread::Builder::new().name(format!("verifier-request-{}", task.id))
+            .spawn(move || {
+                if let Err(error) = super::factory_launch::request(&session, &dispatch.id) {
+                    let _ = attention(&worker, &dispatch, &error);
+                }
+            }).map(Some).map_err(|e| e.to_string());
+    }
+    launch_local(core, task, dispatch)
+}
+
+pub(super) fn launch_local(
     core: &CasCore,
     task: &Task,
     dispatch: &VerificationDispatch,
@@ -311,7 +371,7 @@ pub(crate) fn direct_verdict(dispatch: &VerificationDispatch) -> String {
 /// A dispatch that already holds a verdict, or whose task is terminal, needs no
 /// supervisor notice when a second verifier finds it settled.
 fn resolved(core: &CasCore, dispatch: &VerificationDispatch) -> bool {
-    cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).is_ok_and(|v| v.is_some()) || core
+    cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).is_ok_and(|v| v.is_some_and(|v| !matches!(v.status, VerificationStatus::Error | VerificationStatus::Pending))) || core
         .open_task_store()
         .ok()
         .and_then(|s| s.get(&dispatch.task_id).ok())

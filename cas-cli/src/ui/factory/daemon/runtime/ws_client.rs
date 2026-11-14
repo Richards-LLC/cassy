@@ -399,6 +399,14 @@ impl FactoryDaemon {
         }
 
         match msg {
+            ClientMessage::LaunchVerifier { dispatch_id } => {
+                if let Some(frame) = ws_encode(&DaemonMessage::Error {
+                    message: "Verifier launch requires the local factory socket".into(), client_ref: Some(dispatch_id),
+                }) && let Some(client) = self.ws_clients.get_mut(&client_id) {
+                    let _ = client.sink.feed(frame).now_or_never();
+                }
+            }
+
             ClientMessage::Reexec { nonce, .. } => {
                 if let Some(frame) = ws_encode(&DaemonMessage::Error {
                     message: "Daemon reexec requires the local factory socket".into(), client_ref: Some(nonce),

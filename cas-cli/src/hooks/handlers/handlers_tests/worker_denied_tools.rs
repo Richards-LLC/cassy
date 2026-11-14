@@ -283,6 +283,31 @@ fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
 }
 
 #[test]
+fn worker_file_contents_cannot_feed_protected_subprocess_env_cas_24f2() {
+    let (_env, cwd) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let mut failures = Vec::new();
+    for (body, denied) in [
+        ("e = os.environ.copy(); e['NEON_API_KEY'] = Path('settings.data').read_text().strip(); subprocess.run(['provider-fixture'], env=e)", true),
+        ("os.environ['NEON_API_KEY'] = Path('settings.data').read_bytes(); subprocess.run(['provider-fixture'])", true),
+        ("e = os.environ.copy(); e['NEON_API_KEY'] = Path('settings.data').open().read(); subprocess.run(['provider-fixture'], env=e)", true),
+        ("e = os.environ.copy(); e['PROJECT_DATA'] = Path('settings.data').read_text(); subprocess.run(['provider-fixture'], env=e)", false),
+        ("e = os.environ.copy(); e['NEON_API_KEY'] = 'fixture-value'; subprocess.run(['provider-fixture'], env=e)", false),
+        ("e = os.environ.copy(); e['NEON_API_KEY'] = Path('settings.data').read_text(); print(e)", false),
+        ("text = \"\"\"e['NEON_API_KEY'] = Path('settings.data').read_text()\nsubprocess.run(['provider-fixture'], env=e)\"\"\"; print(text)", false),
+    ] {
+        let command = format!("python3 - <<'PY'\nimport os, subprocess\nfrom pathlib import Path\n{body}\nPY");
+        let output = handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap();
+        let reason = denial(output);
+        if reason.is_some() != denied || (denied && !reason.as_deref().unwrap_or("").contains("[H-09]")) {
+            failures.push(format!("expected denied={denied}: {reason:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
 fn worker_readonly_ssh_project_db_and_checkout_glob_are_allowed_cas_ce2f() {
     let (_env, cwd) = role_env("worker");
     let project = tempfile::tempdir().unwrap();

@@ -61,6 +61,23 @@ class PolicyTests(unittest.TestCase):
         self.assertIn(('release-prebuild', 'build'), writers)
         self.assertIn(('lane', 'lane-impact'), writers)
 
+    def test_native_test_deps_install_once_only_in_test_jobs_cas_32b6(self):
+        # rule-176 (2): bubblewrap is installed where verifier sandbox tests run, once per job;
+        # the shared toolchain action and build-only jobs never install it.
+        native = './.github/actions/setup-native-test-deps'
+        setup = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        self.assertNotIn(native, [step.get('uses') for step in setup['runs']['steps']])
+        wired = {}
+        for name in ('ci', 'lane', 'release', 'release-prebuild', 'full-validation'):
+            workflow = policy.load(self.root / f'.github/workflows/{name}.yml')
+            for job_id, job in workflow['jobs'].items():
+                count = sum(step.get('uses') == native for step in job.get('steps', []))
+                if count:
+                    wired[(name, job_id)] = count
+        self.assertEqual(wired, {('ci', 'scoped-validation-fast'): 1, ('ci', 'scoped-validation'): 1,
+                                 ('ci', 'fast-validation-suite-shards'): 1,
+                                 ('lane', 'lane-impact'): 1, ('lane', 'lane-impact-ring'): 1})
+
     def test_hosted_precheck_selects_queue_jobs_without_advisory_builds(self):
         jobs = self.ci()['jobs']
         common = {'needs.ci-diff.outputs.class':'rust-touched',

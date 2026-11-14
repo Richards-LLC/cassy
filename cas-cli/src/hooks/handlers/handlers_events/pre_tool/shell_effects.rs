@@ -908,7 +908,7 @@ fn collect_script(
     }
     arithmetic_commands(&projected, &mut lexed)?;
     let case_tokens = case_syntax(&projected, &lexed)?;
-    let (tokens, literal_words) = (lexed.tokens, lexed.literals);
+    let (tokens, literal_words, source_ends) = (lexed.tokens, lexed.literals, lexed.ends);
     let captured_status: HashSet<String> = tokens
         .iter()
         .filter_map(|token| match token {
@@ -980,7 +980,11 @@ fn collect_script(
         let visible: Vec<usize> =
             (start..end).filter(|index| case_tokens[*index] == CaseSyntax::Code).collect();
         let visible_tokens: Vec<ShellToken> = visible.iter().map(|&index| tokens[index].clone()).collect();
-        let mut read_command = render(&visible_tokens);
+        // Preserve original argv spelling (notably numeric redirect fds).
+        // The context is paired here with its source span, never by argv match.
+        let source_start = start.checked_sub(1).map_or(0, |index| source_ends[index]);
+        let source_end = source_ends.get(end).map_or(projected.len(), |end| end - 1);
+        let mut read_command = projected[source_start..source_end].to_string();
         let mut statement = visible_tokens.as_slice();
         let mut skipped_keywords = 0;
         start = end + 1;

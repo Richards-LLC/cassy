@@ -263,6 +263,33 @@ single-file rustfmt child effects, a candidate binary with unknown effects,
 and a process-group signal without ownership evidence. No historical or security
 payload executes during any replay.
 
+### Residual new denies the grammar keeps
+
+Supervisor decision #571028 (November 14) accepts a per-class justification
+for sampled FALSE_DENY rows whose shape the grammar refuses by design. At
+`2eb0fd6` the sampled Claude rows that BASE allowed but the candidate denied
+were 16 `shell.dynamic_command` rows and one H-09 row. Literal bindings
+(including later and path-prefix uses) and fixed-prefix home globs as find
+starting points now resolve or admit. These classes stay refused:
+
+| Class | Why it stays denied |
+| --- | --- |
+| A value taken from command output (`$(...)`) used as a find starting point or consumer operand | The value exists only at run time. A word such as `-delete` or one that splits into several can become a find action or a consumer option, and no policy can read it first. |
+| Unquoted expansion of a multi-word literal value | Word splitting changes argv shape, so the command and option positions the policy reads are not the ones that run. |
+| `xargs` feeding a script or a filename reader | Runtime input supplies filenames the credential and write-root policies never see. |
+| A glob with no fixed prefix in a consumer option position | A matching filename can start with `-` and select an output, filename source or helper. |
+| A syntactically incomplete list | The shell rejects it, so the refusal costs the worker nothing. |
+
+These are the deny-by-default promise. BASE admitted them without seeing
+their effects. A sampled row in these classes is reported in its class, not
+treated as a defect to admit.
+
+The H-09 row is a fixture artifact. The fixture's synthetic HOME is a sibling
+of the worker worktree, so a recursive read of the worker's parent reaches
+HOME, which no factory worktree layout allows. The final replay uses a v3
+fixture with HOME outside the worker's parent and reruns BASE on that fixture
+too. Earlier fixture versions stay immutable.
+
 ## Filename-list consumers
 
 This is the admission contract for the consumer migration, not a claim that the

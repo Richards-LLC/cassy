@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.27.0] - 2026-11-14
+
+### Changed — Release
+
+- **macOS prebuild runs on the operator's Mac** — Was: every macOS release
+  prebuild compiled all dependencies cold on hosted macOS (Build step 30.7
+  min). Now: trusted merge-queue and `main` builds run on a self-hosted Apple
+  Silicon runner with a persistent target directory and fall back to hosted
+  macOS when that runner does not start a probe within 90 s.
+  `scripts/install-mac-release-runner.sh` installs the runner as a launchd
+  user agent.
+
+### Fixed — Release trains
+
+- **Wait for the declared cut scope** — Auto-cut waits for the train's blocking deliveries and names those still pending before freezing. Cancelled or retargeted deliveries clear the scope; optional children and trains without a declared scope retain their existing behavior.
+
+### Fixed — Hooks
+
+- **H-11 allows command help** — Was: `cas config grant-write --help` was
+  blocked as a policy mutation. Now: help and version output are recognized as
+  non-mutating by the CLI parser before H-11 evaluates the command.
+
+### Fixed — Commander
+
+- **Show work from fresh supervisor activity** — Recent output lights the working indicator even when no named phase is available. A delivery receipt alone stays quiet, and unknown phases still show no placeholder.
+- **Read conversation history while the daemon is busy** — history uses its own read-only WAL connection, so daemon writes cannot make the conversation fail to load or force repeated retries. Phase status appears only when a phase or a waiting question is known.
+- **Keep history recovery in reach** — An older-page error keeps its Retry control visible through pending activity updates and reconnect layout. Fresh supervisor output still shows working independently of named phases.
+
+### Fixed — Release train
+
+- **One train-suite run per frozen tip** — Was: when a run was already under
+  way at the frozen tip, the daemon dispatched a second one, and a newer
+  cancelled duplicate hid the green receipt from the cut. Now: the daemon
+  dispatches only when no run is queued or running at that tip, and a
+  cancelled run never outranks a finished one at the same tip.
+
 ## [4.26.0] - 2026-11-14
 
 ### Fixed — Release delivery

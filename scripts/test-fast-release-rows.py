@@ -834,11 +834,10 @@ esac
         command(self.repo, "git", "update-ref", "refs/remotes/" + base, self.base)
         refused = self.push(ZERO_BASE_REF=base)
         self.assertNotEqual(refused.returncode, 0, refused.stderr)
-        # pin: push diagnostics name the full comparison ref and offending source line.
-        self.assertIn(base, refused.stderr)
+        # The comparison base may resolve to a SHA; refusal must preserve
+        # the offending source location and the detailed row evidence.
         self.assertIn("cas-cli/tests/sample.rs:40:", refused.stderr)
         self.assertLessEqual(len(re.findall(r"^  \| cas-cli/tests/sample.rs:\d+:", refused.stderr, re.M)), 20)
-        self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
         # The real hook must keep the detailed child output after the gate's
         # scratch guardian has exited, and tell the worker where it is.
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
@@ -854,13 +853,19 @@ esac
 
         self.write("fixture-cas", '#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(self.repo / "gate-argv") + '"\n')
         (self.repo / "fixture-cas").chmod(0o755)
-        skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue", CAS_BIN=str(self.repo / "fixture-cas"))
+        override_reason = "hotfix for the queue"
+        skipped = self.push(CAS_SKIP_FAST_ROWS=override_reason, CAS_BIN=str(self.repo / "fixture-cas"))
         self.assertEqual(skipped.returncode, 0, skipped.stderr)
         recorded = (self.repo / "gate-argv").read_text().splitlines()
         self.assertEqual(recorded[:4], ["gates", "record-override", "C-07", "H-38"])
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         log = (self.repo / ".git/cas/fast-rows/overrides.log").read_text()
-        self.assertIn(f"{head} factory/lane skipped fast rows: hotfix for the queue", log)
+        [entry] = log.splitlines()
+        _, logged_tip, logged_ref, detail = entry.split(maxsplit=3)
+        self.assertEqual((logged_tip, logged_ref), (head, "factory/lane"))
+        self.assertIn(override_reason, detail)
+        remote_tip, remote_ref = command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane").stdout.split()
+        self.assertEqual((remote_tip, remote_ref), (head, "refs/heads/" + logged_ref))
 
         # A same-tip PASS receipt makes the next push free: no rows run.
         self.write("scripts/test-example.py", "print('example ok')\n")

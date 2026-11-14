@@ -82,12 +82,10 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
     }
 }
 
-/// Only numeric source is inert under arithmetic's recursive evaluation. Even
-/// a bare variable can contain an array subscript that executes a substitution.
-fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
-    if expression.bytes().all(|ch| ch.is_ascii_digit() || ch.is_ascii_whitespace()
-        || b"()+-*/%<>=!&|^~?:,".contains(&ch))
-    {
+/// Integer source and proven local numeric bindings are inert. Unknown names
+/// may contain an array subscript that executes a substitution.
+fn numeric_arithmetic(expression: &str, numeric: &HashSet<String>) -> Result<(), &'static str> {
+    if shell_admission::integer_expression(expression, numeric) {
         Ok(())
     } else {
         Err("an unresolved arithmetic operand")
@@ -101,6 +99,7 @@ fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
 fn numeric_test_operand(
     operand: &str,
     captured_status: &HashSet<String>,
+    numeric: &HashSet<String>,
 ) -> Result<(), &'static str> {
     if operand == "$?"
         || operand
@@ -109,58 +108,23 @@ fn numeric_test_operand(
     {
         Ok(())
     } else {
-        numeric_arithmetic(operand)
+        numeric_arithmetic(operand, numeric)
     }
 }
 
 /// Validate arithmetic commands before their operators become shell scopes.
 /// Use source positions: quoted/comment parentheses are ordinary word data.
-fn arithmetic_commands(source: &str, lexed: &mut ShellLexed) -> Result<(), &'static str> {
-    let mut index = 0;
-    while index + 1 < lexed.tokens.len() {
-        if lexed.tokens[index..index + 2] != [ShellToken::Operator('('), ShellToken::Operator('(')]
-            || lexed.ends[index] + 1 != lexed.ends[index + 1]
-        {
-            index += 1;
-            continue;
-        }
-        let start = lexed.ends[index + 1];
-        let mut balance = 2;
-        let mut closing = None;
-        for end in index + 2..lexed.tokens.len() {
-            match lexed.tokens[end] {
-                ShellToken::Operator('(') => balance += 1,
-                ShellToken::Operator(')') => {
-                    balance -= 1;
-                    if balance == 0 {
-                        closing = Some(end);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let end = closing.ok_or("an unresolved arithmetic operand")?;
-        let offset = lexed.ends[end];
-        if lexed.tokens[end - 1] != ShellToken::Operator(')')
-            || lexed.ends[end - 1] + 1 != offset
-        {
-            return Err("an unresolved arithmetic operand");
-        }
-        numeric_arithmetic(&source[start..offset - 2])?;
-        // Numeric arithmetic has no filesystem effects. Leave the enclosing
-        // command and its redirections in place for the ordinary collector.
-        lexed.tokens.splice(index..=end, [ShellToken::Word("true".into())]);
-        lexed.literals.splice(index..=end, [true]);
-        lexed.ends.splice(index..=end, [offset]);
-        index += 1;
+fn arithmetic_commands(source: &str, lexed: &mut ShellLexed, numeric: &HashSet<String>) -> Result<(), &'static str> {
+    for (tokens, expression) in lexed.arithmetic_spans()?.into_iter().rev() {
+        numeric_arithmetic(&source[expression], numeric)?;
+        lexed.erase_arithmetic(tokens);
     }
     Ok(())
 }
 
 /// Numeric comparisons evaluate both operands recursively, even when quoted.
 /// Inspect a whole conditional before command separators split its &&/|| arms.
-fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'static str> {
+fn conditional_arithmetic(source: &str, lexed: &ShellLexed, numeric: &HashSet<String>) -> Result<(), &'static str> {
     let raw = |index: usize| {
         let start = if index == 0 { 0 } else { lexed.ends[index - 1] };
         source[start..lexed.ends[index]].trim()
@@ -218,8 +182,8 @@ fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'stat
                             let (Some(ShellToken::Word(left)), Some(ShellToken::Word(right))) =
                                 (lexed.tokens.get(at - 1), lexed.tokens.get(at + 1).filter(|_| at + 1 < end))
                             else { return Err("an unresolved conditional operand"); };
-                            numeric_arithmetic(left)?;
-                            numeric_arithmetic(right)?;
+                            numeric_arithmetic(left, numeric)?;
+                            numeric_arithmetic(right, numeric)?;
                             at += 1;
                             operand = false;
                         } else if !operand && other_binary(word) {
@@ -241,10 +205,10 @@ fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'stat
 
 /// Parameter syntax comes from the lexer's original source spans, never
 /// cooked words that have lost the distinction between data and expansion.
-fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
+fn parameter_arithmetic(body: &str, numeric: &HashSet<String>) -> Result<(), &'static str> {
     if matches!(body, "!" | "#") { return Ok(()); } // PID/count, not indirection.
     if let Some(target) = body.strip_prefix('!') {
-        numeric_arithmetic(target)?;
+        numeric_arithmetic(target, numeric)?;
         // Even a numeric parameter name reads an unknown value as syntax.
         return Err("an unresolved indirect parameter");
     }
@@ -258,13 +222,13 @@ fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
     while let Some(subscript) = rest.strip_prefix('[') {
         let end = subscript.find(']').ok_or("an unresolved parameter operand")?;
         let index = &subscript[..end];
-        if !matches!(index, "@" | "*") { numeric_arithmetic(index)?; }
+        if !matches!(index, "@" | "*") { numeric_arithmetic(index, numeric)?; }
         rest = &subscript[end + 1..];
     }
     if let Some(position) = rest.strip_prefix(':') {
         // The four default-value operators do not evaluate arithmetic.
         if !position.starts_with(['-', '+', '=', '?']) {
-            numeric_arithmetic(position)?;
+            numeric_arithmetic(position, numeric)?;
         }
     } else if !rest.is_empty() && !rest.starts_with(['-', '+', '=', '?', '/', '#', '%']) {
         return Err("an unresolved parameter operand");
@@ -274,7 +238,7 @@ fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
 
 /// Extract executable substitutions from a shell word. Arithmetic operands
 /// must be numeric source, never values obtained from shell expansion.
-fn substitution_bodies(word: &str) -> Result<Vec<String>, &'static str> {
+fn substitution_bodies(word: &str, numeric: &HashSet<String>) -> Result<Vec<String>, &'static str> {
     let bytes = word.as_bytes();
     let mut bodies = Vec::new();
     let mut index = 0;
@@ -317,7 +281,7 @@ fn substitution_bodies(word: &str) -> Result<Vec<String>, &'static str> {
             }
             if let Some(end) = end {
                 let operand_end = if bracket { end } else { end - 1 };
-                numeric_arithmetic(&word[index + prefix..operand_end])?;
+                numeric_arithmetic(&word[index + prefix..operand_end], numeric)?;
                 index = end + 1;
                 continue;
             }
@@ -379,7 +343,7 @@ pub(super) fn backquote_body(source: &str) -> String {
 /// Heredoc quotes are data, but escaped markers are inert. Remove shell
 /// line continuations, then pass only complete, unescaped expansions through
 /// the ordinary substitution/arithmetic checks without rewriting their source.
-fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Result<Vec<String>, &'static str> {
+fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter, numeric: &HashSet<String>) -> Result<Vec<String>, &'static str> {
     let mut logical = String::new();
     let mut chars = body.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -412,7 +376,7 @@ fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Resu
         if bytes.get(index..index + 2) == Some(b"${") {
             let tail = &logical[index + 2..];
             let end = tail.find('}').ok_or("an unresolved parameter operand")?;
-            parameter_arithmetic(&tail[..end])?;
+            parameter_arithmetic(&tail[..end], numeric)?;
             index += 2; // Nested parameter expansions retain their own checks.
             continue;
         }
@@ -433,7 +397,7 @@ fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Resu
             continue;
         };
         let end = end.ok_or("an unresolved shell payload")?;
-        bodies.extend(substitution_bodies(&logical[index..=end])?);
+        bodies.extend(substitution_bodies(&logical[index..=end], numeric)?);
         index = end + 1;
     }
     Ok(bodies)
@@ -893,11 +857,12 @@ fn collect_script(
     if lexed.unresolved_at.is_some() {
         return Err("an unresolved shell payload");
     }
-    conditional_arithmetic(&projected, &lexed)?;
+    let numeric = &shell_admission::numeric_bindings(&lexed, &projected);
+    conditional_arithmetic(&projected, &lexed, numeric)?;
     for &(start, end) in &lexed.parameters {
-        parameter_arithmetic(&projected[start..end])?;
+        parameter_arithmetic(&projected[start..end], numeric)?;
     }
-    arithmetic_commands(&projected, &mut lexed)?;
+    arithmetic_commands(&projected, &mut lexed, numeric)?;
     let case_tokens = case_syntax(&projected, &lexed)?;
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let captured_status: HashSet<String> = tokens
@@ -1011,7 +976,7 @@ fn collect_script(
                 command.push_str(&delimiter.value);
                 command.push('\n');
                 if !delimiter.literal_body {
-                    expanding_bodies.extend(heredoc_substitution_bodies(&body, &delimiter)?);
+                    expanding_bodies.extend(heredoc_substitution_bodies(&body, &delimiter, numeric)?);
                 }
             }
             let redirects = redirect_words(&statement);
@@ -1061,11 +1026,12 @@ fn collect_script(
                     if at + 2 < args.len()
                         && matches!(binary, Some("-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge"))
                     {
-                        numeric_test_operand(&args[at], &captured_status)?;
+                        numeric_test_operand(&args[at], &captured_status, numeric)?;
                         numeric_test_operand(
                             args.get(at + 2)
                                 .ok_or("an unresolved conditional operand")?,
                             &captured_status,
+                            numeric,
                         )?;
                         at += 3;
                     } else if matches!(binary, Some("=" | "==" | "!=" | "-nt" | "-ot" | "-ef")) {
@@ -1083,7 +1049,7 @@ fn collect_script(
             }
             if name == Some("let") {
                 for arg in args.iter().filter(|arg| arg.as_str() != "--") {
-                    numeric_arithmetic(arg)?;
+                    numeric_arithmetic(arg, numeric)?;
                 }
             }
             // Integer attributes persist into later ordinary assignments.
@@ -1130,7 +1096,7 @@ fn collect_script(
                 .chain(redirect_targets.iter().copied());
             for (word, literal) in every_word {
                 if !literal {
-                    for body in substitution_bodies(word)? {
+                    for body in substitution_bodies(word, numeric)? {
                         collect_script(
                             &body,
                             statement_dirs.clone(),

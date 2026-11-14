@@ -3711,31 +3711,8 @@ pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
 /// this opt-in: workspace/effect guards must still inspect redirect targets.
 pub(super) fn shell_statement_arguments(command: &str) -> Vec<Vec<String>> {
     let command = shell_command_without_heredoc_bodies(command);
-    let (tokens, _) = factory_shell_tokens_for_projection(&command, true);
-    let mut tokens = tokens.into_iter().peekable();
-    let mut arguments = Vec::new();
-    while let Some(token) = tokens.next() {
-        // Bash's combined stdout/stderr redirect starts with `&>`.
-        if token == ShellToken::Operator('&') && tokens.peek() == Some(&ShellToken::Operator('>')) {
-            continue;
-        }
-        if matches!(token, ShellToken::Operator('>' | '<')) {
-            // Consume the operator's remaining characters (>>, <<, <>, >|,
-            // >& and <&) and its one target, without ending the statement.
-            while matches!(
-                tokens.peek(),
-                Some(ShellToken::Operator('>' | '<' | '&' | '|'))
-            ) {
-                tokens.next();
-            }
-            if matches!(tokens.peek(), Some(ShellToken::Word(_))) {
-                tokens.next();
-            }
-            continue;
-        }
-        arguments.push(token);
-    }
-    shell_statements_from_tokens(arguments)
+    let lexed = factory_shell_lex(&command, true, 0);
+    shell_statements_from_tokens(lexed.argument_tokens(&command))
 }
 
 fn shell_statements_from_tokens(tokens: Vec<ShellToken>) -> Vec<Vec<String>> {
@@ -9073,12 +9050,21 @@ EOF
             format!("builtin -- let 'y={operand}'"),
             format!("command -pp -p -- let 'y={operand}'"),
             format!("op=declare; builtin \"$op\" -i y='{operand}'"),
+            "x=0; read -r x; echo \"$((x+1))\"".into(),
+            "x=0; for x in unsafe; do echo \"$((x+1))\"; done".into(),
+            "x=0; if test -f flag; then x=ambient; fi; echo \"$((x+1))\"".into(),
+            "x=0; x[0]=ambient; echo \"$((x+1))\"".into(),
+            "x=0; declare -n ref=x; ref=ambient; echo \"$((x+1))\"".into(),
+            "x=0; printf -v x '%s' ambient; echo \"$((x+1))\"".into(),
+            "true || x=1; echo \"$((x+1))\"".into(),
+            "(x=1); echo \"$((x+1))\"".into(),
+            "y=$((x+1)); x=1; echo \"$y\"".into(),
         ] {
             let response = handle_pre_tool_use(&bash_input(&command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();
             if command.contains("ambient") && !response["hookSpecificOutput"]["permissionDecisionReason"]
                 .as_str().unwrap_or("")
-                .contains("cannot resolve shell filesystem effects (an unresolved arithmetic operand)")
+                .contains("[H-29]")
             {
                 failures.push(format!("arithmetic diagnostic {command}: {response}"));
             }
@@ -9094,6 +9080,10 @@ EOF
             "let '(1+2)*3'",
             "(( (1+2)*3 ))",
             "echo '$(( x ))' '$[ x ]'",
+            "S=12; sed -n \"$((S+1)),$((S+2))p\" file",
+            "x=0; while read -r path < list; do x=$((x+1)); done; echo \"$x\"",
+            "x=1; ((x+=1)); [[ \"$x\" -eq 2 ]]",
+            "x=1; echo \"$(( ${x}+1 ))\"",
         ] {
             let response = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
             let response = serde_json::to_value(response).unwrap();

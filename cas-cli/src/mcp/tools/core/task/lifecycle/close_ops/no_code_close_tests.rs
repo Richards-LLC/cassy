@@ -829,7 +829,10 @@ async fn epic_retarget_rebinds_unchanged_started_source_before_no_delivery_close
     let mut reassigned = f.task(id);
     reassigned.assignee = Some("another-worker".into());
     f.put(&reassigned);
-    let refused = call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "epic":"cas-aac3-new"})).await;
+    let refused = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"update", "id":id, "epic":"cas-aac3-new",
+    })).unwrap())).await;
+    assert!(refused.is_err(), "mismatched assignee must refuse the retarget");
     assert_eq!(tasks.get_parent_epic(id).unwrap().unwrap().id, "cas-aac3-old", "{refused}");
     assert_eq!(f.task(id).deliverables.work_target, Some(target("main")), "{refused}");
     let mut restored = f.task(id);

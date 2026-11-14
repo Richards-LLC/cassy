@@ -219,8 +219,12 @@ pub(super) fn launch(
         let dispatch = dispatch.clone();
         return std::thread::Builder::new().name(format!("verifier-request-{}", task.id))
             .spawn(move || {
+                // cas-5d2e: the same retry guidance as a local launch failure.
                 if let Err(error) = super::factory_launch::request(&session, &dispatch.id) {
-                    let _ = attention(&worker, &dispatch, &error);
+                    let _ = attention(&worker, &dispatch, &format!(
+                        "Automatic verifier could not start: {error}. {}",
+                        recovery(&worker.cas_root, &dispatch)
+                    ));
                 }
             }).map(Some).map_err(|e| e.to_string());
     }

@@ -593,12 +593,14 @@ impl CasCore {
             });
         let agent_store = self.open_agent_store()?;
         let id = if let Some(id) = candidate {
-            agent_store.get(&id).map_err(|_| McpError {
-                code: ErrorCode::INVALID_REQUEST,
-                message: Cow::from(
-                    "Authenticated Cassy session is not registered; receipt submission cannot auto-register it.",
-                ),
-                data: None,
+            agent_store.get(&id).map_err(|error| {
+                store_busy_error(&error).unwrap_or_else(|| McpError {
+                    code: ErrorCode::INVALID_REQUEST,
+                    message: Cow::from(
+                        "Authenticated Cassy session is not registered; receipt submission cannot auto-register it.",
+                    ),
+                    data: None,
+                })
             })?;
             id
         } else {
@@ -625,11 +627,11 @@ impl CasCore {
         crate::mcp::daemon::ensure_factory_process_owner(
             agent_store.as_ref(), &id, Some(std::process::id()),
             Some(harness),
-        ).map_err(|error| McpError {
+        ).map_err(|error| store_busy_error(&error).unwrap_or_else(|| McpError {
             code: ErrorCode::INVALID_REQUEST,
             message: Cow::from(error.to_string()),
             data: None,
-        })?;
+        }))?;
         Ok(id)
     }
 
@@ -1307,4 +1309,18 @@ mod role_registration_tests {
             assert!(store.get(&new_session).is_err());
         }
     }
+}
+
+/// cas-5d2e: a store read that timed out on a busy connection is not evidence
+/// that the caller is unregistered. Keep its real cause and a retryable code.
+pub(crate) const STORE_BUSY_CODE: &str = "store_busy";
+
+pub(crate) fn store_busy_error(error: &crate::store::StoreError) -> Option<McpError> {
+    matches!(error, crate::store::StoreError::Database(sqlite)
+        if cas_store::shared_db::is_busy_error(sqlite))
+    .then(|| McpError {
+        code: ErrorCode::INTERNAL_ERROR,
+        message: Cow::from(error.to_string()),
+        data: Some(serde_json::json!({ "error_code": STORE_BUSY_CODE })),
+    })
 }

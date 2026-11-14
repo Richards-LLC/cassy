@@ -29,7 +29,7 @@ impl CasCore {
             use super::task::lifecycle::close_ops::SupervisorAuthorityError;
             let (stage, cause) = match error {
                 SupervisorAuthorityError::Identity(error) => ("identity", error),
-                SupervisorAuthorityError::Store(error) => ("store", error),
+                SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => ("store", error),
                 SupervisorAuthorityError::NotRegistered { caller_id, error } =>
                     ("registration", format!("caller {caller_id} is not registered: {error}")),
                 SupervisorAuthorityError::NotLive(caller) =>

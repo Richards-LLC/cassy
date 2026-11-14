@@ -707,14 +707,15 @@ impl Candidate {
         let reviewed_changes = |paths: Vec<String>| paths.into_iter()
             .filter(|path| !unchanged_upkeep.contains(&path.as_str())).collect::<Vec<_>>();
         // cas-c5db (cas-c9ec): commits the target gained that the source
-        // already carries are reviewed content, not target changes. Judge
-        // only the target progress the source lacks, from their merge base.
-        let progress = git(&self.repository, &["merge-base", target, &self.source_sha])?;
+        // already carries are target content, not delivered paths. Deliveries
+        // are measured from the current merge base; target movement stays
+        // measured from the reviewed target (cas-192b0).
+        let delivered_base = git(&self.repository, &["merge-base", target, &self.source_sha])?;
         let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
-            &base,
+            &delivered_base,
             &self.source_sha,
-            &progress,
+            &self.target_sha,
             target,
         )?);
         if !changed.is_empty() {

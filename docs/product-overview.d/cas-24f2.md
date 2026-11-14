@@ -20,3 +20,6 @@ from literal script arguments. Bash single-bracket comparisons handle integer
 data; recursive arithmetic remains checked. A literal realpath directory at
 the start of a command can resolve artifact writes without granting new roots.
 Pattern/rule inputs stay separate from lists of filenames to open.
+
+Git scope checks read each statement's original word facts and projected
+arguments, preserving existing ownership and raw syntax-check requirements.

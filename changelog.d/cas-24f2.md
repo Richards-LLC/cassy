@@ -24,3 +24,7 @@ Credential checks use the shared shell input boundaries and admitted nesting
 limit. Bash numeric tests consume data while actual arithmetic keeps its
 checks. Literal entry-directory canonicalization preserves artifact-root
 containment, and pattern/rule-file inputs retain their credential checks.
+
+Git scope checks consume shared statement provenance, so unrelated quoted data
+does not alter a later syntax-check invocation. Shell payload boundaries stay
+consistent across Git, credential and role checks.

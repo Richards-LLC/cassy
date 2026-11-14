@@ -91,11 +91,12 @@ impl PreviewStore {
             if name == "verification-candidates" {
                 relocate_candidates(&live.join(&name), &root.join(&name), live, &root)?;
             } else {
-                link(&live.join(&name), &root.join(&name))?;
+                crate::accounts::symlink(&live.join(&name), &root.join(&name))?;
             }
         }
+        // One consistent read; a paged backup restarts on every live write.
         rusqlite::Connection::open_with_flags(live.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
-            .backup(rusqlite::MAIN_DB, root.join("cas.db"), None)?;
+            .execute("VACUUM INTO ?1", [root.join("cas.db").to_string_lossy().as_ref()])?;
         crate::migration::run_migrations(&root, false)?;
         ensure!(crate::cloud::resolve_canonical_id(&root) == crate::cloud::resolve_canonical_id(live),
             "release preview snapshot does not resolve the live project identity; pin [project] canonical_id");
@@ -127,19 +128,6 @@ fn relocate_candidates(from: &Path, to: &Path, live: &Path, snapshot: &Path) -> 
     Ok(())
 }
 
-#[cfg(unix)]
-fn link(target: &Path, path: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, path)
-}
-
-#[cfg(not(unix))]
-fn link(target: &Path, path: &Path) -> std::io::Result<()> {
-    if target.is_dir() {
-        std::os::windows::fs::symlink_dir(target, path)
-    } else {
-        std::os::windows::fs::symlink_file(target, path)
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ReleasePreview {

@@ -10831,7 +10831,9 @@ EOF
             ("cd src && ln -s . local && printf x > local/new.rs", false),
             ("cd src && python3 - <<'PY'\nopen('../../../config.toml','w').write('x')\nPY", true),
             ("cd src && python3 - <<'PY'\nopen('new.rs','w').write('x')\nPY", false),
-            ("cd \"$UNKNOWN_CWD\" && cat file.txt", false),
+            // cas-707a2: a relative read from an unknown directory may be a
+            // credential read, which the credential gate refuses.
+            ("cd \"$UNKNOWN_CWD\" && git status", false),
             ("sh -c 'printf x > src/new.rs'", false),
             ("(cd src && printf x > new.rs); printf x > local.rs", false),
             ("cd ../.. && cat config.toml", false),

@@ -853,7 +853,8 @@ esac
 
         self.write("fixture-cas", '#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(self.repo / "gate-argv") + '"\n')
         (self.repo / "fixture-cas").chmod(0o755)
-        skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue", CAS_BIN=str(self.repo / "fixture-cas"))
+        override_reason = "hotfix for the queue"
+        skipped = self.push(CAS_SKIP_FAST_ROWS=override_reason, CAS_BIN=str(self.repo / "fixture-cas"))
         self.assertEqual(skipped.returncode, 0, skipped.stderr)
         recorded = (self.repo / "gate-argv").read_text().splitlines()
         self.assertEqual(recorded[:4], ["gates", "record-override", "C-07", "H-38"])
@@ -862,7 +863,7 @@ esac
         [entry] = log.splitlines()
         _, logged_tip, logged_ref, detail = entry.split(maxsplit=3)
         self.assertEqual((logged_tip, logged_ref), (head, "factory/lane"))
-        self.assertIn("hotfix for the queue", detail)  # exact caller-supplied reason
+        self.assertIn(override_reason, detail)
         remote_tip, remote_ref = command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane").stdout.split()
         self.assertEqual((remote_tip, remote_ref), (head, "refs/heads/" + logged_ref))
 

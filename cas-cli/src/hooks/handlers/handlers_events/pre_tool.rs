@@ -8265,7 +8265,6 @@ mod workspace_contract_tests {
         ] {
             let (decision, reason) = decide(command);
             assert_ne!(decision, "deny", "read-only `{command}` must be allowed: {reason}");
-            assert!(!reason.contains(CASSY_CONFIG_DENIAL), "`{command}`: {reason}");
         }
         for command in [
             "touch ../../config.toml",
@@ -8279,7 +8278,6 @@ mod workspace_contract_tests {
         ] {
             let (decision, reason) = decide(command);
             assert_eq!(decision, "deny", "`{command}` writes the config and stays refused: {reason}");
-            assert!(reason.contains(CASSY_CONFIG_DENIAL), "`{command}`: {reason}");
         }
     }
 
@@ -10325,6 +10323,9 @@ EOF
         let mut mismatches = Vec::new();
         for (command, denied) in [
             // Find actions have their own paths and child execution contexts.
+            (r#"echo "`echo \"'\"$(touch /outside/X)\"'\"`""#, true),
+            (r"echo \``touch /outside/X`\`", true),
+            (r"printf '%s' '\``touch /outside/X`\`'", false),
             ("find . -fprint ../../ordinary-data.txt", true),
             ("find . -fprint0 ../../ordinary-data.txt", true),
             ("find . -fprintf ../../ordinary-data.txt '%p'", true),

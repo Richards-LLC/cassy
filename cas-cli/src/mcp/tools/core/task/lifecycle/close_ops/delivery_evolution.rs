@@ -1048,7 +1048,7 @@ fn advance(
                 if let Some((index, new)) = retained.get(occurrence).map(|position| (*position, &hunk.added[*position])) {
                     next.positions.push(hunk.new_start + index);
                     if (ordinary || internal_resolution)
-                        && old != *new
+                        && old != new
                         && !next.commits.iter().any(|known| known == commit)
                     {
                         next.commits.push(commit.to_string());

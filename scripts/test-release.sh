@@ -47,6 +47,8 @@ case "$1 $2" in
   "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
   "api -X")
     case "$4" in
+      */pulls?*) echo '[]' ;;
+      */artifacts?*) echo '{"artifacts":[]}' ;;
       */jobs) echo '{"jobs":[{"name":"Shared train and queue graph / Full-set gate","conclusion":"success"}]}' ;;
       *) cat "${FAKE_TRAIN_RUN:-/dev/null}" ;;
     esac ;;
@@ -72,8 +74,8 @@ case "$1 $2" in
   "release preview")
     jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" \
       --argjson missing "${FAKE_REVIEW_MISSING:-$(printf '%s' '["cas-dead"]')}" \
-      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" \
-      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)),would_close:$n,would_hold:($missing|length),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),ALREADY_CLOSED:$closed},review_missing:$missing}' ;;
+      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" --argjson ci "${FAKE_CI_MISSING:-[]}" \
+      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)+($ci|length)),would_close:$n,would_hold:(($missing|length)+($ci|length)),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),LANE_CI_MISSING:($ci|length),ALREADY_CLOSED:$closed},review_missing:$missing,lane_ci_missing:$ci}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
@@ -330,8 +332,7 @@ dry_release_rebuilds_commander() {
 }
 check 'dry_release_rebuilds_commander' 'cas-56bbc: dry release commits Commander dist identical to a fresh post-bump build'
 
-# cas-4b33: shared docs are generated at the cut. A stale CODEMAP stops prep;
-# once regenerated, the release commit carries the compiled overview fragment.
+# Shared docs join the release commit without a separate train push.
 docs_generated_at_the_cut() {
     local fixture="$tmp/docs-cut" before status=0
     clone_epic "$fixture" epic/docs-cut docs-cut
@@ -343,17 +344,21 @@ docs_generated_at_the_cut() {
     git -C "$fixture" add docs && git -C "$fixture" commit --quiet -m 'overview and fragment'
     write_valid_draft "$tmp/docs-cut-draft.md"
     before="$(git -C "$fixture" rev-parse HEAD)"
-    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || status=$?
-    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
-        grep -q 'CODEMAP.md predates' "$tmp/docs-cut.log" || return 1
     printf '# Map\n\n- docs/ - overview\n' >"$fixture/.claude/CODEMAP.md"
-    git -C "$fixture" commit --quiet -am 'regenerate map'
-    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >>"$tmp/docs-cut.log" 2>&1 || return 1
+    # Only the map may be pending; unrelated source edits still refuse prep.
+    echo 'uncommitted source' >>"$fixture/docs-cut.txt"
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    git -C "$fixture" checkout -- docs-cut.txt
+    # A pending map refresh must ride the release commit, without its own CI.
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD^)" == "$before" ]] &&
+        git -C "$fixture" show HEAD:.claude/CODEMAP.md | grep -q 'docs/ - overview' || return 1
     git -C "$fixture" show HEAD:docs/PRODUCT_OVERVIEW.md | grep -q 'Fragment pitch line.' &&
         ! git -C "$fixture" cat-file -e HEAD:docs/product-overview.d/cas-0006.md 2>/dev/null &&
         [[ -z "$(git -C "$fixture" status --porcelain)" ]]
 }
-check 'docs_generated_at_the_cut || { cat "$tmp/docs-cut.log"; false; }' 'cas-4b33: stale CODEMAP stops prep; the release commit carries compiled doc fragments'
+check 'docs_generated_at_the_cut || { cat "$tmp/docs-cut.log"; false; }' 'release commit folds a pending CODEMAP refresh and compiled doc fragments together'
 
 commander_build_failure_stops_release() {
     local fixture="$tmp/web-failure" before status=0
@@ -557,6 +562,11 @@ hotfix_fallback() {
 train_receipt_cut() {
     local fixture="$tmp/train-ci-cut" status=0 before after
     clone_epic "$fixture" epic/release-train-fixture train-ci
+    mkdir -p "$fixture/docs/product-overview.d"
+    printf '# Overview\n\n## Pitch\n\nBase pitch.\n' >"$fixture/docs/PRODUCT_OVERVIEW.md"
+    printf '## Pitch\n\nCompiled at the cut.\n' >"$fixture/docs/product-overview.d/report.md"
+    git -C "$fixture" add docs
+    git -C "$fixture" commit --quiet -m 'overview inputs before green train receipt'
     write_valid_draft "$tmp/train-ci-notes.md"
     before="$(git -C "$fixture" rev-parse HEAD)"
     mkdir -p "$tmp/train-ci-artifact"
@@ -587,15 +597,33 @@ PY
     [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
     cp "$tmp/train-ci-green.json" "$FAKE_TRAIN_ARTIFACT/receipt.json"
     rm -rf "$fixture/.git/cas/train-ci"
-    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    mkdir -p "$fixture/.claude"
+    printf '# Updated map\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" add .claude/CODEMAP.md
+    git -C "$fixture" commit --quiet -m 'CODEMAP-only follow-up to green train'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --no-watch --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     after="$(git -C "$fixture" rev-parse HEAD)"
     [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
     # There is deliberately no Y run/artifact: retry must fetch X again.
     rm -rf "$fixture/.git/cas/train-ci"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
-    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]]
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]] || return 1
+    # A refresh supplied on a prepared retry still joins that release commit.
+    printf '# Refreshed map on retry\n' >"$fixture/.claude/CODEMAP.md"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD^)" == "$after" && -z "$(git -C "$fixture" status --porcelain)" ]] || return 1
+    after="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]] || return 1
+    echo 'source needs fresh CI' >>"$fixture/train-ci.txt"
+    git -C "$fixture" commit --quiet -am 'source after green receipt'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    status=0
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]]
 }
-check 'train_receipt_cut' 'train cut requires green starting-tip receipt and reuses it on an unchanged prepared retry'
+check 'train_receipt_cut' 'train cut reuses green proof after CODEMAP-only work and prepared retries; source requires fresh proof'
 unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
@@ -679,6 +707,10 @@ cut_own_review_missing() {
     write_valid_draft "$tmp/own-review-notes.md"
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
+    FAKE_REVIEW_MISSING='[]' FAKE_CI_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
+        run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review-ci.log" 2>&1 || status=$?
+    [[ "$status" == 1 ]] && grep -q 'LANE_CI_MISSING.*cas-000a, cas-000b' "$tmp/own-review-ci.log" || return 1
+    status=0
     FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
     # REVIEW_MISSING is the machine refusal identifier; a trailing gate frame

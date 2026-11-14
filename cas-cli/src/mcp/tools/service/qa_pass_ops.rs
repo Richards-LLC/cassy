@@ -16,18 +16,20 @@ impl CasService {
         -> Result<CallToolResult, McpError> {
         let reject = |reason: String| Self::error(ErrorCode::INVALID_PARAMS,
             crate::gates::tag("G-116", format!("batch_receipt rejected: {reason}")));
+        // Release review is computed from existing delivery approvals and
+        // the green train run; there is no ledger recorder to authenticate.
+        if req.verification_type.as_deref() == Some("release") {
+            return Err(reject("RELEASE_REVIEW_COMPUTED: release cuts reuse merge approvals and the green frozen-train receipt; no release review ledger is accepted".into()));
+        }
         let recorder = self.inner.resolve_live_supervisor_authority()
             .map_err(|_| reject("requires a live registered supervisor".into()))?;
         let config = crate::config::Config::load(&self.inner.cas_root).map_err(|e| reject(e.to_string()))?;
         if config.qa().mode != crate::config::QaMode::Batch {
             return Err(reject("requires qa.mode=batch".into()));
         }
-        // cas-ce5e: `verification_type=release` records the one code-review verdict
-        // for the assembled tip, in the shape of a QA receipt but never as one.
         let (schema, check_id, stage, label) = match req.verification_type.as_deref() {
             None | Some("task") => (cas_store::QA_BATCH_RECEIPT_SCHEMA, "qa_batch", cas_store::CheckStage::Qa, "Batch QA receipt"),
-            Some("release") => (cas_store::RELEASE_VERDICT_SCHEMA, "release_verdict", cas_store::CheckStage::Verifier, "Release verdict"),
-            Some(other) => return Err(reject(format!("verification_type {other:?}: batch_receipt takes only 'task' or 'release'"))),
+            Some(other) => return Err(reject(format!("verification_type {other:?}: batch_receipt takes only 'task'"))),
         };
         let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
             required(req.ledger_author.as_deref(), "ledger_author")?,
@@ -61,28 +63,11 @@ impl CasService {
         let note = format!("[{}] {label} {}: staging={} ledger={} recorder={} author={} ({})",
             receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
             receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));
-        let mut author_override_accepted = !receipt.author_overrides.is_empty();
+        let author_override_accepted = !receipt.author_overrides.is_empty();
         for task_id in receipt.task_heads.keys() {
             let note = match receipt.author_overrides.get(task_id) {
                 Some(words) => format!("{note}. DECISION: author is in this task's lineage; accepted by operator override: {words}"),
-                None => {
-                    let waiver = self.inner.open_task_store()?.get(task_id).ok()
-                        .and_then(|task| {
-                            let (repo, _) = crate::qa_batch::task_context(&self.inner.cas_root, &task).ok()?;
-                            if receipt.schema_version != cas_store::RELEASE_VERDICT_SCHEMA
-                                || crate::qa_batch::author_is_independent(&self.inner.cas_root, &task, &repo,
-                                    receipt.ledger_author_id.as_deref()?).ok()? { return None; }
-                            crate::qa_batch::release_author_waiver(&self.inner.cas_root, &task, &repo,
-                                receipt.task_heads.get(task_id)?).ok().flatten()
-                        });
-                    match waiver {
-                        Some(pass) => {
-                            author_override_accepted = true;
-                            format!("{note}. DECISION: QA-record author accepted for release closeout by supervisor waiver {} at {}.", pass.id, pass.bound_head)
-                        },
-                        None => note.clone(),
-                    }
-                },
+                None => note.clone(),
             };
             if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");

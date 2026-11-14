@@ -212,6 +212,13 @@ fn has_route(task: &cas_types::Task) -> bool {
     })
 }
 
+/// The machine a live build route came from (cas-e571).
+pub(crate) fn routed_from(task: &cas_types::Task) -> Option<String> {
+    task.notes.lines().rev().find_map(|line| {
+        serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
+    }).map(|plan| plan.source_machine_id)
+}
+
 fn send_error(error: impl ToString) -> crate::cloud::peer_mailbox::PeerSendError {
     crate::cloud::peer_mailbox::PeerSendError::Failed {
         cause: error.to_string(),

@@ -1750,7 +1750,8 @@ mod tests {
         core.open_agent_store().unwrap().register(&supervisor).unwrap();
         core.set_agent_id_for_testing(supervisor.id);
         let ledger = repo.join("LEDGER.md");
-        std::fs::write(&ledger, "cas-batch-a PASS\ncas-batch-b PASS\n").unwrap();
+        std::fs::write(&ledger, crate::qa_ledger::scaffold_with_coverage(
+            &tasks.get("cas-batch-a").unwrap(), &[], &head, &["cas-batch-a".into(), "cas-batch-b".into()])).unwrap();
         let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
         let context = crate::artifacts::PublishContext {
             store: &artifacts,
@@ -1758,7 +1759,7 @@ mod tests {
             task_id: "cas-batch-a".into(), cloud: None,
         };
         let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact.id;
-        let arguments = serde_json::json!({"action":"batch_receipt", "verification_type":"release",
+        let arguments = serde_json::json!({"action":"batch_receipt", "verification_type":"task",
             "task_ids":["cas-batch-a","cas-batch-b"], "staging_sha":head,
             "ledger_artifact_id":artifact, "ledger_path":ledger, "ledger_author":"independent-reviewer"});
         let request = serde_json::from_value(arguments.clone()).unwrap();

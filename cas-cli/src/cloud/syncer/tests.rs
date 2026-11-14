@@ -102,7 +102,7 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    for team_scope in [true, false] {
+    for (team_scope, row_receipts) in [(true, true), (false, true), (true, false), (false, false)] {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let project = "artifact-race-project";
         let team = "artifact-race-team";
@@ -131,18 +131,22 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
                     let detail = serde_json::json!({"inserted":0,"updated":1,"skipped":0,
                         "accepted": {id.clone(): {"revision":state.1.to_string()}}});
                     let rows = serde_json::json!([{"entity_type":"tasks","id":id,"outcome":"updated"}]);
-                    ResponseTemplate::new(200).set_body_json(if team_scope {
+                    let mut body = if team_scope {
                         serde_json::json!({"synced":{"tasks":detail},"rows":rows})
-                    } else { serde_json::json!({"tasks":detail,"rows":rows}) })
+                    } else { serde_json::json!({"tasks":detail,"rows":rows}) };
+                    if !row_receipts { body.as_object_mut().unwrap().remove("rows"); }
+                    ResponseTemplate::new(200).set_body_json(body)
                 } else {
                     let detail = serde_json::json!({"inserted":0,"updated":0,"skipped":1,
                         "rejected":[{"id":id,"reason":"revision_conflict",
                             "current_revision":state.1.to_string()}]});
                     let rows = serde_json::json!([{"entity_type":"tasks","id":id,
                         "outcome":"rejected","reason":"revision_conflict"}]);
-                    ResponseTemplate::new(200).set_body_json(if team_scope {
+                    let mut body = if team_scope {
                         serde_json::json!({"synced":{"tasks":detail},"rows":rows})
-                    } else { serde_json::json!({"tasks":detail,"rows":rows}) })
+                    } else { serde_json::json!({"tasks":detail,"rows":rows}) };
+                    if !row_receipts { body.as_object_mut().unwrap().remove("rows"); }
+                    ResponseTemplate::new(200).set_body_json(body)
                 }
             }).mount(&server).await;
         let reading = Arc::clone(&remote);
@@ -240,7 +244,7 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
         assert!(delivered_task.notes.contains(&concurrent.notes));
         for notes in [&published.notes, &concurrent.notes] {
             for block in cas_store::task_note_markers::note_blocks(notes) {
-                assert!(cas_store::task_note_markers::contains_complete_lines(&delivered_task.notes, &block));
+                assert!(delivered_task.notes.contains(block));
             }
         }
         drop(state);

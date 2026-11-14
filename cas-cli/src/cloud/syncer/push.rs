@@ -822,7 +822,8 @@ impl CloudSyncer {
                                     };
                                     let diagnostic = match failure {
                                         PushItemizedFailure::Rejection(rejection) => format!(
-                                            "permanent cloud rejection: reason={}; entity={entity_type}; id={}; existing_project={}",
+                                            "{}: reason={}; entity={entity_type}; id={}; existing_project={}",
+                                            if reason == "revision_conflict" { "revision_reconciliation_required" } else { "cloud rejection" },
                                             rejection.reason.as_str(),
                                             rejection.id,
                                             rejection.existing_canonical_id,

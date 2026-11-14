@@ -61,12 +61,25 @@ pub(super) struct Statement {
     pub(super) words: Vec<String>,
     literals: Vec<bool>,
     offsets: Vec<usize>,
+    ends: Vec<usize>,
     assignments: Vec<bool>,
+    /// This occurrence's raw words are exactly its projected argv.
+    pub(super) raw_argv: bool,
     /// Reserved syntax is recognized from raw source, never a cooked word.
     prefix: usize,
 }
 
 impl Statement {
+    pub(super) fn path_word(&self, source: &str, at: usize) -> super::WorkerPathWord {
+        let raw = source[self.offsets[at]..self.ends[at]].trim();
+        super::WorkerPathWord {
+            literal: Some(self.literals[at]),
+            quoted: raw.starts_with('"') && raw.ends_with('"'),
+            raw_syntax_word: raw == self.words[at] && !raw.is_empty()
+                && raw.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)),
+        }
+    }
+
     pub(super) fn policy_words(&self) -> &[String] {
         &self.words[self.prefix..]
     }
@@ -768,6 +781,7 @@ impl ShellLexed {
     }
 
     pub(super) fn statements(&self, source: &str, syntax: &[CaseSyntax]) -> Vec<Statement> {
+        let raw_statements = statement_indices(&self.tokens);
         let indices: Vec<_> = self.argument_indices(source).into_iter()
             .filter(|&at| !matches!(syntax[at], CaseSyntax::Hidden | CaseSyntax::Esac)).collect();
         let tokens: Vec<_> = indices.iter().map(|&at| match syntax[at] {
@@ -789,6 +803,7 @@ impl ShellLexed {
             }
             Statement {
                 prefix,
+                raw_argv: raw_statements.iter().any(|raw| raw == &originals),
                 assignments: originals.iter().map(|&at| {
                     let ShellToken::Word(word) = &self.tokens[at] else { return false; };
                     let start = if at == 0 { 0 } else { self.ends[at - 1] };
@@ -800,6 +815,7 @@ impl ShellLexed {
                     ShellToken::Word(word) => word.clone(), _ => unreachable!(),
                 }).collect(),
                 literals: originals.iter().map(|&at| self.literals[at]).collect(),
+                ends: originals.iter().map(|&at| self.ends[at]).collect(),
                 offsets: originals.iter().map(|&at| {
                     let start = if at == 0 { 0 } else { self.ends[at - 1] };
                     start + source[start..self.ends[at]].len() - source[start..self.ends[at]].trim_start().len()

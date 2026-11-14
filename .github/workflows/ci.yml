@@ -71,6 +71,9 @@ env:
   # namespace so every CI job can reuse identical compiler objects.
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_GHA_VERSION: "cas-v2"
+  # Branch-local compiler objects evict main's release dependencies from the
+  # shared 10 GB cache. Every ref reads main; only main seeds reusable objects.
+  SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
 
 permissions:
   contents: read

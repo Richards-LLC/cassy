@@ -64,7 +64,7 @@ pub(super) struct Statement {
 }
 
 impl Statement {
-    pub(super) fn worker_refusal(&self, index: Option<usize>) -> Option<Unsupported> {
+    pub(super) fn worker_refusal(&self, index: Option<usize>, xargs: bool) -> Option<Unsupported> {
         use super::{is_shell_variable_name, shell_word_basename};
         let words = &self.words;
         let offset = |at: usize| self.offsets.get(at).copied().unwrap_or(0);
@@ -102,6 +102,18 @@ impl Statement {
         }
         let name = shell_word_basename(&words[index]);
         let args = &words[index + 1..];
+        // xargs appends runtime input to argv. Only data-only consumers and
+        // process-signal consumers with their own existing policy can accept
+        // that unknown input. Filename readers/writers and unknown programs
+        // need explicit operands so credential and write-root policy can act.
+        if xargs && !matches!(name,
+            "echo" | "printf" | "true" | "false" | "test" | "[" | "basename" | "dirname" | "tr"
+            | "kill" | "pgrep" | "pkill" | "killall")
+        {
+            return Some(Unsupported::execution("shell.dynamic_command", offset(index), "input-derived command arguments",
+                "runtime input supplies filenames or arguments whose effects cannot be resolved",
+                "use explicit literal operands or a data-only consumer"));
+        }
         if matches!(name, "export" | "declare" | "typeset" | "local" | "readonly") {
             for (at, word) in args.iter().enumerate() {
                 if word.split_once('=').is_some_and(|(name, _)| matches!(name, "PS4" | "PROMPT_COMMAND")) {
@@ -111,7 +123,8 @@ impl Statement {
         }
         match name {
             "alias" => return Some(deferred(index)),
-            "trap" if args.first().is_some_and(|action| !action.is_empty() && action != "-" && !action.starts_with('-')) => return Some(deferred(index)),
+            "trap" if args.iter().find(|arg| arg.as_str() != "--")
+                .is_some_and(|action| !action.is_empty() && action.as_str() != "-" && !action.starts_with('-')) => return Some(deferred(index)),
             "shopt" if args.iter().any(|arg| arg == "expand_aliases") && args.iter().any(|arg| arg.starts_with('-') && arg.contains('s')) => return Some(deferred(index)),
             "eval" if (index + 1..words.len()).any(dynamic) => return Some(payload(index)),
             "source" | "." => {

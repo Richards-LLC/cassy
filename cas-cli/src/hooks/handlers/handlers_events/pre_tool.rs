@@ -1876,44 +1876,9 @@ fn worker_check_log_denial(input: &HookInput, suffix: &str) -> Option<String> {
 /// `bash -c` are inspected too; quoted text in other commands (a commit
 /// message, an echo) is not.
 fn worker_command_rust_build(command: &str, cwd: &Path) -> Option<String> {
-    worker_command_rust_build_at_depth(command, cwd, 0)
-}
-
-fn worker_command_rust_build_at_depth(command: &str, cwd: &Path, depth: usize) -> Option<String> {
-    for words in shell_statement_words(command) {
-        if let Some(found) = rust_build_invocation(&words, cwd) {
-            return Some(found);
-        }
-        if depth < 2 {
-            // `env -S 'cargo …'` runs its split string as the command (cas-cfd6).
-            if let Some(payload) = env_split_string_payload(&words) {
-                if let Some(found) = worker_command_rust_build_at_depth(&payload, cwd, depth + 1) {
-                    return Some(found);
-                }
-            }
-        }
-        if depth < 2 {
-            // `sh -c '<script>'`, `bash -lc "<script>"`
-            for (index, word) in words.iter().enumerate() {
-                let shell = matches!(shell_word_basename(word), "sh" | "bash" | "zsh" | "dash");
-                if !shell {
-                    continue;
-                }
-                let script = words[index + 1..]
-                    .iter()
-                    .position(|arg| {
-                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')
-                    })
-                    .and_then(|flag| words.get(index + 1 + flag + 1));
-                if let Some(found) =
-                    script.and_then(|script| worker_command_rust_build_at_depth(script, cwd, depth + 1))
-                {
-                    return Some(found);
-                }
-            }
-        }
-    }
-    None
+    scan_shell_invocations(command).scopes.iter()
+        .flat_map(|scope| &scope.statements)
+        .find_map(|words| rust_build_invocation(words, cwd))
 }
 
 /// Cargo subcommands that compile the workspace or run compiled tests.
@@ -2179,7 +2144,7 @@ fn make_rule_is_script_only(
                 && !shell_statement_words(line).iter().any(|words| {
                     words.iter().any(|word| matches!(shell_word_basename(word), "make" | "gmake"))
                 })
-                && worker_command_rust_build_at_depth(line, dir, 0).is_none()
+                && worker_command_rust_build(line, dir).is_none()
         }) && prerequisites
             .iter()
             .all(|prerequisite| make_rule_is_script_only(dir, rules, prerequisite, seen))
@@ -3610,31 +3575,25 @@ pub(crate) const FACTORY_AUTO_APPROVE_TOOLS: &[&str] = &[
 
 
 fn worker_command_pattern_kill(command: &str) -> bool {
-    worker_command_pattern_kill_at_depth(command, 0)
+    let scan = scan_shell_invocations(command);
+    scan.scopes.iter().any(|scope| {
+        pattern_kill_in_scope(scope, &scan.commands[scope.commands.clone()])
+    })
 }
 
-/// Judge process searches and signal consumers over the whole shell command:
-/// loops, substitutions and pipelines can carry PIDs across statement boundaries.
-/// This is conservative composition, not general shell dataflow: a diagnostic
-/// `pgrep ...; kill 123` still has no dynamic or piped signal operand.
-fn worker_command_pattern_kill_at_depth(command: &str, depth: usize) -> bool {
-    let command = shell_command_without_heredoc_bodies(command);
-    let tokens = factory_shell_tokens(&command);
-    let variables = factory_shell_variable_values(&tokens);
-    let statements = shell_statement_words(&command);
+/// Process searches and signals compose over an executing scope and its
+/// descendants. The common walk supplies its own lexical/argv provenance.
+fn pattern_kill_in_scope(scope: &ShellScope, commands: &[(String, Vec<String>)]) -> bool {
+    let tokens = &scope.lexed.tokens;
+    let variables = factory_shell_variable_values(tokens);
+    let statements = &scope.statements;
     let piped = tokens.contains(&ShellToken::Operator('|'));
     let mut searches = false;
     let mut process_list = false;
     let mut filters = false;
     let mut dynamic_signal = false;
 
-    for words in &statements {
-        if depth < 4
-            && let Some(script) = env_split_string_payload(words)
-            && worker_command_pattern_kill_at_depth(&script, depth + 1)
-        {
-            return true;
-        }
+    for words in statements {
         // The invocation scanner unwraps xargs, so retain that input edge here.
         if let Some(index) = unwrapped_command_index(words)
             && words[..index].iter().any(|word| shell_word_basename(word) == "xargs")
@@ -3647,7 +3606,7 @@ fn worker_command_pattern_kill_at_depth(command: &str, depth: usize) -> bool {
 
     // The shared scanner sees executable substitutions, loop bodies, eval and
     // shell payloads, while leaving echoed/quoted documentation as arguments.
-    for (name, args) in shell_invocations(&command) {
+    for (name, args) in commands {
         for resolved in expand_factory_shell_word(&name, &variables) {
             match shell_word_basename(&resolved) {
                 "pkill" | "killall" => return true,
@@ -3657,18 +3616,6 @@ fn worker_command_pattern_kill_at_depth(command: &str, depth: usize) -> bool {
                 "kill" => {
                     dynamic_signal |= args.iter().any(|arg| arg.contains(['$', '`']))
                         || (piped && args.iter().all(|arg| arg.starts_with('-')));
-                }
-                "eval" if depth < 4 => {
-                    if worker_command_pattern_kill_at_depth(&args.join(" "), depth + 1) {
-                        return true;
-                    }
-                }
-                "sh" | "bash" | "dash" | "zsh" | "ksh" if depth < 4 => {
-                    if let Some(script) = shell_payload_index(&name, &args).and_then(|at| args.get(at))
-                        && worker_command_pattern_kill_at_depth(script, depth + 1)
-                    {
-                        return true;
-                    }
                 }
                 _ => {}
             }
@@ -5838,10 +5785,16 @@ pub(super) fn executing_shell_arguments(command: &str) -> Result<Vec<Vec<String>
 #[derive(Default)]
 struct ShellInvocationScan {
     commands: Vec<(String, Vec<String>)>,
-    statements: Vec<Vec<String>>,
+    scopes: Vec<ShellScope>,
     arguments: Vec<Vec<String>>,
     refusal: Option<shell_admission::Unsupported>,
     worker_refusal: Option<shell_admission::Unsupported>,
+}
+
+struct ShellScope {
+    lexed: ShellLexed,
+    statements: Vec<Vec<String>>,
+    commands: std::ops::Range<usize>,
 }
 
 fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
@@ -5855,29 +5808,31 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
         Ok(parsed) => parsed,
         Err(error) => { found.refusal.get_or_insert(error); return; }
     };
+    let command_start = found.commands.len();
     let statements = parsed.lexed.statements(&parsed.projected, &parsed.syntax);
     found.arguments.extend(statements.iter().map(|statement| statement.words.clone()));
-    found.statements.extend(shell_statements_from_tokens(parsed.lexed.tokens));
     for statement in statements {
         let words = &statement.words;
         let mut pending = vec![0];
         let mut visited = vec![false; words.len()];
         let mut indices = Vec::new();
+        let mut xargs = false;
         while let Some(start) = pending.pop() {
             if start >= words.len() || visited[start] { continue; }
             visited[start] = true;
             if let Some(relative) = unwrapped_command_index_with_alternatives(
                 &words[start..], &mut |offset| pending.push(start + offset),
+                &mut |offset| xargs |= shell_word_basename(&words[start + offset]) == "xargs",
             ) {
                 let index = start + relative;
                 if !indices.contains(&index) { indices.push(index); }
             }
         }
-        if indices.is_empty() && let Some(refusal) = statement.worker_refusal(None) {
+        if indices.is_empty() && let Some(refusal) = statement.worker_refusal(None, xargs) {
             found.worker_refusal.get_or_insert(refusal);
         }
         for index in indices {
-            if let Some(refusal) = statement.worker_refusal(Some(index)) {
+            if let Some(refusal) = statement.worker_refusal(Some(index), xargs) {
                 found.worker_refusal.get_or_insert(refusal);
             }
             let args = &words[index + 1..];
@@ -5901,6 +5856,9 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     for body in &parsed.bodies {
         collect_shell_invocations(body, depth + 1, found);
     }
+    let statements = shell_statements_from_tokens(parsed.lexed.tokens.clone());
+    found.scopes.push(ShellScope { lexed: parsed.lexed, statements,
+        commands: command_start..found.commands.len() });
 }
 
 /// Heading of every factory workspace contract refusal; tests name the
@@ -6088,19 +6046,21 @@ const COMMAND_WRAPPERS: &[&str] = &[
 /// The index of the command a wrapper chain runs, or `None` when the
 /// statement has no command word.
 pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
-    unwrapped_command_index_with_alternatives(words, &mut |_| {})
+    unwrapped_command_index_with_alternatives(words, &mut |_| {}, &mut |_| {})
 }
 
 fn unwrapped_command_index_with_alternatives(
     words: &[String],
     alternative: &mut dyn FnMut(usize),
+    wrapper: &mut dyn FnMut(usize),
 ) -> Option<usize> {
     let mut index = executable_word_index_with_alternatives(words, alternative)?;
-    for _ in 0..16 {
+    loop {
         let name = shell_word_basename(&words[index]);
         if !COMMAND_WRAPPERS.contains(&name) {
             return Some(index);
         }
+        wrapper(index);
         let value_options = wrapper_value_options(name);
         let mut next = index + 1;
         // File/FD, duration and scheduling priority, respectively.
@@ -6132,7 +6092,6 @@ fn unwrapped_command_index_with_alternatives(
             rest, &mut |offset| alternative(next + offset),
         )?;
     }
-    Some(index)
 }
 
 /// A required short-option value is either attached or the next word. Stop
@@ -6830,7 +6789,7 @@ fn role_env_tampering_in_scan(scan: ShellInvocationScan) -> Option<String> {
             .filter(|(name, _)| is_shell_variable_name(name) && role_name(name))
             .map(|(name, _)| name.to_string())
     };
-    for words in scan.statements {
+    for words in scan.scopes.into_iter().flat_map(|scope| scope.statements) {
         // Assignment prefixes: `CAS_AGENT_ROLE=supervisor cas …`.
         let mut index = 0;
         while let Some(word) = words.get(index) {

@@ -106,6 +106,7 @@ fn request_close_verification_dispatch(
     supervisor_recovery: bool,
     no_delivery_intent: Option<(&str, Option<&str>)>,
     renewal: Option<(&str, &Task, &Task)>,
+    no_code_close: Option<(&Task, &Task)>,
 ) -> Result<CloseVerificationDispatch, McpError> {
     let persist = || -> cas_store::Result<CloseVerificationDispatch> {
         let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
@@ -137,13 +138,21 @@ fn request_close_verification_dispatch(
             && dispatch.repository == boundary.repository;
         // cas-afd2: the corrected report and its fresh review become visible
         // together. Never rewrite an active cycle or a concurrently changed proof.
-        if let Some((_, before, closing)) = renewal.filter(|_| matching_proof)
+        if let Some((before, closing)) = no_code_close
+            .or_else(|| renewal.map(|(_, before, closing)| (before, closing)))
+            .filter(|_| matching_proof)
             && closing.execution_note.as_deref() == Some("no-code")
             && (before.external_ref != closing.external_ref || before.execution_note != closing.execution_note)
         {
+            if already_active {
+                return Err(cas_store::StoreError::Other("Active no-code proof cannot be changed by another close".into()));
+            }
+            // A close audit may already have saved this same inline pair.
+            // Accept that pair or the original snapshot, never another proof.
             let changed = tx.execute(
                 "UPDATE tasks SET execution_note=?1, external_ref=?2, updated_at=?3
-                 WHERE id=?4 AND execution_note IS ?5 AND external_ref IS ?6",
+                 WHERE id=?4 AND ((execution_note IS ?5 AND external_ref IS ?6)
+                     OR (execution_note IS ?1 AND external_ref IS ?2))",
                 rusqlite::params![closing.execution_note, closing.external_ref,
                     chrono::Utc::now().to_rfc3339(), task_id, before.execution_note, before.external_ref],
             )?;
@@ -162,6 +171,7 @@ fn request_close_verification_dispatch(
             let mut deliverables: cas_types::TaskDeliverables = serde_json::from_str(&encoded)?;
             deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
                 dispatch_id: dispatch.id.clone(), reason: reason.to_string(), assignee,
+                no_code_proof: no_code_close.and_then(|(_, closing)| closing.external_ref.clone()),
             });
             tx.execute("UPDATE tasks SET deliverables = ?1 WHERE id = ?2",
                 rusqlite::params![serde_json::to_string(&deliverables)?, task_id])?;
@@ -243,6 +253,7 @@ mod verification_dispatch_tests {
                     requested,
                     false,
                     Some(("Measured no source delivery", Some("worker"))),
+                    None,
                     None,
                 )
                 .expect("active dispatch is verification-pending, never INTERNAL_ERROR");
@@ -10735,6 +10746,16 @@ impl CasCore {
                             .is_ok_and(|agent| {
                                 agent.role == cas_types::AgentRole::Supervisor && agent.is_alive()
                             });
+                        // GH #1930: retain the ordinary no-code close and its
+                        // portable proof in the same transaction as its dispatch.
+                        // The verdict resumes this request through ordinary gates.
+                        let owns_claim = is_assignee && self.open_agent_store()?
+                            .get_lease(&req.id)
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                            .is_some_and(|lease| lease.agent_id == requester_id);
+                        let no_code_close = (!is_epic && !no_delivery_declared && owns_claim
+                            && task.execution_note.as_deref() == Some("no-code"))
+                            .then_some((&close_snapshot, &task));
                         let dispatch = match request_close_verification_dispatch(
                             &self.cas_root,
                             &req.id,
@@ -10742,8 +10763,9 @@ impl CasCore {
                             &owner_id,
                             &proof_boundary,
                             supervisor_direct_recovery,
-                            req.no_delivery.filter(|value| *value).map(|_| (req.reason.as_deref().unwrap_or_default(), close_assignee.as_deref())),
+                            (no_delivery_declared || no_code_close.is_some()).then_some((req.reason.as_deref().unwrap_or_default(), close_assignee.as_deref())),
                             renew_expired_task_dispatch.as_deref().map(|id| (id, &close_snapshot, &task)),
+                            no_code_close,
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {

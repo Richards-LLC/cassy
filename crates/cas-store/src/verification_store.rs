@@ -1638,7 +1638,7 @@ pub fn adopt_retired_verification_dispatch(
            AND a.factory_session IS NOT NULL AND trim(a.factory_session)!=''
            AND a.pid IS ?5 AND a.pid_starttime IS ?6",
         params![dispatch.owner_agent_id, machine, successor.id,
-            successor.registered_at.to_rfc3339(), successor.pid, successor.pid_starttime],
+            successor.registered_at.to_rfc3339(), successor.pid, successor.pid_starttime.map(|v| v as i64)],
         |row| row.get(0),
     ).optional()?;
     let Some(retirement) = retirement else {
@@ -1660,7 +1660,7 @@ pub fn adopt_retired_verification_dispatch(
             return Err(StoreError::Parse("verification_owner_handoff_claim_active".into()));
         }
         if let Some(verifier) = dispatch.verifier_agent_id.as_deref() {
-            let row: Option<(String, String, Option<u32>, Option<u64>, Option<String>)> = tx.query_row(
+            let row: Option<(String, String, Option<u32>, Option<i64>, Option<String>)> = tx.query_row(
                 "SELECT status,registered_at,pid,pid_starttime,machine_id FROM agents WHERE id=?1",
                 [verifier], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
             ).optional()?;
@@ -1669,7 +1669,7 @@ pub fn adopt_retired_verification_dispatch(
                     && host.as_deref() == Some(machine.as_str())
                     && dead.machine_id == host && dead.status.to_string() == status
                     && dead.registered_at.to_rfc3339() == epoch
-                    && dead.pid == pid && dead.pid_starttime == fingerprint)
+                    && dead.pid == pid && dead.pid_starttime.map(|v| v as i64) == fingerprint)
             {
                 return Err(StoreError::Parse("verification_owner_handoff_verifier_live_or_unknown".into()));
             }

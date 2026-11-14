@@ -36,11 +36,11 @@ pub(crate) fn publish_capacity(root: &Path, agent: &mut cas_types::Agent) {
         .factory();
     let guard = crate::factory_build_guard::inspect_capacity(root, &config);
     let mut sample = guard.build_capacity(Utc::now());
-    sample.max_workers = Some(config.max_workers);
+    sample.max_workers = Some(config.max_workers());
     match live_worker_count(root) {
         Ok(workers) => {
             sample.live_workers = Some(workers);
-            sample.free_slots = sample.free_slots.min(config.max_workers.saturating_sub(workers));
+            sample.free_slots = sample.free_slots.min(config.max_workers().saturating_sub(workers));
         }
         Err(_) => sample.free_slots = 0,
     }
@@ -49,41 +49,86 @@ pub(crate) fn publish_capacity(root: &Path, agent: &mut cas_types::Agent) {
     }
 }
 
+/// Machine-wide live workers, keyed by project so every surface that states
+/// the limit can also say whose workers fill it.
+#[derive(Debug, Default)]
+pub(crate) struct LiveWorkers {
+    by_project: std::collections::BTreeMap<String, usize>,
+}
+
+impl LiveWorkers {
+    pub(crate) fn total(&self) -> usize {
+        self.by_project.values().sum()
+    }
+
+    /// `8/8 live on this machine: cassy 1, gabber-studio 7`.
+    pub(crate) fn render(&self, max_workers: usize) -> String {
+        let projects = self.by_project.iter()
+            .map(|(project, count)| format!("{project} {count}"))
+            .collect::<Vec<_>>();
+        let breakdown = if projects.is_empty() { String::new() } else { format!(": {}", projects.join(", ")) };
+        format!("{}/{max_workers} live on this machine{breakdown}", self.total())
+    }
+}
+
+/// A store's project is the directory holding its `.cas`.
+fn project_label(root: &Path) -> String {
+    let project = if root.file_name().is_some_and(|name| name == ".cas") { root.parent() } else { Some(root) };
+    project.and_then(Path::file_name).map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string())
+}
+
 /// Use the roster's native heartbeat/process rule across local project stores.
 /// Registry aliases and same-name re-registrations consume only one slot.
 pub(crate) fn live_worker_count(root: &Path) -> Result<usize, String> {
-    use std::collections::HashSet;
+    live_workers(root).map(|workers| workers.total())
+}
+
+pub(crate) fn live_workers(root: &Path) -> Result<LiveWorkers, String> {
+    use std::collections::{HashMap, HashSet};
     let sessions = crate::ui::factory::SessionManager::new()
         .list_sessions_read_only().map_err(|error| error.to_string())?;
     let mut roots = HashSet::from([root.canonicalize().map_err(|error| error.to_string())?]);
+    let mut session_projects = HashMap::new();
     for session in &sessions {
         if let Some(project) = session.metadata.project_dir.as_deref()
             && let Ok(root) = crate::store::find_cas_root_ignoring_env(Path::new(project))
         {
-            roots.insert(root.canonicalize().map_err(|error| error.to_string())?);
+            let root = root.canonicalize().map_err(|error| error.to_string())?;
+            session_projects.insert(session.name.clone(), project_label(&root));
+            roots.insert(root);
         }
     }
     let machine = cas_types::Agent::get_or_generate_machine_id();
-    let mut workers = HashSet::new();
+    let mut workers = HashMap::new();
     for root in roots {
         let agents = crate::store::open_agent_store(&root).map_err(|error| error.to_string())?;
         for agent in agents.list(None).map_err(|error| error.to_string())? {
             if agent.machine_id.as_deref().is_none_or(|id| id == machine)
                 && crate::mcp::tools::service::agent_liveness::is_live_factory_worker(&agent)
             {
-                workers.insert((agent.factory_session.unwrap_or_else(|| root.display().to_string()), agent.name));
+                workers.insert(
+                    (agent.factory_session.unwrap_or_else(|| root.display().to_string()), agent.name),
+                    project_label(&root),
+                );
             }
         }
     }
     // A real pane process covers the registration gap; dead metadata names do not.
     for session in sessions {
+        let project = session_projects.get(&session.name).cloned()
+            .unwrap_or_else(|| session.name.clone());
         for worker in session.metadata.workers {
             if worker.pid.is_some_and(crate::mcp::daemon::pid_alive) {
-                workers.insert((session.name.clone(), worker.name));
+                workers.entry((session.name.clone(), worker.name)).or_insert_with(|| project.clone());
             }
         }
     }
-    Ok(workers.len())
+    let mut live = LiveWorkers::default();
+    for project in workers.into_values() {
+        *live.by_project.entry(project).or_default() += 1;
+    }
+    Ok(live)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,7 +388,7 @@ fn prepare(
         return Ok(None);
     }
     let local_ready = guard.violations().is_empty()
-        && live_worker_count(root)? < config.max_workers;
+        && live_worker_count(root)? < config.max_workers();
     // Only unsent routes reach this point. Recheck local capacity before discovery.
     if has_route(task) {
         let plan = task.notes.lines().find_map(|line| {

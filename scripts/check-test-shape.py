@@ -24,14 +24,10 @@ from rust_test_source import tokens, pairs
 
 
 @cache
-def registered_gate_codes():
-    """Read the declarations that generate gates::REGISTRY in cas-cli/build.rs."""
+def declaration_sources():
+    """Share the production-source boundary used by machine-ID declarations."""
     repo = Path(__file__).resolve().parent.parent
-    codes = set()
-    delivery_stages = {'park', 'close-after-merge', 'epic-close', 'merge-admission', 'train-merge'}
-    declaration = re.compile(
-        r'^[ \t]*(?:///|//!|//|#|<!--|\*)[ \t]*gate\[([GHWNC]-[0-9]{2,3})'
-        r'[ \t]+([a-z-]+)(?:[ \t]+(integrity|as-of))?[ \t]*\]:([^\n]*)$', re.MULTILINE)
+    sources = []
     for root in ('cas-cli/src', 'crates', 'scripts'):
         for directory, children, files in os.walk(repo / root):
             children[:] = [name for name in children
@@ -44,11 +40,51 @@ def registered_gate_codes():
                     source = (Path(directory) / name).read_text()
                 except (OSError, UnicodeError):
                     continue
-                for code, stage, policy, title in declaration.findall(source):
-                    if (bool(policy) == (stage in delivery_stages)
-                            and title.strip().removesuffix('-->').removesuffix('*/').strip()):
-                        codes.add(code)
+                sources.append((Path(directory) / name, source))
+    return tuple(sources)
+
+
+@cache
+def registered_gate_codes():
+    """Read the declarations that generate gates::REGISTRY in cas-cli/build.rs."""
+    codes = set()
+    delivery_stages = {'park', 'close-after-merge', 'epic-close', 'merge-admission', 'train-merge'}
+    declaration = re.compile(
+        r'^[ \t]*(?:///|//!|//|#|<!--|\*)[ \t]*gate\[([GHWNC]-[0-9]{2,3})'
+        r'[ \t]+([a-z-]+)(?:[ \t]+(integrity|as-of))?[ \t]*\]:([^\n]*)$', re.MULTILINE)
+    for _, source in declaration_sources():
+        for code, stage, policy, title in declaration.findall(source):
+            if (bool(policy) == (stage in delivery_stages)
+                    and title.strip().removesuffix('-->').removesuffix('*/').strip()):
+                codes.add(code)
     return frozenset(codes)
+
+
+@cache
+def declared_rule_ids():
+    """Read namespaced IDs assigned to production Rust rule/rule_id fields.
+
+    Accept declared IDs, not arbitrary spellings under a trusted prefix.
+    Comments, string examples and test-only declarations cannot grant IDs.
+    """
+    ids = set()
+    for path, source in declaration_sources():
+        if path.suffix != '.rs' or not re.search(r'\brule(?:_id)?\s*:', source):
+            continue
+        try:
+            ts = tokens(source)
+            test_ranges = rust_test_ranges(ts, pairs(ts))
+        except ValueError:
+            continue
+        for i, token in enumerate(ts[:-2]):
+            if (token.string or token.value not in ('rule', 'rule_id')
+                    or ts[i + 1].value != ':' or not ts[i + 2].string
+                    or any(left <= token.start < right for left, right in test_ranges)):
+                continue
+            value = ts[i + 2].value.strip('"')
+            if re.fullmatch(r'[a-z][\w-]*(?:\.[a-z][\w-]*)+', value):
+                ids.add(value)
+    return frozenset(ids)
 
 
 def human_message_literal(value):
@@ -61,6 +97,9 @@ def human_message_literal(value):
         return False
     gate = re.fullmatch(r'\[([GHWNC]-[0-9]{2,3})\]', value)
     if gate and gate[1] in registered_gate_codes():
+        return False
+    rule = re.fullmatch(r'\[([a-z][\w-]*(?:\.[a-z][\w-]*)+)\]', value)
+    if rule and rule[1] in declared_rule_ids():
         return False
     static = re.sub(r'\$?\{[^{}]*\}', '', value)
     if not any(char.isalpha() for char in static):
@@ -335,6 +374,27 @@ def javascript_bindings(source):
     return bound
 
 
+def rust_test_ranges(ts, ps):
+    """Reuse the prose check's test-only boundary when reading declarations."""
+    ranges = []
+    for begin, end in ps.items():
+        if ts[begin].value == '{' and 'cfg(test)' in ''.join(t.value for t in ts[max(0, begin - 15):begin]):
+            ranges.append((ts[begin].start, ts[end].end))
+    for index, item in enumerate(ts):
+        if item.string or item.value != 'fn':
+            continue
+        previous = index - 1
+        while previous >= 0 and ts[previous].value not in ('}', ';', '{'):
+            previous -= 1
+        attributes = ''.join(t.value for t in ts[previous + 1:index])
+        if not ('#[test]' in attributes or re.search(r'::test(?:\([^\]]*\))?\]', attributes) or 'cfg(test)' in attributes):
+            continue
+        body = next((j for j in range(index + 1, len(ts)) if not ts[j].string and ts[j].value in ('{', ';')), None)
+        if body is not None and ts[body].value == '{':
+            ranges.append((ts[body].start, ts[ps[body]].end))
+    return ranges
+
+
 def message_assertions(source, path, changed_lines=None):
     """Reject prose operands on error channels, never diagnostic arguments."""
     if changed_lines is not None:
@@ -414,24 +474,8 @@ def message_assertions(source, path, changed_lines=None):
     if Path(path).suffix == '.rs':
         ts = tokens(source)
         ps = pairs(ts)
-        test_ranges = []
         test_file = is_test_file(path)
-        if not test_file:
-            for begin, end in ps.items():
-                if ts[begin].value == '{' and 'cfg(test)' in ''.join(t.value for t in ts[max(0, begin - 15):begin]):
-                    test_ranges.append((ts[begin].start, ts[end].end))
-            for index, item in enumerate(ts):
-                if item.string or item.value != 'fn':
-                    continue
-                previous = index - 1
-                while previous >= 0 and ts[previous].value not in ('}', ';', '{'):
-                    previous -= 1
-                attributes = ''.join(t.value for t in ts[previous + 1:index])
-                if not ('#[test]' in attributes or re.search(r'::test(?:\([^\]]*\))?\]', attributes) or 'cfg(test)' in attributes):
-                    continue
-                body = next((j for j in range(index + 1, len(ts)) if not ts[j].string and ts[j].value in ('{', ';')), None)
-                if body is not None and ts[body].value == '{':
-                    test_ranges.append((ts[body].start, ts[ps[body]].end))
+        test_ranges = [] if test_file else rust_test_ranges(ts, ps)
         for i, token in enumerate(ts[:-2]):
             if token.string or token.value not in ('assert', 'assert_eq', 'assert_ne') or ts[i + 1].value != '!' or i + 2 not in ps:
                 continue

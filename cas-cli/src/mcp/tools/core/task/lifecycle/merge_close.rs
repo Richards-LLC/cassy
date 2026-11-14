@@ -471,11 +471,26 @@ impl CasCore {
         let held = |reason: &str| Some(format!("\nCassy no-delivery close of {task_id} is held: {reason}. No worker close retry was queued."));
         let latest = cas_store::get_latest_verification_dispatch(&self.cas_root, task_id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        if intent.assignee != task.assignee
+        let approved = cas_store::get_verification_for_dispatch(&self.cas_root, dispatch_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+            .is_some_and(|verdict| verdict.task_id == task_id
+                && verdict.status == cas_types::VerificationStatus::Approved
+                && verdict.verification_type == cas_types::VerificationType::Task);
+        if !approved || intent.assignee != task.assignee
+            || intent.no_code_proof.as_ref().is_some_and(|proof|
+                task.execution_note.as_deref() != Some("no-code") || task.external_ref.as_ref() != Some(proof))
             || latest.as_ref().is_none_or(|dispatch| dispatch.id != dispatch_id
                 || dispatch.state != cas_types::VerificationDispatchState::Resolved)
         {
             return Ok(held("saved close intent no longer matches the current assignment and exact verdict"));
+        }
+        if intent.no_code_proof.is_some()
+            && self.open_agent_store()?.get_lease(task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .is_some_and(|lease| latest.as_ref()
+                    .is_some_and(|dispatch| lease.agent_id != dispatch.requester_agent_id))
+        {
+            return Ok(held("the saved close no longer owns the task claim"));
         }
         if task.status == TaskStatus::Blocked
             && !super::super::block_hold::blocked_only_by_verification_wait(&self.cas_root, task_id, dispatch_id)
@@ -491,7 +506,7 @@ impl CasCore {
             return Ok(held("an independent hold remains"));
         }
         let release = VerdictRelease {
-            note: format!("[{}] Cassy close authority: explicit no_delivery intent + verdict dispatch {dispatch_id}.", chrono::Utc::now().format("%Y-%m-%d %H:%M")),
+            note: format!("[{}] Cassy close authority: saved close intent + verdict dispatch {dispatch_id}.", chrono::Utc::now().format("%Y-%m-%d %H:%M")),
             foreign_hold: None,
             was_blocked: task.status == TaskStatus::Blocked,
             resumed_status: TaskStatus::InProgress,
@@ -510,7 +525,8 @@ impl CasCore {
             }
         }
         let request = TaskCloseRequest {
-            id: task_id.to_string(), reason: Some(intent.reason.clone()), no_delivery: Some(true),
+            id: task_id.to_string(), reason: Some(intent.reason.clone()),
+            no_delivery: intent.no_code_proof.is_none().then_some(true),
             stranded_branch_override: None, supervisor_override: None, search_manifest: None, commit_receipt: None,
         };
         let close = crate::async_runtime::heap_future(|| self.cas_task_close(Parameters(request)));
@@ -530,7 +546,7 @@ impl CasCore {
         let notice = super::supervisor_push::queue_no_delivery_close_notice(&self.cas_root, &current, dispatch_id)
             .map(|id| id.map(|id| format!("worker notified (prompt {id})")).unwrap_or_else(|| "no live assigned worker to notify".into()))
             .unwrap_or_else(|error| format!("worker notice failed: {error}"));
-        Ok(Some(format!("\nCassy closed task {task_id} on its approved no-delivery intent; {notice}.{}",
+        Ok(Some(format!("\nCassy closed task {task_id} on its approved close intent; {notice}.{}",
             if unrecorded.is_empty() { String::new() } else { format!(" NOT RECORDED: {}", unrecorded.join("; ")) })))
     }
 

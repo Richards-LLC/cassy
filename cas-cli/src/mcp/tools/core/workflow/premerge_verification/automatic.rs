@@ -1196,6 +1196,47 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             worker.factory_session = owner.factory_session.clone();
             core.open_agent_store().unwrap().register(&worker).unwrap();
             core.bind_agent_identity(worker.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+            // Factory reviews cross the real local control boundary. A session
+            // name alone cannot stand in for the daemon that claims the review.
+            use crate::ui::factory::{ClientMessage, DaemonMessage, SessionState,
+                FRAME_HEADER_SIZE, PROTOCOL_VERSION, decode_length, encode_message,
+                gui_socket_path, local_gui_capabilities};
+            use std::io::{Read, Write};
+            use std::os::fd::AsRawFd;
+            let session = owner.factory_session.clone().unwrap();
+            let socket = gui_socket_path(&session);
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let broker_root = root.clone();
+            let (claimed, claim) = std::sync::mpsc::channel();
+            let broker = std::thread::spawn(move || {
+                let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                assert!(unsafe { libc::poll(&mut ready, 1, 10000) } > 0);
+                let (mut client, _) = listener.accept().unwrap();
+                client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                client.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                client.write_all(&encode_message(&DaemonMessage::Welcome {
+                    session_name: session.clone(),
+                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                        epic_title: None, cols: 80, rows: 24 },
+                    scrollback: None, protocol_version: PROTOCOL_VERSION,
+                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+                }).unwrap()).unwrap();
+                let mut header = [0; FRAME_HEADER_SIZE];
+                client.read_exact(&mut header).unwrap();
+                let mut body = vec![0; decode_length(&header)];
+                client.read_exact(&mut body).unwrap();
+                let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+                    else { panic!("unexpected factory control"); };
+                let review = super::super::factory_launch::launch(&broker_root, &session, &dispatch_id)
+                    .unwrap().unwrap();
+                client.write_all(&encode_message(&DaemonMessage::VerifierLaunched {
+                    dispatch_id: dispatch_id.clone(),
+                }).unwrap()).unwrap();
+                claimed.send(dispatch_id).unwrap();
+                review.join().unwrap();
+                std::fs::remove_file(socket).unwrap();
+            });
             let mut task = Task::new("cas-e50f-no-code".into(), "No-code close".into());
             task.status = cas_types::TaskStatus::InProgress;
             task.task_type = cas_types::TaskType::Chore;
@@ -1214,6 +1255,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert_eq!(close.is_error, Some(true), "initial close must await review: {close:?}");
             let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
                 .unwrap_or_else(|| panic!("real close did not dispatch: {close:?}"));
+            assert_eq!(claim.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), dispatch.id);
+            let dispatch = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert_eq!(dispatch.requester_agent_id, worker.id);
             assert_eq!(dispatch.owner_agent_id, owner.id);
             assert!(core.open_task_store().unwrap().get(&task.id).unwrap().pending_verification);
@@ -1221,11 +1264,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(worker.id.as_str()));
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(owner.id.as_str()));
             std::fs::write(&gate, "go").unwrap();
-            for _ in 0..600 {
-                let child = core.open_agent_store().unwrap().get(dispatch.verifier_agent_id.as_deref().unwrap()).unwrap();
-                if child.status != cas_types::AgentStatus::Active { break; }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+            broker.join().unwrap();
             let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap()
                 .unwrap_or_else(|| panic!("{status}: no verdict; notices {prompts:?}"));

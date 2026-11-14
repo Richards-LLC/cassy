@@ -1404,8 +1404,9 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         let (fallback, notice) = command(env.home(), &env.home().join("verdict.json")).unwrap();
         assert!(fallback.get_args().any(|arg| arg == "-p"), "{fallback:?}");
         assert!(
+            // HOME is the short socket alias (cas-3f0a); compare the directories.
             fallback.get_envs().any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
-                && value.is_some_and(|dir| std::path::Path::new(dir) == claude_home)),
+                && value.is_some_and(|dir| std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&claude_home).ok())),
             "{fallback:?}"
         );
         let notice = notice.expect("fallback notice");

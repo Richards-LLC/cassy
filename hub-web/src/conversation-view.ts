@@ -839,13 +839,14 @@ export class ConversationView {
     this.renderPinned(document);
     this.renderUnsent();
     const historyError = this.options.historyError?.();
-    const revealHistoryFailure = this.historyFailure.hidden && !!historyError;
+    const failureAnchor = historyError?.before === undefined ? this.empty : this.loadEarlier;
+    const moveHistoryFailure = failureAnchor.nextElementSibling !== this.historyFailure;
+    const revealHistoryFailure = !!historyError && (this.historyFailure.hidden || moveHistoryFailure);
     this.historyFailure.hidden = !historyError;
     this.historyFailureDetail.textContent = historyError?.detail ?? "";
     // An older-page failure belongs beside the paging control the reader
     // used, not beyond the cached tail of a long conversation.
-    const failureAnchor = historyError?.before === undefined ? this.empty : this.loadEarlier;
-    if (failureAnchor.nextElementSibling !== this.historyFailure) failureAnchor.after(this.historyFailure);
+    if (moveHistoryFailure) failureAnchor.after(this.historyFailure);
     this.renderEmpty(model.length === 0 && !historyError, this.options.loadingHistory?.() === true);
     this.renderEarlier(model.length === 0);
     this.endReceipt.hidden = !ended;
@@ -877,7 +878,20 @@ export class ConversationView {
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
-    if (revealHistoryFailure) this.historyFailure.scrollIntoView?.({ block: "nearest" });
+    if (revealHistoryFailure) {
+      // An older-page error is now the reader's place. A queued activity pin
+      // or reconnect restoration must not take its Retry control back offscreen.
+      if (historyError?.before !== undefined) {
+        this.following = false;
+        this.pinDeferred = false;
+        this.placePending = false;
+        this.place = undefined;
+      }
+      this.historyFailure.scrollIntoView?.({ block: "nearest" });
+      this.scrolledTo = this.element.scrollTop;
+      this.notePlace();
+      this.jump.hidden = shouldFollowTail(this.element);
+    }
   }
 
   /** Explicit paging through rows already held in memory. */

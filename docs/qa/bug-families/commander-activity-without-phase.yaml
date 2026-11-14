@@ -1,0 +1,5 @@
+title: Fresh supervisor output shows working without requiring a named phase
+found: '2026-11-13'
+tasks: [cas-af35]
+journeys: [HUB-J12, HUB-J4]
+invariants: [HUB-J12-GOAL, HUB-J4-GOAL]

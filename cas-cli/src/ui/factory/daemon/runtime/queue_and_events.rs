@@ -7941,7 +7941,12 @@ impl FactoryDaemon {
         before: Option<i64>,
         requested_limit: u16,
     ) -> anyhow::Result<crate::ui::factory::DaemonMessage> {
-        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        // History is read-only: neither queue setup DDL nor the daemon's
+        // pooled writer mutex belongs on this user request. WAL readers can
+        // see committed turns even while a writer holds its transaction.
+        let queue: Arc<dyn cas_store::PromptQueueStore> = Arc::new(
+            cas_store::SqlitePromptQueueStore::open_read_only(self.app.cas_dir())?,
+        );
         let limit = usize::from(
             requested_limit.clamp(1, crate::ui::factory::protocol::COMMANDER_HISTORY_PAGE_SIZE),
         );
@@ -14069,7 +14074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history() {
+    async fn cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history_cab9() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -14118,7 +14123,23 @@ mod tests {
         assert_eq!(live.operator_label.as_deref(), Some("Ben"));
         // The inert supervisor has not consumed the row. A reload and another
         // pairing still see the same durable acceptance, not Sending again.
+        // cas-cab9: daemon writes may own the pooled mutex after the UI pass
+        // budget is spent. History must still read the committed WAL snapshot.
+        let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
+        let (held_tx, held_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let conn = shared.lock().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            tx.execute("UPDATE prompt_queue SET prompt = 'uncommitted' WHERE id = ?", [id]).unwrap();
+            held_tx.send(()).unwrap();
+            // Dropping the sender on assertion failure releases the fixture too.
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+            tx.rollback().unwrap();
+        });
+        held_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         for device in ["phone", "desktop"] {
+            let _spent = cas_store::wait_budget::bound_waits_until(std::time::Instant::now());
             let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
                 .conversation_history_page(format!("history-{device}"), device, None, 20)
                 .unwrap()
@@ -14137,6 +14158,8 @@ mod tests {
                 "{device}'s receipt regressed on history"
             );
         }
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
         assert!(
             queue
                 .queued_prompt(id)

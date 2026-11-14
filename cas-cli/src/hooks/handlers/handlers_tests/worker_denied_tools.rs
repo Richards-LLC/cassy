@@ -295,6 +295,10 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     for listing in [
         "rg --files /Applications/Postgres.app /opt /usr/local ~/.local/share ~/Library/pnpm 2>/dev/null",
         "find ~ -path '*cas-worker/references/discipline.md' 2>/dev/null",
+        "rg --files ~/.local/share | rg codex",
+        "find ~ -path '*cas-worker/references/discipline.md' | head -3",
+        "rg --files ~ | grep -e . | head -n 3 | tail -n 2 | sort | uniq -c | cut -c 1-8 | tr a-z A-Z | wc -l",
+        "rg --files ~ | xargs printf '%s\\n'",
     ] {
         for redirect in ["", " > discovery.txt"] {
             let command = format!("{listing}{redirect}");
@@ -303,11 +307,11 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
             assert!(reason.is_none(), "{command}: {reason:?}");
         }
     }
-    // A listed name that reaches a reader is still a credential read.
+    // Reading files named by the stream, or literal protected inputs, stays denied.
     for command in [
         "find ~ -name credentials.json -print0 | sort --files0-from=-",
-        "rg --files ~/.local/share | rg codex",
-        "find ~ -path '*cas-worker/references/discipline.md' | head -3",
+        "rg --files ~ | wc --files0-from=-",
+        "rg --files ~ | grep -f ~/.config/neonctl/credentials.json",
         "find ~ -name credentials.json | xargs cat",
         "find ~ -name auth.json -exec cat {} +",
         "cat $(rg --files ~ | rg credentials.json)",

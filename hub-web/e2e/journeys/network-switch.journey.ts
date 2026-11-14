@@ -18,21 +18,12 @@ test.afterEach(async ({ page }) => { expect(pageErrors.get(page)).toEqual([]); }
 // a fresh page and controls BOTH the page's deadlines and the double's replies.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
-  // Diagnostic control: hold publication of the first socket observation,
-  // keeping the actual socket/Welcome and rendered connection behavior real.
-  const opens = hub.machineSocketOpens;
-  const publish = opens.set.bind(opens);
-  let releaseSocket: (() => void) | undefined;
-  opens.set = (machine, count) => {
-    releaseSocket = () => { opens.set = publish; publish(machine, count); hub["observed"](); };
-    return opens;
-  };
   await journey.stage("Open the conversation", async () => {
     await journey.open();
     await chooseConversation(page);
     await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
-    await expect.poll(() => Boolean(releaseSocket)).toBe(true);
-    queueMicrotask(() => releaseSocket!());
+    // The header can be Live before the double observes the machine socket.
+    // Count opens only after that wire event, not after the rendered label.
     await hub.waitFor(() => hub.machineSocketOpens.has("atlas"));
     expect(hub.machineSocketOpens.get("atlas")).toBe(1);
   });

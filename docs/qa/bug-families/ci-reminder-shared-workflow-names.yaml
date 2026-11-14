@@ -1,0 +1,3 @@
+title: A CI reminder's suggested workflow name is shared by several workflows and must bind to the one that ran
+tasks: [cas-a746]
+journeys: [FACTORY-SUPERVISE]

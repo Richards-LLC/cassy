@@ -10666,6 +10666,7 @@ async fn test_062d_lifecycle_start_and_blocked_push_session_isolated() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,

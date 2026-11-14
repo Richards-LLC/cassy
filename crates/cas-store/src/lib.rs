@@ -266,7 +266,7 @@ pub use verification_store::{
     correct_parked_delivery_proof_scope, correct_parked_delivery_proof_targets,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
-    extend_verification_dispatch_deadline, rebind_approved_verification_dispatch,
+    extend_verification_dispatch_deadline,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
     has_active_verification_dispatch, import_peer_premerge_verification, inspect_bound_server_verifier_handoff,
@@ -278,6 +278,7 @@ pub use verification_store::{
     request_changes_for_parked_delivery, request_changes_for_parked_delivery_with_merge_sources,
     resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
+    retry_verification_dispatch_after_error_with_conn, recover_errored_verification_dispatch_with_conn,
     save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
 };
 

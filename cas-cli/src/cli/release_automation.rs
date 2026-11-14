@@ -43,6 +43,13 @@ pub struct PreviewArgs {
 
 /// No store, receipt, ledger-cache or notification writes.
 pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
+    println!("{}", serde_json::to_string(&preview_release_close(args, root)?)?);
+    Ok(())
+}
+
+fn preview_release_close(args: &PreviewArgs, root: &Path) -> Result<ReleasePreview> {
+    let store = PreviewStore::open(root)?;
+    let root = store.root.as_path();
     let repo = PathBuf::from(git(&std::env::current_dir()?, &["rev-parse", "--show-toplevel"])?);
     let mut scope = if let Some(path) = &args.scope {
         serde_json::from_slice(&fs::read(path)?)?
@@ -51,10 +58,76 @@ pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
             args.version.as_deref().context("version required")?, args.train.as_deref(), args.inputs.as_deref())?
     };
     if args.scope.is_some() { scope.bind_reports(root).map_err(anyhow::Error::msg)?; }
-    let preview = preview_scope(root, &repo, scope)?;
-    println!("{}", serde_json::to_string(&preview)?);
+    preview_scope(root, &repo, scope)
+}
+
+/// cas-8e1b: a candidate reads with its own schema. When the live store's
+/// applied migrations lag the candidate's, preview reads a private SQLite
+/// backup migrated to that schema; the live store is only read.
+struct PreviewStore {
+    root: PathBuf,
+    _snapshot: Option<tempfile::TempDir>,
+}
+
+impl PreviewStore {
+    fn open(live: &Path) -> Result<Self> {
+        if !crate::migration::check_migrations_read_only(live)?.has_pending() {
+            return Ok(Self { root: live.to_path_buf(), _snapshot: None });
+        }
+        let config = crate::config::Config::load(live)?;
+        let parent = crate::config::resolved_factory_artifact_paths(
+            live, config.factory().artifacts_root.as_deref()).project_root;
+        fs::create_dir_all(&parent)?;
+        let snapshot = tempfile::Builder::new().prefix("release-preview-").tempdir_in(&parent)?;
+        // A relocated store belongs to no repository; its repository is the
+        // caller's (cas-afdf). Stop Git discovery from adopting an enclosing one.
+        fs::write(snapshot.path().join(".git"), "release preview snapshot: not a repository\n")?;
+        let root = snapshot.path().join(".cas");
+        fs::create_dir(&root)?;
+        // Other store files stay the live ones; only the database is private.
+        for entry in fs::read_dir(live)? {
+            let name = entry?.file_name();
+            if ["cas.db", "cas.db-wal", "cas.db-shm", "cas.db-journal"].iter().any(|db| name == *db) { continue; }
+            if name == "verification-candidates" {
+                relocate_candidates(&live.join(&name), &root.join(&name), live, &root)?;
+            } else {
+                crate::accounts::symlink(&live.join(&name), &root.join(&name))?;
+            }
+        }
+        // One consistent read; a paged backup restarts on every live write.
+        rusqlite::Connection::open_with_flags(live.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+            .execute("VACUUM INTO ?1", [root.join("cas.db").to_string_lossy().as_ref()])?;
+        crate::migration::run_migrations(&root, false)?;
+        ensure!(crate::cloud::resolve_canonical_id(&root) == crate::cloud::resolve_canonical_id(live),
+            "release preview snapshot does not resolve the live project identity; pin [project] canonical_id");
+        Ok(Self { root, _snapshot: Some(snapshot) })
+    }
+}
+
+/// A candidate manifest binds the store it was prepared in (cas-afdf replay
+/// contract); rebind only that path so the snapshot validates it unchanged.
+fn relocate_candidates(from: &Path, to: &Path, live: &Path, snapshot: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let name = entry?.file_name();
+        let (source, target) = (from.join(&name), to.join(&name));
+        if source.is_dir() {
+            relocate_candidates(&source, &target, live, snapshot)?;
+            continue;
+        }
+        let mut manifest = fs::read(&source)?;
+        if name == "candidate.json"
+            && let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&manifest)
+            && value["cas_root"] == serde_json::json!(live)
+        {
+            value["cas_root"] = serde_json::json!(snapshot);
+            manifest = serde_json::to_vec(&value)?;
+        }
+        fs::write(target, manifest)?;
+    }
     Ok(())
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ReleasePreview {
@@ -337,8 +410,15 @@ pub fn context(args: &ContextArgs, root: &Path) -> Result<()> {
 }
 
 pub fn track(args: &TrackArgs, root: &Path) -> Result<()> {
+    track_with_preview(args, root, serde_json::from_reader(std::io::stdin().lock())?)
+}
+
+fn track_with_preview(args: &TrackArgs, root: &Path, preview: ReleasePreview) -> Result<()> {
+    // cas-8e1b: track is the cut's first store write. Bring the store to the
+    // candidate's schema first, as the MCP runtime does; a failure stops the cut.
+    crate::migration::run_migrations(root, false)
+        .context("release track could not apply the candidate's migrations; nothing tracked")?;
     let (repo, train) = open_train(root)?;
-    let preview = serde_json::from_reader(std::io::stdin().lock())?;
     track_on_train(args, root, &repo, &train, preview)
 }
 // gate[G-121 release-verdict]: Release track checks (train branch, full SHA, train tip, version owner, input audit)
@@ -617,7 +697,7 @@ fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> b
     let Some(anchor) = crate::qa_batch::delivery_anchor(repo, child) else {
         return false;
     };
-    crate::qa_batch::release_tag_ships_delivery(repo, &anchor, tag_sha, &child.id)
+    crate::qa_batch::release_tag_ships_delivery(repo, child.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), &anchor, tag_sha, &child.id)
 }
 
 fn published_later_tags(repo: &Path, tag: &str) -> Result<Vec<(String, String)>> {
@@ -1388,10 +1468,17 @@ pub(super) mod tests {
         assert_eq!(shipped.base_sha.as_deref(), Some(base.as_str()));
         assert_eq!(shipped.shipped_commit.as_deref(), Some(mapped.as_str()));
         assert_eq!(shipped.membership, Membership::SquashTree);
-        assert_eq!(
-            shipped.generation,
-            store.get(&code.id).unwrap().updated_at.to_rfc3339()
-        );
+        let mut current = store.get(&code.id).unwrap();
+        assert_eq!(shipped.generation, format!("cycle:{}", current.deliverables.delivery_cycle));
+        current.notes.push_str("Administrative note after inventory");
+        current.updated_at += chrono::Duration::seconds(1);
+        store.update(&current).unwrap();
+        let after_note = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        assert_eq!(after_note.deliveries[0].generation, shipped.generation);
+        current.deliverables.delivery_cycle += 1;
+        store.update(&current).unwrap();
+        let after_cycle = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        assert_ne!(after_cycle.deliveries[0].generation, shipped.generation);
         assert_eq!(shipped.proof_refs.len(), 2);
         assert!(
             shipped
@@ -1552,6 +1639,73 @@ pub(super) mod tests {
         assert!(installed(&InstalledArgs {
             receipt: publication_path, repo: "example/repo".into(), failed_attempts: None,
         }, Some(&root)).is_err());
+    }
+
+    /// cas-8e1b: a candidate one additive column ahead of the live store, as in
+    /// the 4.28 cut, previews exactly what it previews on a current store and
+    /// leaves the live store byte-identical.
+    #[test]
+    fn candidate_preview_of_a_lagging_store_leaves_it_unchanged_cas_8e1b() {
+        use sha2::{Digest, Sha256};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, train, _owner, track) = fixture();
+        let mut child = Task::new("cas-a002".into(), "Child".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.deliverables.factory_branch_anchor = Some(track.commit.clone());
+        let tasks = open_task_store(&root).unwrap();
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&Dependency::new(child.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
+        let args = PreviewArgs { scope: None, commit: Some(track.commit.clone()),
+            version: Some(track.version.clone()), inputs: None, train: Some(train.id.clone()) };
+        let _cwd = env.enter_dir(temp.path());
+        let current = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
+        lag_one_column(&root);
+        let live = || {
+            let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let schema: Vec<String> = conn.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+                .unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+            (schema, format!("{:x}", Sha256::digest(fs::read(root.join("cas.db")).unwrap())))
+        };
+        let before = live();
+        assert!(!before.0.iter().any(|sql| sql.contains("review_dispatch_id")));
+        let lagging = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
+        assert_eq!(lagging, current);
+        assert_eq!(live(), before);
+    }
+
+    /// The store as the installed 4.27 CLI left it: m299's column not yet added.
+    fn lag_one_column(root: &Path) {
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+            "ALTER TABLE tasks DROP COLUMN review_dispatch_id; DELETE FROM cas_migrations WHERE id = 299;
+             PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    }
+
+    /// cas-8e1b: `release track` is the cut's first store write; on a lagging
+    /// store it applies the candidate's migrations before reading the train.
+    /// The cut runs in a Cassy worktree and names the live store by CAS_ROOT.
+    #[test]
+    fn candidate_track_migrates_a_lagging_store_cas_8e1b() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, train, _owner, args) = fixture();
+        fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nrelease_train = true\n").unwrap();
+        let worktree = root.join("worktrees").join("cut");
+        git(temp.path(), &["checkout", "main"]).unwrap();
+        git(temp.path(), &["worktree", "add", worktree.to_str().unwrap(), train.branch.as_deref().unwrap()]).unwrap();
+        env.set("CAS_ROOT", &root);
+        let _cwd = env.enter_dir(&worktree);
+        let scope = cut_scope(&root, &worktree, &args.commit, &args.version, Some(&train.id), None).unwrap();
+        let preview = preview_scope(&root, &worktree, scope).unwrap();
+        lag_one_column(&root);
+        track_with_preview(&args, &root, preview).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        assert!(conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'review_dispatch_id')",
+            [], |row| row.get::<_, bool>(0)).unwrap());
+        assert_eq!(serde_json::from_slice::<ReleaseContext>(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap())
+            .unwrap().train_id, train.id);
     }
 
     #[test]

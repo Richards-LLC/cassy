@@ -2246,6 +2246,10 @@ dialog form > *,
 .thread :is(.working, .phase-line) { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
 .thread .phase-clock { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .thread .phase-line[data-active="false"] .dots i { animation: none; }
+.thread .phase-line[data-state="busy"] .dots i { background: var(--state-ok); }
+.thread .phase-line[data-state="idle"] .dots i { background: var(--state-idle); }
+.thread .phase-line[data-state="unknown"] .dots i { background: var(--state-off); }
+.thread .phase-step { font-family: var(--font-mono); overflow-wrap: anywhere; }
 .thread .dots { display: flex; gap: 4px; }
 .thread .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-mid); }
 @media (forced-colors: none) and (prefers-reduced-motion: no-preference) { .thread .dots i { animation: thread-working 1.2s ease-in-out infinite; } }

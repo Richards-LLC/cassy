@@ -1029,12 +1029,12 @@ fn restrict(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn symlink(target: &Path, path: &Path) -> io::Result<()> {
+pub(crate) fn symlink(target: &Path, path: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, path)
 }
 
 #[cfg(not(unix))]
-fn symlink(target: &Path, path: &Path) -> io::Result<()> {
+pub(crate) fn symlink(target: &Path, path: &Path) -> io::Result<()> {
     if target.is_dir() {
         std::os::windows::fs::symlink_dir(target, path)
     } else {

@@ -18,11 +18,15 @@ test.afterEach(async ({ page }) => { expect(pageErrors.get(page)).toEqual([]); }
 // a fresh page and controls BOTH the page's deadlines and the double's replies.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
-  // Diagnostic control: release the real machine socket on the next microtask
-  // after the header has become Live, exposing the original observation order.
-  const machineSocket = hub["machineSocket"].bind(hub);
+  // Diagnostic control: hold publication of the first socket observation,
+  // keeping the actual socket/Welcome and rendered connection behavior real.
+  const opens = hub.machineSocketOpens;
+  const publish = opens.set.bind(opens);
   let releaseSocket: (() => void) | undefined;
-  hub["machineSocket"] = ws => { releaseSocket = () => machineSocket(ws); };
+  opens.set = (machine, count) => {
+    releaseSocket = () => { opens.set = publish; publish(machine, count); hub["observed"](); };
+    return opens;
+  };
   await journey.stage("Open the conversation", async () => {
     await journey.open();
     await chooseConversation(page);

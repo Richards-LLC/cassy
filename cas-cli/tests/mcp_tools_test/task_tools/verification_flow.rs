@@ -12225,7 +12225,7 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
         let saved = tasks.get(&task.id).unwrap().deliverables.no_delivery_close_intent.unwrap();
         assert_eq!(saved.dispatch_id, dispatch.id);
         assert_eq!(saved.reason, reason);
-        assert_eq!(saved.assignee, task.assignee);
+        assert_eq!(saved.assignee.as_deref(), Some("worker-7fc3"));
         assert_eq!(saved.no_code_proof, (!no_delivery).then(|| "artifact:cas-7fc3/report".into()));
     }
 
@@ -12286,7 +12286,6 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
     assert_eq!(again.closed_at, current.closed_at);
     assert_eq!(queue.peek_all(50).unwrap().len(), rows.len(), "duplicate approval cannot enqueue another close or completion");
     assert_eq!(head(), starting_head, "no-delivery authored no commit");
-
 }
 
 /// Existing no-code ledgers bypass the runtime QA gate, but malformed evidence

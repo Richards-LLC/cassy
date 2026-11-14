@@ -272,6 +272,7 @@ mod m295_quality_friction;
 mod m296_verification_issue_triage;
 mod m297_quality_estimates;
 mod m298_artifact_revocations;
+mod m299_tasks_review_dispatch;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -581,6 +582,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m296_verification_issue_triage::MIGRATION,
     m297_quality_estimates::MIGRATION,
     m298_artifact_revocations::MIGRATION,
+    m299_tasks_review_dispatch::MIGRATION,
 ];
 
 #[cfg(test)]

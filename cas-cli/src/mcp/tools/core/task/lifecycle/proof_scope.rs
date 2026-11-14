@@ -431,6 +431,7 @@ mod tests {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,

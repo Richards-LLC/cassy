@@ -583,6 +583,8 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
         crate::mcp::tools::TaskStartRequest { id: TASK.into(), brief: Some(true), force: None }
     )).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress, "{started}");
+    // cas-c730 / GH #1912: start names the returned tip H-40 keeps, before proof work.
+    assert!(started.contains(&f.predecessor) && started.contains("H-40"), "{started}");
     std::fs::write(f.worker_path.join("correction.txt"), "reviewed correction\n").unwrap();
     git(&f.worker_path, &["add", "correction.txt"]);
     git(&f.worker_path, &["commit", "-qm", &format!("fix({TASK}): reviewed correction")]);

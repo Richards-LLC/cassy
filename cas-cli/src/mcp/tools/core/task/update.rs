@@ -112,6 +112,7 @@ fn requested_update_fields(
     supplied!(acceptance_criteria);
     supplied!(demo_statement);
     supplied!(execution_note);
+    supplied!(review_dispatch_id);
     supplied!(risk);
     supplied!(proof_targets);
     supplied!(door);
@@ -601,6 +602,27 @@ fn set_execution_state_patch_field(
 }
 
 impl CasCore {
+    /// Validate a typed review reference without granting any authority.
+    pub(crate) fn normalize_review_dispatch_id(&self, value: Option<&str>) -> Result<Option<String>, McpError> {
+        let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        cas_store::get_verification_dispatch(&self.cas_root, value)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
+                format!("Review dispatch {value} is unavailable: {error}")))?;
+        Ok(Some(value.to_string()))
+    }
+
+    pub(crate) fn ensure_review_assignee(&self, dispatch: Option<&str>, assignee: Option<&str>) -> Result<(), McpError> {
+        let Some(assignee) = assignee.and_then(normalize_assignee_update_value) else { return Ok(()) };
+        if dispatch.is_none() { return Ok(()) }
+        let agents = self.open_agent_store()?;
+        let role = super::resolve_agent_identity(agents.as_ref(), &assignee)
+            .filter(|agent| agent.is_alive()).map(|agent| agent.role);
+        crate::task_assignment::ensure_review_assignment(dispatch, role)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))
+    }
+
     /// Shared pre-persistence assignment policy for create and update. Keep
     /// identity normalization and freshness together so dispatch cannot accept
     /// an assignment that the supervisor's update path would refuse.
@@ -616,6 +638,8 @@ impl CasCore {
         override_audit: &mut Option<String>,
         warnings: &mut Vec<String>,
     ) -> Result<String, String> {
+        self.ensure_review_assignee(task.review_dispatch_id.as_deref(), Some(assignee))
+            .map_err(|error| error.message.to_string())?;
         if std::env::var("CAS_FACTORY_MODE").is_err() {
             return Ok(assignee.to_string());
         }
@@ -843,6 +867,12 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let review_dispatch_update = req.review_dispatch_id.as_deref()
+            .map(|value| self.normalize_review_dispatch_id(Some(value))).transpose()?;
+        self.ensure_review_assignee(
+            review_dispatch_update.as_ref().unwrap_or(&task.review_dispatch_id).as_deref(),
+            req.assignee.as_deref().or(task.assignee.as_deref()),
+        )?;
         // An older target clear reopened the task but left its source bound.
         // Only that reviewed no-code state may repeat the clear to repair it.
         let artifact_scope_repair = target_repo.is_some_and(|repo| repo.trim().is_empty())
@@ -1147,6 +1177,7 @@ impl CasCore {
                 ("door", req.door.is_some()),
                 ("external_ref", req.external_ref.is_some() && !paired_no_code_proof),
                 ("assignee", req.assignee.is_some()),
+                ("review_dispatch_id", req.review_dispatch_id.is_some()),
                 ("status", req.status.is_some()),
                 ("epic", req.epic.is_some()),
                 (
@@ -1775,8 +1806,12 @@ impl CasCore {
             })?
         } else { None };
         let prior_assignee = task.assignee.clone();
-
         let mut changes = Vec::new();
+        if let Some(review_dispatch_id) = review_dispatch_update {
+            task.review_dispatch_id = review_dispatch_id;
+            changes.push("review_dispatch_id");
+        }
+
         if let Some(origin_project) = origin_project {
             if task.origin_project.as_deref() != Some(origin_project.as_str()) {
                 let previous = task

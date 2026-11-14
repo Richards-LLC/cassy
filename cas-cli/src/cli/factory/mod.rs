@@ -813,7 +813,7 @@ pub enum FactoryCommands {
     RecordTestReceipt {
         #[arg(long)]
         task_id: String,
-        /// Path to JSON evidence: head, repo, cargo_args (array), log_path and exit_code.
+        /// Path to the JSON request file. Fields: head, repo, cargo_args (array of argv strings), log_path and exit_code.
         #[arg(long)]
         request: std::path::PathBuf,
     },

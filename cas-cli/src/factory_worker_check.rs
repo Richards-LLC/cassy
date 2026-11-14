@@ -386,10 +386,17 @@ pub(crate) fn assigned_worker_checkout(cas_root: &Path, task: &cas_types::Task) 
 }
 
 pub(crate) fn read_supervisor_test_request(path: &Path) -> Result<String> {
-    if std::fs::metadata(path)?.len() > 512 * 1024 {
+    let metadata = std::fs::metadata(path).with_context(|| {
+        format!(
+            "test receipt request file {} is missing; create the JSON evidence file and pass its path to --request",
+            path.display()
+        )
+    })?;
+    if metadata.len() > 512 * 1024 {
         bail!("supervisor evidence payload exceeds 512 KiB");
     }
-    Ok(std::fs::read_to_string(path)?)
+    std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read test receipt request file {}", path.display()))
 }
 
 /// Record an existing supervisor-run selection under the assigned worker's

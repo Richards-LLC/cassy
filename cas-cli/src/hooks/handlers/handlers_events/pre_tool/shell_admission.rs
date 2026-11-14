@@ -504,6 +504,12 @@ pub(in crate::hooks::handlers::handlers_events) fn shell_input(args: &[String]) 
 // Argument-only consumers omit attached IO numbers. Security/effect consumers
 // retain the original tokens, including every redirect target.
 #[derive(Clone)]
+pub(super) struct ExecutingSubstitution {
+    pub(super) source: std::ops::Range<usize>,
+    pub(super) body: String,
+}
+
+#[derive(Clone)]
 pub(super) struct ShellLexed {
     pub(super) tokens: Vec<ShellToken>,
     pub(super) literals: Vec<bool>,
@@ -515,7 +521,8 @@ pub(super) struct ShellLexed {
     /// Raw parameter bodies: numeric operand checks must retain source quoting.
     pub(super) parameters: Vec<(usize, usize)>,
     /// Executing substitutions, recorded before word cooking loses quotes.
-    pub(super) substitutions: Vec<String>,
+    pub(super) substitutions: Vec<ExecutingSubstitution>,
+    pub(super) inline_arithmetic: Vec<std::ops::Range<usize>>,
     pub(super) refusal: Option<Unsupported>,
 }
 
@@ -599,6 +606,7 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
     let mut unresolved_at = None;
     let mut parameters = Vec::new();
     let mut substitutions = Vec::new();
+    let mut inline_arithmetic = Vec::new();
     let mut refusal = None;
     let mut substitution_until = 0;
     let mut quote_start = 0;
@@ -768,7 +776,9 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
         if expands && ch == '`' {
             if let Some(end) = backquote_end(command.as_bytes(), index) {
                 if index >= substitution_until {
-                    substitutions.push(backquote_body(&command[index + 1..end]));
+                    substitutions.push(ExecutingSubstitution {
+                        source: index..end + 1, body: backquote_body(&command[index + 1..end]),
+                    });
                     substitution_until = end + 1;
                 }
                 let substitution = &command[index..=end];
@@ -790,7 +800,9 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
             match boundary {
                 Ok(end) => {
                     if index >= substitution_until {
-                        substitutions.push(command[index + 2..end].to_owned());
+                        substitutions.push(ExecutingSubstitution {
+                            source: index..end + 1, body: command[index + 2..end].to_owned(),
+                        });
                         substitution_until = end + 1;
                     }
                     // Keep legacy token projections until each consumer moves:
@@ -822,6 +834,10 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
                     if expansion.balance == 0 {
                         if expansion.opening == '{' {
                             parameters.push((expansion.start + 2, index));
+                        } else if expansion.opening == '[' {
+                            inline_arithmetic.push(expansion.start + 2..index);
+                        } else if expansion.opening == '(' {
+                            inline_arithmetic.push(expansion.start + 3..index - 1);
                         }
                         expansions.pop();
                     }
@@ -969,6 +985,7 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
         unresolved_at,
         parameters,
         substitutions,
+        inline_arithmetic,
         refusal,
     }
 }
@@ -1826,7 +1843,7 @@ pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsuppor
         if !delimiter.literal_body { collect_heredoc_substitutions(&body, &mut found); }
     }
     if let Some(error) = found.refusal { return Err(error); }
-    found.bodies.extend(lexed.substitutions.iter().cloned());
+    found.bodies.extend(lexed.substitutions.iter().map(|substitution| substitution.body.clone()));
     let compound_refusal = compound_refusal(&projected, &lexed, &syntax, depth);
     Ok(ParsedShell { projected, lexed, bodies: found.bodies, syntax, compound_refusal })
 }

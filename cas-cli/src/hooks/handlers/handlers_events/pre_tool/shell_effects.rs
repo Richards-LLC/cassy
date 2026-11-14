@@ -569,9 +569,23 @@ fn collect_script(
     for &(start, end) in &lexed.parameters {
         parameter_arithmetic(&projected[start..end], numeric)?;
     }
+    for span in &lexed.inline_arithmetic {
+        numeric_arithmetic(&script[span.clone()], numeric)?;
+    }
     arithmetic_commands(&projected, &mut lexed, numeric)?;
     let case_tokens = case_syntax(&projected, &lexed)?;
     let opened_files = lexed.opened_file_indices(&projected);
+    // Only substitutions contained in one original word need recursive
+    // collection here. Unquoted $(...) scopes already have ordinary tokens
+    // and run through this walk, preserving their entry/return cwd.
+    let word_substitutions: Vec<_> = lexed.substitutions.iter().filter_map(|substitution| {
+        lexed.tokens.iter().enumerate().find_map(|(at, token)| {
+            let start = if at == 0 { 0 } else { lexed.ends[at - 1] };
+            (matches!(token, ShellToken::Word(_)) && start <= substitution.source.start
+                && substitution.source.end <= lexed.ends[at])
+                .then(|| (at, substitution.body.clone()))
+        })
+    }).collect();
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let captured_status: HashSet<String> = tokens
         .iter()
@@ -699,25 +713,6 @@ fn collect_script(
                     _ => None,
                 })
                 .collect();
-            let word_literals: Vec<bool> = statement
-                .iter()
-                .enumerate()
-                .filter_map(|(index, token)| {
-                    (matches!(token, ShellToken::Word(_)) && !redirects[index])
-                        .then_some(statement_literals[index])
-                })
-                .collect();
-            // A redirect's filename is no operand, but its substitutions still run.
-            let redirect_targets: Vec<(&str, bool)> = statement
-                .iter()
-                .enumerate()
-                .filter_map(|(index, token)| match token {
-                    ShellToken::Word(word) if redirects[index] => {
-                        Some((word.as_str(), statement_literals[index]))
-                    }
-                    _ => None,
-                })
-                .collect();
             let index = if continuation {
                 None
             } else {
@@ -810,28 +805,20 @@ fn collect_script(
                 )?;
             }
 
-            // A quoted argument may execute a substitution even though the
-            // outer tokenizer correctly keeps it as one word. Its filesystem
-            // effects are checked in a subprocess scope; its output remains
-            // unresolved when used as an executable, directory or write path.
-            let every_word = words
-                .iter()
-                .map(String::as_str)
-                .zip(word_literals.iter().copied())
-                .chain(redirect_targets.iter().copied());
-            for (word, literal) in every_word {
-                if !literal {
-                    for body in substitution_bodies(word, numeric)? {
-                        collect_script(
-                            &body,
-                            statement_dirs.clone(),
-                            original,
-                            &directory_values,
-                            depth + 1,
-                            test_uses_arithmetic,
-                            effects,
-                        )?;
-                    }
+            // Executing source facts belong to this statement's original
+            // token positions. Re-scanning cooked words can turn escaped or
+            // single-quoted markers into code and hide real nested code.
+            for (owner, body) in &word_substitutions {
+                if visible.contains(owner) {
+                    collect_script(
+                        body,
+                        dirs.clone(),
+                        original,
+                        &directory_values,
+                        depth + 1,
+                        test_uses_arithmetic,
+                        effects,
+                    )?;
                 }
             }
 

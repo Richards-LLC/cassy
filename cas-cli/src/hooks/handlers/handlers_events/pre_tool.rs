@@ -9525,6 +9525,39 @@ EOF
                 failures.push(format!("refused {command}: {decision}: {reason}"));
             }
         }
+        // Default-deny class audit: every construct that can bind or alter a
+        // name, in every position, removes it from the inert set. Each one is
+        // checked for arithmetic ($((n))) and for indirection (${!v}).
+        let payload = "'a[$(touch /outside/cas-e197-binding)]'";
+        for binding in [
+            "true && <n>=<p>", "false || <n>=<p>", "true | <n>=<p>", "! <n>=<p>", "time <n>=<p>", "coproc <n>=<p>",
+            "( <n>=<p> )", "{ <n>=<p>; }", "<n>+=<p>", "<n>[0]=<p>", "<n>=<p> true", "env <n>=<p> true", "exec <n>=<p> true",
+            "command <n>=<p> true", "declare <n>=<p>", "typeset <n>=<p>", "local <n>=<p>", "export <n>=<p>",
+            "readonly <n>=<p>", "let <n>=<p>", "read <n> < <f>", "mapfile <n> < <f>", "readarray <n> < <f>",
+            "printf -v <n> %s <p>", "wait -p <n>", "getopts ab <n>", "for <n> in $(cat <f>); do :; done",
+            "select <n> in a; do break; done", "((<n>=$(cat <f>)))", ": $((<n>=$(cat <f>)))",
+            ": ${<n>:=<p>}", ": ${<n>=<p>}", "eval <n>=<p>", "source <f>", ". <f>", "exec {<n>}><f>",
+            "op=read; $op <n> < <f>", "unset <n>; : ${<n>:=<p>}",
+        ] {
+            let binding = binding.replace("<p>", payload).replace("<f>", &inside);
+            for (name, define, use_) in [("n", "n=0", "echo $((n))"), ("v", "v=HOME", "echo ${!v}")] {
+                let command = format!("{define}; {}; {use_} > {inside}", binding.replace("<n>", name));
+                let (decision, reason) = decision(&command);
+                if decision != "deny" || !reason.contains(WORKSPACE_CONTRACT_DENIAL) {
+                    failures.push(format!("binding {command}: {decision}: {reason}"));
+                }
+            }
+        }
+        // Bindings with numeric values stay inert in any position.
+        for command in [
+            format!("n=0; true && n=5; echo $((n+1)) > {inside}"),
+            format!("n=0; ((n++)); ((n+=2)); echo $((n)) > {inside}"),
+        ] {
+            let (decision, reason) = decision(&command);
+            if decision == "deny" {
+                failures.push(format!("numeric {command}: {reason}"));
+            }
+        }
         assert!(failures.is_empty(), "{failures:#?}");
     }
 

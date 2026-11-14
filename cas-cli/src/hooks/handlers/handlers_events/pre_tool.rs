@@ -11755,6 +11755,8 @@ mod worker_commit_guard_tests {
             ("PS4+='$(printf safe)'; set -x; :", "shell.deferred_code"),
             ("export PROMPT_COMMAND+='printf safe'", "shell.deferred_code"),
             ("PROMPT_COMMAND[0]='printf safe'", "shell.deferred_code"),
+            ("PROMPT_COMMAND[a=b]='printf safe'", "shell.deferred_code"),
+            ("declare 'PROMPT_COMMAND[a=b]=printf safe'", "shell.deferred_code"),
             ("export PROMPT_COMMAND='printf safe'", "shell.deferred_code"),
             ("shopt -s expand_aliases; alias c='printf safe'; c", "shell.deferred_code"),
             ("eval \"$cmd\"", "shell.dynamic_eval"),
@@ -11772,6 +11774,7 @@ mod worker_commit_guard_tests {
             ("find . -exec touch '{}' +", "shell.dynamic_command"),
             ("find . -exec cat '{}' \\;", "shell.dynamic_command"),
             ("find . -execdir cat relative.txt \\;", "shell.dynamic_command"),
+            ("find \"$MODE\" touch /outside/p '{}' \\;", "shell.dynamic_command"),
             ("find . -name '*.rs' -future-action", "shell.unknown_syntax"),
             ("sort --compress-program helper", "shell.dynamic_command"),
             ("sort --compress-program=helper", "shell.dynamic_command"),
@@ -12959,6 +12962,10 @@ mod worker_commit_guard_tests {
         let mut mismatches = Vec::new();
         for (command, denied) in [
             (format!("bash scripts/test-release.sh > '{linked_path}/shell.log' 2>&1"), false),
+            (format!("cd '{repo_path}'; find . -exec cd '{linked_path}' \\;; git commit -m probe"), true),
+            (format!("find . -exec cd '{repo_path}' \\;; git commit -m work"), false),
+            (format!("find . -execdir git commit -m probe \\;"), true),
+            ("find . -name -exec -printf 'git commit'".into(), false),
             ("sh scripts/test-release.sh --check > shell.log 2>&1".into(), false),
             // Script recognition must not bypass the later workspace-write guard.
             ("bash scripts/test-release.sh > /tmp/cas-6837.log 2>&1".into(), true),

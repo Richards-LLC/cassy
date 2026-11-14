@@ -87,6 +87,7 @@ mod tests {
 
     #[test]
     fn factory_review_starts_outside_worker_userns_cas_343d() {
+        const CANDIDATE_DATA: &[u8] = &[0, 1, 2, 127, 255];
         let role = std::env::var("CAS_TEST_BROKER_ROLE").unwrap_or_default();
         let exact = format!("{}::factory_review_starts_outside_worker_userns_cas_343d", module_path!().split_once("::").unwrap().1);
         if role == "worker" {
@@ -146,7 +147,7 @@ mod tests {
             assert_eq!(verdict.status, VerificationStatus::Approved);
             assert_eq!(verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
             let marker = PathBuf::from(std::env::var_os("CAS_TEST_BROKER_MARKER").unwrap());
-            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "candidate payload\n");
+            assert_eq!(std::fs::read(&marker).unwrap(), CANDIDATE_DATA);
             assert_eq!(std::fs::read_to_string(marker.with_extension("namespace")).unwrap().trim(), std::fs::read_link("/proc/self/ns/user").unwrap().to_str().unwrap());
             return;
         }
@@ -182,7 +183,7 @@ printf '%s' '{"status":"approved","summary":"Candidate read; write denied","conf
         crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
         cas_store::create_verification_dispatch_bound(&root, &task.id, &owner.id, &owner.id,
             &cas_types::VerificationProofBoundary::task(), chrono::Utc::now()+chrono::Duration::minutes(5), false).unwrap();
-        let input = project.join("proof.data"); std::fs::write(&input, "candidate payload\n").unwrap();
+        let input = project.join("proof.data"); std::fs::write(&input, CANDIDATE_DATA).unwrap();
         let marker = home.join("read.marker");
         let path = std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap();
         let result = Command::new(std::env::current_exe().unwrap()).args(["--exact", &exact, "--nocapture"])
@@ -192,7 +193,7 @@ printf '%s' '{"status":"approved","summary":"Candidate read; write denied","conf
             .env("CAS_TEST_BROKER_INPUT", &input).env("CAS_TEST_BROKER_MARKER", marker)
             .output().unwrap();
         assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-        assert_eq!(std::fs::read_to_string(input).unwrap(), "candidate payload\n");
+        assert_eq!(std::fs::read(input).unwrap(), CANDIDATE_DATA);
         env.remove("CAS_TEST_BROKER_ROLE");
     }
 }

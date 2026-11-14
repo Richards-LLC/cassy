@@ -11698,6 +11698,55 @@ mod worker_commit_guard_tests {
         }
     }
 
+    #[test]
+    fn incomplete_shell_constructs_have_source_refusals_cas_24f2() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        let mut failures = Vec::new();
+        for command in ["printf 'unfinished", "printf \"unfinished", "printf unfinished\\", "printf \"$(printf x)", "printf ${x:-unfinished"] {
+            let input = hook_git_write_input("/worktree", command);
+            let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
+            let output = &value["hookSpecificOutput"];
+            if output["permissionDecision"] != "deny"
+                || !output["permissionDecisionReason"].as_str().unwrap_or("").contains("[shell.unterminated]")
+            {
+                failures.push(format!("{command:?}: {value}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn shell_execution_depth_is_bounded_and_explained_cas_24f2() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        let mut command = "printf safe".to_string();
+        for _ in 0..7 {
+            command = format!("bash -c '{}'", command.replace('\'', "'\\''"));
+        }
+        let input = hook_git_write_input("/worktree", &command);
+        let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{value}");
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("[shell.depth]"), "{value}");
+    }
+
+    #[test]
+    fn role_checks_reach_all_admitted_shell_scopes_cas_24f2() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        let mut command = "CAS_AGENT_ROLE=supervisor printf x".to_string();
+        for _ in 0..4 {
+            command = format!("bash -c '{}'", command.replace('\'', "'\\''"));
+        }
+        let input = hook_git_write_input("/worktree", &command);
+        let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{value}");
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("[H-12]"), "{value}");
+    }
+
     // Helper: create a temp git repo with an initial commit on `main`.
     fn make_git_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");

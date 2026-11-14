@@ -71,6 +71,25 @@ ownership remains with its sibling task. #1700 remains out of scope.
 Every row in these tests keeps its decision. A changed row is listed in the
 delivery with its reason.
 
+Intentional control corrections in the implemented slices:
+
+- The cas_3147 Bash `test x -eq 0` row moves from DENY to ALLOW. Bash treats
+  these operands as integer data, producing an integer error rather than
+  evaluating the variable named x. Its previous DENY slot now covers a
+  conservative non-Bash shell case. Double-bracket comparisons and other
+  recursive arithmetic controls retain their decisions (GH #1953).
+- The cas_47e1 filename-pipeline rows transferred here now ALLOW only proven
+  name-data consumers. Pattern/rule input modes remain subject to credential
+  checks; unknown options and filename-opening modes keep their refusals.
+  The sibling's standalone listing controls are unchanged.
+
+R17 recognizes a first top-level, unwrapped `cd` with one literal realpath
+operand (optional `--`). Prior shell state, nested shells, other options,
+dynamic input and extra output commands remain unresolved. Configured and
+canonical artifact spellings share the same authority, including symlink
+escape checks. This bounded source regression is separate from final candidate
+and fourteen-day measurement receipts.
+
 | Test | Rows (approximate) |
 | --- | --- |
 | `cas_3147_heredoc_expansions_obey_workspace_contract` | 62 DENY / 15 ALLOW |

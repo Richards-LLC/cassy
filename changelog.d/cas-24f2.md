@@ -19,3 +19,8 @@ refusals when incomplete, and compound nesting uses the shared depth limit.
 Literal filename-list pipelines through proven text filters retain metadata
 classification; filename-opening consumers and protected inputs keep their
 credential checks. Ripgrep text mode works for policy-documentation searches.
+
+Credential checks use the shared shell input boundaries and admitted nesting
+limit. Bash numeric tests consume data while actual arithmetic keeps its
+checks. Literal entry-directory canonicalization preserves artifact-root
+containment, and pattern/rule-file inputs retain their credential checks.

@@ -11,3 +11,5 @@ coprocesses now receive named grammar refusals. Argument projections retain
 literal provenance and distinguish case patterns and test brackets from command
 words. Build and signal guards consume the common bounded execution walk;
 input-derived xargs filenames require explicit operands.
+Role checks use the same executing prefixes and wrapper traversal, retaining
+the distinction between shell syntax and literal arguments.

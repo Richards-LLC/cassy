@@ -61,9 +61,15 @@ pub(super) struct Statement {
     pub(super) words: Vec<String>,
     literals: Vec<bool>,
     offsets: Vec<usize>,
+    /// Reserved syntax is recognized from raw source, never a cooked word.
+    prefix: usize,
 }
 
 impl Statement {
+    pub(super) fn policy_words(&self) -> &[String] {
+        &self.words[self.prefix..]
+    }
+
     pub(super) fn worker_refusal(&self, index: Option<usize>, xargs: bool) -> Option<Unsupported> {
         use super::{is_shell_variable_name, shell_word_basename};
         let words = &self.words;
@@ -747,7 +753,19 @@ impl ShellLexed {
         }).collect();
         statement_indices(&tokens).into_iter().map(|statement| {
             let originals: Vec<_> = statement.into_iter().map(|at| indices[at]).collect();
+            let mut prefix = 0;
+            while let Some(&at) = originals.get(prefix) {
+                let ShellToken::Word(word) = &self.tokens[at] else { break; };
+                let start = if at == 0 { 0 } else { self.ends[at - 1] };
+                if source[start..self.ends[at]].trim() != word { break; }
+                if word == "function" && originals.get(prefix + 1).is_some() {
+                    prefix += 2;
+                } else if matches!(word.as_str(), "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until") {
+                    prefix += 1;
+                } else { break; }
+            }
             Statement {
+                prefix,
                 words: originals.iter().map(|&at| match &self.tokens[at] {
                     ShellToken::Word(word) => word.clone(), _ => unreachable!(),
                 }).collect(),

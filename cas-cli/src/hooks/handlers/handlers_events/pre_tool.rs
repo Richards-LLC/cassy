@@ -3737,18 +3737,20 @@ fn env_split_string_payload(words: &[String]) -> Option<String> {
 }
 
 pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
-    executable_word_index_with_alternatives(words, &mut |_| {})
+    executable_word_index_with_alternatives(words, true, &mut |_| {}, &mut |_| {})
 }
 
 fn executable_word_index_with_alternatives(
     words: &[String],
+    shell_prefix: bool,
     alternative: &mut dyn FnMut(usize),
+    wrapper: &mut dyn FnMut(usize),
 ) -> Option<usize> {
     let mut index = 0;
     while index < words.len() {
         let word = &words[index];
         match shell_word_basename(word) {
-            "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" => index += 1,
+            "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" if shell_prefix => index += 1,
             "coproc" => {
                 index += 1;
                 // A name can precede any compound command. Otherwise the
@@ -3764,8 +3766,9 @@ fn executable_word_index_with_alternatives(
                     alternative(index + 1);
                 }
             }
-            "function" => index += 2, // Skip the function name to inspect its body.
+            "function" if shell_prefix => index += 2, // Skip the function name to inspect its body.
             "env" => {
+                wrapper(index);
                 // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
                 // value; skipping only the flag made `env -u X cargo …` name
                 // `X` as the executable and miss the worker Rust build guard.
@@ -3790,6 +3793,7 @@ fn executable_word_index_with_alternatives(
                 }
             }
             "sudo" => {
+                wrapper(index);
                 index += 1;
                 while index < words.len() && words[index].starts_with('-') {
                     if words[index] == "--" {
@@ -3804,6 +3808,7 @@ fn executable_word_index_with_alternatives(
                 }
             }
             "command" | "builtin" => {
+                wrapper(index);
                 let command = word == "command";
                 index += 1;
                 while command && let Some(option) = words.get(index)
@@ -5789,6 +5794,7 @@ struct ShellInvocationScan {
     arguments: Vec<Vec<String>>,
     refusal: Option<shell_admission::Unsupported>,
     worker_refusal: Option<shell_admission::Unsupported>,
+    role_denial: Option<String>,
 }
 
 struct ShellScope {
@@ -5813,7 +5819,10 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     found.arguments.extend(statements.iter().map(|statement| statement.words.clone()));
     for statement in statements {
         let words = &statement.words;
-        let mut pending = vec![0];
+        if found.role_denial.is_none() {
+            found.role_denial = role_env_tampering_in_words(statement.policy_words());
+        }
+        let mut pending = vec![words.len() - statement.policy_words().len()];
         let mut visited = vec![false; words.len()];
         let mut indices = Vec::new();
         let mut xargs = false;
@@ -5821,8 +5830,14 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
             if start >= words.len() || visited[start] { continue; }
             visited[start] = true;
             if let Some(relative) = unwrapped_command_index_with_alternatives(
-                &words[start..], &mut |offset| pending.push(start + offset),
-                &mut |offset| xargs |= shell_word_basename(&words[start + offset]) == "xargs",
+                &words[start..], false, &mut |offset| pending.push(start + offset),
+                &mut |offset| {
+                    let at = start + offset;
+                    xargs |= shell_word_basename(&words[at]) == "xargs";
+                    if found.role_denial.is_none() {
+                        found.role_denial = role_env_tampering_in_words(&words[at..]);
+                    }
+                },
             ) {
                 let index = start + relative;
                 if !indices.contains(&index) { indices.push(index); }
@@ -5832,6 +5847,9 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
             found.worker_refusal.get_or_insert(refusal);
         }
         for index in indices {
+            if found.role_denial.is_none() {
+                found.role_denial = role_env_tampering_in_words(&words[index..]);
+            }
             if let Some(refusal) = statement.worker_refusal(Some(index), xargs) {
                 found.worker_refusal.get_or_insert(refusal);
             }
@@ -6046,15 +6064,16 @@ const COMMAND_WRAPPERS: &[&str] = &[
 /// The index of the command a wrapper chain runs, or `None` when the
 /// statement has no command word.
 pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
-    unwrapped_command_index_with_alternatives(words, &mut |_| {}, &mut |_| {})
+    unwrapped_command_index_with_alternatives(words, true, &mut |_| {}, &mut |_| {})
 }
 
 fn unwrapped_command_index_with_alternatives(
     words: &[String],
+    shell_prefix: bool,
     alternative: &mut dyn FnMut(usize),
     wrapper: &mut dyn FnMut(usize),
 ) -> Option<usize> {
-    let mut index = executable_word_index_with_alternatives(words, alternative)?;
+    let mut index = executable_word_index_with_alternatives(words, shell_prefix, alternative, wrapper)?;
     loop {
         let name = shell_word_basename(&words[index]);
         if !COMMAND_WRAPPERS.contains(&name) {
@@ -6089,7 +6108,8 @@ fn unwrapped_command_index_with_alternatives(
         }
         let rest = words.get(next..)?;
         index = next + executable_word_index_with_alternatives(
-            rest, &mut |offset| alternative(next + offset),
+            rest, false, &mut |offset| alternative(next + offset),
+            &mut |offset| wrapper(next + offset),
         )?;
     }
 }
@@ -6783,85 +6803,90 @@ fn role_env_denial(what: &str) -> String {
 
 fn role_env_tampering_in_scan(scan: ShellInvocationScan) -> Option<String> {
     if let Some(error) = scan.refusal { return Some(error.to_string()); }
+    scan.role_denial
+}
+
+/// Role policy consumes the same redirect-free prefixes and wrapper positions
+/// as invocation admission; option values and ordinary arguments stay data.
+fn role_env_tampering_in_words(words: &[String]) -> Option<String> {
     let role_name = |name: &str| ROLE_ENV_NAMES.contains(&name);
     let assigned_role = |word: &str| {
         word.split_once('=')
             .filter(|(name, _)| is_shell_variable_name(name) && role_name(name))
             .map(|(name, _)| name.to_string())
     };
-    for words in scan.scopes.into_iter().flat_map(|scope| scope.statements) {
-        // Assignment prefixes: `CAS_AGENT_ROLE=supervisor cas …`.
-        let mut index = 0;
-        while let Some(word) = words.get(index) {
-            let Some((name, _)) = word.split_once('=') else {
-                break;
-            };
-            if !is_shell_variable_name(name) {
-                break;
-            }
-            if role_name(name) {
-                return Some(role_env_denial(&format!("this command assigns {name}")));
-            }
-            index += 1;
-        }
-        let Some(program) = words.get(index) else {
-            continue;
+    // Assignment prefixes: `CAS_AGENT_ROLE=supervisor cas …`.
+    let mut index = 0;
+    while let Some(word) = words.get(index) {
+        let Some((name, _)) = word.split_once('=') else {
+            break;
         };
-        let args = &words[index + 1..];
-        match shell_word_basename(program) {
-            "env" => {
-                let mut clears_all = false;
-                let mut position = 0;
-                while let Some(arg) = args.get(position) {
-                    let unset = if arg == "-u" || arg == "--unset" {
-                        position += 1;
-                        args.get(position).map(String::as_str)
-                    } else if let Some(name) = arg.strip_prefix("--unset=") {
-                        Some(name)
-                    } else if let Some(name) =
-                        arg.strip_prefix("-u").filter(|name| !name.is_empty())
-                    {
-                        Some(name)
-                    } else {
-                        None
-                    };
-                    if let Some(name) = unset {
-                        if role_name(name) {
-                            return Some(role_env_denial(&format!("this command unsets {name}")));
-                        }
-                        position += 1;
-                        continue;
-                    }
-                    if arg == "-i" || arg == "--ignore-environment" || arg == "-" {
-                        clears_all = true;
-                    } else if ENV_VALUE_OPTIONS.contains(&arg.as_str()) {
-                        position += 1;
-                    } else if let Some(name) = assigned_role(arg) {
-                        return Some(role_env_denial(&format!("this command assigns {name}")));
-                    } else if !arg.starts_with('-') && !arg.contains('=') {
-                        if clears_all && shell_word_basename(arg) == "cas" {
-                            return Some(role_env_denial(
-                                "`env -i` runs cas without this agent's role environment",
-                            ));
-                        }
-                        break;
+        if !is_shell_variable_name(name) {
+            break;
+        }
+        if role_name(name) {
+            return Some(role_env_denial(&format!("this command assigns {name}")));
+        }
+        index += 1;
+    }
+    let Some(program) = words.get(index) else {
+        return None;
+    };
+    let args = &words[index + 1..];
+    match shell_word_basename(program) {
+        "env" => {
+            let mut clears_all = false;
+            let mut position = 0;
+            while let Some(arg) = args.get(position) {
+                let unset = if arg == "-u" || arg == "--unset" {
+                    position += 1;
+                    args.get(position).map(String::as_str)
+                } else if let Some(name) = arg.strip_prefix("--unset=") {
+                    Some(name)
+                } else if let Some(name) =
+                    arg.strip_prefix("-u").filter(|name| !name.is_empty())
+                {
+                    Some(name)
+                } else {
+                    None
+                };
+                if let Some(name) = unset {
+                    if role_name(name) {
+                        return Some(role_env_denial(&format!("this command unsets {name}")));
                     }
                     position += 1;
+                    continue;
                 }
-            }
-            "export" | "declare" | "typeset" | "local" | "readonly" => {
-                if let Some(name) = args.iter().find_map(|arg| assigned_role(arg)) {
+                if arg == "-i" || arg == "--ignore-environment" || arg == "-" {
+                    clears_all = true;
+                } else if ENV_VALUE_OPTIONS.contains(&arg.as_str()) {
+                    position += 1;
+                } else if let Some(name) = assigned_role(arg) {
                     return Some(role_env_denial(&format!("this command assigns {name}")));
+                } else if !arg.starts_with('-') && !arg.contains('=') {
+                    if clears_all && shell_word_basename(arg) == "cas" {
+                        return Some(role_env_denial(
+                            "`env -i` runs cas without this agent's role environment",
+                        ));
+                    }
+                    break;
                 }
+                position += 1;
             }
-            "unset" => {
-                if let Some(name) = args.iter().find(|arg| role_name(arg)) {
-                    return Some(role_env_denial(&format!("this command unsets {name}")));
-                }
-            }
-            _ => {}
         }
+        "export" | "declare" | "typeset" | "local" | "readonly" => {
+            if let Some(name) = args.iter().find_map(|arg| assigned_role(arg)) {
+                return Some(role_env_denial(&format!("this command assigns {name}")));
+            }
+        }
+        "unset" => {
+            if let Some(name) = args.iter().find(|arg| role_name(arg)) {
+                return Some(role_env_denial(&format!("this command unsets {name}")));
+            }
+        }
+        _ => {}
     }
+
     None
 }
 
@@ -11598,6 +11623,8 @@ mod worker_commit_guard_tests {
             "command env -u CAS_AGENT_ROLE printf x",
             "timeout 1 env CAS_FACTORY_MODE=0 printf x",
             "env -u UNUSED env CAS_AGENT_ROLE=supervisor printf x",
+            "command export CAS_FACTORY_MODE=0",
+            "builtin unset CAS_AGENT_ROLE",
         ] {
             let input = hook_git_write_input("/worktree", command);
             let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
@@ -11609,6 +11636,18 @@ mod worker_commit_guard_tests {
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+        for command in [
+            "printf '%s' 'CAS_AGENT_ROLE=supervisor'",
+            "printf '%s' 'if' 'env' '-u' 'CAS_AGENT_ROLE'",
+            "\"if\" env -u CAS_AGENT_ROLE printf x",
+            "env -u UNUSED printf '%s' 'CAS_FACTORY_MODE=0'",
+            "timeout 1 printf '%s' 'env' 'CAS_FACTORY_MODE=0'",
+            "env -C CAS_AGENT_ROLE printf x",
+        ] {
+            let input = hook_git_write_input("/worktree", command);
+            let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
+            assert_ne!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{command}: {value}");
+        }
     }
 
     // Helper: create a temp git repo with an initial commit on `main`.

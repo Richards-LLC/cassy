@@ -38,7 +38,7 @@ export const fixtureWebServer = {
 export const journeyWebServer = {
   name: "Commander journeys",
   command: `node e2e/journeys/serve-dist.mjs ${journeyPort}`,
-  wait: { stdout: listeningOn(`at ${journeyOrigin}/commander/`) },
+  wait: { stdout: listeningOn(`"event":"ready","origin":"${journeyOrigin}"`) },
   reuseExistingServer: false,
   stdout: "pipe",
 } satisfies NonNullable<PlaywrightTestConfig["webServer"]>;

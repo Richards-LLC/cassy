@@ -4698,6 +4698,8 @@ PY"#);
         use rmcp::model::RawContent;
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // The guard is the subject here; the host fixture below supplies load.
+        env.remove("CAS_FACTORY_BUILD_GUARD");
         env.set("CAS_FACTORY_MODE", "1");
         env.set("CAS_FACTORY_SESSION", "capacity-fixture");
         let dir = tempfile::tempdir().unwrap();

@@ -74,9 +74,6 @@ fn refresh_epic_lane_binding(task: &mut Task) {
 
 struct RetargetedSourceRebind {
     actor: String,
-    reason: String,
-    branch: String,
-    tip: String,
     target_tip: String,
     previous_start: cas_types::FactoryBranchStart,
 }
@@ -88,6 +85,7 @@ fn validate_empty_source_retarget(
     cas_root: &std::path::Path,
     task: &Task,
     target: &cas_types::WorkTarget,
+    actor: Result<String, String>,
 ) -> Result<Option<RetargetedSourceRebind>, String> {
     let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
         return Ok(None);
@@ -118,8 +116,13 @@ fn validate_empty_source_retarget(
     if source_tips.is_empty() || source_tips.iter().any(|tip| tip != &start.base_sha) {
         return Ok(None);
     }
-    if task.assignee.as_deref() != Some(start.assignee.as_str()) {
-        return Err("recorded task source assignee differs; the empty source cannot be rebound automatically".into());
+    let Some(assignee) = task.assignee.as_deref() else {
+        return Ok(None);
+    };
+    if assignee != start.assignee {
+        return Err(
+            "recorded task source assignee differs; ask the supervisor to use rebind_branch".into(),
+        );
     }
     let target_ref = super::lifecycle::close_ops::preferred_diff_target_ref_for_delivery(
         repo, &target.target_branch, task.delivery_mode,
@@ -127,24 +130,15 @@ fn validate_empty_source_retarget(
     let Some(target_tip) = crate::git_evidence::resolve_branch_sha(repo, &target_ref) else {
         return Ok(None);
     };
-    let ancestry = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", &start.base_sha, &target_tip])
-        .current_dir(repo)
-        .output()
-        .ok();
-    let Some(ancestry) = ancestry else {
-        return Ok(None);
-    };
-    if !ancestry.status.success() {
+    if !crate::git_evidence::git_commit_is_ancestor(repo, &start.base_sha, &target_tip) {
         return Ok(None);
     }
     Ok(Some(RetargetedSourceRebind {
-        reason: "Automatic retarget of an unchanged source lane whose start is contained in the new target".into(),
-        branch: start.branch.clone(),
-        tip: start.base_sha.clone(),
+        actor: actor.map_err(|error| {
+            format!("Cannot audit source retarget without a registered actor: {error}")
+        })?,
         target_tip,
         previous_start: start.clone(),
-        actor: String::new(),
     }))
 }
 
@@ -2518,9 +2512,14 @@ impl CasCore {
             } else {
                 None
             };
-            let mut source_rebind = if let Some(target) = retarget.as_ref() {
-                validate_empty_source_retarget(&self.cas_root, &task, target)
-                    .map_err(|message| McpError {
+            let source_rebind = if let Some(target) = retarget.as_ref() {
+                validate_empty_source_retarget(
+                    &self.cas_root,
+                    &task,
+                    target,
+                    self.get_agent_id().map_err(|error| error.to_string()),
+                )
+                .map_err(|message| McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(message),
                         data: None,
@@ -2528,13 +2527,6 @@ impl CasCore {
             } else {
                 None
             };
-            if let Some(audit) = source_rebind.as_mut() {
-                audit.actor = self.get_agent_id().map_err(|error| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!("Cannot audit source retarget without a registered actor: {error}")),
-                    data: None,
-                })?;
-            }
             // A parked or recorded delivery never reaches here: the guard
             // above refuses `epic=` for it with the proof_scope_fix route.
             let already_matches = match replacement.as_ref() {
@@ -2579,12 +2571,12 @@ impl CasCore {
                     task.deliverables.factory_branch_start = Some(rebound_start.clone());
                     let audit_row = serde_json::json!({
                         "actor": &audit.actor,
-                        "reason": &audit.reason,
+                        "reason": "Automatic retarget of an unchanged source lane whose start is contained in the new target",
                         "previous_start": &audit.previous_start,
-                        "previous_tip": &audit.tip,
+                        "previous_tip": &audit.previous_start.base_sha,
                         "previous_anchor": task.deliverables.factory_branch_anchor,
                         "start": &rebound_start,
-                        "tip": &audit.tip,
+                        "tip": &audit.previous_start.base_sha,
                         "target_tip": &audit.target_tip,
                     });
                     if !task.notes.is_empty() { task.notes.push('\n'); }
@@ -2912,10 +2904,14 @@ impl CasCore {
             crate::quality_ledger::intervention(
                 &self.cas_root,
                 cas_store::InterventionKind::Rebind,
-                crate::quality_ledger::rebind_key(&task.id, &audit.branch, &audit.tip),
+                crate::quality_ledger::rebind_key(
+                    &task.id,
+                    &audit.previous_start.branch,
+                    &audit.previous_start.base_sha,
+                ),
                 Some(&task.id),
                 Some(&audit.actor),
-                Some(&audit.reason),
+                Some("Automatic retarget of an unchanged source lane whose start is contained in the new target"),
             );
         }
 

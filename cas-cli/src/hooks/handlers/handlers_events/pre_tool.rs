@@ -9514,6 +9514,9 @@ EOF
             (format!("covered=0 | true; echo $((covered+1)) > {inside}"), true),
             (format!("covered=0; read covered < {inside}; echo $((covered+1)) > {inside}"), true),
             (format!("covered=0; covered+='a[1]'; echo $((covered)) > {inside}"), true),
+            // A new process reads its own environment, which `env` may rewrite.
+            ("covered=0; env covered='a[$(touch /outside/cas-e197-numeric)]' bash -c 'echo $((covered))'".to_owned(), true),
+            ("for v in HOME; do env v='a[$(touch /outside/cas-e197-indirect)]' bash -c 'echo ${!v}'; done".to_owned(), true),
         ] {
             let (decision, reason) = decision(&command);
             if decision != "deny" || !reason.contains(WORKSPACE_CONTRACT_DENIAL)

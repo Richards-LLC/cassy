@@ -10324,6 +10324,8 @@ EOF
         for (command, denied) in [
             ("INSPECT=printf; \"$INSPECT\" fixture", false),
             ("ROOT=src; find \"$ROOT\" -type f -print", false),
+            ("TOOL=neonctl; \"$TOOL\" projects list", true),
+            ("TOOL=env; \"$TOOL\" CAS_AGENT_ROLE=supervisor printf fixture", true),
             ("WRITER=touch; \"$WRITER\" ../../ordinary-data.txt", true),
             ("WRITER=printf; printf -v WRITER touch; \"$WRITER\" ../../ordinary-data.txt", true),
             ("WRITER=printf; read -r WRITER; \"$WRITER\" ../../ordinary-data.txt", true),

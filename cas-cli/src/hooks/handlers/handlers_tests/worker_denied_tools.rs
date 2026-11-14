@@ -232,6 +232,8 @@ fn worker_shell_absolute_and_home_credential_reads_are_refused_cas_da9a() {
     let credentials = home.join(".config/neonctl/credentials.json");
     let mut failures = Vec::new();
     for command in [
+        &format!("FILE='{}'; cat \"$FILE\"", credentials.display()),
+        &format!("ROOT='{}'; find \"$ROOT\" -print", home.join(".config/neonctl").display()),
         "cat \"$HOME/.config/neonctl/credentials.json\"",
         "cp \"$HOME/.config/neonctl/credentials.json\" /tmp/copied-token",
         "head -n 1 \"$HOME/.local/share/com.vercel.cli/auth.json\"",

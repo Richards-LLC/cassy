@@ -94,6 +94,13 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     await expect(failure).toBeHidden();
   });
   await journey.stage("An unanswered older page can retry its original cursor", async () => {
+    // cas-cab9/af35: keep real unanswered supervisor activity in the thread
+    // while the history request fails; a quiet fixture misses the late pin.
+    const pending = hub.nextSend();
+    await page.getByRole("textbox", { name: "Your message" }).fill("Read the missing history while you work");
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    expect((await pending).text).toBe("Read the missing history while you work");
+    hub.deliverLatest(PELICAN);
     hub.pausedHistory.add(PELICAN);
     // Reconnect A requests the newest page while the cached thread stays readable.
     hub.drop(PELICAN);
@@ -102,6 +109,8 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
     expect(newest.before).toBeUndefined();
     await page.getByRole("button", { name: "Load earlier", exact: true }).click();
     await expect.poll(() => hub.historyRequests.length).toBe(4);
+    hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [46] } });
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(1);
     await page.clock.fastForward(15_000);
     await expectSettledHistoryFailure(page, failure);
     // A's late page hydrates, but B still owes the older answer (cas-bf2f).

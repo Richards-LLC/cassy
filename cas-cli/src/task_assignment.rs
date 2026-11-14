@@ -3,6 +3,23 @@
 use cas_types::{AgentRole, Task, TaskStatus, TaskType};
 use std::path::Path;
 
+/// Task staffing never creates verifier authority. Sealed daemon verifiers
+/// receive their dispatch directly, rather than accepting an ordinary task.
+// gate[G-156 assign]: Review assignment requires verdict authority
+pub(crate) fn ensure_review_assignment(
+    dispatch_id: Option<&str>,
+    role: Option<AgentRole>,
+) -> Result<(), String> {
+    let Some(dispatch_id) = dispatch_id else { return Ok(()) };
+    if role == Some(AgentRole::Supervisor) { return Ok(()) }
+    Err(crate::gates::tag("G-156", format!(
+        "Review dispatch {dispatch_id} cannot be assigned to an ordinary worker or an unverified identity. \
+         Use Cassy's daemon-owned verifier on this exact dispatch, or have a registered supervisor \
+         record the verdict with verification action=add dispatch_id={dispatch_id}. \
+         Staffing a task does not grant verifier authority."
+    )))
+}
+
 /// The one-line form of cas-writing-tests's "Fewest tests" principle, carried once by
 /// every task start (cas-5a52).
 pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the fewest tests that fail without the change, one per behaviour, \
@@ -31,6 +48,7 @@ pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64, initi
     enqueue_with_queue_occurrence(cas_dir, task, Some(occurrence), initial)
 }
 
+// gate-audit[initial]: selector Chooses the initial or continuation prompt; both run the review authority guard.
 fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>, initial: bool) -> crate::Result<Option<i64>> {
     if !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
         || matches!(task.task_type, TaskType::Epic | TaskType::Gate)
@@ -55,6 +73,10 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
                     .num_seconds()
                     <= cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS
         });
+    if let Some(worker) = worker {
+        ensure_review_assignment(task.review_dispatch_id.as_deref(), Some(worker.role))
+            .map_err(crate::error::CasError::Other)?;
+    }
     // Queue admission precedes registration and optional prompt policy. A tail
     // is delivered by the ordered handoff, never as an immediate start prompt.
     if occurrence.is_none()

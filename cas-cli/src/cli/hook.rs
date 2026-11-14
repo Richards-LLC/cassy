@@ -160,6 +160,9 @@ fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
         {
             ensure!(git.is_ancestor(&receipt.commit_sha, &local), "H-40: {} has an immutable delivery receipt; merge the target instead", task.id);
         }
+        for declined in returned_delivery_tips(&git, task, &remote) {
+            ensure!(git.is_ancestor(&declined, &local), "H-40: {} has returned delivery {declined} on this branch; merge the target instead", task.id);
+        }
         for pass in cas_store::list_qa_passes(&root, &task.id)? {
             if pass.branch == branch && matches!(pass.state, QaPassState::Pending | QaPassState::Claimed | QaPassState::Passed | QaPassState::Waived) {
                 ensure!(git.is_ancestor(&pass.bound_head, &local), "H-40: {} has a bound review tip; merge the target instead", task.id);
@@ -177,6 +180,20 @@ fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
     }
     ensure!(checkpoint, "H-40: cannot prove an owned InProgress checkpoint with its recorded start ancestry; no rewrite permitted");
     Ok(())
+}
+
+/// cas-c730 / GH #1912: reviewed delivery tips a request_changes or merge-conflict
+/// return declined, among those `tip` carries. H-40 keeps each reachable from a
+/// rewritten branch; the returned task's start names them before proof work.
+pub(crate) fn returned_delivery_tips(
+    git: &crate::worktree::GitOperations,
+    task: &cas_types::Task,
+    tip: &str,
+) -> Vec<String> {
+    task.deliverables.declined_factory_anchors().iter()
+        .filter(|anchor| git.is_ancestor(anchor, tip))
+        .cloned()
+        .collect()
 }
 
 /// Persist a pre-push guard refusal without making the guard depend on the

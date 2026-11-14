@@ -108,9 +108,22 @@ impl CasCore {
         let base = task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str());
         lines.push(format!(
             "Branch: {branch}{}, pushed at the delivered tip.{}",
-            target.map(|target| format!(" to {target}")).unwrap_or_default(),
+            target.as_ref().map(|target| format!(" to {target}")).unwrap_or_default(),
             base.map(|base| format!(" Scoped proof base {}.", &base[..base.len().min(12)])).unwrap_or_default(),
         ));
+        // cas-c730 / GH #1912: the same tips H-40 will keep, named before proof work.
+        let git = crate::worktree::GitOperations::new(repo.clone());
+        let returned = [branch.clone(), format!("origin/{branch}")].iter()
+            .find_map(|name| git.resolve_commit(name))
+            .map(|tip| crate::cli::hook::returned_delivery_tips(&git, task, &tip))
+            .unwrap_or_default();
+        if !returned.is_empty() {
+            lines.push(format!(
+                "History: {branch} must keep returned delivery {} reachable; merge {} into it rather than rebasing, or H-40 refuses the push.",
+                returned.join(", "),
+                target.as_deref().unwrap_or("the target"),
+            ));
+        }
         lines.push(
             "Close reason: cite a run id, artifact id or receipt path beside a third-party or future proof claim, or write \"deferred to <stage>\"."
                 .to_string(),

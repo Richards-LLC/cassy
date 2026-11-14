@@ -2833,7 +2833,7 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
 #[tokio::test]
 async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() {
     let mut env = test_env();
-    for landing in ["worktree_merge", "merge queue"] {
+    for landing in ["worktree_merge", "merge queue", "merge queue over target progress"] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -2878,7 +2878,21 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
         })))).await.unwrap();
         assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
         // Only the target ref moves: A2 is already inside the reviewed source.
-        let landed = if landing == "merge queue" {
+        let landed = if landing == "merge queue over target progress" {
+            // cas-c9ec: an independent delivery lands on the target after the
+            // review; the queue merges this tip on top of it (PR #1484 shape).
+            let main = fixture.repo.root.join("queue-main");
+            run_git(&["worktree", "add", "--detach", main.to_str().unwrap(), &shared[1]], &fixture.repo.root);
+            std::fs::write(main.join("independent.txt"), "another delivery\n").unwrap();
+            run_git(&["add", "independent.txt"], &main);
+            run_git(&["commit", "-m", "Independent delivery"], &main);
+            let progress = git_stdout(&main, &["rev-parse", "HEAD"]);
+            run_git(&["merge", "--no-ff", "-m", "Merge pull request from the merge queue", &tip], &main);
+            let queued = git_stdout(&main, &["rev-parse", "HEAD"]);
+            assert_eq!(git_stdout(&main, &["rev-parse", "HEAD^1"]), progress);
+            run_git(&["push", "origin", &format!("{queued}:refs/heads/epic/rebound")], &fixture.repo.root);
+            Some(queued)
+        } else if landing == "merge queue" {
             let queued = git_stdout(&fixture.repo.root, &["commit-tree", &tip_tree, "-p", &shared[1], "-p", &tip,
                 "-m", "Merge pull request from the merge queue"]);
             run_git(&["push", "origin", &format!("{queued}:refs/heads/epic/rebound")], &fixture.repo.root);
@@ -2900,8 +2914,10 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
             assert_eq!(published, queued, "{landing}: reconciliation does not merge again: {text}");
         }
         run_git(&["merge-base", "--is-ancestor", &tip, &published], &fixture.repo.root);
-        assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound^{tree}"]), tip_tree,
-            "{landing}: the target holds exactly the approved tree");
+        if landing != "merge queue over target progress" {
+            assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound^{tree}"]), tip_tree,
+                "{landing}: the target holds exactly the approved tree");
+        }
     }
 }
 

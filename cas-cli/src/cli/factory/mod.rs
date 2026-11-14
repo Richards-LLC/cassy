@@ -1386,9 +1386,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::RecordTestReceipt { task_id, request } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("test receipt requires a Cassy project"))?;
-                let payload = crate::factory_worker_check::read_supervisor_test_request(&request)?;
-                let core = crate::mcp::CasCore::for_cli(root.to_path_buf());
-                println!("{}", crate::factory_worker_check::record_supervisor_test(&core, task_id, &payload)?);
+                println!("{}", crate::factory_worker_check::record_supervisor_test_from_cli(root, task_id, &request)?);
                 Ok(())
             }
             FactoryCommands::WorkerCheck {

@@ -22,8 +22,8 @@ class Shapes(unittest.TestCase):
                 shutil.copyfile(Path(__file__).with_name(name), scripts / name)
             source = root / 'cas-cli/src'
             source.mkdir(parents=True)
-            (source / 'rules.rs').write_text('''
-// gate[H-29 pre-tool]: Workspace boundary
+            gate_marker = 'gate'
+            (source / 'rules.rs').write_text(f'// {gate_marker}[H-29 pre-tool]: Workspace boundary\n' + '''
 fn shell() -> Rule { Rule { rule: "shell.unterminated" } }
 fn other() -> Rule { Rule { rule_id: "fixture.changed" } }
 // Rule { rule: "comment.fake" }

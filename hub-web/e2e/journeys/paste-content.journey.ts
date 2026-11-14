@@ -73,6 +73,8 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         await expect(page.locator(".composer-uploads")).toBeVisible();
         await expect(page.locator("#message-status")).toBeHidden();
         await expect(page.getByRole("button", { name: "Remove screenshot.png", exact: true })).toBeVisible();
+        // Observe the aborted upload before inspecting its recorded request.
+        await expect(page.locator(".upload-error")).toBeVisible();
         expect(uploads.size).toBe(1);
         const next = hub.nextSend();
         await send.click();

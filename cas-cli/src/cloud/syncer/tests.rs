@@ -165,7 +165,7 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
         let queue = Arc::new(SyncQueue::open(&root).unwrap());
         queue.init().unwrap();
         queue.record_revision(EntityType::Task, &original.id, 7).unwrap();
-        queue.set_metadata(&format!("last_team_pull_{team}_{project}"), prior_cursor).unwrap();
+        queue.set_metadata(&format!("last_team_pull_at_{team}_{project}"), prior_cursor).unwrap();
         let syncer = CloudSyncer::new_for_project(Arc::clone(&queue), CloudConfig {
             endpoint:server.uri(),token:Some("test-token".into()),..Default::default()
         }, CloudSyncerConfig::default(), project.into(), &root);
@@ -197,11 +197,9 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
             Some(&serde_json::to_string(task).unwrap()), team).unwrap();
     }
     assert_eq!(publisher_sync.push_team(team).unwrap().pushed_tasks, 1);
-    assert_eq!(publisher_queue.revision(EntityType::Task, &original.id).unwrap(), Some(8));
-    assert_eq!(receiver_sync.push_team(team).unwrap().pushed_tasks, 0);
-    assert_eq!(receiver_queue.revision(EntityType::Task, &original.id).unwrap(), Some(7));
+    let rejected = receiver_sync.push_team(team).unwrap();
     // A retry before the pull must not fall back to unguarded timestamp LWW.
-    assert_eq!(receiver_sync.push_team(team).unwrap().pushed_tasks, 0);
+    let retried = receiver_sync.push_team(team).unwrap();
     assert!(crate::artifacts::lookup_metadata(receiver_root, None, &proof.id)
         .unwrap_err().downcast_ref::<crate::artifacts::MetadataUnavailable>().is_some());
     let result = receiver_sync.pull_team(team, project,
@@ -215,6 +213,12 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
     let recovered = crate::artifacts::lookup_metadata(receiver_root, None, &proof.id).unwrap();
     assert_eq!(recovered.cloud_artifact_id, proof.cloud_artifact_id);
     assert_eq!(recovered.sha256, proof.sha256);
+    assert_eq!(publisher_queue.revision(EntityType::Task, &original.id).unwrap(), Some(8));
+    assert_eq!(receiver_queue.revision(EntityType::Task, &original.id).unwrap(), Some(7));
+    assert_eq!(rejected.pushed_tasks, 0);
+    assert_eq!(retried.pushed_tasks, 0);
+    assert!(server.received_requests().await.unwrap().iter().any(|request|
+        request.url.query_pairs().any(|(key, value)| key == "since" && value == prior_cursor)));
 }
 
 #[tokio::test]

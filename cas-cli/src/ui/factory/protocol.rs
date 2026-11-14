@@ -27,6 +27,8 @@ pub const COMMANDER_EARLIER_SESSIONS_LIMIT: usize = 30;
 pub enum ProtocolCapability {
     /// Local framed Unix GUI control only; never advertised by WS/relay.
     BindingIntakeControlV1,
+    /// Launch a stored verifier dispatch from the local daemon context.
+    VerifierLaunch,
     TargetedInterrupt,
     SupervisorCommands,
     AttributedSendMessage,
@@ -68,6 +70,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
 pub fn local_gui_capabilities() -> Vec<ProtocolCapability> {
     let mut capabilities = daemon_capabilities();
     capabilities.push(ProtocolCapability::BindingIntakeControlV1);
+    capabilities.push(ProtocolCapability::VerifierLaunch);
     capabilities
 }
 
@@ -451,6 +454,8 @@ impl MessageAttribution {
 /// Messages sent from TUI client to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
+    /// Local control: resolve all task, owner and harness data in the daemon.
+    LaunchVerifier { dispatch_id: String },
     /// Local daemon control; never accepted from a remote WebSocket client.
     Reexec { binary: std::path::PathBuf, version: String, nonce: String },
     /// Attach to the session (sent on connect)
@@ -709,6 +714,7 @@ pub enum PaneSizeAuthority {
 /// Messages sent from daemon to TUI client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
+    VerifierLaunched { dispatch_id: String },
     ReexecResult { receipt: super::daemon::reexec::ReexecReceipt },
     /// Local-only response. An acknowledgement exists only after both tasks drain.
     BindingIntake {

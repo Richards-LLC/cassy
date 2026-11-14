@@ -476,8 +476,11 @@ def observe(args):
     runs = api(f'actions/workflows/{WORKFLOW}/runs', '-f', f'branch={branch}', '-f', f'event={TRAIN_EVENT}', '-f', 'per_page=100')['workflow_runs']
     candidates = [run for run in runs if run['head_branch'] == branch and run['event'] == TRAIN_EVENT]
     # Keep only each head's latest attempt; a failed rerun cannot lend old green proof.
+    # cas-bac4: a cancelled or skipped run has no verdict, so it ranks below
+    # every other run at its head; a newer cancelled duplicate hid a green.
     latest = {}
-    for candidate in sorted(candidates, key=lambda item: (item['id'], item.get('run_attempt', 1))):
+    for candidate in sorted(candidates, key=lambda item: (item['conclusion'] not in ('cancelled', 'skipped'),
+                                                          item['id'], item.get('run_attempt', 1))):
         latest[candidate['head_sha']] = candidate
     run = latest.get(head)
     if getattr(args, 'command', None) == 'check' and (not run or run['status'] != 'completed'
@@ -494,8 +497,11 @@ def observe(args):
                         '--no-renames', '-r', '-m', '--first-parent', ancestor).splitlines()
             if not all(release_asset(path) for path in paths) and not prepared(args.repo, ancestor):
                 break
-    state = {**previous, 'branch': branch, 'head': head, 'outcome': 'PENDING'}
+    state = {**previous, 'branch': branch, 'head': head, 'outcome': 'PENDING', 'pending_run_id': None}
     if not run or run['status'] != 'completed' or run['conclusion'] in ('cancelled', 'skipped'):
+        if run and run['status'] != 'completed':
+            # cas-bac4: whoever dispatched it, this head's run is under way.
+            state['pending_run_id'] = str(run['id'])
         write(state_path, state)
         return state
     run_id, attempt = str(run['id']), run.get('run_attempt', 1)

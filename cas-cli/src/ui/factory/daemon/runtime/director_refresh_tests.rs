@@ -1261,38 +1261,58 @@ async fn cas_91bab_non_green_native_transport_fallbacks() {
 
 #[tokio::test]
 async fn cas_9efb_merge_ci_probe_runs_on_external_lane_without_blocking_control() {
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+
     let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
     let cas_dir = fixture.app.cas_dir().to_path_buf();
+    let fifo = |name| {
+        let path = cas_dir.join(name);
+        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+        std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap()
+    };
+    let mut entered = fifo("gh-entered");
+    let mut release = fifo("gh-release");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (returned_tx, returned_rx) = mpsc::channel();
+    let gate = std::thread::spawn(move || {
+        entered.read_exact(&mut [0]).unwrap();
+        entered_tx.send(()).unwrap();
+        // Deadlock fuse only: success depends on the control-return event,
+        // never on how quickly a loop pass or local Git/SQLite work finishes.
+        let returned_before_release = returned_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+        release.write_all(b"release\n").unwrap();
+        returned_before_release
+    });
     crate::test_paths::warm_stub(&cas_dir.join("gh-fixture"),
-        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; else sleep 0.4; cat .cas/ci.json; fi\n");
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; else printf '%s\\n' \"$*\" >> .cas/gh-requests; if [ ! -e .cas/gh-released ]; then printf x > .cas/gh-entered; read release < .cas/gh-release; touch .cas/gh-released; fi; cat .cas/ci.json; fi\n");
     let mut daemon = daemon_on_lanes(&cas_dir);
     std::mem::swap(&mut daemon.app, &mut fixture.app);
     let mut refresh = DirectorRefresh::new();
-    let started = Instant::now();
     refresh.start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![fixture.event.clone()]).unwrap();
-    assert!(started.elapsed() < PASS_LATENCY_LIMIT, "submitting merge evidence blocked control");
+    entered_rx.recv_timeout(Duration::from_secs(30)).expect("GitHub stub never entered");
+    let pending = refresh.take_delivery_read(&mut daemon.queue_jobs).is_none();
+    let external_seen = daemon.queue_jobs.job_lanes().unwrap().lane_stats().into_iter().any(|stats| {
+        stats.running.is_some_and(|job| {
+            job.lane == super::super::jobs::Lane::External && job.key == super::super::factory_jobs::DELIVERY_READ_KEY
+        })
+    });
+    let _ = returned_tx.send(());
+    assert!(gate.join().unwrap(), "control must return before the GitHub stub is released");
+    assert!(pending, "control must return while the GitHub stub is still pending");
+    assert!(external_seen, "the actual merge read must use the external lane");
+
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut external_seen = false;
-    let mut slowest = Duration::ZERO;
     let (events, inputs) = loop {
         assert!(Instant::now() < deadline, "merge evidence did not finish");
-        let pass = Instant::now();
-        let ready = refresh.take_delivery_read(&mut daemon.queue_jobs);
-        slowest = slowest.max(pass.elapsed());
-        external_seen |= daemon.queue_jobs.job_lanes().unwrap().lane_stats().into_iter().any(|stats| {
-            stats.running.is_some_and(|job| {
-                job.lane == super::super::jobs::Lane::External && job.key == super::super::factory_jobs::DELIVERY_READ_KEY
-            })
-        });
-        if let Some(ready) = ready { break ready; }
+        if let Some(ready) = refresh.take_delivery_read(&mut daemon.queue_jobs) { break ready; }
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
-    assert!(external_seen, "the actual merge read must use the external lane");
-    let pass = Instant::now();
+    let requests = std::fs::read(cas_dir.join("gh-requests")).unwrap();
     let (_, prompts, _) = daemon.app.revalidate_and_prompt_for_delivery_from(&events, inputs);
-    slowest = slowest.max(pass.elapsed());
     assert_eq!(prompts.len(), 1);
-    assert!(slowest < PASS_LATENCY_LIMIT, "control waited for GitHub: {slowest:?}");
+    assert_eq!(std::fs::read(cas_dir.join("gh-requests")).unwrap(), requests,
+        "control must reuse the external evidence without calling GitHub again");
 }
 
 #[tokio::test]

@@ -11489,6 +11489,9 @@ mod worker_commit_guard_tests {
         for command in [
             // GH #1886 live shape, preserving the descriptive policy strings.
             "cat > inventory_controls.py <<'PY'\nfrom pathlib import Path\nsource = Path('pre_tool.rs').read_text()\ncontrols = ('factory.write_roots', 'cas config set factory.write_roots /x')\nprint(source.count(controls[0]))\nPY",
+            // Text-mode searches read policy documentation as ordinary data.
+            "rg -a 'cas config set factory.write_roots' README.md",
+            "rg --text 'cas config set factory.write_roots' README.md",
             // GH #1816 exact interpreter list, previously unverified.
             "python3 -I tests/soundwave-desktop-test.py\npython3 -I tests/system-capture-test.py\nbash tests/install-zram-topology-test.sh\nbash tests/restore-soundwave-resilience-test.sh",
             // Valid list continuations, redirects and function bodies retain admission.

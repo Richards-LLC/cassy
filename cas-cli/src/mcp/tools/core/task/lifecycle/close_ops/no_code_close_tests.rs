@@ -1802,6 +1802,7 @@ async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
         assert!(agents.get_lease(id).unwrap().is_some());
         let foreign = assigned("cas-other", TaskType::Spike, "main");
         f.put(&foreign);
+        let foreign = f.task(&foreign.id);
         if case == "stale" {
             cas_store::timeout_verification_dispatch(&f.cas_dir(), id, dispatch.deadline_at).unwrap();
             let renewed = call(&f.worker, request).await;

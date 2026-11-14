@@ -174,10 +174,11 @@ class TrainReceipts(unittest.TestCase):
         self.assertFalse(check('scripts'))
         self.assertFalse(check('rust'))
 
-    def forge(self, artifact, status='completed', conclusion='success', fanin='success'):
-        (self.root/'forge.json').write_text(json.dumps({'artifact': artifact, 'fanin': fanin, 'runs': [{
-            'id': int(self.env['GITHUB_RUN_ID']), 'run_attempt': int(self.env['GITHUB_RUN_ATTEMPT']), 'head_sha': self.env['GITHUB_SHA'],
-            'head_branch': self.env['GITHUB_REF_NAME'], 'event': 'workflow_dispatch', 'status': status, 'conclusion': conclusion}]}))
+    def forge(self, artifact, status='completed', conclusion='success', fanin='success', later=()):
+        run = lambda id, conclusion: {'id': id, 'run_attempt': int(self.env['GITHUB_RUN_ATTEMPT']), 'head_sha': self.env['GITHUB_SHA'],
+            'head_branch': self.env['GITHUB_REF_NAME'], 'event': 'workflow_dispatch', 'status': status, 'conclusion': conclusion}
+        (self.root/'forge.json').write_text(json.dumps({'artifact': artifact, 'fanin': fanin, 'runs': [
+            run(int(self.env['GITHUB_RUN_ID']), conclusion), *(run(id, outcome) for id, outcome in later)]}))
 
     def observe(self, check=False, expected=0):
         return self.run_cli('check' if check else 'observe', '--repo', self.repo, '--head', self.env['GITHUB_SHA'],
@@ -218,6 +219,10 @@ class TrainReceipts(unittest.TestCase):
         fixed = self.observe(check=True)
         self.assertNotIn('red_since', fixed)
         self.assertEqual(fixed['last_green'], self.env['GITHUB_SHA'])
+        # cas-bac4, Nov 13: a duplicate dispatched after the green run at the
+        # same tip was cancelled, and that newer run hid the green receipt.
+        self.forge('fixed', later=[(105, 'cancelled')])
+        self.assertEqual(self.observe(check=True)['run_id'], '104')
 
     def test_cut_reuses_green_ancestor_only_for_release_assets(self):
         self.evidence('green')

@@ -26401,6 +26401,46 @@ pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
         })
 }
 
+/// One release member's measured delivery: `(base, anchor, shipped, task_id)`
+/// as `delivery_content_presence_from_base_on_target_for_task` takes them, or
+/// no base for `delivery_content_presence_on_target_for_task`.
+pub(crate) struct TaskDeliveryRange<'a> {
+    pub(crate) base: Option<&'a str>,
+    pub(crate) anchor: &'a str,
+    pub(crate) shipped: &'a str,
+    pub(crate) task_id: &'a str,
+}
+
+/// cas-0e29e: before a release judges its members one at a time, enumerate
+/// every ordinary line walk their content presence will request on `target`
+/// and walk each delivered path once, carrying every member's owners. The
+/// per-member calls then read those answers. Walks that depend on an earlier
+/// answer (a dropped path's resolution, task-cycle, rename or regeneration
+/// proofs) cannot be enumerated here and still run when reached.
+pub(crate) fn prewalk_task_deliveries(repo: &std::path::Path, target: &str, deliveries: &[TaskDeliveryRange<'_>]) {
+    let mut requests = Vec::new();
+    for delivery in deliveries {
+        let (base, anchor) = match delivery.base {
+            Some(base) => (Some(base.to_string()), delivery.anchor),
+            None => (crate::qa_batch::release_close::delivery_base(repo, delivery.shipped, target), delivery.shipped),
+        };
+        let ranges = match base {
+            Some(base) => task_attribution::first_parent_delivery_ranges(repo, &base, anchor, delivery.shipped, delivery.task_id),
+            None => Some(vec![(delivery.shipped.to_string(), None, None)]),
+        };
+        for (commit, paths, base) in ranges.into_iter().flatten() {
+            if let Ok(range) = delivery_line_range(repo, &commit, target, paths.as_deref(), base.as_deref()) {
+                requests.extend(range.paths.into_iter().map(|path| delivery_evolution::LineRequest {
+                    parent: range.parent.clone(),
+                    delivery: range.delivery.clone(),
+                    path,
+                }));
+            }
+        }
+    }
+    delivery_evolution::prewalk_line_content_presence(repo, target, &requests);
+}
+
 fn delivery_content_presence_on_target_for_paths(
     repo_path: &std::path::Path,
     delivery_commit: &str,
@@ -26450,49 +26490,58 @@ fn delivery_content_presence_on_target_for_paths(
     }
 }
 
-fn delivery_content_presence_on_target_for_paths_raw(
+/// cas-0e29e: the first-parent range and delivered paths one
+/// `delivery_content_presence_on_target_for_paths` call walks, each path from
+/// `parent` to `target` (all resolved commits).
+struct DeliveryLineRange {
+    parent: String,
+    delivery: String,
+    target: String,
+    paths: Vec<String>,
+}
+
+fn delivery_line_range(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     target_ref: &str,
     selected_paths: Option<&[String]>,
-    resolution_only: bool,
     base: Option<&str>,
-) -> DeliveryContentPresence {
+) -> Result<DeliveryLineRange, DeliveryContentPresence> {
     use std::process::Command;
 
     if !is_safe_git_refname(delivery_commit) || !is_safe_git_refname(target_ref)
         || base.is_some_and(|base| !is_safe_git_refname(base)) {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: "delivery commit or target ref is not safe to pass to Git".to_string(),
-        };
+        });
     }
     if !git_ref_exists(repo_path, delivery_commit) || !git_ref_exists(repo_path, target_ref) {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!(
                 "delivery commit `{delivery_commit}` or target `{target_ref}` does not resolve"
             ),
-        };
+        });
     }
 
     let Some(delivery) = resolve_branch_sha(repo_path, &format!("{delivery_commit}^{{commit}}"))
     else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` does not peel to a commit"),
-        };
+        });
     };
     let delivery_commit = delivery.as_str();
 
     let Some(delivery_parent) = base.map(str::to_string)
         .or_else(|| resolve_branch_sha(repo_path, &format!("{delivery_commit}^1")))
     else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` has no resolvable first parent"),
-        };
+        });
     };
     let Some(target) = resolve_branch_sha(repo_path, target_ref) else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("target `{target_ref}` does not resolve to a commit"),
-        };
+        });
     };
 
     // Match repository_proof: lifecycle-owned .cas metadata is outside the
@@ -26515,17 +26564,17 @@ fn delivery_content_presence_on_target_for_paths_raw(
     let names = match names {
         Ok(output) if output.status.success() => output.stdout,
         Ok(output) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!(
                     "Git could not enumerate delivery paths (exit {})",
                     output.status
                 ),
-            };
+            });
         }
         Err(error) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!("failed to enumerate delivery paths: {error}"),
-            };
+            });
         }
     };
     let paths = names
@@ -26540,19 +26589,37 @@ fn delivery_content_presence_on_target_for_paths_raw(
     let paths = match paths {
         Ok(paths) if !paths.is_empty() => paths,
         Ok(_) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!(
                     "delivery commit `{delivery_commit}` has no first-parent tree effect"
                 ),
-            };
+            });
         }
         Err(_) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: "delivery paths are not valid UTF-8 and cannot be reported safely"
                     .to_string(),
-            };
+            });
         }
     };
+
+    Ok(DeliveryLineRange { parent: delivery_parent, delivery, target, paths })
+}
+
+fn delivery_content_presence_on_target_for_paths_raw(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    selected_paths: Option<&[String]>,
+    resolution_only: bool,
+    base: Option<&str>,
+) -> DeliveryContentPresence {
+    let DeliveryLineRange { parent: delivery_parent, delivery, target, paths } =
+        match delivery_line_range(repo_path, delivery_commit, target_ref, selected_paths, base) {
+            Ok(range) => range,
+            Err(unknown) => return unknown,
+        };
+    let delivery_commit = delivery.as_str();
 
     let mut dropped = Vec::new();
     let mut evolved = Vec::new();

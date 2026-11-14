@@ -1369,7 +1369,37 @@ pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<
 pub(super) fn first_parent_delivery_content_presence(
     repo: &Path, base: &str, anchor: &str, shipped: &str, target: &str, task_id: &str,
 ) -> Option<DeliveryContentPresence> {
-    if [base, anchor, shipped, target].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
+    if !is_safe_git_refname(target) { return None; }
+    let (identity, commits) = first_parent_delivery_commits(repo, base, anchor, shipped, task_id)?;
+    if anchor != shipped {
+        let paths = first_parent_delivery_paths(repo, &commits)?;
+        return Some(super::delivery_content_presence_on_target_for_paths(
+            repo, shipped, target, Some(&paths), false, &[task_id], Some(base),
+        ));
+    }
+    merge_tip_content_presence_selected(repo, target, anchor, None, &identity, None, Some(&commits))
+}
+
+/// cas-0e29e: the deliveries `first_parent_delivery_content_presence` measures
+/// with `delivery_content_presence_on_target_for_paths`, as
+/// `(delivery, selected paths, base)`. Explicit commits are measured whole
+/// from their first parent; a squash is measured from `base` on the task's
+/// own paths. A release walks them all at once before judging any member.
+pub(super) fn first_parent_delivery_ranges(
+    repo: &Path, base: &str, anchor: &str, shipped: &str, task_id: &str,
+) -> Option<Vec<(String, Option<Vec<String>>, Option<String>)>> {
+    let (_, commits) = first_parent_delivery_commits(repo, base, anchor, shipped, task_id)?;
+    if anchor != shipped {
+        let paths = first_parent_delivery_paths(repo, &commits)?;
+        return Some(vec![(shipped.to_string(), Some(paths), Some(base.to_string()))]);
+    }
+    Some(commits.into_iter().map(|commit| (commit, None, None)).collect())
+}
+
+fn first_parent_delivery_commits(
+    repo: &Path, base: &str, anchor: &str, shipped: &str, task_id: &str,
+) -> Option<(TaskCommitIdentity, Vec<String>)> {
+    if [base, anchor, shipped].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
     let history = git_text(repo, &["rev-list", "--first-parent", "--no-merges", "--reverse", &format!("{base}..{anchor}")])?;
     let mut identity = TaskCommitIdentity {
         task_id: Some(task_id.into()), start_base: Some(base.into()), ..Default::default()
@@ -1384,20 +1414,19 @@ pub(super) fn first_parent_delivery_content_presence(
     if commits.is_empty() { return None; }
     identity.known_commits = commits.clone();
     identity.known_commits.push(anchor.into());
-    if anchor != shipped {
-        // The squash has the exact source snapshot. Limit its comparison to
-        // the task's own first-parent paths, excluding target-sync imports.
-        let mut paths = Vec::new();
-        for commit in &commits {
-            let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
-            let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", &parent, commit, "--"])?;
-            append_unique(&mut paths, changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect());
-        }
-        return Some(super::delivery_content_presence_on_target_for_paths(
-            repo, shipped, target, Some(&paths), false, &[task_id], Some(base),
-        ));
+    Some((identity, commits))
+}
+
+/// The squash has the exact source snapshot. Limit its comparison to the
+/// task's own first-parent paths, excluding target-sync imports.
+fn first_parent_delivery_paths(repo: &Path, commits: &[String]) -> Option<Vec<String>> {
+    let mut paths = Vec::new();
+    for commit in commits {
+        let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
+        let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", &parent, commit, "--"])?;
+        append_unique(&mut paths, changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect());
     }
-    merge_tip_content_presence_selected(repo, target, anchor, None, &identity, None, Some(&commits))
+    Some(paths)
 }
 
 /// Prove a merge or empty checkpoint delivery from the task's attributed

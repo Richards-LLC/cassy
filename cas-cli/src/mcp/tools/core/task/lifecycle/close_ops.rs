@@ -10754,7 +10754,11 @@ impl CasCore {
                         // GH #1930: retain the ordinary no-code close and its
                         // portable proof in the same transaction as its dispatch.
                         // The verdict resumes this request through ordinary gates.
-                        let no_code_close = (!is_epic && !no_delivery_declared
+                        let owns_claim = is_assignee && self.open_agent_store()?
+                            .get_lease(&req.id)
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                            .is_some_and(|lease| lease.agent_id == requester_id);
+                        let no_code_close = (!is_epic && !no_delivery_declared && owns_claim
                             && task.execution_note.as_deref() == Some("no-code"))
                             .then_some((&close_snapshot, &task));
                         let dispatch = match request_close_verification_dispatch(

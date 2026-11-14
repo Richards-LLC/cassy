@@ -471,13 +471,26 @@ impl CasCore {
         let held = |reason: &str| Some(format!("\nCassy no-delivery close of {task_id} is held: {reason}. No worker close retry was queued."));
         let latest = cas_store::get_latest_verification_dispatch(&self.cas_root, task_id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        if intent.assignee != task.assignee
+        let approved = cas_store::get_verification_for_dispatch(&self.cas_root, dispatch_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+            .is_some_and(|verdict| verdict.task_id == task_id
+                && verdict.status == cas_types::VerificationStatus::Approved
+                && verdict.verification_type == cas_types::VerificationType::Task);
+        if !approved || intent.assignee != task.assignee
             || intent.no_code_proof.as_ref().is_some_and(|proof|
                 task.execution_note.as_deref() != Some("no-code") || task.external_ref.as_ref() != Some(proof))
             || latest.as_ref().is_none_or(|dispatch| dispatch.id != dispatch_id
                 || dispatch.state != cas_types::VerificationDispatchState::Resolved)
         {
             return Ok(held("saved close intent no longer matches the current assignment and exact verdict"));
+        }
+        if intent.no_code_proof.is_some()
+            && self.open_agent_store()?.get_lease(task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .is_some_and(|lease| latest.as_ref()
+                    .is_some_and(|dispatch| lease.agent_id != dispatch.requester_agent_id))
+        {
+            return Ok(held("the saved close no longer owns the task claim"));
         }
         if task.status == TaskStatus::Blocked
             && !super::super::block_hold::blocked_only_by_verification_wait(&self.cas_root, task_id, dispatch_id)

@@ -455,14 +455,14 @@ pub(crate) enum ApprovedCloseRecovery {
     NotQueued(String),
 }
 
-/// Completion of an explicit no-delivery close is quiet and dispatch-idempotent.
+/// Completion of a saved no-delivery or no-code close is quiet and dispatch-idempotent.
 pub(crate) fn queue_no_delivery_close_notice(
     cas_root: &Path, task: &cas_types::Task, dispatch_id: &str,
 ) -> Result<Option<i64>, String> {
     queue_assignee_notice(cas_root, task, |worker_name| (
         format!("cassy-no-delivery-closed:{}:{dispatch_id}:worker:{worker_name}", task.id),
-        format!("{}Task {} is closed: its exact verdict approved your recorded no_delivery close. No re-close is needed.", cas_store::QUIET_MESSAGE_MARKER, task.id),
-        format!("No-delivery close completed: {}", task.id),
+        format!("{}Task {} is closed: verdict for dispatch {dispatch_id} approved your recorded close. No re-close is needed.", cas_store::QUIET_MESSAGE_MARKER, task.id),
+        format!("Close completed: {}", task.id),
     ))
 }
 

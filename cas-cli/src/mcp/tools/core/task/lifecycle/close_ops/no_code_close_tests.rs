@@ -1822,12 +1822,21 @@ async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
         });
         let result = f.supervisor.verification(Parameters(serde_json::from_value(approval.clone()).unwrap())).await;
         let closed = f.task(id);
-        if matches!(case, "foreign" | "stale") {
+        if case == "foreign" {
             assert!(result.is_err() || result.as_ref().unwrap().is_error == Some(true), "{case}: {result:?}");
-            assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap(), latest);
-            assert!(closed.pending_verification);
         } else {
             assert!(!result.as_ref().unwrap().is_error.unwrap_or(false), "{case}: {result:?}");
+        }
+        if matches!(case, "foreign" | "stale") {
+            assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().unwrap(), latest);
+            assert!(closed.pending_verification);
+            if case == "stale" {
+                // Historical review remains auditable without spending the
+                // newer dispatch, clearing its pending flag or closing its task.
+                let historical = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
+                assert_eq!(historical.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+                assert_eq!(historical.status, cas_types::VerificationStatus::Approved);
+            }
         }
         if matches!(case, "approved" | "inline") {
             assert_eq!(closed.status, TaskStatus::Closed, "{case}: {result:?}");

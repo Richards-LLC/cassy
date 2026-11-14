@@ -2005,13 +2005,16 @@ impl CloudSyncer {
         incoming_is_owner: bool,
         result: &mut SyncResult,
     ) -> Result<(), CasError> {
+        if revision.is_none() { return Ok(()) }
         let local = store.get(&remote.id)?;
         let can_reconcile = incoming_is_owner
             && local.origin_project == remote.origin_project
             && matches!(outcome, Ok(UpsertResult::Skipped(
-                "local_conflict" | "lifecycle_timestamp" |
-                "local_mutation_or_delivery_or_live_execution"
+                "local_conflict" | "lifecycle_timestamp"
             )));
+        // A store veto may represent an in-flight delivery, live execution or
+        // a concurrent mutation. It is not a settled local-wins decision and
+        // must stay an explicit conflict until that authority permits a pull.
         if can_reconcile {
             // Lifecycle authority stays local. Union the authenticated ordinary
             // timeline independently; validated proof blocks were restored by

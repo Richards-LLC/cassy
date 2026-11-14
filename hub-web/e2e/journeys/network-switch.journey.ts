@@ -33,6 +33,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
     await expect.poll(() => Boolean(releaseSocket)).toBe(true);
     queueMicrotask(() => releaseSocket!());
+    await hub.waitFor(() => hub.machineSocketOpens.has("atlas"));
     expect(hub.machineSocketOpens.get("atlas")).toBe(1);
   });
   await journey.stage("The route changes under the page", async () => {

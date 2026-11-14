@@ -31,6 +31,7 @@ test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", 
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+    await hub.socketOpen(PELICAN);
     hub.supervisorSays(PELICAN, "Keep this image while reading later updates.", { attachments: [file("art-cached-image", "Cached image.png", "image/png")] });
     await expect(preview).toHaveAttribute("data-preview-state", "waiting");
     await expect(preview).toBeHidden();
@@ -96,6 +97,7 @@ for (const [index, variant] of variants.entries()) {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+        await hub.socketOpen(PELICAN);
         hub.supervisorSays(PELICAN, "Evidence is ready to inspect.");
         await expect(log.getByText("Evidence is ready to inspect.")).toBeVisible();
         expect(richRequests).toEqual([]);
@@ -340,6 +342,7 @@ test("HUB-J22 unavailable syntax color retains source and reading controls", jou
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
     const source = 'const unsafe = "<script>still text</script>"; // no colors';
+    await hub.socketOpen(PELICAN);
     hub.supervisorSays(PELICAN, `\`\`\`ts fallback.ts\n${source}\n\`\`\``);
     const frame = page.getByRole("log").locator(".code-frame");
     await expect(frame.locator("pre")).toHaveAttribute("data-syntax-state", "plain");
@@ -376,6 +379,7 @@ for (const variant of variants) {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+        await hub.socketOpen(PELICAN);
         hub.supervisorSays(PELICAN, `Epic progress, ready for review.\n\n![Epic progress at desktop width](${shown})\n\n![Outside the artifacts directory](/etc/shadow.png)\n\n![Remote](https://example.com/x.png)`);
         const image = log.getByRole("img", { name: "Epic progress at desktop width" });
         await expect(image).toBeVisible();

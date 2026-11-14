@@ -170,6 +170,16 @@ Rows:
 
 ## False-deny measurement (14 days, base and candidate)
 
+The approved measurement is a **fixture-context false-deny rate**, not a
+historical-context rate (supervisor decision #4248608, November 14). Deleted
+worktrees and grants cannot be reconstructed: the earliest observed occurrence
+has a missing cwd for 32,325 of 33,333 Claude commands and 55,430 of 64,432 Codex
+commands; another 28 Codex commands have relative cwds. There are multiple cwd
+contexts for 48 Claude hashes and 316 Codex hashes. These coverage counts must
+accompany the rates. Within each harness, retain the earliest timestamp per
+exact command hash and feed the unchanged original command bytes to both
+binaries in the same deterministic disposable owned-worktree fixture.
+
 - **Source:**
   - Claude harness transcripts under `~/.cas/claude-base/projects/*/*.jsonl`
     (915 files changed in the last 14 days);
@@ -195,7 +205,7 @@ Rows:
   roots, and not operator-only, role, commit-scope or build-cap. Every deny is
   listed in a labeled CSV, together with the labeling rule. That CSV is the
   receipt.
-- **Output:** numerator, denominator and rate at base and at candidate. Each
+- **Output:** fixture-context numerator, denominator and rate at base and at candidate. Each
   candidate deny that the base allowed is listed separately.
 
 ## Filename-list consumers

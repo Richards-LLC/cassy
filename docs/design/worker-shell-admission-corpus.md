@@ -97,6 +97,14 @@ projection and retain wrapper-owned argument files at the wrapper's cwd. Quoted
 replacement values and here-string data remain data. These source regressions
 remain separate from final-candidate and fourteen-day receipts.
 
+Find action outputs and deletion roots retain write authority, while child argv
+retains source provenance and separate cwd/binding state. Unknown expressions,
+dynamic starting points, unresolved option positions and explicit search helpers
+receive grammar refusals. Deferred array targets recognize assignment separators
+after the subscript. Credential context controls cover parent reads after child
+returns and skipped branches, with owned metadata and pushd/popd controls; their
+cwd and opened-file facts come from the common filesystem walk.
+
 R17 recognizes a first top-level, unwrapped `cd` with one literal realpath
 operand (optional `--`). Prior shell state, nested shells, other options,
 dynamic input and extra output commands remain unresolved. Configured and

@@ -33,3 +33,9 @@ Consumer filename-list inputs and unresolved helpers receive explained refusals.
 Explicit sort output/temporary destinations and uniq output operands follow
 workspace containment. Credential checks retain shell-opened files and wrapper
 argument-file inputs separately from literal command data.
+
+Find actions share typed output, deletion and child-command roles. Child
+execution preserves its parent's directory and bindings. Unknown consumer
+options, unresolved option positions and explicit search helpers receive named
+refusals. Credential reads use the filesystem walk's scoped directories and
+opened-file facts, including conditional alternatives and subprocess returns.

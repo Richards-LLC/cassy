@@ -29,3 +29,9 @@ sources do not authorize opening their contents. Explicit output and temporary
 paths retain the command's directory and write-root checks. Credential checks
 include shell-opened files and wrapper input files while keeping replacement,
 here-string and literal script arguments as data.
+
+Find expression roles distinguish metadata, output, deletion and child argv.
+Child execution retains separate directory and binding state. Coreutils options
+use a positive grammar, and search-helper modes require resolved execution.
+Credential checks consume the shared filesystem walk's directory alternatives,
+opened files and receiving heredoc bodies rather than a flattened cwd walk.

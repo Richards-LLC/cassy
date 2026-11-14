@@ -1768,6 +1768,41 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
     }
 }
 
+/// GH #1930: the real close dispatch's approved verdict must release the
+/// no-code worker without a second close or a supervisor recovery turn.
+#[tokio::test]
+async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+    let id = "cas-ea5d";
+    let mut task = assigned(id, TaskType::Spike, "main");
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some(PROOF.into());
+    f.put(&task);
+    claim(&f, id);
+    let pending = call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "reason":"Portable investigation report published",
+    })).await;
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
+        .unwrap().unwrap_or_else(|| panic!("{pending}"));
+    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{pending}");
+    assert!(open_agent_store(&f.cas_dir()).unwrap().get_lease(id).unwrap().is_some());
+    let result = f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"add", "task_id":id, "dispatch_id":dispatch.id,
+        "status":"approved", "summary":"Portable report reviewed",
+    })).unwrap())).await.unwrap();
+    let closed = f.task(id);
+    assert_eq!(closed.status, TaskStatus::Closed, "{result:?}");
+    assert!(!closed.pending_verification);
+    assert!(open_agent_store(&f.cas_dir()).unwrap().get_lease(id).unwrap().is_none());
+    assert!(closed.deliverables.factory_branch_anchor.is_none());
+    assert_eq!(git(f.dir.path(), &["rev-parse", LANE]), f.foreign_tip);
+}
+
 /// A reset starts at the target tip, without inheriting target history as
 /// delivery evidence when the no-delivery verdict is consumed.
 #[tokio::test]

@@ -1643,6 +1643,9 @@ jobs:
           DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
         run: echo "Rust suite shard skipped for $DIFF_CLASS diff."
 
+      - uses: ./.github/actions/setup-native-test-deps
+        if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
+
       - name: Install nextest
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         uses: taiki-e/install-action@nextest

@@ -314,6 +314,20 @@ impl FactoryDaemon {
         }
 
         match msg {
+            ClientMessage::LaunchVerifier { dispatch_id } => {
+                let result = crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
+                    self.app.cas_dir(), &self.session_name, &dispatch_id,
+                );
+                let reply = match result {
+                    Ok(_) => DaemonMessage::VerifierLaunched { dispatch_id },
+                    Err(message) => DaemonMessage::Error { message, client_ref: Some(dispatch_id) },
+                };
+                if let Some(frame) = encode_frame(&reply)
+                    && let Some(client) = self.gui_clients.get_mut(&client_id) {
+                    queue_frame(client, &frame);
+                }
+            }
+
             ClientMessage::Reexec { binary, version, nonce } => {
                 use std::os::fd::AsRawFd;
                 let reply = self.gui_clients.get(&client_id).map(|client| (

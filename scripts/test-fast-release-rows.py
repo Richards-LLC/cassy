@@ -112,7 +112,7 @@ class FastRows(unittest.TestCase):
                        "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
-                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
+                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py", "classify-web-inputs.py",
                        "release-diary-thread.py", "doc-fragments.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
@@ -775,24 +775,34 @@ esac
         self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
         self.assertIn("FAIL release-notes-draft", refused.stderr)  # machine row identifier
         (self.repo / draft).unlink()
-        self.write("hub-web/src/signup.ts", "changed signup\n")
-        self.commit()
-        refused = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
-        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
-        self.assertIn("FAIL hub-web-dist-drift", refused.stderr)  # machine row identifier
-        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", branch).stdout.split()[0], integration)
-        self.assertFalse((self.repo / "cargo-called").exists())
-        # The refused build produced fresh dist. Commit it, then replay the
-        # same pre-push payload twice, as after a transport failure.
-        self.commit()
-        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        # cas-5a04: an unchanged-version source change commits no generated
+        # dist, exactly as the merge queue's dist policy allows, and the
+        # push leaves the checkout clean.
         validator = self.repo / ".git/receipt-validator"
         validator.write_text('#!/bin/sh\ncase "$*" in\n'
                              "'qa journeys --help') echo --base;;\n"
                              "'qa journeys --check'*) exit 0;;\n*) exit 1;;\nesac\n")
         validator.chmod(0o755)
         env = dict(env, CAS_BIN=str(validator))
-        update = f"refs/heads/target {head} {branch} {integration}\n"
+        self.write("hub-web/src/signup.ts", "changed signup\n")
+        self.commit()
+        source_only = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        self.assertEqual(source_only.returncode, 0, source_only.stdout + source_only.stderr)
+        self.assertEqual(command(self.repo, "git", "status", "--porcelain").stdout, "")
+        published = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        # A dist change still needs committed output to match a fresh build.
+        self.write("hub-web/dist/app.js", "hand-edited bundle\n")
+        self.commit()
+        refused = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("FAIL hub-web-dist-drift", refused.stderr)  # machine row identifier
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", branch).stdout.split()[0], published)
+        self.assertFalse((self.repo / "cargo-called").exists())
+        # The refused build produced fresh dist. Commit it, then replay the
+        # same pre-push payload twice, as after a transport failure.
+        self.commit()
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        update = f"refs/heads/target {head} {branch} {published}\n"
         hook = ("bash", "scripts/fast-rows-pre-push.sh", "origin", str(remote))
         first = command(self.repo, *hook, input=update, env=env)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)

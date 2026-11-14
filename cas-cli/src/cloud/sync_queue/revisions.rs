@@ -59,6 +59,63 @@ pub fn wire_revision(raw: &serde_json::Value) -> Option<i64> {
 }
 
 impl SyncQueue {
+    /// Rebuild pending upserts and advance their base in one write transaction.
+    /// The reader must only read the local store: the SQLite write lock keeps
+    /// a concurrent mutation from enqueueing between that read and this update.
+    pub(crate) fn reconcile_pulled_revision(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        revision: i64,
+        max_retries: i32,
+        read_payload: impl FnOnce() -> Result<String, CasError>,
+    ) -> Result<(), CasError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous: Option<i64> = tx.query_row(
+            "SELECT revision FROM sync_revisions WHERE entity_type=?1 AND entity_id=?2",
+            params![entity_type.as_str(), entity_id], |row| row.get(0),
+        ).optional()?;
+        // An older replay cannot authorize a payload built on a newer base.
+        if previous.is_some_and(|previous| previous > revision) {
+            return Ok(());
+        }
+        let payload = read_payload()?;
+        tx.execute(
+            "UPDATE sync_queue SET payload=?3,
+                retry_count=CASE WHEN last_reason='revision_conflict' THEN 0 ELSE retry_count END,
+                last_error=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_error END,
+                last_outcome=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_outcome END,
+                last_reason=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_reason END
+             WHERE entity_type=?1 AND entity_id=?2 AND operation='upsert'
+               AND (retry_count<?4 OR last_reason='revision_conflict')",
+            params![entity_type.as_str(), entity_id, payload, max_retries],
+        )?;
+        tx.execute(
+            "INSERT INTO sync_revisions (entity_type,entity_id,revision,updated_at)
+             VALUES (?1,?2,?3,?4) ON CONFLICT(entity_type,entity_id)
+             DO UPDATE SET revision=excluded.revision, updated_at=excluded.updated_at",
+            params![entity_type.as_str(), entity_id, revision, Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn park_revision_conflicts(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE sync_queue SET retry_count=?3,
+                last_error='revision_reconciliation_required: pulled row could not be reconciled; inspect the sync conflict journal before retrying'
+             WHERE entity_type=?1 AND entity_id=?2 AND last_reason='revision_conflict'",
+            params![entity_type.as_str(), entity_id, max_retries],
+        )?)
+    }
+
     /// Record the server revision observed for one row.
     ///
     /// Monotonic by construction: a replayed older envelope must not roll the

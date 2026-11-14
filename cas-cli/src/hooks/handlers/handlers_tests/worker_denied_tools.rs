@@ -47,33 +47,20 @@ fn role_env(role: &str) -> (TestEnvGuard, tempfile::TempDir) {
     env.set("XDG_CONFIG_HOME", config_home.path());
     env.set("CAS_CLONE_PATH", config_home.path());
     env.set("CAS_AGENT_ROLE", role);
-    env.set(
-        "CAS_AGENT_NAME",
-        if role == "worker" {
-            "quiet-wren-12"
-        } else {
-            "calm-owl-1"
-        },
-    );
+    env.set("CAS_AGENT_NAME", if role == "worker" { "quiet-wren-12" } else { "calm-owl-1" });
     env.set("CAS_FACTORY_SESSION", "cas-src-d757");
     (env, config_home)
 }
 
 const WRAPPED_CLIS: &[(&str, &str)] = &[
     ("vercel", "vercel env ls production"),
-    (
-        "vercel",
-        "env VERCEL_ORG_ID=team_1 vercel env pull .env.local",
-    ),
+    ("vercel", "env VERCEL_ORG_ID=team_1 vercel env pull .env.local"),
     ("vercel", "sudo -u deploy vercel ls"),
     ("vercel", "sh -c 'vercel env ls production'"),
     ("vercel", "cd web && npx vercel logs"),
     ("vercel", "/usr/local/bin/vercel whoami"),
     ("neonctl", "neonctl projects list"),
-    (
-        "neonctl",
-        "env NEON_PROJECT_ID=fixture neonctl branches list",
-    ),
+    ("neonctl", "env NEON_PROJECT_ID=fixture neonctl branches list"),
     ("neonctl", "sh -c 'neonctl projects list'"),
     ("neonctl", "npx -y neonctl@latest projects list"),
     ("neonctl", "pnpm dlx neonctl projects list"),
@@ -95,13 +82,7 @@ fn a_worker_is_refused_default_clis_however_wrapped() {
             assert!(reason.contains(cli));
         }
     }
-    for command in [
-        "git log --grep vercel",
-        "cat vercel.json",
-        "git log --grep neonctl",
-        "cat .env.cas-db",
-        "npm run build",
-    ] {
+    for command in ["git log --grep vercel", "cat vercel.json", "git log --grep neonctl", "cat .env.cas-db", "npm run build"] {
         let output = handle_pre_tool_use(&bash(command, home.path()), Some(&cas_root)).unwrap();
         assert!(denial(output).is_none());
     }
@@ -121,21 +102,14 @@ fn a_supervisor_and_a_plain_session_may_run_default_denied_clis() {
             assert!(denial(output).is_none());
         }
         let output = handle_pre_tool_use(
-            &input(
-                "mcp__claude_ai_Vercel__list_deployments",
-                json!({}),
-                home.path(),
-            ),
+            &input("mcp__claude_ai_Vercel__list_deployments", json!({}), home.path()),
             None,
         )
         .unwrap();
         assert!(denial(output).is_none());
         for (tool, args) in [
             ("mcp__Neon__list_projects", json!({})),
-            (
-                "mcp__cs__factory",
-                json!({"action": "db_branch_create", "task_id": "cas-fixture"}),
-            ),
+            ("mcp__cs__factory", json!({"action": "db_branch_create", "task_id": "cas-fixture"})),
         ] {
             let output = handle_pre_tool_use(&input(tool, args, home.path()), None).unwrap();
             assert!(denial(output).is_none());
@@ -153,14 +127,8 @@ fn a_worker_is_refused_a_matching_mcp_tool() {
         ("mcp__vercel__get_project", json!({"id": "web"})),
         ("mcp__Neon__list_projects", json!({})),
         ("mcp__claude_ai_Neon__list_branches", json!({})),
-        (
-            "mcp__cs__mcp_execute",
-            json!({"code": "neon.list_projects({})"}),
-        ),
-        (
-            "mcp__cs__mcp_execute",
-            json!({"code": "vercel.list_projects({})"}),
-        ),
+        ("mcp__cs__mcp_execute", json!({"code": "neon.list_projects({})"})),
+        ("mcp__cs__mcp_execute", json!({"code": "vercel.list_projects({})"})),
     ] {
         let reason = denial(handle_pre_tool_use(&input(tool, args, home.path()), None).unwrap())
             .unwrap_or_else(|| panic!("{tool} was allowed"));
@@ -182,9 +150,7 @@ fn the_denied_lists_follow_project_config() {
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     let mut config = Config::load(&cas_root).unwrap_or_default();
     config.set("factory.worker_denied_clis", "netlify").unwrap();
-    config
-        .set("factory.worker_denied_mcp_tools", "mcp__neon__*")
-        .unwrap();
+    config.set("factory.worker_denied_mcp_tools", "mcp__neon__*").unwrap();
     config.save(&cas_root).unwrap();
 
     let netlify = denial(
@@ -192,21 +158,14 @@ fn the_denied_lists_follow_project_config() {
     )
     .unwrap();
     assert!(netlify.contains("`netlify`"), "{netlify}");
-    let vercel = handle_pre_tool_use(&bash("vercel ls", home.path()), Some(&cas_root)).unwrap();
+    let vercel =
+        handle_pre_tool_use(&bash("vercel ls", home.path()), Some(&cas_root)).unwrap();
     assert!(denial(vercel).is_none());
-    let neon =
-        handle_pre_tool_use(&bash("neonctl projects list", home.path()), Some(&cas_root)).unwrap();
+    let neon = handle_pre_tool_use(&bash("neonctl projects list", home.path()), Some(&cas_root)).unwrap();
     assert!(denial(neon).is_none());
-    assert!(
-        denial(
-            handle_pre_tool_use(
-                &input("mcp__neon__run_sql", json!({}), home.path()),
-                Some(&cas_root)
-            )
-            .unwrap()
-        )
-        .is_some()
-    );
+    assert!(denial(handle_pre_tool_use(
+        &input("mcp__neon__run_sql", json!({}), home.path()), Some(&cas_root)
+    ).unwrap()).is_some());
     config.set("factory.worker_denied_clis", "").unwrap();
     config.set("factory.worker_denied_mcp_tools", "").unwrap();
     config.save(&cas_root).unwrap();
@@ -231,11 +190,12 @@ fn worker_read_of_operator_neonctl_credentials_is_refused_cas_da9a() {
             .display()
             .to_string(),
     ] {
-        let output = handle_pre_tool_use(
-            &input("Read", json!({"file_path": path}), cwd.path()),
-            Some(&cas_root),
-        )
-        .unwrap();
+        let output =
+            handle_pre_tool_use(
+                &input("Read", json!({"file_path": path}), cwd.path()),
+                Some(&cas_root),
+            )
+            .unwrap();
         assert_operator_credential_refusal(output, &path);
     }
 }
@@ -253,11 +213,12 @@ fn worker_read_of_operator_vercel_auth_is_refused_cas_da9a() {
             .display()
             .to_string(),
     ] {
-        let output = handle_pre_tool_use(
-            &input("Read", json!({"file_path": path}), cwd.path()),
-            Some(&cas_root),
-        )
-        .unwrap();
+        let output =
+            handle_pre_tool_use(
+                &input("Read", json!({"file_path": path}), cwd.path()),
+                Some(&cas_root),
+            )
+            .unwrap();
         assert_operator_credential_refusal(output, &path);
     }
 }
@@ -272,14 +233,8 @@ fn worker_shell_absolute_and_home_credential_reads_are_refused_cas_da9a() {
         "cat \"$HOME/.config/neonctl/credentials.json\"",
         "cp \"$HOME/.config/neonctl/credentials.json\" /tmp/copied-token",
         "head -n 1 \"$HOME/.local/share/com.vercel.cli/auth.json\"",
-        &format!(
-            "cat '{}'",
-            home.join(".config/neonctl/credentials.json").display()
-        ),
-        &format!(
-            "cp '{}' /tmp/copied-token",
-            home.join(".local/share/com.vercel.cli/auth.json").display()
-        ),
+        &format!("cat '{}'", home.join(".config/neonctl/credentials.json").display()),
+        &format!("cp '{}' /tmp/copied-token", home.join(".local/share/com.vercel.cli/auth.json").display()),
     ] {
         let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, command);
@@ -329,11 +284,7 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
     let store = home.join(".config/neonctl");
     std::fs::create_dir_all(&store).unwrap();
-    std::fs::write(
-        store.join("credentials.json"),
-        r#"{"token":"fixture-only"}"#,
-    )
-    .unwrap();
+    std::fs::write(store.join("credentials.json"), r#"{"token":"fixture-only"}"#).unwrap();
     // From a project dir, as a worker runs it; the fixture's config home is
     // itself a store parent.
     let project = tempfile::tempdir().unwrap();
@@ -388,10 +339,7 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
     for command in [
-        format!(
-            "sh -c 'cat {}/.config/neonctl/credentials.json'",
-            home.display()
-        ),
+        format!("sh -c 'cat {}/.config/neonctl/credentials.json'", home.display()),
         "bash -c 'cat ~/.local/share/com.vercel.cli/auth.json'".to_string(),
     ] {
         let output = handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap();
@@ -450,7 +398,7 @@ fn worker_subshell_return_preserves_credential_cwd_cas_707a2() {
     for command in [
         "printf safe; (cd ~); cat .config/neonctl/credentials.json".to_string(),
         format!(
-            "cd ~; pushd '{}'; cat .config/neonctl/credentials.json; popd",
+            "cd ~ && pushd '{}' && cat .config/neonctl/credentials.json; popd",
             project.path().display()
         ),
     ] {
@@ -597,49 +545,23 @@ fn supervisor_and_plain_session_may_read_operator_auth_stores_cas_5120() {
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
         for (tool, args) in [
-            (
-                "Read",
-                json!({"file_path": home.join(".config/neonctl/credentials.json").display().to_string()}),
-            ),
-            (
-                "Read",
-                json!({"file_path": home.join(".local/share/com.vercel.cli/auth.json").display().to_string()}),
-            ),
-            (
-                "Bash",
-                json!({"command": format!("cat '{}'", home.join(".config/neonctl/credentials.json").display())}),
-            ),
-            (
-                "Bash",
-                json!({"command": format!("head -n 1 '{}'", home.join(".local/share/com.vercel.cli/auth.json").display())}),
-            ),
-            (
-                "Grep",
-                json!({"path": "~/.config/neonctl", "pattern": "token"}),
-            ),
-            (
-                "Grep",
-                json!({"path": "~/.local/share/com.vercel.cli", "pattern": "token"}),
-            ),
+            ("Read", json!({"file_path": home.join(".config/neonctl/credentials.json").display().to_string()})),
+            ("Read", json!({"file_path": home.join(".local/share/com.vercel.cli/auth.json").display().to_string()})),
+            ("Bash", json!({"command": format!("cat '{}'", home.join(".config/neonctl/credentials.json").display())})),
+            ("Bash", json!({"command": format!("head -n 1 '{}'", home.join(".local/share/com.vercel.cli/auth.json").display())})),
+            ("Grep", json!({"path": "~/.config/neonctl", "pattern": "token"})),
+            ("Grep", json!({"path": "~/.local/share/com.vercel.cli", "pattern": "token"})),
         ] {
-            let output =
-                handle_pre_tool_use(&input(tool, args, cwd.path()), Some(&cas_root)).unwrap();
+            let output = handle_pre_tool_use(&input(tool, args, cwd.path()), Some(&cas_root)).unwrap();
             let reason = denial(output);
-            assert!(
-                reason.is_none(),
-                "{role:?} {tool} credential access was refused: {reason:?}"
-            );
+            assert!(reason.is_none(), "{role:?} {tool} credential access was refused: {reason:?}");
         }
         for path in ["credentials.json", "id_rsa"] {
             let output = handle_pre_tool_use(
-                &input(
-                    "Read",
-                    json!({
-                        "file_path": project.path().join(path),
-                        "path": home.join(".local/share/com.vercel.cli/auth.json"),
-                    }),
-                    cwd.path(),
-                ),
+                &input("Read", json!({
+                    "file_path": project.path().join(path),
+                    "path": home.join(".local/share/com.vercel.cli/auth.json"),
+                }), cwd.path()),
                 Some(&cas_root),
             )
             .unwrap();

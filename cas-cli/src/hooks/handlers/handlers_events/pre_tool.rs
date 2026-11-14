@@ -1,5 +1,16 @@
 mod shell_effects;
 
+/// Commands remain paired with the cwd alternatives from their own source
+/// statement; callers never align duplicate argv from independent projections.
+pub(super) struct ShellReadContext {
+    pub command: String,
+    pub directories: Vec<std::path::PathBuf>,
+}
+
+pub(super) fn shell_read_contexts(command: &str, cwd: &std::path::Path) -> Option<Vec<ShellReadContext>> {
+    shell_effects::read_contexts(command, cwd)
+}
+
 use crate::hooks::handlers::*;
 
 // PreToolUse Hook Handler

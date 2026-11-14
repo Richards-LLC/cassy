@@ -1636,9 +1636,9 @@ pub fn adopt_retired_verification_dispatch(
            AND a.id=?3 AND a.registered_at=?4 AND e.claimed_epoch=a.registered_at
            AND a.role='supervisor' AND a.status IN ('active','idle')
            AND a.factory_session IS NOT NULL AND trim(a.factory_session)!=''
-           AND a.pid IS ?5 AND a.pid_starttime IS ?6",
+           AND a.pid IS ?5 AND a.pid_starttime IS ?6 AND a.factory_session=?7",
         params![dispatch.owner_agent_id, machine, successor.id,
-            successor.registered_at.to_rfc3339(), successor.pid, successor.pid_starttime.map(|v| v as i64)],
+            successor.registered_at.to_rfc3339(), successor.pid, successor.pid_starttime.map(|v| v as i64), successor.factory_session],
         |row| row.get(0),
     ).optional()?;
     let Some(retirement) = retirement else {
@@ -1655,7 +1655,7 @@ pub fn adopt_retired_verification_dispatch(
     {
         return Err(StoreError::Parse("verification_owner_handoff_not_current".into()));
     }
-    if dispatch.state == VerificationDispatchState::Claimed {
+    if dispatch.state == VerificationDispatchState::Claimed || dispatch.verifier_agent_id.is_some() {
         if dispatch.deadline_at > now {
             return Err(StoreError::Parse("verification_owner_handoff_claim_active".into()));
         }
@@ -3925,9 +3925,9 @@ mod tests {
     #[test]
     fn retired_owner_adoption_fences_handoff_and_verifier_incarnations_cas_32c2() {
         use crate::{AgentStore, SqliteAgentStore};
-        for case in ["pending", "unclaimed", "foreign", "stale-epoch", "revived",
+        for case in ["pending", "unclaimed", "foreign", "stale-epoch", "revived", "raced-successor-session",
             "live-child", "dead-child", "missing-child", "raced-child", "unexpired-child",
-            "terminal-task", "superseded"]
+            "timedout-live-child", "timedout-dead-child", "terminal-task", "superseded"]
         {
             let (_store, dir) = create_test_store();
             let agents = SqliteAgentStore::open(dir.path()).unwrap();
@@ -3963,7 +3963,12 @@ mod tests {
                 agents.update(&next).unwrap();
             }
             if case == "revived" { agents.register(&old).unwrap(); }
-            let dead = if matches!(case, "dead-child" | "raced-child") {
+            if case == "raced-successor-session" {
+                let mut raced = next.clone();
+                raced.factory_session = Some("raced-factory".into());
+                agents.update(&raced).unwrap();
+            }
+            let dead = if matches!(case, "dead-child" | "raced-child" | "timedout-dead-child") {
                 child.status = AgentStatus::Shutdown;
                 agents.update(&child).unwrap();
                 let snapshot = child.clone();
@@ -3974,6 +3979,9 @@ mod tests {
                 Some(snapshot)
             } else { None };
             if case == "missing-child" { agents.unregister(&child.id).unwrap(); }
+            if case.starts_with("timedout-") {
+                timeout_verification_dispatch(dir.path(), &task.id, start + Duration::minutes(11)).unwrap().unwrap();
+            }
             if case == "terminal-task" { task.status = TaskStatus::Closed; tasks.update(&task).unwrap(); }
             if case == "superseded" {
                 // A newer dispatch can only exist once the old one has expired.
@@ -3984,7 +3992,7 @@ mod tests {
             let before = get_verification_dispatch(dir.path(), &dispatch.id).unwrap();
             let now = if case == "unexpired-child" { start } else { start + Duration::minutes(11) };
             let result = adopt_retired_verification_dispatch(dir.path(), &dispatch.id, &next, dead.as_ref(), now);
-            if matches!(case, "pending" | "dead-child" | "missing-child") {
+            if matches!(case, "pending" | "dead-child" | "missing-child" | "timedout-dead-child") {
                 let after = result.unwrap_or_else(|e| panic!("{case}: {e}"));
                 assert_eq!(after.owner_agent_id, next.id, "{case}");
                 assert_eq!(after.requester_agent_id, old.id, "{case}");

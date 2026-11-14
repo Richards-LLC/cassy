@@ -110,6 +110,13 @@ have approval and be contained in the release. The report head need not equal
 
 `release_reconcile::preview_release(root, repo, inventory)` evaluates this same
 rule without writing tasks, operation receipts, sync queues or artifact caches.
+Existing store files stay byte-identical. Reads use ordinary SQLite read-only
+connections with normal locking, never `immutable`, so SQLite may create the
+`cas.db-shm` and `cas.db-wal` coordination sidecars when they are absent and
+the store directory is writable. This is the approved boundary for GH #1859:
+the cas-632d copied-store replay left every existing file, including `cas.db`
+and 309 candidate manifests, unchanged and added only a 32,768-byte SHM and an
+empty WAL. Preview is not a zero-file-creation guarantee.
 Its member map returns would-close (`Closed`), would-hold (`Held` with a reason),
 `AlreadyClosed` or `NotEligible`; inventory exceptions are included. Publication
 uses the same evaluator with writes enabled. Parent acceptance retains the

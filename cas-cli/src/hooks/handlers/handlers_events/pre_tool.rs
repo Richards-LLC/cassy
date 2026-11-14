@@ -11052,16 +11052,28 @@ EOF
         let mut denials = Vec::new();
         for cwd in [logical_root.join("cas-a767"), real_root.join("cas-a767")] {
             for via_realpath in [false, true] {
-            for path in ["helper-audit.json", "new/nested.json", "existing.json"] {
-                let output = run(&cwd, path, via_realpath);
-                assert_ne!(output["hookSpecificOutput"]["permissionDecision"], "deny", "cwd={} target={path}: {output}", cwd.display());
+                for path in ["helper-audit.json", "new/nested.json", "existing.json"] {
+                    let output = run(&cwd, path, via_realpath);
+                    assert_ne!(output["hookSpecificOutput"]["permissionDecision"], "deny", "cwd={} target={path}: {output}", cwd.display());
+                }
+                let output = run(&cwd, "escape/helper-audit.json", via_realpath);
+                assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny", "{output}");
+                let denial = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_string();
+                assert!(denial.contains(&outside.join("helper-audit.json").display().to_string()), "{denial}");
+                denials.push(denial);
             }
-            let output = run(&cwd, "escape/helper-audit.json", via_realpath);
+        }
+        let artifact = logical_root.join("cas-a767");
+        let write = "python3 -c \"from pathlib import Path; Path('helper-audit.json').write_text('{}')\"";
+        for command in [
+            format!("realpath() {{ printf '%s' '{}'; }}; cd \"$(realpath '{}')\" && {write}", outside.display(), artifact.display()),
+            format!("eval 'realpath() {{ printf %s {}; }}'; cd \"$(realpath '{}')\" && {write}", outside.display(), artifact.display()),
+            format!("cd \"$(realpath '{}'; printf '%s' '{}')\" && {write}", artifact.display(), outside.display()),
+            format!("cd \"$(realpath -s '{}')\" && {write}", artifact.display()),
+        ] {
+            let input = tool_input("Bash", serde_json::json!({"command": command, "workdir": &worktree}), &worktree);
+            let output = serde_json::to_value(handle_pre_tool_use(&input, Some(&cas_root)).unwrap()).unwrap();
             assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny", "{output}");
-            let denial = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_string();
-            assert!(denial.contains(&outside.join("helper-audit.json").display().to_string()), "{denial}");
-            denials.push(denial);
-            }
         }
         // Paths are diagnostic data, not pinned human-facing wording. Check
         // these only after both spellings and their escape controls have run.

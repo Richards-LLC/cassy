@@ -84,6 +84,32 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
     }
 }
 
+/// Resolve one literal canonicalizer using metadata only. No command runs and
+/// no arbitrary substitution output is guessed. Options and extra commands
+/// remain outside this recognized form.
+fn realpath_directory(word: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    let body = word.strip_prefix("$(")?.strip_suffix(')')?;
+    let parsed = shell_admission::parse(body, 1).ok()?;
+    if parsed.compound_refusal.is_some() || !parsed.bodies.is_empty()
+        || !parsed.lexed.literals.iter().all(|literal| *literal)
+        || parsed.lexed.tokens.iter().any(|token| !matches!(token, ShellToken::Word(_)))
+    { return None; }
+    let statements = parsed.lexed.statements(&parsed.projected, &parsed.syntax);
+    let [statement] = statements.as_slice() else { return None; };
+    let operand = match statement.words.as_slice() {
+        [name, path] if name == "realpath" && !path.starts_with('-') => path,
+        [name, separator, path] if name == "realpath" && separator == "--" => path,
+        _ => return None,
+    };
+    // Tilde expansion and command-substitution newline trimming require more
+    // provenance than a literal canonical path. Keep those forms unresolved.
+    if operand.starts_with('~') { return None; }
+    let path = Path::new(operand);
+    let resolved = if path.is_absolute() { path.to_path_buf() } else { cwd?.join(path) }
+        .canonicalize().ok()?;
+    (resolved.is_dir() && !resolved.to_str()?.ends_with('\n')).then_some(resolved)
+}
+
 /// Integer source and proven local numeric bindings are inert. Unknown names
 /// may contain an array subscript that executes a substitution.
 fn numeric_arithmetic(expression: &str, numeric: &HashSet<String>) -> Result<(), &'static str> {
@@ -860,7 +886,16 @@ fn collect_script(
                 let mut changed = Vec::new();
                 for directory in &dirs {
                     for target in &targets {
-                        let path = if target.contains(['$', '`', '*', '?', '['])
+                        // Only the entry command can establish this fact:
+                        // prior functions, source/eval or shell state may
+                        // replace a bare canonicalizer. Nested shells retain
+                        // the conservative unknown-directory behavior.
+                        let canonical = (depth == 0 && visible.first() == Some(&0)
+                            && skipped_keywords == 0 && index == Some(0))
+                            .then(|| realpath_directory(target, directory.as_deref())).flatten();
+                        let path = if canonical.is_some() {
+                            canonical
+                        } else if target.contains(['$', '`', '*', '?', '['])
                             || (searches_directory
                                 && !Path::new(target).is_absolute()
                                 && !target.starts_with('~')

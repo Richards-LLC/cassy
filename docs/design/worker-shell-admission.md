@@ -307,6 +307,27 @@ credential-flow denies, and no candidate deny falls outside the labelled
 frames. The H-09 fixture artifact no longer denies. The Claude increase is
 the runtime-derived classes above.
 
+### Unresolved directories in credential reads
+
+The credential-context security review (supervisor decision #571215) added six
+classes to the corpus. They cover a cd that may fail, an empty or unset cd
+target, assignments that never reach the shell and writers that do,
+directory-stack targets, wrapped cd, and reads inside quoted substitutions.
+Each one must be refused by some rule.
+
+A read whose effective directory is unresolved is checked from every parent
+of every operator store. It is also checked from a store itself when an
+operand names an entry that exists there. A read operand led by an
+unresolved expansion is checked the same way by its literal tail. A cd whose
+operand may expand to nothing also reaches HOME. A builtin that writes a
+variable (`read`, `declare`, `for`, `unset`, `printf -v` and similar) leaves
+that variable unresolved.
+
+One residual stays admitted. When the unresolved directory is a store and
+the operand is a bare name that does not exist there, nothing is read from
+the store. Refusing that would refuse every relative read after an
+unresolved cd.
+
 ## Filename-list consumers
 
 This is the admission contract for the consumer migration, not a claim that the

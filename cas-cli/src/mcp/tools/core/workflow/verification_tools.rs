@@ -846,13 +846,14 @@ impl CasCore {
                 }
                 // A question is retained as history, not a final verdict. The
                 // supervisor answers it using this exact proof boundary.
-                if existing.status != VerificationStatus::SupervisorCall {
+                if !matches!(existing.status, VerificationStatus::SupervisorCall | VerificationStatus::Error) {
+                    // gate[G-155 verification]: Conflicting terminal supervisor verification verdict
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(concat!(
+                        message: Cow::from(crate::gates::tag("G-155", concat!(
                             "Supervisor-direct verification rejected: the exact dispatch was ",
                             "already resolved with a different verdict."
-                        )),
+                        ))),
                         data: None,
                     });
                 }
@@ -903,6 +904,10 @@ impl CasCore {
                     data: None,
                 })?;
 
+            if supervisor_direct {
+                cas_store::recover_errored_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
+                    .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+            }
             let mut review_bound_at = None;
             let mut review_consumed_at = None;
             let mut task_row_changed = false;
@@ -1070,7 +1075,11 @@ impl CasCore {
             // A question transfers the decision to the supervisor. The child
             // authority is spent, but the dispatch, delivery and pending task
             // remain unchanged until the supervisor records the answer/verdict.
-            if verification.status != VerificationStatus::SupervisorCall {
+            if verification.status == VerificationStatus::Error {
+                cas_store::retry_verification_dispatch_after_error_with_conn(
+                    &tx, &dispatch.id, &caller_id, verification.capability_id.as_deref(), supervisor_direct,
+                ).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+            } else if verification.status != VerificationStatus::SupervisorCall {
                 cas_store::resolve_verification_dispatch_with_conn(
                     &tx,
                     &dispatch.id,
@@ -1174,7 +1183,7 @@ impl CasCore {
             let _ = crate::store::publish_direct_task_write(&self.cas_root, &req.task_id);
         }
 
-        if verification.status != VerificationStatus::SupervisorCall {
+        if !matches!(verification.status, VerificationStatus::SupervisorCall | VerificationStatus::Error) {
             let _phase = crate::mcp::tools::service::mutation_receipt::phase(
                 "verification_reclaim_targets",
             );
@@ -1198,6 +1207,8 @@ impl CasCore {
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             self.emit_premerge_review_handoff(&task, &current)?;
             "\nSupervisor answer recorded; verifier continuation scheduled on the same dispatch.".to_string()
+        } else if verification.status == VerificationStatus::Error {
+            format!("\nReview infrastructure failed; dispatch {} remains pending. Retry the original review request, or its supervisor can record a verdict on this exact dispatch.", requested_dispatch_id)
         } else if candidate.is_some() {
             let _phase = crate::mcp::tools::service::mutation_receipt::phase(
                 "verification_continuation",

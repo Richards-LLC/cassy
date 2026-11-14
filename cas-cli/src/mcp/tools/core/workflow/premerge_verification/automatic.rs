@@ -135,6 +135,7 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
     command.envs(environment.set);
     match cli {
         cas_mux::SupervisorCli::Codex => {
+            sandbox_preflight()?;
             command
                 .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"])
                 .arg("--model")
@@ -165,9 +166,68 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
     Ok((command, notice))
 }
 
+/// Probe the same namespace primitive before paying for a model that cannot read.
+fn sandbox_preflight() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::bounded_process::{Deadline, run_command};
+        let output = run_command(
+            Command::new("bwrap").args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--", "/bin/true"]),
+            Deadline::after(std::time::Duration::from_secs(5)), std::time::Duration::from_secs(5),
+        ).map_err(|e| format!("verifier_bwrap_preflight: probe_start_failed: {e:?}; install bubblewrap and inspect the launch context"))?;
+        if !output.status.success() {
+            let read = |path| std::fs::read_to_string(path).ok().map(|s| s.trim().to_string());
+            let uid_map = read("/proc/self/uid_map");
+            let initial = uid_map.as_deref().is_some_and(|map| {
+                map.split_whitespace().eq(["0", "0", "4294967295"])
+            });
+            let status = read("/proc/self/status").unwrap_or_default().lines()
+                .filter(|line| line.starts_with("NoNewPrivs:") || line.starts_with("Seccomp:") || line.starts_with("CapBnd:"))
+                .map(str::to_string).collect::<Vec<_>>();
+            return Err(format!("verifier_bwrap_preflight: {}", serde_json::json!({
+                "cause": if initial { "host_namespace_policy" } else { "nested_user_namespace_context" },
+                "pid": std::process::id(), "status": status, "uid_map": uid_map,
+                "user_namespace": std::fs::read_link("/proc/self/ns/user").ok(),
+                "apparmor_profile": read("/proc/self/attr/current"),
+                "max_user_namespaces": read("/proc/sys/user/max_user_namespaces"),
+                "kernel.unprivileged_userns_clone": read("/proc/sys/kernel/unprivileged_userns_clone"),
+                "kernel.apparmor_restrict_unprivileged_userns": read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"),
+                "stderr": tail(&output.stderr),
+                "remedy": if initial {
+                    "Inspect the named host user-namespace limits and AppArmor policy; keep the read-only sandbox enabled"
+                } else {
+                    "Launch the verifier from the factory daemon outside worker store isolation; do not disable either sandbox or change host policy"
+                }
+            })));
+        }
+    }
+    Ok(())
+}
+
 /// Claim synchronously, then do provider work off the MCP/control loop. The
 /// existing dispatch claim prevents a second launch, including manual races.
 pub(super) fn launch(
+    core: &CasCore, task: &Task, dispatch: &VerificationDispatch,
+) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    #[cfg(unix)]
+    if let Some(session) = core.open_agent_store().map_err(|e| e.to_string())?
+        .get(&dispatch.owner_agent_id).map_err(|e| e.to_string())?.factory_session
+    {
+        // The MCP backend may inherit the worker's userns. Only the factory
+        // daemon owns the context from which the harness sandbox can start.
+        let worker = core.clone();
+        let dispatch = dispatch.clone();
+        return std::thread::Builder::new().name(format!("verifier-request-{}", task.id))
+            .spawn(move || {
+                if let Err(error) = super::factory_launch::request(&session, &dispatch.id) {
+                    let _ = attention(&worker, &dispatch, &error);
+                }
+            }).map(Some).map_err(|e| e.to_string());
+    }
+    launch_local(core, task, dispatch)
+}
+
+pub(super) fn launch_local(
     core: &CasCore,
     task: &Task,
     dispatch: &VerificationDispatch,
@@ -311,7 +371,7 @@ pub(crate) fn direct_verdict(dispatch: &VerificationDispatch) -> String {
 /// A dispatch that already holds a verdict, or whose task is terminal, needs no
 /// supervisor notice when a second verifier finds it settled.
 fn resolved(core: &CasCore, dispatch: &VerificationDispatch) -> bool {
-    cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).is_ok_and(|v| v.is_some()) || core
+    cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).is_ok_and(|v| v.is_some_and(|v| !matches!(v.status, VerificationStatus::Error | VerificationStatus::Pending))) || core
         .open_task_store()
         .ok()
         .and_then(|s| s.get(&dispatch.task_id).ok())
@@ -1136,6 +1196,47 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             worker.factory_session = owner.factory_session.clone();
             core.open_agent_store().unwrap().register(&worker).unwrap();
             core.bind_agent_identity(worker.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+            // Factory reviews cross the real local control boundary. A session
+            // name alone cannot stand in for the daemon that claims the review.
+            use crate::ui::factory::{ClientMessage, DaemonMessage, SessionState,
+                FRAME_HEADER_SIZE, PROTOCOL_VERSION, decode_length, encode_message,
+                gui_socket_path, local_gui_capabilities};
+            use std::io::{Read, Write};
+            use std::os::fd::AsRawFd;
+            let session = owner.factory_session.clone().unwrap();
+            let socket = gui_socket_path(&session);
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let broker_root = root.clone();
+            let (claimed, claim) = std::sync::mpsc::channel();
+            let broker = std::thread::spawn(move || {
+                let mut ready = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                assert!(unsafe { libc::poll(&mut ready, 1, 10000) } > 0);
+                let (mut client, _) = listener.accept().unwrap();
+                client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                client.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                client.write_all(&encode_message(&DaemonMessage::Welcome {
+                    session_name: session.clone(),
+                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                        epic_title: None, cols: 80, rows: 24 },
+                    scrollback: None, protocol_version: PROTOCOL_VERSION,
+                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+                }).unwrap()).unwrap();
+                let mut header = [0; FRAME_HEADER_SIZE];
+                client.read_exact(&mut header).unwrap();
+                let mut body = vec![0; decode_length(&header)];
+                client.read_exact(&mut body).unwrap();
+                let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+                    else { panic!("unexpected factory control"); };
+                let review = super::super::factory_launch::launch(&broker_root, &session, &dispatch_id)
+                    .unwrap().unwrap();
+                client.write_all(&encode_message(&DaemonMessage::VerifierLaunched {
+                    dispatch_id: dispatch_id.clone(),
+                }).unwrap()).unwrap();
+                claimed.send(dispatch_id).unwrap();
+                review.join().unwrap();
+                std::fs::remove_file(socket).unwrap();
+            });
             let mut task = Task::new("cas-e50f-no-code".into(), "No-code close".into());
             task.status = cas_types::TaskStatus::InProgress;
             task.task_type = cas_types::TaskType::Chore;
@@ -1154,6 +1255,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert_eq!(close.is_error, Some(true), "initial close must await review: {close:?}");
             let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap()
                 .unwrap_or_else(|| panic!("real close did not dispatch: {close:?}"));
+            assert_eq!(claim.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), dispatch.id);
+            let dispatch = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert_eq!(dispatch.requester_agent_id, worker.id);
             assert_eq!(dispatch.owner_agent_id, owner.id);
             assert!(core.open_task_store().unwrap().get(&task.id).unwrap().pending_verification);
@@ -1161,11 +1264,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(worker.id.as_str()));
             assert_ne!(dispatch.verifier_agent_id.as_deref(), Some(owner.id.as_str()));
             std::fs::write(&gate, "go").unwrap();
-            for _ in 0..600 {
-                let child = core.open_agent_store().unwrap().get(dispatch.verifier_agent_id.as_deref().unwrap()).unwrap();
-                if child.status != cas_types::AgentStatus::Active { break; }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+            broker.join().unwrap();
             let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap()
                 .unwrap_or_else(|| panic!("{status}: no verdict; notices {prompts:?}"));

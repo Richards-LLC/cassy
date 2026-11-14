@@ -2881,7 +2881,7 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
         let landed = if landing == "merge queue over target progress" {
             // cas-c9ec: an independent delivery lands on the target after the
             // review; the queue merges this tip on top of it (PR #1484 shape).
-            let main = fixture.repo.root.join("queue-main");
+            let main = fixture.cas_root.join("queue-main");
             run_git(&["worktree", "add", "--detach", main.to_str().unwrap(), &shared[1]], &fixture.repo.root);
             std::fs::write(main.join("independent.txt"), "another delivery\n").unwrap();
             run_git(&["add", "independent.txt"], &main);

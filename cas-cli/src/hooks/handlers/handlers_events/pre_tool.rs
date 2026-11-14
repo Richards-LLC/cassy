@@ -11530,6 +11530,43 @@ mod worker_commit_guard_tests {
     }
 
     #[test]
+    fn unsupported_execution_inputs_have_rules_cas_24f2() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        let mut failures = Vec::new();
+        for (command, rule) in [
+            ("coproc printf safe", "shell.coproc"),
+            ("if true; then coproc { printf safe; }; fi", "shell.coproc"),
+            ("bash <<'EOF'\nprintf safe\nEOF", "shell.stdin_interpreter"),
+            ("printf safe | env bash", "shell.stdin_interpreter"),
+            ("bash <<< 'printf safe'", "shell.stdin_interpreter"),
+            ("sh -s <<'EOF'\nprintf safe\nEOF", "shell.stdin_interpreter"),
+            ("source /dev/stdin <<'EOF'\nprintf safe\nEOF", "shell.stdin_interpreter"),
+            ("source <(printf safe)", "shell.stdin_interpreter"),
+            ("trap 'printf safe' EXIT", "shell.deferred_code"),
+            ("PS4='$(printf safe)'; set -x; :", "shell.deferred_code"),
+            ("export PROMPT_COMMAND='printf safe'", "shell.deferred_code"),
+            ("shopt -s expand_aliases; alias c='printf safe'; c", "shell.deferred_code"),
+            ("eval \"$cmd\"", "shell.dynamic_eval"),
+            ("bash -c \"$cmd\"", "shell.dynamic_eval"),
+            ("source \"$script\"", "shell.dynamic_eval"),
+            ("$cmd safe", "shell.dynamic_command"),
+            ("env \"$cmd\" safe", "shell.dynamic_command"),
+        ] {
+            let input = hook_git_write_input("/worktree", command);
+            let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
+            let output = &value["hookSpecificOutput"];
+            if output["permissionDecision"] != "deny"
+                || !output["permissionDecisionReason"].as_str().unwrap_or("").contains(rule)
+            {
+                failures.push(format!("{rule} {command:?}: {value}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
     fn incomplete_shell_constructs_have_source_refusals_cas_24f2() {
         let mut env = TestEnvGuard::temp_home();
         env.set("CAS_AGENT_ROLE", "worker");

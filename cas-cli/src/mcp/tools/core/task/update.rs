@@ -2494,7 +2494,10 @@ impl CasCore {
             } else {
                 None
             };
-            let source_rebind = if let Some(target) = retarget.as_ref() {
+            let source_rebind = if let Some(target) = retarget.as_ref()
+                && task.assignee.is_some()
+                && task.deliverables.factory_branch_start.is_some()
+            {
                 let actor = self.get_agent_id().map_err(|error| McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!("Cannot audit source retarget without a registered actor: {error}")),
@@ -4105,6 +4108,10 @@ mod epic_move_work_target_tests {
             task.status = status;
             task.deliverables.work_target = Some(target(branch));
             task.deliverables.work_target_pinned = pinned;
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target(branch), assignee: "prior-worker".into(),
+                branch: "factory/prior-worker".into(), base_sha: "a".repeat(40),
+            });
             store.add(&task).unwrap();
             store.add_dependency(&Dependency::new(
                 id.into(), parent.into(), DependencyType::ParentChild,
@@ -4119,6 +4126,7 @@ mod epic_move_work_target_tests {
                 failures.push(format!("{id}: expected {}, got {}", expected, actual.target_branch));
             }
             assert_eq!(parent_of(&store, id), vec!["cas-0ef5-new".to_string()]);
+            assert_eq!(moved.deliverables.factory_branch_start, task.deliverables.factory_branch_start);
             if branch == expected {
                 let reply = response.content.iter().filter_map(|c| c.as_text())
                     .map(|c| c.text.as_str()).collect::<String>();

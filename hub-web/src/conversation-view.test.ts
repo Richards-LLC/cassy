@@ -17,9 +17,10 @@ describe("ConversationView (Pebble thread)", () => {
     const history = new ConversationHistory();
     history.reply(reply(1, "status", "A real lifecycle follows."), at(9, 0));
     let now = 1000;
+    let activity = false;
     let state = { connected: true, stale: false, waiting: false, now, receivedAt: now };
     let snapshot = { event_id: "phase", kind: "notice", lifecycle: { id: "turn", stage: "phase", phase: "compacting", started_at: "2026-10-28T12:00:00Z", ended_at: undefined as string | undefined }, observed_at: "2026-10-28T12:00:42Z", stale: false };
-    const view = new ConversationView(document, history, { supervisor: "sup", working: () => true, ...{ phase: () => livePhase(snapshot, { ...state, now }) } });
+    const view = new ConversationView(document, history, { supervisor: "sup", working: () => activity, ...{ phase: () => livePhase(snapshot, { ...state, now }) } });
     onTestFinished(() => view.dispose()); document.body.replaceChildren(view.element); view.update();
     expect(view.element.querySelector(".phase-line")?.textContent).toBeTruthy();
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:42");
@@ -47,7 +48,21 @@ describe("ConversationView (Pebble thread)", () => {
     snapshot = { ...snapshot, lifecycle: { ...snapshot.lifecycle, ended_at: "2026-10-28T12:00:46Z" } };
     view.update();
     expect(view.element.querySelector(".phase-clock")?.textContent).toBe("0:46");
-    expect(livePhase(null, { ...state, now, working: true })).toMatchObject({ active: false, unavailable: false });
+    const measured = snapshot;
+    for (const missing of [null, { ...snapshot, lifecycle: { id: "future", stage: "phase", phase: "unknown" } }]) {
+      snapshot = missing as typeof snapshot;
+      view.refreshWorking();
+      expect(livePhase(snapshot, { ...state, now, working: true })).toBeUndefined();
+      expect(view.element.querySelector(".working-turn")).toBeNull();
+      activity = true;
+      view.refreshWorking();
+      expect(view.element.querySelectorAll(".working")).toHaveLength(1);
+      expect(view.element.querySelector(".phase-line, .phase-clock")).toBeNull();
+      activity = false;
+      view.refreshWorking();
+      expect(view.element.querySelector(".working-turn")).toBeNull();
+    }
+    snapshot = measured;
     expect(livePhase({ ...snapshot, lifecycle: { id: "boundary", stage: "phase", phase: "compacted", outcome: "success" } }, { ...state, now })?.active).toBe(false);
   });
   it("keeps a short fenced status as a code frame with exact Copy and retained Wrap", async () => {
@@ -933,6 +948,41 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     view.element.scrollTop = 0;
     view.element.dispatchEvent(new Event("scroll"));
   };
+
+  it("keeps a revealed older-history failure in view across a queued activity pin", () => {
+    const flush = frames();
+    const history = new ConversationHistory();
+    let error: { detail: string; before?: number } | undefined;
+    const view = new ConversationView(document, history, {
+      supervisor: "sup", working: () => true, phase: () => undefined,
+      historyError: () => error, hasEarlier: () => true,
+    });
+    onTestFinished(() => view.dispose());
+    document.body.replaceChildren(view.element);
+    layout(view, { height: 1400 });
+    for (let turn = 1; turn <= 14; turn++) history.reply(reply(turn, "answer"), at(10, turn));
+    view.update();
+    expect(view.element.scrollTop).toBe(1200);
+    const failure = view.element.querySelector<HTMLElement>('[role="alert"]')!;
+    // jsdom has no layout: model the browser revealing the error beside Load earlier.
+    failure.scrollIntoView = () => { view.element.scrollTop = error?.before === undefined ? 1200 : 0; };
+    // Concurrent newest-page A fails first at the tail; older-page B then
+    // moves that same visible alert beside Load earlier (HUB-J23/cas-3590).
+    error = { detail: "fixture:newest-timeout" };
+    view.update();
+    expect(failure.hidden).toBe(false);
+    expect(view.element.scrollTop).toBe(1200);
+    error = { detail: "fixture:history-timeout", before: 42 };
+    view.update();
+    expect(failure.hidden).toBe(false);
+    expect(view.element.scrollTop).toBe(0);
+    flush(); flush();
+    expect(view.element.scrollTop).toBe(0);
+    view.update();
+    flush(); flush();
+    expect(view.element.scrollTop).toBe(0);
+    expect(view.element.querySelectorAll(".working")).toHaveLength(1);
+  });
 
   // HUB-J9 under load: the reader scrolls up within the two frames that
   // follow the pin of the newest turn. The scroll was dropped while the pin

@@ -901,7 +901,8 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         values = self.dependency_fixture()
         setup = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
         prebuild = policy.load(self.root / '.github/workflows/release-prebuild.yml')
-        linker = setup['runs']['steps'][0]
+        linker = next(s for s in setup['runs']['steps']
+                      if s.get('uses') == './.github/actions/setup-linux-linker')
         release_linker = next(s for s in prebuild['jobs']['build']['steps']
                               if s.get('uses') == linker.get('uses'))
         self.assertEqual(release_linker['uses'], linker['uses'])

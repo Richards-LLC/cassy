@@ -229,16 +229,27 @@ fn worker_shell_absolute_and_home_credential_reads_are_refused_cas_da9a() {
     let project = tempfile::tempdir().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let credentials = home.join(".config/neonctl/credentials.json");
+    let mut failures = Vec::new();
     for command in [
         "cat \"$HOME/.config/neonctl/credentials.json\"",
         "cp \"$HOME/.config/neonctl/credentials.json\" /tmp/copied-token",
         "head -n 1 \"$HOME/.local/share/com.vercel.cli/auth.json\"",
+        &format!("grep -f'{}' . fixture.txt", credentials.display()),
+        &format!("rg -f'{}' fixture.txt", credentials.display()),
+        &format!("xargs -a '{}' printf '%s'", credentials.display()),
+        &format!("xargs --arg-file='{}' printf '%s'", credentials.display()),
+        &format!("sort --random-source='{}' names.txt", credentials.display()),
         &format!("cat '{}'", home.join(".config/neonctl/credentials.json").display()),
         &format!("cp '{}' /tmp/copied-token", home.join(".local/share/com.vercel.cli/auth.json").display()),
     ] {
         let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
-        assert_operator_credential_refusal(output, command);
+        let reason = denial(output);
+        if !reason.as_ref().is_some_and(|reason| reason.contains("[H-09]")) {
+            failures.push(format!("{command}: {reason:?}"));
+        }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[test]
@@ -354,18 +365,23 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
     let project = tempfile::tempdir().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let mut failures = Vec::new();
     for command in [
         format!("sh -c 'cat {}/.config/neonctl/credentials.json'", home.display()),
         "bash -c 'cat ~/.local/share/com.vercel.cli/auth.json'".to_string(),
         "bash -c -- 'cat ~/.local/share/com.vercel.cli/auth.json'".to_string(),
+        "bash -c true < ~/.config/neonctl/credentials.json".to_string(),
+        "bash fixture.sh < ~/.config/neonctl/credentials.json".to_string(),
     ] {
         let output = handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap();
-        assert_operator_credential_refusal(output, &command);
+        let reason = denial(output);
+        if !reason.as_ref().is_some_and(|reason| reason.contains("[H-09]")) {
+            failures.push(format!("{command}: {reason:?}"));
+        }
     }
     // Every admitted literal shell scope must retain the credential check.
     // Feed requests to the hook only; none of these programs is executed.
     let mut command = "cat ~/.config/neonctl/credentials.json".to_string();
-    let mut failures = Vec::new();
     for depth in 1..=6 {
         command = format!("sh -c '{}'", command.replace('\'', "'\\''"));
         let reason = denial(handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap());

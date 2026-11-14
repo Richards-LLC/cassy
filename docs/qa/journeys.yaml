@@ -1697,6 +1697,10 @@ bug_families:
     title: Release documentation must not invalidate green train proof or wait for the closure verdict
     tasks: [cas-5b88]
     journeys: [FACTORY-MERGE]
+  supervisor-git-hooks:
+    title: Supervisor launches and epic pushes must retain working Git hook checks
+    tasks: [cas-1efb]
+    journeys: [HUB-J13]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

@@ -712,46 +712,51 @@ impl ShellLexed {
     /// Arguments projected from the same tokens and source spans used for
     /// effects. Only raw attached descriptors are IO numbers; quoted or
     /// separated numbers remain command arguments.
-    fn argument_indices(&self, source: &str) -> Vec<usize> {
-        let mut tokens = self
-            .tokens
-            .iter()
-            .enumerate()
-            .filter_map(|(at, token)| {
-                if let ShellToken::Word(word) = token
-                    && super::is_redirect_descriptor(word, self.tokens.get(at + 1))
-                    && self.ends.get(at + 1) == Some(&(self.ends[at] + 1))
-                {
-                    let start = if at == 0 { 0 } else { self.ends[at - 1] };
-                    if source[start..self.ends[at]].trim() == word {
-                        return None;
-                    }
-                }
-                Some((at, token))
-            })
-            .peekable();
+    fn argument_projection(&self, source: &str) -> (Vec<usize>, Option<Unsupported>) {
         let mut arguments = Vec::new();
-        while let Some((index, token)) = tokens.next() {
-            if *token == ShellToken::Operator('&')
-                && tokens.peek().is_some_and(|(_, token)| **token == ShellToken::Operator('>'))
+        let mut refusal = None;
+        let mut at = 0;
+        let adjacent = |left: usize, right: usize| self.ends[right] == self.ends[left] + 1;
+        let process = |at: usize| matches!(self.tokens.get(at), Some(ShellToken::Operator('<' | '>')))
+            && self.tokens.get(at + 1) == Some(&ShellToken::Operator('('))
+            && adjacent(at, at + 1);
+        while at < self.tokens.len() {
+            if let ShellToken::Word(word) = &self.tokens[at]
+                && super::is_redirect_descriptor(word, self.tokens.get(at + 1))
+                && adjacent(at, at + 1)
             {
-                continue;
+                let start = if at == 0 { 0 } else { self.ends[at - 1] };
+                if source[start..self.ends[at]].trim() == word { at += 1; continue; }
             }
-            if matches!(token, ShellToken::Operator('>' | '<')) {
-                while matches!(
-                    tokens.peek(),
-                    Some((_, ShellToken::Operator('>' | '<' | '&' | '|')))
-                ) {
-                    tokens.next();
-                }
-                if matches!(tokens.peek(), Some((_, ShellToken::Word(_)))) {
-                    tokens.next();
-                }
-                continue;
+            if process(at) { at += 1; continue; }
+            let redirect = matches!(self.tokens[at], ShellToken::Operator('<' | '>'))
+                || (self.tokens[at] == ShellToken::Operator('&')
+                    && self.tokens.get(at + 1) == Some(&ShellToken::Operator('>'))
+                    && adjacent(at, at + 1));
+            if !redirect { arguments.push(at); at += 1; continue; }
+            let start = self.ends[at] - 1;
+            let mut operator = String::new();
+            loop {
+                let ShellToken::Operator(ch) = self.tokens[at] else { unreachable!() };
+                operator.push(ch);
+                at += 1;
+                if !matches!(self.tokens.get(at), Some(ShellToken::Operator('<' | '>' | '&' | '|')))
+                    || !adjacent(at - 1, at) { break; }
             }
-            arguments.push(index);
+            if !matches!(operator.as_str(), "<" | ">" | ">>" | "<>" | "<<" | "<<<" | "<&" | ">&" | ">|" | "&>" | "&>>") {
+                refusal.get_or_insert_with(|| Unsupported::execution("shell.unknown_syntax", start,
+                    "redirect operator", "the redirect is outside the supported grammar", "use a supported file redirect"));
+            }
+            if matches!(self.tokens.get(at), Some(ShellToken::Word(_))) { at += 1; }
+            else if !process(at) {
+                refusal.get_or_insert_with(|| Unsupported::unterminated(start, "redirect target"));
+            }
         }
-        arguments
+        (arguments, refusal)
+    }
+
+    fn argument_indices(&self, source: &str) -> Vec<usize> {
+        self.argument_projection(source).0
     }
 
     pub(super) fn argument_tokens(&self, source: &str) -> Vec<ShellToken> {
@@ -1283,17 +1288,23 @@ impl ShellSubstitutions {
 /// Validate compound boundaries from the same source tokens used by policy.
 /// Heredoc bodies, case patterns and arithmetic are already classified data;
 /// cooked quoted words never open or close a shell construct.
-fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax]) -> Option<Unsupported> {
+fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax], depth: usize) -> Option<Unsupported> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Kind { IfCondition, IfBody, IfElse, LoopCondition, ForHeader, LoopBody, Brace, Paren, Conditional, Case }
     let mut stack: Vec<(Kind, usize, usize)> = Vec::new();
     let mut command_start = true;
     let mut case_header = false;
     let mut function_name = false;
+    let mut function_body = None;
+    let mut rhs = None;
     let arithmetic = lexed.arithmetic_spans().unwrap_or_default();
-    let indices = lexed.argument_indices(source);
-    for &at in &indices {
+    let (indices, refusal) = lexed.argument_projection(source);
+    if refusal.is_some() { return refusal; }
+    let mut indices = indices.into_iter().peekable();
+    while let Some(at) = indices.next() {
         if arithmetic.iter().any(|(span, _)| span.contains(&at)) {
+            function_body = None;
+            rhs = None;
             command_start = false;
             continue;
         }
@@ -1336,8 +1347,33 @@ fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax]) -> 
             continue;
         }
         match &lexed.tokens[at] {
-            ShellToken::Operator(';' | '|' | '&') => command_start = true,
+            ShellToken::Operator(';' | '|' | '&') => {
+                // Operator runs are source-adjacent. Newlines may continue a
+                // pending pipeline; punctuation cannot silently finish one.
+                let mut operator = source[lexed.ends[at] - 1..lexed.ends[at]].to_string();
+                let mut end = lexed.ends[at];
+                while let Some(&next) = indices.peek() {
+                    if !matches!(operator.as_bytes().first(), Some(b';' | b'|' | b'&'))
+                        || !matches!(source.as_bytes().get(end), Some(b';' | b'|' | b'&'))
+                        || !matches!(lexed.tokens[next], ShellToken::Operator(';' | '|' | '&'))
+                        || lexed.ends[next] != end + 1 { break; }
+                    operator.push(source.as_bytes()[end] as char);
+                    end = lexed.ends[next];
+                    indices.next();
+                }
+                match operator.as_str() {
+                    "\n" | "\r" => {},
+                    "|" | "|&" | "&&" | "||" if !command_start => rhs = Some(offset),
+                    ";" | "&" if rhs.is_none() && function_body.is_none() => {},
+                    ";;" | ";&" | ";;&" if rhs.is_none()
+                        && stack.last().is_some_and(|(kind, _, _)| *kind == Kind::Case) => {},
+                    _ => return Some(invalid()),
+                }
+                command_start = true;
+            },
             ShellToken::Operator('(') => {
+                function_body = None;
+                rhs = None;
                 stack.push((Kind::Paren, offset, at));
                 command_start = true;
             }
@@ -1345,6 +1381,7 @@ fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax]) -> 
                 let Some((Kind::Paren, _, open)) = stack.pop() else { return Some(invalid()); };
                 // Empty () is the function declarator; its compound body follows.
                 command_start = at == open + 1;
+                if command_start { function_body = Some(offset); }
             }
             ShellToken::Word(word) => {
                 if function_name {
@@ -1353,6 +1390,12 @@ fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax]) -> 
                     continue;
                 }
                 let keyword = raw == word;
+                if function_body.is_some() {
+                    if !keyword || !matches!(word.as_str(), "{" | "if" | "for" | "while" | "until" | "case" | "[[") {
+                        return Some(invalid());
+                    }
+                    function_body = None;
+                }
                 if stack.last().is_some_and(|(kind, _, _)| *kind == Kind::ForHeader)
                     && !(command_start && keyword && word == "do")
                 {
@@ -1360,9 +1403,14 @@ fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax]) -> 
                     continue;
                 }
                 if !command_start || !keyword {
+                    rhs = None;
                     command_start = false;
                     continue;
                 }
+                if rhs.is_some() && matches!(word.as_str(), "then" | "elif" | "else" | "fi" | "do" | "done" | "}") {
+                    return Some(invalid());
+                }
+                rhs = None;
                 let transition = match word.as_str() {
                     "if" => { stack.push((Kind::IfCondition, offset, at)); None }
                     "while" | "until" => { stack.push((Kind::LoopCondition, offset, at)); None }
@@ -1377,7 +1425,9 @@ fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax]) -> 
                     "do" => Some((vec![Kind::LoopCondition, Kind::ForHeader], Some(Kind::LoopBody))),
                     "done" => Some((vec![Kind::LoopBody], None)),
                     "}" => Some((vec![Kind::Brace], None)),
-                    "function" => { function_name = true; None }
+                    "function" => { function_name = true; function_body = Some(offset); None }
+                    "select" => return Some(Unsupported::execution("shell.unknown_syntax", offset, "select loop",
+                        "select is outside the supported grammar", "use a for loop")),
                     "!" | "time" | "coproc" => None,
                     _ => { command_start = false; None }
                 };
@@ -1392,8 +1442,11 @@ fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax]) -> 
             }
             _ => {}
         }
+        if depth + stack.len() > MAX_DEPTH { return Some(Unsupported::depth(offset)); }
     }
     stack.first().map(|(_, at, _)| Unsupported::unterminated(*at, "compound command"))
+        .or_else(|| function_body.map(|at| Unsupported::unterminated(at, "function body")))
+        .or_else(|| rhs.map(|at| Unsupported::unterminated(at, "list operand")))
 }
 
 pub(super) struct ParsedShell {
@@ -1420,7 +1473,7 @@ pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsuppor
     }
     if let Some(error) = found.refusal { return Err(error); }
     found.bodies.extend(lexed.substitutions.iter().cloned());
-    let compound_refusal = compound_refusal(&projected, &lexed, &syntax);
+    let compound_refusal = compound_refusal(&projected, &lexed, &syntax, depth);
     Ok(ParsedShell { projected, lexed, bodies: found.bodies, syntax, compound_refusal })
 }
 

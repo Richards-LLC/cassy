@@ -11491,6 +11491,11 @@ mod worker_commit_guard_tests {
             "cat > inventory_controls.py <<'PY'\nfrom pathlib import Path\nsource = Path('pre_tool.rs').read_text()\ncontrols = ('factory.write_roots', 'cas config set factory.write_roots /x')\nprint(source.count(controls[0]))\nPY",
             // GH #1816 exact interpreter list, previously unverified.
             "python3 -I tests/soundwave-desktop-test.py\npython3 -I tests/system-capture-test.py\nbash tests/install-zram-topology-test.sh\nbash tests/restore-soundwave-resilience-test.sh",
+            // Valid list continuations, redirects and function bodies retain admission.
+            "printf safe &&\n printf again;\n printf safe | cat &\n wait",
+            "printf safe > list.log 2>&1; cat < list.log; printf safe &>> list.log",
+            "cat < <(printf safe)",
+            "f()\n{ printf safe; }\nf",
             // Complete compounds share boundary facts with unsupported-input checks.
             "if true; then { printf safe; }; elif false; then :; else (printf fallback); fi",
             "for x in if then do; do while false; do :; done; done",

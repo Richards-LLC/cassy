@@ -2918,13 +2918,36 @@ fn collect_git_write_targets(
     // A substitution runs before its statement, in that statement's cwd.
     let mut visited_cwds = Vec::new();
     let statements = lexed.statements(&parsed.projected, &parsed.syntax);
+    enum Pending<'a> {
+        Statement(&'a shell_admission::Statement, std::ops::Range<usize>),
+        Child(&'a shell_admission::Statement, std::ops::Range<usize>, bool),
+        Restore(Option<std::path::PathBuf>, std::collections::HashMap<String, String>, bool, usize),
+    }
+    let mut child_depth = 0;
     let mut pending_statements = std::collections::VecDeque::from(
-        statements.iter().map(|statement| (statement, 0..statement.words.len())).collect::<Vec<_>>());
+        statements.iter().map(|statement| Pending::Statement(statement, 0..statement.words.len())).collect::<Vec<_>>());
     loop {
-        if !visited_cwds.contains(shell_cwd) {
+        let Some(pending) = pending_statements.pop_front() else { break };
+        let (statement, range) = match pending {
+            Pending::Restore(cwd, saved, prefix, depth) => {
+                *shell_cwd = cwd;
+                bindings = saved;
+                prefix_bindings = prefix;
+                child_depth = depth;
+                continue;
+            }
+            Pending::Statement(statement, range) => (statement, range),
+            Pending::Child(statement, range, directory) => {
+                pending_statements.push_front(Pending::Restore(
+                    shell_cwd.clone(), bindings.clone(), prefix_bindings, child_depth));
+                child_depth += 1;
+                if directory { *shell_cwd = None; }
+                (statement, range)
+            }
+        };
+        if child_depth == 0 && !visited_cwds.contains(shell_cwd) {
             visited_cwds.push(shell_cwd.clone());
         }
-        let Some((statement, range)) = pending_statements.pop_front() else { break };
         let words = &statement.words[range.clone()];
         let path_word = |at| statement.path_word(&parsed.projected, range.start + at);
         let standalone_assignments = !words.is_empty() && words.iter().all(|word| {
@@ -3038,8 +3061,8 @@ fn collect_git_write_targets(
             if let Ok(find) = shell_admission::find_arguments(args) {
                 for action in find.actions.into_iter().rev() {
                     let start = range.start + command_index + 1;
-                    pending_statements.push_front((statement,
-                        start + action.argv.start..start + action.argv.end));
+                    pending_statements.push_front(Pending::Child(statement,
+                        start + action.argv.start..start + action.argv.end, action.directory));
                 }
             }
             continue;
@@ -12964,7 +12987,7 @@ mod worker_commit_guard_tests {
             (format!("bash scripts/test-release.sh > '{linked_path}/shell.log' 2>&1"), false),
             (format!("cd '{repo_path}'; find . -exec cd '{linked_path}' \\;; git commit -m probe"), true),
             (format!("find . -exec cd '{repo_path}' \\;; git commit -m work"), false),
-            (format!("find . -execdir git commit -m probe \\;"), true),
+            ("find . -execdir git commit -m probe \\;".into(), true),
             ("find . -name -exec -printf 'git commit'".into(), false),
             ("sh scripts/test-release.sh --check > shell.log 2>&1".into(), false),
             // Script recognition must not bypass the later workspace-write guard.

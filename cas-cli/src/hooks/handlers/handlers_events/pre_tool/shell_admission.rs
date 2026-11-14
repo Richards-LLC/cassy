@@ -134,10 +134,19 @@ impl Statement {
         }
         let name = shell_word_basename(&words[index]);
         let args = &words[index + 1..];
-        if name == "find" && let Err(at) = find_arguments(args) {
-            return Some(Unsupported::execution("shell.unknown_syntax", offset(index + 1 + at),
-                "unsupported find expression", "the expression has an unknown option or incomplete action",
-                "use a supported find expression with complete literal operands"));
+        if name == "find" {
+            match find_arguments(args) {
+                Err(at) => return Some(Unsupported::execution("shell.unknown_syntax", offset(index + 1 + at),
+                    "unsupported find expression", "the expression has an unknown option or incomplete action",
+                    "use a supported find expression with complete literal operands")),
+                Ok(find) => {
+                    if let Some(at) = find.roots.into_iter().find(|at| dynamic(index + 1 + at)) {
+                        return Some(Unsupported::execution("shell.dynamic_command", offset(index + 1 + at),
+                            "dynamic find starting point", "an unresolved word can supply an executing find expression",
+                            "use literal starting points and options"));
+                    }
+                }
+            }
         }
         // xargs appends runtime input to argv. Only data-only consumers and
         // process-signal consumers with their own existing policy can accept
@@ -439,13 +448,24 @@ pub(super) fn consumer_files<'a>(name: &str, args: &'a [String]) -> ConsumerFile
 /// The name bound by scalar, append or array-element assignment syntax. A
 /// declaration builtin interprets its cooked argv; command prefixes additionally
 /// require an unquoted raw lhs (recorded by the statement projection).
+fn assignment_lhs(word: &str) -> Option<&str> {
+    let equal = if let Some(open) = word.find('[').filter(|open| !word[..*open].contains('=')) {
+        let mut depth = 0;
+        let close = word[open..].char_indices().find_map(|(at, ch)| {
+            if ch == '[' { depth += 1; }
+            if ch == ']' { depth -= 1; if depth == 0 { return Some(open + at + 1); } }
+            None
+        })?;
+        let suffix = &word[close..];
+        close + usize::from(suffix.starts_with('+'))
+    } else { word.find('=')? };
+    (word.as_bytes().get(equal) == Some(&b'=')).then_some(&word[..equal])
+}
+
 fn assignment_name(word: &str) -> Option<&str> {
-    let (lhs, _) = word.split_once('=')?;
+    let lhs = assignment_lhs(word)?;
     let lhs = lhs.strip_suffix('+').unwrap_or(lhs);
-    let name = if let Some((name, subscript)) = lhs.split_once('[') {
-        if !subscript.ends_with(']') { return None; }
-        name
-    } else { lhs };
+    let name = lhs.split_once('[').map_or(lhs, |(name, _)| name);
     super::is_shell_variable_name(name).then_some(name)
 }
 
@@ -1104,7 +1124,7 @@ impl ShellLexed {
                 assignments: originals.iter().map(|&at| {
                     let ShellToken::Word(word) = &self.tokens[at] else { return false; };
                     let start = if at == 0 { 0 } else { self.ends[at - 1] };
-                    assignment_name(word).is_some() && word.split_once('=').is_some_and(|(lhs, _)| {
+                    assignment_name(word).is_some() && assignment_lhs(word).is_some_and(|lhs| {
                         source[start..self.ends[at]].trim_start().starts_with(&format!("{lhs}="))
                     })
                 }).collect(),

@@ -511,6 +511,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             if name != 'fast-validation-runner-route':
                 self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
 
+    # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
     def test_lane_runs_only_selected_commander_journeys_and_names_failures_cas_6a42(self):
         """cas-6a42: cas-cab9 broke HUB-J12 yet passed its lane; the frozen
         train's full run found it. A delivery touching hub-web src, e2e or dist

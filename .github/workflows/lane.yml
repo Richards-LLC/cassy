@@ -87,6 +87,7 @@ jobs:
       # instead of the frozen train's full run. Other deliveries select none;
       # an unknown base selects every journey. Shards hold whole journeys,
       # balanced by their test count, so none is ever empty.
+      # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
       - id: journeys
         name: Select affected Commander journeys
         env:
@@ -557,6 +558,7 @@ jobs:
   # cas-6a42: the journeys the ci-diff job selected, headless on the Chromium
   # @playwright/test pins, as ci.yml's queue journeys run them. A failing
   # journey turns the lane red with its ID in an error annotation.
+  # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
   lane-journeys:
     name: Scoped Validation — Commander journeys ${{ matrix.shard }}/${{ needs.ci-diff.outputs.journey-shard-total }}
     if: >-

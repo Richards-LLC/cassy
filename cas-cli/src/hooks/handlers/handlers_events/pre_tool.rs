@@ -6356,7 +6356,7 @@ fn policy_reader_operands(name: &str, args: &[String]) -> Option<Vec<usize>> {
                 "--invert-match",
                 "--color",
             ],
-            &["-e", "--regexp", "--color"],
+            &["-e", "--regexp", "-f", "--file", "--exclude-from", "--color"],
             false,
         ),
         "rg" => (
@@ -6389,6 +6389,9 @@ fn policy_reader_operands(name: &str, args: &[String]) -> Option<Vec<usize>> {
             &[
                 "-e",
                 "--regexp",
+                "-f",
+                "--file",
+                "--ignore-file",
                 "-g",
                 "--glob",
                 "-t",
@@ -6584,7 +6587,8 @@ pub(super) fn filename_pipeline_is_data_only(command: &str) -> bool {
         let Some(operands) = policy_reader_operands(name, args) else { return false; };
         match name {
             "rg" | "grep" | "egrep" | "fgrep" => {
-                let explicit_pattern = args.iter().any(|arg| matches!(arg.as_str(), "-e" | "--regexp") || arg.starts_with("--regexp="));
+                let explicit_pattern = args.iter().any(|arg| matches!(arg.as_str(), "-e" | "--regexp" | "-f" | "--file")
+                    || arg.starts_with("--regexp=") || arg.starts_with("--file="));
                 operands.len() <= usize::from(!explicit_pattern)
             }
             "head" | "tail" | "sort" | "uniq" | "wc" | "cut" => operands.iter().all(|&index| args[index] == "-"),

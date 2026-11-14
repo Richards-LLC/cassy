@@ -99,8 +99,9 @@ impl Statement {
             let Some(rest) = self.words[at].strip_prefix(spelled) else { continue; };
             if rest.contains(['$', '`']) { continue; }
             let Some((value, _)) = bindings.get(name).filter(|(_, from)| *from < statement) else { continue; };
+            let glob = rest.contains(['*', '?', '[', '{']);
             self.words[at] = format!("{value}{rest}");
-            self.literals[at] = !rest.contains(['*', '?', '[', '{']);
+            self.literals[at] = !glob;
             self.non_options[at] = !value.starts_with('-');
             self.raw_argv = false;
         }

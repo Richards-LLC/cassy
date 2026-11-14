@@ -122,12 +122,9 @@ pub(crate) fn launch(
     super::automatic::launch_local(&core, &task, &dispatch)
 }
 
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
+#[cfg(test)]
+mod handoff_tests {
     use super::*;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
 
     #[test]
     fn retired_supervisor_dispatch_launches_for_claimed_successor_cas_32c2() {
@@ -184,6 +181,14 @@ mod tests {
         assert_eq!(audit["previous_owner"], previous.id);
         assert_eq!(audit["owner"], successor.id);
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
 
     #[test]
     fn factory_review_starts_outside_worker_userns_cas_343d() {

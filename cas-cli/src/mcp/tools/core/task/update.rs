@@ -1177,6 +1177,7 @@ impl CasCore {
                 ("door", req.door.is_some()),
                 ("external_ref", req.external_ref.is_some() && !paired_no_code_proof),
                 ("assignee", req.assignee.is_some()),
+                ("review_dispatch_id", req.review_dispatch_id.is_some()),
                 ("status", req.status.is_some()),
                 ("epic", req.epic.is_some()),
                 (

@@ -11,7 +11,7 @@ pub(crate) fn ensure_review_assignment(
     role: Option<AgentRole>,
 ) -> Result<(), String> {
     let Some(dispatch_id) = dispatch_id else { return Ok(()) };
-    if matches!(role, Some(AgentRole::Supervisor | AgentRole::Worker)) { return Ok(()) }
+    if role == Some(AgentRole::Supervisor) { return Ok(()) }
     Err(crate::gates::tag("G-156", format!(
         "Review dispatch {dispatch_id} cannot be assigned to an ordinary worker or an unverified identity. \
          Use Cassy's daemon-owned verifier on this exact dispatch, or have a registered supervisor \

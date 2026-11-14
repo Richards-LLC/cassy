@@ -220,6 +220,7 @@ impl CasCore {
             "delivery_mode": delivery_mode,
             "risk": risk,
             "door": door,
+            "review_dispatch_id": self.normalize_review_dispatch_id(req.review_dispatch_id.as_deref())?,
             "proof_targets": proof_targets,
         });
         let client_request_id = validate_proposal_attempt_id(proposal_attempt_id)?;

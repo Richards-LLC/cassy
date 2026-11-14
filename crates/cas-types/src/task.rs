@@ -1599,6 +1599,7 @@ impl Task {
             && self.closed_at == other.closed_at
             && self.close_reason == other.close_reason
             && self.assignee == other.assignee
+            && self.review_dispatch_id == other.review_dispatch_id
             && self.branch == other.branch
             && self.worktree_id == other.worktree_id
             && self.pending_verification == other.pending_verification
@@ -2113,6 +2114,7 @@ mod tests {
         assert_eq!(decoded.review_dispatch_id, None);
         let mut review = decoded;
         review.review_dispatch_id = Some("vdispatch-e17ce9129b337ebcc86c8a0383080009".into());
+        assert!(!task.lifecycle_matches(&review));
         let decoded: Task = serde_json::from_value(serde_json::to_value(&review).unwrap()).unwrap();
         assert_eq!(decoded.review_dispatch_id, review.review_dispatch_id);
     }

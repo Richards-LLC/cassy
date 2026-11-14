@@ -576,8 +576,10 @@ fn walk(
             if !supported || callback.is_some() {
                 bail!("explicit stability identities require a supported local shared callback");
             }
+            let mut cursor = args.walk();
             let argument = args
-                .named_child(args.named_child_count().saturating_sub(1))
+                .named_children(&mut cursor)
+                .last()
                 .context("declared stability callback missing")?;
             let binding = callback_binding(node, argument, source)?;
             let headers = control_headers(node, source, aliases);

@@ -787,6 +787,60 @@ async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
     }
 }
 
+#[tokio::test]
+async fn epic_retarget_rebinds_unchanged_started_source_before_no_delivery_close() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    git(repo, &["checkout", "-q", "-b", "epic/next"]);
+    git(repo, &["push", "-q", "origin", "epic/next"]);
+    git(repo, &["checkout", "-q", "main"]);
+
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    let target = |branch: &str| WorkTarget {
+        repo_selector: format!("project:{PROJECT}"),
+        target_branch: branch.into(),
+    };
+    for (id, branch) in [("cas-aac3-old", "main"), ("cas-aac3-new", "epic/next")] {
+        let mut epic = Task::new(id.into(), format!("train {branch}"));
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some(branch.into());
+        epic.deliverables.work_target = Some(target("main"));
+        tasks.add(&epic).unwrap();
+    }
+    let id = "cas-aac3-child";
+    let mut helper = assigned(id, TaskType::Task, "main");
+    helper.status = TaskStatus::Open;
+    f.put(&helper);
+    tasks.add_dependency(&Dependency::new(
+        id.into(), "cas-aac3-old".into(), DependencyType::ParentChild,
+    )).unwrap();
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut worker = agents.get("nocode-worker-session").unwrap();
+    worker.metadata.insert(
+        "clone_path".into(),
+        f.cas_dir().join("worktrees").join(WORKER).display().to_string(),
+    );
+    agents.update(&worker).unwrap();
+
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    let original = f.task(id).deliverables.factory_branch_start.unwrap();
+    assert_eq!(original.work_target, target("main"), "{started}");
+    let moved = call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "epic":"cas-aac3-new"})).await;
+    let rebound = f.task(id);
+    assert_eq!(tasks.get_parent_epic(id).unwrap().unwrap().id, "cas-aac3-new", "{moved}");
+    assert_eq!(rebound.deliverables.work_target, Some(target("epic/next")), "{moved}");
+    assert_eq!(rebound.deliverables.factory_branch_start.as_ref().unwrap().work_target, target("epic/next"), "{moved}");
+    assert!(rebound.notes.contains("DELIVERY BRANCH REBOUND"), "{moved}");
+
+    let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref().unwrap().work_target, target("epic/next"), "{restarted}");
+    let closed = call(&f.worker, serde_json::json!({
+        "action":"close", "id":id, "reason":"No code was needed", "no_delivery":true,
+    })).await;
+    assert_closed_without_lane(&f, id, &closed);
+}
+
 /// A derived empty ref cannot erase work on B's publicly recorded source.
 #[tokio::test]
 async fn no_delivery_keeps_generic_source_work_despite_empty_task_ref_gh1370() {

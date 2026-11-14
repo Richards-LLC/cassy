@@ -16790,6 +16790,22 @@ fn recorded_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Resul
     Ok(Some(branch))
 }
 
+/// cas-03738: cas-195e pushed a throwaway proof branch under its per-task
+/// name, switched back to its recorded lane and closed; close parked the proof
+/// branch. The GH #1353 redirect is for a worker that moved onto its per-task
+/// branch. When the recorded lane is the checkout, the per-task branch is not,
+/// and the lane carries this task's started delivery, the lane is the delivery.
+fn checked_out_lane_delivers(repo: &std::path::Path, task: &Task, assignee: &str, per_task: &str) -> bool {
+    let per_task = per_task.strip_prefix("origin/").unwrap_or(per_task);
+    let lane = format!("factory/{assignee}");
+    let Ok(worktrees) = crate::worktree::GitOperations::new(repo.to_path_buf()).list_worktrees() else {
+        return false;
+    };
+    let checked_out = |branch: &str| worktrees.iter().any(|worktree| worktree.branch.as_deref() == Some(branch));
+    checked_out(&lane) && !checked_out(per_task)
+        && task_attribution::started_delivery(repo, task).ok().flatten().is_some()
+}
+
 /// [`close_measured_factory_branch`], refusing instead of binding to another
 /// task's delivery (cas-93db). A worker's plain `factory/<assignee>` whose
 /// recent commits claim another task, and none this one, is that task's
@@ -16825,7 +16841,9 @@ pub(crate) fn resolve_close_delivery_branch(
     // start-to-delivery ownership checks on the branch actually delivered.
     if task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
         start.branch == format!("factory/{assignee}")
-    }) && let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
+    }) && let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id)
+        && !checked_out_lane_delivers(repo_path, task, assignee, &branch)
+    {
         let mut measured = task.clone();
         measured.deliverables.factory_branch_start.as_mut().expect("start checked above")
             .branch = branch.strip_prefix("origin/").unwrap_or(&branch).to_string();

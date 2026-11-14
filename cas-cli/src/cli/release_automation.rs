@@ -79,6 +79,9 @@ impl PreviewStore {
             live, config.factory().artifacts_root.as_deref()).project_root;
         fs::create_dir_all(&parent)?;
         let snapshot = tempfile::Builder::new().prefix("release-preview-").tempdir_in(&parent)?;
+        // A relocated store belongs to no repository; its repository is the
+        // caller's (cas-afdf). Stop Git discovery from adopting an enclosing one.
+        fs::write(snapshot.path().join(".git"), "release preview snapshot: not a repository\n")?;
         let root = snapshot.path().join(".cas");
         fs::create_dir(&root)?;
         // Other store files stay the live ones; only the database is private.

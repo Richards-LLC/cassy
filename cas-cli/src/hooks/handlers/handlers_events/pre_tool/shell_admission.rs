@@ -282,8 +282,9 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
                      end: usize| {
         // Argument consumers must preserve quoted empty values (e.g. --shuffle '').
         if !word.is_empty() || *word_quoted {
+            let constant = *literal || matches!(word.as_str(), "[" | "[[");
             tokens.push(ShellToken::Word(std::mem::take(word)));
-            literals.push(*literal);
+            literals.push(constant);
             ends.push(end);
             *literal = true;
         }
@@ -724,9 +725,13 @@ impl ShellLexed {
         self.argument_indices(source).into_iter().map(|at| self.tokens[at].clone()).collect()
     }
 
-    pub(super) fn statements(&self, source: &str) -> Vec<Statement> {
-        let indices = self.argument_indices(source);
-        let tokens: Vec<_> = indices.iter().map(|&at| self.tokens[at].clone()).collect();
+    pub(super) fn statements(&self, source: &str, syntax: &[CaseSyntax]) -> Vec<Statement> {
+        let indices: Vec<_> = self.argument_indices(source).into_iter()
+            .filter(|&at| !matches!(syntax[at], CaseSyntax::Hidden | CaseSyntax::Esac)).collect();
+        let tokens: Vec<_> = indices.iter().map(|&at| match syntax[at] {
+            CaseSyntax::FirstArm | CaseSyntax::NextArm => ShellToken::Operator(';'),
+            _ => self.tokens[at].clone(),
+        }).collect();
         statement_indices(&tokens).into_iter().map(|statement| {
             let originals: Vec<_> = statement.into_iter().map(|at| indices[at]).collect();
             Statement {
@@ -1212,6 +1217,7 @@ pub(super) struct ParsedShell {
     pub(super) projected: String,
     pub(super) lexed: ShellLexed,
     pub(super) bodies: Vec<String>,
+    pub(super) syntax: Vec<CaseSyntax>,
 }
 
 pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsupported> {
@@ -1219,6 +1225,9 @@ pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsuppor
     let projected = shell_command_projection(command, true);
     let lexed = lex_source(command, &projected, false, depth);
     if let Some(error) = lexed.refusal.clone() { return Err(error); }
+    let syntax = case_syntax(&projected, &lexed).map_err(|_| Unsupported::execution(
+        "shell.unknown_syntax", 0, "case syntax", "the case boundaries cannot be resolved",
+        "use complete case arms with literal patterns"))?;
     let mut found = ShellSubstitutions::default();
     let mut bodies = shell_heredoc_bodies(command).into_iter();
     for delimiter in projected.lines().flat_map(heredoc_delimiters) {
@@ -1227,7 +1236,7 @@ pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsuppor
     }
     if let Some(error) = found.refusal { return Err(error); }
     found.bodies.extend(lexed.substitutions.iter().cloned());
-    Ok(ParsedShell { projected, lexed, bodies: found.bodies })
+    Ok(ParsedShell { projected, lexed, bodies: found.bodies, syntax })
 }
 
 pub(super) fn shell_substitutions(command: &str) -> ShellSubstitutions {
@@ -1343,3 +1352,142 @@ pub(super) fn statement_indices(tokens: &[ShellToken]) -> Vec<Vec<usize>> {
     }
     statements
 }
+
+/// What a token means to the enclosing `case`. Code keeps its ordinary handling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CaseSyntax {
+    Code,
+    /// Pattern text, which runs nothing.
+    Hidden,
+    /// The `)` that opens an arm, which is not a subshell's end.
+    FirstArm,
+    NextArm,
+    Esac,
+}
+
+/// Classify `case` syntax, so that a pattern's `)` closes no scope and its words
+/// run no command. Everything an arm guards stays code. A pattern that can execute
+/// something when matched (a substitution, or anything else this cannot read) and
+/// an unterminated `case` are refused, like any payload this cannot resolve.
+pub(super) fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSyntax>, &'static str> {
+    enum Phase {
+        Subject,
+        In,
+        Pattern { started: bool, first: bool },
+        Body,
+    }
+    struct Case {
+        level: usize,
+        phase: Phase,
+    }
+    let mut syntax = vec![CaseSyntax::Code; lexed.tokens.len()];
+    let mut cases: Vec<Case> = Vec::new();
+    let mut level = 0;
+    let mut command_start = true;
+    let mut previous_operator = None;
+    let mut start = 0;
+    for (index, (token, &end)) in lexed.tokens.iter().zip(&lexed.ends).enumerate() {
+        // A quoted keyword is an ordinary word, as in substitution_end.
+        let raw = source.get(start..end).unwrap_or("").trim();
+        start = end;
+        let previous = previous_operator;
+        previous_operator = match token {
+            ShellToken::Operator(ch) => Some((*ch, end)),
+            _ => None,
+        };
+        if let Some(case) = cases.last_mut().filter(|case| case.level == level) {
+            match (&mut case.phase, token) {
+                (Phase::Subject, ShellToken::Word(_)) => {
+                    case.phase = Phase::In;
+                    continue;
+                }
+                (Phase::In, ShellToken::Word(word)) => {
+                    if word == "in" && raw == word {
+                        case.phase = Phase::Pattern { started: false, first: true };
+                    }
+                    continue;
+                }
+                (Phase::Pattern { started, first }, ShellToken::Word(word)) => {
+                    if !*started && word == "esac" && raw == word {
+                        // With no arm there is no entry to restore.
+                        syntax[index] = if *first { CaseSyntax::Hidden } else { CaseSyntax::Esac };
+                        cases.pop();
+                        command_start = false;
+                        continue;
+                    }
+                    // Words in a pattern are joined by `|`. Two in a row are a command
+                    // this has misread, and must never be hidden as pattern text.
+                    let after_word = index > 0
+                        && syntax[index - 1] == CaseSyntax::Hidden
+                        && matches!(lexed.tokens[index - 1], ShellToken::Word(_));
+                    if after_word || word.contains(['`', '$']) {
+                        return Err("an unresolved shell payload");
+                    }
+                    *started = true;
+                    syntax[index] = CaseSyntax::Hidden;
+                    continue;
+                }
+                (Phase::Pattern { started, .. }, ShellToken::Operator('(')) => {
+                    if *started {
+                        return Err("an unresolved shell payload");
+                    }
+                    *started = true;
+                    syntax[index] = CaseSyntax::Hidden;
+                    continue;
+                }
+                (Phase::Pattern { started: true, .. }, ShellToken::Operator('|')) => {
+                    syntax[index] = CaseSyntax::Hidden;
+                    continue;
+                }
+                (Phase::Pattern { started: true, first }, ShellToken::Operator(')')) => {
+                    syntax[index] = if *first { CaseSyntax::FirstArm } else { CaseSyntax::NextArm };
+                    case.phase = Phase::Body;
+                    command_start = true;
+                    continue;
+                }
+                (Phase::Pattern { started: false, .. }, ShellToken::Operator(';' | '&')) => continue,
+                (Phase::Pattern { .. }, _) => return Err("an unresolved shell payload"),
+                (Phase::Body, ShellToken::Word(word))
+                    if command_start && word == "esac" && raw == word =>
+                {
+                    syntax[index] = CaseSyntax::Esac;
+                    cases.pop();
+                    command_start = false;
+                    continue;
+                }
+                (Phase::Body, ShellToken::Operator(';' | '&'))
+                    if previous == Some((';', end - 1))
+                        && matches!(source.as_bytes().get(end.saturating_sub(2)..end), Some(b";;" | b";&")) =>
+                {
+                    case.phase = Phase::Pattern { started: false, first: false };
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match token {
+            ShellToken::Word(word) => {
+                if command_start && word == "case" && raw == word {
+                    cases.push(Case { level, phase: Phase::Subject });
+                }
+                command_start = command_start
+                    && raw == word
+                    && matches!(word.as_str(), "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{");
+            }
+            ShellToken::Operator('(') => {
+                level += 1;
+                command_start = true;
+            }
+            ShellToken::Operator(')') => {
+                // A stray close stays for the caller's scope check to refuse.
+                level = level.saturating_sub(1);
+                command_start = false;
+            }
+            ShellToken::Operator('<' | '>') => command_start = false,
+            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
+            _ => {}
+        }
+    }
+    if cases.is_empty() { Ok(syntax) } else { Err("an unmatched shell scope") }
+}
+

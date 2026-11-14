@@ -5855,7 +5855,7 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
         Ok(parsed) => parsed,
         Err(error) => { found.refusal.get_or_insert(error); return; }
     };
-    let statements = parsed.lexed.statements(&parsed.projected);
+    let statements = parsed.lexed.statements(&parsed.projected, &parsed.syntax);
     found.arguments.extend(statements.iter().map(|statement| statement.words.clone()));
     found.statements.extend(shell_statements_from_tokens(parsed.lexed.tokens));
     for statement in statements {
@@ -11502,6 +11502,8 @@ mod worker_commit_guard_tests {
             "cat > inventory_controls.py <<'PY'\nfrom pathlib import Path\nsource = Path('pre_tool.rs').read_text()\ncontrols = ('factory.write_roots', 'cas config set factory.write_roots /x')\nprint(source.count(controls[0]))\nPY",
             // GH #1816 exact interpreter list, previously unverified.
             "python3 -I tests/soundwave-desktop-test.py\npython3 -I tests/system-capture-test.py\nbash tests/install-zram-topology-test.sh\nbash tests/restore-soundwave-resilience-test.sh",
+            // Case patterns and test brackets are grammar/data, not dynamic executables.
+            "case x in x|y) printf safe ;; *) printf fallback ;; esac; [ -f README.md ] || true",
             // GH #1814: the Markdown body never executes its documented loop.
             "python3 - <<'PY'\nopen('notes.md','w').write('x')\nPY\ncat > doc.md <<'MD'\nwhile read -r l; do sudo bash -lc \"$l\"; done\nMD",
         ] {

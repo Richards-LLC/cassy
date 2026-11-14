@@ -10,6 +10,7 @@ use cas_core::hooks::types::HookInput;
 use serde_json::Value;
 
 use cas_pty::store_isolation::HOME_STORE_SUFFIXES as STORE_SUFFIXES;
+use super::pre_tool::{SHELL_MAX_DEPTH, ShellInput, shell_input};
 
 const PATH_KEYS: &[&str] = &[
     "file_path",
@@ -94,8 +95,8 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
 }
 
 fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
-    if depth > 3 {
-        return false;
+    if depth > SHELL_MAX_DEPTH {
+        return true;
     }
     let mut cwd = initial_cwd.to_path_buf();
     let mut directory_stack = Vec::new();
@@ -118,15 +119,23 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
         // Inspect shell payloads as nested statement lists so a `cd` inside a
         // `sh -c` or `bash -c` does not leak into the caller's working dir.
         if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-            for payload in shell_command_payloads(args) {
-                if shell_references_store(payload, &cwd, depth + 1) {
-                    return true;
-                }
+            let reads_store = match shell_input(args) {
+                ShellInput::Command(at) => args.get(at)
+                    .is_some_and(|payload| shell_references_store(payload, &cwd, depth + 1)),
+                ShellInput::Script(at) => args.get(at)
+                    .is_some_and(|path| path_references_store(path, &cwd, false)),
+                ShellInput::Stdin | ShellInput::Display => false,
+            };
+            if reads_store {
+                return true;
             }
             continue;
         }
-        if executable == "eval" && shell_references_store(&args.join(" "), &cwd, depth + 1) {
-            return true;
+        if executable == "eval" {
+            if shell_references_store(&args.join(" "), &cwd, depth + 1) {
+                return true;
+            }
+            continue;
         }
 
         if matches!(executable.as_str(), "cd" | "pushd") {
@@ -166,7 +175,7 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
                         && lists_names_only(&executable, &argv[index + 1..])
                 })
             });
-        if statement_references_store(words, &cwd, depth, names_only) {
+        if statement_references_store(words, &cwd, names_only) {
             return true;
         }
     }
@@ -179,12 +188,8 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
 fn statement_references_store(
     words: &[String],
     cwd: &Path,
-    depth: usize,
     names_only: bool,
 ) -> bool {
-    if depth > 3 {
-        return false;
-    }
     let Some(command_index) = super::pre_tool::unwrapped_command_index(words) else {
         return false;
     };
@@ -195,16 +200,6 @@ fn statement_references_store(
         .to_ascii_lowercase();
     let args = &words[command_index + 1..];
 
-    // Inspect shell payloads as nested statement lists so a `cd` inside a
-    // `sh -c` or `bash -c` does not leak into the caller's working dir.
-    if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-        return shell_command_payloads(args)
-            .into_iter()
-            .any(|payload| shell_references_store(payload, cwd, depth + 1));
-    }
-    if executable == "eval" {
-        return shell_references_store(&args.join(" "), cwd, depth + 1);
-    }
     let cwd = &wrapper_cwd(&words[..command_index], cwd);
 
     let descends = invocation_recursively_reads_directories(&executable, args);
@@ -389,23 +384,6 @@ fn path_operand_is_bare_relative(argument: &str) -> bool {
         && !normalized.starts_with('$')
         && !normalized.contains('/')
         && !normalized.contains(['*', '?', '['])
-}
-
-/// Every non-option word after the command flag may be the command string:
-/// other options take their own values (`bash -oc pipefail '<cmd>'`).
-fn shell_command_payloads(args: &[String]) -> Vec<&str> {
-    let Some(flag) = args.iter().position(|arg| {
-        arg == "--command"
-            || arg == "-c"
-            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'))
-    }) else {
-        return Vec::new();
-    };
-    args[flag + 1..]
-        .iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .map(String::as_str)
-        .collect()
 }
 
 fn cd_target(args: &[String]) -> Option<&str> {

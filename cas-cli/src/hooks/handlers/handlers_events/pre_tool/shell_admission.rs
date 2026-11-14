@@ -1,7 +1,7 @@
 //! Shared source-preserving shell scanner and invocation grammar.
 use super::{HeredocDelimiter, heredoc_delimiters, shell_command_projection, shell_heredoc_bodies};
 
-pub(super) const MAX_DEPTH: usize = 6;
+pub(in crate::hooks::handlers::handlers_events) const MAX_DEPTH: usize = 6;
 
 /// A refusal names a parser rule and original byte position, never a guessed
 /// filesystem effect. Construct labels deliberately contain no argument values.
@@ -153,7 +153,7 @@ impl Statement {
     }
 }
 
-enum ShellInput { Command(usize), Script(usize), Stdin, Display }
+pub(in crate::hooks::handlers::handlers_events) enum ShellInput { Command(usize), Script(usize), Stdin, Display }
 
 /// The name bound by scalar, append or array-element assignment syntax. A
 /// declaration builtin interprets its cooked argv; command prefixes additionally
@@ -170,7 +170,7 @@ fn assignment_name(word: &str) -> Option<&str> {
 
 /// Classify shell input once. After a script operand, -c is script data;
 /// after -s, operands are positional arguments rather than a script filename.
-fn shell_input(args: &[String]) -> ShellInput {
+pub(in crate::hooks::handlers::handlers_events) fn shell_input(args: &[String]) -> ShellInput {
     let mut at = 0;
     let mut stdin = false;
     while let Some(arg) = args.get(at) {

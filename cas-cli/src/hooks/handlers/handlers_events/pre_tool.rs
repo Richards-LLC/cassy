@@ -1,4 +1,5 @@
 mod shell_admission;
+pub(super) use shell_admission::{MAX_DEPTH as SHELL_MAX_DEPTH, ShellInput, shell_input};
 mod shell_effects;
 
 use shell_admission::{ShellLexed, ShellToken, factory_shell_lex, shell_ansi_c_word, shell_payload_index, shell_substitutions, substitution_end, literal_cat_heredoc_end, backquote_body, after_redirect};

@@ -943,7 +943,7 @@ fn retains_line(old: &str, new: &str, ordinary: bool, old_tokens: &[&str], new_t
     old_tokens.iter().all(|token| {
         let Some(offset) = new_tokens[cursor..]
             .iter()
-            .position(|candidate| *candidate == token)
+            .position(|candidate| *candidate == *token)
         else {
             return false;
         };

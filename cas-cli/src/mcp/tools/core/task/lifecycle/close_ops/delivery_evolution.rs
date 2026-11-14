@@ -5,6 +5,9 @@ use std::process::Command;
 use super::epic_measurement::CommandExt as _;
 
 #[cfg(test)]
+static USE_SHARED_WALK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(test)]
 static USE_PARALLEL_PROOF_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 #[cfg(test)]
@@ -1318,6 +1321,10 @@ pub(super) struct LineRequest {
 /// owners (`walk_owner_groups`), and every answer is memoized under the key
 /// its member's own call reads. Errors stay unmemoized, as for a single walk.
 pub(super) fn prewalk_line_content_presence(repo: &Path, target: &str, requests: &[LineRequest]) {
+    #[cfg(test)]
+    if !USE_SHARED_WALK.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let Some(target) = commit_of(repo, target) else {
         return;
     };

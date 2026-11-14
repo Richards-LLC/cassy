@@ -68,13 +68,20 @@ fn release_preview_reuses_parallel_proofs_with_identical_outcomes_cas_b7be() {
             promotion_pr: None, release_tag: None, constituent_epic_ids: vec![], included_task_ids: ids,
             no_code_members: Default::default(), proof_refs: vec![],
         };
+        // cas-0e29e: an edge is the unit of a walk's Git and hunk work. The
+        // release must read each (path, edge) once, not once per member walk.
+        let edges = git(&["rev-list", "--parents", "HEAD"]).lines()
+            .map(|record| record.split_whitespace().count() - 1).sum::<usize>();
         let mut results = Vec::new();
         let mut blame_counts = Vec::new();
-        for enabled in [false, true] {
+        // Per-member walks are the reference outcome for the shared walk.
+        for (shared, enabled) in [(false, true), (true, false), (true, true)] {
             // A whole-walk hit must not conceal the edge cache under test.
             if let Some(walks) = WALKS.get() { walks.lock().unwrap().clear(); }
             USE_PARALLEL_PROOF_CACHE.store(enabled, Ordering::Relaxed);
-            let trace = repo.join(format!("git-{enabled}.jsonl"));
+            USE_SHARED_WALK.store(shared, Ordering::Relaxed);
+            EDGE_READS.store(0, Ordering::Relaxed);
+            let trace = repo.join(format!("git-{shared}-{enabled}.jsonl"));
             env.set("GIT_TRACE2_EVENT", &trace);
             let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
             assert!(inventory.exceptions.is_empty(), "{:?}", inventory.exceptions);
@@ -90,11 +97,15 @@ fn release_preview_reuses_parallel_proofs_with_identical_outcomes_cas_b7be() {
                 event["event"] == "start" && event["argv"][1] == "blame"
             }).count();
             blame_counts.push(starts);
+            let reads = EDGE_READS.load(Ordering::Relaxed);
+            eprintln!("PREVIEW_SCALING members={members} shared={shared} edges={edges} edge_reads={reads}");
+            assert!(!shared || reads <= edges, "{reads} edge reads for {edges} edges");
         }
         assert_eq!(results[0], results[1]);
-        eprintln!("PREVIEW_SCALING members={members} uncached_blame={} cached_blame={}", blame_counts[0], blame_counts[1]);
-        assert!(blame_counts[1] > 0, "edge proof must actually execute");
-        assert!(blame_counts[1] <= 2 * members, "{blame_counts:?}");
+        assert_eq!(results[0], results[2]);
+        eprintln!("PREVIEW_SCALING members={members} uncached_blame={} cached_blame={}", blame_counts[1], blame_counts[2]);
+        assert!(blame_counts[2] > 0, "edge proof must actually execute");
+        assert!(blame_counts[2] <= 2 * members, "{blame_counts:?}");
     }
 }
 

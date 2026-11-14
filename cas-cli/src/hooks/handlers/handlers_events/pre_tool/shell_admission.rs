@@ -61,6 +61,7 @@ pub(super) struct Statement {
     pub(super) words: Vec<String>,
     literals: Vec<bool>,
     offsets: Vec<usize>,
+    assignments: Vec<bool>,
     /// Reserved syntax is recognized from raw source, never a cooked word.
     prefix: usize,
 }
@@ -95,9 +96,9 @@ impl Statement {
                 && !word.split_once('=').is_some_and(|(name, _)| is_shell_variable_name(name))
             { break; }
         }
-        let assignment_end = index.unwrap_or(words.len());
-        for (at, word) in words.iter().enumerate().take(assignment_end) {
-            if word.split_once('=').is_some_and(|(name, _)| matches!(name, "PS4" | "PROMPT_COMMAND")) {
+        for at in self.prefix..words.len() {
+            if !self.assignments[at] { break; }
+            if assignment_name(&words[at]).is_some_and(|name| matches!(name, "PS4" | "PROMPT_COMMAND")) {
                 return Some(deferred(at));
             }
         }
@@ -122,7 +123,7 @@ impl Statement {
         }
         if matches!(name, "export" | "declare" | "typeset" | "local" | "readonly") {
             for (at, word) in args.iter().enumerate() {
-                if word.split_once('=').is_some_and(|(name, _)| matches!(name, "PS4" | "PROMPT_COMMAND")) {
+                if assignment_name(word).is_some_and(|name| matches!(name, "PS4" | "PROMPT_COMMAND")) {
                     return Some(deferred(index + 1 + at));
                 }
             }
@@ -153,6 +154,19 @@ impl Statement {
 }
 
 enum ShellInput { Command(usize), Script(usize), Stdin, Display }
+
+/// The name bound by scalar, append or array-element assignment syntax. A
+/// declaration builtin interprets its cooked argv; command prefixes additionally
+/// require an unquoted raw lhs (recorded by the statement projection).
+fn assignment_name(word: &str) -> Option<&str> {
+    let (lhs, _) = word.split_once('=')?;
+    let lhs = lhs.strip_suffix('+').unwrap_or(lhs);
+    let name = if let Some((name, subscript)) = lhs.split_once('[') {
+        if !subscript.ends_with(']') { return None; }
+        name
+    } else { lhs };
+    super::is_shell_variable_name(name).then_some(name)
+}
 
 /// Classify shell input once. After a script operand, -c is script data;
 /// after -s, operands are positional arguments rather than a script filename.
@@ -766,6 +780,13 @@ impl ShellLexed {
             }
             Statement {
                 prefix,
+                assignments: originals.iter().map(|&at| {
+                    let ShellToken::Word(word) = &self.tokens[at] else { return false; };
+                    let start = if at == 0 { 0 } else { self.ends[at - 1] };
+                    assignment_name(word).is_some() && word.split_once('=').is_some_and(|(lhs, _)| {
+                        source[start..self.ends[at]].trim_start().starts_with(&format!("{lhs}="))
+                    })
+                }).collect(),
                 words: originals.iter().map(|&at| match &self.tokens[at] {
                     ShellToken::Word(word) => word.clone(), _ => unreachable!(),
                 }).collect(),

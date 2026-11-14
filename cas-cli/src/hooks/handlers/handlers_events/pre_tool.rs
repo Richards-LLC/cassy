@@ -11490,6 +11490,7 @@ mod worker_commit_guard_tests {
             "python3 -I tests/soundwave-desktop-test.py\npython3 -I tests/system-capture-test.py\nbash tests/install-zram-topology-test.sh\nbash tests/restore-soundwave-resilience-test.sh",
             // Case patterns and test brackets are grammar/data, not dynamic executables.
             "case x in x|y) printf safe ;; *) printf fallback ;; esac; [ -f README.md ] || true",
+            "printf '%s' 'PS4+=example' 'PROMPT_COMMAND[0]=example'",
             // GH #1814: the Markdown body never executes its documented loop.
             "python3 - <<'PY'\nopen('notes.md','w').write('x')\nPY\ncat > doc.md <<'MD'\nwhile read -r l; do sudo bash -lc \"$l\"; done\nMD",
         ] {

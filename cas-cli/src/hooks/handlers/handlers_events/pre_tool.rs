@@ -12036,6 +12036,49 @@ mod worker_commit_guard_tests {
 
     use crate::test_support::TestEnvGuard;
 
+    fn assert_worker_corpus_admitted(command: &str) {
+        let mut env = TestEnvGuard::temp_home();
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().unwrap();
+        add_linked_worktree(repo.path(), linked.path(), "factory/corpus-worker");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "corpus-worker");
+        env.set("CAS_CLONE_PATH", linked.path());
+        let input = hook_git_write_input(linked.path().to_str().unwrap(), command);
+        let output = handle_pre_tool_use(&input, None).expect("real pre-tool hook");
+        let value = serde_json::to_value(output).unwrap();
+        assert_ne!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{command}: {value}");
+    }
+
+    #[test]
+    fn local_counter_inventory_is_read_only_cas_24f2() {
+        // GH #1866: the arithmetic variable is initialized in this shell;
+        // read only binds path, not missing, and no filesystem write occurs.
+        assert_worker_corpus_admitted("missing=0; while read -r path; do [ -f \"$path\" ] || missing=$((missing+1)); done <<'EOF'\na.md\nb.md\nEOF\nprintf 'missing=%s\\n' \"$missing\"");
+    }
+
+    #[test]
+    fn sql_arguments_belong_to_the_wrapper_script_cas_24f2() {
+        // GH #1910: -c and JSONPath are arguments to an opaque literal script,
+        // not Bash's command-string option. The output stays in the worktree.
+        assert_worker_corpus_admitted("bash scripts/readonly-psql-wrapper.sh -At -c \"SELECT jsonb_path_query_array(provider_payload, '$.**.like_count') FROM metrics_snapshots LIMIT 1\" > sql-result.txt");
+    }
+
+    #[test]
+    fn literal_issue_shapes_remain_admitted_cas_24f2() {
+        for command in [
+            // GH #1886 live shape, preserving the descriptive policy strings.
+            "cat > inventory_controls.py <<'PY'\nfrom pathlib import Path\nsource = Path('pre_tool.rs').read_text()\ncontrols = ('factory.write_roots', 'cas config set factory.write_roots /x')\nprint(source.count(controls[0]))\nPY",
+            // GH #1816 exact interpreter list, previously unverified.
+            "python3 -I tests/soundwave-desktop-test.py\npython3 -I tests/system-capture-test.py\nbash tests/install-zram-topology-test.sh\nbash tests/restore-soundwave-resilience-test.sh",
+            // GH #1814: the Markdown body never executes its documented loop.
+            "python3 - <<'PY'\nopen('notes.md','w').write('x')\nPY\ncat > doc.md <<'MD'\nwhile read -r l; do sudo bash -lc \"$l\"; done\nMD",
+        ] {
+            assert_worker_corpus_admitted(command);
+        }
+    }
+
     // Helper: create a temp git repo with an initial commit on `main`.
     fn make_git_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");

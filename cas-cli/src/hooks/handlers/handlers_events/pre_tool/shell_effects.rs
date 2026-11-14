@@ -1293,17 +1293,13 @@ fn collect_script(
                 name,
                 Some("sh" | "bash" | "dash" | "zsh" | "ksh" | "script" | "su" | "runuser")
             ) {
-                args.iter()
-                    .position(|arg| {
-                        arg == "--command"
-                            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
-                    })
+                shell_payload_index(name.unwrap(), args)
                     .map(|position| {
                         payload_literal = index
-                            .and_then(|index| word_literals.get(index + position + 2))
+                            .and_then(|index| word_literals.get(index + position + 1))
                             .copied()
                             .unwrap_or(false);
-                        args.get(position + 1)
+                        args.get(position)
                             .cloned()
                             .ok_or("a shell command without a resolvable payload")
                     })

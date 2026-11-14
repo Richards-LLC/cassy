@@ -378,6 +378,8 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
     let mut failures = Vec::new();
     for command in [
         format!("sh -c 'cat {}/.config/neonctl/credentials.json'", home.display()),
+        format!("cd ~; (cd '{}'); cat .config/neonctl/credentials.json", cwd.path().display()),
+        format!("cd ~; if false; then cd '{}'; fi; cat .config/neonctl/credentials.json", cwd.path().display()),
         "bash -c 'cat ~/.local/share/com.vercel.cli/auth.json'".to_string(),
         "bash -c -- 'cat ~/.local/share/com.vercel.cli/auth.json'".to_string(),
         "bash -c true < ~/.config/neonctl/credentials.json".to_string(),
@@ -408,6 +410,8 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
         "bash fixture.sh -c 'cat ~/.config/neonctl/credentials.json'",
         "bash -c true fixture-name 'cat ~/.config/neonctl/credentials.json'",
         "bash fixture.sh <<< '~/.config/neonctl/credentials.json'",
+        "(cd ~); cat .config/neonctl/credentials.json",
+        "pushd ~; popd; cat .config/neonctl/credentials.json",
     ] {
         let reason = denial(handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap());
         if reason.is_some() {
@@ -439,6 +443,7 @@ fn worker_shell_cd_relative_reads_cannot_reach_operator_credentials_cas_da9a() {
     for command in [
         "cd ~/.config && cat neonctl/credentials.json",
         "cd ~ && cat .config/neonctl/credentials.json",
+        "pushd ~; cat .config/neonctl/credentials.json",
         "pushd ~/.config && tar czf fixture.tgz neonctl",
         "env -C ~/.config tar czf fixture.tgz neonctl",
         "env -C ~/.config cat neonctl/credentials.json",

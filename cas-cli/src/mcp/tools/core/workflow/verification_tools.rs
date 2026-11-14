@@ -847,12 +847,13 @@ impl CasCore {
                 // A question is retained as history, not a final verdict. The
                 // supervisor answers it using this exact proof boundary.
                 if !matches!(existing.status, VerificationStatus::SupervisorCall | VerificationStatus::Error) {
+                    // gate[G-155 verification]: Conflicting terminal supervisor verification verdict
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(concat!(
+                        message: Cow::from(crate::gates::tag("G-155", concat!(
                             "Supervisor-direct verification rejected: the exact dispatch was ",
                             "already resolved with a different verdict."
-                        )),
+                        ))),
                         data: None,
                     });
                 }

@@ -713,10 +713,11 @@ async fn infrastructure_error_keeps_exact_dispatch_recoverable_cas_343d() {
         "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
         "status":"rejected", "summary":"Code defect confirmed",
     })).await.unwrap());
-    assert!(fixture.as_agent(supervisor_id).verification(json!({
+    let error = fixture.as_agent(supervisor_id).verification(json!({
         "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
         "status":"approved", "summary":"Attempt to replace code rejection",
-    })).await.is_err());
+    })).await.unwrap_err();
+    assert_eq!(cas::gates::codes_in(error.message.as_ref()), ["G-155"]);
     assert!(cas_store::issue_server_verifier_handoff(
         &fixture.root, task_id, &dispatch.id, supervisor_id, "rejected-retry",
     ).is_err());

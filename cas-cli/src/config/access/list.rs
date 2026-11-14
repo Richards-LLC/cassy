@@ -250,7 +250,7 @@ impl Config {
                 "factory.auto_route_builds".to_string(),
                 factory.auto_route_builds.to_string(),
             ),
-            ("factory.max_workers".to_string(), factory.max_workers.to_string()),
+            ("factory.max_workers".to_string(), factory.max_workers().to_string()),
             ("factory.build_guard.max_load_ratio".to_string(), format!("{:?}", factory.build_guard.max_load_ratio)),
             ("factory.build_guard.max_cpu_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),
             ("factory.build_guard.max_memory_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_memory_pressure_percent)),
@@ -960,7 +960,20 @@ impl Config {
 
     /// Get factory config with defaults
     pub fn factory(&self) -> FactoryConfig {
-        self.factory.clone().unwrap_or_default()
+        let mut factory = self.factory.clone().unwrap_or_default();
+        factory.max_workers = factory.max_workers.or(self.user_max_workers);
+        factory
+    }
+
+    /// Where `factory().max_workers()` came from: project, user or default.
+    pub fn max_workers_source(&self) -> &'static str {
+        if self.factory.as_ref().is_some_and(|factory| factory.max_workers.is_some()) {
+            "project"
+        } else if self.user_max_workers.is_some() {
+            "user"
+        } else {
+            "default"
+        }
     }
 
     /// Get LLM config with defaults

@@ -84,6 +84,82 @@ async fn provenance_search(
 }
 
 #[tokio::test]
+async fn conceptual_search_reads_committed_tasks_during_refresh_writer_gh1947() {
+    use cas::hybrid_search::SearchIndex;
+    use cas::types::Task;
+    use tantivy::directory::error::LockError;
+    use tantivy::{TantivyDocument, TantivyError, Term};
+
+    async fn ids(service: &CasService) -> Vec<String> {
+        let envelope = provenance_search(service, "consumer inventory", None, 1)
+            .await
+            .expect("a conceptual search must read the committed index during refresh");
+        let mut ids = envelope["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| hit["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let root = temp.path().join(".cas");
+    let tasks = cas::store::open_task_store(&root).unwrap();
+    let alpha = Task::new("cas-cf75-alpha".into(), "consumer inventory".into());
+    let beta = Task::new("cas-cf75-beta".into(), "consumer inventory".into());
+    tasks.add(&alpha).unwrap();
+    let memory = Entry::new("mem-cf75".into(), "consumer inventory".into());
+    cas::store::open_store(&root).unwrap().add(&memory).unwrap();
+    let path = cas::hybrid_search::tantivy_index_dir(&root);
+    let seed = SearchIndex::open(&path).unwrap();
+    seed.refresh_tasks(std::slice::from_ref(&alpha)).unwrap();
+    seed.index_entry(&memory).unwrap();
+    drop(seed);
+    tasks.add(&beta).unwrap();
+
+    // A separately opened writer owns the actual directory lock. Its pending
+    // replacement must not leak into the reader's last committed snapshot.
+    let disk = tantivy::Index::open_in_dir(path).unwrap();
+    let schema = disk.schema();
+    let id = schema.get_field("id").unwrap();
+    let mut writer: tantivy::IndexWriter<TantivyDocument> = disk.writer(50_000_000).unwrap();
+    writer.delete_term(Term::from_field_text(id, &alpha.id));
+    let mut document = TantivyDocument::new();
+    for (field, value) in [
+        ("id", beta.id.as_str()),
+        ("content", beta.title.as_str()),
+        ("title", beta.title.as_str()),
+        ("doc_type", "task"),
+    ] {
+        document.add_text(schema.get_field(field).unwrap(), value);
+    }
+    writer.add_document(document).unwrap();
+    let lock_is_held = || {
+        matches!(
+            disk.writer::<TantivyDocument>(50_000_000),
+            Err(TantivyError::LockFailure(LockError::LockBusy, _))
+        )
+    };
+    let service = CasService::new(core, None);
+    assert_eq!(ids(&service).await, [alpha.id.clone(), memory.id.clone()]);
+    assert!(lock_is_held(), "a reader must preserve the live writer lock");
+
+    // Committing does not release writer ownership. A later reader must see
+    // those committed bytes without trying to replace them behind the writer.
+    writer.commit().unwrap();
+    assert_eq!(ids(&service).await, [beta.id.clone(), memory.id.clone()]);
+    assert!(lock_is_held());
+
+    // A deferred refresh must remain eligible after the lock is released, and
+    // reconciling task rows must preserve the independently indexed memory.
+    drop(writer);
+    assert_eq!(ids(&service).await, [alpha.id, beta.id, memory.id]);
+}
+
+#[tokio::test]
 async fn test_search_empty() {
     let mut test_env = TestEnvGuard::temp_home();
     let (_temp, service) = setup_cas(&mut test_env);
@@ -308,6 +384,42 @@ async fn cas_57e5_colon_bearing_free_text_queries_return_results() {
 }
 
 #[tokio::test]
+async fn conceptual_shell_flag_query_returns_results_cas_6c1a() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
+    let query = "cas-47e1 consumer inventory --files0-from grep -f xargs";
+    let entries = [
+        Entry::new("flags-search".into(), format!("---\nmodule: cas-search\n---\n{query}")),
+        Entry::new("flags-cli".into(), format!("---\nmodule: cas-cli\n---\n{query}")),
+    ];
+    let root = temp.path().join(".cas");
+    let store = cas::store::open_store(&root).unwrap();
+    for entry in &entries {
+        store.add(entry).unwrap();
+    }
+    cas::hybrid_search::SearchIndex::open(&cas::hybrid_search::tantivy_index_dir(&root))
+        .unwrap().index_entries_batch(&entries).unwrap();
+    let service = CasService::new(core, None);
+
+    for (query, expected) in [
+        (query, vec!["flags-cli", "flags-search"]),
+        ("--files0-from", vec!["flags-cli", "flags-search"]),
+        ("-f", vec!["flags-cli", "flags-search"]),
+        ("module:cas-search --files0-from -f", vec!["flags-search"]),
+        ("module:cas-cli --files0-from -f", vec!["flags-cli"]),
+        ("\"consumer -f xargs\"", vec![]),
+    ] {
+        let envelope = provenance_search(&service, query, Some("entry"), 1)
+            .await.unwrap_or_else(|error| panic!("{query:?}: {error}"));
+        assert_eq!(envelope["schema"], "cas.retrieval.provenance.v1");
+        let mut ids: Vec<_> = envelope["hits"].as_array().unwrap().iter()
+            .map(|hit| hit["id"].as_str().unwrap()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, expected, "{query:?}");
+    }
+}
+
+#[tokio::test]
 async fn artifact_fixture_content_is_searchable_after_backfill() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
@@ -430,6 +542,7 @@ async fn test_search_filter_by_type() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -597,6 +710,7 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -633,6 +747,7 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
         external_ref: None,
         assignee: None,

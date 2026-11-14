@@ -3036,10 +3036,10 @@ fn collect_git_write_targets(
                     && path_word(script).literal == Some(true)
             };
             // Syntax checks require exact raw noexec flags followed by raw
-            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Redirects
-            // and expansions can supply +n/-c and execute a payload.
+            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Its own
+            // argument projection must match; another statement's redirect
+            // does not change this invocation's mode or operands.
             let syntax_check = command_index == 0
-                && !lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('<' | '>')))
                 && shell_statement_arguments(command).iter().any(|statement| {
                     if statement != &words { return false; }
                     let flags = statement[1..].iter()
@@ -13134,6 +13134,12 @@ mod worker_commit_guard_tests {
         env.set("CAS_FACTORY_MODE", "1");
         env.set("CAS_AGENT_NAME", "syntax-worker");
         env.set("CAS_CLONE_PATH", &linked_path);
+        std::fs::create_dir_all(linked.path().join("scripts")).unwrap();
+        for script in ["release.sh", "test-release.sh"] {
+            std::fs::write(linked.path().join("scripts").join(script), "# before\n").unwrap();
+        }
+
+        let owned_edit = "python3 - <<'PY'\nfrom pathlib import Path\np = Path('scripts/release.sh')\np.write_text(p.read_text().replace('# before', '# after'))\nPY\n";
 
         for (command, denied) in [
             (format!("bash -n {{+n,-c,'cd \"{repo_path}\"; git commit -m probe'}}"), true),
@@ -13143,6 +13149,13 @@ mod worker_commit_guard_tests {
             ("bash --noexec scripts/release.sh".into(), false),
             ("bash -n --noexec -n scripts/release.sh".into(), false),
             ("sh -n scripts/release.sh".into(), false),
+            // GH #1885/#1816: syntax validation is not shell execution.
+            ("bash -n host/disk-guard/disk-guard.sh && shellcheck host/disk-guard/disk-guard.sh && plutil -lint host/disk-guard/com.prowl.disk-guard.plist".into(), false),
+            // GH #1909: another statement's owned edit/redirection must not
+            // make a following raw, unredirected syntax check indeterminate.
+            (format!("{owned_edit}bash -n scripts/release.sh scripts/test-release.sh\ngit status --short\ngit log -1 --oneline"), false),
+            (format!("{owned_edit}bash -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            (format!("python3 - <<'PY'\nfrom pathlib import Path\nPath('{repo_path}/f.txt').write_text('outside')\nPY\nbash -n scripts/release.sh"), true),
             ("bash -n 'scripts/release.sh'".into(), true),
             ("bash -n 'scripts/release check.sh'".into(), true),
             ("bash -n $VAR".into(), true),

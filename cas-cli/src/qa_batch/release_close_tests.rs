@@ -29,7 +29,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut anchors = BTreeMap::new();
     let mut foreign = None;
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced"] {
         let base = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-qb", id]);
         let source = format!("{id}.rs");
@@ -53,6 +53,16 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             git(&["commit", "-qm", "draft overview and bundle"]);
             std::fs::write(repo.join(&overview), format!("## Core Concepts\n\nOverview for {id}.\n")).unwrap();
             git(&["commit", "-qam", "final overview"]);
+        }
+        if id == "cas-resynced" {
+            // cas-2430 (the cas-aeb3 shape): the delivery lands, main reverts
+            // it, and the lane's sync merge of main removes the source again.
+            // The sync is not the task's own restoration: still a revert.
+            git(&["checkout", "-q", "main"]);
+            git(&["merge", "--no-ff", "-qm", "first landing", id]);
+            git(&["revert", "-m", "1", "--no-edit", "HEAD"]);
+            git(&["checkout", "-q", id]);
+            git(&["merge", "--no-ff", "-qm", "sync train into delivery", "main"]);
         }
         if id == "cas-retained" {
             git(&["checkout", "-qb", "train-input", "main"]);
@@ -157,7 +167,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag: tag.clone() },
     )).unwrap();
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-resynced"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "{id}");
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "RELEASE_MEMBER_REVERTED"), "{id}: {:?}", result.members.get(id));
         assert!(inventory.exceptions.iter().any(|e| e.task_id == id && serde_json::to_value(&e.code).unwrap() == "reverted"));
@@ -166,7 +176,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     for id in ["cas-retained", "cas-redrafted"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{id}: {:?}", result.members.get(id));
     }
-    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted"] {
+    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced"] {
         let task = tasks.get(id).unwrap();
         assert_eq!(release_tag_ships_delivery(&repo,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),

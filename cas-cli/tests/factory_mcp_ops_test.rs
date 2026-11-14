@@ -11328,6 +11328,8 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         "squashed-anchor",
         "reset-to-origin",
         "per-task-branch",
+        // cas-d9d38: cas-cab9's suffixed re-delivery lane.
+        "redelivery-suffix",
         "empty",
         "foreign",
         "target-change",
@@ -11337,7 +11339,9 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         "target-foreign",
     ] {
         let retargeted = shape.starts_with("target-");
-        let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-88c1")]);
+        // qa_request is supervisor-only by harness role as well as registry.
+        let role = (shape == "redelivery-suffix").then_some("supervisor");
+        let _guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", Some("session-88c1")), ("CAS_AGENT_ROLE", role)]);
         let env = FactoryTestEnv::with_server_supervisor();
         // cas-b403: a logged-in project, so the rebind writes through the
         // production SyncingTaskStore rather than the bare SQLite store.
@@ -11425,7 +11429,11 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 .await
                 .unwrap();
         }
-        let branch = if shape == "per-task-branch" || (retargeted && shape != "target-same-branch") {
+        let branch = if shape == "redelivery-suffix" {
+            let branch = format!("factory/{worker}-{}-redelivery", task.id);
+            git(&["switch", "-qc", &branch, "origin/main"]);
+            branch
+        } else if shape == "per-task-branch" || (retargeted && shape != "target-same-branch") {
             let branch = format!("factory/{worker}-{}", task.id);
             git(&["switch", "-qc", &branch, "origin/main"]);
             branch
@@ -11604,6 +11612,21 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap(),
             lease
         );
+        if shape == "redelivery-suffix" {
+            // The rebound lane's live origin tip is the task's recorded delivery.
+            let response = env.service.verification(Parameters(serde_json::from_value(serde_json::json!({
+                "action": "qa_request", "task_id": task.id, "head_sha": tip,
+                "summary": "Review the re-delivery on its rebound branch",
+            })).unwrap())).await;
+            let text = match response {
+                Ok(result) => get_text(&result),
+                Err(error) => error.message.to_string(),
+            };
+            let rounds = cas_store::list_qa_passes(&env.cas_root, &task.id).unwrap();
+            if rounds.len() != 1 || rounds[0].bound_head != tip {
+                failures.push(format!("{shape}: qa_request must open one round at the rebound tip: {text}"));
+            }
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

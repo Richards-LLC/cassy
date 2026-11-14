@@ -90,7 +90,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     // A deletion in the same release without folded bytes stays a loss.
     git(&["rm", "docs/product-overview.d/cas-unfolded.md", "docs/qa/bug-families/cas-unfolded.yaml"]);
     let compile = Command::new("python3")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/doc-fragments.py"))
+        .args(["-c", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/doc-fragments.py"))])
         .args(["compile", "--root"]).arg(&repo).output().unwrap();
     assert!(compile.status.success(), "{compile:?}");
     git(&["add", "-A"]);

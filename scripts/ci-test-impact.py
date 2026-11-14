@@ -547,8 +547,13 @@ def lane_attribute(root, base, failures, destination, configuration=None):
     # Twenty minutes for lookup/preparation/build/test, within the existing
     # 45-minute job. This is a bound, never permission to inherit a missing test.
     deadline = started + 20 * 60
+    # cas-ae6ae: one failure here and one pass at base is not causal proof.
+    # Only a failure recorded more than once at this delivery is "caused".
+    repeats = {}
+    for f in failures:
+        repeats[failure_key(f)] = repeats.get(failure_key(f), 0) + 1
     failures = list({failure_key(f): f for f in failures}.values())
-    result = {"base": base, "inherited": [], "caused": [], "unresolved": failures,
+    result = {"base": base, "inherited": [], "caused": [], "unattributed": [], "unresolved": failures,
               "reused": [], "status": "pending", "timings": {
                   "lookup_seconds": 0, "worktree_seconds": 0, "build_seconds": 0, "test_seconds": 0}}
     def save():
@@ -626,7 +631,9 @@ def lane_attribute(root, base, failures, destination, configuration=None):
                 "failures": result["inherited"] + base_failures if base_configuration == configuration else base_failures,
                 "uncertain": False, "reused": result["reused"]})
             result["inherited"] += base_failures
-            result["caused"] = [f for f in pending if failure_key(f) not in at_base]
+            passed_at_base = [f for f in pending if failure_key(f) not in at_base]
+            result["caused"] = [f for f in passed_at_base if repeats[failure_key(f)] > 1]
+            result["unattributed"] = [f for f in passed_at_base if repeats[failure_key(f)] == 1]
             result["unresolved"] = []
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
             result["error"] = str(error)
@@ -636,16 +643,19 @@ def lane_attribute(root, base, failures, destination, configuration=None):
                 subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True, timeout=15)
             except (OSError, subprocess.SubprocessError) as error:
                 result["cleanup_error"] = str(error)
-    result["status"] = "unresolved" if result["unresolved"] else "caused" if result["caused"] else "inherited"
+    result["status"] = ("unresolved" if result["unresolved"] else "caused" if result["caused"]
+                        else "unattributed" if result["unattributed"] else "inherited")
     save()
     lines = [f"Lane impact: inherited from base {base[:12]} (fails there too): {f['binary']} {f['test']}" for f in result["inherited"]]
-    lines += [f"Lane impact: caused by this delivery (passes or is absent at base): {f['binary']} {f['test']}" for f in result["caused"]]
+    lines += [f"Lane impact: caused by this delivery (failed repeatedly here, passes or is absent at base): {f['binary']} {f['test']}" for f in result["caused"]]
+    lines += [f"Lane impact: unattributed (failed once here, passed once at base {base[:12]}; not proof this delivery caused it): {f['binary']} {f['test']}" for f in result["unattributed"]]
     lines += [f"Lane impact: unresolved at base: {f['binary']} {f['test']}" for f in result["unresolved"]]
     print("\n".join(lines))
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
             handle.write("\n" + "\n".join(f"- {line}" for line in lines) + "\n")
-    return 1 if result["caused"] or result["unresolved"] else 0
+    # An unattributed failure still happened: it stays red, under an honest label.
+    return 1 if result["caused"] or result["unattributed"] or result["unresolved"] else 0
 
 
 def lane_base(root, recorded_ref, inferred):

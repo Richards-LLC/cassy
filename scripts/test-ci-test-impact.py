@@ -453,8 +453,10 @@ path="tests/builtin_archive_portability_test.rs"
         env["RING_TIMEOUT"] = "1"
         self.assertEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0)
         self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "the new timeout is not inherited")
-        caused = json.loads(state.with_name("ring-attribution.json").read_text())["caused"]
-        self.assertEqual([f["test"] for f in caused], ["beta_test::hangs"])
+        # cas-ae6ae: one failure here and one pass at base is unattributed, not "caused".
+        attribution = json.loads(state.with_name("ring-attribution.json").read_text())
+        self.assertEqual(([f["test"] for f in attribution["caused"]], [f["test"] for f in attribution["unattributed"]]),
+                         ([], ["beta_test::hangs"]))
         del env["RING_TIMEOUT"]
         env["RING_UNPARSED"] = "1"
         self.assertNotEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0,

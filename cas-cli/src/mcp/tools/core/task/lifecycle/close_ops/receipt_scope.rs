@@ -1092,7 +1092,8 @@ mod tests {
         )
         .unwrap();
         let titled = commit_changelog_fixture(repo.path(), "add release note");
-        let text = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();
+        let changelog_path = repo.path().join("CHANGELOG.md");
+        let text = std::fs::read_to_string(changelog_path).unwrap();
         assert_eq!(titled_unreleased_entries(&text).unwrap().len(), 1);
         assert!(has_titled_unreleased_delta(repo.path(), &titled, "main", None, &task.id));
         let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main", None);

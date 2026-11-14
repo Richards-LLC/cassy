@@ -28,3 +28,8 @@ containment, and pattern/rule-file inputs retain their credential checks.
 Git scope checks consume shared statement provenance, so unrelated quoted data
 does not alter a later syntax-check invocation. Shell payload boundaries stay
 consistent across Git, credential and role checks.
+
+Consumer filename-list inputs and unresolved helpers receive explained refusals.
+Explicit sort output/temporary destinations and uniq output operands follow
+workspace containment. Credential checks retain shell-opened files and wrapper
+argument-file inputs separately from literal command data.

@@ -83,6 +83,20 @@ Intentional control corrections in the implemented slices:
   checks; unknown options and filename-opening modes keep their refusals.
   The sibling's standalone listing controls are unchanged.
 
+Two workspace/effective-cwd controls that invoke a command through a variable
+move from ALLOW to DENY under the approved design's Simple commands rule two:
+command words must be literal after known wrappers. The malformed-substitution
+control retains DENY and now checks `shell.unterminated` instead of legacy
+human wording. These corrections are separate from the Bash integer-data row.
+
+Standalone filename-list sources and unresolved consumer helpers receive the
+same explained runtime-input refusal as pipeline-derived file readers. Explicit
+sort output/temp destinations and uniq second output operands use existing
+workspace containment. Credential checks consume a common argv/opened-file
+projection and retain wrapper-owned argument files at the wrapper's cwd. Quoted
+replacement values and here-string data remain data. These source regressions
+remain separate from final-candidate and fourteen-day receipts.
+
 R17 recognizes a first top-level, unwrapped `cd` with one literal realpath
 operand (optional `--`). Prior shell state, nested shells, other options,
 dynamic input and extra output commands remain unresolved. Configured and

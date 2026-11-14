@@ -23,3 +23,9 @@ Pattern/rule inputs stay separate from lists of filenames to open.
 
 Git scope checks read each statement's original word facts and projected
 arguments, preserving existing ownership and raw syntax-check requirements.
+
+Consumer option roles share admission and output containment. Unknown filename
+sources do not authorize opening their contents. Explicit output and temporary
+paths retain the command's directory and write-root checks. Credential checks
+include shell-opened files and wrapper input files while keeping replacement,
+here-string and literal script arguments as data.

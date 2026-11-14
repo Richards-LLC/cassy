@@ -980,8 +980,8 @@ impl PushRejectionReason {
 
 /// A row the cloud excluded because its revision cannot be accepted.
 ///
-/// Unlike [`PushRejection`], this is a property of the submitted revision
-/// itself, rather than a project/scope ownership collision. The server returns
+/// Unlike ownership or stale-base rejections, this identifies malformed
+/// submitted revision bytes. The server returns
 /// these under the optional per-entity `invalid` sibling so clients can name
 /// the precise queue row instead of reducing it to an aggregate skip count.
 #[derive(Debug, Clone, Deserialize)]
@@ -1068,10 +1068,9 @@ impl PushRowResult {
 pub(crate) fn push_rejection_is_retryable(reason: &str) -> bool {
     matches!(
         reason.to_ascii_lowercase().as_str(),
-        // A stale base revision is a lost race, not a bad row: the next
-        // cycle pulls the winning state and retries from a valid base.
-        "revision_conflict"
-            | "retryable"
+        // A stale revision needs a pull and payload reconciliation, not a
+        // blind retry. Only transient failures are immediately retryable.
+        "retryable"
             | "temporary"
             | "transient"
             | "server_error"
@@ -1462,36 +1461,6 @@ impl PushResponse {
             }
         }
         revisions
-    }
-
-    /// Rows the server refused because our base revision was stale, mapped to
-    /// the revision the server actually holds.
-    pub(crate) fn revision_conflicts_for(&self, entity_type: &str) -> HashMap<String, Option<i64>> {
-        let mut conflicts = HashMap::new();
-        let Some(rejected) = self
-            .entity_detail(entity_type)
-            .and_then(serde_json::Value::as_object)
-            .and_then(|entity| entity.get("rejected"))
-            .and_then(serde_json::Value::as_array)
-        else {
-            return conflicts;
-        };
-        for rejection in rejected {
-            let is_revision_conflict = rejection
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|reason| reason == "revision_conflict");
-            if !is_revision_conflict {
-                continue;
-            }
-            if let Some(id) = rejection.get("id").and_then(serde_json::Value::as_str) {
-                conflicts.insert(
-                    id.to_string(),
-                    crate::cloud::parse_wire_revision(rejection.get("current_revision")),
-                );
-            }
-        }
-        conflicts
     }
 
     pub(crate) fn row_results_for(

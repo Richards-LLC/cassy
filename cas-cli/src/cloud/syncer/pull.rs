@@ -1967,7 +1967,7 @@ impl CloudSyncer {
         revision: Option<i64>,
         outcome: &Result<UpsertResult, CasError>,
         can_reconcile_skip: bool,
-        read_payload: impl FnOnce() -> Result<String, CasError>,
+        read_payload: impl FnMut(Option<&str>) -> Result<String, CasError>,
         result: &mut SyncResult,
     ) {
         let Some(revision) = revision else { return };
@@ -2016,18 +2016,28 @@ impl CloudSyncer {
         // a concurrent mutation. It is not a settled local-wins decision and
         // must stay an explicit conflict until that authority permits a pull.
         if can_reconcile {
-            // Lifecycle authority stays local. Union the authenticated ordinary
-            // timeline independently; validated proof blocks were restored by
-            // restore_task_proofs and reserved markers stay on their own path.
-            for block in cas_store::task_note_markers::note_blocks(&remote.notes) {
-                if !store.get(&remote.id)?.notes.contains(block) {
-                    store.append_note(&remote.id, &block)?;
-                }
+            let mut merged = local.clone();
+            merged.notes = merge_task_notes(&local.notes, &remote.notes);
+            if merged.notes != local.notes && store.update_from_sync(&merged, &local)?.is_none() {
+                self.queue.park_revision_conflicts(EntityType::Task, &remote.id, self.config.max_retries)?;
+                result.errors.push(format!("revision_reconciliation_required: task {}; local row changed during notes reconciliation", remote.id));
+                return Ok(());
             }
         }
+        let team_id = crate::store::share_policy::resolve_team_id(&self.cloud_config);
         self.settle_pulled_revision(
             EntityType::Task, &remote.id, revision, outcome, can_reconcile,
-            || Ok(serde_json::to_string(&store.get(&remote.id)?)?), result,
+            |previous_payload| {
+                // Scope is stored in the intent/queued wire body, not in the
+                // task table. Preserve that authority when loading canonical state.
+                let previous: serde_json::Value = serde_json::from_str(previous_payload
+                    .ok_or_else(|| CasError::Other("task reconciliation has no queued payload".into()))?)?;
+                Ok(crate::store::load_canonical_sync_payload(
+                    store.get(&remote.id)?,
+                    previous.get("scope").and_then(serde_json::Value::as_str) == Some("global"),
+                    team_id.as_deref(), self.cloud_config.team_only && team_id.is_some(),
+                )?.payload)
+            }, result,
         );
         Ok(())
     }
@@ -2483,7 +2493,7 @@ impl CloudSyncer {
                     EntityType::Entry, &remote_entry_id, entry_revision, &entry_outcome,
                     row_origin.as_deref().is_some_and(|origin| project_ids_match(origin, current_project_id))
                         && !result.memory_fold_conflicts.contains(&remote_entry_id),
-                    || Ok(serde_json::to_string(&store.get(&remote_entry_id)
+                    |_| Ok(serde_json::to_string(&store.get(&remote_entry_id)
                         .or_else(|_| store.get_archived(&remote_entry_id))?)?),
                     &mut result,
                 );
@@ -2687,13 +2697,7 @@ impl CloudSyncer {
                 }
             };
             let remote_rule_id = remote_rule.id.clone();
-            let rule_outcome = self.upsert_rule(rule_store, remote_rule);
-            self.settle_pulled_revision(
-                EntityType::Rule, &remote_rule_id, rule_revision, &rule_outcome,
-                row_origin.as_deref().is_some_and(|origin| project_ids_match(origin, current_project_id)),
-                || Ok(serde_json::to_string(&rule_store.get(&remote_rule_id)?)?), &mut result,
-            );
-            match rule_outcome {
+            match self.upsert_rule(rule_store, remote_rule) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_rules += 1;
                     self.note_pulled_authorship(
@@ -2704,6 +2708,11 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
+                    if let Some(revision) = rule_revision {
+                        let _ =
+                            self.queue
+                                .record_revision(EntityType::Rule, &remote_rule_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
@@ -2732,13 +2741,7 @@ impl CloudSyncer {
                 }
             };
             let remote_skill_id = remote_skill.id.clone();
-            let skill_outcome = self.upsert_skill(skill_store, remote_skill);
-            self.settle_pulled_revision(
-                EntityType::Skill, &remote_skill_id, skill_revision, &skill_outcome,
-                row_origin.as_deref().is_some_and(|origin| project_ids_match(origin, current_project_id)),
-                || Ok(serde_json::to_string(&skill_store.get(&remote_skill_id)?)?), &mut result,
-            );
-            match skill_outcome {
+            match self.upsert_skill(skill_store, remote_skill) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_skills += 1;
                     self.note_pulled_authorship(
@@ -2749,6 +2752,13 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
+                    if let Some(revision) = skill_revision {
+                        let _ = self.queue.record_revision(
+                            EntityType::Skill,
+                            &remote_skill_id,
+                            revision,
+                        );
+                    }
                 }
                 Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
@@ -3715,7 +3725,7 @@ impl CloudSyncer {
                     EntityType::Entry, &remote_entry_id, entry_revision, &entry_outcome,
                     row_origin.as_deref().is_some_and(|origin| project_ids_match(origin, current_project_id))
                         && !result.memory_fold_conflicts.contains(&remote_entry_id),
-                    || Ok(serde_json::to_string(&store.get(&remote_entry_id)
+                    |_| Ok(serde_json::to_string(&store.get(&remote_entry_id)
                         .or_else(|_| store.get_archived(&remote_entry_id))?)?),
                     &mut result,
                 );
@@ -3916,18 +3926,12 @@ impl CloudSyncer {
                 }
             };
             let remote_rule_id = remote_rule.id.clone();
-            let rule_outcome = self.upsert_rule_with_strategy(
+            match self.upsert_rule_with_strategy(
                 rule_store,
                 remote_rule,
                 row_origin.as_deref(),
                 strategy,
-            );
-            self.settle_pulled_revision(
-                EntityType::Rule, &remote_rule_id, rule_revision, &rule_outcome,
-                row_origin.as_deref().is_some_and(|origin| project_ids_match(origin, current_project_id)),
-                || Ok(serde_json::to_string(&rule_store.get(&remote_rule_id)?)?), &mut result,
-            );
-            match rule_outcome {
+            ) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_rules += 1;
                     self.note_pulled_authorship(
@@ -3938,6 +3942,11 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
+                    if let Some(revision) = rule_revision {
+                        let _ =
+                            self.queue
+                                .record_revision(EntityType::Rule, &remote_rule_id, revision);
+                    }
                 }
                 Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
@@ -3966,13 +3975,7 @@ impl CloudSyncer {
                 }
             };
             let remote_skill_id = remote_skill.id.clone();
-            let skill_outcome = self.upsert_skill_with_strategy(skill_store, remote_skill, strategy);
-            self.settle_pulled_revision(
-                EntityType::Skill, &remote_skill_id, skill_revision, &skill_outcome,
-                row_origin.as_deref().is_some_and(|origin| project_ids_match(origin, current_project_id)),
-                || Ok(serde_json::to_string(&skill_store.get(&remote_skill_id)?)?), &mut result,
-            );
-            match skill_outcome {
+            match self.upsert_skill_with_strategy(skill_store, remote_skill, strategy) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_skills += 1;
                     self.note_pulled_authorship(
@@ -3983,6 +3986,13 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
+                    if let Some(revision) = skill_revision {
+                        let _ = self.queue.record_revision(
+                            EntityType::Skill,
+                            &remote_skill_id,
+                            revision,
+                        );
+                    }
                 }
                 Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();

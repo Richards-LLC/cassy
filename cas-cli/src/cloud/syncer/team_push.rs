@@ -511,7 +511,8 @@ impl CloudSyncer {
                         // Preserve a rejected known base until reconciliation;
                         // clearing it would turn the next team push into an
                         // unguarded timestamp write over unseen peer notes.
-                        if let Some(accepted) = body.synced.get(entity_key)
+                        if matches!(entity_type, EntityType::Task | EntityType::Entry)
+                            && let Some(accepted) = body.synced.get(entity_key)
                             .and_then(|detail| detail.get("accepted"))
                             .and_then(serde_json::Value::as_object)
                         {
@@ -769,7 +770,7 @@ impl CloudSyncer {
             let _ = self
                 .queue
                 .record_row_outcome(item.id, "rejected", Some(reason));
-            if row.rejection_is_retryable() && reason != "revision_conflict" {
+            if row.rejection_is_retryable() {
                 let _ = self.queue.mark_failed(item.id, &diagnostic);
             } else {
                 let _ = self

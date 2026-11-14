@@ -68,7 +68,7 @@ impl SyncQueue {
         entity_id: &str,
         revision: i64,
         max_retries: i32,
-        read_payload: impl FnOnce() -> Result<String, CasError>,
+        mut read_payload: impl FnMut(Option<&str>) -> Result<String, CasError>,
     ) -> Result<(), CasError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -80,17 +80,28 @@ impl SyncQueue {
         if previous.is_some_and(|previous| previous > revision) {
             return Ok(());
         }
-        let payload = read_payload()?;
-        tx.execute(
-            "UPDATE sync_queue SET payload=?3,
-                retry_count=CASE WHEN last_reason='revision_conflict' THEN 0 ELSE retry_count END,
-                last_error=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_error END,
-                last_outcome=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_outcome END,
-                last_reason=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_reason END
-             WHERE entity_type=?1 AND entity_id=?2 AND operation='upsert'
-               AND (retry_count<?4 OR last_reason='revision_conflict')",
-            params![entity_type.as_str(), entity_id, payload, max_retries],
-        )?;
+        let pending = {
+            let mut rows = tx.prepare(
+                "SELECT id,payload FROM sync_queue WHERE entity_type=?1 AND entity_id=?2
+                 AND operation='upsert' AND (retry_count<?3 OR last_reason='revision_conflict')",
+            )?;
+            let captured = rows.query_map(params![entity_type.as_str(), entity_id, max_retries],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            captured
+        };
+        for (id, previous_payload) in pending {
+            let payload = read_payload(previous_payload.as_deref())?;
+            tx.execute(
+                "UPDATE sync_queue SET payload=?2,
+                    retry_count=CASE WHEN last_reason='revision_conflict' THEN 0 ELSE retry_count END,
+                    last_error=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_error END,
+                    last_outcome=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_outcome END,
+                    last_reason=CASE WHEN last_reason='revision_conflict' THEN NULL ELSE last_reason END
+                 WHERE id=?1",
+                params![id, payload],
+            )?;
+        }
         tx.execute(
             "INSERT INTO sync_revisions (entity_type,entity_id,revision,updated_at)
              VALUES (?1,?2,?3,?4) ON CONFLICT(entity_type,entity_id)
@@ -161,21 +172,6 @@ impl SyncQueue {
             )
             .optional()?;
         Ok(revision)
-    }
-
-    /// Forget a row's revision, so the next push falls back to the timestamp
-    /// path instead of sending a base the server will reject forever.
-    pub fn clear_revision(
-        &self,
-        entity_type: EntityType,
-        entity_id: &str,
-    ) -> Result<(), CasError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM sync_revisions WHERE entity_type = ?1 AND entity_id = ?2",
-            params![entity_type.as_str(), entity_id],
-        )?;
-        Ok(())
     }
 }
 

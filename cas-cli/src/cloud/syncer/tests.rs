@@ -4483,44 +4483,10 @@ fn decode_push_body(request: &wiremock::Request) -> serde_json::Value {
 
 #[test]
 fn accepted_revisions_are_read_from_either_envelope() {
-    // Personal puts per-type keys at the top level; team nests them under
-    // `synced`. Both must yield the same receipts, or team pushes would
-    // silently never learn a revision.
-    let personal: PushResponse = serde_json::from_value(serde_json::json!({
-        "tasks": {
-            "inserted": 1, "updated": 0, "skipped": 1,
-            "accepted": {"cas-ok": {"revision": "6", "canonical_id": "cas-src"}},
-            "rejected": [{
-                "id": "cas-stale", "reason": "revision_conflict",
-                "existing_canonical_id": "cas-src", "current_revision": "9"
-            }]
-        },
-        "rows": [
-            {"entity_type": "tasks", "id": "cas-ok", "outcome": "updated"},
-            {"entity_type": "tasks", "id": "cas-stale", "outcome": "rejected", "reason": "revision_conflict"}
-        ]
-    }))
-    .unwrap();
-    let team: PushResponse = serde_json::from_value(serde_json::json!({
-        "synced": {
-            "tasks": {
-                "inserted": 1, "updated": 0, "skipped": 1,
-                "accepted": {"cas-ok": {"revision": "6", "canonical_id": "cas-src"}},
-                "rejected": [{
-                    "id": "cas-stale", "reason": "revision_conflict",
-                    "existing_canonical_id": "cas-src", "current_revision": "9"
-                }]
-            }
-        }
-    }))
-    .unwrap();
-
-    for response in [&personal, &team] {
-        assert_eq!(
-            response.accepted_revisions_for("tasks").get("cas-ok"),
-            Some(&6)
-        );
-
+    let detail = serde_json::json!({"accepted":{"cas-ok":{"revision":"6","canonical_id":"cas-src"}}});
+    for body in [serde_json::json!({"tasks":detail}), serde_json::json!({"synced":{"tasks":detail}})] {
+        let response: PushResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(response.accepted_revisions_for("tasks").get("cas-ok"), Some(&6));
     }
 }
 

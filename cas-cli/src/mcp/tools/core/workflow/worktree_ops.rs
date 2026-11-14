@@ -4308,51 +4308,17 @@ impl CasCore {
     ) -> String {
         use crate::worktree::{GitError, WorktreeError};
         let paths = match error {
-            WorktreeError::Git(GitError::MergeConflictPaths(paths)) => paths.iter()
-                .map(|path| crate::worktree::GitOperations::visible_git_label(path))
-                .collect::<Vec<_>>().join(", "),
-            WorktreeError::Git(GitError::MergeConflict) => "not reported by Git".into(),
+            WorktreeError::Git(GitError::MergeConflictPaths(paths)) => paths.clone(),
+            WorktreeError::Git(GitError::MergeConflict) => vec!["not reported by Git".into()],
             _ => return String::new(),
         };
         let Some(task) = task.filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
         else { return String::new(); };
-        let source_tip = task.deliverables.factory_branch_anchor.as_deref().unwrap_or("unrecorded");
-        let Some(target_tip) = target_tip else {
-            return format!("\nCassy could not return task {} to its worker: merge target tip was unresolved.", task.id);
-        };
-        let source = crate::worktree::GitOperations::visible_git_label(&worktree.branch);
-        let target = crate::worktree::GitOperations::visible_git_label(&worktree.parent_branch);
-        let reason = format!(
-            "merge_conflicted: {source} @ {source_tip} could not merge into {target} @ {target_tip}; conflicting paths: {paths}. Merge the target into the delivery branch, resolve, and re-deliver."
-        );
+        let Some(target_tip) = target_tip else { return String::new(); };
         let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
-        let recovery = (|| -> Result<String, String> {
-            let store = self.open_task_store().map_err(|error| error.to_string())?;
-            let current = store.get(&task.id).map_err(|error| error.to_string())?;
-            // Do not decline a new delivery that replaced the attempted one.
-            if current.status != cas_types::TaskStatus::AwaitingMerge
-                || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
-                || current.deliverables.parked_branch != task.deliverables.parked_branch
-                || current.deliverables.work_target != task.deliverables.work_target
-                || current.assignee != task.assignee
-            {
-                return Ok("delivery changed during the merge; no task transition attempted".into());
-            }
-            cas_store::request_changes_for_parked_delivery(&self.cas_root, &task.id, &actor, &reason)
-                .map_err(|error| error.to_string())?;
-            let _ = crate::store::publish_direct_task_write(&self.cas_root, &task.id);
-            let returned = store.get(&task.id).map_err(|error| error.to_string())?;
-            let notice = crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_merge_conflict_reopen_notice(
-                &self.cas_root, &returned, source_tip, target_tip, &reason,
-            );
-            let notice = match notice {
-                Ok(Some(id)) => format!("worker notified (prompt {id})"),
-                Ok(None) => "no live assigned worker to notify".into(),
-                Err(error) => format!("worker notice failed: {error}"),
-            };
-            Ok(format!("Cassy recorded {reason}\nTask {} is Open again with its assignee kept; {notice}. The worker can start task {} and resolve the conflict.", task.id, task.id))
-        })();
-        match recovery {
+        match crate::mcp::tools::core::task::lifecycle::parked_conflicts::return_to_worker(
+            &self.cas_root, task, &worktree.parent_branch, target_tip, &paths, &actor,
+        ) {
             Ok(detail) => format!("\n{detail}"),
             Err(error) => format!("\nCassy could not return task {} to its worker ({error}); run task action=request_changes id={}.", task.id, task.id),
         }
@@ -6491,6 +6457,16 @@ impl CasCore {
         if defer_reviewed_cleanup && !push_outcome.is_published() {
             do_cleanup = false;
             reconcile_note.push_str("\nCleanup deferred until publication; source worktree and branch retained.");
+        }
+        if push_outcome.is_published()
+            && let Some(tip) = merge_commit.as_deref()
+        {
+            let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
+            if let Err(error) = crate::mcp::tools::core::task::lifecycle::parked_conflicts::recheck_target(
+                &cas_root, &cwd, &push_branch, tip, &actor,
+            ) {
+                tracing::warn!(%error, "parked sibling conflict check deferred to daemon scan");
+            }
         }
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
         post_merge_test_delay().await;

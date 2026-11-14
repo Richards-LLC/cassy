@@ -476,7 +476,7 @@ pub enum ReleaseCommands {
     Track(release_automation::TrackArgs),
     /// Resolve shipped deliveries and portable proof references at an exact SHA
     Inventory(release_automation::InventoryArgs),
-    /// Preview per-member close decisions without changing the release store
+    /// Preview per-member close decisions without changing existing release-store data
     Preview(release_automation::PreviewArgs),
     /// Reconcile a published release once, from the host's publication read
     Published(release_adapters::PublishedArgs),

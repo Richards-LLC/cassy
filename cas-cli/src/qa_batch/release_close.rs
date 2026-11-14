@@ -600,6 +600,8 @@ pub(crate) fn parent_dispatch_covered(root: &Path, id: &str) -> bool {
 }
 
 /// Open an existing store without schema initialization, sync repair or cache writes.
+/// A read-only WAL reader keeps normal locking and may create absent `-shm`/`-wal`
+/// sidecars; existing bytes are never changed (GH #1859).
 pub(crate) fn read_connection(root: &Path) -> Result<rusqlite::Connection, String> {
     rusqlite::Connection::open_with_flags(root.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| e.to_string())
@@ -757,7 +759,7 @@ pub(crate) fn reconcile_members(
         outcomes.insert(id, outcome);
     }
     if !write {
-        // Portable replay receipt: preview bypasses logging to preserve its no-write contract.
+        // Portable replay receipt: preview bypasses logging so it writes no store rows.
         eprintln!("approval_lookup: legacy_candidate_approvals={legacy_approvals}");
     }
     Ok(outcomes)

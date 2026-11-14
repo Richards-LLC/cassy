@@ -1138,7 +1138,7 @@ impl GitOperations {
                     reason: "the merge does not contain the observed origin tip".into(),
                 };
             }
-            self.publish_pinned_source_with_lease(branch, head, Some(expected), PUSH_TIMEOUT)
+            self.publish_pinned_source_with_lease(branch, head, Some(expected), true, PUSH_TIMEOUT)
         };
         let first = publish(head, &expected);
         if !reconcile_peer || !matches!(first, TargetPushOutcome::NonFastForward { .. }) {
@@ -1252,7 +1252,7 @@ impl GitOperations {
         head: &str,
         timeout: Duration,
     ) -> TargetPushOutcome {
-        self.publish_pinned_source_with_lease(branch, head, None, timeout)
+        self.publish_pinned_source_with_lease(branch, head, None, false, timeout)
     }
 
     fn publish_pinned_source_with_lease(
@@ -1260,6 +1260,7 @@ impl GitOperations {
         branch: &str,
         head: &str,
         expected: Option<&str>,
+        proven_merge: bool,
         timeout: Duration,
     ) -> TargetPushOutcome {
         let remote_ref = format!("origin/{branch}");
@@ -1314,7 +1315,15 @@ impl GitOperations {
         ])
         // Never block on an interactive credential prompt (mirrors fetch).
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("CAS_PROVEN_MERGE_HEAD")
+        .env_remove("CAS_PROVEN_MERGE_BASE")
         .current_dir(checkout.path());
+        // Only publish_merge_candidate reaches this with checked lane content;
+        // generic supervisor publications must retain their pre-push checks.
+        if proven_merge && let Some(base) = expected {
+            cmd.env("CAS_PROVEN_MERGE_HEAD", &local_sha)
+                .env("CAS_PROVEN_MERGE_BASE", base);
+        }
 
         match Self::run_command_bounded(cmd, timeout.saturating_sub(started.elapsed())) {
             Ok(output) if output.status.success() => TargetPushOutcome::Pushed { sha: local_sha },

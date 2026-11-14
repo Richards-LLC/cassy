@@ -68,6 +68,9 @@ impl Fixture {
 /// A workspace with crate `widget`; the worker's pushed, unmerged lane
 /// changes `widget::gear`; its task declares only an unrelated target.
 fn fixture(env: &mut TestEnvGuard) -> Fixture {
+    // Task identity precedes its delivery; store setup can exceed the
+    // attribution clock-skew allowance on a busy disk.
+    let mut task = Task::new(ID.into(), "turn the gear".into());
     let origin = tempfile::tempdir().unwrap();
     git(origin.path(), &["init", "-q", "--bare"]);
     let dir = tempfile::tempdir().unwrap();
@@ -123,7 +126,6 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("br-supervisor-session".into());
 
-    let mut task = Task::new(ID.into(), "turn the gear".into());
     task.status = TaskStatus::InProgress;
     task.assignee = Some(WORKER.into());
     task.risk = vec![TaskRisk::BlastRadius];

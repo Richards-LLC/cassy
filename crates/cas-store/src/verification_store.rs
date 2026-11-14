@@ -1352,6 +1352,24 @@ pub fn resolve_verification_dispatch_with_conn(
     capability_id: Option<&str>,
     supervisor_direct: bool,
 ) -> Result<Option<VerificationDispatch>> {
+    finish_verification_dispatch_with_conn(conn, dispatch_id, verifier_agent_id, capability_id, supervisor_direct, true)
+}
+
+/// An infrastructure failure consumes the failed child's authority, not the review.
+pub fn retry_verification_dispatch_after_error_with_conn(
+    conn: &Connection, dispatch_id: &str, verifier_agent_id: &str,
+    capability_id: Option<&str>, supervisor_direct: bool,
+) -> Result<Option<VerificationDispatch>> {
+    if latest_dispatch_status(conn, dispatch_id)? != Some(VerificationStatus::Error) {
+        return Err(StoreError::Parse("only an infrastructure ERROR can release review authority".into()));
+    }
+    finish_verification_dispatch_with_conn(conn, dispatch_id, verifier_agent_id, capability_id, supervisor_direct, false)
+}
+
+fn finish_verification_dispatch_with_conn(
+    conn: &Connection, dispatch_id: &str, verifier_agent_id: &str,
+    capability_id: Option<&str>, supervisor_direct: bool, terminal: bool,
+) -> Result<Option<VerificationDispatch>> {
     let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
     let now = Utc::now();
     // A server handoff consumed by the same atomic verdict transaction has
@@ -1394,12 +1412,15 @@ pub fn resolve_verification_dispatch_with_conn(
             "verification dispatch is owned by another verifier".to_string(),
         ));
     }
-    let resolved_at = now;
+    if !terminal { retire_dispatch_claim(conn, &dispatch)?; }
     let changed = conn.execute(
         "UPDATE verification_dispatches
-         SET state = 'resolved', resolved_at = ?2
+         SET state = ?2, resolved_at = ?3,
+             verifier_agent_id = CASE WHEN ?4 THEN verifier_agent_id ELSE NULL END,
+             capability_id = CASE WHEN ?4 THEN capability_id ELSE NULL END
          WHERE id = ?1 AND state IN ('pending', 'claimed', 'timed_out')",
-        params![dispatch.id, resolved_at.to_rfc3339()],
+        params![dispatch.id, if terminal { "resolved" } else { "pending" },
+            terminal.then(|| now.to_rfc3339()), terminal],
     )?;
     if changed != 1 {
         return Err(StoreError::Parse(
@@ -1407,6 +1428,37 @@ pub fn resolve_verification_dispatch_with_conn(
         ));
     }
     get_verification_dispatch_with_conn(conn, dispatch_id).map(Some)
+}
+
+fn latest_dispatch_status(conn: &Connection, id: &str) -> Result<Option<VerificationStatus>> {
+    let row: Option<(String, Option<String>)> = conn.query_row(
+        "SELECT status,status_detail FROM verifications WHERE dispatch_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1",
+        [id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    Ok(row.map(|(status, detail)| VerificationStatus::from_storage(&status, detail.as_deref())))
+}
+
+fn retire_dispatch_claim(conn: &Connection, dispatch: &VerificationDispatch) -> Result<()> {
+    if let Some(capability) = &dispatch.capability_id {
+        let now = Utc::now().to_rfc3339();
+        conn.execute("UPDATE verification_capabilities SET consumed_at=COALESCE(consumed_at,?2) WHERE id=?1", params![capability,now])?;
+        conn.execute("UPDATE verification_handoffs SET state='consumed',consumed_at=COALESCE(consumed_at,?2) WHERE capability_id=?1 AND state IN ('pending','bound')", params![capability,now])?;
+    }
+    Ok(())
+}
+
+/// Repair the old writer's resolved ERROR only at an authorized write boundary.
+/// A real terminal verdict or a newer dispatch can never be reopened here.
+pub fn recover_errored_verification_dispatch_with_conn(conn: &Connection, id: &str) -> Result<()> {
+    let dispatch = get_verification_dispatch_with_conn(conn, id)?;
+    if dispatch.state == VerificationDispatchState::Resolved
+        && latest_dispatch_status(conn, id)? == Some(VerificationStatus::Error)
+        && get_latest_verification_dispatch_with_conn(conn, &dispatch.task_id)?.is_some_and(|d| d.id == id)
+    {
+        retire_dispatch_claim(conn, &dispatch)?;
+        conn.execute("UPDATE verification_dispatches SET state='pending',resolved_at=NULL,verifier_agent_id=NULL,capability_id=NULL WHERE id=?1 AND state='resolved'", [id])?;
+    }
+    Ok(())
 }
 
 /// Current dispatches awaiting expiry recovery (pending, claimed or timed out)
@@ -1743,11 +1795,8 @@ pub fn release_failed_verifier_dispatch(
         "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1 AND status NOT IN ('closed', 'cancelled'))",
         params![dispatch.task_id], |row| row.get(0),
     )?;
-    let has_verdict: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM verifications WHERE dispatch_id = ?1)",
-        params![dispatch_id],
-        |row| row.get(0),
-    )?;
+    let has_verdict = latest_dispatch_status(&tx, dispatch_id)?
+        .is_some_and(|status| !matches!(status, VerificationStatus::Error | VerificationStatus::Pending));
     if dispatch.state != VerificationDispatchState::Claimed
         || dispatch.verifier_agent_id.as_deref() != Some(verifier_agent_id)
         || dispatch.deadline_at <= Utc::now()
@@ -1758,18 +1807,7 @@ pub fn release_failed_verifier_dispatch(
         tx.commit()?;
         return Ok(false);
     }
-    let now = Utc::now().to_rfc3339();
-    if let Some(capability) = &dispatch.capability_id {
-        tx.execute(
-            "UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2) WHERE id = ?1",
-            params![capability, now],
-        )?;
-        tx.execute(
-            "UPDATE verification_handoffs SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
-             WHERE capability_id = ?1 AND state IN ('pending', 'bound')",
-            params![capability, now],
-        )?;
-    }
+    retire_dispatch_claim(&tx, &dispatch)?;
     tx.execute(
         "UPDATE verification_dispatches SET state = 'pending', verifier_agent_id = NULL, capability_id = NULL
          WHERE id = ?1 AND state = 'claimed' AND verifier_agent_id = ?2",

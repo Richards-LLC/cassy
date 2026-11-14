@@ -813,7 +813,7 @@ pub enum FactoryCommands {
     RecordTestReceipt {
         #[arg(long)]
         task_id: String,
-        /// JSON evidence: head, repo, cargo_args, log_path and exit_code.
+        /// Path to the JSON request file. Fields: head, repo, cargo_args (array of argv strings), log_path and exit_code.
         #[arg(long)]
         request: std::path::PathBuf,
     },
@@ -1386,12 +1386,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::RecordTestReceipt { task_id, request } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("test receipt requires a Cassy project"))?;
-                if std::fs::metadata(request)?.len() > 512 * 1024 {
-                    anyhow::bail!("test receipt request exceeds 512 KiB");
-                }
-                let payload = std::fs::read_to_string(request)?;
-                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
-                println!("{}", crate::factory_worker_check::record_supervisor_test(&core, task_id, &payload)?);
+                println!("{}", crate::factory_worker_check::record_supervisor_test_from_cli(root, task_id, &request)?);
                 Ok(())
             }
             FactoryCommands::WorkerCheck {
@@ -2472,6 +2467,14 @@ fn check_factory_launch(
     };
 
     if let Some(cas_root) = resolved_cas_root.as_deref() {
+        // The shared store identifies the supervisor's main checkout even
+        // when launch was requested from a linked worktree with private hooks.
+        let project = cas_root.parent().unwrap_or(cwd);
+        if GitOperations::detect_repo_root(project).is_ok()
+            && let Err(error) = crate::cli::doctor::verify_git_hooks_path(project)
+        {
+            failures.push(error);
+        }
         let config = Config::load(cas_root).unwrap_or_default();
         let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
         // cas-3f93: worker targets on `[factory] scratch_root` fill that

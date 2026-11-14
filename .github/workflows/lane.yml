@@ -503,6 +503,8 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      - uses: ./.github/actions/setup-native-test-deps
+
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 

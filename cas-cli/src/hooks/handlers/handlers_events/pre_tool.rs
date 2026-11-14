@@ -8827,7 +8827,7 @@ EOF
             let response = serde_json::to_value(response).unwrap();
             let decision = &response["hookSpecificOutput"]["permissionDecision"];
             let reason = response["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
-            if (decision == "deny") != denied || (denied && !reason.contains("[H-29]") && !reason.contains("[shell.unterminated]")) {
+            if (decision == "deny") != denied || (denied && !reason.contains("[H-29]") && !reason.contains("shell.unterminated")) {
                 failures.push(format!("{case}: {decision}: {reason}"));
             }
         }
@@ -9084,7 +9084,7 @@ EOF
         ] {
             let (status, reason) = decision(command);
             assert_eq!(status, "deny", "{command}: {reason}");
-            assert!(reason.contains("[H-29]") || reason.contains("[shell.unterminated]"), "{command}: {reason}");
+            assert!(reason.contains("[H-29]") || reason.contains("shell.unterminated"), "{command}: {reason}");
         }
         // cas-d6f2: these operands recursively evaluate subscript text.
         let indirect = "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; ";
@@ -9113,7 +9113,7 @@ EOF
             let command = format!("{indirect}{expression}");
             let (status, reason) = decision(&command);
             assert_eq!(status, "deny", "{command}: {reason}");
-            assert!(reason.contains("[H-29]") || reason.contains("[shell.unterminated]"), "{command}: {reason}");
+            assert!(reason.contains("[H-29]") || reason.contains("shell.unterminated"), "{command}: {reason}");
         }
         for allowed in [
             "[[ 1 -eq 1 ]]",
@@ -11540,7 +11540,7 @@ mod worker_commit_guard_tests {
             let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
             let output = &value["hookSpecificOutput"];
             if output["permissionDecision"] != "deny"
-                || !output["permissionDecisionReason"].as_str().unwrap_or("").contains("[shell.unterminated]")
+                || !output["permissionDecisionReason"].as_str().unwrap_or("").contains("shell.unterminated")
             {
                 failures.push(format!("{command:?}: {value}"));
             }
@@ -11560,7 +11560,7 @@ mod worker_commit_guard_tests {
         let input = hook_git_write_input("/worktree", &command);
         let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
         assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{value}");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("[shell.depth]"), "{value}");
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("shell.depth"), "{value}");
     }
 
     #[test]

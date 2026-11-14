@@ -26415,6 +26415,67 @@ pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
         })
 }
 
+/// cas-f4a2: the first-parent proof measures each task commit alone. In the
+/// v4.28 closeout that read a commit the task itself reverted (03bc's red
+/// control), a fragment draft the task rewrote before release prep folded it
+/// (aeb3) and a bundle release prep rebuilt (343d) as reverts. A member is
+/// reverted only when its net `base..shipped` effect is absent: re-measure the
+/// dropped paths as one range, and leave rebuilt bundles to the cas-baf7 rule
+/// once every source path is proven. Returns the paths still dropped.
+pub(crate) fn release_net_dropped_paths(
+    repo: &std::path::Path,
+    base: &str,
+    shipped: &str,
+    target: &str,
+    task_id: &str,
+    dropped: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let changed = |path: &str| -> Result<bool, String> {
+        let status = std::process::Command::new("git")
+            .args(["diff", "--quiet", "--no-renames", base, shipped, "--", path])
+            .current_dir(repo)
+            .measurement_status()
+            .map_err(|error| format!("failed to inspect net `{path}`: {error}"))?;
+        match status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(format!("Git could not inspect net `{path}` (exit {status})")),
+        }
+    };
+    let mut net = Vec::new();
+    for path in dropped {
+        if changed(&path)? {
+            net.push(path);
+        }
+    }
+    if net.is_empty() {
+        return Ok(net);
+    }
+    let remaining = match delivery_content_presence_on_target_for_paths(
+        repo, shipped, target, Some(&net), false, &[task_id], Some(base),
+    ) {
+        DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => Vec::new(),
+        DeliveryContentPresence::Dropped { paths } => paths,
+        DeliveryContentPresence::Unknown { reason } => return Err(reason),
+    };
+    let carries_source = || -> Result<bool, String> {
+        let names = std::process::Command::new("git")
+            .args(["diff", "--name-only", "--no-renames", base, shipped, "--"])
+            .current_dir(repo)
+            .measurement_output()
+            .map_err(|error| format!("failed to list net delivery paths: {error}"))?;
+        Ok(String::from_utf8_lossy(&names.stdout).lines()
+            .any(|path| !path.is_empty() && !regenerable_build_artifact(repo, path)))
+    };
+    if !remaining.is_empty()
+        && remaining.iter().all(|path| regenerable_build_artifact(repo, path))
+        && carries_source()?
+    {
+        return Ok(Vec::new());
+    }
+    Ok(remaining)
+}
+
 fn delivery_content_presence_on_target_for_paths(
     repo_path: &std::path::Path,
     delivery_commit: &str,

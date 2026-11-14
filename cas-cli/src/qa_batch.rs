@@ -1083,7 +1083,15 @@ pub(crate) fn release_delivery_effect(
     };
     match presence {
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => Ok(()),
-        DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
+        // cas-f4a2: per-commit drops are re-judged by the net delivered range.
+        DeliveryContentPresence::Dropped { paths } => match base {
+            Some(base) => match close_ops::release_net_dropped_paths(repo, base, shipped, target, task_id, paths) {
+                Ok(remaining) if remaining.is_empty() => Ok(()),
+                Ok(_) => Err(ReleaseInventoryCode::Reverted),
+                Err(_) => Err(ReleaseInventoryCode::UnprovenContent),
+            },
+            None => Err(ReleaseInventoryCode::Reverted),
+        },
         DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
     }
 }

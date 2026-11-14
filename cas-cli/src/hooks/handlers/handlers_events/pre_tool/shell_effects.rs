@@ -1203,6 +1203,9 @@ fn collect_script(
                 }
             }
 
+            // A leading command executes before any later conditional syntax.
+            let entry_directory = depth == 0 && skipped_keywords == 0
+                && effects.read_contexts.as_ref().is_some_and(Vec::is_empty);
             if depth == 0 && let Some(contexts) = &mut effects.read_contexts {
                 if dirs.is_empty() { return Err("an unresolved credential working directory"); }
                 contexts.push(ShellReadContext {
@@ -1212,6 +1215,7 @@ fn collect_script(
                 });
             }
             let read_stack = effects.read_contexts.is_some();
+            let read_unconditional = read_stack && (!assignment_may_skip || entry_directory);
             if read_stack && name == Some("popd") {
                 if let Some(previous) = directory_stack.pop() { dirs = previous; }
             }
@@ -1278,7 +1282,7 @@ fn collect_script(
                 }
                 // The next && statement requires cd to have succeeded.
                 // Keep failed/skipped alternatives for later ;/|| joins.
-                if and_then || (read_stack && !assignment_may_skip) {
+                if and_then || read_unconditional {
                     dirs = changed;
                 } else {
                     for directory in changed {
@@ -1290,7 +1294,7 @@ fn collect_script(
             // Keep the credential guard's existing destination policy for an
             // unconditional directory command, including a later ; join.
             // Conditional/skipped commands retain the shared alternatives.
-            if read_stack && !assignment_may_skip && matches!(name, Some("cd" | "pushd")) {
+            if read_unconditional && matches!(name, Some("cd" | "pushd")) {
                 incoming = dirs.clone();
             }
             if name == Some("cd") || (read_stack && matches!(name, Some("pushd" | "popd"))) {

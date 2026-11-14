@@ -17033,6 +17033,28 @@ fn checkout_is_clean(worktree: &std::path::Path) -> bool {
         .output().is_ok_and(|out| out.status.success() && out.stdout.is_empty())
 }
 
+/// Whether the task has any durable delivery or handoff evidence that makes a
+/// no-delivery close ineligible. Retarget safety uses the same evidence gate:
+/// only an otherwise empty source can have its recorded start rebound.
+pub(crate) fn has_recorded_no_delivery_state(task: &Task, receipt: Option<&str>) -> bool {
+    let delivery = &task.deliverables;
+    task.execution_note.is_some()
+        || task.branch.is_some()
+        || receipt.is_some()
+        || !handoff_prior_holders(&task.notes).is_empty()
+        || has_recorded_code_delivery(task)
+        || delivery.parked_branch.is_some()
+        || !delivery.handoff_branches.is_empty()
+        || delivery.integration_batch.is_some()
+        || delivery.delivery_pr_number.is_some()
+        || delivery.review_envelope.is_some()
+        || delivery.negative_result.is_some()
+        || delivery.evidence_only.is_some()
+        || delivery.green_merge_commit.is_some()
+        || delivery.merge_conflicted
+        || delivery.declined_factory_branch_anchors.as_ref().is_some_and(|anchors| !anchors.is_empty())
+}
+
 /// Prove absence for a fresh no_delivery declaration, rather than interpreting
 /// an empty diff (or a failed Git probe) as permission to bypass delivery gates.
 /// Inspect both local and origin refs: a merged local lane cannot hide a newer
@@ -17047,15 +17069,7 @@ fn measure_no_delivery(
     window: Option<&TaskCommitReceiptWindow>,
 ) -> Result<String, String> {
     let delivery = &task.deliverables;
-    if task.execution_note.is_some() || task.branch.is_some() || receipt.is_some()
-        || !handoff_prior_holders(&task.notes).is_empty()
-        || has_recorded_code_delivery(task) || delivery.parked_branch.is_some()
-        || !delivery.handoff_branches.is_empty() || delivery.integration_batch.is_some()
-        || delivery.delivery_pr_number.is_some() || delivery.review_envelope.is_some()
-        || delivery.negative_result.is_some() || delivery.evidence_only.is_some()
-        || delivery.green_merge_commit.is_some() || delivery.merge_conflicted
-        || delivery.declined_factory_branch_anchors.as_ref().is_some_and(|anchors| !anchors.is_empty())
-    {
+    if has_recorded_no_delivery_state(task, receipt) {
         return Err("recorded delivery, methodology or handoff evidence exists; use the ordinary close contract.".into());
     }
     let window = window.ok_or("task attribution is unavailable")?;

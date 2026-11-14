@@ -79,16 +79,16 @@ struct RetargetedSourceRebind {
     tip: String,
     target_tip: String,
     previous_start: cas_types::FactoryBranchStart,
+    actor: String,
 }
 
-/// Rebind an unchanged source snapshot when an unparked task follows its
-/// parent to a later train. A lane with any work, a different assignee, or an
-/// unrelated target needs the explicit audited supervisor rebind path.
+/// Rebind an unchanged, empty source snapshot when an unparked task follows
+/// its parent to a later train. Other source states retain the existing epic
+/// move behavior and keep their recorded start for attribution and close.
 fn validate_empty_source_retarget(
     cas_root: &std::path::Path,
     task: &Task,
     target: &cas_types::WorkTarget,
-    actor: String,
 ) -> Result<Option<RetargetedSourceRebind>, String> {
     let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
         return Ok(None);
@@ -96,34 +96,17 @@ fn validate_empty_source_retarget(
     if start.work_target == *target {
         return Ok(None);
     }
-    if task.assignee.as_deref() != Some(start.assignee.as_str()) {
-        return Err("recorded source assignee differs; use the explicit supervisor branch rebind before retargeting".into());
+    if super::lifecycle::close_ops::has_recorded_no_delivery_state(task, None) {
+        return Ok(None);
     }
-    if start.work_target.repo_selector != target.repo_selector {
-        return Err("recorded source repository differs; use the explicit supervisor branch rebind before retargeting".into());
-    }
-    let has_delivery_state = task.execution_note.is_some()
-        || task.branch.is_some()
-        || super::lifecycle::close_ops::has_recorded_code_delivery(task)
-        || task.deliverables.parked_branch.is_some()
-        || !task.deliverables.handoff_branches.is_empty()
-        || task.deliverables.integration_batch.is_some()
-        || task.deliverables.delivery_pr_number.is_some()
-        || task.deliverables.review_envelope.is_some()
-        || task.deliverables.negative_result.is_some()
-        || task.deliverables.evidence_only.is_some()
-        || task.deliverables.green_merge_commit.is_some()
-        || task.deliverables.merge_conflicted
-        || task.deliverables.declined_factory_branch_anchors.as_ref().is_some_and(|anchors| !anchors.is_empty())
-        || task.deliverables.factory_branch_anchor.is_some()
-        || !task.deliverables.historical_factory_branch_anchors.is_empty();
-    if has_delivery_state {
-        return Err("task has recorded delivery state; use the explicit supervisor branch rebind before retargeting".into());
-    }
-    let old_repo = super::repo_context::resolve_repo_context(cas_root, &start.work_target)?;
-    let new_repo = super::repo_context::resolve_repo_context(cas_root, target)?;
+    let (Ok(old_repo), Ok(new_repo)) = (
+        super::repo_context::resolve_repo_context(cas_root, &start.work_target),
+        super::repo_context::resolve_repo_context(cas_root, target),
+    ) else {
+        return Ok(None);
+    };
     if old_repo.git_common_dir != new_repo.git_common_dir {
-        return Err("recorded source repository differs; use the explicit supervisor branch rebind before retargeting".into());
+        return Ok(None);
     }
     let repo = &new_repo.repo_root;
     let mut source_tips = Vec::new();
@@ -134,28 +117,35 @@ fn validate_empty_source_retarget(
         }
     }
     if source_tips.is_empty() || source_tips.iter().any(|tip| tip != &start.base_sha) {
-        return Err("recorded source lane has changed; use the explicit supervisor branch rebind before retargeting".into());
+        return Ok(None);
+    }
+    if task.assignee.as_deref() != Some(start.assignee.as_str()) {
+        return Err("recorded task source assignee differs; the empty source cannot be rebound automatically".into());
     }
     let target_ref = super::lifecycle::close_ops::preferred_diff_target_ref_for_delivery(
         repo, &target.target_branch, task.delivery_mode,
     );
-    let target_tip = crate::git_evidence::resolve_branch_sha(repo, &target_ref)
-        .ok_or_else(|| "new integration target is unavailable; use the explicit supervisor branch rebind before retargeting".to_string())?;
+    let Some(target_tip) = crate::git_evidence::resolve_branch_sha(repo, &target_ref) else {
+        return Ok(None);
+    };
     let ancestry = std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", &start.base_sha, &target_tip])
         .current_dir(repo)
         .output()
-        .map_err(|_| "cannot inspect source ancestry; use the explicit supervisor branch rebind before retargeting".to_string())?;
+        .ok();
+    let Some(ancestry) = ancestry else {
+        return Ok(None);
+    };
     if !ancestry.status.success() {
-        return Err("new target does not contain the unchanged source lane; use the explicit supervisor branch rebind before retargeting".into());
+        return Ok(None);
     }
     Ok(Some(RetargetedSourceRebind {
-        actor,
         reason: "Automatic retarget of an unchanged source lane whose start is contained in the new target".into(),
         branch: start.branch.clone(),
         tip: start.base_sha.clone(),
         target_tip,
         previous_start: start.clone(),
+        actor: String::new(),
     }))
 }
 
@@ -2494,16 +2484,8 @@ impl CasCore {
             } else {
                 None
             };
-            let source_rebind = if let Some(target) = retarget.as_ref()
-                && task.assignee.is_some()
-                && task.deliverables.factory_branch_start.is_some()
-            {
-                let actor = self.get_agent_id().map_err(|error| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!("Cannot audit source retarget without a registered actor: {error}")),
-                    data: None,
-                })?;
-                validate_empty_source_retarget(&self.cas_root, &task, target, actor)
+            let mut source_rebind = if let Some(target) = retarget.as_ref() {
+                validate_empty_source_retarget(&self.cas_root, &task, target)
                     .map_err(|message| McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(message),
@@ -2512,6 +2494,13 @@ impl CasCore {
             } else {
                 None
             };
+            if let Some(audit) = source_rebind.as_mut() {
+                audit.actor = self.get_agent_id().map_err(|error| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Cannot audit source retarget without a registered actor: {error}")),
+                    data: None,
+                })?;
+            }
             // A parked or recorded delivery never reaches here: the guard
             // above refuses `epic=` for it with the proof_scope_fix route.
             let already_matches = match replacement.as_ref() {
@@ -4063,6 +4052,17 @@ mod epic_move_work_target_tests {
         epic
     }
 
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
     async fn move_into(core: &CasCore, task_id: &str, epic_id: &str) {
         let req: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
             "id": task_id,
@@ -4178,6 +4178,70 @@ mod epic_move_work_target_tests {
             "release/operator-selected",
             "an explicit non-default target must not be overwritten"
         );
+    }
+
+    #[tokio::test]
+    async fn assigned_started_epic_moves_rebind_only_unchanged_empty_source() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = TempDir::new().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(repo.path().join(".cas")).unwrap();
+        std::fs::write(
+            repo.path().join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-c85e\"\n\n[factory]\nepic_base_branch = \"main\"\n",
+        ).unwrap();
+        git(repo.path(), &["commit", "--allow-empty", "-qm", "seed"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["branch", "epic/old", &base]);
+        git(repo.path(), &["branch", "epic/new", &base]);
+        let empty_lane = "factory/real-worker-empty";
+        let nonempty_lane = "factory/real-worker-nonempty";
+        git(repo.path(), &["branch", empty_lane, &base]);
+        git(repo.path(), &["checkout", "-q", "-b", nonempty_lane, "main"]);
+        std::fs::write(repo.path().join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+        git(repo.path(), &["add", "delivery.rs"]);
+        git(repo.path(), &["commit", "-qm", "fix: delivered work"]);
+        git(repo.path(), &["checkout", "-q", "main"]);
+
+        let core = CasCore::with_daemon(repo.path().join(".cas"), None, None);
+        core.set_agent_id_for_testing("real-supervisor".into());
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        store.add(&epic("cas-c85e-old", "epic/old")).unwrap();
+        store.add(&epic("cas-c85e-new", "epic/new")).unwrap();
+
+        for (id, lane, delivered) in [
+            ("cas-c85e-empty-start", empty_lane, false),
+            ("cas-c85e-nonempty-start", nonempty_lane, true),
+        ] {
+            let mut task = Task::new(id.into(), "assigned started retarget".into());
+            task.status = TaskStatus::InProgress;
+            task.assignee = Some("real-worker".into());
+            task.deliverables.work_target = Some(target("epic/old"));
+            let original_start = cas_types::FactoryBranchStart {
+                work_target: target("epic/old"),
+                assignee: "real-worker".into(),
+                branch: lane.into(),
+                base_sha: base.clone(),
+            };
+            task.deliverables.factory_branch_start = Some(original_start.clone());
+            store.add(&task).unwrap();
+            store.add_dependency(&Dependency::new(
+                id.into(), "cas-c85e-old".into(), DependencyType::ParentChild,
+            )).unwrap();
+
+            move_into(&core, id, "cas-c85e-new").await;
+            let moved = store.get(id).unwrap();
+            assert_eq!(branch_of(&store, id), "epic/new");
+            let start = moved.deliverables.factory_branch_start.as_ref().unwrap();
+            if delivered {
+                assert_eq!(start, &original_start, "non-empty source keeps its original start");
+                assert!(!moved.notes.contains("DELIVERY BRANCH REBOUND"));
+            } else {
+                assert_eq!(start.work_target, target("epic/new"));
+                assert!(moved.notes.contains("DELIVERY BRANCH REBOUND"));
+            }
+        }
     }
 
     async fn add_parent(core: &CasCore, task_id: &str, epic_id: &str) -> Result<(), String> {

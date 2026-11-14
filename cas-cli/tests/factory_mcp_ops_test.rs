@@ -1747,6 +1747,103 @@ async fn test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolat
     assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
 }
 
+/// GH #1921 replay: user `max_workers = 20`, no project override, 9 live
+/// workers. Admission must use the inherited limit, a project override must
+/// still win, and with no user value the built-in 8 applies.
+#[test]
+fn spawn_workers_admits_against_inherited_user_max_workers_cas_65b9() {
+    run_isolated_codex_test(
+        "spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child",
+    );
+    env.create_epic("Inherited worker limit Epic");
+    for index in 0..9 {
+        env.register_worker_with_metadata(&format!("live-{index}"), HashMap::new());
+    }
+    let user = std::path::PathBuf::from(std::env::var_os("HOME").expect("child HOME")).join(".cas");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("config.toml"), "[factory]\nmax_workers = 20\n").unwrap();
+    let spawn = || {
+        let mut req = factory_req("spawn_workers");
+        req.count = Some(1);
+        env.service.factory_request(Parameters(req))
+    };
+
+    spawn().await.expect("inherited user limit 20 admits a 10th worker");
+    assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
+
+    let project = env.cas_root.join("config.toml");
+    let original = std::fs::read_to_string(&project).unwrap_or_default();
+    std::fs::write(&project, format!("{original}\n[factory]\nmax_workers = 9\n")).unwrap();
+    let refused = spawn().await.unwrap_err().message;
+    assert!(refused.contains("9/9") && refused.contains("source: project"), "{refused}");
+
+    std::fs::write(&project, original).unwrap();
+    std::fs::remove_file(user.join("config.toml")).unwrap();
+    let refused = spawn().await.unwrap_err().message;
+    assert!(refused.contains("9/8") && refused.contains("source: default"), "{refused}");
+}
+
+/// Nov 13 replay: 1 live worker here, 7 in another factory project. The
+/// refusal and worker_status must state the same 8/8 with both projects.
+#[test]
+fn spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6() {
+    run_isolated_codex_test(
+        "spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child",
+    );
+    env.create_epic("Shared machine capacity Epic");
+    env.register_worker_with_metadata("local-live", HashMap::new());
+    let other = TempDir::new().unwrap();
+    // Its own Git root, so store discovery cannot climb into an enclosing repo.
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(other.path())
+        .status().unwrap().success());
+    let other_root = init_cas_dir(other.path()).unwrap();
+    let other_agents = open_agent_store(&other_root).unwrap();
+    for index in 0..7 {
+        let mut agent = Agent::new(format!("other-{index}"), format!("other-{index}"));
+        agent.role = AgentRole::Worker;
+        other_agents.register(&agent).unwrap();
+    }
+    let sessions = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cas/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join("other.json"), serde_json::json!({
+        "name": "other", "created_at": "2026-11-13T21:51:00Z", "daemon_pid": 0,
+        "socket_path": "/nonexistent", "supervisor": {"name": "other-sup", "pid": null, "worktree_path": null},
+        "workers": [], "project_dir": other.path().display().to_string(),
+    }).to_string()).unwrap();
+    let label = |root: &std::path::Path| root.parent().unwrap().canonicalize().unwrap()
+        .file_name().unwrap().to_string_lossy().into_owned();
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+
+    let status = get_text(&env.service.factory_request(Parameters(factory_req("worker_status"))).await.unwrap());
+    let refused = env.service.factory_request(Parameters(req)).await
+        .expect_err(&format!("spawn must be refused at 8/8; worker_status: {status}")).message;
+    let census = refused.split("Worker capacity: ").nth(1).and_then(|rest| rest.split(';').next())
+        .unwrap_or_else(|| panic!("{refused}"));
+    assert!(census.starts_with("8/8"), "{refused}");
+    assert!(census.contains(&format!("{} 1", label(&env.cas_root))), "{refused}");
+    assert!(census.contains(&format!("{} 7", label(&other_root))), "{refused}");
+    assert!(status.contains(&format!("Worker capacity: {census}")), "{status}");
+}
+
 #[tokio::test]
 async fn test_spawn_workers_requires_epic() {
     let env = FactoryTestEnv::new();

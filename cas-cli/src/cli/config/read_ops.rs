@@ -64,6 +64,8 @@ fn host_scoped_config_keys() -> Vec<&'static str> {
 fn origin_note(config: &Config, key: &str, value: &str) -> &'static str {
     if key == "issues.repo" && !value.is_empty() && config.issue_repo_registry().project.is_none() {
         " (from origin; unset in config)"
+    } else if key == "factory.max_workers" && config.max_workers_source() == "user" {
+        " (inherited from ~/.cas/config.toml)"
     } else {
         ""
     }
@@ -96,6 +98,9 @@ fn with_issue_repo_source(
         });
         json["configured"] = serde_json::json!(config.issue_repo_registry().project.is_some());
     }
+    if key == "factory.max_workers" {
+        json["source"] = serde_json::json!(config.max_workers_source());
+    }
     if blank_component_note(config, key).is_some() {
         let legacy = config.cassy_issue_legacy_repo();
         json["raw_blank"] = serde_json::json!(true);
@@ -123,7 +128,9 @@ fn get_output(
         });
         Ok((serde_json::to_string_pretty(&with_issue_repo_source(json, config, key, value))?, None))
     } else {
-        Ok((value.to_owned(), blank_component_note(config, key)))
+        let inherited = (key == "factory.max_workers" && config.max_workers_source() == "user")
+            .then_some("(inherited from ~/.cas/config.toml)");
+        Ok((value.to_owned(), blank_component_note(config, key).or(inherited)))
     }
 }
 
@@ -554,10 +561,14 @@ pub(in crate::cli) fn reset_config_value(
         alternate_path,
         ..
     } = load_config_key_document(key, cas_root)?;
-    let before: Config = toml::from_str(&raw)?;
+    let user_max_workers = Config::load(&config_root)?.user_max_workers;
+    let mut before: Config = toml::from_str(&raw)?;
     let removed = remove_config_document_key(&mut document, stored_path, alternate_path)?;
     let contents = document.to_string();
-    let after: Config = toml::from_str(&contents)?;
+    let mut after: Config = toml::from_str(&contents)?;
+    // Report the value the project resolves after reset, including inheritance.
+    before.user_max_workers = user_max_workers;
+    after.user_max_workers = user_max_workers;
     guard_operator_config(&before, &after, InvocationContext::from_process)?;
     if removed {
         crate::config::atomic_replace_project_config(&path, &contents)?;
@@ -1062,13 +1073,22 @@ pub(crate) fn execute_reset(
     } else if reg.get(&args.key).is_some() {
         let (old_value, new_value) = reset_config_value(&args.key, &config_root)?;
 
+        let inherited = args.key == "factory.max_workers" && config.user_max_workers.is_some();
         if cli.json {
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "key": args.key,
                 "old_value": old_value,
                 "new_value": new_value
             });
+            if args.key == "factory.max_workers" {
+                json["source"] = serde_json::json!(if inherited { "user" } else { "default" });
+            }
             println!("{}", serde_json::to_string(&json)?);
+        } else if inherited {
+            println!("Reset {} to inherited ~/.cas/config.toml value: {}", args.key, new_value);
+            if old_value != new_value {
+                println!("  (was: {old_value})");
+            }
         } else {
             println!("Reset {} to default: {}", args.key, new_value);
             if old_value != new_value {
@@ -1180,6 +1200,37 @@ mod tests {
         assert!(loaded.list().contains(&(key.into(), "7".into())));
         assert_eq!(reset_config_value(key, &root).unwrap(), ("7".into(), "30".into()));
         assert_eq!(Config::load(&root).unwrap().get(key).as_deref(), Some("30"));
+    }
+
+    /// GH #1921: an unset project limit resolves the user's machine-wide value.
+    #[test]
+    fn project_without_override_reads_and_resets_to_user_max_workers_cas_65b9() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let user = env.home().join(".cas");
+        let project = env.home().join("project/.cas");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let key = "factory.max_workers";
+        let resolved = |root: &Path| {
+            let config = Config::load(root).unwrap();
+            let listed = config.list().into_iter().find(|(k, _)| k == key).unwrap().1;
+            assert_eq!(config.get(key).unwrap(), listed);
+            (listed, config.max_workers_source())
+        };
+
+        assert_eq!(resolved(&project), ("8".into(), "default"));
+        std::fs::write(user.join("config.toml"), "[factory]\nmax_workers = 20\n").unwrap();
+        assert_eq!(resolved(&project), ("20".into(), "user"));
+        std::fs::write(project.join("config.toml"), "[factory]\nmax_workers = 12\n").unwrap();
+        assert_eq!(resolved(&project), ("12".into(), "project"));
+
+        assert_eq!(reset_config_value(key, &project).unwrap(), ("12".into(), "20".into()));
+        assert_eq!(resolved(&project), ("20".into(), "user"));
+        // Saving an unrelated factory key must not pin the inherited value.
+        let mut config = Config::load(&project).unwrap();
+        set_config_value(&mut config, "factory.nice_cargo", "false", &project, InvocationContext::from_process).unwrap();
+        config.save(&project).unwrap();
+        assert_eq!(resolved(&project), ("20".into(), "user"));
     }
 
     #[test]

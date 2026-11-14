@@ -70,8 +70,8 @@ impl SearchIndex {
 
     /// Quote field-like tokens whose field name is not registered in this
     /// index schema so Tantivy treats them as free text instead of rejecting
-    /// the whole query. Registered fields are left untouched to retain
-    /// Tantivy's strict syntax validation.
+    /// the whole query. Leading hyphens in keyword terms are escaped so shell
+    /// flags remain literals. Registered fields retain strict validation.
     fn literalize_unknown_field_tokens(&self, query: &str) -> String {
         // Word apostrophes and unmatched edge quotes are literal text.
         // Keep authored quotes and field/operator syntax intact.
@@ -99,7 +99,13 @@ impl SearchIndex {
             .split_whitespace()
             .map(|token| {
                 let Some((field, _)) = token.split_once(':') else {
-                    return token.to_string();
+                    // Tantivy reads '-' as exclusion and rejects '--flags'.
+                    // Escaping it also preserves hyphens inside authored phrases.
+                    return if token.starts_with('-') {
+                        format!("\\{token}")
+                    } else {
+                        token.to_string()
+                    };
                 };
 
                 if self.schema.get_field(field).is_ok() {

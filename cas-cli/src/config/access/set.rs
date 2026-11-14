@@ -336,9 +336,9 @@ impl Config {
             }
             "factory.max_workers" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).max_workers =
-                    value.parse().map_err(|_| MemError::Parse(format!(
+                    Some(value.parse().map_err(|_| MemError::Parse(format!(
                         "Invalid integer value for factory.max_workers: {value}"
-                    )))?;
+                    )))?);
             }
             "factory.auto_route_builds" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).auto_route_builds =

@@ -301,8 +301,8 @@ pub struct TaskRequest {
     )]
     pub door: Option<String>,
 
-    /// Exact dispatch under review; ordinary workers cannot accept this task.
-    /// Omit to preserve on update; an empty string clears the target.
+    // Exact dispatch under review; ordinary workers cannot accept this task.
+    // Omit to preserve on update; an empty string clears the target.
     #[serde(default)]
     pub review_dispatch_id: Option<String>,
 

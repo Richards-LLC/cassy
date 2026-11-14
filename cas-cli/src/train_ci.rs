@@ -542,19 +542,22 @@ print(json.dumps(state))\n");
             fixtures.path().join("gh-calls"),
             fixtures.path().join("runs.json"),
         );
-        std::fs::write(&forge, format!("import json, pathlib, subprocess, sys\n\
-args, runs = sys.argv[1:], pathlib.Path('{}')\n\
-listed = json.loads(runs.read_text()) if runs.exists() else []\n\
-if args[:2] == ['repo', 'view']: print('fixture/repo')\n\
-elif args[:2] == ['workflow', 'run']:\n\
-    open('{}', 'a').write(' '.join(args) + '\\n')\n\
-    ref = args[args.index('--ref') + 1]\n\
-    tip = subprocess.check_output(['git', 'rev-parse', ref], text=True).strip()\n\
-    listed.append(dict(id=100 + len(listed), run_attempt=1, head_sha=tip, head_branch=ref,\n\
-                       event='workflow_dispatch', status='queued', conclusion=None))\n\
-    runs.write_text(json.dumps(listed))\n\
-elif args[0] == 'api': print(json.dumps({{'workflow_runs': listed}}))\n\
-else: sys.exit(1)\n", runs.display(), calls.display())).unwrap();
+        let forge_script = r#"import json, pathlib, subprocess, sys
+args, runs = sys.argv[1:], pathlib.Path('RUNS')
+listed = json.loads(runs.read_text()) if runs.exists() else []
+if args[:2] == ['repo', 'view']: print('fixture/repo')
+elif args[:2] == ['workflow', 'run']:
+    open('CALLS', 'a').write(' '.join(args) + '\n')
+    ref = args[args.index('--ref') + 1]
+    tip = subprocess.check_output(['git', 'rev-parse', ref], text=True).strip()
+    listed.append(dict(id=100 + len(listed), run_attempt=1, head_sha=tip, head_branch=ref,
+                       event='workflow_dispatch', status='queued', conclusion=None))
+    runs.write_text(json.dumps(listed))
+elif args[0] == 'api': print(json.dumps({'workflow_runs': listed}))
+else: sys.exit(1)
+"#;
+        std::fs::write(&forge, forge_script.replace("RUNS", &runs.display().to_string())
+            .replace("CALLS", &calls.display().to_string())).unwrap();
         crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", forge.display()));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         env.set("GH_BIN", &gh);

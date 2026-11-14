@@ -1726,8 +1726,11 @@ fn merge_tip_content_presence_selected(
         .iter()
         .map(|commit| {
             if explicit_commits.is_some() {
-                return super::delivery_content_presence_on_target_for_task(
-                    repo, commit, target, identity.task_id.as_deref().unwrap_or(""),
+                // Measure this selected commit directly; the public task seam
+                // may expand the release anchor into this same delivery range.
+                return super::delivery_content_presence_on_target_for_paths(
+                    repo, commit, target, None, false,
+                    &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(), None,
                 );
             }
             super::delivery_content_presence_in_parent_leaving_artifacts(

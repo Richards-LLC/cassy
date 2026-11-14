@@ -26372,6 +26372,11 @@ pub(crate) fn delivery_content_presence_on_target_for_task(
     target_ref: &str,
     task_id: &str,
 ) -> DeliveryContentPresence {
+    if let Some(base) = crate::qa_batch::release_close::delivery_base(repo_path, delivery_commit, target_ref) {
+        return delivery_content_presence_from_base_on_target_for_task(
+            repo_path, &base, delivery_commit, delivery_commit, target_ref, task_id,
+        );
+    }
     delivery_content_presence_on_target_for_paths(
         repo_path, delivery_commit, target_ref, None, false, &[task_id], None,
     )

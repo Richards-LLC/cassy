@@ -1490,4 +1490,3 @@ pub(super) fn case_syntax(source: &str, lexed: &ShellLexed) -> Result<Vec<CaseSy
     }
     if cases.is_empty() { Ok(syntax) } else { Err("an unmatched shell scope") }
 }
-

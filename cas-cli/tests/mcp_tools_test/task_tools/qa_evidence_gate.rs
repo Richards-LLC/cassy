@@ -1382,6 +1382,7 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
         "hub-web/e2e/generated/fleet.spec.ts",
         &format!("import {{ test }} from \"@playwright/test\";\ntest(\"fleet\", async () => {{\n  // cas-allow-skip: {allowed_reason}\n  test.fixme(true, \"clipboard\");\n}});\n"),
     );
+    fixture_stability_receipt(&fx.repo, "playwright", "hub-web/e2e/generated/fleet.spec.ts", "fleet");
     let parked = close_text(&fx.core, TASK).await;
     assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{parked}");
     // The exact caller-supplied waiver reason remains in the decision audit.

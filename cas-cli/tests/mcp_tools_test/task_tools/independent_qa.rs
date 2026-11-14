@@ -2120,6 +2120,7 @@ async fn docs_and_test_only_deliveries_are_never_gated_even_with_a_demo() {
     task.demo_statement = "Read the journey catalog".to_string();
     tasks.add(&task).unwrap();
 
+    fixture_stability_receipt(&repo, "playwright", "web/e2e/reply.journey.spec.ts", "x");
     let parked = close_text(&core, "cas-doc01").await;
     assert_eq!(tasks.get("cas-doc01").unwrap().status, TaskStatus::AwaitingMerge, "{parked}");
     assert!(cas_store::list_qa_passes(&cas_dir, "cas-doc01").unwrap().is_empty());
@@ -2348,6 +2349,7 @@ async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
         "test('gap', () => expect(gap()).toBe(8));\n",
         "regression test for the spacing",
     );
+    fixture_stability_receipt(&repo, "vitest", "web/composer.test.ts", "gap");
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");

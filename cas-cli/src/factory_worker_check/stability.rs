@@ -1,5 +1,5 @@
 //! Changed-test stability evidence shares the capped runner's receipt store.
-//! Park reads immutable-tip evidence; adapters own discovery and execution.
+//! Park shares the test receipt's input/ancestry validation; adapters run tests.
 use super::*;
 
 pub(crate) mod rust;
@@ -20,7 +20,7 @@ pub(crate) struct Proof {
     pub elapsed_ms: u128,
 }
 
-fn valid(proof: &Proof) -> bool {
+pub(super) fn valid(proof: &Proof) -> bool {
     matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright")
         && proof.consecutive_passes >= REQUIRED_PASSES
         && !proof.tests.is_empty()
@@ -43,18 +43,19 @@ fn records(cas_root: &Path, repo: &Path, head: &str) -> Result<Vec<(PathBuf, Che
         let entry = entry?;
         if !entry.file_type()?.is_file() { continue; }
         let Ok(record) = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path())?) else { continue; };
-        if record.repo == repo && record.head == head {
+        if record.repo == repo && (record.head == head || receipt_head_is_ancestor(&repo, &record.head, head)) {
             records.push((entry.path(), record));
         }
     }
     Ok(records)
 }
 
-pub(crate) fn missing(cas_root: &Path, repo: &Path, head: &str, tests: &[Identity]) -> Result<Vec<Identity>> {
-    let covered = records(cas_root, repo, head)?.into_iter()
-        .filter_map(|(_, record)| record.test.filter(|test| test.count > 0).and_then(|test| test.stability))
-        .filter(valid).flat_map(|proof| proof.tests).collect::<BTreeSet<_>>();
-    Ok(tests.iter().filter(|test| !covered.contains(*test)).cloned().collect())
+pub(crate) fn missing(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Identity> {
+    if tests.is_empty() { return Vec::new(); }
+    let covered = passing.records().iter()
+        .filter_map(|(_, _, test)| test.stability.as_ref())
+        .filter(|proof| valid(proof)).flat_map(|proof| &proof.tests).collect::<BTreeSet<_>>();
+    tests.iter().filter(|test| !covered.contains(*test)).cloned().collect()
 }
 
 pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
@@ -81,6 +82,7 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
 
 /// A failed rerun may not leave an earlier overlapping five-pass proof usable.
 pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, tests: &[Identity]) -> Result<()> {
+    if tests.is_empty() { return Ok(()); }
     for (path, record) in records(cas_root, repo, head)? {
         if record.test.and_then(|test| test.stability)
             .is_some_and(|proof| proof.tests.iter().any(|test| tests.contains(test)))

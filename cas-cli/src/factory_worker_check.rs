@@ -927,7 +927,7 @@ pub(crate) struct PassingTests<'a> {
     repo: &'a Path,
     head: &'a str,
     target: Option<&'a str>,
-    records: std::sync::OnceLock<Vec<(String, String, TestReceipt)>>,
+    records: std::sync::OnceLock<Vec<(String, Option<String>, TestReceipt)>>,
 }
 
 impl<'a> PassingTests<'a> {
@@ -948,7 +948,7 @@ impl<'a> PassingTests<'a> {
         self
     }
 
-    fn records(&self) -> &[(String, String, TestReceipt)] {
+    fn records(&self) -> &[(String, Option<String>, TestReceipt)] {
         self.records.get_or_init(|| {
             passing_test_records(self.cas_root, self.repo, self.head, self.target)
         })
@@ -958,6 +958,7 @@ impl<'a> PassingTests<'a> {
         let mut receipts = self.records().iter()
             .map(|(receipt_head, package, test)| {
                 let head = self.head;
+                let package = package.as_deref().unwrap_or("stability");
                 let rebind = (receipt_head != head)
                     .then(|| format!(" rebound from {receipt_head} to {head}"))
                     .unwrap_or_default();
@@ -974,6 +975,7 @@ impl<'a> PassingTests<'a> {
     pub(crate) fn packages(&self) -> Vec<String> {
         let mut packages = self.records().iter()
             .filter_map(|(_, package, _)| {
+                let package = package.as_deref()?;
                 let (name, version) = package_selector(package)?;
                 // A dependency's other version must never cover this workspace
                 // crate. The receipt/audit identity keeps the full selector.
@@ -1021,7 +1023,7 @@ fn passing_test_records(
     repo: &Path,
     head: &str,
     target: Option<&str>,
-) -> Vec<(String, String, TestReceipt)> {
+) -> Vec<(String, Option<String>, TestReceipt)> {
     let Ok(repo) = repo.canonicalize() else {
         return Vec::new();
     };
@@ -1109,15 +1111,13 @@ fn read_passing_test_record(
     cas_root: &Path,
     repo: &Path,
     entry: &std::fs::DirEntry,
-) -> Option<(String, String, TestReceipt)> {
+) -> Option<(String, Option<String>, TestReceipt)> {
     if !entry.file_type().ok()?.is_file() {
         return None;
     }
-    let mut record = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path()).ok()?).ok()?;
-    let test = record.test.take()?;
+    let record = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path()).ok()?).ok()?;
+    let test = record.test?;
     if record.repo != repo
-        || record.packages.len() != 1
-        || package_selector(&record.packages[0]).is_none()
         || !named_filter(&test.filter)
         || test.count == 0
         || test
@@ -1127,9 +1127,15 @@ fn read_passing_test_record(
     {
         return None;
     }
-    let package = record.packages.remove(0);
+    // Adapter-only stability receipts share ancestry/input validation, but
+    // cannot count as a passing Rust crate test.
+    let package = match record.packages.as_slice() {
+        [] if test.stability.as_ref().is_some_and(stability::valid) => None,
+        [package] if package_selector(package).is_some() => Some(package.clone()),
+        _ => return None,
+    };
     let targeted_test = TargetedTest {
-        package: package.clone(),
+        package: package.clone().or_else(|| test.stability.as_ref().map(|proof| proof.runner.clone()))?,
         harness: test.harness.clone(),
         filter: test.filter.clone(),
     };
@@ -3007,7 +3013,16 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         std::fs::write(repo.join("src/lib.rs"), "pub fn a() { let _ = 1; }\n").unwrap();
         std::fs::write(repo.join("hub-web/dist/app.js"), "mine\n").unwrap();
         fixture_commit_as(&repo, "delivery");
-        record_passing_test_for_tests(&root, &repo, &fixture_head(&repo), "cas", "test(cached)");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
+        let identity = stability::Identity { path: "src/lib.rs".into(), name: "cached".into() };
+        let selection = TargetedTest { package: "cas".into(), harness: None, filter: "test(cached)".into() };
+        let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &receipt_head, &selection);
+        let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        receipt.test.as_mut().unwrap().stability = Some(stability::Proof {
+            runner: "nextest".into(), tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        });
+        std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
 
         git(&repo, &["checkout", "-q", "lane"]).unwrap();
         std::fs::write(repo.join("src/other.rs"), "pub fn b() {}\n").unwrap();
@@ -3026,6 +3041,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
 
         assert!(passing_test_receipts(&root, &repo, &delivered).is_empty());
         assert_eq!(PassingTests::new(&root, &repo, &delivered).with_target("lane").receipts().len(), 1);
+        assert!(stability::missing(&PassingTests::new(&root, &repo, &delivered).with_target("lane"), &[identity.clone()]).is_empty());
 
         // A Rust conflict resolved by taking one side whole leaves no
         // resolution diff, but it is still untested code.
@@ -3037,6 +3053,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "-q", "-X", "theirs", "lane", "-m", "take theirs"]).unwrap();
         let theirs = fixture_head(&repo);
         assert!(PassingTests::new(&root, &repo, &theirs).with_target("lane").receipts().is_empty());
+        assert_eq!(stability::missing(&PassingTests::new(&root, &repo, &theirs).with_target("lane"), &[identity.clone()]), vec![identity]);
 
         // cas-6d79: any agent can move the shared local target ref. Pointed at
         // an unpublished commit, it must not pass that commit off as target work.

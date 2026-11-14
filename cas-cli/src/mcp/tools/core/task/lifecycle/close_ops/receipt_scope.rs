@@ -139,24 +139,11 @@ pub(super) fn park_refusals(
         ));
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    // Keep the existing docs/test/CI-only park contract, including a rejected
-    // QA round's test-only correction after its product work reached the target.
-    // Mixed product deliveries still owe exact-tip stability for their tests.
-    // Attribution can retain earlier product commits already on a new target;
-    // only product paths still contributed there make this a mixed delivery.
-    let (live_target, _) = super::preferred_live_target_ref_for_delivery(
-        proof_repo, target, task.delivery_mode,
-    );
-    let remaining_paths = super::git_stdout_lines(proof_repo, &[
-        "diff", "--name-only", "--no-ext-diff", &format!("{live_target}...{head}"), "--",
-    ]).ok();
-    if proof_repo.join(".git").exists()
-        && changed_paths.iter().any(|path| !crate::qa_pass::is_non_surface_path(path)
-            && remaining_paths.as_ref().is_none_or(|paths| paths.contains(path)))
-    {
+    let passing = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head).with_target(target);
+    if proof_repo.join(".git").exists() {
         use crate::factory_worker_check::stability;
         match stability::required(proof_repo, head, target, changed_paths, delivery_ranges)
-            .and_then(|tests| stability::missing(cas_root, proof_repo, head, &tests))
+            .map(|tests| stability::missing(&passing, &tests))
         {
             Ok(missing) if !missing.is_empty() => refusals.push(crate::gates::tag("G-61", format!(
                 "CHANGED_TEST_STABILITY_REQUIRED: task {} needs five consecutive capped passes at {short} for: {}. Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner, then retry park.",
@@ -166,7 +153,7 @@ pub(super) fn park_refusals(
             _ => {},
         }
     }
-    let tested = crate::factory_worker_check::passing_test_packages_against(cas_root, proof_repo, head, target);
+    let tested = passing.packages();
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
     // The module check below reads these receipts, so a crate that still owes
     // one cannot be judged yet; running its tests may already cover the module.
@@ -981,6 +968,8 @@ mod tests {
             assert!(!held.contains("untouched"));
             stability::record(root.path(), repo.path(), &head, Proof { runner: runner.into(),
                 tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
+            let packages = crate::factory_worker_check::passing_test_packages(root.path(), repo.path(), &head);
+            assert_eq!(packages, if rust { vec!["fixture".to_string()] } else { vec![] });
             let started = std::time::Instant::now();
             let admitted = park_refusal(root.path(), repo.path(), &task, &paths, &head, "main", None);
             let present_us = started.elapsed().as_micros();
@@ -1103,6 +1092,8 @@ mod tests {
         )
         .unwrap();
         let titled = commit_changelog_fixture(repo.path(), "add release note");
+        let text = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();
+        assert_eq!(titled_unreleased_entries(&text).unwrap().len(), 1);
         assert!(has_titled_unreleased_delta(repo.path(), &titled, "main", None, &task.id));
         let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &titled, "main", None);
         assert!(accepted.is_none(), "{accepted:?}");

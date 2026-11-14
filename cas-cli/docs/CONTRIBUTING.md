@@ -2790,16 +2790,17 @@ runs as `worker-check --detach` in its own session, since Codex `exec_command`
 kills the shell's process group, including any `&` job, when the shell exits
 (cas-3d04); without a log redirect it is refused. Compile checks execute no tests.
 
-The existing focused-proof park gate also requires five consecutive passes at
-the exact tip for the delivery's new or changed test functions. The capped Rust
+The existing focused-proof park gate also requires five consecutive passes for
+the delivery's new or changed test functions, including test-only deliveries. The capped Rust
 runner repeats only owned functions in its requested selection; unchanged tests
 retain one-pass crate coverage. Vitest, Jest and Playwright use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`.
 Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
-Deliveries made only of documentation, tests, fixtures or CI keep their existing
-park exemption, including rejected QA rounds corrected only by tests after their
-product changes reached the target. Mixed product deliveries still owe stability.
+Stability uses the same receipt carry-forward as crate proof: documentation or
+changelog commits preserve it when no test/build inputs change. Target merges
+use the shared input/resolution checks. A changed test needs fresh stability
+even when its name is unchanged or its product change is already on the target.
 
 Detached capped runs register their worker/task, output log and PID incarnation
 before returning. Their existing worker-check command inherits a hidden

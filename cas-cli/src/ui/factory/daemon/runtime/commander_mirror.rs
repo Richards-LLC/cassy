@@ -318,6 +318,45 @@ fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Termina
     inputs
 }
 
+/// A record Claude writes once a turn's Stop hooks have finished.
+fn claude_stop_settled(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("system")
+        && matches!(value.get("subtype").and_then(Value::as_str), Some("stop_hook_summary" | "turn_duration"))
+}
+
+/// A Stop hook refused the turn's end; Claude resumes the same turn.
+fn claude_stop_blocked(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("attachment")
+        && value.pointer("/attachment/type").and_then(Value::as_str) == Some("hook_blocking_error")
+        && value.pointer("/attachment/hookEvent").and_then(Value::as_str) == Some("Stop")
+}
+
+/// A terminal turn produces one visible answer. The latest verified
+/// Commander send supplies its durable thread; receipt scanning still marks
+/// every consumed send delivered.
+fn settle_claude_turn(
+    turns: &mut Vec<CompletedTurn>,
+    inputs: &mut Vec<ClaudeInput>,
+    status: &mut Option<ClaudeInput>,
+    text: String,
+    completed_at: DateTime<Utc>,
+) {
+    let status_only = inputs.is_empty();
+    if status_only {
+        inputs.extend(status.take());
+    }
+    if let Some(input) = inputs.first() {
+        turns.push(CompletedTurn {
+            key: input.key.clone(), started_at: input.at, completed_at,
+            text, commander_id: inputs.iter().rev().find_map(|input| input.commander_id),
+            commander_ids: inputs.iter().filter_map(|input| input.commander_id).collect(),
+            prompt: (!status_only).then(|| input.prompt.clone()),
+        });
+    }
+    inputs.clear();
+    *status = None;
+}
+
 fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<CompletedTurn> {
     let mut turns = Vec::new();
     let mut started: Option<(String, DateTime<Utc>, Option<i64>)> = None;
@@ -325,11 +364,38 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
     let mut final_text: Option<String> = None;
     let mut claude_inputs: Vec<ClaudeInput> = Vec::new();
     let mut claude_status: Option<ClaudeInput> = None;
+    // cas-2a95 (GH #1938): Claude writes an end_turn answer before its Stop
+    // hooks run. A blocked draft was mirrored, and the Stop-hook feedback then
+    // opened a second status turn for the rewrite. Where this transcript
+    // records Stop verdicts, an answer waits for one: a block keeps the turn
+    // open for its rewrite; stop_hook_summary or turn_duration settles it.
+    let stop_verdicts = cli == cas_mux::SupervisorCli::Claude
+        && values.iter().any(claude_stop_settled);
+    let mut held = false;
     for value in values {
         let Some(at) = timestamp(value) else { continue };
         match cli {
             cas_mux::SupervisorCli::Claude => {
-                if let Some(prompt) = claude_prompt(value).or_else(|| claude_commander_hook(value))
+                let input = claude_prompt(value).or_else(|| claude_commander_hook(value));
+                if held {
+                    if claude_stop_blocked(value) {
+                        held = false;
+                        continue;
+                    }
+                    let human = human_provenance(value)
+                        && value.get("attachment").is_none_or(human_provenance);
+                    if input.is_some() && !human {
+                        // Stop-hook feedback is machine input inside this turn.
+                        continue;
+                    }
+                    if claude_stop_settled(value) || input.is_some() {
+                        held = false;
+                        if let Some(text) = final_text.take() {
+                            settle_claude_turn(&mut turns, &mut claude_inputs, &mut claude_status, text, at);
+                        }
+                    }
+                }
+                if let Some(prompt) = input
                 {
                     let key = value
                         .get("promptId")
@@ -384,34 +450,25 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                 // earlier progress text and dropped the answer. Normal ends
                 // and API failures require text on this primary record; a
                 // turn_duration record can also settle the accumulated text.
-                let finished = (value.get("type").and_then(Value::as_str) == Some("assistant")
+                // API errors can end with stop_sequence and no duration, and
+                // no Stop hook judges them.
+                let api_error = value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true);
+                // `answered` requires primary (non-sidechain) text on this
+                // record, so a thinking-only end_turn cannot flush progress.
+                let ended = value.get("type").and_then(Value::as_str) == Some("assistant")
                     && (value.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn")
-                        // API errors can end with stop_sequence and no duration.
-                        || value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true))
-                    // `answered` requires primary (non-sidechain) text on this
-                    // record, so a thinking-only end_turn cannot flush progress.
-                    && answered)
+                        || api_error)
+                    && answered;
+                if ended && stop_verdicts && !api_error {
+                    held = true;
+                    continue;
+                }
+                let finished = ended
                     || (value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"));
                 if finished && let Some(text) = final_text.take()
                 {
-                    let status_only = claude_inputs.is_empty();
-                    if status_only {
-                        claude_inputs.extend(claude_status.take());
-                    }
-                    // A terminal turn produces one visible answer. The latest
-                    // verified Commander send supplies its durable thread;
-                    // receipt scanning still marks every consumed send delivered.
-                    if let Some(input) = claude_inputs.first() {
-                        turns.push(CompletedTurn {
-                            key: input.key.clone(), started_at: input.at, completed_at: at,
-                            text, commander_id: claude_inputs.iter().rev().find_map(|input| input.commander_id),
-                            commander_ids: claude_inputs.iter().filter_map(|input| input.commander_id).collect(),
-                            prompt: (!status_only).then(|| input.prompt.clone()),
-                        });
-                    }
-                    claude_inputs.clear();
-                    claude_status = None;
+                    settle_claude_turn(&mut turns, &mut claude_inputs, &mut claude_status, text, at);
                 }
             }
             cas_mux::SupervisorCli::Codex => {

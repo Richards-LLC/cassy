@@ -2133,7 +2133,7 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
     git(&f.worker_path, &["add", "."]);
     git(&f.worker_path, &["commit", "-qm", "baseline shared callback"]);
     let base = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    git(&repo, &["branch", "-f", "main", &base]);
+    git(&repo, &["reset", "--hard", &base]);
     git(&repo, &["branch", "epic/old", &base]);
     git(&repo, &["update-ref", "refs/remotes/origin/main", &base]);
     let mut task = tasks.get(TASK).unwrap();

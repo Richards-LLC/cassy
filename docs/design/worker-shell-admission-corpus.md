@@ -1,6 +1,8 @@
 # Worker shell admission: acceptance corpus (cas-24f2)
 
-The source table for the `shell_admission_corpus_cas_24f2` test.
+The review inventory for the real-hook corpus and existing control tables.
+Execution receipts must identify each table and row; this inventory alone is
+not a test result.
 
 **Columns.** Commands run from an assigned worker worktree `W`. `S` is a
 sanctioned scratch or artifacts root. `R` is the main checkout, outside `W`.
@@ -27,17 +29,23 @@ classes), and the cas_3147 / cas-4923e controls.
 | R10 | #1820 / #1822 / #1823 | `AUDIT_LINK_ROOT=/x bash scripts/audit.sh` | ALLOW | exact |
 | R11 | #1820 | `env AUDIT_LINK_ROOT=/x bash scripts/audit.sh > audit.log 2>&1` | ALLOW | exact |
 | R12 | #1823 | `bash -c 'AUDIT_LINK_ROOT=/x bash scripts/audit.sh'` | ALLOW | exact |
-| R13 | #1806 | `bash scripts/test-release.sh > /tmp/cas-057f-shell-red.log 2>&1` | ALLOW (scratch target) | exact |
+| R13 | #1806 | `bash scripts/test-release.sh > /tmp/cas-057f-shell-red.log 2>&1` | DENY unless `/tmp` output has an explicit write grant; ALLOW under the original sanctioned-scratch fixture | exact |
 | R14 | #1814 | `python3 - <<'PY'`⏎`open('notes.md','w').write('x')`⏎`PY`⏎`cat <<'MD' > doc.md`⏎`while read -r l; do sudo echo "$l"; done`⏎`MD` | ALLOW (heredoc is data) | reconstructed |
 | R15 | cas-17a5 | `python3 - <<'EOF'`⏎`import subprocess; print("$(not shell)")`⏎`EOF` | ALLOW | reconstructed |
 | R16 | #1752 | `git clone --shared --no-checkout W S/replay && git -C S/replay checkout -b replay-at-release HEAD` | ALLOW (no commit) | reconstructed |
 | R17 | #1603 | `cd "$(realpath S)" && python3 -c "from pathlib import Path; Path('helper-audit.json').write_text('{}')"` | ALLOW | reconstructed |
 | R18 | #1780 | `cat > S/i1.md <<'EOF'`⏎`note`⏎`EOF` | ALLOW | reconstructed |
 | R19 | #1856 | `git checkout factory/<own-branch>` (from a detached HEAD) | ALLOW, existing distinction | exact |
-| R20 | #1860 | `git -C S/current-train checkout --detach <sha>` | ALLOW; a refusal must not tell the caller to retry a commit | exact |
+| R20 | #1860 | `git -C S/current-train checkout --detach <sha>` | DENY outside the owned worktree; remediation must describe checkout scope | exact |
 | R21 | #1615 / #1677 | `git add -A; git commit -m x` on a named branch from a subdirectory | ALLOW | reconstructed |
 | R22 | #1770 | `bash -c 'cd R && git commit --allow-empty -m probe'` | DENY (commit scope) | exact |
-| R23 | survey | `sed -n "$((S+1)),$((S+2))p" file` | ALLOW (live false deny today) | exact |
+| R23 | survey | `sed -n "$((S+1)),$((S+2))p" file` | DENY (ambient arithmetic has no local numeric provenance) | exact |
+
+| R23b | #1866 / survey | `S=12; sed -n "$((S+1)),$((S+2))p" file` | ALLOW (literal local numeric initialization) | reconstructed |
+
+#1838/#1808/#1754 retain their credential-policy dependency; their presence
+here does not transfer ownership of credential policy. #1677 start-branch
+ownership remains with its sibling task. #1700 remains out of scope.
 
 ## Bypass-class rows (cas-dc36 notes, 10/30). Expected: DENY with the rule id shown
 

@@ -255,37 +255,19 @@ fn selected(args: &[String], culprit: &mut Option<String>) -> bool {
     targeted
 }
 
-fn unfiltered(command: &str, depth: usize, culprit: &mut Option<String>) -> bool {
-    if depth > 4 {
-        return true;
-    }
-    for words in super::pre_tool::shell_statement_arguments(command) {
-        if words.first().is_some_and(|w| w.starts_with('#')) {
-            continue;
-        }
+fn unfiltered(command: &str, culprit: &mut Option<String>) -> bool {
+    // The shared invocation walk owns quoting, payload boundaries and depth.
+    // H-11 returns its explained refusal before any factory auto-approval.
+    let Ok(statements) = super::pre_tool::executing_shell_arguments(command) else {
+        return false;
+    };
+    for words in statements {
         let Some(executable) = super::pre_tool::executable_word_index(&words) else {
             continue;
         };
         let name = words[executable].rsplit('/').next().unwrap_or("");
-        if matches!(
-            name,
-            "cat" | "printf" | "echo" | "rg" | "grep" | "sed" | "head" | "tail"
-        ) {
+        if matches!(name, "cat" | "printf" | "echo" | "rg" | "grep" | "sed" | "head" | "tail") {
             continue;
-        }
-        // Inspect literal shell wrappers; don't turn quoted source text or
-        // trace/CLI/version commands into browser suite invocations.
-        if let Some(i) = words
-            .iter()
-            .position(|w| matches!(w.rsplit('/').next(), Some("bash" | "sh" | "zsh")))
-        {
-            if words.get(i + 1).is_some_and(|w| w == "-c" || w == "-lc")
-                && words
-                    .get(i + 2)
-                    .is_some_and(|w| unfiltered(w, depth + 1, culprit))
-            {
-                return true;
-            }
         }
         if words.iter().any(|w| {
             matches!(
@@ -364,7 +346,7 @@ pub(super) fn denial(input: &HookInput) -> Option<String> {
     }
     let command = input.tool_input.as_ref()?.get("command")?.as_str()?;
     let mut culprit = None;
-    unfiltered(command, 0, &mut culprit).then(|| {
+    unfiltered(command, &mut culprit).then(|| {
         let mut reason = String::from(
         "BROWSER TEST TIER: authoring follows cas-playwright-tests; workers run touched vitest files and typecheck; journeys run in batch QA. Iterate on a named spec (tests/example.spec.cjs --workers=1) or canonical --grep journey IDs, preserving original failures, or scripts/journey-eval.sh <task-artifact-dir> (default affected). The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. --full is refused here.",
         );
@@ -383,7 +365,6 @@ mod tests {
         let mut culprit = None;
         assert!(super::unfiltered(
             "npx playwright test qa/a.spec.ts widen",
-            0,
             &mut culprit
         ));
         assert_eq!(culprit.as_deref(), Some("widen"));

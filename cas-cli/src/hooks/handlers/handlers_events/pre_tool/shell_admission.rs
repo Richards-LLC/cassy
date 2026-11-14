@@ -1,5 +1,49 @@
 //! Shared source-preserving shell scanner and invocation grammar.
-use super::shell_effects;
+use super::{HeredocDelimiter, heredoc_delimiters, shell_command_projection, shell_heredoc_bodies};
+
+pub(super) const MAX_DEPTH: usize = 6;
+
+/// A refusal names a parser rule and original byte position, never a guessed
+/// filesystem effect. Construct labels deliberately contain no argument values.
+#[derive(Clone, Debug)]
+pub(super) struct Unsupported {
+    pub(super) rule: &'static str,
+    pub(super) offset: usize,
+    construct: &'static str,
+    why: &'static str,
+    alternative: &'static str,
+}
+
+impl Unsupported {
+    fn unterminated(offset: usize, construct: &'static str) -> Self {
+        Self { rule: "shell.unterminated", offset, construct,
+            why: "the construct is incomplete", alternative: "close the construct" }
+    }
+
+    pub(super) fn depth(offset: usize) -> Self {
+        Self { rule: "shell.depth", offset, construct: "nested shell",
+            why: "nesting exceeds six executing scopes",
+            alternative: "flatten the command or use a literal script file" }
+    }
+}
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SHELL CONSTRUCT REFUSED [{}] at byte {} ({}): {}. Instead: {}.",
+            self.rule, self.offset, self.construct, self.why, self.alternative)
+    }
+}
+
+/// All consumers use this escape-aware boundary; the body is decoded only
+/// after its exact source span is known.
+pub(super) fn backquote_end(bytes: &[u8], opening: usize) -> Option<usize> {
+    let mut end = opening + 1;
+    while let Some(&byte) = bytes.get(end) {
+        if byte == b'`' { return Some(end); }
+        end += if byte == b'\\' { 2 } else { 1 };
+    }
+    None
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ShellToken {
@@ -18,6 +62,9 @@ pub(super) struct ShellLexed {
     pub(super) unresolved_at: Option<usize>,
     /// Raw parameter bodies: numeric operand checks must retain source quoting.
     pub(super) parameters: Vec<(usize, usize)>,
+    /// Executing substitutions, recorded before word cooking loses quotes.
+    pub(super) substitutions: Vec<String>,
+    pub(super) refusal: Option<Unsupported>,
 }
 
 /// ANSI-C quoting is a constant word part, not a parameter or command
@@ -91,6 +138,10 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
     let mut ends = Vec::new();
     let mut unresolved_at = None;
     let mut parameters = Vec::new();
+    let mut substitutions = Vec::new();
+    let mut refusal = None;
+    let mut substitution_until = 0;
+    let mut quote_start = 0;
     let mut word = String::new();
     let mut literal = true;
     let mut word_quoted = false;
@@ -237,45 +288,49 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
                 continue;
             }
         }
-        if active_quote != Some('\'') && ch == '`' {
-            let bytes = command.as_bytes();
-            let mut end = index + 1;
-            while end < bytes.len() && bytes[end] != b'`' {
-                end += if bytes[end] == b'\\' { 2 } else { 1 };
-            }
-            if end < bytes.len() {
+        let expands = active_quote != Some('\'')
+            || (quote == Some('"') && !expansions.is_empty());
+        if expands && ch == '`' {
+            if let Some(end) = backquote_end(command.as_bytes(), index) {
+                if index >= substitution_until {
+                    substitutions.push(backquote_body(&command[index + 1..end]));
+                    substitution_until = end + 1;
+                }
                 let substitution = &command[index..=end];
                 word.push_str(substitution);
-                for _ in 1..substitution.chars().count() {
-                    chars.next();
-                }
+                for _ in 1..substitution.chars().count() { chars.next(); }
                 literal = false;
                 continue;
             }
             unresolved_at.get_or_insert(index);
+            refusal.get_or_insert_with(|| Unsupported::unterminated(index, "backquote"));
         }
-        // A substitution has its own quoting context: its double quotes must
-        // not close the outer word or turn quoted parentheses into scopes.
-        // Preserve its source for the recursive effect collector, which still
-        // judges both the commands it runs and how its output is used.
-        if active_quote != Some('\'')
-            && (quote == Some('"') || !expansions.is_empty())
-            && ch == '$'
-            && chars.peek().is_some_and(|(_, ch)| *ch == '(')
+        if expands && ch == '$'
+            && command.as_bytes().get(index + 1) == Some(&b'(')
+            && command.as_bytes().get(index + 2) != Some(&b'(')
         {
-            let tail = &command[index..];
-            if let Some(end) = shell_effects::literal_cat_heredoc_end(&tail)
-                .or_else(|| shell_effects::substitution_end(tail.as_bytes(), 2, depth + 1))
-            {
-                let substitution = &tail[..=end];
-                word.push_str(substitution);
-                for _ in 1..substitution.chars().count() {
-                    chars.next();
+            let boundary = literal_cat_heredoc_end(&command[index..])
+                .map(|end| Ok(index + end))
+                .unwrap_or_else(|| substitution_boundary(command.as_bytes(), index + 2, depth + 1));
+            match boundary {
+                Ok(end) => {
+                    if index >= substitution_until {
+                        substitutions.push(command[index + 2..end].to_owned());
+                        substitution_until = end + 1;
+                    }
+                    // Keep legacy token projections until each consumer moves:
+                    // unquoted substitutions retain their ordinary scope tokens.
+                    if quote == Some('"') || !expansions.is_empty() {
+                        word.push_str(&command[index..=end]);
+                        for _ in 1..command[index..=end].chars().count() { chars.next(); }
+                        literal = false;
+                        continue;
+                    }
                 }
-                literal = false;
-                continue;
-            } else {
-                unresolved_at.get_or_insert(index);
+                Err(error) => {
+                    unresolved_at.get_or_insert(index);
+                    refusal.get_or_insert(error);
+                }
             }
         }
         if let Some(expansion) = expansions.last_mut() {
@@ -340,6 +395,7 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
                 }
                 '\'' | '"' => {
                     quote = Some(ch);
+                    quote_start = index;
                     word_quoted = true;
                 }
                 '#' if word.is_empty() => comment = true,
@@ -396,10 +452,20 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
     }
     if escaped {
         word.push('\\');
+        let at = command.len().saturating_sub(1);
+        unresolved_at.get_or_insert(at);
+        refusal.get_or_insert_with(|| Unsupported::unterminated(at, "escape"));
+    }
+    if quote.is_some() {
+        unresolved_at.get_or_insert(quote_start);
+        refusal.get_or_insert_with(|| Unsupported::unterminated(quote_start, "quote"));
     }
     if let Some(expansion) = expansions.first() {
         unresolved_at =
             Some(unresolved_at.map_or(expansion.start, |at: usize| at.min(expansion.start)));
+    }
+    if let Some(at) = unresolved_at {
+        refusal.get_or_insert_with(|| Unsupported::unterminated(at, "expansion"));
     }
     push_word(
         &mut tokens,
@@ -416,6 +482,8 @@ pub(super) fn factory_shell_lex(command: &str, arguments_only: bool, depth: usiz
         ends,
         unresolved_at,
         parameters,
+        substitutions,
+        refusal,
     }
 }
 
@@ -816,4 +884,282 @@ pub(super) fn integer_expression(
         }
     }
     true
+}
+
+/// Closing `)` of exactly `$(cat <<'WORD'\n...\nWORD\n)` (also double
+/// quoted delimiters and <<-). No options, redirects or extra commands are
+/// accepted. The quoted body cannot expand, so its quotes/parentheses are data.
+/// This only finds the boundary; callers still treat the output as dynamic
+/// when used as an executable, shell program, directory or write target.
+pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
+    let newline = word.find('\n')?;
+    let header = word.get(2..newline)?;
+    if !word.starts_with("$(") {
+        return None;
+    }
+    let header = header.trim_matches([' ', '\t']);
+    let delimiter = header.strip_prefix("cat")?.trim_start_matches([' ', '\t']);
+    let delimiter = delimiter.strip_prefix("<<")?;
+    let strip_tabs = delimiter.starts_with('-');
+    let delimiter = delimiter.strip_prefix('-').unwrap_or(delimiter).trim_start_matches([' ', '\t']);
+    let quote = *delimiter.as_bytes().first()?;
+    if !matches!(quote, b'\'' | b'"') {
+        return None;
+    }
+    let delimiter = delimiter.strip_prefix(char::from(quote))?.strip_suffix(char::from(quote))?;
+    if delimiter.is_empty() || !delimiter.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_') {
+        return None;
+    }
+    let mut offset = newline + 1;
+    for line in word[offset..].split_inclusive('\n') {
+        let candidate = line.strip_suffix('\n').unwrap_or(line);
+        let candidate = if strip_tabs { candidate.trim_start_matches('\t') } else { candidate };
+        offset += line.len();
+        if candidate == delimiter {
+            let closing = word[offset..].trim_start_matches([' ', '\t']);
+            return closing.starts_with(')').then_some(word.len() - closing.len());
+        }
+    }
+    None
+}
+
+
+/// Backquotes remove one escape layer before parsing their command, even
+/// inside its quotes. Other backslashes must survive for the inner parser.
+pub(super) fn backquote_body(source: &str) -> String {
+    let mut body = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek().is_some_and(|next| matches!(next, '`' | '\\' | '$')) {
+            body.push(chars.next().unwrap());
+        } else {
+            body.push(ch);
+        }
+    }
+    body
+}
+
+
+/// Resolve a substitution with the ordinary shell lexer. Only real operator
+/// tokens can close it: quoted/comment text and case-pattern ')' are data.
+pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Option<usize> {
+    substitution_boundary(bytes, index, depth).ok()
+}
+
+fn substitution_boundary(bytes: &[u8], index: usize, depth: usize) -> Result<usize, Unsupported> {
+    if depth > MAX_DEPTH { return Err(Unsupported::depth(index.saturating_sub(2))); }
+    let incomplete = || Unsupported::unterminated(index.saturating_sub(2), "substitution");
+    let source = std::str::from_utf8(bytes.get(index..).ok_or_else(incomplete)?)
+        .map_err(|_| incomplete())?;
+    let projected = shell_command_projection(source, true);
+    let lexed = factory_shell_lex(&projected, false, depth);
+    enum Phase {
+        Word,
+        In,
+        Pattern { started: bool, parentheses: usize },
+        Body,
+    }
+    struct Case { level: usize, phase: Phase }
+    let mut cases: Vec<Case> = Vec::new();
+    let mut level = 0;
+    let mut arithmetic = vec![false];
+    let mut command_start = true;
+    let mut previous_operator = None;
+    let mut start = 0;
+    for (token, &end) in lexed.tokens.iter().zip(&lexed.ends) {
+        let raw = source.get(start..end).ok_or_else(incomplete)?.trim();
+        start = end;
+        let keyword = |word: &str| raw == word;
+        let previous = previous_operator;
+        previous_operator = match token {
+            ShellToken::Operator(ch) => Some((*ch, end)),
+            _ => None,
+        };
+        let mut handled = false;
+        let mut close_case = false;
+        if let Some(case) = cases.last_mut().filter(|case| case.level == level && !arithmetic[level]) {
+            match (&mut case.phase, token) {
+                (Phase::Word, ShellToken::Word(_)) => {
+                    case.phase = Phase::In;
+                    handled = true;
+                }
+                (Phase::In, ShellToken::Word(word)) => {
+                    if word == "in" && keyword(word) {
+                        case.phase = Phase::Pattern { started: false, parentheses: 0 };
+                    }
+                    handled = true;
+                }
+                (Phase::Pattern { started, .. }, ShellToken::Word(word)) => {
+                    close_case = !*started && word == "esac" && keyword(word);
+                    *started = true;
+                    handled = true;
+                }
+                (Phase::Pattern { started, parentheses }, ShellToken::Operator('(')) => {
+                    if *started { *parentheses += 1; }
+                    *started = true;
+                    handled = true;
+                }
+                (Phase::Pattern { parentheses, .. }, ShellToken::Operator(')')) => {
+                    if *parentheses > 0 {
+                        *parentheses -= 1;
+                    } else {
+                        case.phase = Phase::Body;
+                        command_start = true;
+                    }
+                    handled = true;
+                }
+                (Phase::Body, ShellToken::Word(word))
+                    if command_start && word == "esac" && keyword(word) => close_case = true,
+                (Phase::Body, ShellToken::Operator(';' | '&'))
+                    if previous == Some((';', end - 1))
+                        && matches!(source.as_bytes().get(end.saturating_sub(2)..end), Some(b";;" | b";&")) =>
+                {
+                    case.phase = Phase::Pattern { started: false, parentheses: 0 };
+                    handled = true;
+                }
+                _ => {}
+            }
+        }
+        if close_case {
+            cases.pop();
+            command_start = false;
+            continue;
+        }
+        if handled { continue; }
+        match token {
+            ShellToken::Word(word) => {
+                if command_start && !arithmetic[level] && word == "case" && keyword(word) {
+                    cases.push(Case { level, phase: Phase::Word });
+                }
+                command_start = command_start && keyword(word)
+                    && matches!(word.as_str(), "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{");
+            }
+            ShellToken::Operator('(') => {
+                let at = end - 1;
+                let dollar = at > 0 && source.as_bytes().get(at - 1) == Some(&b'$');
+                arithmetic.push(if at == 0 { true } else if dollar {
+                    source.as_bytes().get(at + 1) == Some(&b'(')
+                } else { arithmetic[level] });
+                level += 1;
+                command_start = true;
+            }
+            ShellToken::Operator(')') if level > 0 => {
+                arithmetic.pop();
+                level -= 1;
+                command_start = false;
+            }
+            ShellToken::Operator(')') => {
+                if let Some(mut error) = lexed.refusal.clone().filter(|error| error.offset < end) {
+                    error.offset += index;
+                    return Err(error);
+                }
+                return if cases.is_empty() { Ok(index + end - 1) } else { Err(incomplete()) };
+            }
+            ShellToken::Operator('<' | '>') => command_start = false,
+            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
+            _ => {}
+        }
+    }
+    if let Some(mut error) = lexed.refusal {
+        error.offset += index;
+        Err(error)
+    } else { Err(incomplete()) }
+}
+
+
+
+#[derive(Default)]
+pub(super) struct ShellSubstitutions {
+    pub(super) bodies: Vec<String>,
+    pub(super) refusal: Option<Unsupported>,
+}
+
+impl ShellSubstitutions {
+    pub(super) fn unresolved(&self) -> bool { self.refusal.is_some() }
+}
+
+pub(super) struct ParsedShell {
+    pub(super) projected: String,
+    pub(super) lexed: ShellLexed,
+    pub(super) bodies: Vec<String>,
+}
+
+pub(super) fn parse(command: &str, depth: usize) -> Result<ParsedShell, Unsupported> {
+    if depth > MAX_DEPTH { return Err(Unsupported::depth(0)); }
+    let projected = shell_command_projection(command, true);
+    let lexed = factory_shell_lex(&projected, false, depth);
+    if let Some(error) = lexed.refusal.clone() { return Err(error); }
+    let mut found = ShellSubstitutions::default();
+    let mut bodies = shell_heredoc_bodies(command).into_iter();
+    for delimiter in projected.lines().flat_map(heredoc_delimiters) {
+        let body = bodies.next().ok_or_else(|| Unsupported::unterminated(0, "heredoc"))?;
+        if !delimiter.literal_body { collect_heredoc_substitutions(&body, &mut found); }
+    }
+    if let Some(error) = found.refusal { return Err(error); }
+    found.bodies.extend(lexed.substitutions.iter().cloned());
+    Ok(ParsedShell { projected, lexed, bodies: found.bodies })
+}
+
+pub(super) fn shell_substitutions(command: &str) -> ShellSubstitutions {
+    match parse(command, 0) {
+        Ok(parsed) => ShellSubstitutions { bodies: parsed.bodies, refusal: None },
+        Err(error) => ShellSubstitutions { bodies: Vec::new(), refusal: Some(error) },
+    }
+}
+
+/// Expanding heredoc text is data except for substitutions. Quotes in its
+/// body do not suppress expansion; escaped markers and quoted delimiters do.
+fn collect_heredoc_substitutions(body: &str, found: &mut ShellSubstitutions) {
+    // The shell removes unescaped backslash-newline pairs before expanding
+    // the body. Preserve escaped backslashes so marker escaping stays exact.
+    let mut logical = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'\n') {
+            chars.next();
+            continue;
+        }
+        logical.push(ch);
+        if ch == '\\' && let Some(next) = chars.next() {
+            logical.push(next);
+        }
+    }
+    let bytes = logical.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
+            let end = literal_cat_heredoc_end(&logical[index..])
+                .map(|end| index + end)
+                .or_else(|| substitution_end(bytes, index + 2, 0));
+            (index + 2, end)
+        } else if bytes[index] == b'`' {
+            let start = index + 1;
+            (start, backquote_end(bytes, index))
+        } else {
+            index += 1;
+            continue;
+        };
+        let Some(end) = end else {
+            found.refusal = Some(Unsupported::unterminated(index, "heredoc expansion"));
+            break;
+        };
+        found.bodies.push(if bytes[index] == b'`' {
+            backquote_body(&logical[start..end])
+        } else {
+            logical[start..end].to_string()
+        });
+        index = end + 1;
+    }
+}
+
+
+/// Whether this operator continues a redirect, as in `>&` and `>|`. The next word
+/// is that redirect's filename, so it is not in command position and cannot be a
+/// keyword. Bash runs `>case touch in /outside/p` as `touch in /outside/p`.
+pub(super) fn after_redirect(previous: Option<(char, usize)>, end: usize) -> bool {
+    matches!(previous, Some(('<' | '>', at)) if at + 1 == end)
 }

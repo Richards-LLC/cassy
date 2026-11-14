@@ -308,36 +308,15 @@ fn substitution_bodies(word: &str, numeric: &HashSet<String>) -> Result<Vec<Stri
             bodies.push(word[index + 2..end].to_owned());
             index = end + 1;
         } else if bytes[index] == b'`' {
-            let start = index + 1;
-            index = start;
-            while index < bytes.len() && bytes[index] != b'`' {
-                index += if bytes[index] == b'\\' { 2 } else { 1 };
-            }
-            if index >= bytes.len() {
-                return Err("an unresolved shell payload");
-            }
-            bodies.push(backquote_body(&word[start..index]));
-            index += 1;
+            let end = shell_admission::backquote_end(bytes, index)
+                .ok_or("an unresolved shell payload")?;
+            bodies.push(backquote_body(&word[index + 1..end]));
+            index = end + 1;
         } else {
             index += 1;
         }
     }
     Ok(bodies)
-}
-
-/// Backquotes remove one escape layer before parsing their command, even
-/// inside its quotes. Other backslashes must survive for the inner parser.
-pub(super) fn backquote_body(source: &str) -> String {
-    let mut body = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' && chars.peek().is_some_and(|next| matches!(next, '`' | '\\' | '$')) {
-            body.push(chars.next().unwrap());
-        } else {
-            body.push(ch);
-        }
-    }
-    body
 }
 
 /// Heredoc quotes are data, but escaped markers are inert. Remove shell
@@ -387,11 +366,7 @@ fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter, numeric
         } else if bytes.get(index..index + 2) == Some(b"$[") {
             logical[index + 2..].find(']').map(|end| index + 2 + end)
         } else if bytes[index] == b'`' {
-            let mut end = index + 1;
-            while end < bytes.len() && bytes[end] != b'`' {
-                end += if bytes[end] == b'\\' { 2 } else { 1 };
-            }
-            (end < bytes.len()).then_some(end)
+            shell_admission::backquote_end(bytes, index)
         } else {
             index += 1;
             continue;
@@ -401,43 +376,6 @@ fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter, numeric
         index = end + 1;
     }
     Ok(bodies)
-}
-
-/// Closing `)` of exactly `$(cat <<'WORD'\n...\nWORD\n)` (also double
-/// quoted delimiters and <<-). No options, redirects or extra commands are
-/// accepted. The quoted body cannot expand, so its quotes/parentheses are data.
-/// This only finds the boundary; callers still treat the output as dynamic
-/// when used as an executable, shell program, directory or write target.
-pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
-    let newline = word.find('\n')?;
-    let header = word.get(2..newline)?;
-    if !word.starts_with("$(") {
-        return None;
-    }
-    let header = header.trim_matches([' ', '\t']);
-    let delimiter = header.strip_prefix("cat")?.trim_start_matches([' ', '\t']);
-    let delimiter = delimiter.strip_prefix("<<")?;
-    let strip_tabs = delimiter.starts_with('-');
-    let delimiter = delimiter.strip_prefix('-').unwrap_or(delimiter).trim_start_matches([' ', '\t']);
-    let quote = *delimiter.as_bytes().first()?;
-    if !matches!(quote, b'\'' | b'"') {
-        return None;
-    }
-    let delimiter = delimiter.strip_prefix(char::from(quote))?.strip_suffix(char::from(quote))?;
-    if delimiter.is_empty() || !delimiter.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_') {
-        return None;
-    }
-    let mut offset = newline + 1;
-    for line in word[offset..].split_inclusive('\n') {
-        let candidate = line.strip_suffix('\n').unwrap_or(line);
-        let candidate = if strip_tabs { candidate.trim_start_matches('\t') } else { candidate };
-        offset += line.len();
-        if candidate == delimiter {
-            let closing = word[offset..].trim_start_matches([' ', '\t']);
-            return closing.starts_with(')').then_some(word.len() - closing.len());
-        }
-    }
-    None
 }
 
 /// Marks each token that belongs to a redirect rather than the command: its
@@ -466,127 +404,6 @@ fn redirect_words(tokens: &[ShellToken]) -> Vec<bool> {
         }
     }
     marked
-}
-
-/// Whether this operator continues a redirect, as in `>&` and `>|`. The next word
-/// is that redirect's filename, so it is not in command position and cannot be a
-/// keyword. Bash runs `>case touch in /outside/p` as `touch in /outside/p`.
-fn after_redirect(previous: Option<(char, usize)>, end: usize) -> bool {
-    matches!(previous, Some(('<' | '>', at)) if at + 1 == end)
-}
-
-/// Resolve a substitution with the ordinary shell lexer. Only real operator
-/// tokens can close it: quoted/comment text and case-pattern ')' are data.
-pub(super) fn substitution_end(bytes: &[u8], index: usize, depth: usize) -> Option<usize> {
-    if depth > 8 { return None; }
-    let source = std::str::from_utf8(bytes.get(index..)?).ok()?;
-    let projected = shell_command_projection(source, true);
-    let lexed = factory_shell_lex(&projected, false, depth);
-    enum Phase {
-        Word,
-        In,
-        Pattern { started: bool, parentheses: usize },
-        Body,
-    }
-    struct Case { level: usize, phase: Phase }
-    let mut cases: Vec<Case> = Vec::new();
-    let mut level = 0;
-    let mut arithmetic = vec![false];
-    let mut command_start = true;
-    let mut previous_operator = None;
-    let mut start = 0;
-    for (token, &end) in lexed.tokens.iter().zip(&lexed.ends) {
-        let raw = source.get(start..end)?.trim();
-        start = end;
-        let keyword = |word: &str| raw == word;
-        let previous = previous_operator;
-        previous_operator = match token {
-            ShellToken::Operator(ch) => Some((*ch, end)),
-            _ => None,
-        };
-        let mut handled = false;
-        let mut close_case = false;
-        if let Some(case) = cases.last_mut().filter(|case| case.level == level && !arithmetic[level]) {
-            match (&mut case.phase, token) {
-                (Phase::Word, ShellToken::Word(_)) => {
-                    case.phase = Phase::In;
-                    handled = true;
-                }
-                (Phase::In, ShellToken::Word(word)) => {
-                    if word == "in" && keyword(word) {
-                        case.phase = Phase::Pattern { started: false, parentheses: 0 };
-                    }
-                    handled = true;
-                }
-                (Phase::Pattern { started, .. }, ShellToken::Word(word)) => {
-                    close_case = !*started && word == "esac" && keyword(word);
-                    *started = true;
-                    handled = true;
-                }
-                (Phase::Pattern { started, parentheses }, ShellToken::Operator('(')) => {
-                    if *started { *parentheses += 1; }
-                    *started = true;
-                    handled = true;
-                }
-                (Phase::Pattern { parentheses, .. }, ShellToken::Operator(')')) => {
-                    if *parentheses > 0 {
-                        *parentheses -= 1;
-                    } else {
-                        case.phase = Phase::Body;
-                        command_start = true;
-                    }
-                    handled = true;
-                }
-                (Phase::Body, ShellToken::Word(word))
-                    if command_start && word == "esac" && keyword(word) => close_case = true,
-                (Phase::Body, ShellToken::Operator(';' | '&'))
-                    if previous == Some((';', end - 1))
-                        && matches!(source.as_bytes().get(end.saturating_sub(2)..end), Some(b";;" | b";&")) =>
-                {
-                    case.phase = Phase::Pattern { started: false, parentheses: 0 };
-                    handled = true;
-                }
-                _ => {}
-            }
-        }
-        if close_case {
-            cases.pop();
-            command_start = false;
-            continue;
-        }
-        if handled { continue; }
-        match token {
-            ShellToken::Word(word) => {
-                if command_start && !arithmetic[level] && word == "case" && keyword(word) {
-                    cases.push(Case { level, phase: Phase::Word });
-                }
-                command_start = command_start && keyword(word)
-                    && matches!(word.as_str(), "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{");
-            }
-            ShellToken::Operator('(') => {
-                let at = end - 1;
-                let dollar = at > 0 && source.as_bytes().get(at - 1) == Some(&b'$');
-                arithmetic.push(if at == 0 { true } else if dollar {
-                    source.as_bytes().get(at + 1) == Some(&b'(')
-                } else { arithmetic[level] });
-                level += 1;
-                command_start = true;
-            }
-            ShellToken::Operator(')') if level > 0 => {
-                arithmetic.pop();
-                level -= 1;
-                command_start = false;
-            }
-            ShellToken::Operator(')') => {
-                return (cases.is_empty() && lexed.unresolved_at.is_none_or(|at| at >= end))
-                    .then_some(index + end - 1);
-            }
-            ShellToken::Operator('<' | '>') => command_start = false,
-            ShellToken::Operator(';' | '|' | '&') => command_start = !after_redirect(previous, end),
-            _ => {}
-        }
-    }
-    None
 }
 
 /// What a token means to the enclosing `case`. Code keeps its ordinary handling.
@@ -848,8 +665,8 @@ fn collect_script(
     depth: usize,
     effects: &mut ShellEffects,
 ) -> Result<Directories, &'static str> {
-    if depth > 8 {
-        return Err("a shell payload beyond the resolution limit");
+    if depth > shell_admission::MAX_DEPTH {
+        return Err("[shell.depth] a shell payload beyond the resolution limit");
     }
     check_heredoc_boundaries(script)?;
     let projected = shell_command_without_heredoc_bodies(script);
@@ -1327,8 +1144,8 @@ fn collect_script(
         }
         match separator {
             Some('(') => {
-                if scopes.len() >= 8 {
-                    return Err("a shell payload beyond the resolution limit");
+                if depth + scopes.len() >= shell_admission::MAX_DEPTH {
+                    return Err("[shell.depth] a shell payload beyond the resolution limit");
                 }
                 scopes.push((
                     dirs.clone(),

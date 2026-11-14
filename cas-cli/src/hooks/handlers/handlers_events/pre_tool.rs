@@ -1,7 +1,7 @@
 mod shell_admission;
 mod shell_effects;
 
-use shell_admission::{ShellLexed, ShellToken, factory_shell_lex, shell_ansi_c_word, shell_payload_index};
+use shell_admission::{ShellLexed, ShellToken, factory_shell_lex, shell_ansi_c_word, shell_payload_index, shell_substitutions, substitution_end, literal_cat_heredoc_end, backquote_body, after_redirect};
 
 use crate::hooks::handlers::*;
 
@@ -5862,11 +5862,18 @@ pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
     scan_shell_invocations(command).commands
 }
 
+pub(super) fn executing_shell_arguments(command: &str) -> Result<Vec<Vec<String>>, String> {
+    let scan = scan_shell_invocations(command);
+    if let Some(error) = scan.refusal { return Err(error.to_string()); }
+    Ok(scan.arguments)
+}
+
 #[derive(Default)]
 struct ShellInvocationScan {
     commands: Vec<(String, Vec<String>)>,
-    unresolved_heredoc: bool,
-    unresolved_ansi_c: bool,
+    statements: Vec<Vec<String>>,
+    arguments: Vec<Vec<String>>,
+    refusal: Option<shell_admission::Unsupported>,
 }
 
 fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
@@ -5876,16 +5883,16 @@ fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
 }
 
 fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvocationScan) {
-    if depth > 3 {
-        return;
-    }
-    let substitutions = shell_substitutions(command);
-    found.unresolved_heredoc |= substitutions.unresolved_heredoc;
-    found.unresolved_ansi_c |= substitutions.unresolved_ansi_c;
-    for body in &substitutions.bodies {
+    let parsed = match shell_admission::parse(command, depth) {
+        Ok(parsed) => parsed,
+        Err(error) => { found.refusal.get_or_insert(error); return; }
+    };
+    found.arguments.extend(shell_statements_from_tokens(parsed.lexed.argument_tokens(&parsed.projected)));
+    for body in &parsed.bodies {
         collect_shell_invocations(body, depth + 1, found);
     }
-    for words in shell_statement_words(command) {
+    for words in shell_statements_from_tokens(parsed.lexed.tokens) {
+        found.statements.push(words.clone());
         if let Some(payload) = env_split_string_payload(&words) {
             collect_shell_invocations(&payload, depth + 1, found);
         }
@@ -5920,169 +5927,6 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
     }
 }
 
-/// Command text one shell line runs through substitution, for every guard
-/// that inspects executed commands. Expanding heredoc bodies contribute only
-/// their substitutions; literal bodies are data. Each flag marks text that
-/// could not be bounded, which callers must refuse rather than skip. An
-/// unterminated `$(` is a syntax error; the workspace contract names it.
-#[derive(Default)]
-pub(super) struct ShellSubstitutions {
-    pub(super) bodies: Vec<String>,
-    pub(super) unresolved_heredoc: bool,
-    pub(super) unresolved_ansi_c: bool,
-}
-
-impl ShellSubstitutions {
-    pub(super) fn unresolved(&self) -> bool {
-        self.unresolved_heredoc || self.unresolved_ansi_c
-    }
-}
-
-pub(super) fn shell_substitutions(command: &str) -> ShellSubstitutions {
-    let mut found = ShellSubstitutions::default();
-    let projected = shell_command_without_heredoc_bodies(command);
-    let mut bodies = shell_heredoc_bodies(command).into_iter();
-    for delimiter in projected.lines().flat_map(heredoc_delimiters) {
-        if let Some(body) = bodies.next()
-            && !delimiter.literal_body
-        {
-            collect_heredoc_substitutions(&body, &mut found);
-        }
-    }
-    collect_shell_substitutions(&projected, &mut found);
-    found
-}
-
-/// Inspect substitutions before word projection removes quote provenance.
-/// Parameter/arithmetic word parts can contain executable substitutions even
-/// when the outer word is unquoted; their source must remain inspectable.
-fn collect_shell_substitutions(command: &str, found: &mut ShellSubstitutions) {
-    let bytes = command.as_bytes();
-    let mut index = 0;
-    let mut quote = None;
-    let mut word_start = true;
-    while index < bytes.len() {
-        let ch = bytes[index];
-        if quote == Some(b'\'') {
-            if ch == b'\'' {
-                quote = None;
-            }
-            index += 1;
-            continue;
-        }
-        if ch == b'\\' {
-            // A line continuation does not begin a new word or comment.
-            if bytes.get(index + 1) != Some(&b'\n') {
-                word_start = false;
-            }
-            index += 2;
-            continue;
-        }
-        if ch == b'"' || (ch == b'\'' && quote.is_none()) {
-            quote = if quote.is_some() { None } else { Some(ch) };
-            word_start = false;
-            index += 1;
-            continue;
-        }
-        if ch == b'#' && quote.is_none() && word_start {
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if quote.is_none() && bytes.get(index..index + 2) == Some(b"$'") {
-            let Some((_, end)) = shell_ansi_c_word(command, index) else {
-                found.unresolved_ansi_c = true;
-                break;
-            };
-            index = end;
-            word_start = false;
-            continue;
-        }
-        let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
-            let end = shell_effects::literal_cat_heredoc_end(&command[index..])
-                .map(|end| index + end)
-                .or_else(|| shell_effects::substitution_end(bytes, index + 2, 0));
-            (index + 2, end)
-        } else if ch == b'`' {
-            let start = index + 1;
-            let mut end = start;
-            while end < bytes.len() && bytes[end] != b'`' {
-                end += if bytes[end] == b'\\' { 2 } else { 1 };
-            }
-            (start, (end < bytes.len()).then_some(end))
-        } else {
-            if quote.is_none() {
-                word_start = ch.is_ascii_whitespace()
-                    || matches!(ch, b'(' | b')' | b';' | b'|' | b'&' | b'<' | b'>');
-            }
-            index += 1;
-            continue;
-        };
-        let Some(end) = end else { break };
-        found.bodies.push(if ch == b'`' {
-            shell_effects::backquote_body(&command[start..end])
-        } else {
-            command[start..end].to_string()
-        });
-        word_start = false;
-        index = end + 1;
-    }
-}
-
-/// Expanding heredoc text is data except for substitutions. Quotes in its
-/// body do not suppress expansion; escaped markers and quoted delimiters do.
-fn collect_heredoc_substitutions(body: &str, found: &mut ShellSubstitutions) {
-    // The shell removes unescaped backslash-newline pairs before expanding
-    // the body. Preserve escaped backslashes so marker escaping stays exact.
-    let mut logical = String::new();
-    let mut chars = body.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' && chars.peek() == Some(&'\n') {
-            chars.next();
-            continue;
-        }
-        logical.push(ch);
-        if ch == '\\' && let Some(next) = chars.next() {
-            logical.push(next);
-        }
-    }
-    let bytes = logical.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
-            continue;
-        }
-        let (start, end) = if bytes.get(index..index + 2) == Some(b"$(") {
-            let end = shell_effects::literal_cat_heredoc_end(&logical[index..])
-                .map(|end| index + end)
-                .or_else(|| shell_effects::substitution_end(bytes, index + 2, 0));
-            (index + 2, end)
-        } else if bytes[index] == b'`' {
-            let start = index + 1;
-            let mut end = start;
-            while end < bytes.len() && bytes[end] != b'`' {
-                end += if bytes[end] == b'\\' { 2 } else { 1 };
-            }
-            (start, (end < bytes.len()).then_some(end))
-        } else {
-            index += 1;
-            continue;
-        };
-        let Some(end) = end else {
-            found.unresolved_heredoc = true;
-            break;
-        };
-        found.bodies.push(if bytes[index] == b'`' {
-            shell_effects::backquote_body(&logical[start..end])
-        } else {
-            logical[start..end].to_string()
-        });
-        index = end + 1;
-    }
-}
-
 /// Heading of every factory workspace contract refusal; tests name the
 /// guard by it.
 const WORKSPACE_CONTRACT_DENIAL: &str = "🚫 FACTORY WORKSPACE CONTRACT";
@@ -6111,11 +5955,8 @@ const OPERATOR_POLICY_COMMAND_DENIAL: &str = "🚫 OPERATOR-ONLY (cas-3147, GH #
 /// assembled at run time, is out of reach of a tool-call hook.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
     let scan = scan_shell_invocations(&normalize_cas_substitutions(command));
-    if scan.unresolved_ansi_c {
-        return Some("🚫 OPERATOR-ONLY: Cannot inspect an unsupported ANSI-C shell word.".into());
-    }
-    if scan.unresolved_heredoc {
-        return Some("🚫 Cannot inspect an unresolved command substitution in an expanding heredoc.".into());
+    if let Some(refusal) = scan.refusal {
+        return Some(refusal.to_string());
     }
     for (_, args) in scan.commands.into_iter().filter(|(name, _)| name == "cas") {
         // cas-3c26: operator-only actions, judged by the CLI parser.
@@ -6990,7 +6831,7 @@ const ROLE_ENV_NAMES: &[&str] = &["CAS_AGENT_ROLE", "CAS_FACTORY_MODE"];
 /// environment: an assignment prefix, `env NAME=`, `env -u NAME`, `env -i`
 /// before `cas`, `export`/`declare -x NAME=` or `unset NAME`.
 fn role_env_tampering_denial(command: &str) -> Option<String> {
-    role_env_tampering_at_depth(command, 0)
+    role_env_tampering_in_scan(scan_shell_invocations(command))
 }
 
 // gate-audit[forward]: H-12 Returned denial is tagged by the environment-role spoof guard.
@@ -7001,17 +6842,15 @@ fn role_env_denial(what: &str) -> String {
     )
 }
 
-fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
-    if depth > 3 {
-        return None;
-    }
+fn role_env_tampering_in_scan(scan: ShellInvocationScan) -> Option<String> {
+    if let Some(error) = scan.refusal { return Some(error.to_string()); }
     let role_name = |name: &str| ROLE_ENV_NAMES.contains(&name);
     let assigned_role = |word: &str| {
         word.split_once('=')
             .filter(|(name, _)| is_shell_variable_name(name) && role_name(name))
             .map(|(name, _)| name.to_string())
     };
-    for words in shell_statement_words(command) {
+    for words in scan.statements {
         // Assignment prefixes: `CAS_AGENT_ROLE=supervisor cas …`.
         let mut index = 0;
         while let Some(word) = words.get(index) {
@@ -7079,14 +6918,6 @@ fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
             "unset" => {
                 if let Some(name) = args.iter().find(|arg| role_name(arg)) {
                     return Some(role_env_denial(&format!("this command unsets {name}")));
-                }
-            }
-            // Wrappers whose option value is itself a shell command.
-            "sh" | "bash" | "zsh" | "dash" | "script" | "su" | "runuser" => {
-                if let Some(payload) = shell_payload_index(shell_word_basename(program), args).and_then(|at| args.get(at))
-                    && let Some(denial) = role_env_tampering_at_depth(payload, depth + 1)
-                {
-                    return Some(denial);
                 }
             }
             _ => {}

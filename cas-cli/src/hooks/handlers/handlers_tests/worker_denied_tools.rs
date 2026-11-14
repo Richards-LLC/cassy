@@ -239,6 +239,9 @@ fn worker_shell_absolute_and_home_credential_reads_are_refused_cas_da9a() {
         &format!("rg -f'{}' fixture.txt", credentials.display()),
         &format!("xargs -a '{}' printf '%s'", credentials.display()),
         &format!("xargs --arg-file='{}' printf '%s'", credentials.display()),
+        &format!("xargs -0a'{}' printf '%s'", credentials.display()),
+        &format!("xargs --arg-f='{}' printf '%s'", credentials.display()),
+        "env -C ~/.config/neonctl xargs -a credentials.json printf '%s'",
         &format!("sort --random-source='{}' names.txt", credentials.display()),
         &format!("cat '{}'", home.join(".config/neonctl/credentials.json").display()),
         &format!("cp '{}' /tmp/copied-token", home.join(".local/share/com.vercel.cli/auth.json").display()),
@@ -250,6 +253,13 @@ fn worker_shell_absolute_and_home_credential_reads_are_refused_cas_da9a() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+    for command in [
+        format!("xargs -I '{}' printf '%s'", credentials.display()),
+        format!("xargs -I'{}' printf '%s'", credentials.display()),
+    ] {
+        let reason = denial(handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap());
+        assert!(reason.is_none(), "replacement data: {reason:?}");
+    }
 }
 
 #[test]
@@ -372,6 +382,10 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
         "bash -c -- 'cat ~/.local/share/com.vercel.cli/auth.json'".to_string(),
         "bash -c true < ~/.config/neonctl/credentials.json".to_string(),
         "bash fixture.sh < ~/.config/neonctl/credentials.json".to_string(),
+        "< ~/.config/neonctl/credentials.json bash -c true".to_string(),
+        "bash -c true 3< ~/.config/neonctl/credentials.json".to_string(),
+        "< ~/.config/neonctl/credentials.json".to_string(),
+        "cd ~/.config && cd /tmp >& neonctl/credentials.json".to_string(),
     ] {
         let output = handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap();
         let reason = denial(output);
@@ -393,6 +407,7 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
     for command in [
         "bash fixture.sh -c 'cat ~/.config/neonctl/credentials.json'",
         "bash -c true fixture-name 'cat ~/.config/neonctl/credentials.json'",
+        "bash fixture.sh <<< '~/.config/neonctl/credentials.json'",
     ] {
         let reason = denial(handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap());
         if reason.is_some() {

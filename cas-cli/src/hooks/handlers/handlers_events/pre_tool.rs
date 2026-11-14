@@ -5764,6 +5764,13 @@ pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
     scan_shell_invocations(command).commands
 }
 
+/// Credential policy consumes argv and opened files from one shared parse.
+/// Grammar failures are reported by admission rather than invented as reads.
+pub(super) fn shell_statement_io(command: &str, depth: usize) -> Vec<(Vec<String>, Vec<String>)> {
+    let Ok(parsed) = shell_admission::parse(command, depth) else { return Vec::new(); };
+    parsed.lexed.statement_io(&parsed.projected, &parsed.syntax)
+}
+
 pub(super) fn executing_shell_arguments(command: &str) -> Result<Vec<Vec<String>>, String> {
     let scan = scan_shell_invocations(command);
     if let Some(error) = scan.refusal { return Err(error.to_string()); }
@@ -6117,6 +6124,45 @@ fn xargs_short_option_needs_value(word: &str, options: &[&str]) -> bool {
         }
     }
     false
+}
+
+/// A wrapper can open its own input before running a data-only child. Use
+/// the actual wrapper traversal and option-value table, so replacement/format
+/// data never becomes an input-file option.
+pub(super) fn shell_wrapper_read_paths(words: &[String]) -> Vec<(String, usize)> {
+    let mut files = Vec::new();
+    unwrapped_command_index_with_alternatives(words, true, &mut |_| {}, &mut |at| {
+        if shell_word_basename(&words[at]) != "xargs" { return; }
+        let options = wrapper_value_options("xargs");
+        let wrapper_at = at;
+        let mut at = at + 1;
+        while let Some(word) = words.get(at).map(String::as_str) {
+            if !word.starts_with('-') || word == "--" || word == "-" { break; }
+            let mut value = None;
+            if word.starts_with("--") {
+                let (flag, attached) = word.split_once('=').map_or((word, None), |(flag, value)| (flag, Some(value)));
+                if let Some(option) = options.iter().find(|option| option.starts_with("--") && option.starts_with(flag)) {
+                    value = Some((*option == "--arg-file", attached));
+                }
+            } else {
+                for (offset, flag) in word[1..].char_indices() {
+                    // GNU optional short values consume only their suffix.
+                    if matches!(flag, 'i' | 'e' | 'l') { break; }
+                    if options.iter().any(|option| *option == format!("-{flag}")) {
+                        let suffix = &word[1 + offset + flag.len_utf8()..];
+                        value = Some((flag == 'a', (!suffix.is_empty()).then_some(suffix)));
+                        break;
+                    }
+                }
+            }
+            if let Some((input_file, attached)) = value {
+                let value = attached.or_else(|| { at += 1; words.get(at).map(String::as_str) });
+                if input_file && let Some(value) = value { files.push((value.to_string(), wrapper_at)); }
+            }
+            at += 1;
+        }
+    });
+    files
 }
 
 /// `30`, `1.5`, `30s`, `2m`: a number or `timeout` duration.

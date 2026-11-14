@@ -105,9 +105,11 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     // Nested shells are not standalone listings, so their payloads never
     // reach here with inert names.
     let names_inert = depth == 0 && listed_names_stay_inert(command);
-    let statements = super::pre_tool::shell_statement_words(command);
-    let arguments = super::pre_tool::shell_statement_arguments(command);
-    for (statement_index, words) in statements.iter().enumerate() {
+    for (words, redirects) in super::pre_tool::shell_statement_io(command, depth) {
+        if redirects.iter().any(|path| path_references_store(path, &cwd, false))
+            || super::pre_tool::shell_wrapper_read_paths(&words).iter()
+                .any(|(path, wrapper)| path_references_store(path, &wrapper_cwd(&words[..*wrapper], &cwd), false))
+        { return true; }
         let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
             continue;
         };
@@ -166,18 +168,8 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             continue;
         }
 
-        // Parse actual argv, without `2>/dev/null`, but retain raw words for
-        // protected redirect targets below. Ambiguous statement alignment
-        // keeps the conservative read classification.
-        let names_only = names_inert
-            && statements.len() == arguments.len()
-            && arguments.get(statement_index).is_some_and(|argv| {
-                super::pre_tool::unwrapped_command_index(argv).is_some_and(|index| {
-                    argv[index] == words[command_index]
-                        && lists_names_only(&executable, &argv[index + 1..])
-                })
-            });
-        if statement_references_store(words, &cwd, names_only) {
+        let names_only = names_inert && lists_names_only(&executable, args);
+        if statement_references_store(&words, &cwd, names_only) {
             return true;
         }
     }

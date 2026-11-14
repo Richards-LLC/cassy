@@ -830,8 +830,9 @@ impl ShellLexed {
     /// Arguments projected from the same tokens and source spans used for
     /// effects. Only raw attached descriptors are IO numbers; quoted or
     /// separated numbers remain command arguments.
-    fn argument_projection(&self, source: &str) -> (Vec<usize>, Option<Unsupported>) {
+    fn argument_projection(&self, source: &str) -> (Vec<usize>, Vec<usize>, Option<Unsupported>) {
         let mut arguments = Vec::new();
+        let mut files = Vec::new();
         let mut refusal = None;
         let mut at = 0;
         let adjacent = |left: usize, right: usize| self.ends[right] == self.ends[left] + 1;
@@ -865,12 +866,15 @@ impl ShellLexed {
                 refusal.get_or_insert_with(|| Unsupported::execution("shell.unknown_syntax", start,
                     "redirect operator", "the redirect is outside the supported grammar", "use a supported file redirect"));
             }
-            if matches!(self.tokens.get(at), Some(ShellToken::Word(_))) { at += 1; }
+            if matches!(self.tokens.get(at), Some(ShellToken::Word(_))) {
+                if !matches!(operator.as_str(), "<<" | "<<<") { files.push(at); }
+                at += 1;
+            }
             else if !process(at) {
                 refusal.get_or_insert_with(|| Unsupported::unterminated(start, "redirect target"));
             }
         }
-        (arguments, refusal)
+        (arguments, files, refusal)
     }
 
     fn argument_indices(&self, source: &str) -> Vec<usize> {
@@ -879,6 +883,31 @@ impl ShellLexed {
 
     pub(super) fn argument_tokens(&self, source: &str) -> Vec<ShellToken> {
         self.argument_indices(source).into_iter().map(|at| self.tokens[at].clone()).collect()
+    }
+
+    /// Keep redirect file operands separate from argv even for a statement
+    /// with no executable. Heredoc delimiters and here-string data open no file.
+    pub(super) fn statement_io(&self, source: &str, syntax: &[CaseSyntax]) -> Vec<(Vec<String>, Vec<String>)> {
+        let (arguments, files, _) = self.argument_projection(source);
+        let arguments: std::collections::HashSet<_> = arguments.into_iter().collect();
+        let files: std::collections::HashSet<_> = files.into_iter().collect();
+        // & and | inside a redirect do not end its receiving command.
+        let grouping: Vec<_> = self.tokens.iter().enumerate().map(|(at, token)| {
+            if !arguments.contains(&at) && !files.contains(&at)
+                && matches!(token, ShellToken::Operator(_))
+            { ShellToken::Word(String::new()) } else { token.clone() }
+        }).collect();
+        statement_indices(&grouping).into_iter().map(|indices| {
+            let mut argv = Vec::new();
+            let mut redirects = Vec::new();
+            for at in indices {
+                if matches!(syntax[at], CaseSyntax::Hidden | CaseSyntax::Esac) { continue; }
+                let ShellToken::Word(word) = &self.tokens[at] else { continue; };
+                if arguments.contains(&at) { argv.push(word.clone()); }
+                else if files.contains(&at) { redirects.push(word.clone()); }
+            }
+            (argv, redirects)
+        }).collect()
     }
 
     pub(super) fn statements(&self, source: &str, syntax: &[CaseSyntax]) -> Vec<Statement> {
@@ -1419,7 +1448,7 @@ fn compound_refusal(source: &str, lexed: &ShellLexed, syntax: &[CaseSyntax], dep
     let mut function_body = None;
     let mut rhs = None;
     let arithmetic = lexed.arithmetic_spans().unwrap_or_default();
-    let (indices, refusal) = lexed.argument_projection(source);
+    let (indices, _, refusal) = lexed.argument_projection(source);
     if refusal.is_some() { return refusal; }
     let mut indices = indices.into_iter().peekable();
     while let Some(at) = indices.next() {

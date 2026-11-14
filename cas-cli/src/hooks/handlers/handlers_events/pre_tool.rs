@@ -10322,6 +10322,11 @@ EOF
         env.set("CAS_CLONE_PATH", &worktree);
         let mut mismatches = Vec::new();
         for (command, denied) in [
+            ("INSPECT=printf; \"$INSPECT\" fixture", false),
+            ("ROOT=src; find \"$ROOT\" -type f -print", false),
+            ("WRITER=touch; \"$WRITER\" ../../ordinary-data.txt", true),
+            ("WRITER=printf; printf -v WRITER touch; \"$WRITER\" ../../ordinary-data.txt", true),
+            ("WRITER=printf; read -r WRITER; \"$WRITER\" ../../ordinary-data.txt", true),
             ("rg -n \"needle$\" src/*.rs", false),
             ("sort src/*.rs | wc -l", false),
             ("rg -n \"needle$\" \"src/${FILE}\"", false),

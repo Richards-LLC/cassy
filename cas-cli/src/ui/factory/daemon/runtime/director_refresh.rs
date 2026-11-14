@@ -734,7 +734,8 @@ impl DirectorRefresh {
         let submitted = if external {
             spec.lane = super::jobs::Lane::External;
             spec.budget = factory_jobs::CI_STATUS_BUDGET;
-            jobs.submit_external(spec, move || work(None))
+            let output = work(None); // cas-bc7a adversarial probe: run GitHub on control.
+            jobs.submit_external(spec, move || output)
         } else {
             jobs.submit_external_read(spec, work)
         };

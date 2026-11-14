@@ -40,10 +40,9 @@ classes), and the cas_3147 / cas-4923e controls.
 | R21 | #1615 / #1677 | `git add -A; git commit -m x` on a named branch from a subdirectory | ALLOW | reconstructed |
 | R22 | #1770 | `bash -c 'cd R && git commit --allow-empty -m probe'` | DENY (commit scope) | exact |
 | R23 | survey | `sed -n "$((S+1)),$((S+2))p" file` | DENY (ambient arithmetic has no local numeric provenance) | exact |
-
 | R23b | #1866 / survey | `S=12; sed -n "$((S+1)),$((S+2))p" file` | ALLOW (literal local numeric initialization) | reconstructed |
 
-#1838/#1808/#1754 retain their credential-policy dependency; their presence
+Issues #1838/#1808/#1754 retain their credential-policy dependency; their presence
 here does not transfer ownership of credential policy. #1677 start-branch
 ownership remains with its sibling task. #1700 remains out of scope.
 

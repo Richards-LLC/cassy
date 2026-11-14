@@ -921,6 +921,15 @@ export class HubDouble {
     return this.sockets.has(session);
   }
 
+  /**
+   * Resolves when the double holds the socket a reply to `session` rides. The
+   * header turns Live before a multiplexed page subscribes its session, so a
+   * send right after Live can find no socket (cas-9d2c). Event-driven, no polling.
+   */
+  socketOpen(session: string): Promise<void> {
+    return this.waitFor(() => this.sockets.has(session));
+  }
+
   /** Resolves when the next SendMessage arrives. */
   nextSend(): Promise<SentMessage> {
     const count = this.sends.length;
@@ -1333,6 +1342,7 @@ export class HubDouble {
     if (this.held.has(session) || !this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
     this.legacySocketOpens.set(session, (this.legacySocketOpens.get(session) ?? 0) + 1);
     this.sockets.set(session, ws);
+    this.observed();
     let bucket = this.sessionSocketsByMachine.get(machineId);
     if (!bucket) this.sessionSocketsByMachine.set(machineId, (bucket = new Set()));
     bucket.add(ws);

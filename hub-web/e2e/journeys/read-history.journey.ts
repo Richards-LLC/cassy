@@ -18,6 +18,7 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
   await page.context().route("https://store.test/**", route => route.fulfill({ contentType: "image/png", body: imageBytes }));
   await journey.open(); await openConversation(page, "cas-src");
   const images = ["First screenshot.png", "Second screenshot.png", "Missing screenshot.png"].map((name, index) => ({ ...file(["gallery-first", "gallery-second", "gallery-missing"][index]!, name), mime: "image/png" }));
+  await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, "Compare these screenshots.", { attachments: images });
   hub.supervisorSays(PELICAN, "This image belongs to another turn.", { attachments: [{ ...images[0], artifact_id: "gallery-other", name: "Other turn.png" }] });
   const first = page.getByRole("log").getByRole("link", { name: /^First screenshot.png/ });
@@ -136,6 +137,7 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
   await journey.open();
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+  await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, [
     "| Tab | State |", "| --- | --- |",
     "| **Daniel Open Hours** | Tracks *open hours* in `time-tracking`; [details](https://example.org/hours) stay available. |",
@@ -234,6 +236,7 @@ test("HUB-J4 copy real tables as Markdown and spreadsheet CSV", journeyPart, asy
   await journey.open();
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+  await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, `# Evidence ready to reuse\n\n${markdown}\n\n~~~txt\n| literal | source |\n| --- | --- |\n~~~`);
   const log = page.getByRole("log");
   const table = log.getByRole("table", { name: "Evidence", exact: true }).filter({ has: page.getByRole("columnheader", { name: "Item", exact: true }) });
@@ -329,6 +332,7 @@ test("HUB-J4 a short status shows its callout and bold, not their markers", jour
   await journey.open();
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+  await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, "> [!WARNING]\n> **Blocked:** the queue is red on two Commander journeys.", { kind: "status" });
   hub.supervisorSays(PELICAN, "**Merged.** Gate 11 of 14 is green and the release branch is ready for its next pass.", { kind: "status" });
   const log = page.getByRole("log");
@@ -358,6 +362,7 @@ test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", 
   await journey.open();
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
+  await hub.socketOpen(PELICAN);
   hub.supervisorSays(PELICAN, [
     "# Release is ready", "## Evidence", "### Checks", "The reviewed build passed.",
     "> [!NOTE]", "> **Read** the [receipt](https://example.org/receipt).", ">", "> The evidence stays available.", "",

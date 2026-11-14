@@ -25472,7 +25472,13 @@ pub(crate) fn validate_pushed_task_receipt(
             parked_anchor_advance_with_target_is_attributable(
                 &context.repo_root, anchor, &tip, &task.id, None, &target)
         });
-        if !attributed && !correction {
+        // cas-d9d38: a rebound lane is attributed the way rebind approved it,
+        // by its validated start-to-tip delivery, not a parked anchor.
+        let started = !attributed && !correction
+            && task.deliverables.factory_branch_start.as_ref().is_some_and(|start| start.branch == branch)
+            && task_attribution::started_delivery(&context.repo_root, task).ok().flatten()
+                .is_some_and(|delivery| resolve_branch_sha(&context.repo_root, &delivery.branch).as_deref() == Some(tip.as_str()));
+        if !attributed && !correction && !started {
             return Err(format!("PUSHED TASK RECEIPT REJECTED: {tip} is not attributable to task {}", task.id));
         }
         return Ok((branch, tip));

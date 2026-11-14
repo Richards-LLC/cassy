@@ -1830,13 +1830,14 @@ async fn spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
 
-    let refused = env.service.factory_request(Parameters(req)).await.unwrap_err().message;
+    let status = get_text(&env.service.factory_request(Parameters(factory_req("worker_status"))).await.unwrap());
+    let refused = env.service.factory_request(Parameters(req)).await
+        .expect_err(&format!("spawn must be refused at 8/8; worker_status: {status}")).message;
     let census = refused.split("Worker capacity: ").nth(1).and_then(|rest| rest.split(';').next())
         .unwrap_or_else(|| panic!("{refused}"));
     assert!(census.starts_with("8/8"), "{refused}");
     assert!(census.contains(&format!("{} 1", label(&env.cas_root))), "{refused}");
     assert!(census.contains(&format!("{} 7", label(&other_root))), "{refused}");
-    let status = get_text(&env.service.factory_request(Parameters(factory_req("worker_status"))).await.unwrap());
     assert!(status.contains(&format!("Worker capacity: {census}")), "{status}");
 }
 

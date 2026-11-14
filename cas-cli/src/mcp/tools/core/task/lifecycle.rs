@@ -49,6 +49,7 @@ impl TaskLifecycleGateError {
 }
 
 pub(crate) mod close_ops;
+pub(crate) mod parked_conflicts;
 pub(crate) mod epic_lane;
 mod epic_overlap;
 mod recall_terms;

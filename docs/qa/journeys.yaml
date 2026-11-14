@@ -1726,6 +1726,25 @@ bug_families:
     title: Verifier infrastructure errors preserve exact-dispatch recovery and daemon launches retain read-only containment
     tasks: [cas-343d]
     journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  approved-no-code-close:
+    title: Approved no-code close dispatches finish their exact task and release its claim
+    tasks: [cas-ea5d]
+    journeys: [FACTORY-CLOSE]
+  image-viewer-failure-note-settles:
+    title: The image-viewer failure note is asserted after the lazy chunk rejection settles, not by a one-shot count
+    tasks: [cas-be19]
+    journeys: [HUB-J4]
+    invariants: [HUB-J4-IMAGE-INSPECTION]
+  release-preview-shared-proofs:
+    title: Release preview repeats shared merge-edge proofs across members
+    tasks: [cas-b7be]
+    journeys: []
+    invariants: []
+  search-shell-flags:
+    title: Conceptual search treats shell flags as literal keywords
+    tasks: [cas-6c1a]
+    journeys: []
+    invariants: []
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

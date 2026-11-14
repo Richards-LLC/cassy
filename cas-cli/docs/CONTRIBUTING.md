@@ -2716,6 +2716,17 @@ Merge-queue proof reuse accepts successful completed `merge_group` runs from
 colon. Repository identities, queue branch, exact tree receipt and landed
 containment remain mandatory.
 
+Release cuts accept the nearest green train ancestor when all intervening commits
+change only the release assets recognized by `scripts/train-ci.py`. This includes
+CODEMAP, changelog, notes, release reports and per-task doc fragments. Source
+changes, even if reverted later, require fresh proof. The receipt still needs
+matching run identity, complete logs, successful full-set jobs and the current
+main baseline. Normal train observation continues to report the exact tip.
+A pending `.claude/CODEMAP.md` edit can ride the release commit without a
+separate train commit. The release verdict uses existing member approvals and
+the green frozen-train receipt, with no separate batch release review. Missing
+required member approvals or exempt-lane CI still refuse the cut by task ID.
+
 Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
 Name cached or recorded state as such; a successful mutation does not establish
 that its follow-up, release publication, or installation on another host completed.
@@ -3174,23 +3185,37 @@ non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
 Slim lanes omit broad Rust tests for factory pushes, but run the train's
-impact selection (`scripts/ci-test-impact.py`, unchanged) for the delivery's
-range on hosted runners (cas-2e1b). The range starts at the delivery's
-recorded start base when `refs/cas/delivery-base/<branch>` exists and is an
-ancestor of the pushed head (task start pushes that ref, best effort, each
-time it records a new start base); otherwise it uses the classifier's inferred
-comparison base. The plan step logs which one it used. `Scoped Validation — impact own tests`
-builds the selection and runs the changed modules' unit tests, edited
-integration suites and directly changed crates first; up to three `impact ring`
-shards then run the rest of the selection from its archive, only after the own
-tests pass. A workspace plan (build/test policy, `scripts/`, `.github/` or an
-unmappable path) runs the whole workspace, still own tests first, exactly as
-the selector decided. A failed test fails the lane only when it passes (or
-does not exist) at the delivery's base: the same job checks out that base and
-reruns just the failed tests. Tests that fail there too are named in the job
-summary as inherited from the base and do not fail the delivery. Lane receipts are published as `lane-impact-*`, outside the
-selector's failure history. Merges into a release train start no train
-suite; lane CI already proved each delivery. The daemon's train CI scan
+impact selection (`scripts/ci-test-impact.py`) for the delivery's range on hosted
+runners (cas-2e1b). Selection compares the pushed head with its merge-base with
+the live target, as resolved by the classifier. Content merged in from the
+train is excluded. The recorded start base in `refs/cas/delivery-base/<branch>`
+is used only for failure attribution, falling back to the inferred base when
+missing or not an ancestor. The plan logs both bases separately.
+`Scoped Validation — impact own tests` builds the selection and runs the changed
+modules' unit tests, edited integration suites, directly changed crates and
+explicit file-reading contracts first; up to three `impact ring` shards run the
+rest from its archive after own tests pass. Agent/config roots `.claude/`,
+`.codex/`, `.grok/`, `docs/` and `changelog.d/` select no Rust tests. Script and
+workflow inputs use their existing script/CI contract tier plus Rust test
+functions with matching file literals, including local helper/constant reads.
+Cargo manifests/lockfiles, nextest configuration, `.cargo/`, `vendor/` and
+unmapped code retain conservative workspace/crate selection. No Rust match
+produces an explicit empty selection and invokes no Cargo. A failed test fails the lane only when it passes (or
+does not exist) at the delivery's base. The same job first looks for explicit
+failure receipts from existing CI runs at that exact SHA, matching package,
+binary, test, compiler, nextest, runner image and profile/configuration. A prior
+lane's explicit base replay can supply this proof even when its own head differs.
+It reuses matching failures without preparing or compiling the base, then checks
+out the base and reruns only identities without proof. Missing, expired,
+configuration-mismatched or legacy receipts are misses. Tests that fail at the
+base are named in the job summary as inherited and do not fail the delivery.
+Named failure receipts are uploaded before attribution. Attribution records
+lookup, worktree, build and test times, with a twenty-minute total replay budget
+inside the unchanged forty-five-minute job. Interrupted or failed preparation
+leaves explicit unresolved identities and keeps the lane red. Lane receipts are
+published as `lane-impact-*`, outside the selector's failure history.
+Merges into a release train start no train suite; lane CI already proved each
+delivery. The daemon's train CI scan
 dispatches `full-validation.yml` once per frozen train tip (cas-0fc56), and a
 frozen train accepts no merge that could supersede it. That dispatched run and
 merge-group events call the same reusable `ci.yml` through
@@ -5003,9 +5028,9 @@ and `worktree_merge`; resume those calls after the run. This manual wait does
 not enforce a shared hold across machines.
 
 Auto-cut (`workflow/release_auto_cut.rs`) runs inside the daemon's cut-notice
-poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip
-has a green train-suite receipt, it acts when the tip holds `changelog.d/`
-fragments, no merge-queue run is in flight, the operator has not paused it
+poll (`train_guardrails::notify_train_cuts`). For an uncut train it may freeze
+when the tip holds `changelog.d/` fragments, its declared must-land scope has
+landed, no merge-queue run is in flight, the operator has not paused it
 (Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
 label), the train's supervisor is registered on this machine and the cadence
 allows it: fewer than `release.auto_cut_max_per_day` (default 4) other trains
@@ -5019,6 +5044,16 @@ supervisor once. `release.sh` arms landing and publication reminders, and the
 post-publish notice has the supervisor post the approved notes. Cassy never
 writes or posts notes. Declined trains get the ordinary ready-to-cut notice,
 which names the reason.
+
+Record a required delivery with
+`task action=dep_add id=<train> to_id=<delivery> dep_type=blocks`.
+Auto-cut names unresolved blocking tasks and waits before freezing. Ordinary
+closure after merge or cancellation clears a blocker; moving a delivery to
+another target also removes it from this train's cut scope. Other dependency
+types and optional children do not hold the cut. Without Blocks dependencies,
+the existing fragment, queue and cadence rules apply. Free-text decision notes
+do not define machine scope; record the required IDs as dependencies. An
+explicit release cut remains available to the operator.
 
 ## Ordered train merge queue
 

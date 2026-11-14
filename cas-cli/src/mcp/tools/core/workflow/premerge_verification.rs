@@ -1204,7 +1204,7 @@ impl CasCore {
         }
         // A peer machine's committed evidence lands where the verifier reads,
         // before the digest so a restored LEDGER.md is part of this candidate.
-        crate::artifacts::proof::materialize_peer_evidence(&self.cas_root, task);
+        crate::artifacts::proof::materialize_peer_evidence(&self.cas_root, task).map_err(fail)?;
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))

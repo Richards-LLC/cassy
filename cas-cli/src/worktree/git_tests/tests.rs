@@ -1619,8 +1619,23 @@ fn publish_branch_to_origin_is_already_current_when_nothing_to_push() {
 /// `origin/<parent>` view agree without a manual push step.
 #[test]
 fn publish_branch_to_origin_pushes_a_locally_merged_target() {
-    let (_temp, _origin_path, local_path, merge_sha) = merged_locally_with_origin_behind();
-    let git = GitOperations::new(local_path);
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.set("CAS_PROVEN_MERGE_HEAD", "inherited-head");
+    env.set("CAS_PROVEN_MERGE_BASE", "inherited-base");
+    let (temp, origin_path, local_path, merge_sha) = merged_locally_with_origin_behind();
+    let git = GitOperations::new(local_path.clone());
+    let integration_base = git.resolve_commit("origin/main").unwrap();
+    let marker = temp.path().join("push-marker");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = local_path.join(".git/hooks/pre-push");
+        std::fs::write(&hook, format!(
+            "#!/bin/sh\nprintf '%s\\n' \"${{CAS_PROVEN_MERGE_HEAD:-}}\" \"${{CAS_PROVEN_MERGE_BASE:-}}\" > '{}'\n",
+            marker.display(),
+        )).unwrap();
+        std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     assert_eq!(
         git.publish_branch_to_origin("main"),
@@ -1633,6 +1648,19 @@ fn publish_branch_to_origin_pushes_a_locally_merged_target() {
         Some(merge_sha.as_str()),
         "origin/main must now carry the merge"
     );
+    #[cfg(unix)]
+    {
+        // Ordinary publications cannot inherit the engine exemption.
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "\n\n");
+        let created = Command::new("git")
+            .args(["update-ref", "refs/heads/epic/proven", &integration_base])
+            .current_dir(&origin_path).output().unwrap();
+        assert!(created.status.success());
+        assert_eq!(git.publish_merge_candidate("epic/proven", &merge_sha, false),
+                   TargetPushOutcome::Pushed { sha: merge_sha.clone() });
+        assert_eq!(std::fs::read_to_string(marker).unwrap(),
+                   format!("{merge_sha}\n{integration_base}\n"));
+    }
 }
 
 /// AC3: the close guard's own measurement — which is what rejected the worker

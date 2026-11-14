@@ -7,6 +7,80 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.27.0] - 2026-11-14
+
+### Changed — Release
+
+- **macOS prebuild runs on the operator's Mac** — Was: every macOS release
+  prebuild compiled all dependencies cold on hosted macOS (Build step 30.7
+  min). Now: trusted merge-queue and `main` builds run on a self-hosted Apple
+  Silicon runner with a persistent target directory and fall back to hosted
+  macOS when that runner does not start a probe within 90 s.
+  `scripts/install-mac-release-runner.sh` installs the runner as a launchd
+  user agent.
+
+### Fixed — Release trains
+
+- **Wait for the declared cut scope** — Auto-cut waits for the train's blocking deliveries and names those still pending before freezing. Cancelled or retargeted deliveries clear the scope; optional children and trains without a declared scope retain their existing behavior.
+
+### Fixed — Hooks
+
+- **H-11 allows command help** — Was: `cas config grant-write --help` was
+  blocked as a policy mutation. Now: help and version output are recognized as
+  non-mutating by the CLI parser before H-11 evaluates the command.
+
+### Fixed — Commander
+
+- **Show work from fresh supervisor activity** — Recent output lights the working indicator even when no named phase is available. A delivery receipt alone stays quiet, and unknown phases still show no placeholder.
+- **Read conversation history while the daemon is busy** — history uses its own read-only WAL connection, so daemon writes cannot make the conversation fail to load or force repeated retries. Phase status appears only when a phase or a waiting question is known.
+- **Keep history recovery in reach** — An older-page error keeps its Retry control visible through pending activity updates and reconnect layout. Fresh supervisor output still shows working independently of named phases.
+
+### Fixed — Release train
+
+- **One train-suite run per frozen tip** — Was: when a run was already under
+  way at the frozen tip, the daemon dispatched a second one, and a newer
+  cancelled duplicate hid the green receipt from the cut. Now: the daemon
+  dispatches only when no run is queued or running at that tip, and a
+  cancelled run never outranks a finished one at the same tip.
+
+## [4.26.0] - 2026-11-14
+
+### Fixed — Release delivery
+
+- **Check supervisor train pushes** — Supervisor commits run fast admission checks, release-notes lint and Commander dist checks before pushing. Integration publication reuses checked delivery content through an exact head/base marker, avoiding a second fast-row run and the merge push timeout. Doctor and supervisor startup detect missing hook directories.
+
+## [4.25.0] - 2026-11-13
+
+### Fixed — Release flow
+
+- **Reuse delivery approvals at release** — Tier 1 code receives review before merge in batch mode. Release cuts use existing merge approvals and the green train receipt, name missing approvals, and need no separate code-review ledger or recorder. Deliberate light, sampled and Tier 0 exemptions use green lane CI alongside the train run.
+
+### Fixed — Releases
+
+- **Reuse green train proof after release documentation changes** — CODEMAP, changelog, release notes and reports can follow a green train run without another full train CI. Pending CODEMAP edits join the release commit. The release verdict uses existing member approvals and the green frozen-train receipt, without a separate batch release review. Missing required approvals still refuse the cut.
+
+- **Prepared retries and completed reports** — Compiled product overview and journey docs retain green train proof on cut retries. Already closed no-code members keep their original external links without being rebound to artifact metadata. Open report deliveries still require valid artifact proof and remain open until approved.
+
+### Fixed — CI
+
+- **Reuse exact-base failure proof** — Lane attribution reuses configuration-matched failing-test receipts before rebuilding the base, publishes failures early, and keeps incomplete attribution red within a bounded replay budget.
+- **Delivery-only lane selection** — Select changes against the live target merge-base, keep recorded bases for attribution, and run only file-reading Rust contracts for script/workflow changes. Agent configuration and documentation no longer widen Rust selection.
+
+### Fixed — Factory
+
+- **Same-millisecond mail reaches the next tool boundary** — Was: a message
+  whose inbox signal shared the millisecond of the worker's last tool-boundary
+  check stayed hidden until unrelated mail arrived. Now: an equal signal
+  triggers one more check, and already shown mail is never repeated.
+
+### Fixed — Factory merges
+
+- **Keep approval while a candidate rebuild continues** — an unchanged delivery's approval now survives a candidate rebuild that exceeds the response deadline. Retrying the merge reuses the existing approval after preparation finishes. Disjoint train changes retain the original dispatch and record the carried approval on the task; changed deliveries and conflicts retain their existing review checks.
+
+### Fixed — Factory routing
+
+- **Routed builds ship their evidence to the reviewing machine** — Was: a delivery built on another machine (a routed build) left its LEDGER.md and logs in that machine's artifacts root, so the routing machine's pre-merge verifier found no evidence directory and a supervisor copied the files by hand. Now: parking a routed build publishes every file in the task evidence directory, including nested `qa/` captures and empty files, through the artifact path and records a sha256 manifest; the reviewing machine restores those exact bytes where its verifier reads before dispatch. If a file cannot be published or restored, park or review refuses and names both machines' evidence directories.
+
 ## [4.24.0] - 2026-11-13
 
 ### Changed — Release validation

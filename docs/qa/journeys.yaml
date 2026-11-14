@@ -1693,6 +1693,26 @@ bug_families:
     statement: A command sent while the supervisor's native turn is open is queued, typed exactly once after the turn completes and replays return the same receipt; drafts and native modals still refuse.
     tasks: [cas-4e11]
     journeys: [HUB-J27]
+  docs-only-train-receipt-reuse:
+    title: Release documentation must not invalidate green train proof or wait for the closure verdict
+    tasks: [cas-5b88]
+    journeys: [FACTORY-MERGE]
+  supervisor-git-hooks:
+    title: Supervisor launches and epic pushes must retain working Git hook checks
+    tasks: [cas-1efb]
+    journeys: [HUB-J13]
+  commander-activity-without-phase:
+    title: Fresh supervisor output shows working without requiring a named phase
+    found: '2026-11-13'
+    tasks: [cas-af35]
+    journeys: [HUB-J12, HUB-J4]
+    invariants: [HUB-J12-GOAL, HUB-J4-GOAL]
+  commander-history-writer-contention:
+    title: Commander history stays readable while a daemon writer owns the shared SQLite connection
+    found: '2026-11-13'
+    tasks: [cas-cab9]
+    journeys: [HUB-J4, HUB-J12, HUB-J23]
+    invariants: [HUB-J4-GOAL, HUB-J12-GOAL, HUB-J23-GOAL]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

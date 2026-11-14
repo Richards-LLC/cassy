@@ -264,6 +264,48 @@ The portable `cas-test-audit` skill produces one read-only inventory of test val
 
 Train CI runs once when Cassy dispatches the frozen tip; prepared release pushes start no train workflow. Cut retries resolve `Train-CI-Head` directly to the original green source receipt, without a release-head run or adoption artifact. Pull-request admission, queue reuse and Release Prebuild retain their existing behavior.
 
+Code deliveries receive their review before merge, including Tier 1 in batch QA mode. A release cut combines those approvals (local or peer) with the green frozen-train run, naming any missing approval before push. It requires no separate release-review ledger or recorder identity. Batch QA remains independent evidence and the merge queue remains the gate to main.
+
+Deliberate depth=light, rapid-response sampling and Tier 0 exemptions use green lane CI plus the green frozen-train run. Pending or rejected reviews retain their authority. Missing lane CI is named separately from a missing required review.
+
+Release admission reuses the nearest green train ancestor when every intervening commit changes only the release asset allow-list. Source changes, including changes reverted before the cut, require fresh train proof. Receipt identity, complete logs, successful full-set jobs and the current main baseline remain mandatory. A pending CODEMAP refresh can join the release commit. The release verdict uses existing approvals and the green frozen-train receipt without another batch release review; missing required approvals still refuse the cut. The merge queue proves the final tree.
+
+Prepared release assets include the compiled product overview and journey registry as well as their input fragments. Terminal no-code members are reported from their saved outcome without reinterpreting their original external link as an artifact. Active report deliveries retain artifact integrity checks and must carry their required approval before the cut.
+
+### Lane failure attribution
+
+Lane CI reuses explicit failing-test proof only for the recorded base SHA and matching package, binary, test, platform, toolchain and profile. Missing proof triggers a bounded replay; unresolved attribution remains red. Failure receipts are published before base preparation, with separate attribution timings and no additional CI job.
+
+### Delivery-only lane impact
+
+Lane selection excludes changes imported from the train. Script and workflow inputs retain their script contracts and directly referencing Rust tests, while recorded start bases remain available for failure attribution. Agent configuration and documentation roots add no Rust tests; build policy and unmapped code retain conservative coverage.
+
+### Approval across train movement
+
+When the train advances without changing a delivery's reviewed paths, the merge
+retains its approved dispatch and records the target movement on the task. Clean
+same-file merges retain the existing unchanged-patch approval path. If preparing
+that candidate exceeds the response deadline, the merge stays held with its
+approval intact until preparation finishes. A retry reuses that preparation;
+changed delivery content and merge conflicts keep their existing review checks.
+
+Factory and supervisor-authored epic pushes require local fast checks, including changed release-note drafts. A push changing `hub-web/` also proves committed dist matches a fresh build. The integration engine reuses already checked delivery content with a marker bound to the exact pushed head and observed remote base; a later supervisor commit cannot reuse that exemption. Supervisor startup and doctor verify the main checkout's configured hook directory and name its repair.
+
+A release train records its must-land scope with Blocks dependencies on required deliveries. Auto-cut waits for those deliveries to close after merge, be cancelled or move to another target before freezing the train. It names unresolved deliveries; optional children and prose notes do not define the scope. Trains without Blocks dependencies retain the existing auto-cut rules.
+
+Commander shows a working indicator from fresh supervisor activity independently
+of named lifecycle phases. When no phase is known, recent output still indicates
+work without a phase label or clock. A delivery receipt alone does not indicate
+execution, and losing the live connection clears the activity indicator.
+
+Commander history reads use an independent read-only SQLite connection, including
+earlier sessions, open questions and delivery receipts. A daemon writer holding the
+shared connection no longer prevents those reads. The conversation shows measured
+phase status or a known waiting question; absent or unrecognized phases add no
+placeholder phase label or timer. Fresh unanswered activity independently shows
+working. An older-page error becomes the reading position when revealed, so a
+pending tail pin cannot scroll its Retry control away.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

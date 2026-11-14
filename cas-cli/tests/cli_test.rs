@@ -108,6 +108,8 @@ fn release_preview_does_not_initialize_tracing_on_success_or_failure() {
 
 #[test]
 fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
+    // Keep real task creation ahead of the delivery, including slow CAS setup.
+    let mut task = cas::types::Task::new("cas-legacy-impact".into(), "Legacy impact".into());
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let git = |args: &[&str]| {
@@ -144,7 +146,6 @@ fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
         repo_selector: "project:legacy-impact-fixture".into(),
         target_branch: "main".into(),
     };
-    let mut task = cas::types::Task::new("cas-legacy-impact".into(), "Legacy impact".into());
     task.origin_project = Some("legacy-impact-fixture".into());
     task.assignee = Some("fixture".into());
     task.status = cas::types::TaskStatus::InProgress;

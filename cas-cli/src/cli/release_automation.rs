@@ -1009,11 +1009,14 @@ pub(super) mod tests {
         env.set("CAS_AGENT_NAME", &owner.name);
         env.set("CAS_AGENT_ROLE", "supervisor");
         let tasks = open_task_store(&root).unwrap();
-        for id in ["cas-e3041", "cas-ef2b", "cas-undeclared"] {
+        for id in ["cas-e3041", "cas-ef2b", "cas-undeclared", "cas-closed"] {
             let mut task = Task::new(id.into(), "No-code report".into());
             task.origin_project = Some("release-fixture".into());
             task.execution_note = Some("no-code".into());
-            task.status = TaskStatus::AwaitingMerge;
+            task.status = if id == "cas-closed" { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
+            if id == "cas-closed" {
+                task.external_ref = Some("https://example.slack.com/archives/reports/p123456789".into());
+            }
             task.risk = vec![cas_types::TaskRisk::None];
             tasks.add(&task).unwrap();
         }
@@ -1079,6 +1082,16 @@ pub(super) mod tests {
             &tasks.get(&train.id).unwrap()));
         foreign.origin_project = Some("release-fixture".into());
         tasks.update(&foreign).unwrap();
+        // A historical completed report's request link is not rebound as a
+        // new artifact. This does not exempt current members from approvals.
+        fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041", "cas-closed"],
+        })).unwrap()).unwrap();
+        let pending = cut_scope(&root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref()).unwrap();
+        assert!(!pending.no_code_members.contains_key("cas-closed"));
+        fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
+        })).unwrap()).unwrap();
         // Portable report bytes alone do not approve its delivery.
         assert!(track_on_train(&args, &root, repo, &train).is_err());
         let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {

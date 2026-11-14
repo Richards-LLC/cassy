@@ -11571,7 +11571,10 @@ mod worker_commit_guard_tests {
         env.set("CAS_AGENT_ROLE", "worker");
         env.set("CAS_FACTORY_MODE", "1");
         let mut failures = Vec::new();
-        for command in ["printf 'unfinished", "printf \"unfinished", "printf unfinished\\", "printf \"$(printf x)", "printf ${x:-unfinished"] {
+        for command in ["printf 'unfinished", "printf \"unfinished", "printf unfinished\\", "printf \"$(printf x)", "printf ${x:-unfinished",
+            "if true; then printf safe", "while false; do printf safe",
+            "for x in safe; do printf safe", "{ printf safe;", "( printf safe",
+        ] {
             let input = hook_git_write_input("/worktree", command);
             let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
             let output = &value["hookSpecificOutput"];

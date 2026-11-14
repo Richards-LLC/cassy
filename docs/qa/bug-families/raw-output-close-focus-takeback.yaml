@@ -1,0 +1,4 @@
+title: Raw output's deferred close handler no longer takes focus back from a control chosen after the drawer closed
+tasks: [cas-c60a]
+invariants: [HUB-J17-UNDO-SHELL-FOCUS]
+journeys: [HUB-J17]

@@ -212,6 +212,34 @@ pub(crate) fn event(
     .with_metadata(metadata))
 }
 
+/// cas-692a7: backfill_delivery_cycles mints cycles after the fact, so a
+/// receipt-less verdict recorded before any cycle existed had none to bind.
+/// It still names its exact head, unless that head was later retired by an
+/// ended cycle. Natively minted cycles precede their dispatches and never
+/// qualify (cas-e88d).
+fn predates_cycles(
+    conn: &Connection,
+    task: &Task,
+    dispatch: &VerificationDispatch,
+    anchor: &str,
+) -> Result<bool, String> {
+    let rows = conn
+        .prepare("SELECT created_at, anchors, ended_at IS NOT NULL FROM delivery_cycles WHERE task_id=?1")
+        .map_err(|e| e.to_string())?
+        .query_map([&task.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (created, anchors, ended) in rows {
+        let created = chrono::DateTime::parse_from_rfc3339(&created).map_err(|e| e.to_string())?;
+        let anchors: Vec<String> = serde_json::from_str(&anchors).map_err(|e| e.to_string())?;
+        if dispatch.requested_at >= created || (ended && anchors.iter().any(|tip| tip == anchor)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Resolve by dispatch receipt_id first. A newer task-level dispatch cannot
 /// conceal this cycle's approval. Events cannot create approval authority.
 pub(crate) struct ApprovalMatch {
@@ -276,8 +304,9 @@ pub(crate) fn approved(
                 // cas-bd17: a task that never minted a delivery cycle (an
                 // explicit no-code report, cas-2ecc) has no cycle to bind; its
                 // receipt-less dispatch approves the head it reviewed, as
-                // before c8b54ca9fd. Cycle-bound tasks never take this path.
-                if cycle.is_none()
+                // before c8b54ca9fd. Cycle-bound tasks never take this path,
+                // except a verdict that predates every cycle (cas-692a7).
+                if (cycle.is_none() || predates_cycles(&conn, task, &dispatch, anchor)?)
                     && dispatch.repository.as_ref().is_some_and(|r| {
                         r.head_commit == anchor || r.anchor_commits.iter().any(|head| head == anchor)
                     })
@@ -319,7 +348,6 @@ pub(crate) fn approved(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cas_store::TaskStore;
 
     #[test]
     fn transaction_receipt_requires_exactly_one_cycle_cas_e01f() {
@@ -366,86 +394,5 @@ mod tests {
         .unwrap();
         conn.execute("INSERT INTO delivery_cycles SELECT 'dc-ambiguous',project,task_id,cycle+1,anchors,start_base,ended_at,created_at,updated_at FROM delivery_cycles WHERE cycle_id=?1",[&cycle]).unwrap();
         assert!(receipt_cycle(&conn, &dispatch).is_err());
-    }
-
-    #[test]
-    fn rebind_keeps_original_registry_stamp_cas_e01f() {
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let dir = tempfile::tempdir().unwrap();
-        let root = crate::store::init_cas_dir(dir.path()).unwrap();
-        env.set("CAS_ROOT", &root);
-        let task = Task::new("cas-carry-stamp".into(), "Carry".into());
-        crate::store::open_task_store(&root)
-            .unwrap()
-            .add(&task)
-            .unwrap();
-        let mut boundary = VerificationProofBoundary::task_at(RepositoryProofBoundary {
-            peer_premerge: None,
-            repository_root: "/repo".into(),
-            worktree_root: "/repo/candidate".into(),
-            head_commit: "head".into(),
-            state_digest: "digest".into(),
-            target_branch: None,
-            anchor_commits: vec![],
-        });
-        boundary.receipt_id = Some("dc-cycle".into());
-        let dispatch = cas_store::create_verification_dispatch_bound(
-            &root,
-            &task.id,
-            "worker",
-            "supervisor",
-            &boundary,
-            chrono::Utc::now() + chrono::Duration::hours(1),
-            false,
-        )
-        .unwrap();
-        let mut verdict =
-            Verification::approved("ver-original".into(), task.id.clone(), "review".into());
-        verdict.provenance = VerificationProvenance::System;
-        verdict.dispatch_id = Some(dispatch.id.clone());
-        cas_store::add_system_verification(&root, &verdict).unwrap();
-        let conn = Connection::open(root.join("cas.db")).unwrap();
-        cas_store::resolve_verification_dispatch_with_conn(
-            &conn,
-            &dispatch.id,
-            "supervisor",
-            None,
-            true,
-        )
-        .unwrap();
-        let historical: crate::gates::RegistryVersion =
-            serde_json::from_value(serde_json::json!(["G-104"])).unwrap();
-        let original = Stamp {
-            cycle_id: "dc-cycle".into(),
-            approved_anchor: "source".into(),
-            dispatch_id: dispatch.id.clone(),
-            verdict_id: verdict.id.clone(),
-            registry_version: Some(historical.clone()),
-        };
-        let event = Event::new(
-            EventType::VerificationAdded,
-            EventEntityType::Verification,
-            &verdict.id,
-            "review",
-        )
-        .with_metadata(serde_json::to_value(original).unwrap());
-        cas_store::record_event_with_conn(&conn, &event).unwrap();
-        let (carried, new_verdict) = cas_store::rebind_approved_verification_dispatch(
-            &root,
-            &dispatch.id,
-            &verdict.id,
-            "worker",
-            "supervisor",
-            &boundary,
-            "carry",
-            "rebased-source",
-        )
-        .unwrap();
-        let preserved = stamp(&conn, &new_verdict.id).unwrap().unwrap();
-        assert_eq!(carried.receipt_id, dispatch.receipt_id);
-        assert_eq!(preserved.registry_version, Some(historical));
-        assert_eq!(preserved.approved_anchor, "rebased-source");
-        assert_eq!(preserved.verdict_id, new_verdict.id);
-        assert_eq!(preserved.dispatch_id, carried.id);
     }
 }

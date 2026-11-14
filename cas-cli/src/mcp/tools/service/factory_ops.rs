@@ -2678,6 +2678,14 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         mut req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        let tasks = self.inner.open_task_store()?;
+        for id in req.task_ids.as_deref().unwrap_or_default().iter().map(String::as_str)
+            .chain(req.task_id.as_deref())
+        {
+            let task = tasks.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), None)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
         if let Some(ids) = req.task_ids.as_ref() {
             let distinct = ids.iter().collect::<std::collections::HashSet<_>>();
             if req.task_id.is_some() || ids.is_empty() || distinct.len() != ids.len()

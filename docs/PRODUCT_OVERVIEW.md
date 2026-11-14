@@ -306,6 +306,47 @@ placeholder phase label or timer. Fresh unanswered activity independently shows
 working. An older-page error becomes the reading position when revealed, so a
 pending tail pin cannot scroll its Retry control away.
 
+Schema migrations use a private SQLite connection with the same WAL+NORMAL policy as production stores. Store creation and upgrades retain per-migration transactions and rollback while avoiding FULL-mode disk syncs on every commit.
+
+Release dependency caches and compiler objects share GitHub's repository storage quota. Main seeds reusable compiler objects; factory, train and queue builds read them without adding branch-specific copies. Dependency cache identity continues to include third-party dependencies, toolchain and build compatibility inputs while excluding workspace version bumps.
+
+An infrastructure ERROR preserves a pending verification dispatch and its evidence while consuming the failed reviewer's authority. A replacement reviewer or the registered supervisor can settle the same review; a code rejection remains terminal. Factory verifier processes start from the daemon's namespace, retaining the harness's read-only sandbox. Linux startup checks bubblewrap before invoking the model and reports the failing namespace context, policy settings and recovery action.
+
+### JavaScript stability checks
+
+The capped worker runner accepts `cas factory worker-check --cas-root "$CAS_ROOT" -- vitest path/to/file.test.ts`. Substitute `jest` or `playwright` for the runner and select that runner's test files. Paths are relative to the repository root. It resolves each file's package and uses its locally installed runner in an isolated worker or managed review checkout.
+
+Only new or changed test functions are selected from the delivery diff. Vitest and Jest run the selected names five times; Playwright uses five repetitions with retries disabled. The first failure stops execution and names the failing test. A successful run records the selected identities, five consecutive passes and elapsed time against the clean commit. Park reads that evidence without running tests.
+
+Dynamic or parameterized changed titles, out-of-line callbacks and test factories that cannot be mapped safely to runtime identities require an explicit source-to-runtime resolution instead of broadening execution to unchanged tests.
+
+- **Review assignment authority** — A task can name its exact `review_dispatch_id`. Ordinary worker assignment, spawn and start refuse that verdict work before accepting it. The daemon verifier or an authorized supervisor records the dispatch verdict; task staffing grants no verifier rights.
+
+- **Candidate schema at the cut** — A release candidate can be newer than the store's schema. `cas release preview` then reads a private, migrated backup and leaves the live store unchanged. `cas release track` is the cut's first write, so it applies the candidate's migrations first and stops the cut if one fails. `scripts/release.sh` passes `CAS_ROOT` to both candidate calls.
+
+### Changed-test stability at park
+
+Every factory project uses the existing focused-proof gate to require five
+consecutive passing executions of its delivery's new or changed tests. Receipts
+bind the repository, tested commit and source test identities. Existing
+one-pass crate evidence remains useful for unchanged tests. A later overlapping
+failure retires overlapping stability evidence at that commit and its ancestors.
+
+Test-only corrections also require five-pass proof. Documentation or changelog
+commits preserve evidence through the same input and ancestry checks as crate
+proof; target merges use the same resolution checks. Changes to test or build
+inputs invalidate old evidence, even when a test keeps its name.
+
+The capped Rust runner resolves Cargo roots and source modules, runs the requested
+selection once, then repeats only its changed functions four more times within
+the same admission and memory cap. JavaScript adapters use static source names
+and runner reports; Playwright uses repeat-each with retries disabled. A failure
+stops execution. Park only reads the resulting receipt and names missing tests.
+
+Release inventory and closeout require the task's own first-parent content at the published commit, using the same content continuity proof as merge verification. Train imports remain separate from task delivery. Owned overview and bug-family fragments remain delivered when a release folds their content into the maintained documents and that content remains present. A later revert or a bound release review marking a member as reverted holds that member for re-delivery. Other independently approved shipped members can still close.
+
+Commander's conversation working line follows the supervisor's native turn, from its prompt to the harness's own turn end (Claude `turn_duration` or an Esc interrupt; Codex task completion), across every tool inside it. While busy it names the running tool without its input, shows the turn's elapsed time and the last transcript activity in local time, and colors its dots by state: working, idle or unknown. Status arrives with each machine heartbeat; facts older than fifteen seconds, or a stopped session daemon, read as unknown and possibly stuck rather than idle. Without any reported phase the line stays absent, so a delivery receipt never implies work.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

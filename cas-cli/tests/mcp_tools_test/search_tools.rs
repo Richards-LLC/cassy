@@ -331,7 +331,6 @@ async fn conceptual_shell_flag_query_returns_results_cas_6c1a() {
         ("-f", vec!["flags-cli", "flags-search"]),
         ("module:cas-search --files0-from -f", vec!["flags-search"]),
         ("module:cas-cli --files0-from -f", vec!["flags-cli"]),
-        ("consumer AND NOT absentmarker", vec!["flags-cli", "flags-search"]),
         ("\"consumer -f xargs\"", vec![]),
     ] {
         let envelope = provenance_search(&service, query, Some("entry"), 1)

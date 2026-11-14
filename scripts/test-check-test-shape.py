@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import shutil
 
 spec = importlib.util.spec_from_file_location('shape', Path(__file__).with_name('check-test-shape.py'))
 shape = importlib.util.module_from_spec(spec)
@@ -12,6 +13,49 @@ spec.loader.exec_module(shape)
 
 
 class Shapes(unittest.TestCase):
+    def test_declared_rule_ids_are_machine_data_cas_fd48(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / 'scripts'
+            scripts.mkdir()
+            for name in ('check-test-shape.py', 'rust_test_source.py'):
+                shutil.copyfile(Path(__file__).with_name(name), scripts / name)
+            source = root / 'cas-cli/src'
+            source.mkdir(parents=True)
+            gate_marker = 'gate'
+            (source / 'rules.rs').write_text(f'// {gate_marker}[H-29 pre-tool]: Workspace boundary\n' + '''
+fn shell() -> Rule { Rule { rule: "shell.unterminated" } }
+fn other() -> Rule { Rule { rule_id: "fixture.changed" } }
+// Rule { rule: "comment.fake" }
+const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
+#[cfg(test)] mod tests {
+    fn fixture() -> Rule { Rule { rule: "test.fake" } }
+}
+''')
+            target = source / 'rules_tests.rs'
+            target.write_text('')
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.email', 'fixture@example.test')
+            git('config', 'user.name', 'fixture')
+            git('add', '.')
+            git('commit', '-qm', 'declared rule fixture')
+            base = git('rev-parse', 'HEAD')
+            for marker, expected in [
+                ('[shell.unterminated]', 0), ('[fixture.changed]', 0), ('[H-29]', 0),
+                ('[shell.undeclared]', 1), ('[comment.fake]', 1), ('[quoted.fake]', 1),
+                ('[test.fake]', 1), ('[please close the shell]', 1),
+            ]:
+                with self.subTest(marker=marker):
+                    target.write_text('#[test] fn check() { assert!(reason.contains(' + repr(marker).replace("'", '"') + ')); }')
+                    result = subprocess.run(
+                        ['python3', str(scripts / 'check-test-shape.py'),
+                         '--messages-only', '--changed-since', base],
+                        cwd=root, capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
     def test_human_message_assertions_use_behavior_or_machine_ids(self):
         cases = [
             ('test_example.py', 'with self.assertRaisesRegex(ValueError, "please try later"): run()', True),

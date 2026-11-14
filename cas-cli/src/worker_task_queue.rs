@@ -126,6 +126,8 @@ pub(crate) fn admit_assignment(root: &Path, task: &cas_types::Task, live: Option
     if task.status != TaskStatus::Open { return Ok(false); }
     let Some(assignee) = task.assignee.as_deref() else { return Ok(false); };
     let Some((worker, receipt)) = assignment_worker(root, assignee, live)? else { return Ok(false); };
+    crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), Some(worker.role))
+        .map_err(crate::error::CasError::Other)?;
     let session = worker.factory_session.as_deref().expect("assignment session");
     let queues = SqliteWorkerTaskQueueStore::open(root)?;
     if let Some(receipt) = &receipt {
@@ -238,6 +240,11 @@ impl CasCore {
             }
             let mut unique = std::collections::HashSet::new();
             let tasks = self.open_task_store()?;
+            for id in &ids {
+                let task = tasks.get(id).map_err(error)?;
+                crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), Some(worker.role))
+                    .map_err(error)?;
+            }
             for id in &ids {
                 if id.trim().is_empty() || !unique.insert(id.clone()) {
                     return Err(error(

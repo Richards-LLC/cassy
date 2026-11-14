@@ -491,6 +491,9 @@ impl CasCore {
         if let Some(ref execution_note) = task.execution_note {
             output.push_str(&format!("\nExecution Note: {execution_note}\n"));
         }
+        if let Some(dispatch) = task.review_dispatch_id.as_deref() {
+            output.push_str(&format!("Review dispatch: {dispatch}\n"));
+        }
 
         if !task.risk.is_empty() {
             let risks = task

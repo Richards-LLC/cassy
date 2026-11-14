@@ -7,6 +7,86 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.28.0] - 2026-11-14
+
+### Changed — Factory
+
+- **One delivery identity check per question** — Was: an approval could be
+  rebound to a new candidate when a target move touched a delivered file but
+  the delivery's own patch-id (minus five generated paths) stayed equal;
+  rebased deliveries were compared commit by commit; release membership read
+  three anchor orders; a member's generation was the task row's last edit.
+  Now: the only pre-merge carry is the candidate tree still validating, so a
+  target move on a delivered path gets a fresh review. A rebased delivery is
+  the same delivery when its whole change has the same patch-id (merge
+  commits and other tasks' commits still refuse). Membership uses the one
+  delivery anchor, and a member's generation is its delivery cycle.
+  Generated output is excluded through one list.
+
+### Fixed — Storage
+
+- **Faster schema migrations** — New stores and schema upgrades use the existing WAL+NORMAL SQLite policy, avoiding a full disk sync for every migration commit while preserving migration transactions and rollback.
+
+### Fixed — Release pipeline
+
+- **Reduce dependency cache eviction** — Factory, train and queue builds reuse main's compiler cache without writing branch-specific objects into the shared cache quota. Main continues to seed compiler and release dependency caches, whose keys exclude workspace version bumps.
+
+### Fixed — Commander
+
+- **One reply per supervisor answer** — Was: when a Stop hook blocked a
+  supervisor's draft, Commander showed the blocked draft, and sometimes the
+  rewrite too. Now: a Claude answer reaches Commander only after its Stop hooks
+  accept it, so the operator sees the accepted rewrite once (GH #1938).
+- **The supervisor's working line follows its whole turn** — Was: each
+  finished tool replaced the open turn, so a long supervisor turn read as done
+  between steps, and a stopped daemon or status that stopped arriving kept its
+  last state. Now: the line stays busy from the prompt to the harness's own turn
+  end, names the running tool without its input, shows the turn's duration and
+  the last transcript activity, and reads unknown once status is over fifteen
+  seconds old or the daemon has stopped. Claude's Esc ends the turn.
+
+### Fixed — Factory
+
+- **Recover verifier infrastructure failures** — Verifier ERROR verdicts retain the pending review and retire the failed child's authority, allowing a replacement verifier or a supervisor verdict on the same dispatch. Factory reviews launch from the daemon outside worker credential isolation. Linux startup probes the real read-only bubblewrap sandbox and reports namespace policy diagnostics and the corresponding remedy when it cannot start.
+- **Syntax checks after owned edits** — A preceding heredoc edit no longer makes a plain `bash -n` check look like unresolved shell execution. Existing command-scope and write-ownership checks still apply.
+
+### Added — Factory
+
+- **JavaScript test stability evidence** — New or changed Vitest, Jest and Playwright tests must pass five consecutive executions. The runner selects changed test functions, stops at the first failure and records exact-commit receipts for park.
+- **Catch unstable tests before park** — A delivery's new or changed tests need five consecutive capped passes, including test-only corrections. The existing receipt gate reads that evidence without running tests. Rust repeats only changed functions in the requested selection; Vitest, Jest and Playwright use the same receipt contract. A failure stops the run and leaves park held for a fix or deletion.
+- **Preserve proof after documentation changes** — Stability shares crate proof's input and ancestry checks, so a documentation or changelog commit can retain its five-pass receipt. Test and build changes require fresh evidence; target merges keep the existing resolution checks.
+
+### Fixed — Release
+
+- **Release close counts reviews recorded before delivery cycles existed** — A delivery approved at its exact shipped commit before Cassy backfilled its delivery cycles now closes at release instead of staying held as missing review. A verdict recorded after a cycle exists, or one for a commit that was later sent back, still requires a fresh review.
+
+### Fixed — CLI
+
+- **Factory test receipt requests identify missing files** — The command now
+  reports the request path when its JSON evidence file cannot be opened and
+  resolves the active harness session before applying the shared gate.
+
+### Fixed — Factory verification
+
+- **Check review authority before staffing** — Was: a supervisor could assign an independent verdict to an ordinary worker that could not record it. Now: tasks can name their exact review dispatch, and worker assignment, spawn and start refuse incompatible authority before accepting work, with the daemon or supervisor route available.
+
+### Fixed — Releases
+
+- **A release that adds a column no longer breaks its own cut** — Was: the
+  candidate's `release preview` read the live store on the installed CLI's
+  older schema and failed with "no such column" whenever the release added a
+  column to an existing table; `release track` then reported "no open release
+  train" for the same reason. Now: preview reads a private, migrated backup of
+  the store and leaves the live store byte-identical; track, the cut's first
+  write, applies the candidate's migrations before reading the train and
+  stops the cut if one fails. `scripts/release.sh` names the live store with
+  `CAS_ROOT` for both candidate calls, so a cut from a Cassy worktree works.
+
+### Fixed — Release closeout
+
+- **Reverted deliveries stay open** — Release inventory and closeout verify the task's own content at the release tag, excluding train imports and recognizing metadata folded into release documents. Reverted changes and bound review rows marked as reverted remain held for re-delivery instead of being closed as shipped.
+- **Queue landing preserves release proof** — Public content checks measure the whole task-owned delivery at the release cut, so a later loss cannot hide behind an intact final commit while genuinely landed deliveries still close. Reconciliation retains delivery-cycle identity alongside the scoped content and reverted-review checks.
+
 ## [4.27.0] - 2026-11-14
 
 ### Changed — Release

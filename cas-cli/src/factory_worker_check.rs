@@ -14,6 +14,9 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod stability;
+pub(crate) mod javascript;
+
 #[cfg(unix)]
 static WORKER_WAIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
 #[cfg(unix)]
@@ -126,6 +129,8 @@ struct TestReceipt {
     harness: Option<String>,
     count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    stability: Option<stability::Proof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_log: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
@@ -171,6 +176,10 @@ impl TestReceipt {
         }
         if let Some(log) = &self.selected_log {
             note.push_str(&format!(" [selected log: {}]", log.display()));
+        }
+        if let Some(proof) = &self.stability {
+            note.push_str(&format!(" [stability: {} consecutive passes; changed_tests={}; runner={}; elapsed_ms={}]",
+                proof.consecutive_passes, proof.tests.len(), proof.runner, proof.elapsed_ms));
         }
         note
     }
@@ -271,7 +280,7 @@ fn targeted_test(args: &[String]) -> Option<TargetedTest> {
 }
 
 pub(crate) fn allowed_args(args: &[String]) -> bool {
-    check_packages(args).is_some() || targeted_test(args).is_some()
+    check_packages(args).is_some() || targeted_test(args).is_some() || javascript::allowed_args(args)
 }
 
 /// Use the same explicit [[test]] name/path inventory as cas-test-targets.py;
@@ -527,6 +536,7 @@ pub(crate) fn record_supervisor_test(
             filter: test.filter,
             harness: test.harness,
             count,
+            stability: None,
             selected_log: Some(provenance.log_path.clone()),
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
@@ -941,7 +951,7 @@ pub(crate) struct PassingTests<'a> {
     repo: &'a Path,
     head: &'a str,
     target: Option<&'a str>,
-    records: std::sync::OnceLock<Vec<(String, String, TestReceipt)>>,
+    records: std::sync::OnceLock<Vec<(String, Option<String>, TestReceipt)>>,
 }
 
 impl<'a> PassingTests<'a> {
@@ -962,7 +972,7 @@ impl<'a> PassingTests<'a> {
         self
     }
 
-    fn records(&self) -> &[(String, String, TestReceipt)] {
+    fn records(&self) -> &[(String, Option<String>, TestReceipt)] {
         self.records.get_or_init(|| {
             passing_test_records(self.cas_root, self.repo, self.head, self.target)
         })
@@ -972,6 +982,7 @@ impl<'a> PassingTests<'a> {
         let mut receipts = self.records().iter()
             .map(|(receipt_head, package, test)| {
                 let head = self.head;
+                let package = package.as_deref().unwrap_or("stability");
                 let rebind = (receipt_head != head)
                     .then(|| format!(" rebound from {receipt_head} to {head}"))
                     .unwrap_or_default();
@@ -988,6 +999,7 @@ impl<'a> PassingTests<'a> {
     pub(crate) fn packages(&self) -> Vec<String> {
         let mut packages = self.records().iter()
             .filter_map(|(_, package, _)| {
+                let package = package.as_deref()?;
                 let (name, version) = package_selector(package)?;
                 // A dependency's other version must never cover this workspace
                 // crate. The receipt/audit identity keeps the full selector.
@@ -1035,7 +1047,7 @@ fn passing_test_records(
     repo: &Path,
     head: &str,
     target: Option<&str>,
-) -> Vec<(String, String, TestReceipt)> {
+) -> Vec<(String, Option<String>, TestReceipt)> {
     let Ok(repo) = repo.canonicalize() else {
         return Vec::new();
     };
@@ -1123,15 +1135,13 @@ fn read_passing_test_record(
     cas_root: &Path,
     repo: &Path,
     entry: &std::fs::DirEntry,
-) -> Option<(String, String, TestReceipt)> {
+) -> Option<(String, Option<String>, TestReceipt)> {
     if !entry.file_type().ok()?.is_file() {
         return None;
     }
-    let mut record = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path()).ok()?).ok()?;
-    let test = record.test.take()?;
+    let record = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path()).ok()?).ok()?;
+    let test = record.test?;
     if record.repo != repo
-        || record.packages.len() != 1
-        || package_selector(&record.packages[0]).is_none()
         || !named_filter(&test.filter)
         || test.count == 0
         || test
@@ -1141,9 +1151,15 @@ fn read_passing_test_record(
     {
         return None;
     }
-    let package = record.packages.remove(0);
+    // Adapter-only stability receipts share ancestry/input validation, but
+    // cannot count as a passing Rust crate test.
+    let package = match record.packages.as_slice() {
+        [] if test.stability.as_ref().is_some_and(stability::valid) => None,
+        [package] if package_selector(package).is_some() => Some(package.clone()),
+        _ => return None,
+    };
     let targeted_test = TargetedTest {
-        package: package.clone(),
+        package: package.clone().or_else(|| test.stability.as_ref().map(|proof| proof.runner.clone()))?,
         harness: test.harness.clone(),
         filter: test.filter.clone(),
     };
@@ -1553,6 +1569,7 @@ pub(crate) fn record_passing_test_for_tests(
             filter: filter.to_string(),
             harness: None,
             count: 1,
+            stability: None,
             selected_log: None,
             host_path_opt_out: None,
             supervisor_recorded: None,
@@ -2065,6 +2082,12 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 }
 
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
+    if javascript::allowed_args(args) {
+        if isolated_test_env.is_some() || !test_env.is_empty() {
+            bail!("JavaScript stability commands do not accept Rust child environment profiles");
+        }
+        return javascript::execute(cas_root, args, cwd);
+    }
     validate_test_environment(args, test_env)?;
     let test = targeted_test(args);
     if let Some(directory) = isolated_test_env {
@@ -2091,6 +2114,10 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         validate_harness(&repo, test)?;
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
+    let owned_tests = if let Some(test) = &test {
+        let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
+        stability::rust::selected(&repo, &base, &head, test)?
+    } else { Vec::new() };
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
@@ -2099,6 +2126,8 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let lane_path = lane_lock_path(&cas_root, &repo)?;
     let _lane = try_lock_lane_with_command(&cas_root, &repo, &worker_check_command(args))?
         .ok_or_else(|| lane_lock_refusal(&lane_path))?;
+    let owned_identities = owned_tests.iter().map(|test| test.identity.clone()).collect::<Vec<_>>();
+    stability::invalidate(&cas_root, &repo, &head, &owned_identities)?;
     if let Some(stale) = &_lane.stale_holder {
         eprintln!("{}", stale_lane_holder_notice(stale, chrono::Utc::now()));
     }
@@ -2274,6 +2303,10 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     {
         cargo_args.insert(4, "--lib".into());
     }
+    // Native retries must not turn a failing invocation into stability proof.
+    if !owned_tests.is_empty() {
+        cargo_args.extend(["--retries".into(), "0".into()]);
+    }
     command
         .args(&cargo_args)
         .current_dir(&repo)
@@ -2299,6 +2332,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         for key in ISOLATED_TEST_CREDENTIALS { command.env_remove(key); }
         command.env("XDG_CONFIG_HOME", directory);
         println!("Worker test environment: provider credentials removed; private XDG_CONFIG_HOME");
+    }
+    if let Some(test) = &test && !owned_tests.is_empty() {
+        command = stability::rust::wrap(command, test, &owned_tests, &count_file);
     }
     let scope_directory = tempfile::tempdir_in(&slots)?;
     let high = crate::factory_build_memory::memory_high(
@@ -2328,6 +2364,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     #[cfg(unix)]
     let worker_signals = WorkerWaitSignals::install()?;
+    let started = std::time::Instant::now();
     let mut child = command
         .spawn()
         .context("start capped worker Cargo command")?;
@@ -2341,10 +2378,10 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     drop(worker_signals);
     drop(slot);
     if !status.success() {
-        bail!(
+        bail!(crate::gates::tag("G-61", format!(
             "{}: FAIL {head} ({status})",
             if test.is_some() { "test" } else { "check" }
-        );
+        )));
     }
     if clean_head(&repo)? != head {
         bail!("Worker tree changed during check; no PASS receipt recorded");
@@ -2363,6 +2400,11 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 filter: test.filter,
                 harness: test.harness,
                 count,
+                stability: (!owned_identities.is_empty()).then(|| stability::Proof {
+                    runner: "nextest".into(), tests: owned_identities,
+                    consecutive_passes: stability::REQUIRED_PASSES,
+                    elapsed_ms: started.elapsed().as_millis(),
+                }),
                 selected_log,
                 host_path_opt_out,
                 supervisor_recorded: None,
@@ -2401,6 +2443,80 @@ mod tests {
         let error = read_supervisor_test_request(&path).unwrap_err().to_string();
 
         assert!(error.contains(path.to_str().unwrap()), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_tests_need_five_consecutive_capped_passes_cas_9e02e() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let root = env.home().join("project/.cas");
+        for seeded_failure in [true, false] {
+            let repo = root.join(format!("worktrees/worker-{seeded_failure}"));
+            fixture_commit(&repo);
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n").unwrap();
+            fixture_commit_as(&repo, "base");
+            let base = fixture_head(&repo);
+            git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
+            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n#[test]\nfn owned_new() {}\n").unwrap();
+            fixture_commit_as(&repo, "new test");
+            env.set_current_dir(&repo);
+            let cargo = repo.join("target/fake-cargo");
+            std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+            fake_cargo(&cargo, &format!(r#"python3 - "$@" <<'PY'
+from pathlib import Path
+import sys
+p = Path('target/attempts')
+n = int(p.read_text()) + 1 if p.exists() else 1
+p.write_text(str(n))
+selection = sys.argv[sys.argv.index('-E') + 1]
+retries = sys.argv[sys.argv.index('--retries') + 1] if '--retries' in sys.argv else None
+with Path('target/retries').open('a') as output:
+    output.write(str(retries) + '\n')
+names = ['owned_new'] + (['untouched'] if 'untouched' in selection else [])
+with Path('target/executed').open('a') as output:
+    output.write(','.join(names) + '\n')
+if {seeded_failure} and n % 3 == 0:
+    if retries == '0':
+        print('        FAIL [ 0.01s] (1/1) fixture owned_new')
+        print('     Summary [ 0.01s] 1 test run: 0 passed, 1 failed')
+        raise SystemExit(1)
+    # Emulate a project profile that retries and hides a failed invocation.
+    n += 1
+    p.write_text(str(n))
+    print('   FLAKY 2/2 [ 0.01s] (1/1) fixture owned_new')
+for name in names:
+    print(f'        PASS [ 0.01s] (1/{{len(names)}}) fixture {{name}}')
+print(f'     Summary [ 0.01s] {{len(names)}} tests run: {{len(names)}} passed, 0 skipped')
+PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
+            let args = ["nextest", "run", "-p", "fixture", "--lib", "-E", "test(owned_new) | test(untouched)"].map(str::to_owned);
+            let result = execute_at(&root, &args, &repo, &cargo);
+            if seeded_failure {
+                assert!(result.is_err());
+                assert_eq!(std::fs::read_to_string(repo.join("target/attempts")).unwrap(), "3");
+                assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
+            } else {
+                result.unwrap();
+                assert_eq!(std::fs::read_to_string(repo.join("target/attempts")).unwrap(), "5");
+                let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &fixture_head(&repo), &targeted_test(&args).unwrap());
+                let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 5);
+                assert_eq!(receipt["test"]["stability"]["tests"][0]["name"], "owned_new");
+                assert_eq!(receipt["test"]["count"], 2);
+                assert_eq!(std::fs::read_to_string(repo.join("target/retries")).unwrap().lines().collect::<Vec<_>>(), vec!["0"; 5]);
+                let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
+                assert_eq!(executed.lines().filter(|line| line.split(',').any(|name| name == "untouched")).count(), 1);
+                let script = std::fs::read_to_string(&cargo).unwrap().replace("if False and", "if True and");
+                std::fs::write(&cargo, script).unwrap();
+                std::fs::write(repo.join("target/attempts"), "0").unwrap();
+                let mut overlap = args.clone();
+                overlap[6] = "test(owned_new) & test(owned_new)".into();
+                assert!(execute_at(&root, &overlap, &repo, &cargo).is_err());
+                assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -2933,7 +3049,16 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         std::fs::write(repo.join("src/lib.rs"), "pub fn a() { let _ = 1; }\n").unwrap();
         std::fs::write(repo.join("hub-web/dist/app.js"), "mine\n").unwrap();
         fixture_commit_as(&repo, "delivery");
-        record_passing_test_for_tests(&root, &repo, &fixture_head(&repo), "cas", "test(cached)");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
+        let identity = stability::Identity { path: "src/lib.rs".into(), name: "cached".into() };
+        let selection = TargetedTest { package: "cas".into(), harness: None, filter: "test(cached)".into() };
+        let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &receipt_head, &selection);
+        let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        receipt.test.as_mut().unwrap().stability = Some(stability::Proof {
+            runner: "nextest".into(), tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0,
+        });
+        std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
 
         git(&repo, &["checkout", "-q", "lane"]).unwrap();
         std::fs::write(repo.join("src/other.rs"), "pub fn b() {}\n").unwrap();
@@ -2952,6 +3077,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
 
         assert!(passing_test_receipts(&root, &repo, &delivered).is_empty());
         assert_eq!(PassingTests::new(&root, &repo, &delivered).with_target("lane").receipts().len(), 1);
+        assert!(stability::missing(&PassingTests::new(&root, &repo, &delivered).with_target("lane"), &[identity.clone()]).is_empty());
 
         // A Rust conflict resolved by taking one side whole leaves no
         // resolution diff, but it is still untested code.
@@ -2963,6 +3089,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "-q", "-X", "theirs", "lane", "-m", "take theirs"]).unwrap();
         let theirs = fixture_head(&repo);
         assert!(PassingTests::new(&root, &repo, &theirs).with_target("lane").receipts().is_empty());
+        assert_eq!(stability::missing(&PassingTests::new(&root, &repo, &theirs).with_target("lane"), &[identity.clone()]), vec![identity]);
 
         // cas-6d79: any agent can move the shared local target ref. Pointed at
         // an unpublished commit, it must not pass that commit off as target work.
@@ -4306,7 +4433,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         // cas-7b2d: inspect receipt data independently of display provenance.
         passing_test_records(root, repo, head, None)
             .into_iter()
-            .map(|(head, package, test)| (head, package, test.filter, test.count))
+            .map(|(head, package, test)| (head, package.expect("fixture records a Rust package"), test.filter, test.count))
             .collect()
     }
 
@@ -4719,6 +4846,80 @@ PY"#);
         assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none());
         crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit_since + chrono::Duration::minutes(30)).unwrap();
         assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
+    }
+
+    /// Nov 13 replay: load falls between load refusals and then below the
+    /// limit. Each refusal, worker_status and the 20-minute notice report the
+    /// load measured when they are produced, not the first or last refusal's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capacity_wait_reports_load_measured_at_each_report_cas_243a() {
+        use crate::mcp::{CasCore, CasService};
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+        use rmcp::handler::server::wrapper::Parameters;
+        use rmcp::model::RawContent;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // The guard is the subject here; the host fixture below supplies load.
+        env.remove("CAS_FACTORY_BUILD_GUARD");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "capacity-fixture");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        env.set("CAS_ROOT", &root);
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        for (id, name, role) in [
+            ("capacity-worker", "worker", AgentRole::Worker),
+            ("capacity-supervisor", "capacity-lead", AgentRole::Supervisor),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("capacity-fixture".into());
+            agents.register(&agent).unwrap();
+        }
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-243a".into(), "wait for load".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, "capacity-worker", 3600, Some("working")).unwrap();
+        let proc = dir.path().join("proc");
+        std::fs::create_dir_all(&proc).unwrap();
+        let _host = crate::factory_build_guard::host_fixture::HostFixture::new(&root, &proc);
+        let cpus = std::thread::available_parallelism().unwrap().get() as f64;
+        let set_load = |load: f64| std::fs::write(proc.join("loadavg"), format!("{load:.2} 0 0 1/1 1\n")).unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+
+        let (first, second, live) = (cpus * 3.0 + 0.36, cpus * 2.0 + 0.64, cpus * 0.25);
+        set_load(first);
+        let refused = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(refused.contains(&format!("load {first:.2}")), "{refused}");
+        set_load(second);
+        let refused = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(refused.contains(&format!("load {second:.2}")) && !refused.contains(&format!("{first:.2}")), "{refused}");
+
+        set_load(live);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("capacity-supervisor".into());
+        let result = CasService::new(core, None).factory(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "worker_status", "summary_mode": true,
+        })).unwrap())).await.unwrap();
+        let status = result.content.into_iter().filter_map(|content| match content.raw {
+            RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(status.contains(&format!("load_1m={live:.2}")), "{status}");
+        let wait = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"),
+            wait.since + chrono::Duration::minutes(20)).unwrap();
+        let notices = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap();
+        let notice = notices.iter().find(|row| row.source.starts_with("supervisor-notice:")).expect("20-minute notice");
+        assert!(notice.prompt.contains(&format!("load_1m={live:.2}")), "{}", notice.prompt);
     }
 
     #[cfg(unix)]

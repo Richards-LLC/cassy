@@ -1419,6 +1419,11 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
 
+    /// Exact verification dispatch this task reviews. This names evidence,
+    /// never grants verdict authority. Ordinary workers cannot accept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_dispatch_id: Option<String>,
+
     /// Optional labels for categorization
     #[serde(default)]
     pub labels: Vec<String>,
@@ -1552,6 +1557,7 @@ impl Task {
             task_type: TaskType::Task,
             risk: Vec::new(),
             door: None,
+            review_dispatch_id: None,
             proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
@@ -1597,6 +1603,7 @@ impl Task {
             && self.closed_at == other.closed_at
             && self.close_reason == other.close_reason
             && self.assignee == other.assignee
+            && self.review_dispatch_id == other.review_dispatch_id
             && self.branch == other.branch
             && self.worktree_id == other.worktree_id
             && self.pending_verification == other.pending_verification
@@ -1697,6 +1704,7 @@ impl Default for Task {
             task_type: TaskType::Task,
             risk: Vec::new(),
             door: None,
+            review_dispatch_id: None,
             proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
@@ -2108,9 +2116,16 @@ mod tests {
 
         let encoded = serde_json::to_value(&task).unwrap();
         assert!(encoded.get("origin_project").is_none());
+        assert!(encoded.get("review_dispatch_id").is_none());
 
         let decoded: Task = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.origin_project, None);
+        assert_eq!(decoded.review_dispatch_id, None);
+        let mut review = decoded;
+        review.review_dispatch_id = Some("vdispatch-e17ce9129b337ebcc86c8a0383080009".into());
+        assert!(!task.lifecycle_matches(&review));
+        let decoded: Task = serde_json::from_value(serde_json::to_value(&review).unwrap()).unwrap();
+        assert_eq!(decoded.review_dispatch_id, review.review_dispatch_id);
     }
 
     #[test]

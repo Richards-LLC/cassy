@@ -181,7 +181,12 @@ Rows:
   Tokens and env values are redacted. Any secret-shaped command keeps only a
   SHA-256 hash with its decision and rule.
 - **Replay:** a one-off script (not shipped) feeds each command, as a worker
-  PreToolUse request, to the base binary (`7f6b77429`) and to the candidate.
+  PreToolUse request, to the released base binary (`v4.27.0`, `ff20dd1e`) and
+  to the final delivery candidate. Supervisor decision #4248572 on November 14
+  pins this baseline; its verified version is `cas 4.27.0 (ff20dd1 2026-11-14)`.
+  The earlier `7f6b77429` design reference is superseded. Both binaries receive
+  identical environment, cwd shapes and hook inputs; their version lines are
+  recorded next to their measurements.
   It records decision and rule.
 - **Denominator:** distinct worker Bash commands in the window, deduplicated
   on exact command text.
@@ -192,6 +197,40 @@ Rows:
   receipt.
 - **Output:** numerator, denominator and rate at base and at candidate. Each
   candidate deny that the base allowed is listed separately.
+
+## Filename-list consumers
+
+This is the admission contract for the consumer migration, not a claim that the
+current implementation has completed it. `ALLOW` below always retains existing
+credential, execution and write-root policy. Literal file inputs are checked
+against their effective cwd; a filename listing grants no permission to read
+the files it names. Unknown options or unresolved filenames are refused rather
+than assumed to consume inert data. Redirections are independent file inputs
+or outputs even when argv consumes only stdin data.
+
+| Consumer | ALLOW modes and reason | DENY modes and reason |
+| --- | --- | --- |
+| `cd` | Literal directory operand, or resolved HOME/OLDPWD/CDPATH; it changes the cwd for subsequent checks and does not open piped names | Unresolved directory state, because later relative inputs cannot be checked |
+| `rg` | Stdin text filtering; literal pattern files (`-f`/`--file`), ignore files (`--ignore-file`) and path operands after credential checks; effective `--files` is a metadata listing | Protected content inputs, including auxiliary config/ignore inputs; unresolved `--pre`/`--hostname-bin` execution. `-l`/`--files-with-matches` and `--files-without-match` read content and receive no listing exemption |
+| `find` | Literal starting points and metadata/reference tests, including `-newer`, `-anewer`, `-cnewer`, `-newerXY`, `-samefile`, under existing credential metadata policy; print/print0/printf remain name data | `-files0-from FILE` or stdin when file-list contents cannot be resolved; protected data inputs; `-exec`/`-execdir`/`-ok`/`-okdir` with unknown command or input-derived writer operands; `-delete` or `-fprint`/`-fprint0`/`-fprintf`/`-fls` outside write roots |
+| `grep`, `egrep`, `fgrep` | Stdin data; `-f -`/`--file=-` consume pattern data, not filenames; literal positional files, `-f FILE` and `--exclude-from FILE` after credential checks | Protected file/rule inputs and unresolved recursive roots. `-l`/`-L` still read content and receive no listing exemption |
+| `head` | Stdin data; literal file operands after credential checks; `-n`/`--lines`, `-c`/`--bytes` are counts | Protected or unresolved file operands; no filename-list input mode is admitted |
+| `tail` | Stdin data; literal file operands after credential checks; follow/retry modes keep checking that same path; count/offset options are data | Protected or unresolved file operands; no filename-list input mode is admitted |
+| `sort` | Stdin data and literal file operands after credential checks; `-o`/`--output`, `-T`/`--temporary-directory` and TMPDIR under write-root policy; literal `--random-source` under credential policy | `--files0-from FILE`/`--files0-from=-` when the contained filenames are unknown; unresolved `--compress-program` execution; protected random/input files or unauthorized output/temp paths |
+| `uniq` | Stdin or first positional input after credential checks; second positional output under write-root policy; `-f`/`--skip-fields` and `-s`/`--skip-chars` are counts | Protected first input, unauthorized second output, or unresolved operands; no filename-list input mode is admitted |
+| `wc` | Stdin data and literal file operands after credential checks, including byte-count modes | `--files0-from FILE`/`--files0-from=-` when filenames are unknown; a count does not authorize opening protected inputs |
+| `cut` | Stdin data and literal input files after credential checks; selection lists and delimiters are data | Protected or unresolved file inputs; no filename-list input mode is admitted |
+| `tr` | Stdin data; operands are character sets, not filenames | Protected input redirections or unauthorized output redirections; there is no argv file-input mode |
+| `xargs` | A literal command with checked options; a known data-only or read-only invocation whose input provenance preserves credential policy; `-a`/`--arg-file` is itself a checked file input | Dynamic command position, input-derived writer operands, protected argument files, or an unresolved stream-to-filename content read |
+
+The initial inventory is cas-47e1 artifact `art-d088a676`. On soundwave,
+GNU findutils 4.10.0 `find --help` confirms `-files0-from FILE`, reference-file
+tests and file-writing/command actions; GNU grep 3.12 `grep --help` confirms
+`--exclude-from=FILE`, `-f FILE`, recursion and content-reading `-l`/`-L` modes.
+The [GNU coreutils manual](https://www.gnu.org/software/coreutils/manual/)
+and [ripgrep argument documentation](https://github.com/BurntSushi/ripgrep/blob/master/crates/core/flags/defs.rs)
+define the remaining option contracts. BSD-only or unknown variants require
+an explicit parser entry before admission.
 
 ## Delivery plan
 

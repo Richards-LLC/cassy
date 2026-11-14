@@ -8807,7 +8807,7 @@ EOF
             let response = serde_json::to_value(response).unwrap();
             let decision = &response["hookSpecificOutput"]["permissionDecision"];
             let reason = response["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
-            if (decision == "deny") != denied || (denied && !reason.contains("[H-29]") && !reason.contains("shell.unterminated")) {
+            if (decision == "deny") != denied || (denied && !reason.contains("[H-29]") && !reason.contains("shell.unterminated") && !reason.contains("shell.unknown_syntax")) {
                 failures.push(format!("{case}: {decision}: {reason}"));
             }
         }
@@ -11533,6 +11533,7 @@ mod worker_commit_guard_tests {
             ("eval \"$cmd\"", "shell.dynamic_eval"),
             ("bash -c \"$cmd\"", "shell.dynamic_eval"),
             ("source \"$script\"", "shell.dynamic_eval"),
+            ("xargs touch <<'EOF'\n/outside/p\nEOF", "shell.dynamic_command"),
             ("$cmd safe", "shell.dynamic_command"),
             ("env \"$cmd\" safe", "shell.dynamic_command"),
         ] {
@@ -11543,6 +11544,32 @@ mod worker_commit_guard_tests {
                 || !output["permissionDecisionReason"].as_str().unwrap_or("").contains(rule)
             {
                 failures.push(format!("{rule} {command:?}: {value}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn remaining_consumers_share_execution_depth_cas_24f2() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        let mut failures = Vec::new();
+        for (base, nesting, gate) in [
+            ("cargo build -p cas", 4, "[H-03]"),
+            ("pgrep -f corpus-worker | xargs kill", 5, "[H-16]"),
+        ] {
+            let mut command = base.to_string();
+            for _ in 0..nesting {
+                command = format!("bash -c '{}'", command.replace('\'', "'\\''"));
+            }
+            let input = hook_git_write_input("/worktree", &command);
+            let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
+            let output = &value["hookSpecificOutput"];
+            if output["permissionDecision"] != "deny"
+                || !output["permissionDecisionReason"].as_str().unwrap_or("").contains(gate)
+            {
+                failures.push(format!("{gate}: {value}"));
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");

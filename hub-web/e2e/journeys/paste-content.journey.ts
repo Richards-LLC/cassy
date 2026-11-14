@@ -269,7 +269,12 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
         }
       });
     };
-    if (width === 1440 && colorScheme === "light") test("HUB-J24 paste content into the composer", run);
-    else test(`HUB-J24 paste content ${width} ${colorScheme}`, journeyPart, run);
+    if (width === 1440 && colorScheme === "light") {
+      // cas-stability-identities: ["composer paste 1440 light HUB-J24 paste content into the composer"]
+      test("HUB-J24 paste content into the composer", run);
+    } else {
+      // cas-stability-identities: ["composer paste 1440 dark HUB-J24 paste content 1440 dark", "composer paste 390 light HUB-J24 paste content 390 light", "composer paste 390 dark HUB-J24 paste content 390 dark"]
+      test(`HUB-J24 paste content ${width} ${colorScheme}`, journeyPart, run);
+    }
   });
 }

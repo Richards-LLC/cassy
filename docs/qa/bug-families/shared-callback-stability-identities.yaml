@@ -1,0 +1,4 @@
+title: Shared journey callbacks could not obtain scoped stability evidence
+statement: Changed local shared callbacks select exactly their declared expanded runtime cases, validated against native registration locations before five passes with zero retries.
+tasks: [cas-13c9]
+journeys: [HUB-J24]

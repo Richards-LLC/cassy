@@ -11583,6 +11583,34 @@ mod worker_commit_guard_tests {
         assert!(value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("[H-12]"), "{value}");
     }
 
+    #[test]
+    fn role_checks_use_executing_prefixes_cas_24f2() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        let mut failures = Vec::new();
+        for command in [
+            "if CAS_AGENT_ROLE=supervisor true; then :; fi",
+            "if true; then CAS_FACTORY_MODE=0 printf x; fi",
+            "for x in safe; do CAS_AGENT_ROLE=supervisor printf x; done",
+            "{ CAS_AGENT_ROLE=supervisor printf x; }",
+            ">role-log CAS_AGENT_ROLE=supervisor printf x",
+            "command env -u CAS_AGENT_ROLE printf x",
+            "timeout 1 env CAS_FACTORY_MODE=0 printf x",
+            "env -u UNUSED env CAS_AGENT_ROLE=supervisor printf x",
+        ] {
+            let input = hook_git_write_input("/worktree", command);
+            let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
+            let output = &value["hookSpecificOutput"];
+            if output["permissionDecision"] != "deny"
+                || !output["permissionDecisionReason"].as_str().unwrap_or("").contains("[H-12]")
+            {
+                failures.push(format!("{command:?}: {value}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     // Helper: create a temp git repo with an initial commit on `main`.
     fn make_git_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");

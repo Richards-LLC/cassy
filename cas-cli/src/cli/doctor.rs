@@ -6431,6 +6431,9 @@ mod tests {
         assert_eq!(tasks.get(&legacy.id).unwrap().review_dispatch_id, None);
         // A recorded-but-missing additive column is repaired, with its
         // reconciliation receipt, rather than trusted from the ledger alone.
+        // The migration wrote through a different connection; use a fresh
+        // DDL connection rather than its pre-migration cached schema.
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         conn.execute_batch("ALTER TABLE tasks DROP COLUMN review_dispatch_id;").unwrap();
         assert!(matches!(schema_check(&root).status, CheckStatus::Warning));
         crate::migration::run_migrations(&root, false).unwrap();

@@ -48,6 +48,7 @@ pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64, initi
     enqueue_with_queue_occurrence(cas_dir, task, Some(occurrence), initial)
 }
 
+// gate-audit[initial]: selector Chooses the initial or continuation prompt; both run the review authority guard.
 fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>, initial: bool) -> crate::Result<Option<i64>> {
     if !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
         || matches!(task.task_type, TaskType::Epic | TaskType::Gate)

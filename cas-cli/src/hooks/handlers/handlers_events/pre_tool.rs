@@ -10239,6 +10239,17 @@ EOF
             ("cd src && uniq ../names.txt ../../../ordinary-data.txt", true),
             ("sort -o sorted.txt names.txt", false),
             ("sort -T src names.txt", false),
+            ("sort -o../../ordinary-data.txt names.txt", true),
+            ("sort -nro../../ordinary-data.txt names.txt", true),
+            ("sort -s --output=../../ordinary-data.txt names.txt", true),
+            ("TMPDIR=../../operator; sort names.txt; TMPDIR=src", true),
+            ("TMPDIR=src; sort names.txt; TMPDIR=../../operator", false),
+            ("TMPDIR=../../operator sort -T src names.txt", false),
+            ("TMPDIR=../../operator sort -T src names.txt; sort names.txt", false),
+            ("sort -T '' names.txt", true),
+            ("TMPDIR= sort names.txt", true),
+            ("uniq -f2 -s1 names.txt ../../ordinary-data.txt", true),
+            ("uniq -f2 -s1 names.txt -", false),
             ("TMPDIR=src sort names.txt", false),
             ("uniq names.txt unique.txt", false),
             ("sort -- --output=../../ordinary-data.txt", false),
@@ -10284,8 +10295,8 @@ EOF
             ("gh issue comment 1290 --body \"$(cat <<EOF\n$(touch ../../ordinary-data.txt)\nEOF\n)\"", true),
             ("bash -c \"$(cat <<'EOF'\ntouch ../../ordinary-data.txt\nEOF\n)\"", true),
             ("sh -c \"printf '%s' $?\"", false),
-            ("B=$PWD/target/debug/cas; $B --version", false),
-            ("R='env -i PATH=/usr/bin /bin/true'; $R", false),
+            ("B=$PWD/target/debug/cas; $B --version", true),
+            ("R='env -i PATH=/usr/bin /bin/true'; $R", true),
             ("kill $(cat target/a.pid) $(cat target/b.pid)", false),
             ("echo $(cat src/new.rs) touch ../../ordinary-data.txt", false),
             ("echo $(touch ../../config.toml) data", true),
@@ -10326,7 +10337,7 @@ EOF
             }
             if command == r#"printf '%s\n' "$(cat"#
                 && !value["hookSpecificOutput"]["permissionDecisionReason"].as_str()
-                    .is_some_and(|reason| reason.contains("cannot resolve shell filesystem effects"))
+                    .is_some_and(|reason| reason.contains("shell.unterminated"))
             {
                 mismatches.push(format!("malformed substitution needs a resolution reason: {value}"));
             }
@@ -11667,6 +11678,7 @@ mod worker_commit_guard_tests {
             ("sort --files0=-", "shell.dynamic_command"),
             ("wc --files0=-", "shell.dynamic_command"),
             ("sort -k 1 names.txt --files0-from=-", "shell.dynamic_command"),
+            ("sort -s --files0-from=-", "shell.dynamic_command"),
             ("env /usr/bin/wc --files0-from=-", "shell.dynamic_command"),
             ("bash -c 'sort --files0-from=-'", "shell.dynamic_command"),
             ("sort --compress-prog=helper", "shell.dynamic_command"),

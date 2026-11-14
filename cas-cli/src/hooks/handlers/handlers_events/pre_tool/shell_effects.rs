@@ -830,8 +830,35 @@ fn collect_script(
                     }
                 }
             }
+            let consumer = shell_admission::consumer_files(name.unwrap_or(""), args);
+            // Explicit temp selection has the same authority as an output
+            // path. Only preceding shell bindings and this invocation's
+            // assignment prefix apply; future assignments cannot grant it.
+            let mut temporary_dirs = Vec::new();
+            if name == Some("sort") && consumer.temporaries.is_empty() {
+                temporary_dirs = directory_values.get("TMPDIR").cloned().unwrap_or_default();
+                for word in &words[..index.unwrap_or(0)] {
+                    if let Some(value) = word.strip_prefix("TMPDIR=") {
+                        temporary_dirs = expand_factory_shell_word(value, &directory_values);
+                    }
+                }
+            }
             for directory in &statement_dirs {
                 let base = directory.as_deref();
+                let consumer_targets = consumer.outputs.iter().map(|path| (*path, false))
+                    .chain(consumer.temporaries.iter().map(|path| (*path, true)));
+                for (target, temporary) in consumer_targets {
+                    for target in expand_factory_shell_word(target, &directory_values) {
+                        // GNU sort appends /sortXXXXXX even to an empty
+                        // temporary-directory value, producing a root path.
+                        let target = if temporary && target.is_empty() { "/" } else { &target };
+                        effects.writes.push((rooted(target, base, original)?, None));
+                    }
+                }
+                for target in &temporary_dirs {
+                    let target = if target.is_empty() { "/" } else { target };
+                    effects.writes.push((rooted(target, base, original)?, None));
+                }
                 for raw in bash_write_targets(&command) {
                     for raw in expand_factory_shell_word(&raw, &values) {
                         let path = rooted(&raw, base, original)?;
@@ -951,10 +978,12 @@ fn collect_script(
             } else {
                 &words[..index.unwrap_or(words.len())]
             };
+            let persistent_assignment = index.is_none() || name == Some("export");
             for word in assignments {
                 if let Some((name, value)) = word.split_once('=')
                     && is_shell_variable_name(name)
                 {
+                    if name == "TMPDIR" && !persistent_assignment { continue; }
                     let expanded = expand_factory_shell_word(value, &directory_values);
                     if assignment_may_skip {
                         let previous = directory_values

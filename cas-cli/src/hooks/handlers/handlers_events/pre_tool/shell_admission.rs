@@ -134,7 +134,7 @@ impl Statement {
                 "runtime input supplies filenames or arguments whose effects cannot be resolved",
                 "use explicit literal operands or a data-only consumer"));
         }
-        if let Some(at) = runtime_consumer_input(name, args) {
+        if let Some(at) = consumer_files(name, args).runtime {
             return Some(Unsupported::execution("shell.dynamic_command", offset(index + 1 + at),
                 "runtime filename source or consumer helper",
                 "the consumer obtains unknown filenames or executes a helper outside the command projection",
@@ -174,59 +174,99 @@ impl Statement {
 
 pub(in crate::hooks::handlers::handlers_events) enum ShellInput { Command(usize), Script(usize), Stdin, Display }
 
-/// A literal path to a list file does not prove the filenames stored inside.
-/// Inspect option positions, not token presence: option values and operands
-/// after -- remain data. GNU long-option prefixes select the same modes.
-fn runtime_consumer_input(name: &str, args: &[String]) -> Option<usize> {
-    if !matches!(name, "sort" | "wc" | "find") { return None; }
+/// Filesystem roles of consumer argv, independent of cwd and authorization.
+#[derive(Default)]
+pub(super) struct ConsumerFiles<'a> {
+    pub(super) outputs: Vec<&'a str>,
+    pub(super) temporaries: Vec<&'a str>,
+    runtime: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum ConsumerValue { Data, Output, Temporary, Runtime }
+
+/// A literal list-file path does not prove the filenames stored inside. This
+/// same option walk supplies admission and write-root policy, preserving data
+/// values, attached short values, GNU long prefixes and the -- boundary.
+pub(super) fn consumer_files<'a>(name: &str, args: &'a [String]) -> ConsumerFiles<'a> {
+    use ConsumerValue::*;
+    let mut files = ConsumerFiles::default();
+    if !matches!(name, "sort" | "wc" | "uniq" | "find") { return files; }
     let mut at = 0;
+    let mut operands = 0;
+    let mut options = true;
     while let Some(word) = args.get(at).map(String::as_str) {
-        if name != "find" && word == "--" { break; }
-        let flag = word.split_once('=').map_or(word, |(flag, _)| flag);
-        let filename_source = if name == "find" {
-            word == "-files0-from"
-        } else {
-            flag.starts_with("--") && "--files0-from".starts_with(flag)
+        if name != "find" && options && word == "--" {
+            options = false;
+            at += 1;
+            continue;
+        }
+        if !options || !word.starts_with('-') || word == "-" {
+            if name == "uniq" {
+                if operands == 1 && word != "-" { files.outputs.push(word); }
+                operands += 1;
+            }
+            at += 1;
+            continue;
+        }
+        let (flag, attached) = word.split_once('=').map_or((word, None), |(flag, value)| (flag, Some(value)));
+        let long: &[(&str, ConsumerValue)] = match name {
+            "sort" => &[
+                ("--key", Data), ("--field-separator", Data), ("--sort", Data),
+                ("--batch-size", Data), ("--buffer-size", Data), ("--parallel", Data),
+                ("--random-source", Data), ("--output", Output),
+                ("--temporary-directory", Temporary), ("--files0-from", Runtime),
+                ("--compress-program", Runtime),
+            ],
+            "wc" => &[("--files0-from", Runtime)],
+            "uniq" => &[("--skip-fields", Data), ("--skip-chars", Data), ("--check-chars", Data)],
+            _ => &[],
         };
-        let helper = name == "sort" && flag.starts_with("--")
-            && "--compress-program".starts_with(flag);
-        if filename_source || helper { return Some(at); }
+        let mut option = flag.starts_with("--").then(|| long.iter().find(|(name, _)| name.starts_with(flag)))
+            .flatten().map(|(_, role)| (*role, attached));
+        if option.is_none() && matches!(name, "sort" | "uniq") && !word.starts_with("--") {
+            for (offset, flag) in word[1..].char_indices() {
+                let role = match (name, flag) {
+                    ("sort", 'o') => Some(Output),
+                    ("sort", 'T') => Some(Temporary),
+                    ("sort", 'k' | 't' | 'S' | 'y') => Some(Data),
+                    ("uniq", 'f' | 's' | 'w') => Some(Data),
+                    _ => None,
+                };
+                if let Some(role) = role {
+                    let suffix = &word[1 + offset + flag.len_utf8()..];
+                    option = Some((role, (!suffix.is_empty()).then_some(suffix)));
+                    break;
+                }
+            }
+        }
         if name == "find" {
-            if matches!(word, "-exec" | "-execdir" | "-ok" | "-okdir") {
-                // The action's argv is a child invocation, not find options.
+            if word == "-files0-from" { option = Some((Runtime, None)); }
+            else if matches!(word, "-exec" | "-execdir" | "-ok" | "-okdir") {
+                // Action argv is a child invocation, not find options.
                 at += 1;
                 while args.get(at).is_some_and(|word| !matches!(word.as_str(), ";" | "+")) { at += 1; }
             } else if super::find_value_option(word)
                 || (word.len() == 8 && word.starts_with("-newer"))
                 || matches!(word, "-fprint" | "-fprint0" | "-fprintf" | "-fls" | "-D" | "-O")
             {
-                at += 1;
-                // -fprintf consumes both an output path and a format.
-                if word == "-fprintf" { at += 1; }
+                at += 1 + usize::from(word == "-fprintf");
             }
-        } else if name == "sort" {
-            const VALUES: &[&str] = &[
-                "--key", "--field-separator", "--output", "--sort", "--batch-size",
-                "--buffer-size", "--temporary-directory", "--parallel", "--random-source",
-            ];
-            if word.starts_with("--") && !word.contains('=')
-                && VALUES.iter().any(|value| value.starts_with(word))
-            {
-                at += 1;
-            } else if word.starts_with('-') && !word.starts_with("--") {
-                // In a short cluster the first value option consumes the
-                // suffix, or the next argv word when the suffix is empty.
-                for (offset, flag) in word[1..].char_indices() {
-                    if "kotsSTy".contains(flag) {
-                        if offset + flag.len_utf8() == word.len() - 1 { at += 1; }
-                        break;
-                    }
+        }
+        if let Some((role, attached)) = option {
+            if matches!(role, Runtime) { files.runtime = Some(at); return files; }
+            let value = attached.or_else(|| { at += 1; args.get(at).map(String::as_str) });
+            if let Some(value) = value {
+                match role {
+                    Output => files.outputs.push(value),
+                    Temporary => files.temporaries.push(value),
+                    Data | Runtime => {}
                 }
             }
         }
         at += 1;
     }
-    None
+    files
 }
 
 /// The name bound by scalar, append or array-element assignment syntax. A

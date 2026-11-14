@@ -173,7 +173,7 @@ fn inert_names(script: &str, projected: &str, lexed: &ShellLexed, parent: &Inert
             let value = text.split_once('=').filter(|(name, _)| is_shell_variable_name(name))
                 .map_or(text.as_str(), |(_, value)| value);
             VALUE_MUTATORS.contains(&value)
-                || (matches!(value, "printf" | "wait") && word(index + 1).is_some_and(|next| (next.starts_with("-v") || next.starts_with("-p"))))
+                || (matches!(value, "printf" | "wait") && word(index + 1).is_some_and(|next| next.starts_with("-v") || next.starts_with("-p")))
                 // `.` sources a file only in command position; `find .` is data.
                 || (value == "." && (index == 0 || matches!(tokens[index - 1], ShellToken::Operator(_))))
         }

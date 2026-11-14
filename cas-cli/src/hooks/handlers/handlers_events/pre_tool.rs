@@ -9475,6 +9475,56 @@ EOF
         assert!(failures.is_empty(), "arithmetic re-expansion must be refused: {failures:#?}");
     }
 
+    /// cas-e197: a read-only counting loop (the prowl supervisor's 7:00 PM ET
+    /// repro) and a literal `${!v}` loop have only known, inert values, so H-29
+    /// judges their writes alone. Inherited, substituted, piped or late-bound
+    /// values still make the arithmetic unresolved.
+    #[test]
+    fn known_loop_values_resolve_arithmetic_and_indirection_cas_e197() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let inside = project.path().join("count.txt").display().to_string();
+        let decision = |command: &str| {
+            let response = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            (response["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+             response["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string())
+        };
+        let counter = |target: &str| format!(
+            "covered=0; for id in 1933 1942 1513; do if sqlite3 -readonly .cas/cas.db \"select 1 from tasks where external_ref like '%#$id%'\" | grep -q 1; then covered=$((covered+1)); fi; done; echo \"covered=$covered\" > {target}"
+        );
+        let indirect = |words: &str, target: &str| format!("for v in {words}; do echo \"$v=${{!v}}\"; done > {target}");
+        let mut failures = Vec::new();
+        for command in [counter(&inside), indirect("HOME USER", &inside)] {
+            let (decision, reason) = decision(&command);
+            if decision == "deny" {
+                failures.push(format!("allowed {command}: {reason}"));
+            }
+        }
+        for (command, unresolved) in [
+            (counter("/outside/cas-e197/count.txt"), false),
+            (indirect("HOME USER", "/outside/cas-e197/env.txt"), false),
+            (indirect("$(compgen -e)", &inside), true),
+            (format!("echo $((covered)) > {inside}; covered=0"), true),
+            (format!("covered=0; covered=$(cat {inside}); echo $((covered+1)) > {inside}"), true),
+            (format!("covered=0 | true; echo $((covered+1)) > {inside}"), true),
+            (format!("covered=0; read covered < {inside}; echo $((covered+1)) > {inside}"), true),
+            (format!("covered=0; covered+='a[1]'; echo $((covered)) > {inside}"), true),
+        ] {
+            let (decision, reason) = decision(&command);
+            if decision != "deny" || !reason.contains(WORKSPACE_CONTRACT_DENIAL)
+                || (unresolved && !reason.contains("cannot resolve shell filesystem effects"))
+            {
+                failures.push(format!("refused {command}: {decision}: {reason}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     /// cas-3147: an agent shell cannot run the operator-only commands,
     /// however the command is wrapped.
     #[test]

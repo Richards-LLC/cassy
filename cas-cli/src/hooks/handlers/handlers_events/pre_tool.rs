@@ -11036,26 +11036,32 @@ EOF
             ("CAS_FACTORY_SESSION", "artifact-root-a767")] { env.set(key, value); }
         env.set("CAS_CLONE_PATH", &worktree);
         env.set("CAS_ROOT", &cas_root);
-        let run = |cwd: &Path, path: &str| {
+        let run = |cwd: &Path, path: &str, via_realpath: bool| {
             // Codex projects exec_command as Bash/command plus workdir, while
             // the hook's turn cwd remains the worker's assigned checkout.
+            let write = format!("python3 -c \"from pathlib import Path; Path('{path}').write_text('{{}}')\"");
+            let command = if via_realpath {
+                format!("cd \"$(realpath '{}')\" && {write}", cwd.display())
+            } else { write };
             let input = tool_input("Bash", serde_json::json!({
-                "command": format!("python3 -c \"from pathlib import Path; Path('{path}').write_text('{{}}')\""),
-                "workdir": cwd,
+                "command": command,
+                "workdir": if via_realpath { &worktree } else { cwd },
             }), &worktree);
             serde_json::to_value(handle_pre_tool_use(&input, Some(&cas_root)).unwrap()).unwrap()
         };
         let mut denials = Vec::new();
         for cwd in [logical_root.join("cas-a767"), real_root.join("cas-a767")] {
+            for via_realpath in [false, true] {
             for path in ["helper-audit.json", "new/nested.json", "existing.json"] {
-                let output = run(&cwd, path);
+                let output = run(&cwd, path, via_realpath);
                 assert_ne!(output["hookSpecificOutput"]["permissionDecision"], "deny", "cwd={} target={path}: {output}", cwd.display());
             }
-            let output = run(&cwd, "escape/helper-audit.json");
+            let output = run(&cwd, "escape/helper-audit.json", via_realpath);
             assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny", "{output}");
             let denial = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_string();
             assert!(denial.contains(&outside.join("helper-audit.json").display().to_string()), "{denial}");
             denials.push(denial);
+            }
         }
         // Paths are diagnostic data, not pinned human-facing wording. Check
         // these only after both spellings and their escape controls have run.

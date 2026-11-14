@@ -37,7 +37,8 @@ test("HUB-J4 inspect images in a turn without leaving the conversation", journey
     for (let attempt = 0; attempt < 3; attempt++) {
       await first.click();
       await expect(first).toBeVisible();
-      expect.soft(await first.locator(".preview-note").count()).toBe(1);
+      // The note follows the chunk import's async rejection; wait for that state.
+      await expect.soft(first.locator(".preview-note")).toHaveCount(1);
     }
     for (const colorScheme of ["light", "dark"] as const) {
       await page.setViewportSize({ width: 390, height: 844 }); await page.emulateMedia({ colorScheme });

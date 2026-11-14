@@ -7,6 +7,72 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.29.0] - 2026-11-14
+
+### Fixed — Factory
+
+- **Close parks the lane the worker is on** — Was: a worker that started on
+  its lane, pushed a throwaway proof branch under its per-task name, then
+  switched back and closed got the proof branch parked for merge, extra
+  commits included. Now: when the recorded lane is checked out, carries the
+  task's work and the per-task branch is not checked out, close parks the
+  lane's tip. A worker that moved onto its per-task branch still parks that
+  branch.
+- **Worker capacity names every project on the machine** — Was: a spawn
+  refused at "8/8 live on this machine" while `worker_status` listed one live
+  worker, because the limit counts other projects' workers too. Now: the
+  refusal and `worker_status` show the same machine-wide count with a
+  per-project breakdown, for example "8/8 live on this machine: cassy 1,
+  gabber-studio 7".
+- **Capacity waits show the load measured now** — Was: `worker_status` and
+  the 20-minute supervisor notice repeated the figure from the last refusal,
+  so a wait could still say "1-minute load 52.36" after the load had fallen
+  well below the limit. Now: both show the refusal's figure as "cause at last
+  refusal" next to a fresh "now" reading of load, builders and disk.
+- **The user-level worker limit applies to every project** — Was: a project
+  without its own `factory.max_workers` ignored `~/.cas/config.toml`, so
+  `cas config get`, `list` and `reset` showed 8 and spawns were refused at
+  9/8. Now: the limit resolves project, then user, then 8 in config readback,
+  reset and spawn admission, and each names where the value came from.
+- **Conflicts caught before merge admission** — Parking refuses deliveries that conflict with the current train and names the paths. When the train advances, conflicting parked siblings return to their workers with their existing branch and ownership.
+- **Conflict admission policy change** — Conflicting deliveries now stay with their worker when parking is refused, with an explicit merge alternative. This retires the former park-then-flag recovery contract. Historical batch reconciliation failures retain their existing delivery state and are not treated as new merge candidates.
+- **A returned delivery's start names the tip it must keep** — Was: after a
+  parked delivery came back on a merge conflict, its start listed only the
+  pushed-tip requirement, and the push guard let a rebase force-push over the
+  reviewed tip. Now: the start's close checks list the returned delivery tip
+  and say to merge the target in, and the push guard refuses any rewrite that
+  drops that tip. Ordinary unparked checkpoints can still be rebased.
+- **QA can be requested for a rebound re-delivery** — Was: after a
+  supervisor rebound a task to a new branch such as
+  `factory/<worker>-<task>-redelivery`, `verification qa_request` with that
+  branch's pushed tip was refused as "not the live pushed tip", so the close
+  stayed stuck. Now: the task's recorded delivery branch from the rebind is
+  checked too, and the round opens at its live origin tip.
+- **Finish approved no-code closes** — Approval of an eligible no-code close dispatch now completes the saved close through the ordinary gates and releases the worker claim. The continuation binds the assignment, exact dispatch and portable proof; independent holds and stale or foreign approvals retain their guards.
+
+### Fixed — Search
+
+- **Shell flags are searchable keywords** — Conceptual queries containing flags such as `--files0-from` and `-f` return search results instead of an internal parser error. Structured filters and quoted phrases retain their meaning.
+- **Search during task refresh** — Conceptual searches read the committed index when another writer is refreshing it. Task reconciliation resumes when the writer is available, without removing locks or retrying the query.
+
+### Fixed — Releases
+
+- **Reuse shared delivery proofs during release preview** — Release previews
+  reuse successful proofs for the same immutable merge edge and live line
+  positions across deliveries, avoiding repeated Git blame and lexical work
+  while preserving ownership and review verdicts.
+- **Release preview states its real read-only boundary** — Was: `cas release
+  preview` promised no store writes, yet on a copied store without WAL files
+  SQLite added a 32 KiB `cas.db-shm` and an empty `cas.db-wal`. Now: the
+  command help, source contract and release-inventory docs say preview leaves
+  every existing store file unchanged and writes no store data, while SQLite
+  may create those coordination files. Locking and approval checks are
+  unchanged.
+
+### Fixed — Test hygiene
+
+- **Declared rule IDs remain testable** — The test-shape checker recognizes bracketed machine IDs from production rule declarations, including shell parser rules, while rejecting undeclared IDs, test-only examples and bracketed prose.
+
 ## [4.28.0] - 2026-11-14
 
 ### Changed — Factory

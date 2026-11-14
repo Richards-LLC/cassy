@@ -106,6 +106,7 @@ fn request_close_verification_dispatch(
     supervisor_recovery: bool,
     no_delivery_intent: Option<(&str, Option<&str>)>,
     renewal: Option<(&str, &Task, &Task)>,
+    no_code_close: Option<(&Task, &Task)>,
 ) -> Result<CloseVerificationDispatch, McpError> {
     let persist = || -> cas_store::Result<CloseVerificationDispatch> {
         let conn = rusqlite::Connection::open(cas_root.join("cas.db"))?;
@@ -137,13 +138,21 @@ fn request_close_verification_dispatch(
             && dispatch.repository == boundary.repository;
         // cas-afd2: the corrected report and its fresh review become visible
         // together. Never rewrite an active cycle or a concurrently changed proof.
-        if let Some((_, before, closing)) = renewal.filter(|_| matching_proof)
+        if let Some((before, closing)) = no_code_close
+            .or_else(|| renewal.map(|(_, before, closing)| (before, closing)))
+            .filter(|_| matching_proof)
             && closing.execution_note.as_deref() == Some("no-code")
             && (before.external_ref != closing.external_ref || before.execution_note != closing.execution_note)
         {
+            if already_active {
+                return Err(cas_store::StoreError::Other("Active no-code proof cannot be changed by another close".into()));
+            }
+            // A close audit may already have saved this same inline pair.
+            // Accept that pair or the original snapshot, never another proof.
             let changed = tx.execute(
                 "UPDATE tasks SET execution_note=?1, external_ref=?2, updated_at=?3
-                 WHERE id=?4 AND execution_note IS ?5 AND external_ref IS ?6",
+                 WHERE id=?4 AND ((execution_note IS ?5 AND external_ref IS ?6)
+                     OR (execution_note IS ?1 AND external_ref IS ?2))",
                 rusqlite::params![closing.execution_note, closing.external_ref,
                     chrono::Utc::now().to_rfc3339(), task_id, before.execution_note, before.external_ref],
             )?;
@@ -162,6 +171,7 @@ fn request_close_verification_dispatch(
             let mut deliverables: cas_types::TaskDeliverables = serde_json::from_str(&encoded)?;
             deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
                 dispatch_id: dispatch.id.clone(), reason: reason.to_string(), assignee,
+                no_code_proof: no_code_close.and_then(|(_, closing)| closing.external_ref.clone()),
             });
             tx.execute("UPDATE tasks SET deliverables = ?1 WHERE id = ?2",
                 rusqlite::params![serde_json::to_string(&deliverables)?, task_id])?;
@@ -243,6 +253,7 @@ mod verification_dispatch_tests {
                     requested,
                     false,
                     Some(("Measured no source delivery", Some("worker"))),
+                    None,
                     None,
                 )
                 .expect("active dispatch is verification-pending, never INTERNAL_ERROR");
@@ -7820,7 +7831,9 @@ impl CasCore {
             MergeStateGateOutcome::Reject(message) if !gate_preflight::is_merge_handoff(&message) => {
                 Err(TaskLifecycleGateError::UnmergedChildBranch { message })
             }
-            MergeStateGateOutcome::Reject(message) | MergeStateGateOutcome::Unresolved(message) => {
+            MergeStateGateOutcome::Reject(message)
+            | MergeStateGateOutcome::HistoricalDeliveryRejection(message)
+            | MergeStateGateOutcome::Unresolved(message) => {
                 Err(TaskLifecycleGateError::UnmergedChildBranch { message: crate::gates::tag("G-55", message) })
             }
         }
@@ -9508,56 +9521,43 @@ impl CasCore {
                     gate_refusals.push(crate::gates::tag("G-55", message));
                     return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                 }
+                MergeStateGateOutcome::HistoricalDeliveryRejection(message) => {
+                    // A reverted or unproven batch remains a historical
+                    // reconciliation failure. Keep its existing lifecycle;
+                    // its worker branch is not a new merge candidate.
+                    gate_refusals.push(crate::gates::tag("G-55", message));
+                    return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
+                }
                 MergeStateGateOutcome::Reject(msg) => {
                     // MERGE REQUIRED is the park these refusals stand in front
                     // of; anything else this outcome carries is another refusal.
                     if !gate_refusals.is_empty() && !gate_preflight::is_merge_handoff(&msg) {
                         gate_refusals.push(msg.clone());
                     }
-                    // cas-a844: "MERGE REQUIRED" alone doesn't say whether the
-                    // supervisor's merge will actually succeed — it fires for
-                    // ANY stranded commits, whether or not they'd conflict.
-                    // Distinguish the two with a read-only preflight (bright-
-                    // gopher-20's cas-e18f `preflight_merge_conflicts`, which
-                    // uses `git merge-tree --write-tree` and touches neither
-                    // the working tree nor the index) so the parked state and
-                    // this refusal both name the real situation instead of
-                    // reading as "done, pending a formality" either way.
+                    // Only a mergeable delivery may enter the merge queue.
+                    // The merge-state gate has refreshed origin; measure that
+                    // live target rather than a stale local train branch.
                     let measured_branch = recovery_branch.clone().or_else(|| {
                         task.assignee.as_deref().map(|assignee| {
                             close_measured_factory_branch(&close_project_root, &task, assignee)
                         }).or_else(|| task_delivery_branch(&close_project_root, &task))
                     });
-                    let conflict_check = measured_branch.as_deref().map(|branch| {
-                        factory_branch_merge_conflict_paths(
+                    let conflict_refusal = measured_branch.as_deref().and_then(|branch| {
+                        match factory_branch_merge_conflict_paths(
                             &close_project_root, &resolved_parent_branch, branch,
-                        )
-                    }).unwrap_or_else(|| Ok(Vec::new()));
-                    let (conflict_paths, conflict_check_error) =
-                        classify_merge_conflict_preflight(conflict_check);
-                    // cas-7308a: an unavailable preflight is not evidence that
-                    // the branch is clean. Mark the park reopen-eligible so a
-                    // transient git error cannot reinstate the awaiting_merge
-                    // dead end that cas-5054 removed.
-                    let merge_conflicted =
-                        !conflict_paths.is_empty() || conflict_check_error.is_some();
-
-                    // cas-a844 AC4: name the alternative in the refusal
-                    // itself when the merge genuinely can't succeed — not
-                    // just in the parked task's notes. Computed before
-                    // parking so the enriched text is what both the parked
-                    // task's activity log AND the returned refusal carry.
-                    let msg = enrich_merge_required_with_conflict_check(
-                        msg,
-                        task.assignee
-                            .as_deref()
-                            .and_then(|assignee| self.recipient_guidance_prefix(assignee))
-                            .unwrap_or(""),
-                        &resolved_parent_branch,
-                        &task.id,
-                        &conflict_paths,
-                        conflict_check_error.as_deref(),
-                    );
+                        ) {
+                            Ok(paths) if paths.is_empty() => None,
+                            Ok(paths) => Some(format!(
+                                "PARK REFUSED: {branch} conflicts with {resolved_parent_branch}; conflicting paths: {}.\n\nAlternative: run `git merge {}` on {branch}, resolve and commit the conflicts, then close task {} again.",
+                                paths.iter().map(|path| crate::worktree::GitOperations::visible_git_label(path)).collect::<Vec<_>>().join(", "),
+                                freshest_target_ref(&close_project_root, &resolved_parent_branch), task.id,
+                            )),
+                            Err(error) => Some(format!(
+                                "PARK REFUSED: cannot prove {branch} merges into {resolved_parent_branch}: {error}. No park was recorded.",
+                            )),
+                        }
+                    });
+                    let merge_conflicted = conflict_refusal.is_some();
 
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
@@ -9709,6 +9709,18 @@ impl CasCore {
                         )));
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
+                    // Attribution owns a refused continuation: keep its recorded
+                    // boundary, first foreign commit and next-task remedy. Only
+                    // an attributable delivery can reach merge admission.
+                    if let Some(refusal) = conflict_refusal {
+                        if task.status == TaskStatus::AwaitingMerge
+                            && !task.deliverables.merge_conflicted
+                        {
+                            self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
+                        }
+                        gate_refusals.push(crate::gates::tag("G-55", refusal));
+                        return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
+                    }
                     // Focused-test receipts at this
                     // exact tip, read (never run) while the worker can still
                     // fix them; cas-d6eb: the blast-radius module check before
@@ -9771,7 +9783,7 @@ impl CasCore {
                             "MERGE REQUIRED",
                             &msg,
                             anchor.clone(),
-                            merge_conflicted,
+                            false,
                             measured_branch.clone(),
                             req.reason.as_deref(),
                         ) {
@@ -9794,13 +9806,7 @@ impl CasCore {
                         ) {
                             return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
                         }
-                        if merge_conflicted && !task.deliverables.merge_conflicted {
-                            // Already parked (a retry), but a fresh preflight now
-                            // shows a genuine conflict or cannot be evaluated.
-                            // Refresh the flag so the worker exit remains open
-                            // without duplicating the park audit note.
-                            self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
-                        }
+
                     }
 
                     // cas-619f: a user-facing delivery needs an independent
@@ -10740,6 +10746,16 @@ impl CasCore {
                             .is_ok_and(|agent| {
                                 agent.role == cas_types::AgentRole::Supervisor && agent.is_alive()
                             });
+                        // GH #1930: retain the ordinary no-code close and its
+                        // portable proof in the same transaction as its dispatch.
+                        // The verdict resumes this request through ordinary gates.
+                        let owns_claim = is_assignee && self.open_agent_store()?
+                            .get_lease(&req.id)
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                            .is_some_and(|lease| lease.agent_id == requester_id);
+                        let no_code_close = (!is_epic && !no_delivery_declared && owns_claim
+                            && task.execution_note.as_deref() == Some("no-code"))
+                            .then_some((&close_snapshot, &task));
                         let dispatch = match request_close_verification_dispatch(
                             &self.cas_root,
                             &req.id,
@@ -10747,8 +10763,9 @@ impl CasCore {
                             &owner_id,
                             &proof_boundary,
                             supervisor_direct_recovery,
-                            req.no_delivery.filter(|value| *value).map(|_| (req.reason.as_deref().unwrap_or_default(), close_assignee.as_deref())),
+                            (no_delivery_declared || no_code_close.is_some()).then_some((req.reason.as_deref().unwrap_or_default(), close_assignee.as_deref())),
                             renew_expired_task_dispatch.as_deref().map(|id| (id, &close_snapshot, &task)),
+                            no_code_close,
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {
@@ -14830,8 +14847,11 @@ pub(crate) enum MergeStateGateOutcome {
     /// tasks. Carries the audit note the caller records on the task, so
     /// the residue is logged rather than fatal.
     ProceedWithNote(String),
-    /// Close must be rejected with this user-facing error message.
+    /// A new merge candidate is not yet delivered.
     Reject(String),
+    /// Historical delivery evidence failed reconciliation. This is not an
+    /// instruction to merge the current worker branch or mint a new park.
+    HistoricalDeliveryRejection(String),
     /// The delivery branch cannot be resolved. Return the evidence error
     /// without a merge preflight or AwaitingMerge projection.
     Unresolved(String),
@@ -14974,53 +14994,7 @@ pub(crate) fn factory_branch_merge_conflict_paths(
     factory_branch: &str,
 ) -> Result<Vec<String>, crate::worktree::GitError> {
     crate::worktree::GitOperations::new(repo_path.to_path_buf())
-        .preflight_merge_conflicts(parent_branch, factory_branch)
-}
-
-fn classify_merge_conflict_preflight(
-    check: Result<Vec<String>, crate::worktree::GitError>,
-) -> (Vec<String>, Option<String>) {
-    match check {
-        Ok(paths) => (paths, None),
-        Err(error) => (Vec::new(), Some(error.to_string())),
-    }
-}
-
-fn enrich_merge_required_with_conflict_check(
-    message: String,
-    worker_prefix: &str,
-    parent_branch: &str,
-    task_id: &str,
-    conflict_paths: &[String],
-    check_error: Option<&str>,
-) -> String {
-    if !conflict_paths.is_empty() {
-        format!(
-            "{message}\n\n\
-             ⚠️ This branch has a genuine git merge conflict against \
-             {parent_branch} (not just unmerged commits) — a supervisor \
-             merge attempt will fail here. Conflicting file(s): {}.\n\n\
-             Alternative: the assigned worker can \
-             `{worker_prefix}task action=start id={task_id}` (now permitted from \
-             `awaiting_merge`) to inspect from inside their worker worktree, \
-             rebase the factory branch onto the current integration target tip, \
-             push, and close again to re-park it.",
-            conflict_paths.join(", ")
-        )
-    } else if let Some(error) = check_error {
-        format!(
-            "{message}\n\n\
-             ⚠️ Cassy could not determine whether this branch merges cleanly \
-             into {parent_branch}. Git conflict preflight failed: {error}.\n\n\
-             To avoid stranding the task in `awaiting_merge`, Cassy marks this \
-             park as reopen-eligible. The assigned worker can \
-             `{worker_prefix}task action=start id={task_id}` to inspect from inside \
-             the worker worktree, rebase the factory branch onto the current \
-             integration target tip, push, and close again to re-park it."
-        )
-    } else {
-        message
-    }
+        .preflight_merge_conflicts(&freshest_target_ref(repo_path, parent_branch), factory_branch)
 }
 
 /// cas-baf7: committed build output that is regenerated from source, never
@@ -16740,6 +16714,10 @@ fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
             .into_iter()
             .map(|holder| format!("factory/{holder}")),
     );
+    // cas-d9d38: an approved rebind records its lane only as the start
+    // boundary (for example a `-redelivery` suffix). Last, so earlier
+    // candidates keep their precedence.
+    candidates.extend(task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.clone()));
     let mut unique: Vec<String> = Vec::new();
     for candidate in candidates {
         if is_safe_git_refname(&candidate) && !unique.contains(&candidate) {
@@ -16865,6 +16843,22 @@ fn recorded_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Resul
     Ok(Some(branch))
 }
 
+/// cas-03738: cas-195e pushed a throwaway proof branch under its per-task
+/// name, switched back to its recorded lane and closed; close parked the proof
+/// branch. The GH #1353 redirect is for a worker that moved onto its per-task
+/// branch. When the recorded lane is the checkout, the per-task branch is not,
+/// and the lane carries this task's started delivery, the lane is the delivery.
+fn checked_out_lane_delivers(repo: &std::path::Path, task: &Task, assignee: &str, per_task: &str) -> bool {
+    let per_task = per_task.strip_prefix("origin/").unwrap_or(per_task);
+    let lane = format!("factory/{assignee}");
+    let Ok(worktrees) = crate::worktree::GitOperations::new(repo.to_path_buf()).list_worktrees() else {
+        return false;
+    };
+    let checked_out = |branch: &str| worktrees.iter().any(|worktree| worktree.branch.as_deref() == Some(branch));
+    checked_out(&lane) && !checked_out(per_task)
+        && task_attribution::started_delivery(repo, task).ok().flatten().is_some()
+}
+
 /// [`close_measured_factory_branch`], refusing instead of binding to another
 /// task's delivery (cas-93db). A worker's plain `factory/<assignee>` whose
 /// recent commits claim another task, and none this one, is that task's
@@ -16900,7 +16894,9 @@ pub(crate) fn resolve_close_delivery_branch(
     // start-to-delivery ownership checks on the branch actually delivered.
     if task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
         start.branch == format!("factory/{assignee}")
-    }) && let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
+    }) && let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id)
+        && !checked_out_lane_delivers(repo_path, task, assignee, &branch)
+    {
         let mut measured = task.clone();
         measured.deliverables.factory_branch_start.as_mut().expect("start checked above")
             .branch = branch.strip_prefix("origin/").unwrap_or(&branch).to_string();
@@ -17423,7 +17419,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         }
         let batch = task.deliverables.integration_batch.as_ref().expect("checked above");
         if !commit_is_merged_into_parent(repo_path, &batch.tip, parent_branch) {
-            return MergeStateGateOutcome::Reject(format!(
+            return MergeStateGateOutcome::HistoricalDeliveryRejection(format!(
                 "⚠️ MERGE REQUIRED\n\nintegration batch {}@{} is staged but not proven on {}. A squash must carry exactly the batch's changed paths, final blobs and modes; extra or missing paths are refused. Publish the complete batch, then retry close (or a registered supervisor can clear merged_into to choose a different integration path).",
                 batch.branch, batch.tip, parent_branch
             ));
@@ -25514,6 +25510,7 @@ pub(crate) fn validate_pushed_task_receipt(
         if own_task.as_deref() != Some(branch.as_str())
             && task.deliverables.parked_branch.as_deref() != Some(branch.as_str())
             && !task.deliverables.handoff_branches.contains(&branch)
+            && task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()) != Some(branch.as_str())
         {
             continue;
         }
@@ -25546,7 +25543,13 @@ pub(crate) fn validate_pushed_task_receipt(
             parked_anchor_advance_with_target_is_attributable(
                 &context.repo_root, anchor, &tip, &task.id, None, &target)
         });
-        if !attributed && !correction {
+        // cas-d9d38: a rebound lane is attributed the way rebind approved it,
+        // by its validated start-to-tip delivery, not a parked anchor.
+        let started = !attributed && !correction
+            && task.deliverables.factory_branch_start.as_ref().is_some_and(|start| start.branch == branch)
+            && task_attribution::started_delivery(&context.repo_root, task).ok().flatten()
+                .is_some_and(|delivery| resolve_branch_sha(&context.repo_root, &delivery.branch).as_deref() == Some(tip.as_str()));
+        if !attributed && !correction && !started {
             return Err(format!("PUSHED TASK RECEIPT REJECTED: {tip} is not attributable to task {}", task.id));
         }
         return Ok((branch, tip));
@@ -29061,6 +29064,85 @@ mod merge_state_gate_tests {
             .collect::<Vec<_>>()
             .join("\n");
         (response.is_error, text)
+    }
+
+    fn conflict_train_fixture(status: TaskStatus) -> UnpushedAnchorFixture {
+        let f = unpushed_anchor_fixture(status, AnchorChoice::Local);
+        let p = f.dir.path();
+        git(p, &["push", "-q", "origin", &f.branch]);
+        git(p, &["branch", "epic/conflict-train", "main"]);
+        git(p, &["push", "-q", "origin", "epic/conflict-train"]);
+        let mut task = f.store.get(&f.task_id).unwrap();
+        task.deliverables.work_target.as_mut().unwrap().target_branch = "epic/conflict-train".into();
+        f.store.update(&task).unwrap();
+        let agents = crate::store::open_agent_store(&p.join(".cas")).unwrap();
+        let mut worker = agents.get("anchor-worker-id").unwrap();
+        worker.factory_session = Some("conflict-scan".into());
+        agents.update(&worker).unwrap();
+        f
+    }
+
+    fn advance_conflicting_train(f: &UnpushedAnchorFixture) {
+        // Another delivery lands through a separate checkout. The local train
+        // branch remains at its old tip; only origin has the conflicting file.
+        let checkout = tempfile::tempdir().unwrap();
+        git(f.dir.path(), &["worktree", "add", "-q", "--detach", checkout.path().to_str().unwrap(), "main"]);
+        std::fs::write(checkout.path().join("delivery.rs"), "// sibling delivery\n").unwrap();
+        git(checkout.path(), &["add", "delivery.rs"]);
+        git(checkout.path(), &["commit", "-q", "-m", "fix: landed sibling"]);
+        git(checkout.path(), &["push", "-q", "origin", "HEAD:epic/conflict-train"]);
+        git(f.dir.path(), &["worktree", "remove", "--force", checkout.path().to_str().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn park_refuses_conflict_with_live_train_cas_c05a() {
+        let f = conflict_train_fixture(TaskStatus::InProgress);
+        advance_conflicting_train(&f);
+        let (error, message) = close_text(&f).await;
+        assert_eq!(error, Some(true), "{message}");
+        assert_eq!(f.store.get(&f.task_id).unwrap().status, TaskStatus::InProgress, "{message}");
+        assert!(message.contains("delivery.rs"), "{message}");
+        assert!(cas_store::get_latest_verification_dispatch(&f.dir.path().join(".cas"), &f.task_id).unwrap().is_none());
+        assert_eq!(rev_parse_local(f.dir.path(), "HEAD"), f.local);
+        assert!(git_command(f.dir.path(), &["status", "--porcelain", "--untracked-files=no"]).output().unwrap().stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn daemon_scan_returns_conflicted_parked_siblings_cas_c05a() {
+        use cas_store::PromptQueueStore;
+        let f = conflict_train_fixture(TaskStatus::InProgress);
+        let (_, message) = close_text(&f).await;
+        assert_eq!(f.store.get(&f.task_id).unwrap().status, TaskStatus::AwaitingMerge, "{message}");
+        let parked = f.store.get(&f.task_id).unwrap();
+        let mut second = parked.clone();
+        second.id = "cas-second".into();
+        second.deliverables.parked_branch = Some("factory/second".into());
+        git(f.dir.path(), &["branch", "factory/second", &f.local]);
+        git(f.dir.path(), &["push", "-q", "origin", "factory/second"]);
+        f.store.add(&second).unwrap();
+        let mut contained = parked.clone();
+        contained.id = "cas-contained".into();
+        contained.deliverables.parked_branch = Some("main".into());
+        contained.deliverables.factory_branch_anchor = Some(rev_parse_local(f.dir.path(), "main"));
+        f.store.add(&contained).unwrap();
+        advance_conflicting_train(&f);
+        let root = f.dir.path().join(".cas");
+        crate::mcp::tools::core::workflow::train_merge::resume_pending(&root, "conflict-scan").await.unwrap();
+        for id in [&f.task_id, &second.id] {
+            let returned = f.store.get(id).unwrap();
+            assert_eq!(returned.status, TaskStatus::Open, "{}", returned.notes);
+            assert_eq!(returned.assignee, parked.assignee);
+            assert!(returned.deliverables.factory_branch_anchor.is_none());
+            assert!(returned.notes.contains("delivery.rs"), "{}", returned.notes);
+        }
+        assert_eq!(f.store.get(&contained.id).unwrap().status, TaskStatus::AwaitingMerge);
+        let queue = cas_store::SqlitePromptQueueStore::open(&root).unwrap();
+        let notices = queue.peek_all(100).unwrap();
+        for id in [&f.task_id, &second.id] {
+            assert!(notices.iter().any(|row| row.prompt.contains(id) && row.prompt.contains("delivery.rs")));
+        }
+        crate::mcp::tools::core::workflow::train_merge::resume_pending(&root, "conflict-scan").await.unwrap();
+        assert_eq!(queue.peek_all(100).unwrap().len(), notices.len());
     }
 
     #[tokio::test]
@@ -37420,10 +37502,18 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             git(&p, &["checkout", "-q", "main"]);
             write("CHANGELOG.md", &format!("# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-11-01\n\n- The base release.\n{older}"));
             write("scripts/release_changelog.py", PROMOTER);
+            // cas-799e5: the cas-af35 shape also ships overview and bug-family
+            // fragments plus rebuilt dist, which the release consolidates.
+            write("docs/PRODUCT_OVERVIEW.md", "# Product overview\n\n## Factory\n\n- Existing capability.\n");
+            write("docs/qa/journeys.yaml", "bug_families: {}\n");
+            write("hub-web/dist/app.js", "bundle(1);\n");
             git(&p, &["add", "-A"]);
             git(&p, &["commit", "-q", "-m", "changelog"]);
             git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
             write(&fragment, &format!("### Fixed — Factory\n\n{ENTRY}\n"));
+            write(&format!("docs/product-overview.d/{owner}.md"), "## Factory\n\n- Fresh activity shows without a phase.\n");
+            write(&format!("docs/qa/bug-families/{owner}-activity.yaml"), &format!("tasks:\n  - {owner}\nsummary: activity without a phase\n"));
+            write("hub-web/dist/app.js", "bundle(2);\n");
             write("src/feature.rs", "pub fn feature() {}\n");
             git(&p, &["add", "-A"]);
             git(&p, &["commit", "-q", "-m", "cas-test1: feature and changelog fragment"]);
@@ -37440,6 +37530,11 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
                         .unwrap();
                     assert!(promoted.status.success(), "{}", String::from_utf8_lossy(&promoted.stderr));
                     assert!(!p.join(&fragment).exists(), "the release promotion deletes the fragment");
+                    let overview = std::fs::read_to_string(p.join("docs/PRODUCT_OVERVIEW.md")).unwrap();
+                    write("docs/PRODUCT_OVERVIEW.md", &format!("{overview}- Fresh activity shows without a phase.\n"));
+                    write("docs/qa/journeys.yaml", &format!("bug_families:\n  {owner}-activity:\n    tasks:\n      - {owner}\n    summary: activity without a phase\n"));
+                    git(&p, &["rm", "-q", &format!("docs/product-overview.d/{owner}.md"), &format!("docs/qa/bug-families/{owner}-activity.yaml")]);
+                    write("hub-web/dist/app.js", "bundle(3);\n");
                     git(&p, &["add", "-A"]);
                     git(&p, &["commit", "-q", "-m", "release: v1.0.1"]);
                 }
@@ -40425,37 +40520,13 @@ mod merge_conflict_detection_tests {
 
     #[test]
     fn missing_branch_preserves_preflight_error() {
-        // cas-7308a: unknown is not clean. The close path uses this error
-        // to park reopen-eligible instead of recreating the dead end.
+        // Unknown is not clean: the close path must retain this error and
+        // refuse admission instead of parking an unmeasured delivery.
         let dir = init_factory_repo("worker");
         let p = dir.path();
-        let (paths, error) = classify_merge_conflict_preflight(
-            factory_branch_merge_conflict_paths(p, "main", "factory/nobody"),
-        );
-        assert!(paths.is_empty());
-        let error = error.expect("missing source branch must remain distinguishable from clean");
-        assert!(
-            error.contains("factory/nobody"),
-            "error should name the missing source branch: {error}"
-        );
-        assert!(
-            !paths.is_empty() || !error.is_empty(),
-            "the production reopen predicate must treat preflight errors as eligible"
-        );
-        let message = enrich_merge_required_with_conflict_check(
-            "MERGE REQUIRED".to_string(),
-            "",
-            "main",
-            "cas-7308a",
-            &paths,
-            Some(&error),
-        );
-        assert!(
-            message.contains("Git conflict preflight failed")
-                && message.contains("reopen-eligible")
-                && message.contains("action=start id=cas-7308a"),
-            "error refusal must preserve the cause and the worker exit: {message}"
-        );
+        let error = factory_branch_merge_conflict_paths(p, "main", "factory/nobody")
+            .expect_err("missing source must remain distinguishable from clean");
+        assert!(error.to_string().contains("factory/nobody"));
     }
 
     #[test]

@@ -371,6 +371,7 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
 /// model turn is needed to consume an approved candidate.
 // gate-audit[ci_override]: selector Derived accepted G-114 token forwarded in response; not another request flag.
 pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
+    crate::mcp::tools::core::task::lifecycle::parked_conflicts::scan(root)?;
     let paths = match std::fs::read_dir(directory(root)) {
         Ok(paths) => paths,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

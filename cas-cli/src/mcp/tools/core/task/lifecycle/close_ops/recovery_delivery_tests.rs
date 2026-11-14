@@ -583,6 +583,8 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
         crate::mcp::tools::TaskStartRequest { id: TASK.into(), brief: Some(true), force: None }
     )).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress, "{started}");
+    // cas-c730 / GH #1912: start names the returned tip H-40 keeps, before proof work.
+    assert!(started.contains(&f.predecessor) && started.contains("H-40"), "{started}");
     std::fs::write(f.worker_path.join("correction.txt"), "reviewed correction\n").unwrap();
     git(&f.worker_path, &["add", "correction.txt"]);
     git(&f.worker_path, &["commit", "-qm", &format!("fix({TASK}): reviewed correction")]);
@@ -830,6 +832,51 @@ async fn fresh_close_after_pushed_target_merge_binds_tip_without_receipt_cas_d81
             assert!(parked.deliverables.historical_factory_branch_anchors.contains(&f.predecessor));
         }
     }
+}
+
+/// cas-03738: cas-195e started on its lane, pushed a throwaway proof branch
+/// under its per-task name, switched back to the lane and closed. Close must
+/// park the checked-out recorded lane, never the per-task proof branch.
+#[tokio::test]
+async fn close_parks_checked_out_start_lane_over_pushed_proof_branch_cas_03738() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    git(&f.worker_path, &["reset", "--hard", "main"]);
+    let base = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    std::fs::write(f.worker_path.join("note.txt"), "delivered\n").unwrap();
+    git(&f.worker_path, &["add", "note.txt"]);
+    git(&f.worker_path, &["commit", "-qm", &format!("fix({TASK}): deliver note")]);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let proof = crate::factory_isolation::worker_task_branch(WORKER, TASK);
+    git(&f.worker_path, &["switch", "-qc", &proof]);
+    std::fs::write(f.worker_path.join("proof.txt"), "proof only\n").unwrap();
+    git(&f.worker_path, &["add", "proof.txt"]);
+    git(&f.worker_path, &["commit", "-qm", &format!("chore({TASK}): proof-only version bump")]);
+    git(&f.worker_path, &["switch", "-q", BRANCH]);
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(&f.worker_path, &["push", "-q", "origin", "main", BRANCH, &proof]);
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.parked_branch = None;
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.historical_factory_branch_anchors.clear();
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: BRANCH.into(), base_sha: base,
+    });
+    tasks.update(&task).unwrap();
+    let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some(format!("PASS {tip}: lane delivery")),
+        commit_receipt: None, no_delivery: None, supervisor_override: None,
+        stranded_branch_override: None, search_manifest: None,
+    })).await.unwrap());
+    let parked = tasks.get(TASK).unwrap();
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH), "{output}");
+    assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
 }
 
 /// GH #1571: generated history follows a target-sync merge, while the only

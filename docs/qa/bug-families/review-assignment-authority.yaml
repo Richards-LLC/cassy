@@ -1,0 +1,3 @@
+title: Independent verdict work is refused before ordinary worker assignment accepts it
+tasks: [cas-8dab]
+journeys: [FACTORY-SUPERVISE, FACTORY-SPAWN, FACTORY-CLOSE]

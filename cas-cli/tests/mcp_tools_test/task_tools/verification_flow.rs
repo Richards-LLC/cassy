@@ -4134,6 +4134,7 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
     }
 
     let repo = temp.path();
+    let merge_target = "epic/cas-a844";
     let git = |args: &[&str]| {
         let ok = Command::new("git")
             .args(args)
@@ -4153,14 +4154,14 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
     std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
     git(&["add", "seed.txt"]);
     git(&["commit", "-q", "-m", "seed"]);
-    git(&["checkout", "-q", "-b", "epic/cas-a844"]);
+    git(&["checkout", "-q", "-b", merge_target]);
     git(&["checkout", "-q", "-b", "factory/test-agent"]);
     // Worker edits seed.txt on its factory branch.
     std::fs::write(repo.join("seed.txt"), "worker's edit\n").unwrap();
     git(&["commit", "-q", "-am", "worker edits seed"]);
     // The epic branch picks up a CONFLICTING edit to the same file
     // underneath the worker (e.g. another task landed and touched it).
-    git(&["checkout", "-q", "epic/cas-a844"]);
+    git(&["checkout", "-q", merge_target]);
     std::fs::write(repo.join("seed.txt"), "epic's conflicting edit\n").unwrap();
     git(&["commit", "-q", "-am", "epic edits seed differently"]);
     git(&["checkout", "-q", "factory/test-agent"]);
@@ -4199,7 +4200,7 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
     .to_string();
     {
         let mut epic = task_store.get(&epic_id).expect("epic exists");
-        epic.branch = Some("epic/cas-a844".to_string());
+        epic.branch = Some(merge_target.to_string());
         task_store.update(&epic).expect("update epic branch");
     }
 
@@ -4224,71 +4225,34 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
         task_store.update(&task_a).expect("set A assignee");
     }
 
-    let close_text = extract_text(
-        service
-            .cas_task_close(Parameters(TaskCloseRequest {
-                no_delivery: None,
-                stranded_branch_override: None,
-                id: id_a.clone(),
-                reason: Some("ready for merge".to_string()),
-                supervisor_override: None,
-                search_manifest: None,
-                commit_receipt: None,
-            }))
-            .await
-            .expect("close A returns"),
-    );
-    assert!(
-        close_text.contains("MERGE REQUIRED"),
-        "close must still reject on stranded factory branch: {close_text}"
-    );
-    assert!(
-        close_text.to_lowercase().contains("conflict"),
-        "refusal must say this is a genuine conflict, not just unmerged commits: {close_text}"
-    );
-    assert!(
-        close_text.contains("task action=start") || close_text.contains("action=start"),
-        "refusal must name the worker task-start alternative: {close_text}"
-    );
-    assert!(
-        close_text.contains("seed.txt"),
-        "refusal must name the actual conflicting file(s), not just say 'conflict': {close_text}"
-    );
-
-    let parked = task_store.get(&id_a).expect("A exists");
-    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
-    assert!(
-        parked.deliverables.merge_conflicted,
-        "a genuine conflict must be flagged on the parked task"
-    );
-    assert_eq!(
-        parked.deliverables.parked_branch.as_deref(),
-        Some("factory/test-agent")
-    );
-
-    service
-        .cas_task_start(Parameters(IdRequest { id: id_a.clone() }))
+    let before_close = task_store.get(&id_a).expect("A exists before close");
+    let close_result = service
+        .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
+            stranded_branch_override: None,
+            id: id_a.clone(),
+            reason: Some("ready for merge".to_string()),
+            supervisor_override: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
         .await
-        .expect("assigned worker can resume conflicted park");
-    let resumed = task_store.get(&id_a).expect("A exists after resume");
-    assert_eq!(resumed.status, TaskStatus::InProgress);
-    assert!(
-        resumed.deliverables.factory_branch_anchor.is_none(),
-        "conflict rework must invalidate the anchor captured by MERGE REQUIRED"
-    );
-    assert!(
-        resumed.deliverables.parked_branch.is_none(),
-        "conflict rework must clear the parked branch receipt"
-    );
-    assert!(
-        !resumed.deliverables.merge_conflicted,
-        "conflict rework must clear the prior close cycle's conflict flag"
-    );
-    assert!(
-        resumed.notes.to_lowercase().contains("merge conflict"),
-        "resume must record a decision note naming the conflict: {}",
-        resumed.notes
-    );
+        .expect("close A returns");
+    assert_eq!(close_result.is_error, Some(true));
+    let close_text = extract_text(close_result);
+    assert!(close_text.contains("[G-55]"), "{close_text}");
+    assert!(close_text.contains("seed.txt"), "{close_text}");
+    let merge_alternative = format!("git merge {merge_target}");
+    assert!(close_text.contains(&merge_alternative), "{close_text}");
+
+    // Approved c05a policy: a genuinely conflicting delivery stays with
+    // its worker instead of minting the former park-then-flag record.
+    let refused = task_store.get(&id_a).expect("A exists after refusal");
+    assert_eq!(refused.status, TaskStatus::InProgress);
+    assert_eq!(refused.deliverables.factory_branch_anchor, before_close.deliverables.factory_branch_anchor);
+    assert_eq!(refused.deliverables.parked_branch, before_close.deliverables.parked_branch);
+    assert!(!refused.deliverables.merge_conflicted);
+
 }
 
 /// cas-a844 negative control: unmerged-but-cleanly-mergeable commits must
@@ -12283,11 +12247,11 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
 
 /// cas-7fc3 (GH #1388), real path: a no-code worker closes, receives an exact
 /// supervisor-owned dispatch and waits Blocked on it. The supervisor's
-/// approval leaves remaining ordinary close with the supervisor. Explicit
-/// no-delivery intents instead finish automatically through the saved close.
+/// approval resumes the saved no-code close through ordinary gates, just as
+/// an explicit no-delivery close does, without another worker close.
 #[tokio::test]
-async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
-    for wait in ["working", "verification"] {
+async fn approved_no_code_wait_closes_without_worker_retry_gh1930() {
+    for wait in ["working", "verification", "independent", "successor"] {
         verification_wait_close_fixture(false, wait).await;
     }
 }
@@ -12348,7 +12312,7 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
         // ordinary no-code cycle; it must not suppress supervisor recovery.
         task.deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
             dispatch_id: "retired-dispatch".into(), reason: "Earlier measurement".into(),
-            assignee: task.assignee.clone(),
+            assignee: task.assignee.clone(), no_code_proof: None,
         });
     }
     task.risk = vec![cas::types::TaskRisk::None];
@@ -12372,11 +12336,12 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
         .unwrap()
         .expect("exact dispatch");
     assert_eq!(dispatch.owner_agent_id, "sup-7fc3");
-    if no_delivery {
+    {
         let saved = tasks.get(&task.id).unwrap().deliverables.no_delivery_close_intent.unwrap();
         assert_eq!(saved.dispatch_id, dispatch.id);
         assert_eq!(saved.reason, reason);
         assert_eq!(saved.assignee.as_deref(), Some("worker-7fc3"));
+        assert_eq!(saved.no_code_proof, (!no_delivery).then(|| "artifact:cas-7fc3/report".into()));
     }
 
     // The worker records the documented verification wait.
@@ -12414,54 +12379,28 @@ async fn verification_wait_close_fixture(no_delivery: bool, wait: &str) {
             .await
             .expect("supervisor approves the exact dispatch"),
     );
-    if no_delivery {
-        let current = tasks.get(&task.id).unwrap();
-        let expected = if independent_hold || changed_assignment { TaskStatus::Blocked } else { TaskStatus::Closed };
-        assert_eq!(current.status, expected, "approval must finish only its exact no-delivery wait: {approved}");
-        if independent_hold {
-            let state = tasks.get_execution_state(&task.id).unwrap().unwrap();
-            assert_eq!(state["blocked_hold"]["reason"], "Operator decision still required");
-        } else if changed_assignment {
-            assert!(current.deliverables.no_delivery_close_intent.is_some());
-            assert_eq!(current.assignee.as_deref(), Some("successor-842d"));
-        } else {
-            assert_eq!(current.close_reason.as_deref(), Some(reason));
-            assert!(current.deliverables.no_delivery_close_intent.is_none());
-            assert!(tasks.get_execution_state(&task.id).unwrap().unwrap_or_default().get("blocked_hold").is_none());
-        }
-        let queue = cas::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let rows = queue.peek_all(50).unwrap();
-        // pin: the worker contract forbids a second close after its verdict.
-        assert!(!rows.iter().any(|row| row.prompt.contains("Retry task close")));
-        supervisor_core.cas_verification_add(Parameters(approval())).await.expect("identical verdict retry is idempotent");
-        let again = tasks.get(&task.id).unwrap();
-        assert_eq!(again.status, expected);
-        assert_eq!(again.closed_at, current.closed_at);
-        assert_eq!(queue.peek_all(50).unwrap().len(), rows.len(), "duplicate approval cannot enqueue another close or completion");
-        assert_eq!(head(), starting_head, "no-delivery authored no commit");
-        return;
+    let current = tasks.get(&task.id).unwrap();
+    let expected = if independent_hold || changed_assignment { TaskStatus::Blocked } else { TaskStatus::Closed };
+    assert_eq!(current.status, expected, "approval must finish only its exact no-delivery wait: {approved}");
+    if independent_hold {
+        let state = tasks.get_execution_state(&task.id).unwrap().unwrap();
+        assert_eq!(state["blocked_hold"]["reason"], "Operator decision still required");
+    } else if changed_assignment {
+        assert!(current.deliverables.no_delivery_close_intent.is_some());
+        assert_eq!(current.assignee.as_deref(), Some("successor-842d"));
+    } else {
+        assert_eq!(current.close_reason.as_deref(), Some(reason));
+        assert!(current.deliverables.no_delivery_close_intent.is_none());
+        assert!(tasks.get_execution_state(&task.id).unwrap().unwrap_or_default().get("blocked_hold").is_none());
     }
-    assert!(approved.contains("Supervisor close recovery queued"), "{approved}");
     let queue = cas::store::open_prompt_queue_store(&cas_dir).unwrap();
     let rows = queue.peek_all(50).unwrap();
-    let recovery = rows.iter().find(|row| row.target == "sup-7fc3" && row.prompt.contains(&dispatch.id))
-        .unwrap_or_else(|| panic!("supervisor owns recovery: {rows:?}"));
-    // pin: the permitted close command belongs to the supervisor, never the worker.
-    assert!(recovery.prompt.contains("task action=close id=cas-7fc3-wait"));
-    assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains(&dispatch.id)));
-    supervisor_core.cas_verification_add(Parameters(approval())).await.expect("identical approval repairs recovery idempotently");
-    assert_eq!(queue.peek_all(50).unwrap().len(), rows.len());
-    assert_eq!(tasks.get(&task.id).unwrap().status, waiting.status);
-
-    let closed = extract_text(
-        supervisor_core
-            .cas_task_close(Parameters(close_request(&task.id, reason)))
-            .await
-            .unwrap(),
-    );
-    assert!(closed.contains("Closed task:"), "{closed}");
-    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
-    assert_eq!(head(), starting_head, "the no-code delivery authored no commit");
+    supervisor_core.cas_verification_add(Parameters(approval())).await.expect("identical verdict retry is idempotent");
+    let again = tasks.get(&task.id).unwrap();
+    assert_eq!(again.status, expected);
+    assert_eq!(again.closed_at, current.closed_at);
+    assert_eq!(queue.peek_all(50).unwrap().len(), rows.len(), "duplicate approval cannot enqueue another close or completion");
+    assert_eq!(head(), starting_head, "no-delivery authored no commit");
 }
 
 /// Existing no-code ledgers bypass the runtime QA gate, but malformed evidence

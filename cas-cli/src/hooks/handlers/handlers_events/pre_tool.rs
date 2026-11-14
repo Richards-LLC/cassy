@@ -12894,6 +12894,9 @@ mod worker_commit_guard_tests {
             (format!("bash -n {{+n,-c,'cd \"{repo_path}\"; git commit -m probe'}}"), true),
             (format!("bash -n < scripts/release.sh +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
             ("bash -n scripts/release.sh scripts/fast-rows-pre-push.sh".into(), false),
+            // A prior data word cannot change this invocation's provenance.
+            ("printf '%s' '-n'; bash -n scripts/release.sh".into(), false),
+            ("printf '%s' 'scripts/release.sh'; bash -n scripts/release.sh".into(), false),
             ("bash -n ./scripts/release-v1.sh".into(), false),
             ("bash --noexec scripts/release.sh".into(), false),
             ("bash -n --noexec -n scripts/release.sh".into(), false),

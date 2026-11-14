@@ -817,6 +817,9 @@ impl CasCore {
                     } else if existing.status == VerificationStatus::Approved
                         && existing.verification_type == VerificationType::Task
                         && proof_receipt.transaction().is_none()
+                        && cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                            .is_some_and(|dispatch| dispatch.id == requested_dispatch_id)
                     {
                         if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
                             outcome
@@ -871,7 +874,7 @@ impl CasCore {
         // verdict also resolves the exact dispatch and pending task transition.
         // If any step fails, all authority and lifecycle writes roll back.
         let mut resume_verifier = false;
-        let task_row_changed = {
+        let (task_row_changed, is_current_dispatch) = {
             let db_path = self.cas_root.join("cas.db");
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -904,6 +907,12 @@ impl CasCore {
                     data: None,
                 })?;
 
+            // Historical exact-dispatch verdicts remain recordable (including
+            // epic timeout recovery). Only the current cycle owns task flags
+            // and close continuation; measure that under this write transaction.
+            let is_current_dispatch = cas_store::get_latest_verification_dispatch_with_conn(&tx, &req.task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .is_some_and(|dispatch| dispatch.id == requested_dispatch_id);
             if supervisor_direct {
                 cas_store::recover_errored_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
                     .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
@@ -1146,7 +1155,7 @@ impl CasCore {
                     })? > 0;
                 }
 
-                if task.pending_verification {
+                if task.pending_verification && is_current_dispatch {
                     cas_store::clear_pending_verification_with_conn(&tx, &req.task_id).map_err(
                         |e| McpError {
                             code: ErrorCode::INTERNAL_ERROR,
@@ -1175,7 +1184,7 @@ impl CasCore {
                 &req.task_id,
                 &verification.id,
             );
-            task_row_changed
+            (task_row_changed, is_current_dispatch)
         };
         // The verdict transaction bypasses SyncingTaskStore. Publish before
         // any later close/notice can mask its pending flag or delivery state.
@@ -1224,6 +1233,7 @@ impl CasCore {
         } else if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
             && (task.pending_verification || cassy_merged)
+            && is_current_dispatch
             && proof_receipt.transaction().is_none()
         {
             if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
@@ -1264,6 +1274,7 @@ impl CasCore {
         } else if verification.status == VerificationStatus::Rejected
             && verification.verification_type == VerificationType::Task
             && cassy_merged
+            && is_current_dispatch
             && proof_receipt.transaction().is_none()
         {
             self.return_rejected_merged_delivery(&req.task_id, &verification)

@@ -1760,11 +1760,6 @@ impl FactoryApp {
         // guard does not apply on this path.
         let unfiltered_data = loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
         let merge_now = self.merge_alert_retries.clock();
-        #[cfg(test)]
-        if events.iter().any(|event| merge_alert::task_id(event) == Some("cas-9efb-test")) {
-            eprintln!("[DEBUG-a706] delivery: authoritative={delivery_state_is_authoritative} answered={answered_blocked_workers:?} merge_alerts={merge_alerts:?} agents={:?}",
-                unfiltered_data.agents.iter().map(|agent| (&agent.name, &agent.active_lease)).collect::<Vec<_>>());
-        }
         for event in events {
             self.merge_alert_retries.remember(event, merge_now);
         }
@@ -1840,10 +1835,6 @@ impl FactoryApp {
             .collect();
 
         // cas-09d0: tasks that are Open but have an unmet `Blocks` dependency
-        #[cfg(test)]
-        if events.iter().any(|event| merge_alert::task_id(event) == Some("cas-9efb-test")) {
-            eprintln!("[DEBUG-a706] revalidated events: {delivery_events:?}");
-        }
         // must not be counted as "dispatchable" — see `compute_gated_task_ids`.
         let non_closed_ids = non_closed_task_ids(&unfiltered_data);
         let gated_task_ids =
@@ -1980,10 +1971,6 @@ impl FactoryApp {
         }
 
         let sweep_data = delivery_state_is_authoritative.then_some(unfiltered_data);
-        #[cfg(test)]
-        if events.iter().any(|event| merge_alert::task_id(event) == Some("cas-9efb-test")) {
-            eprintln!("[DEBUG-a706] prompts={} liveness={idle_liveness:?}", prompts.len());
-        }
         (delivery_events, prompts, sweep_data)
     }
 

@@ -61,8 +61,8 @@ class PolicyTests(unittest.TestCase):
         self.assertIn(('release-prebuild', 'build'), writers)
         self.assertIn(('lane', 'lane-impact'), writers)
 
+    # cas-rule: rule-176 scope: "(2) Each check runs once per change, at the cheapest point that catches its defect. Running the same check in more places is a defect."
     def test_native_test_deps_install_once_only_in_test_jobs_cas_32b6(self):
-        # cas-rule: rule-176 scope: "(2) Each check runs once per change, at the cheapest point that catches its defect. Running the same check in more places is a defect."
         native = './.github/actions/setup-native-test-deps'
         setup = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
         self.assertNotIn(native, [step.get('uses') for step in setup['runs']['steps']])

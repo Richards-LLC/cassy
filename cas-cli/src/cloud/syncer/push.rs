@@ -489,6 +489,11 @@ impl CloudSyncer {
         item: &QueuedSync,
         mut payload: serde_json::Value,
     ) -> serde_json::Value {
+        // Only these kinds have a pull path that reconciles a queued body.
+        // Leave other entity payloads on their existing compatibility path.
+        if !matches!(item.entity_type, EntityType::Task | EntityType::Entry) {
+            return payload;
+        }
         let Some(object) = payload.as_object_mut() else {
             return payload;
         };
@@ -549,7 +554,7 @@ impl CloudSyncer {
             let _ = self
                 .queue
                 .record_row_outcome(item.id, "rejected", Some(reason));
-            if row.rejection_is_retryable() && reason != "revision_conflict" {
+            if row.rejection_is_retryable() {
                 let _ = self.queue.mark_failed(item.id, &diagnostic);
             } else {
                 let _ = self

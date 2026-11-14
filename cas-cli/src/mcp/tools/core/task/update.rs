@@ -79,7 +79,6 @@ struct RetargetedSourceRebind {
     tip: String,
     target_tip: String,
     previous_start: cas_types::FactoryBranchStart,
-    actor: String,
 }
 
 /// Rebind an unchanged, empty source snapshot when an unparked task follows

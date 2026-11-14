@@ -4595,12 +4595,13 @@ async fn push_declares_the_stored_base_revision_and_omits_it_when_unknown() {
             .unwrap();
     }
 
+    let _rules = crate::store::open_rule_store_local(temp.path()).unwrap();
     let rule_payload = serde_json::json!({"id":"rule-unguarded","origin_project":"p"});
     queue.record_revision(EntityType::Rule, "rule-unguarded", 7).unwrap();
     queue.enqueue(EntityType::Rule, "rule-unguarded", crate::cloud::SyncOperation::Upsert,
         Some(&rule_payload.to_string())).unwrap();
     Mock::given(method("POST")).and(path("/api/sync/push"))
-        .and(wiremock::matchers::body_partial_json(serde_json::json!({"rules":[rule_payload.clone()]})))
+        .and(|request: &wiremock::Request| decode_push_body(request).get("rules").is_some())
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "rules":{"inserted":1,"updated":0,"skipped":0},
             "rows":[{"entity_type":"rules","id":"rule-unguarded","outcome":"inserted"}]

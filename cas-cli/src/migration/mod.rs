@@ -2018,6 +2018,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn migrations_use_normal_synchronous_policy() {
+        let temp = TempDir::new().unwrap();
+        {
+            let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+            conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA).unwrap();
+            conn.execute_batch(cas_store::TASK_SCHEMA).unwrap();
+            ensure_migrations_table(&conn).unwrap();
+            // Observe the real runner's connection at its ledger writes:
+            // synchronous is connection-local, so reopening afterward cannot
+            // detect a runner that silently used SQLite's FULL default.
+            conn.execute_batch(
+                "CREATE TRIGGER require_normal_sync BEFORE INSERT ON cas_migrations
+                 WHEN (SELECT synchronous FROM pragma_synchronous) <> 1
+                 BEGIN SELECT RAISE(ABORT, 'migration_sync_policy'); END;",
+            )
+            .unwrap();
+        }
+
+        let result = run_migrations(temp.path(), false).unwrap();
+        assert!(result.applied_count > 0);
+        assert_eq!(check_migrations(temp.path()).unwrap().pending_count(), 0);
+    }
+
     /// cas-bdb9: running migrations a second time on the same already-
     /// bootstrapped DB is a no-op (no errors, no duplicate apply).
     #[test]

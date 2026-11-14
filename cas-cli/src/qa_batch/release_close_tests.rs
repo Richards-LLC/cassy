@@ -476,3 +476,95 @@ fn published_train_closes_members_independently_cas_734b() {
     assert!(complete.residuals.is_empty());
     assert!(!complete.exceptions.is_empty());
 }
+
+/// cas-692a7: cas-23a6 shipped in v4.27.0 holding an approved, receipt-less
+/// verdict at its exact anchor (2026-11-10), but backfill minted its cycles on
+/// 2026-11-12 and release close then read it as REVIEW_MISSING.
+#[test]
+fn pre_backfill_exact_head_approval_closes_at_release_cas_692a7() {
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let repo = env.home().join("release");
+    std::fs::create_dir_all(&repo).unwrap();
+    let root = crate::store::init_cas_dir(&repo).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &repo);
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='backfill'\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    git(&["remote", "add", "origin", "https://github.com/example/backfill.git"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    git(&["add", ".gitignore"]);
+    git(&["commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("app.rs"), "fn first() {}\n").unwrap();
+    git(&["add", "app.rs"]);
+    git(&["commit", "-qm", "first delivery"]);
+    let retired = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("app.rs"), "fn reviewed() {}\n").unwrap();
+    git(&["commit", "-qam", "reviewed delivery"]);
+    let anchor = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "landed merge"]);
+    let published = git(&["rev-parse", "HEAD"]);
+    let tasks = crate::store::open_task_store(&root).unwrap();
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    let backfilled = "2026-11-12T22:52:08.620538+00:00";
+    let mut expected = BTreeMap::new();
+    // (member, verdict requested at, anchor also retired by an ended cycle)
+    for (id, requested, reretired, closes) in [
+        ("cas-pre-backfill", "2026-11-10T21:14:46.323+00:00", false, true),
+        ("cas-after-cycle", "2026-11-13T00:00:00+00:00", false, false),
+        ("cas-retired-head", "2026-11-10T21:14:46.323+00:00", true, false),
+    ] {
+        let mut task = Task::new(id.into(), id.into());
+        task.origin_project = Some("backfill".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget { repo_selector: "project:backfill".into(), target_branch: "main".into() },
+            branch: format!("factory/{id}"), assignee: "worker".into(), base_sha: base.clone(),
+        });
+        tasks.add(&task).unwrap();
+        // cas-23a6's backfilled shape: an ended cycle 1, an open cycle 2 holding the anchor.
+        conn.execute("DELETE FROM delivery_cycles WHERE task_id=?1", [id]).unwrap();
+        let first = if reretired { vec![retired.clone(), anchor.clone()] } else { vec![retired.clone()] };
+        for (n, anchors, ended) in [(1, first, Some(backfilled)), (2, vec![retired.clone(), anchor.clone()], None)] {
+            conn.execute("INSERT INTO delivery_cycles VALUES (?1,'backfill',?2,?3,?4,?5,?6,?7,?7)", rusqlite::params![
+                cas_store::delivery_cycle_id("backfill", id, n), id, n, serde_json::to_string(&anchors).unwrap(),
+                base, ended, backfilled]).unwrap();
+        }
+        let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+            peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
+            head_commit: published.clone(), state_digest: String::new(), target_branch: None, anchor_commits: vec![anchor.clone()],
+        });
+        let dispatch = cas_store::create_verification_dispatch_bound(&root, id, "worker", "supervisor", &boundary,
+            chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+        conn.execute("UPDATE verification_dispatches SET state='resolved', requested_at=?1 WHERE id=?2",
+            rusqlite::params![requested, dispatch.id]).unwrap();
+        conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES (?1,?2,'reviewer','task','approved','pass','[]',?3,?4)",
+            rusqlite::params![format!("ver-{id}"), id, requested, dispatch.id]).unwrap();
+        expected.insert(id.to_string(), closes);
+    }
+    let scope = ReleaseScope {
+        project_id: "backfill".into(), repository: "example/backfill".into(), release_id: "v9.99.0".into(),
+        reviewed_sha: anchor, final_release_sha: published, promotion_pr: None, release_tag: None,
+        constituent_epic_ids: vec![], included_task_ids: expected.keys().cloned().collect(),
+        no_code_members: BTreeMap::new(), proof_refs: vec![],
+    };
+    let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    let outcomes = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    for (id, closes) in expected {
+        let outcome = outcomes.get(&id);
+        if closes {
+            assert!(matches!(outcome, Some(CassyMergeClose::Closed { .. })), "{id}: {outcome:?}");
+        } else {
+            assert!(matches!(outcome, Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"), "{id}: {outcome:?}");
+        }
+    }
+}

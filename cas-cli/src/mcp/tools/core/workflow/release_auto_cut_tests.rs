@@ -130,25 +130,21 @@ fn train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     assert_eq!(wakes().len(), 1);
 }
 
-/// Nov 13: cas-8fb1 had only cas-5a22's fragment when the recorded scope
-/// still awaited its other deliveries. Record scope through the real MCP
-/// dependency operation, then drive the daemon poll against Git and SQLite.
-#[tokio::test]
-async fn must_land_scope_prevents_the_partial_train_freeze_cas_8695() {
+/// Record scope through the real MCP dependency operation, then drive the
+/// daemon poll against Git and SQLite with one incident's landed fragment.
+async fn replay_partial_train_scope(train_id: &str, lane: &str, landed: &str, required: [&str; 8]) {
     use cas_types::{Dependency, DependencyType, WorkTarget};
     use rmcp::handler::server::wrapper::Parameters;
 
     let mut env = TestEnvGuard::temp_home();
     let temp = tempfile::TempDir::new().unwrap();
     let repo = temp.path();
-    let train_id = "cas-8fb1";
-    let lane = "epic/release-train-vnext-cas-8fb1";
     run(repo, &["init", "-q", "-b", "main"]);
     std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
     commit(repo, ".gitignore");
     commit(repo, "scripts/release.sh");
     run(repo, &["checkout", "-qb", lane]);
-    commit(repo, "changelog.d/cas-5a22.md");
+    commit(repo, &format!("changelog.d/{landed}.md"));
     run(repo, &["checkout", "-q", "main"]);
     let root = crate::store::init_cas_dir(repo).unwrap();
     env.set("CAS_ROOT", &root);
@@ -161,7 +157,6 @@ async fn must_land_scope_prevents_the_partial_train_freeze_cas_8695() {
     let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
     core.set_agent_id_for_testing("sup-id".into());
     let service = crate::mcp::CasService::new(core, None);
-    let required = ["cas-7dd6", "cas-5b88", "cas-c896", "cas-1efb", "cas-3126", "cas-cab9", "cas-870d", "cas-e571"];
     for id in required {
         let mut member = Task::new(id.into(), "Required delivery".into());
         member.status = TaskStatus::AwaitingMerge;
@@ -216,4 +211,18 @@ async fn must_land_scope_prevents_the_partial_train_freeze_cas_8695() {
     }
     assert_eq!(store.get("cas-e074").unwrap().status, TaskStatus::InProgress);
     assert_eq!(store.get(required[7]).unwrap().status, TaskStatus::AwaitingMerge);
+}
+
+#[tokio::test]
+async fn must_land_scope_blocks_nov13_8fb1_partial_freeze_cas_8695() {
+    // 9a393d45cb held just cas-5a22 when the original must-land set was pending.
+    replay_partial_train_scope("cas-8fb1", "epic/release-train-vnext-cas-8fb1", "cas-5a22",
+        ["cas-7dd6", "cas-5b88", "cas-c896", "cas-1efb", "cas-3126", "cas-cab9", "cas-870d", "cas-e571"]).await;
+}
+
+#[tokio::test]
+async fn must_land_scope_blocks_nov13_1e8a_partial_freeze_cas_8695() {
+    // 8807571a0f held just cas-1efb while new-train deliveries were still pending.
+    replay_partial_train_scope("cas-1e8a", "epic/release-train-vnext-cas-1e8a", "cas-1efb",
+        ["cas-c05a", "cas-94e8", "cas-aeb3", "cas-8695", "cas-343d", "cas-bac4", "cas-195e", "cas-262b"]).await;
 }

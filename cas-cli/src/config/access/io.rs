@@ -215,14 +215,17 @@ fn read_user_source(dir: &Path) -> Result<(toml::Value, Option<usize>), MemError
     let qa = document.get("qa").cloned().unwrap_or_else(empty_qa_table);
     // Fail on invalid user policy rather than silently changing its QA mode.
     let _: QaConfig = qa.clone().try_into().map_err(|error| MemError::Parse(format!("Invalid [qa] at {}: {error}", dir.display())))?;
-    let max_workers = match document.get("factory").and_then(|factory| factory.get("max_workers")) {
-        None => None,
-        Some(value) => Some(
-            value.as_integer().and_then(|n| usize::try_from(n).ok()).filter(|n| *n >= 1).ok_or_else(|| {
-                MemError::Parse(format!("Invalid factory.max_workers at {}: {value}", dir.display()))
-            })?,
-        ),
-    };
+    let raw = document.get("factory").and_then(|factory| factory.get("max_workers"));
+    let max_workers = raw.and_then(toml::Value::as_integer)
+        .and_then(|n| usize::try_from(n).ok()).filter(|n| *n >= 1);
+    if let (Some(value), None) = (raw, max_workers) {
+        // An invalid limit must not also discard the user's valid [qa] defaults.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| eprintln!(
+            "Warning: invalid factory.max_workers = {value} in {}; using the project value or 8.",
+            dir.display()
+        ));
+    }
     Ok((qa, max_workers))
 }
 
@@ -346,7 +349,7 @@ impl Config {
                     let path = if host.join("config.toml").exists() {
                         host.join("config.toml")
                     } else { host.join("config.yaml") };
-                    eprintln!("Warning: unreadable or invalid user defaults ([qa], factory.max_workers) in {}\n  User defaults ignored; project and built-in settings apply.\n  Repair this file to restore inheritance.", path.display());
+                    eprintln!("Warning: unreadable or invalid user QA defaults in {}\n  User defaults ignored; project and built-in settings apply.\n  Repair this file to restore inheritance.", path.display());
                 });
                 (empty_qa_table(), None)
             })

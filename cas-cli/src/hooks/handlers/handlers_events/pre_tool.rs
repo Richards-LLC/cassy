@@ -5784,21 +5784,17 @@ pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
     scan_shell_invocations(command).commands
 }
 
-/// Credential policy consumes argv and opened files from one shared parse.
-/// Grammar failures are reported by admission rather than invented as reads.
-pub(super) fn shell_statement_io(command: &str, depth: usize) -> Vec<(Vec<String>, Vec<String>)> {
-    let Ok(parsed) = shell_admission::parse(command, depth) else { return Vec::new(); };
-    parsed.lexed.statement_io(&parsed.projected, &parsed.syntax)
+pub(super) struct ShellReadContext {
+    pub(super) words: Vec<String>,
+    pub(super) opened: Vec<String>,
+    pub(super) cwd: Option<std::path::PathBuf>,
+    pub(super) bodies: Vec<String>,
 }
 
-/// Literal child argv is quoted as data when a policy needs to recurse into
-/// its interpreter payload. Command/argument provenance remains with the
-/// Statement used by admission and Git collection.
-pub(super) fn find_child_commands(args: &[String]) -> Vec<String> {
-    shell_admission::find_arguments(args).map(|find| find.actions.into_iter().map(|action| {
-        args[action.argv].iter().map(|word| format!("'{}'", word.replace('\'', "'\\''")))
-            .collect::<Vec<_>>().join(" ")
-    }).collect()).unwrap_or_default()
+/// Read-side policies use the filesystem walk's scoped cwd and opened-file
+/// facts. A failed walk remains a grammar/effects refusal, not a guessed read.
+pub(super) fn shell_read_contexts(command: &str, cwd: &Path) -> Vec<ShellReadContext> {
+    shell_effects::collect(command, cwd).map(|effects| effects.reads).unwrap_or_default()
 }
 
 pub(super) fn executing_shell_arguments(command: &str) -> Result<Vec<Vec<String>>, String> {

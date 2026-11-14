@@ -100,15 +100,16 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
         // report shell.depth instead of inventing a credential-store access.
         return false;
     }
-    let mut cwd = initial_cwd.to_path_buf();
-    let mut directory_stack = Vec::new();
     // Nested shells are not standalone listings, so their payloads never
     // reach here with inert names.
     let names_inert = depth == 0 && listed_names_stay_inert(command);
-    for (words, redirects) in super::pre_tool::shell_statement_io(command, depth) {
-        if redirects.iter().any(|path| path_references_store(path, &cwd, false))
+    for context in super::pre_tool::shell_read_contexts(command, initial_cwd) {
+        let cwd = context.cwd.as_deref().unwrap_or(initial_cwd);
+        let words = context.words;
+        if context.opened.iter().any(|path| path_references_store(path, cwd, false))
             || super::pre_tool::shell_wrapper_read_paths(&words).iter()
-                .any(|(path, wrapper)| path_references_store(path, &wrapper_cwd(&words[..*wrapper], &cwd), false))
+                .any(|(path, wrapper)| path_references_store(path, &wrapper_cwd(&words[..*wrapper], cwd), false))
+            || context.bodies.iter().any(|body| script_constructs_store_path(body, cwd))
         { return true; }
         let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
             continue;
@@ -120,21 +121,15 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             .to_ascii_lowercase();
         let args = &words[command_index + 1..];
 
-        if executable == "find" {
-            let child_cwd = wrapper_cwd(&words[..command_index], &cwd);
-            if super::pre_tool::find_child_commands(args).iter()
-                .any(|child| shell_references_store(child, &child_cwd, depth + 1))
-            { return true; }
-        }
-
         // Inspect shell payloads as nested statement lists so a `cd` inside a
         // `sh -c` or `bash -c` does not leak into the caller's working dir.
         if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
+            let child_cwd = wrapper_cwd(&words[..command_index], cwd);
             let reads_store = match shell_input(args) {
                 ShellInput::Command(at) => args.get(at)
-                    .is_some_and(|payload| shell_references_store(payload, &cwd, depth + 1)),
+                    .is_some_and(|payload| shell_references_store(payload, &child_cwd, depth + 1)),
                 ShellInput::Script(at) => args.get(at)
-                    .is_some_and(|path| path_references_store(path, &cwd, false)),
+                    .is_some_and(|path| path_references_store(path, &child_cwd, false)),
                 ShellInput::Stdin | ShellInput::Display => false,
             };
             if reads_store {
@@ -143,47 +138,19 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             continue;
         }
         if executable == "eval" {
-            if shell_references_store(&args.join(" "), &cwd, depth + 1) {
+            if shell_references_store(&args.join(" "), cwd, depth + 1) {
                 return true;
             }
             continue;
         }
 
-        if matches!(executable.as_str(), "cd" | "pushd") {
-            if let Some(target) = cd_target(args) {
-                if path_references_store(target, &cwd, false) {
-                    return true;
-                }
-                if let Some(next_cwd) = resolve_path(target, &cwd) {
-                    if executable == "pushd" {
-                        directory_stack.push(cwd.clone());
-                    }
-                    cwd = next_cwd;
-                }
-            } else if let Some(home) = std::env::var_os("HOME") {
-                if executable == "pushd" {
-                    directory_stack.push(cwd.clone());
-                }
-                cwd = PathBuf::from(home);
-            }
-            continue;
-        }
-        if executable == "popd" {
-            if let Some(previous) = directory_stack.pop() {
-                cwd = previous;
-            }
-            continue;
-        }
-
         let names_only = names_inert && lists_names_only(&executable, args);
-        if statement_references_store(&words, &cwd, names_only) {
+        if statement_references_store(&words, cwd, names_only) {
             return true;
         }
     }
 
-    super::pre_tool::shell_heredoc_bodies(command)
-        .iter()
-        .any(|body| script_constructs_store_path(body, &cwd))
+    false
 }
 
 fn statement_references_store(
@@ -385,12 +352,6 @@ fn path_operand_is_bare_relative(argument: &str) -> bool {
         && !normalized.starts_with('$')
         && !normalized.contains('/')
         && !normalized.contains(['*', '?', '['])
-}
-
-fn cd_target(args: &[String]) -> Option<&str> {
-    args.iter()
-        .find(|arg| !matches!(arg.as_str(), "-L" | "-P" | "--"))
-        .map(String::as_str)
 }
 
 fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool {

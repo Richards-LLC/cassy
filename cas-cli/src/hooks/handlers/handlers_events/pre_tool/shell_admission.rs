@@ -1072,29 +1072,10 @@ impl ShellLexed {
         self.argument_indices(source).into_iter().map(|at| self.tokens[at].clone()).collect()
     }
 
-    /// Keep redirect file operands separate from argv even for a statement
-    /// with no executable. Heredoc delimiters and here-string data open no file.
-    pub(super) fn statement_io(&self, source: &str, syntax: &[CaseSyntax]) -> Vec<(Vec<String>, Vec<String>)> {
-        let (arguments, files, _) = self.argument_projection(source);
-        let arguments: std::collections::HashSet<_> = arguments.into_iter().collect();
-        let files: std::collections::HashSet<_> = files.into_iter().collect();
-        // & and | inside a redirect do not end its receiving command.
-        let grouping: Vec<_> = self.tokens.iter().enumerate().map(|(at, token)| {
-            if !arguments.contains(&at) && !files.contains(&at)
-                && matches!(token, ShellToken::Operator(_))
-            { ShellToken::Word(String::new()) } else { token.clone() }
-        }).collect();
-        statement_indices(&grouping).into_iter().map(|indices| {
-            let mut argv = Vec::new();
-            let mut redirects = Vec::new();
-            for at in indices {
-                if matches!(syntax[at], CaseSyntax::Hidden | CaseSyntax::Esac) { continue; }
-                let ShellToken::Word(word) = &self.tokens[at] else { continue; };
-                if arguments.contains(&at) { argv.push(word.clone()); }
-                else if files.contains(&at) { redirects.push(word.clone()); }
-            }
-            (argv, redirects)
-        }).collect()
+    /// Heredoc delimiters and here-string data open no file. Keep the original
+    /// token positions so scoped policy consumers need no parallel argv parse.
+    pub(super) fn opened_file_indices(&self, source: &str) -> std::collections::HashSet<usize> {
+        self.argument_projection(source).1.into_iter().collect()
     }
 
     pub(super) fn statements(&self, source: &str, syntax: &[CaseSyntax]) -> Vec<Statement> {

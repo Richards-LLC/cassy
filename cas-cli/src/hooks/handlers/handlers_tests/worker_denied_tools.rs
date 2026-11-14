@@ -412,6 +412,8 @@ fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
         "bash fixture.sh <<< '~/.config/neonctl/credentials.json'",
         "(cd ~); cat .config/neonctl/credentials.json",
         "pushd ~; popd; cat .config/neonctl/credentials.json",
+        "find . -type f -print",
+        "rg --files .",
     ] {
         let reason = denial(handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap());
         if reason.is_some() {

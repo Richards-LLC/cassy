@@ -12,6 +12,7 @@ pub(super) struct ShellEffects {
     pub edits: Vec<String>,
     pub deletes: Vec<(String, bool)>,
     pub links: Vec<(ShellLink, PathBuf)>,
+    pub reads: Vec<ShellReadContext>,
 }
 
 type Directories = Vec<Option<PathBuf>>;
@@ -570,6 +571,7 @@ fn collect_script(
     }
     arithmetic_commands(&projected, &mut lexed, numeric)?;
     let case_tokens = case_syntax(&projected, &lexed)?;
+    let opened_files = lexed.opened_file_indices(&projected);
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let captured_status: HashSet<String> = tokens
         .iter()
@@ -606,6 +608,7 @@ fn collect_script(
     }
     let mut heredocs = delimiters.into_iter().zip(bodies);
     let mut scopes = Vec::new();
+    let mut directory_stack: Vec<Directories> = Vec::new();
     // The directories on entry to each open `case`. Only one arm runs, so no arm
     // sees a `cd` from an earlier one and any of them may be the one that ran.
     let mut case_entries: Vec<Directories> = Vec::new();
@@ -672,6 +675,7 @@ fn collect_script(
             // The existing script-write recognizer needs the body attached to
             // its receiving command, rather than interpreted as shell words.
             let mut expanding_bodies = Vec::new();
+            let mut script_bodies = Vec::new();
             for expected in heredoc_delimiters(&command) {
                 let (delimiter, body) = heredocs.next().ok_or("an unresolved shell payload")?;
                 if expected.value != delimiter.value || expected.strip_leading_tabs != delimiter.strip_leading_tabs {
@@ -679,6 +683,7 @@ fn collect_script(
                 }
                 command.push('\n');
                 command.push_str(&body);
+                script_bodies.push(body.clone());
                 command.push_str(&delimiter.value);
                 command.push('\n');
                 if !delimiter.literal_body {
@@ -782,6 +787,16 @@ fn collect_script(
             } else {
                 dirs.clone()
             };
+
+            let opened: Vec<String> = visible.iter().filter(|at| opened_files.contains(at))
+                .filter_map(|&at| match &tokens[at] { ShellToken::Word(word) => Some(word.clone()), _ => None }).collect();
+            // Redirects open before wrapper-local chdir. The policy applies
+            // wrapper input-file and final argv cwd roles independently.
+            for directory in &dirs {
+                effects.reads.push(ShellReadContext {
+                    words: words.clone(), opened: opened.clone(), cwd: directory.clone(), bodies: script_bodies.clone(),
+                });
+            }
 
             for body in expanding_bodies {
                 collect_script(
@@ -909,7 +924,15 @@ fn collect_script(
                 }
             }
 
-            if name == Some("cd") {
+            if name == Some("popd") {
+                let restored = if args.is_empty() { directory_stack.pop() } else { None };
+                let restored = restored.unwrap_or_else(|| vec![None]);
+                if conditional_bindings {
+                    for directory in restored { add_directory(&mut dirs, directory); }
+                } else { dirs = restored; }
+            }
+            if matches!(name, Some("cd" | "pushd")) {
+                if name == Some("pushd") { directory_stack.push(dirs.clone()); }
                 let mut cdpath = directory_values.get("CDPATH").cloned().unwrap_or_default();
                 for word in &words[..index.unwrap_or(0)] {
                     if let Some(value) = word.strip_prefix("CDPATH=") {
@@ -922,6 +945,7 @@ fn collect_script(
                     .filter(|arg| arg.as_str() != "--" && arg.as_str() != "-L")
                     .collect();
                 let targets = match operands.as_slice() {
+                    [] if name == Some("pushd") => vec!["$UNRESOLVED_CWD".into()],
                     [] => directory_values
                         .get("HOME")
                         .cloned()
@@ -989,7 +1013,7 @@ fn collect_script(
                 }
             }
 
-            if name == Some("cd") {
+            if matches!(name, Some("cd" | "pushd" | "popd")) {
                 directory_values.insert("PWD".into(), pwd_values(&dirs));
             }
             let assignments = if continuation {
@@ -1110,6 +1134,7 @@ fn collect_script(
                     alternatives.clone(),
                     directory_values.clone(),
                     substitution_scope,
+                    directory_stack.clone(),
                 ));
                 continuation = false;
             }
@@ -1119,6 +1144,7 @@ fn collect_script(
                 alternatives = parent.1;
                 directory_values = parent.2;
                 continuation = parent.3;
+                directory_stack = parent.4;
             }
             Some('&') if and_then => {
                 continuation = false;

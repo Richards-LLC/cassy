@@ -940,9 +940,13 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
     }
     let db_path = cas_dir.join("cas.db");
 
-    let conn = Connection::open(&db_path)?;
+    // Keep migration transactions private while using the stores' WAL+NORMAL
+    // policy; a raw connection defaults to FULL and fsyncs every ledger commit.
+    let connection = cas_store::shared_db::dedicated_connection(&db_path)?;
+    let conn = connection
+        .lock()
+        .map_err(|_| CasError::Other("migration connection lock poisoned".to_string()))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
     // Check that base tables exist (cas init has been run)
     if !is_db_initialized(&conn) {
@@ -2996,8 +3000,8 @@ mod tests {
     fn test_failing_migration_rolls_back_cleanly() {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path().join("cas.db");
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let connection = cas_store::shared_db::dedicated_connection(&db_path).unwrap();
+        let conn = connection.lock().unwrap();
         ensure_migrations_table(&conn).unwrap();
 
         // Create base tables so migration flow is considered initialized.

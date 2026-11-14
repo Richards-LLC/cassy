@@ -120,9 +120,14 @@ PY
         base="${base:-origin/main}"
     fi
     base="$(git merge-base "$base" "$local_sha" 2>/dev/null || printf '%s' "$base")"
-    web_changed=false
-    if ! git diff --quiet "$base" "$local_sha" -- hub-web/; then
-        web_changed=true
+    # cas-5a04: committed Commander output must match a fresh build exactly
+    # where the merge queue requires it: the shared classifier's dist policy
+    # (a version or dist change, or an unreadable version). A source-only lane
+    # defers it to release preparation, which rebuilds and commits dist. A
+    # failed classifier keeps the check.
+    dist_needed=true
+    if [[ "$(python3 scripts/classify-web-inputs.py "$base" "$local_sha" --dist-policy 2>/dev/null)" == *' false' ]]; then
+        dist_needed=false
     fi
     web_receipt="$receipts/$local_sha.web.pass"
     web_proved=false
@@ -131,7 +136,7 @@ PY
     fi
     # Row selection depends on the push range: a receipt over a narrower range
     # may not have built the web assets that this epic push changes.
-    if [[ "$web_changed" == false || "$web_proved" == true ]] \
+    if [[ "$dist_needed" == false || "$web_proved" == true ]] \
         && head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha base=$base "; then
         continue
     fi
@@ -144,7 +149,7 @@ PY
         status=1
         continue
     fi
-    if [[ "$web_changed" == true && "$web_proved" == false ]]; then
+    if [[ "$dist_needed" == true && "$web_proved" == false ]]; then
         version="$(sed -n 's/^version = "\([^" ]*\)".*/\1/p' cas-cli/Cargo.toml | head -n1)"
         if ! CAS_RELEASE_GATE_LOG_DIR="$attempt_logs" bash scripts/release-gate.sh "$version" --only hub-web-dist-drift \
             </dev/null >"$attempt_logs/gate.log" 2>&1; then

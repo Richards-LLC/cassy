@@ -151,7 +151,18 @@ impl Statement {
                 "runtime input supplies filenames or arguments whose effects cannot be resolved",
                 "use explicit literal operands or a data-only consumer"));
         }
-        if let Some(at) = consumer_files(name, args).runtime {
+        let consumer = consumer_files(name, args);
+        if let Some(at) = consumer.option_words.iter().copied().find(|at| dynamic(index + 1 + at)) {
+            return Some(Unsupported::execution("shell.dynamic_command", offset(index + 1 + at),
+                "dynamic consumer option position", "an unresolved word can select a filename source, output or helper",
+                "use literal options and put data operands after --"));
+        }
+        if let Some(at) = consumer.unknown {
+            return Some(Unsupported::execution("shell.unknown_syntax", offset(index + 1 + at),
+                "unsupported consumer option", "the option or its value is outside the supported consumer grammar",
+                "use a supported option with a complete value, or put filenames after --"));
+        }
+        if let Some(at) = consumer.runtime {
             return Some(Unsupported::execution("shell.dynamic_command", offset(index + 1 + at),
                 "runtime filename source or consumer helper",
                 "the consumer obtains unknown filenames or executes a helper outside the command projection",
@@ -198,6 +209,8 @@ pub(super) struct ConsumerFiles<'a> {
     pub(super) temporaries: Vec<&'a str>,
     pub(super) deletes: Vec<&'a str>,
     runtime: Option<usize>,
+    unknown: Option<usize>,
+    option_words: Vec<usize>,
 }
 
 pub(super) struct FindAction {
@@ -269,7 +282,7 @@ pub(super) fn find_arguments(args: &[String]) -> Result<FindArguments, usize> {
 }
 
 #[derive(Clone, Copy)]
-enum ConsumerValue { Data, Output, Temporary, Runtime }
+enum ConsumerValue { Flag, Optional, Data, Output, Temporary, Runtime }
 
 /// A literal list-file path does not prove the filenames stored inside. This
 /// same option walk supplies admission and write-root policy, preserving data
@@ -277,6 +290,37 @@ enum ConsumerValue { Data, Output, Temporary, Runtime }
 pub(super) fn consumer_files<'a>(name: &str, args: &'a [String]) -> ConsumerFiles<'a> {
     use ConsumerValue::*;
     let mut files = ConsumerFiles::default();
+    if name == "rg" {
+        let mut at = 0;
+        while let Some(word) = args.get(at).map(String::as_str) {
+            if word == "--" { break; }
+            let (flag, attached) = word.split_once('=').map_or((word, None), |(flag, value)| (flag, Some(value)));
+            if matches!(flag, "--pre" | "--hostname-bin") {
+                let value = attached.or_else(|| { at += 1; args.get(at).map(String::as_str) });
+                if value != Some("") { files.runtime = Some(at); return files; }
+            } else if matches!(flag, "--regexp" | "--file" | "--glob" | "--iglob" | "--type" | "--type-not"
+                | "--type-add" | "--type-clear" | "--ignore-file" | "--max-count" | "--after-context"
+                | "--before-context" | "--context" | "--context-separator" | "--field-match-separator"
+                | "--field-context-separator" | "--replace" | "--colors" | "--color" | "--sort" | "--sortr"
+                | "--path-separator" | "--engine" | "--encoding" | "--regex-size-limit" | "--dfa-size-limit"
+                | "--max-columns" | "--max-depth" | "--max-filesize" | "--threads" | "--pre-glob"
+                | "--hyperlink-format" | "--generate")
+            {
+                if attached.is_none() { at += 1; }
+            } else if word.starts_with('-') && !word.starts_with("--") {
+                for (position, flag) in word[1..].char_indices() {
+                    if "efgdtTmABCrEMj".contains(flag) {
+                        if position + 2 == word.len() { at += 1; }
+                        break;
+                    }
+                }
+            } else if !word.starts_with('-') {
+                files.option_words.push(at);
+            }
+            at += 1;
+        }
+        return files;
+    }
     if name == "find" {
         match find_arguments(args) {
             Ok(find) => {
@@ -302,6 +346,7 @@ pub(super) fn consumer_files<'a>(name: &str, args: &'a [String]) -> ConsumerFile
             continue;
         }
         if !options || !word.starts_with('-') || word == "-" {
+            if options { files.option_words.push(at); }
             if name == "uniq" {
                 if operands == 1 && word != "-" { files.outputs.push(word); }
                 operands += 1;
@@ -317,14 +362,36 @@ pub(super) fn consumer_files<'a>(name: &str, args: &'a [String]) -> ConsumerFile
                 ("--random-source", Data), ("--output", Output),
                 ("--temporary-directory", Temporary), ("--files0-from", Runtime),
                 ("--compress-program", Runtime),
+                ("--check", Optional), ("--help", Flag), ("--version", Flag),
+                ("--ignore-leading-blanks", Flag), ("--dictionary-order", Flag),
+                ("--ignore-case", Flag), ("--general-numeric-sort", Flag),
+                ("--ignore-nonprinting", Flag), ("--month-sort", Flag),
+                ("--human-numeric-sort", Flag), ("--numeric-sort", Flag),
+                ("--random-sort", Flag), ("--reverse", Flag), ("--version-sort", Flag),
+                ("--debug", Flag), ("--merge", Flag), ("--stable", Flag),
+                ("--unique", Flag), ("--zero-terminated", Flag), ("--check-silent", Flag),
             ],
-            "wc" => &[("--files0-from", Runtime)],
-            "uniq" => &[("--skip-fields", Data), ("--skip-chars", Data), ("--check-chars", Data)],
+            "wc" => &[("--files0-from", Runtime), ("--total", Data), ("--bytes", Flag),
+                ("--chars", Flag), ("--lines", Flag), ("--max-line-length", Flag),
+                ("--words", Flag), ("--help", Flag), ("--version", Flag)],
+            "uniq" => &[("--skip-fields", Data), ("--skip-chars", Data), ("--check-chars", Data),
+                ("--all-repeated", Optional), ("--group", Optional), ("--count", Flag),
+                ("--repeated", Flag), ("--ignore-case", Flag), ("--unique", Flag),
+                ("--zero-terminated", Flag), ("--help", Flag), ("--version", Flag)],
             _ => &[],
         };
-        let mut option = flag.starts_with("--").then(|| long.iter().find(|(name, _)| name.starts_with(flag)))
-            .flatten().map(|(_, role)| (*role, attached));
-        if option.is_none() && matches!(name, "sort" | "uniq") && !word.starts_with("--") {
+        let mut option = None;
+        if flag.starts_with("--") {
+            let exact = long.iter().find(|(name, _)| *name == flag);
+            let mut matches = long.iter().filter(|(name, _)| name.starts_with(flag));
+            let selected = exact.or_else(|| {
+                let first = matches.next()?;
+                matches.next().is_none().then_some(first)
+            });
+            option = selected.map(|(_, role)| (*role, attached));
+        } else {
+            option = Some((Flag, None));
+            let switches = match name { "sort" => "bCdfgiMmnRhruVzcs", "uniq" => "cdiDuzhV", "wc" => "cmlLwhV", _ => "" };
             for (offset, flag) in word[1..].char_indices() {
                 let role = match (name, flag) {
                     ("sort", 'o') => Some(Output),
@@ -337,18 +404,31 @@ pub(super) fn consumer_files<'a>(name: &str, args: &'a [String]) -> ConsumerFile
                     let suffix = &word[1 + offset + flag.len_utf8()..];
                     option = Some((role, (!suffix.is_empty()).then_some(suffix)));
                     break;
+                } else if !switches.contains(flag) {
+                    option = None;
+                    break;
                 }
             }
         }
-        if let Some((role, attached)) = option {
+        let Some((role, attached)) = option else {
+            files.option_words.push(at);
+            files.unknown = Some(at);
+            return files;
+        };
+        if matches!(role, Flag | Optional) {
+            if matches!(role, Flag) && attached.is_some() { files.unknown = Some(at); return files; }
+        } else {
             if matches!(role, Runtime) { files.runtime = Some(at); return files; }
             let value = attached.or_else(|| { at += 1; args.get(at).map(String::as_str) });
             if let Some(value) = value {
                 match role {
                     Output => files.outputs.push(value),
                     Temporary => files.temporaries.push(value),
-                    Data | Runtime => {}
+                    Data | Runtime | Flag | Optional => {}
                 }
+            } else {
+                files.unknown = Some(at.saturating_sub(1));
+                return files;
             }
         }
         at += 1;

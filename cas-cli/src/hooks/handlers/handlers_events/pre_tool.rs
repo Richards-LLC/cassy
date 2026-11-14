@@ -3742,7 +3742,7 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
 
 fn executable_word_index_with_alternatives(
     words: &[String],
-    shell_prefix: bool,
+    mut shell_prefix: bool,
     alternative: &mut dyn FnMut(usize),
     wrapper: &mut dyn FnMut(usize),
 ) -> Option<usize> {
@@ -3753,6 +3753,8 @@ fn executable_word_index_with_alternatives(
             "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" if shell_prefix => index += 1,
             "coproc" => {
                 index += 1;
+                // A coprocess operand can itself be a compound command.
+                shell_prefix = true;
                 // A name can precede any compound command. Otherwise the
                 // policy scanner must inspect both possible command words.
                 if words.get(index).is_some_and(|name| is_shell_variable_name(name))

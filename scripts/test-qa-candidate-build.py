@@ -265,8 +265,9 @@ signal.pause()
         npm.write_text(f"#!{sys.executable}\n" + f"""
 import pathlib, sys
 if sys.argv[1] == 'run':
-    pathlib.Path({str(built)!r}).write_text('ran')
-    print('vite: fixture syntax error')
+    output = 'vite: fixture syntax error in ' + sys.argv[-1]
+    pathlib.Path({str(built)!r}).write_text(output)
+    print(output)
     sys.exit(1)
 """)
         npm.chmod(0o700)
@@ -286,8 +287,7 @@ if sys.argv[1] == 'run':
     def test_failed_journey_build_keeps_its_log_under_task_artifacts_cas_40d4(self):
         error, kept, built = self.failed_journey_build()
         self.assertNotIsInstance(error, candidate["journey_dist"].NotStarted)
-        self.assertIn("vite: fixture syntax error", kept.read_text())
-        self.assertTrue(built.exists())
+        self.assertIn(built.read_text(), kept.read_text())  # the kept log is the build's own output
 
     def test_memory_admission_refusal_is_reported_not_started_cas_40d4(self):
         # The refusal line worker-memory.py prints, with the 7:35 AM ET numbers.

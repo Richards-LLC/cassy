@@ -2017,9 +2017,7 @@ impl CloudSyncer {
             // timeline independently; validated proof blocks were restored by
             // restore_task_proofs and reserved markers stay on their own path.
             for block in cas_store::task_note_markers::note_blocks(&remote.notes) {
-                if !cas_store::task_note_markers::contains_complete_lines(
-                    &store.get(&remote.id)?.notes, &block,
-                ) {
+                if !store.get(&remote.id)?.notes.contains(block) {
                     store.append_note(&remote.id, &block)?;
                 }
             }

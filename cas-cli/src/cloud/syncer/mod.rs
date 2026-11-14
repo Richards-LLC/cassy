@@ -941,7 +941,7 @@ struct TeamPushResponse {
 }
 
 /// A row the cloud accepted at HTTP level but refused to write because the
-/// existing global-keyed row belongs to a different project or sync scope.
+/// existing row belongs to another owner or has a different revision.
 ///
 /// The client deliberately keeps this wire type strict.  An itemized response
 /// is useful only when it names a unique local queue row; malformed itemization
@@ -950,6 +950,7 @@ struct TeamPushResponse {
 pub(crate) struct PushRejection {
     pub id: String,
     pub reason: PushRejectionReason,
+    #[serde(default)]
     pub existing_canonical_id: String,
 }
 
@@ -958,6 +959,7 @@ pub(crate) struct PushRejection {
 pub(crate) enum PushRejectionReason {
     ProjectMismatch,
     ScopeMismatch,
+    RevisionConflict,
 }
 
 impl PushRejectionReason {
@@ -965,6 +967,7 @@ impl PushRejectionReason {
         match self {
             Self::ProjectMismatch => "project_mismatch",
             Self::ScopeMismatch => "scope_mismatch",
+            Self::RevisionConflict => "revision_conflict",
         }
     }
 
@@ -1219,6 +1222,9 @@ pub(crate) fn itemized_rejections_for(
     let queued_ids = queued_ids.collect::<std::collections::HashSet<_>>();
     let mut by_id = HashMap::with_capacity(rejected.len());
     for rejection in rejected {
+        if rejection.reason.is_permanent() && rejection.existing_canonical_id.is_empty() {
+            return Err(format!("{location}.rejected ownership collision lacks existing_canonical_id"));
+        }
         if !queued_ids.contains(&rejection.id) {
             return Err(format!(
                 "{location}.rejected names row {} that was not in this sub-batch",

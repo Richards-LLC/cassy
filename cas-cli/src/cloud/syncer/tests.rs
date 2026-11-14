@@ -214,7 +214,16 @@ async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_c
     assert_eq!(recovered.cloud_artifact_id, proof.cloud_artifact_id);
     assert_eq!(recovered.sha256, proof.sha256);
     assert_eq!(publisher_queue.revision(EntityType::Task, &original.id).unwrap(), Some(8));
-    assert_eq!(receiver_queue.revision(EntityType::Task, &original.id).unwrap(), Some(7));
+    let delivered = receiver_sync.push_team(team).unwrap();
+    assert_eq!(delivered.pushed_tasks, 1, "{delivered:?}");
+    assert!(receiver_queue.pending_for_team(team, 10, 5).unwrap().is_empty());
+    assert_eq!(receiver_queue.revision(EntityType::Task, &original.id).unwrap(), Some(9));
+    let state = remote.lock().unwrap();
+    let delivered_task: Task = serde_json::from_value(state.0.clone()).unwrap();
+    assert_eq!(delivered_task.status, concurrent.status);
+    assert!(delivered_task.notes.contains(&concurrent.notes));
+    assert!(delivered_task.notes.contains(&published.notes));
+    drop(state);
     assert_eq!(rejected.pushed_tasks, 0);
     assert_eq!(retried.pushed_tasks, 0);
     assert!(server.received_requests().await.unwrap().iter().any(|request|

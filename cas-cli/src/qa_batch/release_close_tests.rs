@@ -25,7 +25,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     git(&["commit", "-qm", "base"]);
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut anchors = BTreeMap::new();
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-retained"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-retained"] {
         let base = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-qb", id]);
         let source = format!("{id}.rs");
@@ -64,7 +64,16 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     git(&["tag", &tag]);
     let ledger = root.join("release-review.md");
-    let body = "| task | verdict |\n| --- | --- |\n| cas-ledger | NOT A ROUTE: reverted, not shipped |\n| cas-retained-extra | NOT A ROUTE: reverted |\n";
+    let body = concat!(
+        "| task | verdict |\n| --- | --- |\n",
+        "| cas-compact | NOT A ROUTE: reverted, not shipped |\n",
+        "| cas-retained-extra | NOT A ROUTE: reverted |\n",
+        "| cas-retained | NOT A ROUTE: documentation-only |\n",
+        "```example\n| cas-retained | NOT A ROUTE: reverted |\n```\n\n",
+        "| id | cell | expected | observed | verdict | label | evidence path | defect task |\n",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| R09 | cas-ledger live working indicator | Reverted on this train and absent from the release | terminal: Reverted, not shipped | NOT A ROUTE | real-build | review/revert.txt | - |\n",
+    );
     std::fs::write(&ledger, body).unwrap();
     let review = QaBatchReceipt {
         schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-reverted".into(),
@@ -86,19 +95,26 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             reviewed_sha: published, receipt_id: Some(review.id.clone()),
         }],
     };
+    let mut unbound = scope.clone();
+    unbound.proof_refs.clear();
+    let unbound_inventory = resolve_release_inventory(&root, &repo, &unbound).unwrap();
+    assert!(unbound_inventory.deliveries.iter().any(|d| d.task_id == "cas-ledger"));
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
     let preview = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
-        &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag },
+        &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag: tag.clone() },
     )).unwrap();
-    for id in ["cas-reverted", "cas-partial", "cas-ledger"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "{id}");
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "RELEASE_MEMBER_REVERTED"), "{id}: {:?}", result.members.get(id));
         assert!(inventory.exceptions.iter().any(|e| e.task_id == id && serde_json::to_value(&e.code).unwrap() == "reverted"));
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == id));
     }
     assert_eq!(tasks.get("cas-retained").unwrap().status, TaskStatus::Closed);
+    for id in ["cas-reverted", "cas-partial"] {
+        assert!(prepare_release_tag_receipt(&root, &[id.into()], &tag).is_err());
+    }
     assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());
 }
 

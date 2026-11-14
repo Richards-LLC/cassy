@@ -26284,7 +26284,7 @@ pub(crate) fn delivery_content_presence_on_target(
     delivery_commit: &str,
     target_ref: &str,
 ) -> DeliveryContentPresence {
-    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false, &[])
+    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false, &[], None)
 }
 
 pub(crate) fn delivery_content_presence_on_target_for_task(
@@ -26294,7 +26294,21 @@ pub(crate) fn delivery_content_presence_on_target_for_task(
     task_id: &str,
 ) -> DeliveryContentPresence {
     delivery_content_presence_on_target_for_paths(
-        repo_path, delivery_commit, target_ref, None, false, &[task_id],
+        repo_path, delivery_commit, target_ref, None, false, &[task_id], None,
+    )
+}
+
+/// A release inventory binds the whole parked delivery range, including work
+/// before its last commit. Reuse the verifier's content-continuity proof.
+pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
+    repo: &std::path::Path,
+    base: &str,
+    anchor: &str,
+    target: &str,
+    task_id: &str,
+) -> DeliveryContentPresence {
+    delivery_content_presence_on_target_for_paths(
+        repo, anchor, target, None, false, &[task_id], Some(base),
     )
 }
 
@@ -26305,6 +26319,7 @@ fn delivery_content_presence_on_target_for_paths(
     selected_paths: Option<&[String]>,
     resolution_only: bool,
     owners: &[&str],
+    base: Option<&str>,
 ) -> DeliveryContentPresence {
     let presence = delivery_content_presence_on_target_for_paths_raw(
         repo_path,
@@ -26312,6 +26327,7 @@ fn delivery_content_presence_on_target_for_paths(
         target_ref,
         selected_paths,
         resolution_only,
+        base,
     );
     let DeliveryContentPresence::Dropped { paths } = presence else {
         return presence;
@@ -26345,10 +26361,12 @@ fn delivery_content_presence_on_target_for_paths_raw(
     target_ref: &str,
     selected_paths: Option<&[String]>,
     resolution_only: bool,
+    base: Option<&str>,
 ) -> DeliveryContentPresence {
     use std::process::Command;
 
-    if !is_safe_git_refname(delivery_commit) || !is_safe_git_refname(target_ref) {
+    if !is_safe_git_refname(delivery_commit) || !is_safe_git_refname(target_ref)
+        || base.is_some_and(|base| !is_safe_git_refname(base)) {
         return DeliveryContentPresence::Unknown {
             reason: "delivery commit or target ref is not safe to pass to Git".to_string(),
         };
@@ -26369,7 +26387,8 @@ fn delivery_content_presence_on_target_for_paths_raw(
     };
     let delivery_commit = delivery.as_str();
 
-    let Some(delivery_parent) = crate::qa_batch::release_close::delivery_base(repo_path, delivery_commit, target_ref)
+    let Some(delivery_parent) = base.map(str::to_string)
+        .or_else(|| crate::qa_batch::release_close::delivery_base(repo_path, delivery_commit, target_ref))
         .or_else(|| resolve_branch_sha(repo_path, &format!("{delivery_commit}^1")))
     else {
         return DeliveryContentPresence::Unknown {
@@ -26673,6 +26692,7 @@ fn delivery_content_presence_in_parent_for_paths(
         selected_paths,
         resolution_only,
         owners,
+        None,
     )
 }
 
@@ -37011,7 +37031,7 @@ esac
         std::fs::write(&trace, "").unwrap();
         let first_path = vec![files[0].to_string()];
         assert_eq!(
-            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false, &[]),
+            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false, &[], None),
             DeliveryContentPresence::Present { paths: first_path },
         );
         let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");

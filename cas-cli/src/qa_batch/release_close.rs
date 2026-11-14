@@ -56,7 +56,8 @@ pub(crate) fn prepare(
         let receipts = read_receipts(root, &inventory.scope.project_id)?;
         let mut reviews = Vec::new();
         for proof in inventory.scope.proof_refs.iter().filter(|p| p.kind == ReleaseProofKind::Review) {
-            let Some(receipt) = receipts.iter().find(|r| proof_matches(proof, r)) else { continue; };
+            let Some(receipt) = receipts.iter().find(|r| proof_matches(proof, r)
+                && r.staging_sha == inventory.scope.reviewed_sha) else { continue; };
             let Ok(body) = std::fs::read_to_string(&receipt.ledger_path) else { continue; };
             if body.len() as u64 == receipt.ledger_size_bytes
                 && format!("{:x}", Sha256::digest(body.as_bytes())) == receipt.ledger_sha256 {
@@ -130,6 +131,13 @@ pub(crate) fn prepare(
         self.member_errors.get(id).map(String::as_str)
     }
 
+    pub(crate) fn ledger_reverts(&self, id: &str, anchor: Option<&str>) -> bool {
+        self.reviews.iter().any(|(receipt, body)| {
+            receipt.task_heads.get(id).is_some_and(|head| anchor.is_none_or(|anchor| head == anchor))
+                && ledger_marks_reverted(body, id)
+        })
+    }
+
     pub(crate) async fn scope<F: std::future::Future>(self, future: F) -> F::Output {
         CURRENT.scope(self, future).await
     }
@@ -137,6 +145,34 @@ pub(crate) fn prepare(
     fn delivery(&self, id: &str) -> Option<&ReleaseDelivery> {
         self.inventory.deliveries.iter().find(|d| d.task_id == id)
     }
+}
+
+fn ledger_marks_reverted(body: &str, id: &str) -> bool {
+    let reverted = |text: &str| text.trim().split(|c: char| !c.is_alphanumeric()).next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("reverted"));
+    // The incident's canonical ledger used a journey ID, the task in `cell`,
+    // and NOT A ROUTE with a Reverted disposition in `expected`.
+    if crate::qa_ledger::parse(body, 0).rows.iter().any(|row| {
+        row.verdict == crate::qa_ledger::Verdict::NotARoute
+            && report_names(&row.cell, id)
+            && (reverted(&row.expected) || reverted(&row.observed))
+    }) { return true; }
+    // Older release reports use a compact task/verdict table instead.
+    let mut fence = None;
+    body.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let marker = line.chars().next().unwrap();
+            fence = if fence == Some(marker) { None } else { Some(marker) };
+            return false;
+        }
+        if fence.is_some() || !line.starts_with('|') { return false; }
+        let cells: Vec<_> = line.trim_matches('|').split('|')
+            .map(|cell| cell.trim().trim_matches('`')).collect();
+        cells.first() == Some(&id) && cells.iter().skip(1).any(|cell| {
+            cell.strip_prefix("NOT A ROUTE:").is_some_and(reverted)
+        })
+    })
 }
 
 pub(crate) fn parse_manifest(body: &str) -> Result<Option<ReleaseTransformations>, String> {
@@ -628,6 +664,7 @@ pub(crate) fn reconcile_members(
     use crate::mcp::tools::core::task::lifecycle::{merge_close::CassyMergeClose, review_tier::{self, VerificationTier}};
     let tasks = read_tasks(root)?;
     let receipts = read_receipts(root, &inventory.scope.project_id)?;
+    let review = ReleaseClose::prepare(root, repo, inventory)?;
     let ids: std::collections::BTreeSet<_> = inventory.deliveries.iter().map(|d| d.task_id.clone())
         .chain(inventory.exceptions.iter().map(|e| e.task_id.clone()))
         .chain(inventory.scope.included_task_ids.iter().cloned())
@@ -639,11 +676,15 @@ pub(crate) fn reconcile_members(
             let task = match tasks.get(&id) { Ok(task) => task, Err(_) => return Ok(CassyMergeClose::NotEligible) };
             let already_closed = task.status == TaskStatus::Closed;
             if task.is_terminal() && !already_closed { return Ok(CassyMergeClose::NotEligible); }
-            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id).filter(|_| !already_closed) {
-                return Err(format!("RELEASE_MEMBER_HELD: {:?}", exception.code));
+            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id)
+                .filter(|e| !already_closed || matches!(e.code, ReleaseInventoryCode::Reverted | ReleaseInventoryCode::UnprovenContent)) {
+                return Err(exception.code.close_gate());
             }
             let delivery = inventory.deliveries.iter().find(|d| d.task_id == id).ok_or("RELEASE_MEMBERSHIP_MISSING")?;
             if task.updated_at.to_rfc3339() != delivery.generation { return Err("RELEASE_GENERATION_CHANGED".into()); }
+            if review.ledger_reverts(&id, delivery.anchor.as_deref()) {
+                return Err(ReleaseInventoryCode::Reverted.close_gate());
+            }
             let mut anchors = Vec::new();
             if delivery.membership == ReleaseMembership::ExplicitNoCode {
                 crate::release_reconcile::validate_no_code_proofs(root, &inventory.scope, &id, &delivery.proof_refs)?;
@@ -653,6 +694,8 @@ pub(crate) fn reconcile_members(
                 if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|current| current != anchor) {
                     return Err("RELEASE_GENERATION_CHANGED".into());
                 }
+                release_delivery_effect(repo, delivery.base_sha.as_deref(), anchor,
+                    &inventory.scope.final_release_sha, &id).map_err(|code| code.close_gate())?;
                 anchors.push(anchor);
             }
             let tier_zero = delivery.anchor.as_deref().is_some_and(|anchor| {

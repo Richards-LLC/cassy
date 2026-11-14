@@ -128,6 +128,18 @@ pub(crate) enum ReleaseInventoryCode {
     MissingMapping,
     MissingNoCodeProof,
     Quarantined,
+    Reverted,
+    UnprovenContent,
+}
+
+impl ReleaseInventoryCode {
+    pub(crate) fn close_gate(&self) -> String {
+        match self {
+            Self::Reverted => "RELEASE_MEMBER_REVERTED".into(),
+            Self::UnprovenContent => "RELEASE_CONTENT_UNPROVEN".into(),
+            other => format!("RELEASE_MEMBER_HELD: {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -218,6 +230,7 @@ pub(crate) fn resolve_release_inventory(
         deliveries: Vec::new(),
         exceptions: Vec::new(),
     };
+    let review = release_close::ReleaseClose::prepare(root, repo, &inventory)?;
     let expected: BTreeSet<String> = scope
         .included_task_ids
         .iter()
@@ -300,7 +313,7 @@ pub(crate) fn resolve_release_inventory(
         let anchor = recorded.and_then(|sha| recorded_commit(sha));
         let valid_base = |anchor: &str| base.as_deref()
             .is_some_and(|base| ancestor(repo, base, anchor) == Some(true));
-        let shipped_mapping = |anchor: &str| {
+        let release_mapping = |anchor: &str| {
             if ancestor(repo, anchor, &scope.final_release_sha) == Some(true) {
                 Some((anchor.to_string(), ReleaseMembership::Ancestry))
             } else {
@@ -311,11 +324,11 @@ pub(crate) fn resolve_release_inventory(
                     .map(|mapped| (mapped, ReleaseMembership::SquashTree))
             }
         };
-        let shipped = anchor.as_deref().and_then(&shipped_mapping);
-        if !expected.contains(&id) && shipped.is_none()
+        let mapped = anchor.as_deref().and_then(&release_mapping);
+        if !expected.contains(&id) && mapped.is_none()
             && !d.historical_factory_branch_anchors.iter()
                 .filter_map(|sha| recorded_commit(sha))
-                .any(|historical| shipped_mapping(&historical).is_some())
+                .any(|historical| release_mapping(&historical).is_some())
         {
             continue;
         }
@@ -378,10 +391,20 @@ pub(crate) fn resolve_release_inventory(
             } else if !valid_base(&anchor) {
                 issue(ReleaseInventoryCode::InvalidBase);
             }
-            let Some((shipped, membership)) = shipped else {
+            let Some((shipped, membership)) = mapped else {
                 issue(ReleaseInventoryCode::MissingMapping);
                 continue;
             };
+            if review.ledger_reverts(&id, Some(&anchor)) {
+                issue(ReleaseInventoryCode::Reverted);
+                continue;
+            }
+            if let Err(code) = release_delivery_effect(
+                repo, base.as_deref(), &anchor, &scope.final_release_sha, &id,
+            ) {
+                issue(code);
+                continue;
+            }
             let proofs = release_proof_refs(&receipts, &id, &anchor);
             (Some(anchor), Some(shipped), membership, proofs)
         };
@@ -998,7 +1021,9 @@ pub(crate) fn prepare_release_tag_receipt(
         tag_sha.get_or_insert(candidate.clone());
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| crate::gates::tag("G-117", format!("task {id} has no resolvable delivery anchor")))?;
-        if !release_tag_ships_delivery(&repo, &anchor, &candidate, &task.id) {
+        if release_delivery_effect(&repo,
+            task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
+            &anchor, &candidate, &task.id).is_err() {
             return Err(crate::gates::tag("G-117", format!("release tag {tag} does not contain task {id}'s delivery tree effect")));
         }
         heads.insert(id.clone(), anchor);
@@ -1023,17 +1048,27 @@ pub(crate) fn prepare_release_tag_receipt(
     })
 }
 
-/// A release tag contains a delivery when it carries the delivery commit or
-/// preserves the delivery's tree effect, including a later edit to its files.
+/// History membership cannot prove shipment: a later revert retains ancestry.
+/// The final tree must preserve the delivery's effect, including ordinary edits.
 pub(crate) fn release_tag_ships_delivery(repo: &Path, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
-    ancestor(repo, anchor, tag_sha) == Some(true)
-        || matches!(
-            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
-                repo, anchor, tag_sha, task_id,
-            ),
-            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
-                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
-        )
+    release_delivery_effect(repo, None, anchor, tag_sha, task_id).is_ok()
+}
+
+pub(crate) fn release_delivery_effect(
+    repo: &Path, base: Option<&str>, anchor: &str, target: &str, task_id: &str,
+) -> Result<(), ReleaseInventoryCode> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::{self, DeliveryContentPresence};
+    // An explicitly empty delivery has no content that can be reverted.
+    if base == Some(anchor) { return Ok(()); }
+    let presence = match base {
+        Some(base) => close_ops::delivery_content_presence_from_base_on_target_for_task(repo, base, anchor, target, task_id),
+        None => close_ops::delivery_content_presence_on_target_for_task(repo, anchor, target, task_id),
+    };
+    match presence {
+        DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => Ok(()),
+        DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
+        DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
+    }
 }
 
 /// The QA receipt covering this delivery.

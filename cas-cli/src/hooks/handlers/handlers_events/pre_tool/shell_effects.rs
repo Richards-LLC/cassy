@@ -22,6 +22,7 @@ pub(super) fn collect(command: &str, cwd: &Path) -> Result<ShellEffects, &'stati
         vec![Some(cwd.to_path_buf())],
         cwd,
         &HashMap::new(),
+        &InertNames::default(),
         0,
         &mut effects,
     )?;
@@ -85,34 +86,13 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
 /// cas-e197: names whose every value in this command is known. Numeric names
 /// hold only digits or arithmetic over numeric names; identifier names hold
 /// only literal variable names. Anything inherited, read or substituted is
-/// absent, so arithmetic and `${!name}` over it stay refused.
+/// absent, so arithmetic and `${!name}` over it stay refused. It is passed to
+/// each nested script explicitly: same-shell bodies (command substitution,
+/// `eval`) inherit it, and a new-process payload starts empty.
 #[derive(Clone, Default)]
 struct InertNames {
     numeric: HashSet<String>,
     identifier: HashSet<String>,
-}
-
-thread_local! {
-    static INERT: std::cell::RefCell<Vec<InertNames>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-struct InertScope;
-
-impl InertScope {
-    fn enter(names: InertNames) -> Self {
-        INERT.with(|stack| stack.borrow_mut().push(names));
-        Self
-    }
-}
-
-impl Drop for InertScope {
-    fn drop(&mut self) {
-        INERT.with(|stack| stack.borrow_mut().pop());
-    }
-}
-
-fn inert_current() -> InertNames {
-    INERT.with(|stack| stack.borrow().last().cloned().unwrap_or_default())
 }
 
 fn identifier_run(bytes: &[u8], at: usize) -> usize {
@@ -146,8 +126,8 @@ fn arithmetic_over(expression: &str, numeric: &HashSet<String>) -> bool {
 /// Only numeric source is inert under arithmetic's recursive evaluation. Even
 /// a bare variable can contain an array subscript that executes a substitution,
 /// unless every value the command gives it is numeric (cas-e197).
-fn numeric_arithmetic(expression: &str) -> Result<(), &'static str> {
-    if arithmetic_over(expression, &inert_current().numeric) {
+fn numeric_arithmetic(expression: &str, inert: &InertNames) -> Result<(), &'static str> {
+    if arithmetic_over(expression, &inert.numeric) {
         Ok(())
     } else {
         Err("an unresolved arithmetic operand")
@@ -191,8 +171,13 @@ fn inert_names(script: &str, projected: &str, lexed: &ShellLexed, parent: &Inert
     let mut defined: HashMap<String, usize> = HashMap::new();
     let mut depth = 0usize;
     let mut statement_start = true;
+    // `env NAME=VALUE cmd` hands NAME to a new process: never trust NAME.
+    let mut after_env = false;
     let mut index = 0;
     while index < tokens.len() {
+        if matches!(tokens[index], ShellToken::Operator(_)) {
+            after_env = false;
+        }
         match &tokens[index] {
             ShellToken::Operator(';') => statement_start = true,
             ShellToken::Operator('(') => { depth += 1; statement_start = true; }
@@ -232,6 +217,12 @@ fn inert_names(script: &str, projected: &str, lexed: &ShellLexed, parent: &Inert
                 let keyword = matches!(text.as_str(), "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "{" | "!");
                 // Assignments are only the unquoted `name=` prefix words of a
                 // command; `echo "n=$n"` or `env n=1 cmd` leave the shell's n alone.
+                if after_env && let Some((name, _)) = text.split_once('=').filter(|(name, _)| is_shell_variable_name(name)) {
+                    assigned.entry(name.to_string()).or_default().push((String::new(), false));
+                }
+                if text == "env" {
+                    after_env = true;
+                }
                 let prefix = text.split_once('=').map(|(name, _)| name)
                     .filter(|name| statement_start && is_shell_variable_name(name)
                         && raw(index).strip_prefix(*name).is_some_and(|rest| rest.starts_with('=')));
@@ -341,6 +332,7 @@ fn inert_names(script: &str, projected: &str, lexed: &ShellLexed, parent: &Inert
 fn numeric_test_operand(
     operand: &str,
     captured_status: &HashSet<String>,
+    inert: &InertNames,
 ) -> Result<(), &'static str> {
     if operand == "$?"
         || operand
@@ -349,13 +341,13 @@ fn numeric_test_operand(
     {
         Ok(())
     } else {
-        numeric_arithmetic(operand)
+        numeric_arithmetic(operand, inert)
     }
 }
 
 /// Validate arithmetic commands before their operators become shell scopes.
 /// Use source positions: quoted/comment parentheses are ordinary word data.
-fn arithmetic_commands(source: &str, lexed: &mut ShellLexed) -> Result<(), &'static str> {
+fn arithmetic_commands(source: &str, lexed: &mut ShellLexed, inert: &InertNames) -> Result<(), &'static str> {
     let mut index = 0;
     while index + 1 < lexed.tokens.len() {
         if lexed.tokens[index..index + 2] != [ShellToken::Operator('('), ShellToken::Operator('(')]
@@ -387,7 +379,7 @@ fn arithmetic_commands(source: &str, lexed: &mut ShellLexed) -> Result<(), &'sta
         {
             return Err("an unresolved arithmetic operand");
         }
-        numeric_arithmetic(&source[start..offset - 2])?;
+        numeric_arithmetic(&source[start..offset - 2], inert)?;
         // Numeric arithmetic has no filesystem effects. Leave the enclosing
         // command and its redirections in place for the ordinary collector.
         lexed.tokens.splice(index..=end, [ShellToken::Word("true".into())]);
@@ -400,7 +392,7 @@ fn arithmetic_commands(source: &str, lexed: &mut ShellLexed) -> Result<(), &'sta
 
 /// Numeric comparisons evaluate both operands recursively, even when quoted.
 /// Inspect a whole conditional before command separators split its &&/|| arms.
-fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'static str> {
+fn conditional_arithmetic(source: &str, lexed: &ShellLexed, inert: &InertNames) -> Result<(), &'static str> {
     let raw = |index: usize| {
         let start = if index == 0 { 0 } else { lexed.ends[index - 1] };
         source[start..lexed.ends[index]].trim()
@@ -458,8 +450,8 @@ fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'stat
                             let (Some(ShellToken::Word(left)), Some(ShellToken::Word(right))) =
                                 (lexed.tokens.get(at - 1), lexed.tokens.get(at + 1).filter(|_| at + 1 < end))
                             else { return Err("an unresolved conditional operand"); };
-                            numeric_arithmetic(left)?;
-                            numeric_arithmetic(right)?;
+                            numeric_arithmetic(left, inert)?;
+                            numeric_arithmetic(right, inert)?;
                             at += 1;
                             operand = false;
                         } else if !operand && other_binary(word) {
@@ -481,15 +473,15 @@ fn conditional_arithmetic(source: &str, lexed: &ShellLexed) -> Result<(), &'stat
 
 /// Parameter syntax comes from the lexer's original source spans, never
 /// cooked words that have lost the distinction between data and expansion.
-fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
+fn parameter_arithmetic(body: &str, inert: &InertNames) -> Result<(), &'static str> {
     if matches!(body, "!" | "#") { return Ok(()); } // PID/count, not indirection.
     if let Some(target) = body.strip_prefix('!') {
         // cas-e197: a name whose every value is a literal variable name reads
         // that variable as data; nothing in it is evaluated as syntax.
-        if inert_current().identifier.contains(target) {
+        if inert.identifier.contains(target) {
             return Ok(());
         }
-        numeric_arithmetic(target)?;
+        numeric_arithmetic(target, inert)?;
         // Even a numeric parameter name reads an unknown value as syntax.
         return Err("an unresolved indirect parameter");
     }
@@ -503,13 +495,13 @@ fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
     while let Some(subscript) = rest.strip_prefix('[') {
         let end = subscript.find(']').ok_or("an unresolved parameter operand")?;
         let index = &subscript[..end];
-        if !matches!(index, "@" | "*") { numeric_arithmetic(index)?; }
+        if !matches!(index, "@" | "*") { numeric_arithmetic(index, inert)?; }
         rest = &subscript[end + 1..];
     }
     if let Some(position) = rest.strip_prefix(':') {
         // The four default-value operators do not evaluate arithmetic.
         if !position.starts_with(['-', '+', '=', '?']) {
-            numeric_arithmetic(position)?;
+            numeric_arithmetic(position, inert)?;
         }
     } else if !rest.is_empty() && !rest.starts_with(['-', '+', '=', '?', '/', '#', '%']) {
         return Err("an unresolved parameter operand");
@@ -519,7 +511,7 @@ fn parameter_arithmetic(body: &str) -> Result<(), &'static str> {
 
 /// Extract executable substitutions from a shell word. Arithmetic operands
 /// must be numeric source, never values obtained from shell expansion.
-fn substitution_bodies(word: &str) -> Result<Vec<String>, &'static str> {
+fn substitution_bodies(word: &str, inert: &InertNames) -> Result<Vec<String>, &'static str> {
     let bytes = word.as_bytes();
     let mut bodies = Vec::new();
     let mut index = 0;
@@ -562,7 +554,7 @@ fn substitution_bodies(word: &str) -> Result<Vec<String>, &'static str> {
             }
             if let Some(end) = end {
                 let operand_end = if bracket { end } else { end - 1 };
-                numeric_arithmetic(&word[index + prefix..operand_end])?;
+                numeric_arithmetic(&word[index + prefix..operand_end], inert)?;
                 index = end + 1;
                 continue;
             }
@@ -624,7 +616,7 @@ pub(super) fn backquote_body(source: &str) -> String {
 /// Heredoc quotes are data, but escaped markers are inert. Remove shell
 /// line continuations, then pass only complete, unescaped expansions through
 /// the ordinary substitution/arithmetic checks without rewriting their source.
-fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Result<Vec<String>, &'static str> {
+fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter, inert: &InertNames) -> Result<Vec<String>, &'static str> {
     let mut logical = String::new();
     let mut chars = body.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -657,7 +649,7 @@ fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Resu
         if bytes.get(index..index + 2) == Some(b"${") {
             let tail = &logical[index + 2..];
             let end = tail.find('}').ok_or("an unresolved parameter operand")?;
-            parameter_arithmetic(&tail[..end])?;
+            parameter_arithmetic(&tail[..end], inert)?;
             index += 2; // Nested parameter expansions retain their own checks.
             continue;
         }
@@ -678,7 +670,7 @@ fn heredoc_substitution_bodies(body: &str, delimiter: &HeredocDelimiter) -> Resu
             continue;
         };
         let end = end.ok_or("an unresolved shell payload")?;
-        bodies.extend(substitution_bodies(&logical[index..=end])?);
+        bodies.extend(substitution_bodies(&logical[index..=end], inert)?);
         index = end + 1;
     }
     Ok(bodies)
@@ -1126,6 +1118,7 @@ fn collect_script(
     mut dirs: Directories,
     original: &Path,
     inherited: &HashMap<String, Vec<String>>,
+    parent_inert: &InertNames,
     depth: usize,
     effects: &mut ShellEffects,
 ) -> Result<Directories, &'static str> {
@@ -1138,12 +1131,12 @@ fn collect_script(
     if lexed.unresolved_at.is_some() {
         return Err("an unresolved shell payload");
     }
-    let _inert = InertScope::enter(inert_names(script, &projected, &lexed, &inert_current()));
-    conditional_arithmetic(&projected, &lexed)?;
+    let inert = inert_names(script, &projected, &lexed, parent_inert);
+    conditional_arithmetic(&projected, &lexed, &inert)?;
     for &(start, end) in &lexed.parameters {
-        parameter_arithmetic(&projected[start..end])?;
+        parameter_arithmetic(&projected[start..end], &inert)?;
     }
-    arithmetic_commands(&projected, &mut lexed)?;
+    arithmetic_commands(&projected, &mut lexed, &inert)?;
     let case_tokens = case_syntax(&projected, &lexed)?;
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let captured_status: HashSet<String> = tokens
@@ -1257,7 +1250,7 @@ fn collect_script(
                 command.push_str(&delimiter.value);
                 command.push('\n');
                 if !delimiter.literal_body {
-                    expanding_bodies.extend(heredoc_substitution_bodies(&body, &delimiter)?);
+                    expanding_bodies.extend(heredoc_substitution_bodies(&body, &delimiter, &inert)?);
                 }
             }
             let redirects = redirect_words(&statement);
@@ -1307,11 +1300,12 @@ fn collect_script(
                     if at + 2 < args.len()
                         && matches!(binary, Some("-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge"))
                     {
-                        numeric_test_operand(&args[at], &captured_status)?;
+                        numeric_test_operand(&args[at], &captured_status, &inert)?;
                         numeric_test_operand(
                             args.get(at + 2)
                                 .ok_or("an unresolved conditional operand")?,
                             &captured_status,
+                            &inert,
                         )?;
                         at += 3;
                     } else if matches!(binary, Some("=" | "==" | "!=" | "-nt" | "-ot" | "-ef")) {
@@ -1329,7 +1323,7 @@ fn collect_script(
             }
             if name == Some("let") {
                 for arg in args.iter().filter(|arg| arg.as_str() != "--") {
-                    numeric_arithmetic(arg)?;
+                    numeric_arithmetic(arg, &inert)?;
                 }
             }
             // Integer attributes persist into later ordinary assignments.
@@ -1354,12 +1348,14 @@ fn collect_script(
                 dirs.clone()
             };
 
+            // Command substitutions fork this shell: its variables carry over.
             for body in expanding_bodies {
                 collect_script(
                     &body,
                     statement_dirs.clone(),
                     original,
                     &directory_values,
+                    &inert,
                     depth + 1,
                     effects,
                 )?;
@@ -1376,12 +1372,13 @@ fn collect_script(
                 .chain(redirect_targets.iter().copied());
             for (word, literal) in every_word {
                 if !literal {
-                    for body in substitution_bodies(word)? {
+                    for body in substitution_bodies(word, &inert)? {
                         collect_script(
                             &body,
                             statement_dirs.clone(),
                             original,
                             &directory_values,
+                            &inert,
                             depth + 1,
                             effects,
                         )?;
@@ -1585,11 +1582,16 @@ fn collect_script(
                 if !payload_literal {
                     return Err("an unresolved shell payload");
                 }
+                // cas-e197: only `eval` runs in this shell. A `-c`, `env -S`, su,
+                // runuser or script payload is a new process whose variables come
+                // from its environment, which this command may have rewritten.
+                let payload_inert = if name == Some("eval") { inert.clone() } else { InertNames::default() };
                 let nested = collect_script(
                     &payload,
                     statement_dirs,
                     original,
                     &directory_values,
+                    &payload_inert,
                     depth + 1,
                     effects,
                 )?;

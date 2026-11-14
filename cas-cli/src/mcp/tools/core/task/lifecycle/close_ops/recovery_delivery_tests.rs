@@ -2095,3 +2095,131 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
     assert!(ledger.iter().any(|event| matches!(&event.payload,
         cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::OverrideClose, .. })), "{ledger:?}");
 }
+
+
+/// GH #1962: a resumed delivery owns its implementation between a temporary
+/// journey edit and its revert; the final tree owes no proof for that journey.
+#[tokio::test]
+async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
+    async fn status(core: &CasCore, state: &str) {
+        core.cas_task_update(Parameters(serde_json::from_value(serde_json::json!({
+            "id": TASK, "status": state,
+        })).unwrap())).await.unwrap();
+    }
+    async fn start(core: &CasCore) {
+        core.cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
+            id: TASK.into(), brief: Some(true), force: None,
+        })).await.unwrap();
+    }
+    let mut env = TestEnvGuard::temp_home();
+    let mut f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path().to_path_buf();
+    let root = repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let agents = open_agent_store(&root).unwrap();
+    let mut worker = agents.get("recovery-session").unwrap();
+    worker.metadata.insert("clone_path".into(), f.worker_path.display().to_string());
+    agents.update(&worker).unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let earlier = chrono::Utc::now() - chrono::Duration::hours(2);
+    env.set("GIT_AUTHOR_DATE", earlier.to_rfc3339());
+    env.set("GIT_COMMITTER_DATE", earlier.to_rfc3339());
+    git(&f.worker_path, &["reset", "--hard", "main"]);
+    let journey = "shared.journey.ts";
+    let original = "const run = async () => {};\ntest('shared callback', run);\n";
+    std::fs::write(f.worker_path.join(journey), original).unwrap();
+    std::fs::create_dir_all(f.worker_path.join("changelog.d")).unwrap();
+    std::fs::write(f.worker_path.join("changelog.d/README.md"), "Release fragments.\n").unwrap();
+    git(&f.worker_path, &["add", "."]);
+    git(&f.worker_path, &["commit", "-qm", "baseline shared callback"]);
+    let base = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(&repo, &["branch", "-f", "main", &base]);
+    git(&repo, &["branch", "epic/old", &base]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &base]);
+    let mut task = tasks.get(TASK).unwrap();
+    task.created_at = earlier - chrono::Duration::hours(1);
+    task.depth = cas_types::TaskDepth::Light;
+    task.demo_statement.clear();
+    task.deliverables.factory_branch_anchor = None;
+    task.deliverables.historical_factory_branch_anchors.clear();
+    task.deliverables.parked_branch = Some(BRANCH.into());
+    task.deliverables.work_target.as_mut().unwrap().target_branch = "epic/old".into();
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: BRANCH.into(), base_sha: base.clone(),
+    });
+    tasks.update(&task).unwrap();
+    std::fs::write(f.worker_path.join(journey), original.replace("shared callback", "temporary callback")).unwrap();
+    git(&f.worker_path, &["add", journey]);
+    git(&f.worker_path, &["commit", "-qm", &format!("test({TASK}): temporary journey edit")]);
+    let edit = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    task.deliverables.factory_branch_anchor = Some(edit.clone());
+    tasks.update(&task).unwrap();
+    status(&f.core, "blocked").await;
+    let supervisor = CasCore::with_daemon(root.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    // Exercise e5c1's real cross-target rebinding, not a hand-edited start.
+    supervisor.cas_task_update_with_target(
+        serde_json::from_value(serde_json::json!({"id": TASK})).unwrap(),
+        Some("project:cas-c6e1-fixture-project"), Some("main"), true,
+        Some("Retarget the resumed delivery to the current train"), None,
+    ).await.unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    status(&f.core, "open").await;
+    start(&f.core).await;
+    let resumed = tasks.get(TASK).unwrap();
+    assert_eq!(resumed.deliverables.factory_branch_start.as_ref().unwrap().work_target,
+        resumed.deliverables.work_target.clone().unwrap());
+    // A target-sync merge imports a sibling, splitting attribution ranges.
+    std::fs::write(repo.join("sibling.py"), "sibling = True\n").unwrap();
+    git(&repo, &["add", "sibling.py"]);
+    git(&repo, &["commit", "-qm", "fix(cas-beef): sibling delivery"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+    git(&f.worker_path, &["merge", "--no-ff", "main", "-m", "merge current target"]);
+    std::fs::write(f.worker_path.join("parser.py"), "supported = True\n").unwrap();
+    let fragment = format!("changelog.d/{TASK}.md");
+    std::fs::write(f.worker_path.join(&fragment), "### Fixed — Checks\n\n- **Resume delivery checks** — Preserve the delivered parser correction.\n").unwrap();
+    git(&f.worker_path, &["add", "parser.py", &fragment]);
+    git(&f.worker_path, &["commit", "-qm", "fix(parser): retain implementation"]);
+    // A source task named as context is not a foreign ownership claim.
+    std::fs::write(f.worker_path.join(journey), original.replace("shared callback", "ported callback")).unwrap();
+    git(&f.worker_path, &["add", journey]);
+    git(&f.worker_path, &["commit", "-qm", "test(journeys): port barrier from cas-e074"]);
+    status(&f.core, "blocked").await;
+    status(&f.core, "open").await;
+    start(&f.core).await;
+    std::fs::write(f.worker_path.join(journey), original).unwrap();
+    git(&f.worker_path, &["add", journey]);
+    git(&f.worker_path, &["commit", "-qm", "test(journeys): restore the released journey"]);
+    f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
+    let current = tasks.get(TASK).unwrap();
+    let history = agents.get_lease_history(TASK, None).unwrap();
+    // Durable-anchor fallback must cover the same full first-parent delivery
+    // even when old installed metadata cannot validate the original start.
+    let window = resolve_task_commit_receipt_window(current.created_at, &history,
+        task_commit_identity(&current, Some(f.final_tip.clone())));
+    let ranges = task_attribution::range_bounds(&repo, "main", &window, Some(&f.final_tip)).unwrap();
+    let paths = task_attribution::paths(&repo, "main", &window, Some(&f.final_tip)).unwrap();
+    let required = crate::factory_worker_check::stability::required(
+        &repo, &f.final_tip, "main", &paths, Some(&ranges));
+    assert!(paths.contains(&"parser.py".into()) && paths.contains(&fragment), "{ranges:?}: {paths:?}");
+    assert!(!paths.contains(&"sibling.py".into()));
+    assert!(required.unwrap().is_empty());
+    let parked = close(&f).await;
+    assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
+    // Surviving ambiguous callbacks still fail closed, unlike the reverted edit.
+    std::fs::write(f.worker_path.join(journey), original.replace("shared callback", "actual callback")).unwrap();
+    git(&f.worker_path, &["add", journey]);
+    git(&f.worker_path, &["commit", "-qm", "test: actual changed callback"]);
+    let ambiguous = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    assert!(crate::factory_worker_check::stability::required(&repo, &ambiguous, "main",
+        &[journey.into()], Some(&[(base, ambiguous.clone())])).is_err());
+    std::fs::write(f.worker_path.join("foreign.py"), "foreign = True\n").unwrap();
+    git(&f.worker_path, &["add", "foreign.py"]);
+    git(&f.worker_path, &["commit", "-qm", "fix(cas-beef): foreign delivery"]);
+    let mut active = current;
+    active.status = TaskStatus::InProgress;
+    assert!(task_commit_identity_in_repo(&repo, &active, None).is_err());
+}

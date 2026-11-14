@@ -427,6 +427,7 @@ fn worker_skipped_branch_preserves_credential_cwd_cas_707a2() {
         "if false; then cd ~; fi; cat README.md".to_string(),
         "find ~ -name credentials.json -print".to_string(),
         format!("cd '{}' && printf safe; grep -R fixture-only ..", project.path().join("inner").display()),
+        format!("cd '{}' && printf safe; for item in one; do printf safe; done; grep -R fixture-only ..", project.path().join("inner").display()),
     ] {
         assert!(
             denial(handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap())

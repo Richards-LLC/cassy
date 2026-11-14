@@ -144,7 +144,10 @@ pub use daemon::{
 };
 pub use layout::{Direction, MissionControlLayout, PANE_SIDECAR, PaneGrid};
 pub use notification::{Notifier, NotifyBackend, NotifyConfig};
-pub(crate) use protocol::{COMMANDER_REPLAY_BYTES_PER_PANE, MAX_MESSAGE_SIZE, encode_message};
+pub(crate) use protocol::{
+    COMMANDER_REPLAY_BYTES_PER_PANE, FRAME_HEADER_SIZE, MAX_MESSAGE_SIZE, decode_length,
+    encode_message, local_gui_capabilities,
+};
 pub(crate) use session::{gui_socket_path, sessions_dir, valid_session_name, validate_daemon_start};
 pub use protocol::{
     ClientMessage, ConversationHistoryMessage, ConversationHistoryReply, DaemonMessage, OperatorNotice,

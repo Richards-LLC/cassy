@@ -667,6 +667,10 @@ async fn infrastructure_error_keeps_exact_dispatch_recoverable_cas_343d() {
         assert!(tasks.get(&task_id).unwrap().pending_verification);
         assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
         assert_eq!(open_verification_store(&fixture.root).unwrap().get_latest_for_task(&task_id).unwrap().unwrap().status, VerificationStatus::Error);
+        assert!(fixture.as_agent(&child_id).verification(json!({
+            "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+            "status":"approved", "summary":"Late verdict from failed child",
+        })).await.is_err());
         let caller = if mode == "redispatch" {
             let next = format!("replacement-{mode}");
             agents.register(&Agent::new_sub_agent(next.clone(), "task-verifier".into(), supervisor_id.into())).unwrap();
@@ -695,4 +699,27 @@ async fn infrastructure_error_keeps_exact_dispatch_recoverable_cas_343d() {
         assert!(history.iter().any(|v| v.status == VerificationStatus::Error));
         assert!(history.iter().any(|v| v.status == VerificationStatus::Approved));
     }
+    // A code rejection still consumes the exact review permanently.
+    let task_id = "cas-rejection-terminal";
+    let mut task = Task::new(task_id.into(), "Code rejection".into());
+    task.status = TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &fixture.root, task_id, supervisor_id, supervisor_id,
+        &VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    text(fixture.as_agent(supervisor_id).verification(json!({
+        "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+        "status":"rejected", "summary":"Code defect confirmed",
+    })).await.unwrap());
+    assert!(fixture.as_agent(supervisor_id).verification(json!({
+        "action":"add", "task_id":task_id, "dispatch_id":dispatch.id,
+        "status":"approved", "summary":"Attempt to replace code rejection",
+    })).await.is_err());
+    assert!(cas_store::issue_server_verifier_handoff(
+        &fixture.root, task_id, &dispatch.id, supervisor_id, "rejected-retry",
+    ).is_err());
+    assert_eq!(cas_store::get_verification_dispatch(&fixture.root, &dispatch.id).unwrap().state,
+        VerificationDispatchState::Resolved);
 }

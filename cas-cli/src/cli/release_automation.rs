@@ -340,8 +340,11 @@ pub fn context(args: &ContextArgs, root: &Path) -> Result<()> {
 }
 
 pub fn track(args: &TrackArgs, root: &Path) -> Result<()> {
+    track_with_preview(args, root, serde_json::from_reader(std::io::stdin().lock())?)
+}
+
+fn track_with_preview(args: &TrackArgs, root: &Path, preview: ReleasePreview) -> Result<()> {
     let (repo, train) = open_train(root)?;
-    let preview = serde_json::from_reader(std::io::stdin().lock())?;
     track_on_train(args, root, &repo, &train, preview)
 }
 // gate[G-121 release-verdict]: Release track checks (train branch, full SHA, train tip, version owner, input audit)
@@ -1583,10 +1586,7 @@ pub(super) mod tests {
             version: Some(track.version.clone()), inputs: None, train: Some(train.id.clone()) };
         let _cwd = env.enter_dir(temp.path());
         let current = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
-        // The store as the installed CLI left it: m299's column not yet added.
-        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
-            "ALTER TABLE tasks DROP COLUMN review_dispatch_id; DELETE FROM cas_migrations WHERE id = 299;
-             PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        lag_one_column(&root);
         let live = || {
             let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -1599,6 +1599,34 @@ pub(super) mod tests {
         let lagging = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
         assert_eq!(lagging, current);
         assert_eq!(live(), before);
+    }
+
+    /// The store as the installed 4.27 CLI left it: m299's column not yet added.
+    fn lag_one_column(root: &Path) {
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+            "ALTER TABLE tasks DROP COLUMN review_dispatch_id; DELETE FROM cas_migrations WHERE id = 299;
+             PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    }
+
+    /// cas-8e1b: `release track` is the cut's first store write; on a lagging
+    /// store it applies the candidate's migrations before reading the train.
+    #[test]
+    fn candidate_track_migrates_a_lagging_store_cas_8e1b() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, train, _owner, args) = fixture();
+        fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nrelease_train = true\n").unwrap();
+        let _cwd = env.enter_dir(temp.path());
+        let scope = cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap();
+        let preview = preview_scope(&root, temp.path(), scope).unwrap();
+        lag_one_column(&root);
+        track_with_preview(&args, &root, preview).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        assert!(conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'review_dispatch_id')",
+            [], |row| row.get::<_, bool>(0)).unwrap());
+        assert_eq!(serde_json::from_slice::<ReleaseContext>(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap())
+            .unwrap().train_id, train.id);
     }
 
     #[test]

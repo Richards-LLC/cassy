@@ -1291,10 +1291,12 @@ async fn cas_9efb_merge_ci_probe_runs_on_external_lane_without_blocking_control(
             job.lane == super::super::jobs::Lane::External && job.key == super::super::factory_jobs::DELIVERY_READ_KEY
         })
     });
+    let ci_queried_while_held = cas_dir.join("gh-requests").exists();
     let _ = returned_tx.send(());
     assert!(gate.join().unwrap(), "control must return before the delivery read is released");
     assert!(pending, "control must return while the delivery read is still pending");
     assert!(external_seen, "the actual merge read must use the external lane");
+    assert!(!ci_queried_while_held, "GitHub must be queried by the held external job, not control");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (events, inputs) = loop {

@@ -212,6 +212,34 @@ pub(crate) fn event(
     .with_metadata(metadata))
 }
 
+/// cas-692a7: backfill_delivery_cycles mints cycles after the fact, so a
+/// receipt-less verdict recorded before any cycle existed had none to bind.
+/// It still names its exact head, unless that head was later retired by an
+/// ended cycle. Natively minted cycles precede their dispatches and never
+/// qualify (cas-e88d).
+fn predates_cycles(
+    conn: &Connection,
+    task: &Task,
+    dispatch: &VerificationDispatch,
+    anchor: &str,
+) -> Result<bool, String> {
+    let rows = conn
+        .prepare("SELECT created_at, anchors, ended_at IS NOT NULL FROM delivery_cycles WHERE task_id=?1")
+        .map_err(|e| e.to_string())?
+        .query_map([&task.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (created, anchors, ended) in rows {
+        let created = chrono::DateTime::parse_from_rfc3339(&created).map_err(|e| e.to_string())?;
+        let anchors: Vec<String> = serde_json::from_str(&anchors).map_err(|e| e.to_string())?;
+        if dispatch.requested_at >= created || (ended && anchors.iter().any(|tip| tip == anchor)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Resolve by dispatch receipt_id first. A newer task-level dispatch cannot
 /// conceal this cycle's approval. Events cannot create approval authority.
 pub(crate) struct ApprovalMatch {
@@ -276,8 +304,9 @@ pub(crate) fn approved(
                 // cas-bd17: a task that never minted a delivery cycle (an
                 // explicit no-code report, cas-2ecc) has no cycle to bind; its
                 // receipt-less dispatch approves the head it reviewed, as
-                // before c8b54ca9fd. Cycle-bound tasks never take this path.
-                if cycle.is_none()
+                // before c8b54ca9fd. Cycle-bound tasks never take this path,
+                // except a verdict that predates every cycle (cas-692a7).
+                if (cycle.is_none() || predates_cycles(&conn, task, &dispatch, anchor)?)
                     && dispatch.repository.as_ref().is_some_and(|r| {
                         r.head_commit == anchor || r.anchor_commits.iter().any(|head| head == anchor)
                     })

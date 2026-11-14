@@ -37,6 +37,9 @@ cas-core = { path = "../crates/cas-core" }
 
 # Code analysis (workspace crate)
 cas-code = { path = "../crates/cas-code" }
+tree-sitter = "0.26"
+tree-sitter-typescript = "0.23"
+tree-sitter-rust = "0.24"
 
 # Diff parsing, rendering, and syntax highlighting
 cas-diffs = { path = "../crates/cas-diffs" }

@@ -154,6 +154,16 @@ fn request_close_verification_dispatch(
                     chrono::Utc::now().to_rfc3339(), task_id, before.execution_note, before.external_ref],
             )?;
             if changed != 1 {
+                #[cfg(test)]
+                {
+                    // [DEBUG-ea5d] Temporary predicate capture for inline metadata.
+                    let stored: (Option<String>, Option<String>) = tx.query_row(
+                        "SELECT execution_note, external_ref FROM tasks WHERE id=?1", [task_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    eprintln!("[DEBUG-ea5d] before={:?} closing={:?} stored={stored:?}",
+                        (&before.execution_note, &before.external_ref), (&closing.execution_note, &closing.external_ref));
+                }
                 return Err(cas_store::StoreError::Other("No-code proof changed before verification renewal; retry close".into()));
             }
         }

@@ -1794,7 +1794,9 @@ async fn approved_no_code_dispatch_closes_and_releases_claim_gh1930() {
             request["execution_note"] = "no-code".into();
             request["external_ref"] = PROOF.into();
         }
-        let pending = call(&f.worker, request.clone()).await;
+        let pending = f.worker.task(Parameters(serde_json::from_value(request.clone()).unwrap())).await
+            .unwrap_or_else(|error| panic!("{case}: {error:?}; stored={:?}", f.task(id)));
+        let pending = format!("{pending:?}");
         let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), id)
             .unwrap().unwrap_or_else(|| panic!("{case}: {pending}"));
         assert_eq!(f.task(id).status, TaskStatus::InProgress, "{case}: {pending}");

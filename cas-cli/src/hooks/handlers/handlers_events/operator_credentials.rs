@@ -96,7 +96,9 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
 
 fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
     if depth > SHELL_MAX_DEPTH {
-        return true;
+        // This scope is outside the shared admission grammar. Let that guard
+        // report shell.depth instead of inventing a credential-store access.
+        return false;
     }
     let mut cwd = initial_cwd.to_path_buf();
     let mut directory_stack = Vec::new();

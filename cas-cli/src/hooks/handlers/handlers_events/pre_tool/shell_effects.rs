@@ -259,9 +259,41 @@ fn inert_names(script: &str, projected: &str, lexed: &ShellLexed, parent: &Inert
         let raw = raw(index);
         let len = raw.bytes().take_while(|byte| identifier_byte(*byte)).count();
         let name = &raw[..len];
-        (is_shell_variable_name(name) && raw[len..].starts_with(['=', '+', '[']))
-            .then_some((name, &raw[len..]))
+        let rest = &raw[len..];
+        (is_shell_variable_name(name) && (rest.starts_with('=') || rest.starts_with("+=") || rest.starts_with('[')))
+            .then_some((name, rest))
     };
+    // `((…))` commands hold arithmetic, not shell words; the evaluated-span
+    // classification below judges every name inside them.
+    let mut arithmetic = vec![false; tokens.len()];
+    let mut at = 0;
+    while at + 1 < tokens.len() {
+        if tokens[at..at + 2] == [ShellToken::Operator('('), ShellToken::Operator('(')]
+            && lexed.ends[at] + 1 == lexed.ends[at + 1]
+        {
+            let mut balance = 0usize;
+            let mut end = at;
+            while end < tokens.len() {
+                match tokens[end] {
+                    ShellToken::Operator('(') => balance += 1,
+                    ShellToken::Operator(')') => {
+                        balance = balance.saturating_sub(1);
+                        if balance == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            for flag in &mut arithmetic[at..end.min(tokens.len() - 1) + 1] {
+                *flag = true;
+            }
+            at = end + 1;
+        } else {
+            at += 1;
+        }
+    }
     // Bindings keyed by source offset of the bound name.
     let mut bindings: HashMap<usize, (Binding, bool)> = HashMap::new();
     let mut invalid: HashSet<String> = HashSet::new();
@@ -272,6 +304,12 @@ fn inert_names(script: &str, projected: &str, lexed: &ShellLexed, parent: &Inert
     let mut wrapped = false;
     let mut index = 0;
     while index < tokens.len() {
+        if arithmetic[index] {
+            statement_start = false;
+            expect_command = false;
+            index += 1;
+            continue;
+        }
         let text = match &tokens[index] {
             ShellToken::Operator(ch) => {
                 match ch {

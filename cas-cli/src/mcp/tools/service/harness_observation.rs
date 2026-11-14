@@ -559,7 +559,16 @@ fn json_timestamp(value: &Value) -> Option<DateTime<Utc>> {
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
-fn claude_user_text(value: &Value) -> Option<&str> {
+/// A top-level textual user record: the Claude turn-start boundary. Local
+/// commands never reach the model, and an interrupt record ends a turn.
+pub(crate) fn claude_user_text(value: &Value) -> Option<&str> {
+    claude_text(value).filter(|text| !text.trim_start().starts_with(CLAUDE_INTERRUPT))
+}
+
+/// Claude records Esc as this user text and writes no turn_duration after it.
+const CLAUDE_INTERRUPT: &str = "[Request interrupted by user";
+
+fn claude_text(value: &Value) -> Option<&str> {
     if value.get("type").and_then(Value::as_str) != Some("user")
         || value.pointer("/message/role").and_then(Value::as_str) != Some("user")
         || value.get("isSidechain").and_then(Value::as_bool) == Some(true)
@@ -586,9 +595,10 @@ fn claude_is_assistant(value: &Value) -> bool {
         && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
 }
 
-fn claude_is_turn_end(value: &Value) -> bool {
+pub(crate) fn claude_is_turn_end(value: &Value) -> bool {
     (value.get("type").and_then(Value::as_str) == Some("system")
         && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"))
+        || claude_text(value).is_some_and(|text| text.trim_start().starts_with(CLAUDE_INTERRUPT))
         || (claude_is_assistant(value)
             && value
                 .pointer("/message/stop_reason")

@@ -34,6 +34,11 @@ import {
   type ThreadTurn,
 } from "./thread-model";
 
+/** What re-renders the working line; elapsed and last-activity text change in place. */
+function phaseSignature(phase?: PhaseLine): string {
+  return JSON.stringify([phase?.label, phase?.state, phase?.step, phase?.active, phase?.unavailable, phase?.elapsed !== undefined, phase?.lastActivityAt !== undefined]);
+}
+
 /**
  * Pebble thread (cas-d167). The conversation shows only operator turns and
  * supervisor→operator turns; the live pane never appears here — its raw text
@@ -795,7 +800,7 @@ export class ConversationView {
     const ended = this.options.sessionEnd?.();
     this.phase = ended ? undefined : this.options.phase?.();
     const working = !ended && (this.phase !== undefined || this.options.working?.() === true);
-    if (!this.phase?.active && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
+    if (!this.phase && this.phaseClock !== undefined) { clearInterval(this.phaseClock); this.phaseClock = undefined; }
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
     if (!reuseModel || !this.model) {
@@ -1423,23 +1428,16 @@ export class ConversationView {
     const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
     const phase = this.options.phase?.();
     const working = !this.options.sessionEnd?.() && (phase !== undefined || this.options.working?.() === true) && !sending;
-    const signature = (value?: PhaseLine): string => JSON.stringify([value?.label, value?.active, value?.unavailable, value?.elapsed !== undefined]);
-    if (working !== this.nodes.has("working") || signature(phase) !== signature(this.phase)) this.update();
-    else {
-      const clock = this.nodes.get("working")?.querySelector(".phase-clock");
-      if (clock && phase?.elapsed !== undefined) clock.textContent = phase.elapsed;
-    }
+    if (working !== this.nodes.has("working") || phaseSignature(phase) !== phaseSignature(this.phase)) this.update();
+    else if (phase) this.syncPhase(this.nodes.get("working"), phase);
   }
 
   private renderItem(node: HTMLElement, item: ThreadItem): void {
     const rows = this.options.workRows;
-    const signature = item.type === "working" ? JSON.stringify([this.phase?.label, this.phase?.active, this.phase?.unavailable, this.phase?.elapsed !== undefined])
+    const signature = item.type === "working" ? phaseSignature(this.phase)
       : item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
     if (node.dataset.signature === signature) {
-      if (item.type === "working") {
-        const clock = node.querySelector(".phase-clock");
-        if (clock && this.phase?.elapsed !== undefined) clock.textContent = this.phase.elapsed;
-      }
+      if (item.type === "working" && this.phase) this.syncPhase(node, this.phase);
       return;
     }
     node.dataset.signature = signature;
@@ -1477,7 +1475,7 @@ export class ConversationView {
     node.className = "turn working-turn";
     const phase = this.phase;
     const line = document.createElement("div"); line.className = phase?.unavailable ? "phase-line" : phase ? "working phase-line" : "working"; line.setAttribute("role", "status");
-    if (phase) line.dataset.active = String(phase.active);
+    if (phase) { line.dataset.active = String(phase.active); line.dataset.state = phase.state; }
     const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
     dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
     line.append(dots, document.createTextNode(phase?.label ?? "working"));
@@ -1485,13 +1483,28 @@ export class ConversationView {
       const clock = document.createElement("span"); clock.className = "phase-clock"; clock.setAttribute("role", "timer"); clock.setAttribute("aria-live", "off"); clock.textContent = phase.elapsed;
       line.append(document.createTextNode(" · "), clock);
     }
+    if (phase?.step) {
+      const step = document.createElement("span"); step.className = "phase-step"; step.textContent = phase.step;
+      line.append(document.createTextNode(" · "), step);
+    }
+    if (phase?.lastActivityAt) line.append(document.createTextNode(" · Last activity "), document.createElement("time"));
     node.replaceChildren(line);
-    if (phase?.active && phase.elapsed !== undefined && this.phaseClock === undefined) {
-      this.phaseClock = setInterval(() => {
-        const clock = this.nodes.get("working")?.querySelector(".phase-clock");
-        const current = this.options.phase?.();
-        if (this.element.isConnected && clock && current?.active && current.elapsed !== undefined) clock.textContent = current.elapsed;
-      }, 1000);
+    if (phase) this.syncPhase(node, phase);
+    // Facts expire without any new event, so the line re-reads its phase each
+    // second while one is shown, not only while it is busy.
+    if (phase && this.phaseClock === undefined) {
+      this.phaseClock = setInterval(() => { if (this.element.isConnected) this.refreshWorking(); }, 1000);
+    }
+  }
+
+  /** Moving values change in place; a new state or step re-renders the line. */
+  private syncPhase(node: HTMLElement | undefined, phase: PhaseLine): void {
+    const clock = node?.querySelector(".phase-clock");
+    if (clock && phase.elapsed !== undefined) clock.textContent = phase.elapsed;
+    const time = node?.querySelector("time");
+    if (time && phase.lastActivityAt && time.dateTime !== phase.lastActivityAt) {
+      time.dateTime = phase.lastActivityAt;
+      time.textContent = new Date(phase.lastActivityAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
     }
   }
 

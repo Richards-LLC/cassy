@@ -996,7 +996,7 @@ fn collect_script(
         }
         let substitution_scope = separator == Some('(')
             && matches!(statement.last(), Some(ShellToken::Word(word)) if word.ends_with('$'));
-        let incoming = dirs.clone();
+        let mut incoming = dirs.clone();
         let and_then =
             separator == Some('&') && tokens.get(end + 1) == Some(&ShellToken::Operator('&'));
         if !statement.is_empty() {
@@ -1278,7 +1278,7 @@ fn collect_script(
                 }
                 // The next && statement requires cd to have succeeded.
                 // Keep failed/skipped alternatives for later ;/|| joins.
-                if and_then {
+                if and_then || (read_stack && !assignment_may_skip) {
                     dirs = changed;
                 } else {
                     for directory in changed {
@@ -1287,6 +1287,12 @@ fn collect_script(
                 }
             }
 
+            // Keep the credential guard's existing destination policy for an
+            // unconditional directory command, including a later ; join.
+            // Conditional/skipped commands retain the shared alternatives.
+            if read_stack && !assignment_may_skip && matches!(name, Some("cd" | "pushd")) {
+                incoming = dirs.clone();
+            }
             if name == Some("cd") || (read_stack && matches!(name, Some("pushd" | "popd"))) {
                 directory_values.insert("PWD".into(), pwd_values(&dirs));
             }

@@ -98,7 +98,7 @@ pub(super) fn credential_store_access_denial(input: &HookInput, tool: &str) -> O
 
 fn operator_credential_refusal() -> String {
     format!(
-        "🚫 WORKER-DENIED OPERATOR CREDENTIALS (GH #1293): factory workers cannot read the operator's Neon or Vercel authentication stores. {}",
+        "🚫 WORKER-DENIED OPERATOR CREDENTIALS (GH #1293): factory workers cannot read operator authentication stores or pass file contents into protected credential environments for subprocesses. {}",
         blocker_steps("need operator credential access", NEED)
     )
 }

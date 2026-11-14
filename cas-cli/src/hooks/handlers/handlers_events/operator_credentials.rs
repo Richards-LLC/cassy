@@ -861,7 +861,94 @@ fn alias_references_store(reference: &str, include_parent: bool) -> bool {
     false
 }
 
+/// Recognize the direct file -> protected environment -> subprocess form.
+/// This is a bounded syntax recognizer, not general Python dataflow. Literal
+/// script text stays in its containing statement and cannot create assignments.
+fn script_file_credential_environment_flow(script: &str) -> bool {
+    use std::{collections::HashSet, sync::LazyLock};
+    static ENV_TARGET: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
+        r#"^([A-Za-z_]\w*|os\.environ)\s*\[\s*['\"]([A-Za-z_]\w*)['\"]\s*\]$"#).unwrap());
+    static FILE_READ: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
+        r#"^Path\s*\(\s*(?:'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\("#).unwrap());
+    static SUBPROCESS: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
+        r"(?s)^(?:[A-Za-z_]\w*\s*=\s*)?subprocess\.(?:run|call|Popen|check_output|check_call)\s*\((.*)\)\s*$").unwrap());
+    static ENV_ARGUMENT: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
+        r"(?:^|,)\s*env\s*=\s*([A-Za-z_]\w*(?:\.environ)?)\s*(?:,|$)").unwrap());
+    static QUOTED: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
+        r#"(?s)\"\"\".*?\"\"\"|'''.*?'''|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|#[^\n]*"#).unwrap());
+    let mut tainted = HashSet::<String>::new();
+    for statement in script_statements(script) {
+        let statement = statement.trim();
+        if let Some(call) = SUBPROCESS.captures(statement) {
+            let arguments = QUOTED.replace_all(&call[1], " ");
+            let env = ENV_ARGUMENT.captures(&arguments);
+            if env.as_ref().is_some_and(|capture| tainted.contains(&capture[1]))
+                || (env.is_none() && tainted.contains("os.environ"))
+            { return true; }
+        }
+        if statement.starts_with("os.exec") && tainted.contains("os.environ") {
+            return true;
+        }
+        let Some((target, value)) = statement.split_once('=') else { continue; };
+        let target = target.trim();
+        if let Some(env) = ENV_TARGET.captures(target) {
+            if cas_pty::PROTECTED_OPERATOR_ENV.contains(&env.get(2).unwrap().as_str()) {
+                if FILE_READ.is_match(value.trim()) {
+                    tainted.insert(env[1].to_string());
+                } else {
+                    tainted.remove(&env[1]);
+                }
+            }
+        } else if target.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+            // Rebinding a local environment discards the prior read value.
+            tainted.remove(target);
+        }
+    }
+    false
+}
+
+/// Split only executable statement boundaries. Quotes (including multiline
+/// source data), comments and parenthesized calls retain their own context.
+fn script_statements(script: &str) -> Vec<&str> {
+    let bytes = script.as_bytes();
+    let (mut at, mut start, mut depth) = (0, 0, 0usize);
+    let mut result = Vec::new();
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\'' | b'"' => {
+                let quote = bytes[at];
+                let width = if bytes.get(at..at + 3).is_some_and(|s| s == [quote; 3]) { 3 } else { 1 };
+                at += width;
+                while at < bytes.len() {
+                    if bytes[at] == b'\\' { at = (at + 2).min(bytes.len()); }
+                    else if bytes.get(at..at + width).is_some_and(|s| s.iter().all(|ch| *ch == quote)) {
+                        at += width; break;
+                    } else { at += 1; }
+                }
+                continue;
+            }
+            b'#' => {
+                if depth == 0 { result.push(&script[start..at]); }
+                while at < bytes.len() && bytes[at] != b'\n' { at += 1; }
+                if depth == 0 { start = at; }
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b';' | b'\n' if depth == 0 => {
+                result.push(&script[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    result.push(&script[start..]);
+    result
+}
+
 fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
+    if script_file_credential_environment_flow(script) { return true; }
     static PYTHON_GLOB_OPERAND: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| {
             regex::Regex::new(r"\bglob\.(?:glob|iglob)\(\s*(?:os\.path\.expanduser\(\s*)?$")

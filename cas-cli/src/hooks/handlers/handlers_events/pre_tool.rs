@@ -11625,6 +11625,19 @@ mod worker_commit_guard_tests {
             ("bash -c \"$cmd\"", "shell.dynamic_eval"),
             ("source \"$script\"", "shell.dynamic_eval"),
             ("xargs touch <<'EOF'\n/outside/p\nEOF", "shell.dynamic_command"),
+            // A literal list-file path still supplies unknown filenames at runtime.
+            ("sort --files0-from=-", "shell.dynamic_command"),
+            ("sort --files0-from names.list", "shell.dynamic_command"),
+            ("wc --files0-from=-", "shell.dynamic_command"),
+            ("wc --files0-from names.list", "shell.dynamic_command"),
+            ("find -files0-from names.list -print", "shell.dynamic_command"),
+            ("find -files0-from - -print", "shell.dynamic_command"),
+            ("sort --compress-program helper", "shell.dynamic_command"),
+            ("sort --compress-program=helper", "shell.dynamic_command"),
+            // GNU long-option abbreviations must retain the same effect.
+            ("sort --files0=-", "shell.dynamic_command"),
+            ("wc --files0=-", "shell.dynamic_command"),
+            ("sort --compress-prog=helper", "shell.dynamic_command"),
             ("$cmd safe", "shell.dynamic_command"),
             ("env \"$cmd\" safe", "shell.dynamic_command"),
         ] {

@@ -11562,6 +11562,10 @@ mod worker_commit_guard_tests {
             // Text-mode searches read policy documentation as ordinary data.
             "rg -a 'cas config set factory.write_roots' README.md",
             "rg --text 'cas config set factory.write_roots' README.md",
+            // Single-bracket/test operands are expanded data in Bash. Unlike
+            // [[ arithmetic, a non-integer produces an error without eval.
+            "for f in README.md; do c=$(git rev-list --count HEAD -- \"$f\"); if [ \"$c\" -gt 0 ]; then printf '%s\\n' \"$f\"; fi; done",
+            "test x -eq 0",
             // GH #1816 exact interpreter list, previously unverified.
             "python3 -I tests/soundwave-desktop-test.py\npython3 -I tests/system-capture-test.py\nbash tests/install-zram-topology-test.sh\nbash tests/restore-soundwave-resilience-test.sh",
             // Valid list continuations, redirects and function bodies retain admission.

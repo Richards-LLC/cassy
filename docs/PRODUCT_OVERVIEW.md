@@ -347,6 +347,33 @@ Release inventory and closeout require the task's own first-parent content at th
 
 Commander's conversation working line follows the supervisor's native turn, from its prompt to the harness's own turn end (Claude `turn_duration` or an Esc interrupt; Codex task completion), across every tool inside it. While busy it names the running tool without its input, shows the turn's elapsed time and the last transcript activity in local time, and colors its dots by state: working, idle or unknown. Status arrives with each machine heartbeat; facts older than fifteen seconds, or a stopped session daemon, read as unknown and possibly stuck rather than idle. Without any reported phase the line stays absent, so a delivery receipt never implies work.
 
+- **Close measures the checked-out delivery lane** - when a task started on the worker's lane and a per-task branch `factory/<worker>-<task>` also exists, close parks the lane if the worker has it checked out and it holds the task's commits since start. The per-task branch is parked only when the worker is on it, or when the lane has no work for this task.
+
+- **Machine-wide worker census** - spawn admission and `worker_status` read one census of live workers across every local factory project. Both print it as "N/M live on this machine: <project> <count>, …", so a refusal shows which projects fill the limit.
+
+- **Live capacity wait readings** - a capacity wait keeps the figure its last refusal measured, labelled "cause at last refusal", and every later report (`worker_status` and the 20-minute supervisor notice) adds a "now" reading of load, builders and disk taken when the report is produced.
+
+- **Inherited worker limit** - `factory.max_workers` resolves the project value, then `~/.cas/config.toml`, then eight. Config get, list and reset, spawn admission and advertised peer capacity all use that one value, and readback and capacity refusals name its source (project, user or default).
+
+Conceptual search accepts shell flags as literal keywords after parsing structured filters, so pasted command terms can be searched alongside memory and task descriptions.
+
+- **Shared release proof work** — Release previews reuse successful parallel-edit
+  proofs across deliveries that traverse the same immutable merge edge, file
+  and live line positions. Storage is bounded; failed measurements remain
+  retryable and each delivery retains its ownership and review checks.
+
+### Factory merge admission
+
+Parking requires a clean merge against the current train. A train update rechecks parked siblings before queued merges resume; conflicting deliveries reopen for their assigned workers, naming the files to resolve and invalidating the old proof cycle.
+
+- **Returned deliveries stay in branch history** - when a parked delivery is returned for changes or a merge conflict, its tip stays reachable on the branch. The returned task's start lists that tip under close checks, and the worker push guard (H-40) refuses a rebase that would drop it; merging the target in is the supported recovery.
+
+Search returns the last committed results while another writer owns the task search index. The next search reconciles canonical task rows once the writer is available; uncommitted changes remain invisible.
+
+- **Release preview's read-only boundary** - `cas release preview` writes no task, receipt, operation, sync-queue, artifact-cache or notification data and leaves every existing store file unchanged. It reads through ordinary SQLite read-only connections with normal locking, so SQLite may add its `cas.db-shm` and `cas.db-wal` coordination files when they are absent; preview does not promise that no file is created.
+
+A no-code task's close request and portable evidence are saved with its verification dispatch. Approval resumes that same close through the ordinary gates and releases ownership when it completes. A changed assignment, replaced proof or independent hold prevents automatic completion. An identical approval retry preserves the existing terminal state and completion notice.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

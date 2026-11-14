@@ -1,5 +1,3 @@
-## [Unreleased]
-
 ### Fixed — Hooks
 
 - **H-11 allows command help** — Was: `cas config grant-write --help` was

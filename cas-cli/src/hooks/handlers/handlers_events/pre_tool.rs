@@ -10274,6 +10274,22 @@ EOF
         env.set("CAS_CLONE_PATH", &worktree);
         let mut mismatches = Vec::new();
         for (command, denied) in [
+            // Find actions have their own paths and child execution contexts.
+            ("find . -fprint ../../ordinary-data.txt", true),
+            ("find . -fprint0 ../../ordinary-data.txt", true),
+            ("find . -fprintf ../../ordinary-data.txt '%p'", true),
+            ("find . -fls ../../ordinary-data.txt", true),
+            ("find ../.. -name ordinary-data.txt -delete", true),
+            ("find . -exec touch ../../ordinary-data.txt \\;", true),
+            ("find . -execdir touch relative.txt \\;", true),
+            ("find . -ok touch ../../ordinary-data.txt \\;", true),
+            ("find . -okdir touch relative.txt \\;", true),
+            ("find src -type f -delete", false),
+            ("find . -fprint found.txt -fprintf formatted.txt '%p' -fls details.txt", false),
+            ("find . -name -delete -printf '%p'", false),
+            ("find . -exec touch explicit.txt \\;", false),
+            ("find . -exec printf '%s' '{}' +", false),
+            ("find . -execdir printf '%s' '{}' +", false),
             // Consumer destinations are writes even without a shell redirect.
             ("sort -o ../../ordinary-data.txt names.txt", true),
             ("sort --output=../../ordinary-data.txt names.txt", true),
@@ -11718,6 +11734,11 @@ mod worker_commit_guard_tests {
             ("wc --files0-from names.list", "shell.dynamic_command"),
             ("find -files0-from names.list -print", "shell.dynamic_command"),
             ("find -files0-from - -print", "shell.dynamic_command"),
+            ("find . -exec \"$cmd\" '{}' \\;", "shell.dynamic_command"),
+            ("find . -exec touch '{}' +", "shell.dynamic_command"),
+            ("find . -exec cat '{}' \\;", "shell.dynamic_command"),
+            ("find . -execdir cat relative.txt \\;", "shell.dynamic_command"),
+            ("find . -name '*.rs' -future-action", "shell.unknown_syntax"),
             ("sort --compress-program helper", "shell.dynamic_command"),
             ("sort --compress-program=helper", "shell.dynamic_command"),
             // GNU long-option abbreviations must retain the same effect.

@@ -13,6 +13,58 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::process::Command;
 use tempfile::TempDir;
 
+#[tokio::test]
+async fn review_assignment_refuses_worker_before_acceptance_gh1908() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, supervisor) = setup_cas_as(&mut env, AgentRole::Supervisor);
+    let root = temp.path().join(".cas");
+    env.set("CAS_FACTORY_MODE", "1");
+    let agents = open_agent_store(&root).unwrap();
+    let implementer = cas::types::Agent::new_with_role(
+        "rapid-lion".into(), "rapid-lion".into(), AgentRole::Worker,
+    );
+    let reviewer = cas::types::Agent::new_with_role(
+        "solid-jaguar".into(), "solid-jaguar".into(), AgentRole::Worker,
+    );
+    agents.register(&implementer).unwrap();
+    agents.register(&reviewer).unwrap();
+    let tasks = open_task_store(&root).unwrap();
+    let mut delivery = cas::types::Task::new("cas-delivery".into(), "No-code delivery".into());
+    delivery.assignee = Some(implementer.name.clone());
+    tasks.add(&delivery).unwrap();
+    let supervisor_id = format!("test-session-{}", std::process::id());
+    let dispatch = cas_store::create_verification_dispatch(
+        &root, &delivery.id, &implementer.id, &supervisor_id,
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    ).unwrap();
+    let worker = cas::mcp::CasCore::with_daemon(root.clone(), None, None);
+    worker.set_agent_id_for_testing(reviewer.id.clone());
+    let verdict = serde_json::from_value(serde_json::json!({
+        "task_id": delivery.id, "dispatch_id": dispatch.id,
+        "status": "approved", "summary": "Independent read-only review",
+    })).unwrap();
+    let error = worker.cas_verification_add(Parameters(verdict)).await.unwrap_err();
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_none());
+
+    let service = CasService::new(supervisor, None);
+    // The incident's separate worker and exact dispatch, through the real MCP
+    // router. The review target is data; title/description grant no authority.
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "create", "title": "Independent candidate review",
+        "task_type": "chore", "execution_note": "no-code",
+        "assignee": reviewer.name, "review_dispatch_id": dispatch.id,
+    })).unwrap();
+    let error = service.task(Parameters(request)).await
+        .expect_err("a worker cannot accept a review requiring verifier authority");
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert_eq!(tasks.list(None).unwrap().len(), 1);
+    assert!(agents.list_active_leases().unwrap().is_empty());
+    let unchanged = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+    assert_eq!(unchanged.state, cas::types::VerificationDispatchState::Pending);
+    assert_eq!(unchanged.verifier_agent_id, None);
+}
+
 #[path = "../../fixtures/ci_check_run.rs"]
 mod ci_check_run;
 

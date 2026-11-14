@@ -385,6 +385,13 @@ pub(crate) fn assigned_worker_checkout(cas_root: &Path, task: &cas_types::Task) 
         .context("assigned worker checkout is unavailable")
 }
 
+pub(crate) fn read_supervisor_test_request(path: &Path) -> Result<String> {
+    if std::fs::metadata(path)?.len() > 512 * 1024 {
+        bail!("supervisor evidence payload exceeds 512 KiB");
+    }
+    Ok(std::fs::read_to_string(path)?)
+}
+
 /// Record an existing supervisor-run selection under the assigned worker's
 /// normal receipt key. The authority, task binding and provenance are checked
 /// here so MCP and CLI use exactly the same path.
@@ -2369,6 +2376,16 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
 mod tests {
     use super::*;
 
+    #[test]
+    fn missing_supervisor_test_request_names_its_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("request.json");
+
+        let error = read_supervisor_test_request(&path).unwrap_err().to_string();
+
+        assert!(error.contains(path.to_str().unwrap()), "{error}");
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b() {
@@ -2815,8 +2832,8 @@ exec "$@" > target/raw.log 2>&1"#);
         let mut task = cas_types::Task::new("cas-70b8".into(), "selected log".into());
         task.assignee = Some("worker".into());
         tasks.add(&task).unwrap();
-        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-        core.set_agent_id_for_testing("supervisor-id".into());
+        env.set("CAS_SESSION_ID", "supervisor-id");
+        let core = crate::mcp::CasCore::for_cli(root.clone());
         let mut evidence = serde_json::json!({"head": head, "repo": repo.canonicalize().unwrap(), "cargo_args": args, "log_path": raw, "exit_code": 0});
         assert!(record_supervisor_test(&core, "cas-70b8", &evidence.to_string()).is_err(), "combined guard evidence must remain inadmissible");
         evidence["log_path"] = serde_json::json!(&selected);

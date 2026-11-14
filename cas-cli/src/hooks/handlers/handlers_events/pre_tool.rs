@@ -3036,10 +3036,10 @@ fn collect_git_write_targets(
                     && path_word(script).literal == Some(true)
             };
             // Syntax checks require exact raw noexec flags followed by raw
-            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Redirects
-            // and expansions can supply +n/-c and execute a payload.
+            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Its own
+            // argument projection must match; another statement's redirect
+            // does not change this invocation's mode or operands.
             let syntax_check = command_index == 0
-                && !lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('<' | '>')))
                 && shell_statement_arguments(command).iter().any(|statement| {
                     if statement != &words { return false; }
                     let flags = statement[1..].iter()

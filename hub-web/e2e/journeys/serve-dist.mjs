@@ -3,7 +3,7 @@
 // producer supplies its manifest; standalone named journeys build one here.
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync } from 'node:fs';
+import { existsSync, fstatSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,16 @@ const port = Number(process.argv[2] ?? process.env.HUB_JOURNEY_PORT);
 if (!Number.isInteger(port) || port <= 0) {
   console.error('serve-dist: pass the port (playwright.config.ts picks this checkout\'s own; see e2e/checkout-ports.mjs)');
   process.exit(2);
+}
+// cas-5873: Playwright launches this server in its own process group with a
+// stdin pipe and reaps that group only from its own orderly exit. A runner
+// killed while cancelling leaves the group listening on this checkout's port,
+// so the next run fails EADDRINUSE. The pipe closes whenever the runner dies,
+// however it dies, so end with it, as Vite's fixture server already does.
+const stdin = fstatSync(0);
+if (stdin.isFIFO() || stdin.isSocket()) {
+  process.stdin.on('end', () => process.exit(0));
+  process.stdin.resume();
 }
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.wasm': 'application/wasm', '.woff2': 'font/woff2' };
 

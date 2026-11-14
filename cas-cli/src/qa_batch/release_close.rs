@@ -79,13 +79,11 @@ pub(crate) fn prepare(
         task: &Task,
         receipt: &QaBatchReceipt,
     ) -> Self {
+        let anchor = resolved_delivery_anchor(repo, task, &receipt.staging_sha);
         let proofs = release_proof_refs(
             std::slice::from_ref(receipt),
             &task.id,
-            task.deliverables
-                .factory_branch_anchor
-                .as_deref()
-                .unwrap_or(""),
+            anchor.as_deref().unwrap_or(""),
         );
         Self {
             root: root.to_path_buf(),
@@ -111,8 +109,8 @@ pub(crate) fn prepare(
                 },
                 deliveries: vec![ReleaseDelivery {
                     task_id: task.id.clone(),
-                    generation: task.updated_at.to_rfc3339(),
-                    anchor: delivery_anchor(repo, task),
+                    generation: delivery_generation(task),
+                    anchor,
                     base_sha: task
                         .deliverables
                         .factory_branch_start
@@ -226,7 +224,7 @@ pub(crate) fn validate_task(root: &Path, task: &Task) -> Result<(), String> {
             if let Some(error) = context.member_error(&task.id) {
                 return Err(error.to_string());
             }
-            if delivery.generation != task.updated_at.to_rfc3339()
+            if delivery.generation != delivery_generation(task)
                 || delivery.base_sha.as_deref()
                     != task
                         .deliverables
@@ -681,7 +679,7 @@ pub(crate) fn reconcile_members(
                 return Err(exception.code.close_gate());
             }
             let delivery = inventory.deliveries.iter().find(|d| d.task_id == id).ok_or("RELEASE_MEMBERSHIP_MISSING")?;
-            if task.updated_at.to_rfc3339() != delivery.generation { return Err("RELEASE_GENERATION_CHANGED".into()); }
+            if delivery_generation(&task) != delivery.generation { return Err("RELEASE_GENERATION_CHANGED".into()); }
             if review.ledger_reverts(&id, delivery.anchor.as_deref()) {
                 return Err(ReleaseInventoryCode::Reverted.close_gate());
             }

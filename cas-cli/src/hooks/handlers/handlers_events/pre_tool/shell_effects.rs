@@ -960,7 +960,13 @@ fn collect_script(
                         .cloned()
                         .unwrap_or_else(|| vec!["$HOME".into()]),
                     [target] if !target.starts_with('-') => {
-                        expand_factory_shell_word(target, &directory_values)
+                        // An expansion that may be empty can leave `cd` with no
+                        // operand, which changes to HOME.
+                        let mut targets = expand_factory_shell_word(target, &directory_values);
+                        if targets.iter().any(String::is_empty) {
+                            targets.extend(directory_values.get("HOME").cloned().unwrap_or_else(|| vec!["$HOME".into()]));
+                        }
+                        targets
                     }
                     _ => vec!["$UNRESOLVED_CWD".into()],
                 };
@@ -1053,6 +1059,24 @@ fn collect_script(
                         }
                     } else {
                         directory_values.insert(name.into(), expanded);
+                    }
+                }
+            }
+
+            // Builtins that write a variable leave its value unresolved.
+            let writes_variables = match name {
+                Some("unset" | "read" | "readarray" | "mapfile" | "declare" | "typeset" | "local"
+                    | "readonly" | "getopts" | "for" | "select") => true,
+                Some("printf") => args.first().is_some_and(|arg| arg.starts_with("-v")),
+                Some("wait") => args.iter().any(|arg| arg.starts_with('-') && arg.contains('p')),
+                _ => false,
+            };
+            if writes_variables {
+                for arg in args {
+                    let written = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+                    let written = written.strip_prefix("-v").unwrap_or(written);
+                    if is_shell_variable_name(written) {
+                        directory_values.insert(written.into(), vec![format!("${written}")]);
                     }
                 }
             }

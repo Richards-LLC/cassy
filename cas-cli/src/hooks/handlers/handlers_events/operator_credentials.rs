@@ -103,54 +103,113 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     // Nested shells are not standalone listings, so their payloads never
     // reach here with inert names.
     let names_inert = depth == 0 && listed_names_stay_inert(command);
+    let (parents, roots) = unresolved_directories(initial_cwd);
+    // An unresolved directory may be a store's parent, or the store itself
+    // when an operand names a file that exists there.
+    let anywhere = |words: &[String], opened: &[String], bodies: &[String]| {
+        parents.iter().any(|cwd| read_references_store(words, opened, bodies, cwd, depth, names_inert))
+            || roots.iter().any(|root| names_existing_file(words, opened, root))
+    };
     for context in super::pre_tool::shell_read_contexts(command, initial_cwd) {
-        let cwd = context.cwd.as_deref().unwrap_or(initial_cwd);
-        let words = context.words;
-        if context.opened.iter().any(|path| path_references_store(path, cwd, false))
-            || super::pre_tool::shell_wrapper_read_paths(&words).iter()
-                .any(|(path, wrapper)| path_references_store(path, &wrapper_cwd(&words[..*wrapper], cwd), false))
-            || context.bodies.iter().any(|body| script_constructs_store_path(body, cwd))
+        let known = context.cwd.as_deref().unwrap_or(initial_cwd);
+        if read_references_store(&context.words, &context.opened, &context.bodies, known, depth, names_inert)
+            || (context.cwd.is_none() && anywhere(&context.words, &context.opened, &context.bodies))
         { return true; }
-        let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
-            continue;
-        };
-        let executable = Path::new(&words[command_index])
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&words[command_index])
-            .to_ascii_lowercase();
-        let args = &words[command_index + 1..];
-
-        // Inspect shell payloads as nested statement lists so a `cd` inside a
-        // `sh -c` or `bash -c` does not leak into the caller's working dir.
-        if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-            let child_cwd = wrapper_cwd(&words[..command_index], cwd);
-            let reads_store = match shell_input(args) {
-                ShellInput::Command(at) => args.get(at)
-                    .is_some_and(|payload| shell_references_store(payload, &child_cwd, depth + 1)),
-                ShellInput::Script(at) => args.get(at)
-                    .is_some_and(|path| path_references_store(path, &child_cwd, false)),
-                ShellInput::Stdin | ShellInput::Display => false,
-            };
-            if reads_store {
-                return true;
+        // An operand whose leading directory is unresolved keeps only its
+        // literal tail, read from any such directory; other operands are inert.
+        let command_index = super::pre_tool::unwrapped_command_index(&context.words).unwrap_or(usize::MAX);
+        let mut dynamic = false;
+        let mut project = |words: &[String], first: usize| words.iter().enumerate().map(|(at, word)| {
+            if at < first { return word.clone(); }
+            match unresolved_tail(word) {
+                Some(tail) => { dynamic = true; tail }
+                None if word.starts_with('-') => word.clone(),
+                None => "/dev/null".into(),
             }
-            continue;
-        }
-        if executable == "eval" {
-            if shell_references_store(&args.join(" "), cwd, depth + 1) {
-                return true;
-            }
-            continue;
-        }
-
-        let names_only = names_inert && lists_names_only(&executable, args);
-        if statement_references_store(&words, cwd, names_only) {
-            return true;
-        }
+        }).collect::<Vec<_>>();
+        let words = project(&context.words, command_index.saturating_add(1));
+        let opened = project(&context.opened, 0);
+        if dynamic && anywhere(&words, &opened, &[]) { return true; }
     }
 
     false
+}
+
+/// Strict ancestors of every operator store root, and the roots themselves.
+fn unresolved_directories(initial: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let roots = store_roots(initial);
+    let mut parents: Vec<PathBuf> = Vec::new();
+    for directory in roots.iter().flat_map(|root| root.ancestors().skip(1)) {
+        if !roots.iter().any(|root| root == directory) && !parents.iter().any(|known| known == directory) {
+            parents.push(directory.to_path_buf());
+        }
+    }
+    (parents, roots)
+}
+
+/// A relative operand that names an existing entry under a store root.
+fn names_existing_file(words: &[String], opened: &[String], root: &Path) -> bool {
+    let first = super::pre_tool::unwrapped_command_index(words).map_or(words.len(), |at| at + 1);
+    words[first.min(words.len())..].iter().chain(opened).any(|word| {
+        let word = normalize_path_operand(word);
+        !word.is_empty() && !word.starts_with(['-', '/', '~', '$']) && !matches!(word, "." | "..")
+            && root.join(word).symlink_metadata().is_ok()
+    })
+}
+
+/// The literal path tail after a word's last expansion, when that expansion
+/// is followed by `/` and so supplies only the leading directory.
+fn unresolved_tail(word: &str) -> Option<String> {
+    let last = word.rfind(['$', '`', ')', '}'])?;
+    let mut tail = &word[last + 1..];
+    if word.as_bytes()[last] == b'$' {
+        tail = tail.trim_start_matches(|ch: char| ch == '_' || ch.is_ascii_alphanumeric());
+    }
+    let tail = tail.strip_prefix('/')?.trim_start_matches('/');
+    (!tail.is_empty() && !tail.contains(['$', '`'])).then(|| tail.to_string())
+}
+
+fn read_references_store(
+    words: &[String],
+    opened: &[String],
+    bodies: &[String],
+    cwd: &Path,
+    depth: usize,
+    names_inert: bool,
+) -> bool {
+    if opened.iter().any(|path| path_references_store(path, cwd, false))
+        || super::pre_tool::shell_wrapper_read_paths(words).iter()
+            .any(|(path, wrapper)| path_references_store(path, &wrapper_cwd(&words[..*wrapper], cwd), false))
+        || bodies.iter().any(|body| script_constructs_store_path(body, cwd))
+    { return true; }
+    let Some(command_index) = super::pre_tool::unwrapped_command_index(words) else {
+        return false;
+    };
+    let executable = Path::new(&words[command_index])
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&words[command_index])
+        .to_ascii_lowercase();
+    let args = &words[command_index + 1..];
+
+    // Inspect shell payloads as nested statement lists so a `cd` inside a
+    // `sh -c` or `bash -c` does not leak into the caller's working dir.
+    if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
+        let child_cwd = wrapper_cwd(&words[..command_index], cwd);
+        return match shell_input(args) {
+            ShellInput::Command(at) => args.get(at)
+                .is_some_and(|payload| shell_references_store(payload, &child_cwd, depth + 1)),
+            ShellInput::Script(at) => args.get(at)
+                .is_some_and(|path| path_references_store(path, &child_cwd, false)),
+            ShellInput::Stdin | ShellInput::Display => false,
+        };
+    }
+    if executable == "eval" {
+        return shell_references_store(&args.join(" "), cwd, depth + 1);
+    }
+
+    let names_only = names_inert && lists_names_only(&executable, args);
+    statement_references_store(words, cwd, names_only)
 }
 
 fn statement_references_store(

@@ -455,7 +455,7 @@ impl CloudSyncer {
                         upserts_by_project
                             .entry(target_project.to_string())
                             .or_default()
-                            .push((item, value));
+                            .push((item, self.with_base_revision(item, value)));
                     }
                     Err(_) => {
                         let _ = self
@@ -508,6 +508,10 @@ impl CloudSyncer {
                 Ok(response) => {
                     self.rearm_after_successful_team_contact(team_id, &mut errors);
                     if let Some(body) = response.as_ref() {
+                        // Preserve a rejected known base until reconciliation;
+                        // clearing it would turn the next team push into an
+                        // unguarded timestamp write over unseen peer notes.
+                        self.record_accepted_revisions(entity_key, body);
                         self.maybe_adopt_team_canonical_id(body);
                     }
 

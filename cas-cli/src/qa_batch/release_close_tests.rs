@@ -21,11 +21,15 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     git(&["config", "user.email", "fixture@example.test"]);
     git(&["remote", "add", "origin", "https://github.com/example/reverted.git"]);
     std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
-    git(&["add", ".gitignore"]);
+    std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+    std::fs::write(repo.join("docs/PRODUCT_OVERVIEW.md"), "# Product\n\n## Core Concepts\n\nBaseline.\n").unwrap();
+    std::fs::write(repo.join("docs/qa/journeys.yaml"), "version: 1\nbug_families: {}\njourneys: []\ninvariants: {}\n").unwrap();
+    git(&["add", ".gitignore", "docs"]);
     git(&["commit", "-qm", "base"]);
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut anchors = BTreeMap::new();
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-retained"] {
+    let mut foreign = None;
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained"] {
         let base = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-qb", id]);
         let source = format!("{id}.rs");
@@ -33,6 +37,26 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         git(&["add", &source]);
         git(&["commit", "-qm", "delivery source"]);
         let first = git(&["rev-parse", "HEAD"]);
+        if id == "cas-retained" {
+            git(&["checkout", "-qb", "train-input", "main"]);
+            std::fs::write(repo.join("foreign.rs"), "fn other_delivery() {}\n").unwrap();
+            git(&["add", "foreign.rs"]);
+            git(&["commit", "-qm", "another delivery"]);
+            foreign = Some(git(&["rev-parse", "HEAD"]));
+            git(&["checkout", "-q", "main"]);
+            git(&["merge", "--ff-only", "train-input"]);
+            git(&["checkout", "-q", id]);
+            git(&["merge", "--no-ff", "-qm", "sync train into delivery", "main"]);
+        }
+        if id == "cas-retained" || id == "cas-unfolded" {
+            std::fs::create_dir_all(repo.join("docs/product-overview.d")).unwrap();
+            std::fs::create_dir_all(repo.join("docs/qa/bug-families")).unwrap();
+            std::fs::write(repo.join(format!("docs/product-overview.d/{id}.md")),
+                format!("## Core Concepts\n\nOverview for {id}.\n")).unwrap();
+            std::fs::write(repo.join(format!("docs/qa/bug-families/{id}.yaml")),
+                format!("title: Family for {id}\ntasks: [{id}]\n")).unwrap();
+            git(&["add", "docs/product-overview.d", "docs/qa/bug-families"]);
+        }
         // The delivery's final commit alone cannot describe its net effect.
         let doc = format!("{id}.md");
         std::fs::write(repo.join(&doc), "Delivery guide\n").unwrap();
@@ -60,8 +84,18 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         tasks.record_merge_admission(id, &merge, cas_types::MergeCiAdmission::Green).unwrap();
         anchors.insert(id.to_string(), anchor);
     }
-    let published = git(&["rev-parse", "HEAD"]);
     let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    git(&["revert", "--no-edit", foreign.as_deref().unwrap()]);
+    // One real release compile consumes the retained member's fragments.
+    // A deletion in the same release without folded bytes stays a loss.
+    git(&["rm", "docs/product-overview.d/cas-unfolded.md", "docs/qa/bug-families/cas-unfolded.yaml"]);
+    let compile = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/doc-fragments.py"))
+        .args(["compile", "--root"]).arg(&repo).output().unwrap();
+    assert!(compile.status.success(), "{compile:?}");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", &format!("release: {tag}")]);
+    let published = git(&["rev-parse", "HEAD"]);
     git(&["tag", &tag]);
     let ledger = root.join("release-review.md");
     let body = concat!(
@@ -105,7 +139,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag: tag.clone() },
     )).unwrap();
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "{id}");
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "RELEASE_MEMBER_REVERTED"), "{id}: {:?}", result.members.get(id));
         assert!(inventory.exceptions.iter().any(|e| e.task_id == id && serde_json::to_value(&e.code).unwrap() == "reverted"));

@@ -116,7 +116,7 @@ pub(super) fn validated_started_delivery(
     let Some(current_target) = task.deliverables.work_target.as_ref() else { return Ok(None); };
     // Retargeting nonempty work preserves the original start for audit. Its
     // repository, assignee and base still fence ownership; upstream is current.
-    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
+    if current_target.repo_selector != start.work_target.repo_selector
         || task.assignee.as_deref() != Some(start.assignee.as_str())
         || !(checkout_identity_matches
             || crate::mcp::tools::core::task::repo_context::git_layout(repo)

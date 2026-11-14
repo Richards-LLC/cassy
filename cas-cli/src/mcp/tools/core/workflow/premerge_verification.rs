@@ -249,6 +249,10 @@ struct Promotion {
 
 mod peer;
 mod automatic;
+#[cfg(unix)]
+mod factory_launch;
+#[cfg(unix)]
+pub(crate) use factory_launch::launch as launch_factory_verifier;
 pub(crate) mod cycle;
 pub(crate) use peer::{PeerReceiptIngested, TAG as PEER_PREMERGE_TAG, ingest_peer_receipt};
 

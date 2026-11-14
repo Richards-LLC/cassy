@@ -278,6 +278,7 @@ pub use verification_store::{
     request_changes_for_parked_delivery, request_changes_for_parked_delivery_with_merge_sources,
     resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
+    retry_verification_dispatch_after_error_with_conn, recover_errored_verification_dispatch_with_conn,
     save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
 };
 

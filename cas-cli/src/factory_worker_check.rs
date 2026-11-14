@@ -394,6 +394,30 @@ pub(crate) fn assigned_worker_checkout(cas_root: &Path, task: &cas_types::Task) 
         .context("assigned worker checkout is unavailable")
 }
 
+pub(crate) fn read_supervisor_test_request(path: &Path) -> Result<String> {
+    let metadata = std::fs::metadata(path).with_context(|| {
+        format!(
+            "test receipt request file {} is missing; create the JSON evidence file and pass its path to --request",
+            path.display()
+        )
+    })?;
+    if metadata.len() > 512 * 1024 {
+        bail!("supervisor evidence payload exceeds 512 KiB");
+    }
+    std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read test receipt request file {}", path.display()))
+}
+
+pub(crate) fn record_supervisor_test_from_cli(
+    cas_root: &Path,
+    task_id: &str,
+    request: &Path,
+) -> Result<String> {
+    let payload = read_supervisor_test_request(request)?;
+    let core = crate::mcp::CasCore::for_cli(cas_root.to_path_buf());
+    record_supervisor_test(&core, task_id, &payload)
+}
+
 /// Record an existing supervisor-run selection under the assigned worker's
 /// normal receipt key. The authority, task binding and provenance are checked
 /// here so MCP and CLI use exactly the same path.
@@ -2411,6 +2435,16 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
 mod tests {
     use super::*;
 
+    #[test]
+    fn missing_supervisor_test_request_names_its_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("request.json");
+
+        let error = read_supervisor_test_request(&path).unwrap_err().to_string();
+
+        assert!(error.contains(path.to_str().unwrap()), "{error}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn changed_tests_need_five_consecutive_capped_passes_cas_9e02e() {
@@ -2931,12 +2965,14 @@ exec "$@" > target/raw.log 2>&1"#);
         let mut task = cas_types::Task::new("cas-70b8".into(), "selected log".into());
         task.assignee = Some("worker".into());
         tasks.add(&task).unwrap();
-        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-        core.set_agent_id_for_testing("supervisor-id".into());
+        env.set("CAS_SESSION_ID", "supervisor-id");
         let mut evidence = serde_json::json!({"head": head, "repo": repo.canonicalize().unwrap(), "cargo_args": args, "log_path": raw, "exit_code": 0});
-        assert!(record_supervisor_test(&core, "cas-70b8", &evidence.to_string()).is_err(), "combined guard evidence must remain inadmissible");
+        let request = dir.path().join("request.json");
+        std::fs::write(&request, evidence.to_string()).unwrap();
+        assert!(record_supervisor_test_from_cli(&root, "cas-70b8", &request).is_err(), "combined guard evidence must remain inadmissible");
         evidence["log_path"] = serde_json::json!(&selected);
-        record_supervisor_test(&core, "cas-70b8", &evidence.to_string()).unwrap();
+        std::fs::write(&request, evidence.to_string()).unwrap();
+        record_supervisor_test_from_cli(&root, "cas-70b8", &request).unwrap();
         assert_eq!(passing_test_packages(&root, &repo, &head), vec!["cas"]);
 
         // Use actual registered gate identities in the admission fixture;

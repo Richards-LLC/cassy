@@ -934,6 +934,16 @@ struct MergeQueuePullRequests {
     nodes: Vec<MergeQueuePullRequest>,
 }
 
+/// How a `ci_completed` workflow selector resolved against the repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkflowSelection {
+    Resolved(u64),
+    Unknown,
+    /// Several workflows match and the commit's runs do not single one out:
+    /// `(workflow id, file path)` per candidate.
+    Ambiguous(Vec<(u64, String)>),
+}
+
 /// Real, bounded `gh` transport.  The watcher intentionally uses the CLI so
 /// it inherits the operator's normal `gh auth`/token setup without persisting
 /// credentials in Cassy.
@@ -960,8 +970,14 @@ impl GhCiTransport {
     }
 
     /// Bind a selector to GitHub's workflow identity before persisting a wake.
-    /// Duplicate display names are ambiguous; file paths and IDs remain usable.
-    pub(crate) fn resolve_workflow(&self, selector: &str) -> Result<Option<u64>, CiWatchError> {
+    /// A display name shared by several workflows (one repository has three
+    /// named "CI") binds to the one that ran for `sha`, the workflow its run
+    /// reports by that name; otherwise the candidates are returned.
+    pub(crate) fn resolve_workflow(
+        &self,
+        selector: &str,
+        sha: &str,
+    ) -> Result<WorkflowSelection, CiWatchError> {
         #[derive(Deserialize)]
         struct Workflow { id: u64, name: String, path: String }
         #[derive(Deserialize)]
@@ -971,18 +987,28 @@ impl GhCiTransport {
             format!("repos/{}/actions/workflows", self.repo),
             "-f".into(), "per_page=100".into(), "--paginate".into(), "--slurp".into(),
         ])?;
-        let mut matches = pages.into_iter().flat_map(|page| page.workflows).filter(|workflow| {
+        let matches: Vec<Workflow> = pages.into_iter().flat_map(|page| page.workflows).filter(|workflow| {
             if let Ok(id) = selector.parse::<u64>() {
                 workflow.id == id
             } else {
                 workflow.name == selector || workflow.path == selector
                     || workflow.path.rsplit('/').next() == Some(selector)
             }
-        });
-        Ok(match (matches.next(), matches.next()) {
-            (Some(workflow), None) => Some(workflow.id),
-            _ => None,
-        })
+        }).collect();
+        if let [workflow] = matches.as_slice() {
+            return Ok(WorkflowSelection::Resolved(workflow.id));
+        }
+        if matches.is_empty() {
+            return Ok(WorkflowSelection::Unknown);
+        }
+        let ran: Vec<u64> = self.runs_for_sha(sha)?.into_iter().filter_map(|run| run.workflow_id).collect();
+        let mut ran_matches = matches.iter().filter(|workflow| ran.contains(&workflow.id));
+        if let (Some(workflow), None) = (ran_matches.next(), ran_matches.next()) {
+            return Ok(WorkflowSelection::Resolved(workflow.id));
+        }
+        Ok(WorkflowSelection::Ambiguous(
+            matches.into_iter().map(|workflow| (workflow.id, workflow.path)).collect(),
+        ))
     }
 
     #[track_caller]

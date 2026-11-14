@@ -511,7 +511,16 @@ impl CloudSyncer {
                         // Preserve a rejected known base until reconciliation;
                         // clearing it would turn the next team push into an
                         // unguarded timestamp write over unseen peer notes.
-                        self.record_accepted_revisions(entity_key, body);
+                        if let Some(accepted) = body.synced.get(entity_key)
+                            .and_then(|detail| detail.get("accepted"))
+                            .and_then(serde_json::Value::as_object)
+                        {
+                            for (id, receipt) in accepted {
+                                if let Some(revision) = crate::cloud::parse_wire_revision(receipt.get("revision")) {
+                                    let _ = self.queue.record_revision(entity_type, id, revision);
+                                }
+                            }
+                        }
                         self.maybe_adopt_team_canonical_id(body);
                     }
 

@@ -15,6 +15,10 @@ pub(super) struct Unsupported {
 }
 
 impl Unsupported {
+    fn execution(rule: &'static str, offset: usize, construct: &'static str, why: &'static str, alternative: &'static str) -> Self {
+        Self { rule, offset, construct, why, alternative }
+    }
+
     fn unterminated(offset: usize, construct: &'static str) -> Self {
         Self { rule: "shell.unterminated", offset, construct,
             why: "the construct is incomplete", alternative: "close the construct" }
@@ -49,6 +53,109 @@ pub(super) fn backquote_end(bytes: &[u8], opening: usize) -> Option<usize> {
 pub(super) enum ShellToken {
     Word(String),
     Operator(char),
+}
+
+/// Cooked argv keeps its source provenance when redirections and shell
+/// grouping are projected away. Quoted data cannot manufacture command syntax.
+pub(super) struct Statement {
+    pub(super) words: Vec<String>,
+    literals: Vec<bool>,
+    offsets: Vec<usize>,
+}
+
+impl Statement {
+    pub(super) fn worker_refusal(&self, index: Option<usize>) -> Option<Unsupported> {
+        use super::{is_shell_variable_name, shell_word_basename};
+        let words = &self.words;
+        let offset = |at: usize| self.offsets.get(at).copied().unwrap_or(0);
+        let dynamic = |at: usize| !self.literals.get(at).copied().unwrap_or(false);
+        let deferred = |at| Unsupported::execution("shell.deferred_code", offset(at), "deferred shell code",
+            "the action runs later as code", "run the command directly");
+        let input = |at| Unsupported::execution("shell.stdin_interpreter", offset(at), "shell input stream",
+            "the program text comes from input instead of a literal argument",
+            "use a literal script file or a literal shell -c payload");
+        let payload = |at| Unsupported::execution("shell.dynamic_eval", offset(at), "dynamic shell payload",
+            "the program text is unknown until run time", "use a literal payload or script path");
+
+        // Reserved words are recognized only at the command prefix. A wrapper
+        // option value or an ordinary argument named coproc is inert data.
+        for (at, word) in words.iter().enumerate() {
+            if word == "coproc" {
+                return Some(Unsupported::execution("shell.coproc", offset(at), "coprocess",
+                    "the named and unnamed forms have ambiguous command boundaries",
+                    "use a pipeline or a background job"));
+            }
+            if !matches!(word.as_str(), "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until")
+                && !word.split_once('=').is_some_and(|(name, _)| is_shell_variable_name(name))
+            { break; }
+        }
+        let assignment_end = index.unwrap_or(words.len());
+        for (at, word) in words.iter().enumerate().take(assignment_end) {
+            if word.split_once('=').is_some_and(|(name, _)| matches!(name, "PS4" | "PROMPT_COMMAND")) {
+                return Some(deferred(at));
+            }
+        }
+        let index = index?;
+        if dynamic(index) {
+            return Some(Unsupported::execution("shell.dynamic_command", offset(index), "dynamic command word",
+                "the executable is unknown until run time", "name the program literally"));
+        }
+        let name = shell_word_basename(&words[index]);
+        let args = &words[index + 1..];
+        if matches!(name, "export" | "declare" | "typeset" | "local" | "readonly") {
+            for (at, word) in args.iter().enumerate() {
+                if word.split_once('=').is_some_and(|(name, _)| matches!(name, "PS4" | "PROMPT_COMMAND")) {
+                    return Some(deferred(index + 1 + at));
+                }
+            }
+        }
+        match name {
+            "alias" => return Some(deferred(index)),
+            "trap" if args.first().is_some_and(|action| !action.is_empty() && action != "-" && !action.starts_with('-')) => return Some(deferred(index)),
+            "shopt" if args.iter().any(|arg| arg == "expand_aliases") && args.iter().any(|arg| arg.starts_with('-') && arg.contains('s')) => return Some(deferred(index)),
+            "eval" if (index + 1..words.len()).any(dynamic) => return Some(payload(index)),
+            "source" | "." => {
+                let at = index + 1 + usize::from(args.first().is_some_and(|arg| arg == "--"));
+                match words.get(at).map(String::as_str) {
+                    None | Some("-" | "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0") => return Some(input(index)),
+                    Some(_) if dynamic(at) => return Some(payload(at)),
+                    _ => {}
+                }
+            }
+            "sh" | "bash" | "dash" | "zsh" | "ksh" => match shell_input(args) {
+                ShellInput::Stdin => return Some(input(index)),
+                ShellInput::Command(at) | ShellInput::Script(at) if dynamic(index + 1 + at) => return Some(payload(index + 1 + at)),
+                _ => {}
+            },
+            _ => {}
+        }
+        None
+    }
+}
+
+enum ShellInput { Command(usize), Script(usize), Stdin, Display }
+
+/// Classify shell input once. After a script operand, -c is script data;
+/// after -s, operands are positional arguments rather than a script filename.
+fn shell_input(args: &[String]) -> ShellInput {
+    let mut at = 0;
+    let mut stdin = false;
+    while let Some(arg) = args.get(at) {
+        if matches!(arg.as_str(), "--help" | "--version") { return ShellInput::Display; }
+        if arg == "--" {
+            return if stdin || args.get(at + 1).is_none() { ShellInput::Stdin } else { ShellInput::Script(at + 1) };
+        }
+        if !arg.starts_with(['-', '+']) || arg == "-" {
+            return if stdin || arg == "-" { ShellInput::Stdin } else { ShellInput::Script(at) };
+        }
+        if arg == "--command" || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')) {
+            return ShellInput::Command(at + 1);
+        }
+        if arg.starts_with('-') && !arg.starts_with("--") && arg.contains('s') { stdin = true; }
+        if matches!(arg.as_str(), "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file") { at += 1; }
+        at += 1;
+    }
+    ShellInput::Stdin
 }
 
 // Argument-only consumers omit attached IO numbers. Security/effect consumers
@@ -497,10 +604,12 @@ fn lex_source(command: &str, projection: &str, arguments_only: bool, depth: usiz
 /// script consumes the remaining argv; its -c arguments belong to that script.
 /// Wrapper programs retain their own option grammar (su may name a user first).
 pub(super) fn shell_payload_index(name: &str, args: &[String]) -> Option<usize> {
-    let shell = matches!(name, "sh" | "bash" | "dash" | "zsh" | "ksh");
+    if matches!(name, "sh" | "bash" | "dash" | "zsh" | "ksh") {
+        return match shell_input(args) { ShellInput::Command(at) => Some(at), _ => None };
+    }
     let mut at = 0;
     while let Some(arg) = args.get(at) {
-        if arg == "--" || (shell && (!arg.starts_with(['-', '+']) || arg == "-")) {
+        if arg == "--" {
             return None;
         }
         if arg == "--command"
@@ -509,14 +618,6 @@ pub(super) fn shell_payload_index(name: &str, args: &[String]) -> Option<usize> 
             return Some(at + 1);
         }
         // These options consume a value, which cannot itself become -c.
-        if shell
-            && matches!(
-                arg.as_str(),
-                "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file"
-            )
-        {
-            at += 1;
-        }
         at += 1;
     }
     None
@@ -577,7 +678,7 @@ impl ShellLexed {
     /// Arguments projected from the same tokens and source spans used for
     /// effects. Only raw attached descriptors are IO numbers; quoted or
     /// separated numbers remain command arguments.
-    pub(super) fn argument_tokens(&self, source: &str) -> Vec<ShellToken> {
+    fn argument_indices(&self, source: &str) -> Vec<usize> {
         let mut tokens = self
             .tokens
             .iter()
@@ -592,32 +693,55 @@ impl ShellLexed {
                         return None;
                     }
                 }
-                Some(token.clone())
+                Some((at, token))
             })
             .peekable();
         let mut arguments = Vec::new();
-        while let Some(token) = tokens.next() {
-            if token == ShellToken::Operator('&')
-                && tokens.peek() == Some(&ShellToken::Operator('>'))
+        while let Some((index, token)) = tokens.next() {
+            if *token == ShellToken::Operator('&')
+                && tokens.peek().is_some_and(|(_, token)| **token == ShellToken::Operator('>'))
             {
                 continue;
             }
             if matches!(token, ShellToken::Operator('>' | '<')) {
                 while matches!(
                     tokens.peek(),
-                    Some(ShellToken::Operator('>' | '<' | '&' | '|'))
+                    Some((_, ShellToken::Operator('>' | '<' | '&' | '|')))
                 ) {
                     tokens.next();
                 }
-                if matches!(tokens.peek(), Some(ShellToken::Word(_))) {
+                if matches!(tokens.peek(), Some((_, ShellToken::Word(_)))) {
                     tokens.next();
                 }
                 continue;
             }
-            arguments.push(token);
+            arguments.push(index);
         }
         arguments
     }
+
+    pub(super) fn argument_tokens(&self, source: &str) -> Vec<ShellToken> {
+        self.argument_indices(source).into_iter().map(|at| self.tokens[at].clone()).collect()
+    }
+
+    pub(super) fn statements(&self, source: &str) -> Vec<Statement> {
+        let indices = self.argument_indices(source);
+        let tokens: Vec<_> = indices.iter().map(|&at| self.tokens[at].clone()).collect();
+        statement_indices(&tokens).into_iter().map(|statement| {
+            let originals: Vec<_> = statement.into_iter().map(|at| indices[at]).collect();
+            Statement {
+                words: originals.iter().map(|&at| match &self.tokens[at] {
+                    ShellToken::Word(word) => word.clone(), _ => unreachable!(),
+                }).collect(),
+                literals: originals.iter().map(|&at| self.literals[at]).collect(),
+                offsets: originals.iter().map(|&at| {
+                    let start = if at == 0 { 0 } else { self.ends[at - 1] };
+                    start + source[start..self.ends[at]].len() - source[start..self.ends[at]].trim_start().len()
+                }).collect(),
+            }
+        }).collect()
+    }
+
 }
 
 /// A shell arithmetic name is safe only after an unconditional local numeric
@@ -1168,4 +1292,54 @@ fn collect_heredoc_substitutions(body: &str, found: &mut ShellSubstitutions) {
 /// keyword. Bash runs `>case touch in /outside/p` as `touch in /outside/p`.
 pub(super) fn after_redirect(previous: Option<(char, usize)>, end: usize) -> bool {
     matches!(previous, Some(('<' | '>', at)) if at + 1 == end)
+}
+
+/// Statement boundaries shared by policy and provenance consumers.
+pub(super) fn statement_indices(tokens: &[ShellToken]) -> Vec<Vec<usize>> {
+    let mut statements = Vec::new();
+    let mut words: Vec<usize> = Vec::new();
+    // One entry per open `(`: the enclosing statement an argument
+    // substitution returns to, or `None` when `)` starts a new statement.
+    let mut open: Vec<Option<Vec<usize>>> = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            ShellToken::Word(_) => words.push(index),
+            ShellToken::Operator('(') => {
+                let argument_substitution = words.last().is_some_and(|&at| matches!(&tokens[at], ShellToken::Word(word) if word.ends_with('$')))
+                    && super::unwrapped_command_index(&words.iter().map(|&at| match &tokens[at] { ShellToken::Word(word) => word.clone(), _ => unreachable!() }).collect::<Vec<_>>()).is_some_and(|index| index + 1 < words.len());
+                if argument_substitution {
+                    open.push(Some(std::mem::take(&mut words)));
+                } else {
+                    if !words.is_empty() {
+                        statements.push(std::mem::take(&mut words));
+                    }
+                    open.push(None);
+                }
+            }
+            ShellToken::Operator(')') => {
+                if !words.is_empty() {
+                    statements.push(std::mem::take(&mut words));
+                }
+                if let Some(Some(enclosing)) = open.pop() {
+                    words = enclosing;
+                }
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
+                if !words.is_empty() {
+                    statements.push(std::mem::take(&mut words));
+                }
+            }
+            ShellToken::Operator(_) => {}
+        }
+    }
+    if !words.is_empty() {
+        statements.push(words);
+    }
+    // An unclosed argument substitution still reports its enclosing words.
+    for enclosing in open.into_iter().flatten().rev() {
+        if !enclosing.is_empty() {
+            statements.push(enclosing);
+        }
+    }
+    statements
 }

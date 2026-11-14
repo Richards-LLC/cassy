@@ -559,9 +559,16 @@ fn handle_pre_tool_use_checked(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
             .and_then(|command| {
-                operator_policy_command_denial(command)
+                let scan = scan_shell_invocations(&normalize_cas_substitutions(command));
+                if crate::harness_policy::is_factory_agent(input)
+                    && !crate::harness_policy::is_supervisor(input)
+                    && let Some(refusal) = &scan.worker_refusal
+                {
+                    return Some(crate::gates::tag("H-11", refusal.to_string()));
+                }
+                operator_policy_command_denial_in_scan(command, &scan)
                     .map(|reason| crate::gates::tag("H-11", reason))
-                    .or_else(|| role_env_tampering_denial(command).map(|reason| crate::gates::tag("H-12", reason)))
+                    .or_else(|| role_env_tampering_in_scan(scan).map(|reason| crate::gates::tag("H-12", reason)))
             })
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
@@ -3716,52 +3723,12 @@ pub(super) fn shell_statement_arguments(command: &str) -> Vec<Vec<String>> {
 }
 
 fn shell_statements_from_tokens(tokens: Vec<ShellToken>) -> Vec<Vec<String>> {
-    let mut statements = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    // One entry per open `(`: the enclosing statement an argument
-    // substitution returns to, or `None` when `)` starts a new statement.
-    let mut open: Vec<Option<Vec<String>>> = Vec::new();
-    for token in tokens {
-        match token {
-            ShellToken::Word(word) => words.push(word),
-            ShellToken::Operator('(') => {
-                let argument_substitution = words.last().is_some_and(|word| word.ends_with('$'))
-                    && unwrapped_command_index(&words).is_some_and(|index| index + 1 < words.len());
-                if argument_substitution {
-                    open.push(Some(std::mem::take(&mut words)));
-                } else {
-                    if !words.is_empty() {
-                        statements.push(std::mem::take(&mut words));
-                    }
-                    open.push(None);
-                }
-            }
-            ShellToken::Operator(')') => {
-                if !words.is_empty() {
-                    statements.push(std::mem::take(&mut words));
-                }
-                if let Some(Some(enclosing)) = open.pop() {
-                    words = enclosing;
-                }
-            }
-            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
-                if !words.is_empty() {
-                    statements.push(std::mem::take(&mut words));
-                }
-            }
-            ShellToken::Operator(_) => {}
-        }
-    }
-    if !words.is_empty() {
-        statements.push(words);
-    }
-    // An unclosed argument substitution still reports its enclosing words.
-    for enclosing in open.into_iter().flatten().rev() {
-        if !enclosing.is_empty() {
-            statements.push(enclosing);
-        }
-    }
-    statements
+    shell_admission::statement_indices(&tokens).into_iter().map(|indices| {
+        indices.into_iter().map(|index| match &tokens[index] {
+            ShellToken::Word(word) => word.clone(),
+            _ => unreachable!(),
+        }).collect()
+    }).collect()
 }
 
 fn shell_word_basename(word: &str) -> &str {
@@ -5874,6 +5841,7 @@ struct ShellInvocationScan {
     statements: Vec<Vec<String>>,
     arguments: Vec<Vec<String>>,
     refusal: Option<shell_admission::Unsupported>,
+    worker_refusal: Option<shell_admission::Unsupported>,
 }
 
 fn scan_shell_invocations(command: &str) -> ShellInvocationScan {
@@ -5887,15 +5855,11 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
         Ok(parsed) => parsed,
         Err(error) => { found.refusal.get_or_insert(error); return; }
     };
-    found.arguments.extend(shell_statements_from_tokens(parsed.lexed.argument_tokens(&parsed.projected)));
-    for body in &parsed.bodies {
-        collect_shell_invocations(body, depth + 1, found);
-    }
-    for words in shell_statements_from_tokens(parsed.lexed.tokens) {
-        found.statements.push(words.clone());
-        if let Some(payload) = env_split_string_payload(&words) {
-            collect_shell_invocations(&payload, depth + 1, found);
-        }
+    let statements = parsed.lexed.statements(&parsed.projected);
+    found.arguments.extend(statements.iter().map(|statement| statement.words.clone()));
+    found.statements.extend(shell_statements_from_tokens(parsed.lexed.tokens));
+    for statement in statements {
+        let words = &statement.words;
         let mut pending = vec![0];
         let mut visited = vec![false; words.len()];
         let mut indices = Vec::new();
@@ -5909,7 +5873,13 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
                 if !indices.contains(&index) { indices.push(index); }
             }
         }
+        if indices.is_empty() && let Some(refusal) = statement.worker_refusal(None) {
+            found.worker_refusal.get_or_insert(refusal);
+        }
         for index in indices {
+            if let Some(refusal) = statement.worker_refusal(Some(index)) {
+                found.worker_refusal.get_or_insert(refusal);
+            }
             let args = &words[index + 1..];
             let name = shell_word_basename(&words[index]);
             match name {
@@ -5924,6 +5894,12 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut ShellInvoc
             }
             found.commands.push((name.to_string(), args.to_vec()));
         }
+        if let Some(payload) = env_split_string_payload(words) {
+            collect_shell_invocations(&payload, depth + 1, found);
+        }
+    }
+    for body in &parsed.bodies {
+        collect_shell_invocations(body, depth + 1, found);
     }
 }
 
@@ -5955,10 +5931,14 @@ const OPERATOR_POLICY_COMMAND_DENIAL: &str = "🚫 OPERATOR-ONLY (cas-3147, GH #
 /// assembled at run time, is out of reach of a tool-call hook.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
     let scan = scan_shell_invocations(&normalize_cas_substitutions(command));
-    if let Some(refusal) = scan.refusal {
+    operator_policy_command_denial_in_scan(command, &scan)
+}
+
+fn operator_policy_command_denial_in_scan(command: &str, scan: &ShellInvocationScan) -> Option<String> {
+    if let Some(refusal) = &scan.refusal {
         return Some(refusal.to_string());
     }
-    for (_, args) in scan.commands.into_iter().filter(|(name, _)| name == "cas") {
+    for (_, args) in scan.commands.iter().filter(|(name, _)| name == "cas") {
         // cas-3c26: operator-only actions, judged by the CLI parser.
         if let Some(action) = crate::config::operator_policy::operator_only_cas_invocation(&args) {
             return Some(format!(

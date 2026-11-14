@@ -1,7 +1,11 @@
 # Why it works — accounting-journals.html
 
 Type: accounting presentation example. Audience: practitioner.
+<!-- cas-src:begin -->
 Design: DESIGN.md@b43940e432, inheriting hub-web/DESIGN.md@3577bff4a1.
+<!-- cas-src:else -->
+Design: apply the report project's DESIGN.md tokens; the example illustrates journal layout.
+<!-- cas-src:end -->
 
 ## Plan alignment
 

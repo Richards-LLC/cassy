@@ -7,8 +7,8 @@
 //! adversarially. The highest tier any path reaches applies to the delivery.
 //! Anything unmeasurable stays at today's path, one verifier. Verification and QA
 //! share this classifier, so a delivery has one tier however it is reviewed.
-//! In `qa.mode=batch` Tier 1 shares one verifier per release: a single verdict of the
-//! assembled tip names every delivery. Tier 2 and unmeasurable deliveries keep their own.
+//! Code review happens before merge in every QA mode. Release cuts reuse those
+//! approvals; a batch QA ledger never supplies code-review authority.
 use cas_types::{Task, TaskType};
 
 /// A supervisor's label that keeps a verifier on an otherwise Tier 0 delivery.
@@ -140,15 +140,8 @@ pub(crate) fn tier_for_delivery(task: &Task, repo: &std::path::Path) -> Option<T
     Some(TierDecision { tier, reason, tip: tip.to_string() })
 }
 
-/// Whether this delivery closes on the release verdict and opens no verifier of its
-/// own. A rapid-response fix ships alone, and `force-verifier` asks for a dedicated
-/// review, so both keep their own. Unreadable config stays on the per-task path.
-pub(crate) fn release_verdict_owns(cas_root: &std::path::Path, task: &Task, repo: &std::path::Path) -> bool {
-    own_review(cas_root, task, repo).is_none()
-}
-
-/// cas-bc15: the review a delivery keeps instead of the release verdict, and
-/// how to satisfy it; `None` when the release verdict owns it.
+/// Receipt callbacks retain the delivery's ordinary review path. Code
+/// approvals belong to the pre-merge verifier in every QA mode.
 pub(crate) fn own_review(cas_root: &std::path::Path, task: &Task, repo: &std::path::Path) -> Option<String> {
     if !crate::config::Config::load(cas_root).is_ok_and(|config| config.qa().mode == crate::config::QaMode::Batch) {
         return Some("qa.mode is not batch, so its own verifier closes it".into());
@@ -163,7 +156,9 @@ pub(crate) fn own_review(cas_root: &std::path::Path, task: &Task, repo: &std::pa
         return Some("a rapid-response window closes it on its own merge".into());
     }
     match tier_for_delivery(task, repo).map(|decision| decision.tier) {
-        Some(VerificationTier::Standard) => None,
+        Some(VerificationTier::Standard) => {
+            Some("Tier 1: its own pre-merge verifier in every QA mode".into())
+        },
         Some(VerificationTier::Mechanical) => {
             Some("Tier 0 (docs/tests only): task close passes on CI and the mechanical gates".into())
         }

@@ -1559,19 +1559,17 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     let premerge = CasCore::with_daemon(f.cas_dir(), None, None);
     premerge.set_agent_id_for_testing("br-supervisor-session".into());
-    let dispatch = if eligible {
-        premerge.prepare_premerge_verification(&f.task(), repo, LANE, "main")
-            .expect_err("an eligible fast lane needs its pre-merge verifier, rather than the batch verdict");
-        let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap();
+    // Ordinary code and eligible fast lanes both need review before merge.
+    let held = premerge.prepare_premerge_verification(&f.task(), repo, LANE, "main")
+        .expect_err("code publication requires its pre-merge verifier");
+    assert!(held.message.contains("[G-104]"), "{held}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap();
+    if eligible {
         f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
             "action": "add", "task_id": ID, "dispatch_id": dispatch.id,
             "status": "approved", "summary": "gear turns before publication", "confidence": 1.0,
         })).unwrap())).await.expect("approve before the lane merge");
-        Some(dispatch.id)
-    } else {
-        assert!(premerge.prepare_premerge_verification(&f.task(), repo, LANE, "main").unwrap().is_none());
-        None
-    };
+    }
     git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "merge lane"]);
     git(repo, &["push", "-q", "origin", "main"]);
     let merge = git(repo, &["rev-parse", "HEAD"]);
@@ -1619,8 +1617,10 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     receipt("in_progress", None);
     let pending = cassy.close_green_merged_delivery(ID).await.receipt(ID);
     if !eligible {
-        assert!(pending.contains("RELEASE VERDICT"), "an ineligible backend delivery cannot skip the batch verdict: {pending}");
-        assert_ne!(f.task().status, TaskStatus::Closed);
+        assert!(pending.contains("[G-34]"), "an ineligible delivery cannot close without its pending pre-merge approval: {pending}");
+        assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+        assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap().id, dispatch.id,
+            "close must not replace the missing pre-merge approval with a post-merge dispatch");
         continue;
     }
     assert!(pending.contains("FAST LANE RECEIPT PENDING"), "{pending}");
@@ -1704,7 +1704,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
         receipt("completed", Some("success"));
         let closed = cassy.close_green_merged_delivery(ID).await.receipt(ID);
         assert_eq!(f.task().status, TaskStatus::Closed, "the pre-merge PASS plus trusted receipt closes without a batch verdict: {closed}");
-        assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap().id, dispatch.unwrap());
+        assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap().id, dispatch.id);
         continue;
     }
     receipt("completed", Some("failure"));

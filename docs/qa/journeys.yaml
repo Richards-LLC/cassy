@@ -1678,6 +1678,25 @@ bug_families:
     title: Prepared train pushes and queue entries adopt full-suite proof only across verified release plumbing
     tasks: [cas-976f]
     journeys: [FACTORY-MERGE]
+  claude-visible-operator-evidence:
+    title: Claude Code supervisor replies use visible same-turn evidence without hidden tool-use IDs
+    statement: Matching numbers and SHAs pass; unsupported literals, failed or stale results, and clipboard claims without a fresh read remain refused.
+    tasks: [cas-1f5f]
+    journeys: [HUB-J5]
+  deterministic-history-recovery:
+    title: History recovery keeps fixed chronological timestamps and settles scroll before viewport checks
+    tasks: [cas-4452f]
+    invariants: [HUB-J23-HISTORY-FAILURE]
+    journeys: [HUB-J23]
+  supervisor-command-open-turn-queue:
+    title: Supervisor commands sent during an open native turn queue until the turn ends
+    statement: A command sent while the supervisor's native turn is open is queued, typed exactly once after the turn completes and replays return the same receipt; drafts and native modals still refuse.
+    tasks: [cas-4e11]
+    journeys: [HUB-J27]
+  docs-only-train-receipt-reuse:
+    title: Release documentation must not invalidate green train proof or wait for the closure verdict
+    tasks: [cas-5b88]
+    journeys: [FACTORY-MERGE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1931,7 +1950,7 @@ invariants:
     check: Run HUB-J27 in supervisor-commands.journey.ts at desktop and 390 px; read exact semantic command frames, confirmation flags and mutation counts from the double, and retain real native acceptance evidence separately.
   HUB-J27-NATIVE-IDLE-COMMANDS:
     statement: An empty Claude prompt after native turn completion accepts Exit and Reload Cassy on the first request despite old busy prose or background repaint; local command receipts never start a model turn or appear as raw XML in the thread or preview.
-    check: Run the cas-99e7 HUB-J27 part and conversations Vitest case, the supervisor command runtime tests and latest Claude turn observation regression. Verify active turns, drafts and modals still refuse; retain actual PTY admission and one semantic command frame per request.
+    check: Run the cas-99e7 HUB-J27 part and conversations Vitest case, the supervisor command runtime tests and latest Claude turn observation regression. Verify an active turn queues the command without typing (cas-4e11) while drafts and modals still refuse; retain actual PTY admission and one semantic command frame per request.
     bug: {task: cas-99e7}
   HUB-J27-ALLOWLIST:
     statement: A command requires authenticated control and an active lease; arbitrary strings, foreign references, busy prompts and operator drafts cannot inject input.
@@ -1954,7 +1973,7 @@ invariants:
     bug: {task: cas-affc}
   HUB-J27-REFUSAL-ROW:
     statement: Refusals of one command share one conversation row that names the reason and the attempts, the row clears once that command is accepted, a command error raises no Attention event, and an error after the daemon's receipt stays uncertain rather than refused.
-    check: Run the refused-row case in supervisor-commands.test.ts and the command-error case in attention.test.ts, then on a disposable real harness resend /usage during a turn and read one row with the attempt count and no new Attention event.
+    check: Run the refused-row case in supervisor-commands.test.ts and the command-error case in attention.test.ts, then on a disposable real harness resend /usage with a draft in the native prompt and read one row with the attempt count and no new Attention event.
     bug: {task: cas-d959}
   HUB-J27-CONFIRM-SHEET:
     statement: A confirmed command's sheet shows content-width Cancel then the command, right-aligned on desktop and stacked only on a phone; Cancel starts focused, arrows and Tab rove inside it, Enter or Space chooses, and Esc returns to the composer without sending.

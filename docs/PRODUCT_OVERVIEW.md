@@ -256,6 +256,39 @@ Supervisor answers recorded with `verification action=add status=supervisor_call
 
 Prepared release pushes and merge-queue entries reuse an ancestor's successful full-set proof when only release plumbing changed and main is unchanged. A durable adoption artifact records the release head/tree and original native producer head/run/attempt. Consumers verify both completed workflows, complete logs, source proof and the actual queue delta before suppressing suite jobs. Compile, launch, generated assets and Release Prebuild remain checked against the release tree. Any source edit or invalid proof keeps the full suite selected.
 
+A release train runs its full suite once, when it is frozen for release. Merges into an unfrozen train start no train suite, because lane CI already proved each delivery. The daemon's train CI scan dispatches the shared full-validation workflow once per frozen tip; a repair or plumbing commit on a frozen train is a new tip with its own single run. The cut consumes that run's green receipt, and a red raises the train-red notice. Auto-cut freezes a ready train with changelog fragments, asks for notes while the suite runs, and cuts on green.
+
+Supervisor replies can use successful same-turn tool results without citing hidden tool-use IDs. The operator evidence guard matches numbers and SHAs against those results and accepts exact command strings in backticks. Optional ID citations narrow the evidence used; clipboard claims still require a read after the latest write.
+
+The portable `cas-test-audit` skill produces one read-only inventory of test value, flake risk and the project's own recent flake history. Findings carry source location, pattern, confidence, evidence and a fix. The report distinguishes a named failure/pass on identical source from a workflow flip or issue report, calibrates static candidates with hand review, and routes actionable findings to the approved fix-or-delete batch. It never reruns a suite or changes tests/issues while auditing.
+
+Train CI runs once when Cassy dispatches the frozen tip; prepared release pushes start no train workflow. Cut retries resolve `Train-CI-Head` directly to the original green source receipt, without a release-head run or adoption artifact. Pull-request admission, queue reuse and Release Prebuild retain their existing behavior.
+
+Code deliveries receive their review before merge, including Tier 1 in batch QA mode. A release cut combines those approvals (local or peer) with the green frozen-train run, naming any missing approval before push. It requires no separate release-review ledger or recorder identity. Batch QA remains independent evidence and the merge queue remains the gate to main.
+
+Deliberate depth=light, rapid-response sampling and Tier 0 exemptions use green lane CI plus the green frozen-train run. Pending or rejected reviews retain their authority. Missing lane CI is named separately from a missing required review.
+
+Release admission reuses the nearest green train ancestor when every intervening commit changes only the release asset allow-list. Source changes, including changes reverted before the cut, require fresh train proof. Receipt identity, complete logs, successful full-set jobs and the current main baseline remain mandatory. A pending CODEMAP refresh can join the release commit. The release verdict uses existing approvals and the green frozen-train receipt without another batch release review; missing required approvals still refuse the cut. The merge queue proves the final tree.
+
+Prepared release assets include the compiled product overview and journey registry as well as their input fragments. Terminal no-code members are reported from their saved outcome without reinterpreting their original external link as an artifact. Active report deliveries retain artifact integrity checks and must carry their required approval before the cut.
+
+### Lane failure attribution
+
+Lane CI reuses explicit failing-test proof only for the recorded base SHA and matching package, binary, test, platform, toolchain and profile. Missing proof triggers a bounded replay; unresolved attribution remains red. Failure receipts are published before base preparation, with separate attribution timings and no additional CI job.
+
+### Delivery-only lane impact
+
+Lane selection excludes changes imported from the train. Script and workflow inputs retain their script contracts and directly referencing Rust tests, while recorded start bases remain available for failure attribution. Agent configuration and documentation roots add no Rust tests; build policy and unmapped code retain conservative coverage.
+
+### Approval across train movement
+
+When the train advances without changing a delivery's reviewed paths, the merge
+retains its approved dispatch and records the target movement on the task. Clean
+same-file merges retain the existing unchanged-patch approval path. If preparing
+that candidate exceeds the response deadline, the merge stays held with its
+approval intact until preparation finishes. A retry reuses that preparation;
+changed delivery content and merge conflicts keep their existing review checks.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -361,6 +394,8 @@ submitting even an error verdict.
 Factory turn costs are recorded locally for Claude, Codex and Grok supervisors and workers, independently of Commander mirroring. `cas ledger report --release vX.Y.Z --offline` reads release-window ledger rows to show wakes, no-op wakes, input/output tokens and minutes by channel, with counts for missing measurements. Wake channels come from authenticated queue provenance, including a session-less daemon row addressed to that exact agent. Without a row, a Claude background-task notification counts as the agent's own role, CAS's fixed worker startup and delivery-watchdog texts count as daemon, and any other input counts as terminal (unauthenticated pane input). A no-op means no successful supported action was observed. Prose counts as an answer only for an authenticated operator wake or a question verified against its authenticated queue row; Teams wrappers and pointer wakes use the original row provenance, and launch-context messages do not take the wake slot. For other wakes, only typed tool actions count: task, coordination and edit writes, factory and verification writes such as merges and spawns, and subagent launches. Reads, waits, receipt-only replies and status restatements do not count. Shell actions are conservatively recognized only for explicit commit, push and check commands, including the patches and commands inside a Codex code-mode `exec` script. OpenCode turns are not recorded yet. Unsupported Cloud Turn events remain queued locally behind their own push cursor and six-hour kind cooldown; other ledger kinds keep pushing, and every sync round attempts pull even if push fails.
 
 Merged delivery close reads test receipts from the assigned worker's registered checkout even after recovery changes its path or branch. Receipts remain bound to the delivered commit and declared repository; the original proof target declaration stays unchanged.
+
+A supervisor command sent from Commander while the supervisor's native turn is open is queued and typed once at the turn boundary, the same way Finish already waited. The card stays Queued until then and can be dismissed without typing anything. If the session ends first, the card settles with the end reason.
 
 ## Authoritative Sources
 

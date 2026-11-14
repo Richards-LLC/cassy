@@ -367,17 +367,11 @@ fn find_lists_names_only(args: &[String]) -> bool {
     true
 }
 
-/// Only a standalone listing (optionally redirected to a file) qualifies.
-/// A pipeline consumer can open the listed files, even when it also works
-/// as a text filter (`sort --files0-from=-`). Substitutions can likewise
-/// turn names into file operands. Leave those forms to normal inspection.
+/// Metadata names remain inert only through proven data-only consumers. The
+/// common shell/option projection refuses ambiguous or file-opening flows;
+/// the credential path policy below remains independent of that classification.
 fn listed_names_stay_inert(command: &str) -> bool {
-    if command.contains("$(") || command.contains('`') || command.contains("<(")
-        || command.contains(">(")
-    {
-        return false;
-    }
-    super::pre_tool::shell_statement_words(command).len() == 1
+    super::pre_tool::filename_pipeline_is_data_only(command)
 }
 
 fn cwd_is_store_or_parent(cwd: &Path) -> bool {

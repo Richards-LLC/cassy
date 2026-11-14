@@ -6269,17 +6269,19 @@ fn read_only_statement(words: &[String]) -> bool {
 /// Positive flag sets only. Operands are data, including words after `--`.
 /// Short clusters contain only listed switches; value options stay separate
 /// (or use `=`). The legacy numeric count is limited to tools that define it.
-fn policy_output_flags(
+fn policy_output_operands(
     args: &[String],
     switches: &[&str],
     values: &[&str],
     numeric_count: bool,
-) -> bool {
+) -> Option<Vec<usize>> {
+    let mut operands = Vec::new();
     let mut index = 0;
     while let Some(word) = args.get(index) {
         let word = word.as_str();
         if word == "--" {
-            return true;
+            operands.extend(index + 1..args.len());
+            return Some(operands);
         }
         if switches.contains(&word) {
             index += 1;
@@ -6287,7 +6289,7 @@ fn policy_output_flags(
         }
         if values.contains(&word) {
             if args.get(index + 1).is_none() {
-                return false;
+                return None;
             }
             index += 2;
             continue;
@@ -6309,17 +6311,22 @@ fn policy_output_flags(
                     .chars()
                     .all(|flag| switches.contains(&format!("-{flag}").as_str()));
             if !count && !cluster {
-                return false;
+                return None;
             }
         }
+        if !word.starts_with('-') || word == "-" { operands.push(index); }
         index += 1;
     }
-    true
+    Some(operands)
+}
+
+fn policy_output_flags(args: &[String], switches: &[&str], values: &[&str], numeric_count: bool) -> bool {
+    policy_output_operands(args, switches, values, numeric_count).is_some()
 }
 
 /// Keep a small output-only set per reader. Pagers and configurable search
 /// frontends are intentionally absent rather than treated as generic reads.
-fn policy_reader_flags(name: &str, args: &[String]) -> bool {
+fn policy_reader_operands(name: &str, args: &[String]) -> Option<Vec<usize>> {
     let (switches, values, count): (&[&str], &[&str], bool) = match name {
         "grep" | "egrep" | "fgrep" => (
             &[
@@ -6520,9 +6527,68 @@ fn policy_reader_flags(name: &str, args: &[String]) -> bool {
             &[],
             false,
         ),
-        _ => return false,
+        _ => return None,
     };
-    policy_output_flags(args, switches, values, count)
+    policy_output_operands(args, switches, values, count)
+}
+
+fn policy_reader_flags(name: &str, args: &[String]) -> bool {
+    policy_reader_operands(name, args).is_some()
+}
+
+/// A filename listing grants no permission to open the files it names. Admit
+/// the metadata exemption only while each literal pipeline stage handles stdin
+/// as data. Existing credential checks still inspect all redirects and paths.
+/// File-list modes, explicit file operands, execution and unknown options never
+/// inherit this exemption.
+pub(super) fn filename_pipeline_is_data_only(command: &str) -> bool {
+    let Ok(parsed) = shell_admission::parse(command, 0) else { return false; };
+    if parsed.compound_refusal.is_some() || !parsed.bodies.is_empty() { return false; }
+    let tokens = parsed.lexed.argument_tokens(&parsed.projected);
+    if tokens.iter().any(|token| matches!(token, ShellToken::Operator(ch) if *ch != '|')) {
+        return false;
+    }
+    // || is a list operator, not a filename stream.
+    if parsed.lexed.tokens.windows(2).zip(parsed.lexed.ends.windows(2)).any(|(tokens, ends)| {
+        tokens == [ShellToken::Operator('|'), ShellToken::Operator('|')] && ends[1] == ends[0] + 1
+    }) { return false; }
+    let statements = parsed.lexed.statements(&parsed.projected, &parsed.syntax);
+    if statements.is_empty() { return false; }
+    // Keep the existing standalone listing contract, including known HOME
+    // prefixes and literal executable paths. Its producer options are checked
+    // independently by the credential guard.
+    if statements.len() == 1 { return true; }
+    // No expansion may manufacture an option or executable after classification.
+    if !parsed.lexed.literals.iter().all(|literal| *literal) { return false; }
+    statements.iter().enumerate().all(|(at, statement)| {
+        let Some(name) = statement.words.first().map(String::as_str) else { return false; };
+        let args = &statement.words[1..];
+        // The credential guard separately validates these producers' listing
+        // options. A find action or a content-search flag cannot become one.
+        if at == 0 && matches!(name, "rg" | "find") { return true; }
+        if name == "xargs" {
+            return unwrapped_command_index(&statement.words).is_some_and(|index| {
+                matches!(statement.words[index].as_str(), "printf" | "echo" | "basename" | "dirname" | "tr")
+                    && policy_output_operands(&statement.words[1..index],
+                        &["-0", "--null", "-r", "--no-run-if-empty", "-t", "--verbose"],
+                        wrapper_value_options("xargs"), false).is_some_and(|operands| operands.is_empty())
+            });
+        }
+        if name == "tr" {
+            return policy_output_operands(args,
+                &["-c", "-C", "-d", "-s", "-t", "--complement", "--delete", "--squeeze-repeats", "--truncate-set1"],
+                &[], false).is_some_and(|operands| operands.len() <= 2);
+        }
+        let Some(operands) = policy_reader_operands(name, args) else { return false; };
+        match name {
+            "rg" | "grep" | "egrep" | "fgrep" => {
+                let explicit_pattern = args.iter().any(|arg| matches!(arg.as_str(), "-e" | "--regexp") || arg.starts_with("--regexp="));
+                operands.len() <= usize::from(!explicit_pattern)
+            }
+            "head" | "tail" | "sort" | "uniq" | "wc" | "cut" => operands.iter().all(|&index| args[index] == "-"),
+            _ => false,
+        }
+    })
 }
 
 fn policy_set_flags(args: &[String]) -> bool {

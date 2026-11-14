@@ -111,6 +111,9 @@ remote="${RELEASE_REMOTE:-origin}"
 gh_bin="${GH_BIN:-gh}"
 cas_bin="${CAS_BIN:-cas}"
 release_input_report="$(git rev-parse --path-format=absolute --git-path cas/release-inputs.json)"
+# cas-8e1b: name the live store explicitly for the candidate. A cut may run in a
+# Cassy worktree, where the candidate may not implicitly migrate the shared store.
+release_store_root="${CAS_ROOT:-$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.cas}"
 release_date() { printf '%s\n' "${RELEASE_DATE:-$(date -u +%Y-%m-%d)}"; }
 
 release_manifests=(
@@ -500,7 +503,7 @@ preview_cut() {
     release_candidate="$candidate"
     local train_args=()
     "$train_tracking" && train_args=(--train "$task")
-    release_close_preview="$("$candidate" release preview --commit "$sha" --version "$version" \
+    release_close_preview="$(CAS_ROOT="$release_store_root" "$candidate" release preview --commit "$sha" --version "$version" \
         --inputs "$release_input_report" "${train_args[@]}")"
     release_close_preview="$(jq --argjson seconds "$build_seconds" '. + {candidate_build_seconds:$seconds}' \
         <<<"$release_close_preview")"
@@ -589,7 +592,7 @@ done
 # Persist context and arm reminders before push: publication may follow quickly,
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
-    if ! tracking="$("$release_candidate" release track --commit "$(git rev-parse HEAD)" --version "$version" \
+    if ! tracking="$(CAS_ROOT="$release_store_root" "$release_candidate" release track --commit "$(git rev-parse HEAD)" --version "$version" \
         --inputs "$release_input_report" --first-child "$first_child" <<<"$release_close_preview" 2>&1)"; then
         retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
         die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"

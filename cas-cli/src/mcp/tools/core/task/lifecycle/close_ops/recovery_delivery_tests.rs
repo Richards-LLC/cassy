@@ -2196,7 +2196,12 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
     git(&f.worker_path, &["commit", "-qm", "test(journeys): restore the released journey"]);
     f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     git(&repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
-    let current = tasks.get(TASK).unwrap();
+    // Match commit-time capture: retain the old checkpoint and record the
+    // actual pushed delivery, rather than testing an unrelated stale anchor.
+    let mut current = tasks.get(TASK).unwrap();
+    current.deliverables.historical_factory_branch_anchors.push(edit);
+    current.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
+    tasks.update(&current).unwrap();
     let history = agents.get_lease_history(TASK, None).unwrap();
     // Durable-anchor fallback must cover the same full first-parent delivery
     // even when old installed metadata cannot validate the original start.

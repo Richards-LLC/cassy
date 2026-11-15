@@ -59,7 +59,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             // delivery's source on the lane. It is not the task's own work,
             // so the loss still reads as a revert.
             git(&["rm", "-q", &source]);
-            git(&["commit", "-qm", "fix(cas-other): drop the helper"]);
+            git(&["commit", "-qm", "fix(cas-9f1e): drop the helper"]);
         }
         if id == "cas-resynced" {
             // cas-2430 (the cas-aeb3 shape): the delivery lands, main reverts

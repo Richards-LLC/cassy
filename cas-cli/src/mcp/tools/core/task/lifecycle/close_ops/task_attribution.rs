@@ -1414,26 +1414,36 @@ pub(super) fn first_parent_delivery_content_presence(
         changed_paths(repo, &format!("{commit}^1"), commit)
             .is_some_and(|changed| changed.iter().any(|path| synced.contains(path)))
     }).cloned().collect();
-    let mut proofs = Vec::new();
-    if !clean.is_empty() {
-        proofs.push(super::delivery_content_presence_on_target_for_paths(
-            repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
-        ));
-    }
-    if !synced_commits.is_empty() {
-        proofs.push(merge_tip_content_presence_selected(
+    let clean_proof = (!clean.is_empty()).then(|| super::delivery_content_presence_on_target_for_paths(
+        repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
+    ));
+    let synced_proof = if synced_commits.is_empty() { None } else {
+        Some(merge_tip_content_presence_selected(
             repo, target, anchor, None, &identity, None, Some((synced_commits.as_slice(), synced.as_slice())),
-        )?);
-    }
+        )?)
+    };
+    judge_presence(clean_proof, synced_proof, |paths| {
+        paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
+            && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
+    })
+}
+
+/// Join the net proof of the task's own-only paths with the per-commit proof
+/// of synced paths. cas-baf7, shared by close and release: rebuilt bundle
+/// output is not a revert when every other delivered path, and some source,
+/// is proven (`rebuilt_bundles_only`).
+fn judge_presence(
+    clean: Option<DeliveryContentPresence>,
+    synced: Option<DeliveryContentPresence>,
+    rebuilt_bundles_only: impl FnOnce(&[String]) -> bool,
+) -> Option<DeliveryContentPresence> {
+    let proofs: Vec<_> = clean.into_iter().chain(synced).collect();
     if proofs.is_empty() { return None; }
     let presence = combine_presence(proofs);
-    // cas-baf7, shared by close and release: rebuilt bundle output is not a
-    // revert when every other delivered path, and some source, is proven.
     if let DeliveryContentPresence::Dropped { paths } = &presence
-        && paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
-        && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
+        && rebuilt_bundles_only(paths)
     {
-        return Some(DeliveryContentPresence::Present { paths: clean });
+        return Some(DeliveryContentPresence::Present { paths: Vec::new() });
     }
     Some(presence)
 }
@@ -2423,6 +2433,17 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::process::Command;
+
+
+    #[test]
+    fn rebuilt_bundle_drop_never_hides_an_unfinished_proof_cas_2430() {
+        let bundle = DeliveryContentPresence::Dropped { paths: vec!["hub-web/dist/app.js".into()] };
+        let unknown = DeliveryContentPresence::Unknown { reason: "ancestry not proven".into() };
+        assert!(matches!(
+            judge_presence(Some(bundle), Some(unknown), |_| true),
+            Some(DeliveryContentPresence::Unknown { .. })
+        ));
+    }
 
     fn git(repo: &Path, args: &[&str]) -> String {
         let out = Command::new("git")

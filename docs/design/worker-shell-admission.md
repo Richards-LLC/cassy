@@ -328,8 +328,8 @@ the operand is a bare name that does not exist there, nothing is read from
 the store. Refusing that would refuse every relative read after an
 unresolved cd.
 
-This rule adds a class to the residual denies above, which supervisor decision
-#571298 accepts without a partial fix. That class is a read from a directory
+This rule adds a class to the residual denies above, which decision #571298
+of the supervisor accepts without a partial fix. That class is a read from a directory
 the guard cannot resolve: a loop variable, a cd to a glob path, or a script
 that globs a path passed as an argument. At interim candidate `b622e9e` on the
 v3 fixture, seven denies fell outside every labelled frame. A full-census

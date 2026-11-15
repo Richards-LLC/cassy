@@ -1379,12 +1379,14 @@ pub(super) fn first_parent_delivery_content_presence(
     let mut identity = TaskCommitIdentity {
         task_id: Some(task_id.into()), start_base: Some(base.into()), ..Default::default()
     };
-    let mut commits = Vec::new();
+    let (mut commits, mut foreign) = (Vec::new(), Vec::new());
     for commit in history.lines().filter(|commit| !commit.is_empty()) {
         let message = git_text(repo, &["show", "-s", "--format=%B", commit])?;
         let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
         let paths = git_text(repo, &["diff", "--name-only", &parent, commit, "--", ".", ":(exclude).cas", ":(exclude).cas/**"])?;
-        if !paths.is_empty() && !subject_claims_another_task(&message, &identity) { commits.push(commit.to_string()); }
+        if paths.is_empty() { continue; }
+        if subject_claims_another_task(&message, &identity) { foreign.push(commit.to_string()); }
+        else { commits.push(commit.to_string()); }
     }
     if commits.is_empty() { return None; }
     identity.known_commits = commits.clone();
@@ -1407,8 +1409,10 @@ pub(super) fn first_parent_delivery_content_presence(
     // restoration (a delivery reverted on the target and re-merged by a
     // sync stays reverted).
     let mut synced = Vec::new();
+    // A first-parent commit naming another task is not the task's own work
+    // either, so the paths it touches keep the per-commit proof too.
     let merges = git_text(repo, &["rev-list", "--first-parent", "--merges", &format!("{base}..{anchor}")])?;
-    for merge in merges.lines().filter(|merge| !merge.is_empty()) {
+    for merge in merges.lines().filter(|merge| !merge.is_empty()).chain(foreign.iter().map(String::as_str)) {
         append_unique(&mut synced, changed_paths(repo, &format!("{merge}^1"), merge)?
             .into_iter().filter(|path| paths.contains(path)).collect());
     }
@@ -1434,23 +1438,29 @@ pub(super) fn first_parent_delivery_content_presence(
 }
 
 /// Join the net proof of the task's own-only paths with the per-commit proof
-/// of synced paths. cas-baf7, shared by close and release: rebuilt bundle
-/// output is not a revert when every other delivered path, and some source,
+/// of synced paths. An unfinished proof leaves the delivery unknown. cas-baf7,
+/// shared by close and release: rebuilt bundle output among the own-only
+/// paths is not a revert when every other delivered path, and some source,
 /// is proven (`rebuilt_bundles_only`).
 fn judge_presence(
     clean: Option<DeliveryContentPresence>,
     synced: Option<DeliveryContentPresence>,
-    rebuilt_bundles_only: impl FnOnce(&[String]) -> bool,
+    rebuilt_bundles_only: impl Fn(&[String]) -> bool,
 ) -> Option<DeliveryContentPresence> {
-    let proofs: Vec<_> = clean.into_iter().chain(synced).collect();
-    if proofs.is_empty() { return None; }
-    let presence = combine_presence(proofs);
-    if let DeliveryContentPresence::Dropped { paths } = &presence
-        && rebuilt_bundles_only(paths)
+    if clean.is_none() && synced.is_none() { return None; }
+    if let Some(DeliveryContentPresence::Unknown { reason }) = [&clean, &synced].into_iter().flatten()
+        .find(|proof| matches!(proof, DeliveryContentPresence::Unknown { .. }))
     {
-        return Some(DeliveryContentPresence::Present { paths: Vec::new() });
+        return Some(DeliveryContentPresence::Unknown { reason: reason.clone() });
     }
-    Some(presence)
+    // Per-commit drops of synced paths always stand.
+    let clean = match clean {
+        Some(DeliveryContentPresence::Dropped { paths }) if rebuilt_bundles_only(&paths) => {
+            Some(DeliveryContentPresence::Present { paths: Vec::new() })
+        }
+        other => other,
+    };
+    Some(combine_presence(clean.into_iter().chain(synced).collect()))
 }
 
 fn changed_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {

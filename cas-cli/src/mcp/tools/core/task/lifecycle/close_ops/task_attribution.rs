@@ -1384,20 +1384,89 @@ pub(super) fn first_parent_delivery_content_presence(
     if commits.is_empty() { return None; }
     identity.known_commits = commits.clone();
     identity.known_commits.push(anchor.into());
+    let mut paths = Vec::new();
+    for commit in &commits {
+        append_unique(&mut paths, changed_paths(repo, &format!("{commit}^1"), commit)?);
+    }
     if anchor != shipped {
         // The squash has the exact source snapshot. Limit its comparison to
         // the task's own first-parent paths, excluding target-sync imports.
-        let mut paths = Vec::new();
-        for commit in &commits {
-            let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
-            let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", &parent, commit, "--"])?;
-            append_unique(&mut paths, changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect());
-        }
         return Some(super::delivery_content_presence_on_target_for_paths(
             repo, shipped, target, Some(&paths), false, &[task_id], Some(base),
         ));
     }
-    merge_tip_content_presence_selected(repo, target, anchor, None, &identity, None, Some(&commits))
+    // cas-2430: a path only the task's own commits touched is judged by its
+    // net base..anchor effect, so a change the task itself reverted or
+    // rewrote is not a loss. A path a target-sync merge also touched keeps
+    // the per-commit proof: the sync's content is never the task's own
+    // restoration (a delivery reverted on the target and re-merged by a
+    // sync stays reverted).
+    let mut synced = Vec::new();
+    let merges = git_text(repo, &["rev-list", "--first-parent", "--merges", &format!("{base}..{anchor}")])?;
+    for merge in merges.lines().filter(|merge| !merge.is_empty()) {
+        append_unique(&mut synced, changed_paths(repo, &format!("{merge}^1"), merge)?
+            .into_iter().filter(|path| paths.contains(path)).collect());
+    }
+    let net = changed_paths(repo, base, anchor)?;
+    let clean: Vec<String> = paths.iter()
+        .filter(|path| !synced.contains(path) && net.contains(path)).cloned().collect();
+    let synced_commits: Vec<String> = commits.iter().filter(|commit| {
+        changed_paths(repo, &format!("{commit}^1"), commit)
+            .is_some_and(|changed| changed.iter().any(|path| synced.contains(path)))
+    }).cloned().collect();
+    let mut proofs = Vec::new();
+    if !clean.is_empty() {
+        proofs.push(super::delivery_content_presence_on_target_for_paths(
+            repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
+        ));
+    }
+    if !synced_commits.is_empty() {
+        proofs.push(merge_tip_content_presence_selected(
+            repo, target, anchor, None, &identity, None, Some((synced_commits.as_slice(), synced.as_slice())),
+        )?);
+    }
+    if proofs.is_empty() { return None; }
+    let presence = combine_presence(proofs);
+    // cas-baf7, shared by close and release: rebuilt bundle output is not a
+    // revert when every other delivered path, and some source, is proven.
+    if let DeliveryContentPresence::Dropped { paths } = &presence
+        && paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
+        && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
+    {
+        return Some(DeliveryContentPresence::Present { paths: clean });
+    }
+    Some(presence)
+}
+
+fn changed_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", from, to, "--"])?;
+    Some(changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect())
+}
+
+/// Any drop wins, then any unknown, then any supersession.
+fn combine_presence(proofs: Vec<DeliveryContentPresence>) -> DeliveryContentPresence {
+    let (mut present, mut superseded, mut commits, mut dropped, mut unknown) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None);
+    for proof in proofs {
+        match proof {
+            DeliveryContentPresence::Present { paths } => append_unique(&mut present, paths),
+            DeliveryContentPresence::Superseded { paths, commits: by } => {
+                append_unique(&mut superseded, paths);
+                append_unique(&mut commits, by);
+            }
+            DeliveryContentPresence::Dropped { paths } => append_unique(&mut dropped, paths),
+            DeliveryContentPresence::Unknown { reason } => { unknown.get_or_insert(reason); }
+        }
+    }
+    if !dropped.is_empty() {
+        DeliveryContentPresence::Dropped { paths: dropped }
+    } else if let Some(reason) = unknown {
+        DeliveryContentPresence::Unknown { reason }
+    } else if !superseded.is_empty() {
+        DeliveryContentPresence::Superseded { paths: superseded, commits }
+    } else {
+        DeliveryContentPresence::Present { paths: present }
+    }
 }
 
 /// Prove a merge or empty checkpoint delivery from the task's attributed
@@ -1433,8 +1502,10 @@ fn merge_tip_content_presence_selected(
     window: Option<&TaskCommitReceiptWindow>,
     identity: &TaskCommitIdentity,
     validated_receipt: Option<&str>,
-    explicit_commits: Option<&[String]>,
+    explicit: Option<(&[String], &[String])>,
 ) -> Option<DeliveryContentPresence> {
+    let explicit_commits = explicit.map(|(commits, _)| commits);
+    let explicit_paths = explicit.map(|(_, paths)| paths);
     let full_tip = git_text(repo, &["rev-parse", &format!("{merge_tip}^{{commit}}")])?;
     let merge_tip = full_tip.as_str();
     let has_work_window = window.is_some();
@@ -1729,7 +1800,7 @@ fn merge_tip_content_presence_selected(
                 // Measure this selected commit directly; the public task seam
                 // may expand the release anchor into this same delivery range.
                 return super::delivery_content_presence_on_target_for_paths(
-                    repo, commit, target, None, false,
+                    repo, commit, target, explicit_paths, false,
                     &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(), None,
                 );
             }

@@ -586,6 +586,12 @@ fn collect_script(
                 .then(|| (at, substitution.body.clone()))
         })
     }).collect();
+    // A word whose raw text starts with an active `$` can take a binding.
+    let active_words: Vec<bool> = (0..lexed.tokens.len()).map(|at| {
+        let start = if at == 0 { 0 } else { lexed.ends[at - 1] };
+        let raw = projected[start..lexed.ends[at]].trim_start();
+        raw.strip_prefix('"').unwrap_or(raw).starts_with('$')
+    }).collect();
     let (tokens, literal_words) = (lexed.tokens, lexed.literals);
     let captured_status: HashSet<String> = tokens
         .iter()
@@ -721,6 +727,9 @@ fn collect_script(
                         .then_some(statement_literals[index])
                 })
                 .collect();
+            let word_actives: Vec<bool> = visible[skipped_keywords..].iter().enumerate()
+                .filter_map(|(index, &at)| (matches!(tokens[at], ShellToken::Word(_)) && !redirects[index]).then(|| active_words[at]))
+                .collect();
             let index = if continuation {
                 None
             } else {
@@ -791,27 +800,31 @@ fn collect_script(
                 dirs.clone()
             };
 
-            // A single preceding binding resolves this operand without
-            // reinterpreting quoted literal markers or changing argv roles.
-            let read_operand = |word: &String, literal: bool| {
-                if !literal && let Some(value) = shell_admission::literal_variable_name(word)
-                    .and_then(|name| directory_values.get(name))
-                    .filter(|values| values.len() == 1).and_then(|values| values.first())
-                    .filter(|value| !value.contains(['$', '`']))
-                { return value.clone(); }
-                word.clone()
+            // A single preceding binding resolves an operand that starts with
+            // an active expansion of its name, keeping the literal remainder,
+            // without reinterpreting quoted literal markers or argv roles.
+            let read_operand = |word: &String, literal: bool, active: bool| -> (String, bool) {
+                if literal { return (word.clone(), false); }
+                let resolved = active.then(|| shell_admission::leading_parameter(word)).flatten()
+                    .and_then(|(name, spelled)| {
+                        let rest = word.strip_prefix(spelled)?;
+                        let value = directory_values.get(name).filter(|values| values.len() == 1)?.first()?;
+                        (!rest.contains(['$', '`']) && !value.contains(['$', '`'])).then(|| format!("{value}{rest}"))
+                    });
+                match resolved { Some(value) => (value, false), None => (word.clone(), true) }
             };
-            let read_words: Vec<String> = words.iter().zip(&word_literals)
-                .map(|(word, literal)| read_operand(word, *literal)).collect();
-            let opened: Vec<String> = visible.iter().filter(|at| opened_files.contains(at))
+            let (read_words, dynamic): (Vec<String>, Vec<bool>) = words.iter().zip(&word_literals).zip(&word_actives)
+                .map(|((word, literal), active)| read_operand(word, *literal, *active)).unzip();
+            let (opened, opened_dynamic): (Vec<String>, Vec<bool>) = visible.iter().filter(|at| opened_files.contains(at))
                 .filter_map(|&at| match &tokens[at] {
-                    ShellToken::Word(word) => Some(read_operand(word, literal_words[at])), _ => None,
-                }).collect();
+                    ShellToken::Word(word) => Some(read_operand(word, literal_words[at], active_words[at])), _ => None,
+                }).unzip();
             // Redirects open before wrapper-local chdir. The policy applies
             // wrapper input-file and final argv cwd roles independently.
             for directory in &dirs {
                 effects.reads.push(ShellReadContext {
-                    words: read_words.clone(), opened: opened.clone(), cwd: directory.clone(), bodies: script_bodies.clone(),
+                    words: read_words.clone(), dynamic: dynamic.clone(), opened: opened.clone(),
+                    opened_dynamic: opened_dynamic.clone(), cwd: directory.clone(), bodies: script_bodies.clone(),
                 });
             }
 

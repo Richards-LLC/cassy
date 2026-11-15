@@ -1216,7 +1216,7 @@ pub(super) fn literal_variable_name(word: &str) -> Option<&str> {
 }
 
 /// `$NAME` or `${NAME}` at the start of raw word text, with its spelling.
-fn leading_parameter(raw: &str) -> Option<(&str, &str)> {
+pub(super) fn leading_parameter(raw: &str) -> Option<(&str, &str)> {
     if let Some(tail) = raw.strip_prefix("${") {
         let name = &tail[..tail.find('}')?];
         return super::is_shell_variable_name(name).then(|| (name, &raw[..name.len() + 3]));

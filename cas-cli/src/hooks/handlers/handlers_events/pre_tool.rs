@@ -5786,7 +5786,10 @@ pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
 
 pub(super) struct ShellReadContext {
     pub(super) words: Vec<String>,
+    /// Words whose value stays unresolved after preceding bindings.
+    pub(super) dynamic: Vec<bool>,
     pub(super) opened: Vec<String>,
+    pub(super) opened_dynamic: Vec<bool>,
     pub(super) cwd: Option<std::path::PathBuf>,
     pub(super) bodies: Vec<String>,
 }

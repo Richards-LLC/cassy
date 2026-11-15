@@ -119,16 +119,16 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
         // literal tail, read from any such directory; other operands are inert.
         let command_index = super::pre_tool::unwrapped_command_index(&context.words).unwrap_or(usize::MAX);
         let mut dynamic = false;
-        let mut project = |words: &[String], first: usize| words.iter().enumerate().map(|(at, word)| {
+        let mut project = |words: &[String], dynamics: &[bool], first: usize| words.iter().enumerate().map(|(at, word)| {
             if at < first { return word.clone(); }
-            match unresolved_tail(word) {
+            match dynamics.get(at).copied().unwrap_or(false).then(|| unresolved_tail(word)).flatten() {
                 Some(tail) => { dynamic = true; tail }
                 None if word.starts_with('-') => word.clone(),
                 None => "/dev/null".into(),
             }
         }).collect::<Vec<_>>();
-        let words = project(&context.words, command_index.saturating_add(1));
-        let opened = project(&context.opened, 0);
+        let words = project(&context.words, &context.dynamic, command_index.saturating_add(1));
+        let opened = project(&context.opened, &context.opened_dynamic, 0);
         if dynamic && anywhere(&words, &opened, &[]) { return true; }
     }
 

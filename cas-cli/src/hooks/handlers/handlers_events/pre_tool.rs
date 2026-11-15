@@ -10341,6 +10341,7 @@ EOF
             ("WRITER=printf; exec {WRITER}>/dev/null; \"$WRITER\" fixture", true),
             ("cd src && D=.; wc -l $D/*.rs", true),
             ("D=src; wc -l $D/*.rs; rg -n needle \"$D/new.rs\"; \"$D/run.sh\" fixture", false),
+            ("D=src; wc -c $D/*; rg -n '(^|/)needle/' src", false),
             ("printf x; B=src; find $B -name '*.rs' -print", false),
             ("find ~/.cache* -maxdepth 1 -name fixture -print", false),
             ("rg -n \"needle$\" src/*.rs", false),

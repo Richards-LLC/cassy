@@ -328,6 +328,21 @@ the operand is a bare name that does not exist there, nothing is read from
 the store. Refusing that would refuse every relative read after an
 unresolved cd.
 
+This rule adds a class to the residual denies above, which supervisor decision
+#571298 accepts without a partial fix. That class is a read from a directory
+the guard cannot resolve: a loop variable, a cd to a glob path, or a script
+that globs a path passed as an argument. At interim candidate `b622e9e` on the
+v3 fixture, seven denies fell outside every labelled frame. A full-census
+independent labeller marked all seven FALSE_DENY:
+
+| Harness | BASE v3 false denies | Candidate v3 false denies | Net change (simultaneous 95% interval) |
+| --- | --- | --- | --- |
+| Claude | 298.07 | 431.50 | +133.43 (−27 to +225) |
+| Codex | 411.00 | 336.74 | −74.26 (−102 to +33) |
+
+All 250 independently TRUE_DENY inputs still deny. The operator's random-20
+agreement check is not yet exercised.
+
 ## Filename-list consumers
 
 This is the admission contract for the consumer migration, not a claim that the

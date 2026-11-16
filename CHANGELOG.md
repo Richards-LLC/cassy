@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.31.0] - 2026-11-16
+
+### Fixed — Factory
+
+- **Large stores no longer stall the factory on task reads** — The director's two-second refresh reads task headers only, and migration m300 indexes the task list's sort order, so ordered task lists stop sorting every task body under the shared store connection. On a 767 MB store each read drops from about 1.2 s to under 0.3 s, so closes and verifier launches no longer wait behind it.
+
+### Fixed — Releases
+
+- **Old held deliveries no longer block every release cut** — The cut's zero-would-close check now counts only the tasks this release includes. Older deliveries still held from earlier releases are listed in the cut output and no longer refuse it, so a train whose own tasks all close or are already closed can cut. A held task inside the release still refuses.
+
+### Fixed — Verification
+
+- **Parked deliveries no longer sit Pending behind a refused verifier start** — Was: the factory daemon launching a pre-merge verifier re-checked the owning supervisor as if it were an inherited-environment caller. A live supervisor's own harness process is a different process, so the check refused exactly the live supervisor (`verifier_factory_owner: live registered supervisor required`), and a transient failure (a spent store wait budget) was reported once and never retried, leaving the dispatch Pending and every merge held. Now: an owner identity the server bound itself is trusted as a live supervisor; a failed start is retried up to four times with a growing delay, the notice names the attempt, and the refusal reason is included instead of a fixed sentence.
+
 ## [4.30.0] - 2026-11-16
 
 ### Fixed — Factory checks

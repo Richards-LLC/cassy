@@ -622,14 +622,20 @@ impl CasCore {
         };
         // Existence alone is not authentication: nested harnesses inherit
         // CAS_SESSION_ID. Validate before caching, without registering/reviving.
-        crate::mcp::daemon::ensure_factory_process_owner(
-            agent_store.as_ref(), &id, Some(std::process::id()),
-            Some(harness),
-        ).map_err(|error| McpError {
-            code: ErrorCode::INVALID_REQUEST,
-            message: Cow::from(error.to_string()),
-            data: None,
-        })?;
+        // cas-d824: an identity this server bound itself (ServerInternal) did
+        // not come from the environment. The factory daemon launches a review
+        // for a supervisor whose own process is another live harness, so the
+        // process-ownership check would refuse exactly the live supervisor.
+        if !self.has_server_internal_identity(&id) {
+            crate::mcp::daemon::ensure_factory_process_owner(
+                agent_store.as_ref(), &id, Some(std::process::id()),
+                Some(harness),
+            ).map_err(|error| McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: Cow::from(error.to_string()),
+                data: None,
+            })?;
+        }
         Ok(id)
     }
 

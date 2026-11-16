@@ -1564,3 +1564,19 @@ fn cas_bfa1_epic_for_branch_prefers_live_owner_and_bounds_lookup() {
             .is_terminal()
     );
 }
+
+#[test]
+fn task_heads_read_carries_no_body_text_cas_5461() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new("cas-5461".into(), "Director row".into());
+    task.notes = "n".repeat(64 * 1024);
+    task.description = "body".into();
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("worker".into());
+    store.add(&task).unwrap();
+
+    let (tasks, _, _) = store.list_heads_with_parent_deps_and_start_gates().unwrap();
+    let head = tasks.iter().find(|row| row.id == task.id).unwrap();
+    assert_eq!((head.title.as_str(), head.status, head.assignee.as_deref()), ("Director row", TaskStatus::AwaitingMerge, Some("worker")));
+    assert!(head.notes.is_empty() && head.description.is_empty(), "the factory director's per-refresh read must not copy task bodies");
+}

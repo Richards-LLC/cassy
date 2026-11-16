@@ -109,7 +109,7 @@ pub(crate) fn launch(
     core.bind_agent_identity(owner.id, crate::mcp::AgentIdentitySource::ServerInternal)
         .map_err(|e| e.to_string())?;
     core.resolve_live_supervisor_authority()
-        .map_err(|_| "verifier_factory_owner: live registered supervisor required".to_string())?;
+        .map_err(|error| format!("verifier_factory_owner: live registered supervisor required ({error:?})"))?;
     let task = core
         .open_task_store()
         .map_err(|e| e.to_string())?

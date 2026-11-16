@@ -483,6 +483,14 @@ pub(crate) fn record_supervisor_test(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    // cas-763f: as for a worker rerun, any recording of changed tests
+    // withdraws overlapping stability proof until this evidence passes.
+    let config = crate::config::Config::load(&root)?.factory();
+    let target = task.deliverables.work_target.as_ref()
+        .map(|work| work.target_branch.clone()).or(config.epic_base_branch);
+    let owned = stability::rust::selected(&repo, &diff_base(&repo, target.as_deref())?, &evidence.head, &test)?;
+    stability::invalidate(&root, &repo, &evidence.head,
+        &owned.iter().map(|test| test.identity.clone()).collect::<Vec<_>>())?;
     if evidence.exit_code != 0 {
         bail!(
             "supervisor test exited {}; no PASS receipt recorded",
@@ -497,11 +505,6 @@ pub(crate) fn record_supervisor_test(
             bail!("stability evidence needs exactly {} per-repeat logs after the selected log",
                 stability::REQUIRED_PASSES - 1);
         }
-        let config = crate::config::Config::load(&root)?.factory();
-        let target = task.deliverables.work_target.as_ref()
-            .map(|work| work.target_branch.clone()).or(config.epic_base_branch);
-        let base = diff_base(&repo, target.as_deref())?;
-        let owned = stability::rust::selected(&repo, &base, &evidence.head, &test)?;
         if owned.is_empty() {
             bail!("this selection owns no changed tests; no stability evidence is needed");
         }

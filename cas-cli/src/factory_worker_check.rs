@@ -279,6 +279,16 @@ fn targeted_test(args: &[String]) -> Option<TargetedTest> {
     })
 }
 
+/// The refusal names the shape the caller was attempting: a JavaScript
+/// runner command is never answered with the Cargo-only grammar.
+fn admission_refusal(args: &[String]) -> &'static str {
+    if javascript::names_runner(args) {
+        javascript::SHAPE
+    } else {
+        "Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed"
+    }
+}
+
 pub(crate) fn allowed_args(args: &[String]) -> bool {
     check_packages(args).is_some() || targeted_test(args).is_some() || javascript::allowed_args(args)
 }
@@ -1898,7 +1908,7 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Optio
 #[cfg(unix)]
 pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if !allowed_args(args) {
-        bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
+        bail!(admission_refusal(args));
     }
     validate_test_environment(args, test_env)?;
     let repo = std::env::current_dir()?;
@@ -2097,7 +2107,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     }
     let packages = match &test {
         Some(test) => vec![test.package.clone()],
-        None => check_packages(args).context("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed")?,
+        None => check_packages(args).with_context(|| admission_refusal(args))?,
     };
     let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     let cas_root = cas_root.canonicalize()?;
@@ -3051,7 +3061,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         fixture_commit_as(&repo, "delivery");
         let receipt_head = fixture_head(&repo);
         record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
-        let identity = stability::Identity { path: "src/lib.rs".into(), name: "cached".into() };
+        let identity = stability::Identity::exact("src/lib.rs", "cached");
         let selection = TargetedTest { package: "cas".into(), harness: None, filter: "test(cached)".into() };
         let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &receipt_head, &selection);
         let mut receipt: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

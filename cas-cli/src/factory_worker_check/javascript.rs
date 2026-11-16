@@ -1480,7 +1480,6 @@ mod tests {
         for source in [
             "test(title, () => {});",
             "describe(title, () => { test('child', () => {}); });",
-            "test.each([1, 2])('row %i', () => {});",
             "test('case_id', callback);",
             "describe('suite_id', declareTests);",
         ] {
@@ -1489,12 +1488,43 @@ mod tests {
                 "{source}"
             );
         }
+        // GH #1977/#1978: an `.each` table registers one runtime test per row.
+        let rows = "describe.each(['x'])('suite %s', () => {\n  it.each([1, 2])('row %i', () => {});\n});";
+        let template = Identity { parameterized: true, ..id("a.test.ts", "suite %s row %i") };
+        assert_eq!(source_tests("a.test.ts", rows, &[(2, 2)]).unwrap(), [template.clone()]);
+        assert!(template.selects(&id("a.test.ts", "suite x row 2")));
+        assert!(!template.selects(&id("a.test.ts", "suite x other 2")));
+        // GH #1973: a TypeScript generic over an import type parses.
+        let generic = "vi.mock('vue-i18n', async importOriginal => ({\n  ...(await importOriginal<typeof import('vue-i18n')>()),\n}));\nit('a', () => { expect(1).toBe(1); });";
+        assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);
         assert_eq!(
             changed_lines("@@ -7 +7,0 @@\n-x\n@@ -10 +9,2 @@\n+y\n+z").unwrap(),
             [(7, 7), (9, 10)]
         );
         assert!(!allowed_args(&["vitest".into(), "--retry=3".into()]));
         assert!(!allowed_args(&["jest".into(), "../a.test.js".into()]));
+        // GH #1985, #1992, #1973, #1978, #1998: the shapes worker discipline and
+        // package scripts use, plus a package-local jest config.
+        let parse = |command: &str| {
+            invocation(&command.split(' ').map(String::from).collect::<Vec<_>>())
+        };
+        let file = || vec!["src/a.spec.ts".to_string()];
+        for (command, runner, config) in [
+            ("npx vitest run src/a.spec.ts", "vitest", None),
+            ("pnpm exec vitest run src/a.spec.ts", "vitest", None),
+            ("npx jest src/a.spec.ts --runInBand", "jest", None),
+            ("pnpm exec jest --config jest.conversations.config.js --runInBand src/a.spec.ts", "jest", Some("jest.conversations.config.js")),
+            ("yarn playwright test -c e2e/playwright.config.ts src/a.spec.ts", "playwright", Some("e2e/playwright.config.ts")),
+        ] {
+            assert_eq!(
+                parse(command),
+                Some(Invocation { runner, config: config.map(String::from), files: file() }),
+                "{command}"
+            );
+        }
+        for command in ["npx jest -t name src/a.spec.ts", "vitest run --retry 2 src/a.spec.ts", "jest --config ../x.js src/a.spec.ts"] {
+            assert_eq!(parse(command), None, "{command}");
+        }
         let aliased = "import { test as check } from 'vitest'; check('case_id', () => {});";
         assert_eq!(
             source_tests("a.test.ts", aliased, &[(1, 1)]).unwrap(),
@@ -1761,6 +1791,64 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         );
     }
 
+    /// GH #1977, #2000, #1971: park asks only for tests the task's own
+    /// commits changed in the delivered tree.
+    #[test]
+    fn park_requires_only_tests_the_delivery_changed_at_its_tip() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let spec = "a.spec.ts";
+        let commit = |source: &str, message: &str| {
+            std::fs::write(repo.path().join(spec), source).unwrap();
+            git(&["add", spec]);
+            git(&["commit", "--quiet", "-m", message]);
+            git(&["rev-parse", "HEAD"])
+        };
+        let file = |table: &str, own: &str, foreign: &str| format!(
+            "it.each([{table}])('row %s', () => {{}});\nit('own', () => {{ {own} }});\nit('foreign', () => {{ {foreign} }});\n"
+        );
+        git(&["init", "--quiet", "-b", "main"]);
+        let base = commit(&file("1", "", ""), "base");
+        git(&["checkout", "--quiet", "-b", "lane"]);
+        // #1977: an edited table row, then restored, is not in the net delivery.
+        let edited = commit(&file("1, 2", "", ""), "cas-1 edit row");
+        // #1971: another author's commit on the lane changes its own test.
+        let foreign = commit(&file("1, 2", "", "foreign();"), "foreign PR work");
+        // #2000: the target edits its table; the lane merges the target.
+        git(&["checkout", "--quiet", "main"]);
+        commit(&file("3", "", ""), "target edits its table");
+        git(&["checkout", "--quiet", "lane"]);
+        // The table conflicts; the merge resolves to the target's row.
+        let _ = Command::new("git")
+            .current_dir(repo.path())
+            .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+            .args(["merge", "--quiet", "--no-ff", "--no-commit", "main"])
+            .output()
+            .unwrap();
+        std::fs::write(repo.path().join(spec), file("3", "", "foreign();")).unwrap();
+        git(&["add", spec]);
+        git(&["commit", "--quiet", "-m", "merge main"]);
+        let merge = git(&["rev-parse", "HEAD"]);
+        let head = commit(&file("3", "own();", "foreign();"), "cas-1 own test");
+        let ranges = [(base, edited), (merge, head.clone())];
+        let required = crate::factory_worker_check::stability::required(
+            repo.path(), &head, "main", &[spec.into()], Some(&ranges),
+        )
+        .unwrap();
+        assert_eq!(required, [id(spec, "own")], "foreign commit {foreign}");
+    }
+
     #[test]
     fn javascript_reports_require_every_selected_test_and_reject_failure_or_extra_execution() {
         let repo = Path::new("/project");
@@ -1781,6 +1869,14 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             let mut retried = passing.clone();
             retried["testResults"][0]["assertionResults"][0]["invocations"] = json!(2);
             assert!(validate_report(runner, repo, &retried, &selected, 1).is_err());
+            // GH #1978: a template is proved when every row it selects passes.
+            let template = [Identity { parameterized: true, ..id("a.test.js", "row %s") }];
+            let rows = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed", "assertionResults":[
+                {"fullName":"row a","status":"passed"}, {"fullName":"row b","status":"passed"}]}]});
+            validate_report(runner, repo, &rows, &template, 1).unwrap();
+            let mut failed_row = rows.clone();
+            failed_row["testResults"][0]["assertionResults"][1]["status"] = json!("failed");
+            assert!(validate_report(runner, repo, &failed_row, &template, 1).is_err());
         }
     }
 

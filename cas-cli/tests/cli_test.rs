@@ -246,6 +246,7 @@ esac
     report.status = TaskStatus::AwaitingMerge;
     report.execution_note = Some("no-code".into());
     tasks.add(&report).unwrap();
+    tasks.add_dependency(&Dependency::new(report.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
     let (ok, unbound) = plan();
     assert!(!ok && unbound["blockers"].get("NO_CODE_PROOF").is_some(), "{unbound}");
     let refused = cut(false);

@@ -482,6 +482,23 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
         await expect(dialog.getByText("hello@example.test", { exact: true })).toBeInViewport();
       }
     });
+    await journey.stage(`Clean up confirmation spans the sheet at ${width} in ${colorScheme}`, async () => {
+      const banner = dialog.locator(".accounts-cleanup-banner");
+      const bannerHeight = (await banner.boundingBox())!.height;
+      await banner.getByRole("button", { name: "Clean up", exact: true }).click();
+      const editor = dialog.locator(".accounts-editor");
+      await expect(editor).toBeVisible();
+      await expect(editor.locator("input")).toBeFocused();
+      const box = (await editor.boundingBox())!, field = (await editor.locator("input").boundingBox())!, bar = (await banner.boundingBox())!;
+      if (process.env.DELIVERY_QA) await page.screenshot({ path: join(process.env.DELIVERY_QA, `cleanup-${width}-${colorScheme}.png`) });
+      // cas-9543: the shared dialog form is a zero-intrinsic-width grid; as a child of the banner's flex row it was a sliver.
+      expect(box.width).toBeGreaterThanOrEqual(bar.width - 1);
+      expect(field.width).toBeGreaterThan(box.width / 2);
+      expect(bar.height).toBeCloseTo(bannerHeight, 0);
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(editor).toBeHidden();
+    });
   }
   await journey.stage("Typed confirmation removes the intended profile and New session refreshes", async () => {
     const row = dialog.locator("li").filter({ hasText: "hello@example.test" });

@@ -469,6 +469,8 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                     VerificationDispatchState::Pending | VerificationDispatchState::Claimed
                 )
             {
+                // GH #2018: an unclaimed dispatch needs its daemon verifier
+                // requested here; nothing else starts it while the train holds.
                 queue.waiting = Some(crate::gates::tag("G-115", format!("{} awaiting dispatch {}", entry.task, dispatch.id)));
                 save(&path, &queue)?;
                 break;
@@ -978,6 +980,17 @@ mod tests {
         task.depth = TaskDepth::Deep;
         tasks.update(&task).unwrap();
         fixture.start().await;
+        // The live stuck state: a daemonless pass left this exact dispatch
+        // Pending and unclaimed.
+        let parked = tasks.get(&fixture.ids[0]).unwrap();
+        assert!(fixture.core.prepare_premerge_verification(
+            &parked, fixture._repo.path(), "factory/worker-1", "epic/train",
+        ).is_err());
+        let pending = cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.state, VerificationDispatchState::Pending);
+        let broker_root = fixture.root.clone();
         // The factory daemon's local control socket, as the real daemon serves it.
         let socket = gui_socket_path("queue-session");
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
@@ -1012,12 +1025,21 @@ mod tests {
             else {
                 panic!("unexpected factory control");
             };
+            // The real daemon launch path claims the exact dispatch.
+            let review = crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
+                &broker_root, "queue-session", &dispatch_id,
+            )
+            .unwrap();
+            let claimed = cas_store::get_verification_dispatch(&broker_root, &dispatch_id).unwrap();
             client
                 .write_all(&encode_message(&DaemonMessage::VerifierLaunched {
                     dispatch_id: dispatch_id.clone(),
                 }).unwrap())
                 .unwrap();
-            Some(dispatch_id)
+            if let Some(review) = review {
+                review.join().unwrap();
+            }
+            Some((dispatch_id, claimed.state, claimed.verifier_agent_id))
         });
 
         resume_pending(&fixture.root, "queue-session").await.unwrap();
@@ -1025,7 +1047,11 @@ mod tests {
         let dispatch = cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[0])
             .unwrap()
             .expect("the train entry needs a verdict");
-        assert_eq!(broker.join().unwrap(), Some(dispatch.id.clone()));
+        let (launched, state, verifier) =
+            broker.join().unwrap().expect("one resume pass requests the daemon verifier");
+        assert_eq!((launched, state), (pending.id.clone(), VerificationDispatchState::Claimed));
+        assert!(verifier.is_some_and(|id| id.starts_with("task-verifier-")));
+        assert_eq!(dispatch.id, pending.id);
         let operations = GitOperations::new(fixture._repo.path().to_path_buf());
         assert!(!operations.is_ancestor(&fixture.shas[0], "epic/train"));
         // The verdict resumes the same position without a single merge.

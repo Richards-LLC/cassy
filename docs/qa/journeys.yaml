@@ -2617,6 +2617,10 @@ invariants:
     statement: The Quality journey focuses the visible desktop search or phone composer, sends one palette shortcut and waits for the palette; the selected project's trend factor and chart remain visible in both schemes.
     check: Run the original HUB-J13 quality trend identity headlessly on locked Playwright with retries zero; keep a red focus-loss control, the passing control, and the final four viewport/scheme captures. The journey must show the trend, not merely issue a quality request.
     bug: {task: cas-c008}
+  FACTORY-JS-STABILITY-RUNNER-ROOT:
+    statement: A JavaScript stability run starts from the nearest ancestor holding the runner's config and passes it explicitly, so a nested package.json cannot hide the project's transforms; the stability refusal names each changed test's runner command and never a shell-metacharacter alternative.
+    check: Run factory_worker_check::javascript::tests::nested_package_json_runs_from_the_jest_config_root_cas_1468 and config_free_test_runner_comes_from_package_evidence_cas_1468 through the capped runner.
+    bug: {task: cas-1468}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -2671,7 +2675,7 @@ journeys:
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
   owners: [cas-cli/src/factory_worker_check.rs, scripts/worker-proof-guards.py, cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/mcp/tools/core/task/rebind.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs, cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs, cas-cli/src/mcp/tools/service/server_handler.rs]
-  invariants: [FACTORY-SELECTED-TEST-LOG, FACTORY-QUEUED-SOURCE-BOUNDARY, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-ESCAPED-CALLER-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY, FACTORY-CLOSE-LATE-PARK, FACTORY-MACHINE-COMMAND-SHAPE]
+  invariants: [FACTORY-SELECTED-TEST-LOG, FACTORY-QUEUED-SOURCE-BOUNDARY, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-ESCAPED-CALLER-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY, FACTORY-CLOSE-LATE-PARK, FACTORY-MACHINE-COMMAND-SHAPE, FACTORY-JS-STABILITY-RUNNER-ROOT]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE

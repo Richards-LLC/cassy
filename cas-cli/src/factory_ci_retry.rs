@@ -332,6 +332,7 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
     }
     use crate::mcp::tools::core::workflow::retry_ci_status;
     match retry_ci_status(
+        Some(root),
         &request.sha,
         &request.target,
         &request.repo,

@@ -318,10 +318,10 @@ if os.environ.get('EXTRA_OUTPUT') == 'true':
         self.assertEqual(self.classify()['web-check-needed'], 'true')
 
     def test_every_repo_level_file_hub_web_reads_is_a_web_input(self):
-        # A new `../scripts/x` or `../docs/x` read in hub-web must join WEB_INPUTS.
-        reference = re.compile(r'((?:\.\./)+(?:scripts|docs)/[\w./-]+\.\w+)')
+        # Relative reads into any of these sibling trees must join WEB_INPUTS.
+        reference = re.compile(r'((?:\.\./)+(?:scripts|docs|cas-cli|crates)/[\w./-]+)')
         sources = [ROOT / 'hub-web/package.json', *ROOT.glob('hub-web/*.ts')]
-        for folder in ('src', 'scripts', 'e2e', 'fixtures'):
+        for folder in ('src', 'scripts', 'e2e', 'fixtures', 'preview'):
             sources += [p for p in (ROOT / 'hub-web' / folder).rglob('*')
                         if p.suffix in ('.ts', '.mjs', '.js', '.json') and 'node_modules' not in p.parts]
         found = set()
@@ -331,7 +331,7 @@ if os.environ.get('EXTRA_OUTPUT') == 'true':
                 for base in (source.parent, ROOT / 'hub-web'):
                     target = (base / relative).resolve()
                     if target.exists() and target.is_relative_to(ROOT) and not target.is_relative_to(ROOT / 'hub-web'):
-                        found.add(str(target.relative_to(ROOT)))
+                        found.add(str(target.relative_to(ROOT)) + ('/' if target.is_dir() else ''))
         workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
         for job in workflow['jobs'].values():
             default = job.get('defaults', {}).get('run', {}).get('working-directory')
@@ -343,7 +343,12 @@ if os.environ.get('EXTRA_OUTPUT') == 'true':
         self.assertNotIn('scripts/worker-memory.py', found)
         self.assertIn('docs/design/design-tokens.json', found)
         self.assertIn('scripts/test-ci-journey-evidence-upload.sh', found)
-        missing = sorted(path for path in found if not WEB.covered(path))
+        self.assertIn('cas-cli/src/hub/server.rs', found)
+        self.assertIn('cas-cli/src/hub/visual_page_csp.txt', found)
+        self.assertIn('crates/cas-operator-crypto/tests/fixtures/', found)
+        # The CLI manifest contributes its version through the classifier's
+        # separate version check and the job key's parsed-version binding.
+        missing = sorted(path for path in found if path != 'cas-cli/Cargo.toml' and not WEB.covered(path))
         self.assertEqual(missing, [], 'add these hub-web inputs to scripts/classify-web-inputs.py WEB_INPUTS')
 
     def test_pr_1191_merge_queue_entry_skips_web_tests(self):

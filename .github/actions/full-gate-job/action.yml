@@ -1,5 +1,5 @@
 name: Full gate job receipt
-description: Restore or publish one exact-tree job in the shared full-set receipt graph.
+description: Restore or publish one job with matching inputs in the shared full-set receipt graph.
 inputs:
   phase:
     description: restore or save

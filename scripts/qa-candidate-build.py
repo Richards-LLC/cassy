@@ -168,6 +168,28 @@ def sweep_abandoned(repo, scratch_parent, scratch_prefix, task_dir):
             shutil.rmtree(stage, ignore_errors=True)
 
 
+def journey_failure(status, web_artifacts, task_dir, revision):
+    """Keep the journey build log under the task's artifacts; scratch is removed.
+
+    cas-40d4: the error named a build.log inside the owned scratch tree that
+    teardown deletes, and called a memory-admission refusal a build failure.
+    """
+    logs = sorted(web_artifacts.glob('journey-builds/*/build.log'), key=lambda log: log.stat().st_mtime)
+    kept = 'no build log was written'
+    refusal = None
+    if logs:
+        directory = task_dir / 'candidate-logs'
+        directory.mkdir(exist_ok=True)
+        stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+        kept = directory / f'{revision}-{stamp}-journey-build.log'
+        shutil.copy2(logs[-1], kept)
+        refusal = journey_dist.admission_refusal(kept) if status == journey_dist.NOT_STARTED_EXIT else None
+    if refusal:
+        return journey_dist.NotStarted(
+            f'journey snapshot build not started: memory admission: {refusal}; log kept at {kept}')
+    return ValueError(f'journey snapshot build failed (exit {status}); log kept at {kept}')
+
+
 def build(repo, revision, candidate_dir):
     repo = repo.resolve()
     resolved = subprocess.check_output(
@@ -210,8 +232,15 @@ def build(repo, revision, candidate_dir):
                 # Use the journey producer's source-bound production build,
                 # then install its bytes only in this disposable checkout.
                 web_artifacts = owned/'web'
-                run(scope, [sys.executable,checkout/'scripts/journey_dist.py','build',
-                            '--repo',checkout,'--artifacts',web_artifacts],stdout=sys.stderr,stderr=sys.stderr)
+                # cas-40d4: `cas qa candidate build` refuses workers (qa.rs), so
+                # a supervisor or operator build takes proof admission.
+                role = 'worker' if os.environ.get('CAS_AGENT_ROLE') == 'worker' else 'proof'
+                try:
+                    run(scope, [sys.executable,checkout/'scripts/journey_dist.py','build',
+                                '--repo',checkout,'--artifacts',web_artifacts,'--admission-role',role],
+                        stdout=sys.stderr,stderr=sys.stderr)
+                except subprocess.CalledProcessError as error:
+                    raise journey_failure(error.returncode, web_artifacts, task_dir, revision) from error
                 snapshot = json.loads((web_artifacts/'journey-build.json').read_text())
                 journey_dist.verify_build(checkout,snapshot,revision)
                 # The verified generated assets are the only intentional delta

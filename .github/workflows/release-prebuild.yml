@@ -217,14 +217,15 @@ jobs:
           strip package/cas
           cp LICENSE package/
 
-      # The BLAKE3 build-output audit needs the build directory, so it runs
-      # here. The packaged-binary ISA audit and launch smoke run again in
-      # release.yml on the exact archive that ships.
+      # The one ISA audit of the shipped Linux bytes. Its SHA-256 travels in
+      # the artifact; release.yml checks the archive's executable against it
+      # and runs only the launch smoke.
       - name: Audit build outputs and packaged Linux executable
         if: steps.compile.outputs.needed == 'true'
         run: |
           ./scripts/check-blake3-no-avx512-build.sh "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/$RELEASE_DIR/build"
           ./scripts/test-check-portable-x86_64-isa.sh package/cas
+          (cd package && sha256sum cas) > cas-x86_64-unknown-linux-gnu.audited.sha256
 
       - name: Package
         if: steps.compile.outputs.needed == 'true'
@@ -238,7 +239,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cas-x86_64-unknown-linux-gnu
-          path: cas-x86_64-unknown-linux-gnu.tar.gz
+          path: |
+            cas-x86_64-unknown-linux-gnu.tar.gz
+            cas-x86_64-unknown-linux-gnu.audited.sha256
+          if-no-files-found: error
           retention-days: 14
 
       - name: Report sccache stats

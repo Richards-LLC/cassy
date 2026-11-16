@@ -382,6 +382,47 @@ A merge importing a recorded delivery from an earlier worker retains that task's
 
 - **CI completion reminders** — A workflow display name that several workflows share resolves to the one with a run for the reminder's commit. Otherwise registration is refused as ambiguous and the refusal names each candidate workflow file and ID to choose from.
 
+### Parallel full-set validation
+
+The Rust archive feeds six disjoint suite shards, with complete shard evidence
+required by the collector. Classification also handles runner routing and tree
+reuse. The hosted full-set gate collects native reports, publishes repair issues
+and rejects failed or cancelled producers, publication and queue checks. Its
+receipt binds those outcomes to the evaluated tree. A separate Fast Validation
+wrapper preserves the protected branch's required job check.
+
+### Full-set proof follows job inputs
+
+A frozen train repair can reuse a successful full-set job when its input content,
+workflow, selection, baseline and runner binding match. Commander web and journeys
+include the CLI version, hub asset list, preview CSP and Rust crypto fixtures.
+Content reuse applies only to full-set train dispatches; queue job receipts retain
+exact-tree keys. Rust proof includes embedded web assets and shared test
+fixtures; preflight and script tiers retain broad input closures. Unknown paths
+invalidate all job scopes, and unknown jobs use the entire tree. Reused receipts
+name the current evaluated tree and preserve their source tree and producer run.
+The full gate still requires every selected job before a release can proceed.
+
+Frozen release train CI tracks its pending run. A run still queued with zero jobs after ninety seconds gets one replacement at the same frozen head. Durable per-head dispatch history excludes the abandoned run from pending state and prevents a replacement chain. Runs with jobs, runs in progress and younger queued runs keep their existing behavior; recovery never cancels a GitHub run.
+
+The Accounts sheet's Clean up confirmation opens directly under its banner at full sheet width, so the explanation and typed-confirmation field stay readable at desktop and phone widths.
+
+### Frozen train repair admission
+
+For an active release freeze, merge admission requires the repair's exact SHA
+  to pass the lane's fast and factory/PR checks. Rust impact jobs defer to the
+  full-set run at the new frozen train tip. Completed impact failures still refuse admission. Other job failures and pending work
+  retain their normal verdicts. Missing freeze or check evidence retains normal
+  lane admission. Existing freeze, repair authorization and main landing gates
+  still apply.
+
+After publishing the merge, Cassy makes a bounded attempt to cancel that SHA's
+  factory lane when its only unfinished jobs are Rust impact jobs. Cancellation
+  never targets the train's full-set workflow, and failure to cancel does not
+  undo the merge.
+
+Resumed delivery checks preserve task-owned first-parent intervals across train retargets and use surviving journey changes to determine stability proof. An unchanged restored journey does not need new test identities; current ambiguous test changes and foreign task ownership still refuse.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

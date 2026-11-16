@@ -35,6 +35,9 @@ GIB = 1024**3
 HEADROOM_BYTES = 2 * GIB
 DEFAULT_ESTIMATE_BYTES = 4 * GIB
 HOLD_POLL_SECS = 0.2
+# cas-40d4: admission expired before the command started (EX_TEMPFAIL). A
+# caller reports this as "not started", never as the command's own failure.
+NOT_STARTED_EXIT = 75
 STALE_SCAN_SECS = 5
 # cas-833e taste lane: one positively bounded worker run beside a proof. It
 # lives inside the proof's reserve, so the reserve and fresh memory must both
@@ -223,6 +226,24 @@ def try_taste_lane(directory, env, memory_budget, estimate_bytes):
     return stream, memory, 'admitted'
 
 
+class NotStarted(ValueError):
+    """Admission expired; the command was never started (cas-40d4)."""
+
+    def __init__(self, message, memory):
+        super().__init__(message)
+        self.memory = memory
+
+
+def memory_terms(memory):
+    """The sampled budget, estimate and reserve behind a refusal, in GiB."""
+    if 'budget_bytes' not in memory:
+        return ''
+    gib = lambda key: f"{memory.get(key, 0) / GIB:.1f} GiB"
+    return (f" (budget {gib('budget_bytes')}, estimate {gib('estimate_bytes')}"
+            f" + headroom {gib('headroom_bytes')}, reserved {gib('reserved_bytes')},"
+            f" reserve {gib('reserve_bytes')}, available {gib('available_bytes')})")
+
+
 @contextmanager
 def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=None, report=None,
               estimate_bytes=DEFAULT_ESTIMATE_BYTES, lane=None):
@@ -344,7 +365,8 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
                 emit(role, reason, started, report, memory)
                 elapsed = time.monotonic() - started
                 if elapsed >= wait_secs:
-                    raise ValueError(f'{role} host memory admission deadline expired after {wait_secs}s: {reason}; command was not started')
+                    raise NotStarted(f'{role} host memory admission deadline expired after {wait_secs}s: '
+                                     f'{reason}; command was not started{memory_terms(memory)}', memory)
                 time.sleep(min(poll_secs, wait_secs - elapsed))
             fcntl.flock(priority, fcntl.LOCK_UN)
             priority_held = False

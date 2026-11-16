@@ -169,6 +169,53 @@ def elapsed(started, ended=None):
     return seconds
 
 
+def job_inputs(repo, job, tree):
+    """Hash a conservative content closure; unclassified paths affect all jobs.
+
+    The script tier/preflight read other subsystems' source and stay whole-tree.
+    Rust tests also read scripts, docs, dist and shared web fixtures, so those
+    remain in their closure even though the web application's source can differ.
+    """
+    web = job == 'fast-validation-web' or re.fullmatch(r'fast-validation-journeys-\d+', job)
+    rust = job in ('fast-validation-suite-build', 'fast-validation-docs') or re.fullmatch(
+        r'fast-validation-suite-shards-\d+', job)
+    bridge = job == 'fast-validation-slack-bridge'
+    if not (web or rust or bridge):
+        return tree
+    rows = git(repo, 'ls-tree', '-rz', 'HEAD').split('\0')
+    selected = []
+    for row in rows:
+        if not row:
+            continue
+        path = row.split('\t', 1)[1]
+        if path.startswith(('cas-cli/', 'crates/', 'vendor/', '.cargo/')) or path in (
+                'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'):
+            if rust:
+                selected.append(row)
+        elif path.startswith('hub-web/'):
+            if web or (rust and (path.startswith(('hub-web/dist/', 'hub-web/public/',
+                    'hub-web/src/fixtures/', 'hub-web/e2e/')) or path in (
+                    'hub-web/package.json', 'hub-web/package-lock.json'))):
+                selected.append(row)
+        elif path.startswith('slack-bridge/'):
+            if bridge:
+                selected.append(row)
+        else:
+            # Includes workflow/actions, scripts, docs and unknown/new families.
+            # This covers every external WEB_INPUTS entry from the web classifier.
+            selected.append(row)
+    if web:
+        # The web build embeds this value, not the rest of the Rust manifest.
+        try:
+            version = tomllib.loads(git(repo, 'show', 'HEAD:cas-cli/Cargo.toml'))['package']['version']
+            if not isinstance(version, str):
+                return tree
+        except (ValueError, KeyError, TypeError):
+            return tree
+        selected.append('cas-cli-version:' + version)
+    return hashlib.sha256(json.dumps(selected).encode()).hexdigest()
+
+
 def job_identity(args):
     # Runtime selection, matrix and toolchain inputs matter even on one tree.
     inputs=json.loads(args.inputs)
@@ -176,8 +223,9 @@ def job_identity(args):
     digest=hashlib.sha256(json.dumps({'workflow':workflow,'inputs':inputs,
         'os':os.environ.get('RUNNER_OS'),'arch':os.environ.get('RUNNER_ARCH')},sort_keys=True).encode()).hexdigest()
     tree=git(args.repo,'rev-parse','HEAD^{tree}')
-    key=hashlib.sha256(json.dumps([tree,args.job,digest]).encode()).hexdigest()
-    return {'schema':2,'scope':'job','tree':tree,'job':args.job,'job_name':args.job_name,
+    content=job_inputs(args.repo,args.job,tree)
+    key=hashlib.sha256(json.dumps([content,args.job,digest]).encode()).hexdigest()
+    return {'schema':2,'scope':'job','tree':tree,'content_hash':content,'job':args.job,'job_name':args.job_name,
         'inputs_hash':digest,'key':key,'artifact':'full-gate-job-'+key}
 
 
@@ -190,6 +238,7 @@ def job_save(args):
         'producer_run':reused.get('producer_run',os.environ['GITHUB_RUN_ID'])}
     if reused.get('reused_from'):
         result['reused_from']=reused['reused_from']
+        result['source_tree']=reused['source_tree']
     # Keep the native train reports with their job, so a cache hit can feed
     # the existing full-suite collector without inventing a second approval.
     reports=args.repo/'target/train-suite'
@@ -224,7 +273,7 @@ def job_check(args):
                 record=json.loads((Path(temporary)/'receipt.json').read_text())
                 reports={str(path.relative_to(Path(temporary)/'train-suite')):path.read_bytes()
                     for path in (Path(temporary)/'train-suite').rglob('*') if path.is_file()}
-            if any(record.get(key)!=value for key,value in expected.items()) or record.get('outcome')!='PASS':
+            if any(record.get(key)!=value for key,value in expected.items() if key!='tree') or record.get('outcome')!='PASS':
                 continue
             if record.get('run_id')!=run_id or record.get('head')!=run.get('head_sha'):
                 continue
@@ -253,7 +302,8 @@ def job_check(args):
                 else:
                     target.write_bytes(body)
             result.update(reused=True,reused_from=run_id,producer_run=record.get('producer_run',run_id))
-            write(args.out/'receipt.json',{**record,**identity(),'reused_from':run_id})
+            write(args.out/'receipt.json',{**record,**identity(),**expected,'reused_from':run_id,
+                'source_tree':record.get('source_tree',record['tree'])})
             break
     except (ValueError,OSError,KeyError,subprocess.SubprocessError) as error:
         # Cache outage or malformed evidence means execution, never approval.

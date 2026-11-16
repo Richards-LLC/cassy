@@ -1,5 +1,5 @@
 name: Run selected script suites
-description: Provision only changed-input script suites inside an existing CI job.
+description: Provision and run selected script suites four at a time inside an existing CI job.
 inputs:
   full-set:
     description: Run every registered script suite for a cumulative full gate.
@@ -81,4 +81,4 @@ runs:
         comparison=(--all)
         if [[ "${FULL_SET:-false}" == true ]]; then BASE_SHA=''; fi
         if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
-        python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" --provisioned
+        python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" --provisioned --jobs 4

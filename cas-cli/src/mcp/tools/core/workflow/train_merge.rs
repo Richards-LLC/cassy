@@ -419,8 +419,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             cloud_sync_enabled: false,
             ..Default::default()
         });
-        let _ = daemon;
-        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let core = CasCore::with_daemon(root.to_path_buf(), None, Some(std::sync::Arc::new(daemon)));
         core.bind_agent_identity(
             queue.supervisor.clone(),
             crate::mcp::AgentIdentitySource::ServerInternal,

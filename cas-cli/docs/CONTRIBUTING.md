@@ -3244,6 +3244,11 @@ frozen train accepts no merge that could supersede it. That dispatched run and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.
+The archive feeds six disjoint `count:N/6` shards. Classification, runner routing
+and tree reuse share one classifier job. The hosted Full-set gate collects Rust
+reports, publishes repairs and checks every direct producer, including the
+default-feature queue check. Its receipt records gate and repair-publication
+step outcomes. The separate required `Fast Validation` wrapper stays a job check.
 Both preserve the first failure, publish P0 repair issues and run without retries
 or test exclusions. The schema-2 `train-full-gate` artifact
 binds every required job to the source tree and main baseline; train cuts refuse
@@ -4058,7 +4063,7 @@ once with retries disabled. Every nonzero exit fails the shard, including cleanu
 errors after a passing test summary. The queue never excludes tests based on
 issue labels. Native reports and original output remain in the shard artifacts.
 
-The hosted `queue-flake-publication` fan-in reads those artifacts and creates or
+The hosted Full-set gate's repair-publication step reads those artifacts and creates or
 updates one `priority:p0`, `flaky` repair issue per failed native test identity in
 the configured route (`Richards-LLC/cassy` here). The issue names the test, links
 the run and failure output, and carries a fix-or-delete deadline on the next

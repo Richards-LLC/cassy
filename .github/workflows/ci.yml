@@ -167,12 +167,11 @@ jobs:
             echo 'archive-mode=hosted' >> "$GITHUB_OUTPUT"
           fi
 
-  # A merge queue validates a synthetic tree, then GitHub pushes that exact
-  # tree to main. Re-running the Fast Validation family on that push wastes
-  # hosted capacity without adding coverage. This gate is fail-closed: direct
-  # pushes, bypass merges, lookup failures, and any different tree run the
-  # complete suite normally.
-
+      # A merge queue validates a synthetic tree, then GitHub pushes that exact
+      # tree to main. Re-running the Fast Validation family on that push wastes
+      # hosted capacity without adding coverage. This gate is fail-closed: direct
+      # pushes, bypass merges, lookup failures, and any different tree run the
+      # complete suite normally.
       - id: tree-dedupe
         if: >-
           steps.classify-diff.outputs.class != 'docs-only'

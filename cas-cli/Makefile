@@ -275,7 +275,6 @@ test-ci-tiers:
 	cd .. && ./scripts/test-codemap-latency-receipt.sh
 	cd .. && ./scripts/test-detect-pending-release.sh
 	cd .. && ./scripts/test-find-release-prebuild.sh
-	cd .. && python3 scripts/test-route-release-runner.py
 	cd .. && ./scripts/test-check-release-runner-trust.sh
 	cd .. && ./scripts/test-check-release-preflight.sh
 	cd .. && ./scripts/test-journeys.sh

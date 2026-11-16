@@ -78,10 +78,16 @@ pub(super) fn include_superseded_commits(
 }
 
 /// cas-f45f: the tips Cassy recorded in this task's delivery cycles (the
-/// commit hook's own-branch commits and every park) are this task's commits.
-/// That exact record outranks a commit subject naming another task. An
-/// unreadable store adds nothing, so attribution falls back to the subject rule.
+/// commit hook's own-branch commits and every park) are this task's commits
+/// while they lead to an anchor the task still holds. That exact record
+/// outranks a commit subject naming another task. A retired false park, no
+/// longer under any held anchor, adds nothing (cas-255b), and an unreadable
+/// store adds nothing, so attribution falls back to the subject rule.
 pub(crate) fn include_cycle_anchors(repo: &Path, task: &Task, identity: &mut TaskCommitIdentity) {
+    let held: Vec<String> = identity.known_commits.clone();
+    if held.is_empty() {
+        return;
+    }
     let Some(target) = task.deliverables.work_target.as_ref() else { return };
     let Ok((primary, _)) = crate::mcp::tools::core::task::repo_context::git_layout(repo) else { return };
     let root = primary.join(".cas");
@@ -92,7 +98,9 @@ pub(crate) fn include_cycle_anchors(repo: &Path, task: &Task, identity: &mut Tas
     }
     let Ok(cycles) = cas_store::delivery_cycles(&root, &task.id) else { return };
     for anchor in cycles.into_iter().flat_map(|cycle| cycle.anchors) {
-        if !identity.matches_known_commit(&anchor) {
+        if !identity.matches_known_commit(&anchor)
+            && held.iter().any(|tip| git_commit_is_ancestor(repo, &anchor, tip))
+        {
             identity.known_commits.push(anchor);
         }
     }

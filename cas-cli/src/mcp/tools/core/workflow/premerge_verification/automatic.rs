@@ -142,6 +142,17 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
                 .arg(model)
                 .arg("-c")
                 .arg(format!("model_reasoning_effort=\"{}\"", effort.as_str()))
+                // GH #2023: `exec` runs with approval: never, which refuses
+                // every MCP call that needs approval. Pre-approve only Cassy's
+                // canonical server; its own identity checks still apply.
+                .args([
+                    "-c",
+                    "mcp_servers.cs.command=\"cas\"",
+                    "-c",
+                    "mcp_servers.cs.args=[\"serve\"]",
+                    "-c",
+                    "mcp_servers.cs.default_tools_approval_mode=\"approve\"",
+                ])
                 .args(["-c", "project_doc_max_bytes=0", "--output-last-message"])
                 .arg(output)
                 .arg("-");

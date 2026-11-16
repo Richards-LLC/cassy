@@ -245,7 +245,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         archive_i, _ = policy.role(job, 'Build full suite archive', source)
         def valid(candidate):
             probe, disable = candidate['steps'][probe_i], candidate['steps'][disable_i]
-            return probe.get('continue-on-error') is True and "steps.classify-diff.outputs.rust-unaffected != 'true'" in disable['if'] and "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" in disable['if'] and "echo 'RUSTC_WRAPPER='" in policy.uncomment(disable['run']) and disable_i < archive_i
+            return probe.get('continue-on-error') is True and "steps.classify-diff.outputs.rust-unaffected != 'true'" in disable['if'] and "needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted'" in disable['if'] and "echo 'RUSTC_WRAPPER='" in policy.uncomment(disable['run']) and disable_i < archive_i
         self.assertTrue(valid(job), 'positive control for the actual parsed archive contract')
         changed = copy.deepcopy(job);changed['steps'][probe_i].pop('continue-on-error')
         self.assertFalse(valid(changed), 'legacy removed probe fail-open mutation')
@@ -263,7 +263,19 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         jobs = self.ci()['jobs']
         preflight = jobs['fast-validation-preflight']
         archive = jobs['fast-validation-suite-build']
-        check = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
+        # cas-f0e7: the check runs in its own job, beside preflight's build.
+        checker = jobs['fast-validation-queue-check']
+        self.assertNotIn('fast-validation-preflight', checker['needs'])
+        self.assertIn('fast-validation-queue-check', jobs['fast-validation']['needs'])
+        # The required rollup admits the adopted queue tree only if the check passed or was not needed.
+        adopted = next(s for s in jobs['fast-validation']['steps'] if s.get('name') == 'Report the adopted train full-set receipt')
+        for result, admitted in [('success', True), ('skipped', True), ('failure', False), ('cancelled', False)]:
+            with self.subTest(queue_check=result):
+                ran = self.run_body(adopted['run'], dict(PREFLIGHT='success', QUEUE_CHECK=result, SLACK_BRIDGE='success',
+                                                         JOURNEYS='success', JOURNEYS_REUSE='false', JOURNEYS_PRIOR_URL='',
+                                                         VALIDATING_RUN_ID='1', PRIOR_RUN_URL='u', GITHUB_STEP_SUMMARY=str(self.root / 'summary')))
+                self.assertEqual(ran.returncode == 0, admitted, ran.stderr)
+        check = next(s for s in checker['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
         build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
         self.assertNotIn('--no-default-features', shlex.split(build['run']))
         portable = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-5:] == ['cargo','build','-p','cas','--no-default-features'])
@@ -282,11 +294,14 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                 case = {**context,
                         'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
                         'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                        # The check follows preflight's own classifier, not ci-diff's.
+                        'needs.ci-diff.outputs.rust-unaffected': 'true',
+                        'steps.proven.outputs.identical': 'false',
                         'steps.classify-diff.outputs.rust-unaffected': unaffected}
                 # These functions are GitHub job status, not routing inputs.
                 selected = lambda job, step: self.gh_expr(job['if'], case) and self.gh_expr(
                     step.get('if', 'true').replace('cancelled()', 'False').replace('success()', 'True'), case)
-                self.assertEqual(selected(preflight, check), expected_check)
+                self.assertEqual(selected(checker, check), expected_check)
                 self.assertEqual(selected(archive, build), expected_archive)
                 self.assertEqual(selected(preflight, portable), expected_portable)
                 self.assertEqual(selected(preflight, consumer), expected_portable and not reuse)
@@ -316,7 +331,6 @@ out = pathlib.Path(args[args.index('--dir')+1]); out.mkdir(parents=True, exist_o
 shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
 ''')
         gh.chmod(0o755)
-        check = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-4:] == ['cargo', 'check', '-p', 'cas'])
         build = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-5:] == ['cargo', 'build', '-p', 'cas', '--no-default-features'])
         smoke = next(s for s in job['steps'] if 'npm run --prefix hub-web build' in s.get('run', ''))
         context = {'steps.job-receipt.outputs.reused': 'false',
@@ -358,10 +372,36 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 route = {**case, 'steps.cli-restore.outputs.restored': outputs['restored'],
                          'steps.classify-diff.outputs.rust-unaffected': 'false',
                          'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false'}
-                self.assertEqual(self.gh_expr(check['if'], route), not restored)
                 self.assertEqual(self.gh_expr(build['if'], route), not restored)
                 if proof == 'full-gate':
                     self.assertTrue(self.gh_expr(smoke['if'], route))
+
+    def test_release_ships_only_the_executable_the_prebuild_audited_cas_f0e7(self):
+        prebuild = {s.get('name'): s for s in policy.load(self.root / '.github/workflows/release-prebuild.yml')['jobs']['build']['steps']}
+        release = {s.get('name'): s for s in policy.load(self.root / '.github/workflows/release.yml')['jobs']['audit-linux']['steps']}
+        audit = prebuild['Audit build outputs and packaged Linux executable']['run'].splitlines()
+        isa = next(i for i, line in enumerate(audit) if 'test-check-portable-x86_64-isa.sh package/cas' in line)
+        [digest] = [i for i, line in enumerate(audit) if 'sha256sum' in line]
+        # The digest names the bytes the ISA audit just passed, and it ships in the artifact.
+        self.assertGreater(digest, isa)
+        self.assertIn('cas-x86_64-unknown-linux-gnu.audited.sha256', prebuild['Upload artifact']['with']['path'].split())
+        verify = release['Verify the packaged executable is the audited one']['run']
+        self.assertNotIn('check-portable-x86_64-isa', verify)
+        for case in ('audited', 'tampered', 'missing digest'):
+            with self.subTest(case=case):
+                for leftover in ('package', 'asset', 'release'):
+                    shutil.rmtree(self.root / leftover, ignore_errors=True)
+                (self.root / 'package').mkdir(); (self.root / 'release').mkdir()
+                (self.root / 'package/cas').write_bytes(b'audited executable'); (self.root / 'package/LICENSE').write_text('x')
+                env = dict(GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
+                self.assertEqual(self.run_body(audit[digest], env).returncode, 0)
+                if case == 'tampered':
+                    (self.root / 'package/cas').write_bytes(b'other executable')
+                self.assertEqual(self.run_body(prebuild['Package']['run'], env).returncode, 0)
+                for name in prebuild['Upload artifact']['with']['path'].split():
+                    if case != 'missing digest' or not name.endswith('.sha256'):
+                        shutil.copyfile(self.root / name, self.root / 'release' / name)
+                self.assertEqual(self.run_body(verify, env).returncode == 0, case == 'audited')
 
     def test_train_runs_once_at_freeze_while_factory_runs_cancel_cas_0fc56(self):
         cases = [('push', 'refs/heads/factory/fixture', True, True),
@@ -449,7 +489,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                         step.get('with',{}).get('phase')=='save' or
                         step.get('with',{}).get('name','').startswith('train-suite-shard-'))
                     self.assertEqual(runs,evidence,(name,shard,step))
-        self.assertEqual(len(cached),8)
+        self.assertEqual(len(cached),9)
         # Cross-run archive reuse must point consumers at its original run.
         download=next(s for s in jobs['fast-validation-suite-shards']['steps']
             if s.get('with',{}).get('name')=='fast-validation-suite-archive')
@@ -1271,16 +1311,35 @@ sys.exit(17 if name == 'test-release-report-post.py' else 0)
         self.assertFalse(log.exists())
 
     def test_real_runner_route_defaults_to_hosted_and_requires_both_opt_ins(self):
-        route = next(s for s in self.ci()['jobs']['fast-validation-runner-route']['steps'] if s.get('id') == 'route')['run']
-        for event, enabled in itertools.product(['merge_group', 'push', 'pull_request', 'schedule'], ['enabled', '', 'disabled']):
-            with self.subTest(event=event, enabled=enabled):
+        jobs = self.ci()['jobs']
+        route = next(s for s in jobs['fast-validation-runner-route']['steps'] if s.get('id') == 'route')['run']
+        guard = next(s for s in jobs['fast-validation-suite-build']['steps'] if s.get('name') == 'Verify self-hosted archive trust boundary')['run']
+        guard_script = self.root / 'scripts/check-cassy-actions-runner-isolation.sh'; guard_script.parent.mkdir(exist_ok=True)
+        shutil.copyfile(policy.ROOT / guard_script.relative_to(self.root), guard_script); guard_script.chmod(0o755)
+        local = ['self-hosted','Linux','X64','cas-ci-32core']
+        events = [('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1'), ('push', 'refs/heads/main'),
+                  ('pull_request', 'refs/pull/1/merge'), ('schedule', 'refs/heads/main'),
+                  ('workflow_dispatch', 'refs/heads/epic/release-train-x'), ('workflow_dispatch', 'refs/heads/factory/x')]
+        for (event, ref), queue, train in itertools.product(events, ['enabled', '', 'disabled'], ['enabled', '']):
+            with self.subTest(event=event, ref=ref, queue=queue, train=train):
                 output = self.root / 'route.output';output.write_text('')
-                result = self.run_body(route, dict(EVENT_NAME=event, SELF_HOSTED_ENABLED=enabled, GITHUB_OUTPUT=str(output)))
+                values = dict(EVENT_NAME=event, REF=ref, REPOSITORY='Richards-LLC/cassy', SELF_HOSTED_ENABLED=queue, TRAIN_ARCHIVE_ENABLED=train)
+                result = self.run_body(route, dict(values, GITHUB_OUTPUT=str(output)))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                expected = ['self-hosted','Linux','X64','cas-ci-32core'] if event == 'merge_group' and enabled == 'enabled' else ['ubuntu-latest']
+                expected = local if event == 'merge_group' and queue == 'enabled' else ['ubuntu-latest']
+                # cas-f0e7: only the archive follows the train's own opt-in.
+                archive = local if expected == local or (ref == 'refs/heads/epic/release-train-x' and train == 'enabled') else ['ubuntu-latest']
                 lines = dict(line.split('=', 1) for line in output.read_text().splitlines())
                 self.assertEqual(json.loads(lines['runner']), expected)
                 self.assertEqual(lines['mode'], 'self-hosted' if len(expected)>1 else 'hosted')
+                self.assertEqual(json.loads(lines['archive-runner']), archive)
+                self.assertEqual(lines['archive-mode'], 'self-hosted' if len(archive)>1 else 'hosted')
+                # The archive job re-checks on the machine; it admits exactly the routed runs.
+                slot = dict(GITHUB_EVENT_NAME=event, GITHUB_REF=ref, GITHUB_REPOSITORY='Richards-LLC/cassy',
+                            SELF_HOSTED_ENABLED=queue, TRAIN_ARCHIVE_ENABLED=train,
+                            CARGO_TARGET_DIR='/var/lib/cassy-actions/cache/cargo-target',
+                            SCCACHE_DIR='/var/lib/cassy-actions/cache/sccache', SCCACHE_SERVER_PORT='4227')
+                self.assertEqual(self.run_body(guard, slot).returncode == 0, len(archive) > 1)
 
     def mac_route(self, values):
         # Fake gh: the dispatch prints a run id (or fails), the jobs query

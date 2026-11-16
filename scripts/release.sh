@@ -348,6 +348,9 @@ plan_cut() {
         --base "$remote/$base" --notes "$source" "${train_args[@]}")" || die "RELEASE_PLAN_BLOCKED: $plan; nothing built or pushed"
     mkdir -p "$(dirname "$release_input_report")"
     jq '.inputs' <<<"$plan" >"$release_input_report"
+    local legacy
+    legacy="$(jq -r '(.legacy_held // []) | join(", ")' <<<"$plan")"
+    [[ -z "$legacy" ]] || say "legacy holds outside this release (nonblocking): $legacy"
 }
 
 if "$print_only"; then

@@ -20,6 +20,9 @@ pub(super) struct CutPlan {
     pub inputs: Option<ReleaseInputs>,
     pub preview: Option<ReleasePreview>,
     pub blockers: BTreeMap<String, String>,
+    /// cas-be03: held members outside the included tasks, reported without refusing.
+    #[serde(default)]
+    pub legacy_held: Vec<String>,
     pub cut_started_at: Option<String>,
 }
 
@@ -105,7 +108,8 @@ pub(super) fn evaluate(args: &PlanArgs, root: &Path, repo: &Path) -> CutPlan {
         ensure!(out.status.success() && config["maximumEntriesToMerge"] == 1 && config["mergingStrategy"] == "ALLGREEN", "Set singleton ALLGREEN landing; retain parallel builds");
         Ok(())
     })());
-    CutPlan { tip, version, notes, inputs, preview, blockers, cut_started_at: None }
+    let legacy_held = preview.as_ref().map(ReleasePreview::legacy_held).unwrap_or_default();
+    CutPlan { tip, version, notes, inputs, preview, blockers, legacy_held, cut_started_at: None }
 }
 
 pub fn plan(args: &PlanArgs, root: &Path) -> Result<()> {

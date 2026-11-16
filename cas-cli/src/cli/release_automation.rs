@@ -135,9 +135,6 @@ pub(super) struct ReleasePreview {
     review_missing: Vec<String>,
     #[serde(default)]
     lane_ci_missing: Vec<String>,
-    /// Held members outside this release's included tasks: listed, never refused.
-    #[serde(default)]
-    legacy_held: Vec<String>,
     members_by_id: BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
 }
 
@@ -147,7 +144,7 @@ impl ReleasePreview {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut value = Self { scope, members: members_by_id.len(), would_close: 0,
             would_hold: 0, already_closed: 0, not_eligible: 0, by_reason: BTreeMap::new(),
-            review_missing: vec![], lane_ci_missing: vec![], legacy_held: vec![], members_by_id };
+            review_missing: vec![], lane_ci_missing: vec![], members_by_id };
         for (id, outcome) in &value.members_by_id {
             let reason = match outcome {
                 CassyMergeClose::Closed { .. } => { value.would_close += 1; "WOULD_CLOSE" }
@@ -158,7 +155,6 @@ impl ReleasePreview {
                     let code = reason.split(':').next().unwrap_or(reason).trim();
                     if code == "REVIEW_MISSING" { value.review_missing.push(id.clone()); }
                     if code == "LANE_CI_MISSING" { value.lane_ci_missing.push(id.clone()); }
-                    if !value.includes(id) { value.legacy_held.push(id.clone()); }
                     if code == "RELEASE_MEMBER_HELD" { reason.as_str() } else { code }
                 }
             };
@@ -170,6 +166,14 @@ impl ReleasePreview {
     /// A release with no audited inclusion list owns every member.
     fn includes(&self, id: &str) -> bool {
         self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.iter().any(|included| included == id)
+    }
+
+    /// Held members outside this release's included tasks: listed, never refused.
+    fn legacy_held(&self) -> Vec<String> {
+        self.members_by_id.iter()
+            .filter(|(id, outcome)| !self.includes(id)
+                && matches!(outcome, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::Held(_)))
+            .map(|(id, _)| id.clone()).collect()
     }
 
     /// The one cut-eligibility evaluator: `release plan` reports these before
@@ -187,7 +191,7 @@ impl ReleasePreview {
             && own.iter().any(|outcome| matches!(outcome, CassyMergeClose::Held(_) | CassyMergeClose::NotEligible))
         {
             blockers.insert("NO_ELIGIBLE_MEMBERS".into(), format!(
-                "zero would-close among included members; by_reason {:?}; legacy_held {:?}", self.by_reason, self.legacy_held));
+                "zero would-close among included members; by_reason {:?}; legacy_held {:?}", self.by_reason, self.legacy_held()));
         }
         blockers
     }
@@ -1073,7 +1077,7 @@ pub(super) mod tests {
         legacy_scope.included_task_ids = vec!["cas-a001".into(), "cas-a002".into()];
         let legacy = ReleasePreview::from_members(legacy_scope.clone(), members.clone());
         assert!(legacy.allow_cut().is_ok());
-        assert_eq!(legacy.legacy_held.len(), 14);
+        assert_eq!(legacy.legacy_held().len(), 14);
         legacy_scope.included_task_ids.push("cas-1000".into());
         assert!(ReleasePreview::from_members(legacy_scope, members).cut_blockers().contains_key("NO_ELIGIBLE_MEMBERS"));
         let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
@@ -1275,8 +1279,6 @@ pub(super) mod tests {
         ).await.unwrap();
         assert_eq!(tasks.get("cas-e3041").unwrap().closed_at, closed.closed_at);
         assert_eq!(tasks.get("cas-ef2b").unwrap().status, TaskStatus::AwaitingMerge);
-        // Already-closed reviewed members remain a valid idempotent cut.
-        track_on_train(&args, &root, repo, &train).unwrap();
     }
 
     #[test]

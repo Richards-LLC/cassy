@@ -1049,22 +1049,20 @@ impl SqliteTaskStore {
         Ok(())
     }
 
-    /// Atomically load all tasks and parent-child dependencies in a single lock hold.
+    /// Every task's header plus its parent-child dependencies and the ids of
+    /// tasks whose explicit `requires-start` prerequisites are not yet
+    /// terminal, all read under one lock hold so a task and its epic link are
+    /// never seen out of step (panel flicker).
     ///
-    /// Prevents read skew where a task exists but its epic link is invisible (or vice
-    /// versa) due to a concurrent write between two separate queries.
-    pub fn list_with_parent_deps(&self) -> Result<(Vec<Task>, Vec<Dependency>)> {
-        let (tasks, deps, _) = self.list_with_parent_deps_and_start_gates()?;
-        Ok((tasks, deps))
-    }
-
-    /// [`Self::list_with_parent_deps`] plus the ids of tasks whose explicit
-    /// `requires-start` prerequisites are not yet terminal, all read under one
-    /// lock hold.
+    /// The body text (description, design, acceptance criteria, notes, demo
+    /// statement and close reason) is left empty. The factory director reads
+    /// this every refresh, and on a long-lived store notes alone run to
+    /// ~100 MB; reading them held the shared connection for 1-2 s a pass
+    /// (cas-5461). Read a task's body with `get`.
     ///
     /// The prerequisite predicate matches `list_ready` and the `start` gate:
     /// a prerequisite resolves only once it is `closed` or `cancelled`.
-    pub fn list_with_parent_deps_and_start_gates(
+    pub fn list_heads_with_parent_deps_and_start_gates(
         &self,
     ) -> Result<(Vec<Task>, Vec<Dependency>, HashSet<String>)> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -1072,10 +1070,10 @@ impl SqliteTaskStore {
         // Both queries run under the same mutex hold, guaranteeing a consistent snapshot
         let tasks = {
             let mut stmt = conn.prepare_cached(
-                "SELECT id, title, description, design, acceptance_criteria, notes,
+                "SELECT id, title, '', '', '', '',
                  status, priority, task_type, assignee, labels, created_at, updated_at,
-                 closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
-                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door, review_dispatch_id
+                 closed_at, NULL, external_ref, content_hash, branch, worktree_id,
+                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, '', execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door, review_dispatch_id
                  FROM tasks ORDER BY priority, created_at DESC",
             )?;
             stmt.query_map([], Self::task_from_row)?

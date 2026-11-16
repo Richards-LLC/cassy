@@ -515,11 +515,10 @@ fn reconcile_reused_factory_branch(
                 // also trusts manual merge resolutions as synchronization.
                 // Every off-target ancestor still faces the ownership check.
                 // cas-f45f (GH #1944): Cassy's own record of a task commit and
-                // a grant answer before the subject rule; unrecorded commits
-                // naming another task stay unattributed.
+                // a grant answer before the subject rule.
                 let task_owned = identity.matches_known_commit(sha)
                     || granted(sha)
-                    || !close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
+                    || !close_ops::task_attribution::commit_claims_another_task(worktree_path, sha, identity)
                         && (identity
                             .task_id
                             .as_deref()

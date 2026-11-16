@@ -10,7 +10,7 @@ The sole required context is `Fast Validation` (operator decision, November 4, 2
 
 | Required context | Unique protection | Steady-state wall | Verdict |
 | --- | --- | --- | --- |
-| `Fast Validation` | On the canonical `merge_group` tree, its rollup rejects a failed preflight, the full-suite fan-in (and every exhaustive nextest shard), **and doctests**. | Queue receipt 32367317728: 3m38 from merge-group start to the rollup. | Required; a main PR reports a cheap hosted admission context, then the merged tree receives the exhaustive check. |
+| `Fast Validation` | On the canonical `merge_group` tree, the folded full-set gate rejects failed preflight, archive build, any of six exhaustive nextest shards, **doctests**, repair publication and the queue check when selected. | Queue receipt 32367317728: 3m38 from merge-group start to the rollup. | Required; a main PR reports a cheap hosted admission context, then the merged tree receives the exhaustive check. |
 
 `Fast Validation — doctests` is intentionally not a separate required context: the required
 `Fast Validation` fan-in already requires `fast-validation-docs` to succeed. Its coverage is
@@ -82,7 +82,7 @@ These CI jobs illustrate the required-set boundary. Their triggers decide eligib
 
 | Job (`name:`) | Triggers | Required? |
 | --- | --- | --- |
-| `Fast Validation` | Cheap hosted admission on `pull_request`; exhaustive rollup on `merge_group`, push to `main`, schedule, dispatch | **Yes — the rollup, not the lower full-suite fan-in** |
+| `Fast Validation` | Cheap hosted admission on `pull_request`; exhaustive rollup on `merge_group`, push to `main`, schedule, dispatch | **Yes — the full-set wrapper reports the folded gate's result** |
 | `macOS Check` | Informational notice on protected `pull_request`; advisory Darwin/cache lane on push to `main`, tags, schedule, dispatch; never `merge_group` | **No** |
 | `Release-Profile & Build Guard (compile-only, no test suite)` | `if:` limits it to `schedule` or `refs/heads/main` | **No — must not be required** |
 

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,7 @@ import zipfile
 ARTIFACT = 'train-full-gate'
 WORKFLOW = 'full-validation.yml'
 REQUIRED_JOBS = ('fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-validation-web',
-                 'fast-validation-suite', 'fast-validation-docs', 'queue-flake-publication')
+                 'fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-docs')
 PREFIX = 'epic/release-train-'
 # cas-0fc56: Cassy dispatches the one train run at a release freeze; merges start none.
 TRAIN_EVENT = 'workflow_dispatch'
@@ -149,7 +150,7 @@ def collect(args):
         receipt['failures'].extend(row['failures'])
         if row['status'] != 0 or not (path.parent/'native.log').is_file():
             receipt['outcome'] = 'FAIL'
-    if slots != {'1/3', '2/3', '3/3'} or args.build_status != 'success' or args.shards_status != 'success':
+    if slots != {f'{slot}/6' for slot in range(1, 7)} or args.build_status != 'success' or args.shards_status != 'success':
         receipt['outcome'] = 'FAIL'
     if not receipt['tests']:
         receipt['outcome'] = 'FAIL'
@@ -158,6 +159,8 @@ def collect(args):
     write(args.evidence/'receipt.json', receipt)
     write(args.evidence/'failures.json', receipt['failures'])
     print(json.dumps(receipt))
+    if receipt['outcome'] == 'FAIL':
+        raise ValueError('suite evidence is incomplete or contains failures')
 
 
 def elapsed(started, ended=None):
@@ -169,6 +172,55 @@ def elapsed(started, ended=None):
     return seconds
 
 
+def job_inputs(repo, job, tree):
+    """Hash a conservative content closure; unclassified paths affect all jobs.
+
+    The script tier/preflight read other subsystems' source and stay whole-tree.
+    Rust tests also read scripts, docs, dist and shared web fixtures, so those
+    remain in their closure even though the web application's source can differ.
+    """
+    web = job == 'fast-validation-web' or re.fullmatch(r'fast-validation-journeys-\d+', job)
+    rust = job in ('fast-validation-suite-build', 'fast-validation-docs') or re.fullmatch(
+        r'fast-validation-suite-shards-\d+', job)
+    bridge = job == 'fast-validation-slack-bridge'
+    if not (web or rust or bridge):
+        return tree
+    covered = runpy.run_path(str(Path(__file__).with_name('classify-web-inputs.py')))['covered'] if web else None
+    rows = git(repo, 'ls-tree', '-rz', 'HEAD').split('\0')
+    selected = []
+    for row in rows:
+        if not row:
+            continue
+        path = row.split('\t', 1)[1]
+        if web and covered(path):
+            selected.append(row)
+        elif path.startswith(('cas-cli/', 'crates/', 'vendor/', '.cargo/')) or path in (
+                'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'):
+            if rust:
+                selected.append(row)
+        elif path.startswith('hub-web/'):
+            if web or (rust and (path.startswith(('hub-web/dist/', 'hub-web/public/',
+                    'hub-web/src/fixtures/', 'hub-web/e2e/')) or path in (
+                    'hub-web/package.json', 'hub-web/package-lock.json'))):
+                selected.append(row)
+        elif path.startswith('slack-bridge/'):
+            if bridge:
+                selected.append(row)
+        else:
+            # Includes workflow/actions, scripts, docs and unknown/new families.
+            selected.append(row)
+    if web:
+        # The web build embeds this value, not the rest of the Rust manifest.
+        try:
+            version = tomllib.loads(git(repo, 'show', 'HEAD:cas-cli/Cargo.toml'))['package']['version']
+            if not isinstance(version, str):
+                return tree
+        except (ValueError, KeyError, TypeError):
+            return tree
+        selected.append('cas-cli-version:' + version)
+    return hashlib.sha256(json.dumps(selected).encode()).hexdigest()
+
+
 def job_identity(args):
     # Runtime selection, matrix and toolchain inputs matter even on one tree.
     inputs=json.loads(args.inputs)
@@ -176,8 +228,12 @@ def job_identity(args):
     digest=hashlib.sha256(json.dumps({'workflow':workflow,'inputs':inputs,
         'os':os.environ.get('RUNNER_OS'),'arch':os.environ.get('RUNNER_ARCH')},sort_keys=True).encode()).hexdigest()
     tree=git(args.repo,'rev-parse','HEAD^{tree}')
-    key=hashlib.sha256(json.dumps([tree,args.job,digest]).encode()).hexdigest()
-    return {'schema':2,'scope':'job','tree':tree,'job':args.job,'job_name':args.job_name,
+    train_full_set=(inputs.get('full_set') in (True,'true')
+        and os.environ.get('GITHUB_EVENT_NAME')==TRAIN_EVENT
+        and os.environ.get('GITHUB_REF_NAME','').startswith(PREFIX))
+    content=job_inputs(args.repo,args.job,tree) if train_full_set else tree
+    key=hashlib.sha256(json.dumps([content,args.job,digest]).encode()).hexdigest()
+    return {'schema':2,'scope':'job','tree':tree,'content_hash':content,'job':args.job,'job_name':args.job_name,
         'inputs_hash':digest,'key':key,'artifact':'full-gate-job-'+key}
 
 
@@ -190,6 +246,7 @@ def job_save(args):
         'producer_run':reused.get('producer_run',os.environ['GITHUB_RUN_ID'])}
     if reused.get('reused_from'):
         result['reused_from']=reused['reused_from']
+        result['source_tree']=reused['source_tree']
     # Keep the native train reports with their job, so a cache hit can feed
     # the existing full-suite collector without inventing a second approval.
     reports=args.repo/'target/train-suite'
@@ -224,7 +281,7 @@ def job_check(args):
                 record=json.loads((Path(temporary)/'receipt.json').read_text())
                 reports={str(path.relative_to(Path(temporary)/'train-suite')):path.read_bytes()
                     for path in (Path(temporary)/'train-suite').rglob('*') if path.is_file()}
-            if any(record.get(key)!=value for key,value in expected.items()) or record.get('outcome')!='PASS':
+            if any(record.get(key)!=value for key,value in expected.items() if key!='tree') or record.get('outcome')!='PASS':
                 continue
             if record.get('run_id')!=run_id or record.get('head')!=run.get('head_sha'):
                 continue
@@ -253,7 +310,8 @@ def job_check(args):
                 else:
                     target.write_bytes(body)
             result.update(reused=True,reused_from=run_id,producer_run=record.get('producer_run',run_id))
-            write(args.out/'receipt.json',{**record,**identity(),'reused_from':run_id})
+            write(args.out/'receipt.json',{**record,**identity(),**expected,'reused_from':run_id,
+                'source_tree':record.get('source_tree',record['tree'])})
             break
     except (ValueError,OSError,KeyError,subprocess.SubprocessError) as error:
         # Cache outage or malformed evidence means execution, never approval.
@@ -270,6 +328,11 @@ def full_collect(args):
     if outputs.get('bridge-check-needed') == 'true':
         required.append('fast-validation-slack-bridge')
     failures = [name for name in required if jobs.get(name, {}).get('result') != 'success']
+    checks = {'gate': args.gate_status, 'repair-publication': args.publication_status}
+    failures.extend(name for name, status in checks.items() if status != 'success')
+    queue_check = jobs.get('fast-validation-queue-check', {}).get('result', 'skipped')
+    if queue_check not in ('success', 'skipped'):
+        failures.append('fast-validation-queue-check')
     main = git(args.repo, 'rev-parse', args.main_baseline + '^{commit}')
     head = git(args.repo, 'rev-parse', 'HEAD')
     if subprocess.run(['git', 'merge-base', '--is-ancestor', main, head], cwd=args.repo).returncode:
@@ -289,6 +352,7 @@ def full_collect(args):
                'journeys_required': outputs.get('journeys-check-needed') == 'true',
                'bridge_required': outputs.get('bridge-check-needed') == 'true',
                'required_jobs': required, 'jobs': {name: job.get('result') for name, job in jobs.items()},
+               'checks': checks,
                'elapsed_seconds': elapsed(args.started_at)}
     write(args.evidence/'receipt.json', receipt)
     print(json.dumps(receipt))
@@ -305,6 +369,8 @@ def validate_full(receipt, tree):
             or receipt.get('tree') != tree or set(required) != complete
             or not isinstance(receipt.get('journeys_required'), bool)
             or not isinstance(receipt.get('bridge_required'), bool)
+            or (receipt.get('outcome') == 'PASS' and receipt.get('checks') != {'gate':'success', 'repair-publication':'success'})
+            or (receipt.get('outcome') == 'PASS' and receipt.get('jobs', {}).get('fast-validation-queue-check', 'skipped') not in ('success', 'skipped'))
             or (receipt.get('outcome') == 'PASS' and any(receipt.get('jobs', {}).get(name) != 'success' for name in required))
             or not isinstance(receipt.get('elapsed_seconds'), (int, float))
             or receipt['elapsed_seconds'] < 0
@@ -620,6 +686,8 @@ def main():
     full.add_argument('--jobs-json', required=True)
     full.add_argument('--main-baseline', required=True)
     full.add_argument('--started-at', required=True)
+    full.add_argument('--publication-status', required=True)
+    full.add_argument('--gate-status', required=True)
     reuse_parser = sub.add_parser('reuse')
     reuse_parser.add_argument('--repo', type=Path, default=Path.cwd())
     reuse_parser.add_argument('--gh', default=os.environ.get('GH_BIN', 'gh'))

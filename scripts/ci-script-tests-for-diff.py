@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import os
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -36,6 +37,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 MAKEFILE = "cas-cli/Makefile"
@@ -204,6 +206,8 @@ def main() -> int:
     parser.add_argument("--repo", default=".")
     parser.add_argument("--only", help="restrict changed-input selection to one tier test path")
     parser.add_argument("--dry-run", action="store_true", help="print the selection only")
+    parser.add_argument("--jobs", type=int, choices=range(1, 5), default=4,
+                        help="maximum concurrent suites (default: 4); browser suites never overlap")
     parser.add_argument("--provisioned", action="store_true", help="run only the provisioned CI cohort, including slow suites")
     parser.add_argument("--github-output", type=Path, help="write selected tool requirements and exit without running tests")
     args = parser.parse_args()
@@ -239,10 +243,10 @@ def main() -> int:
     if not selected:
         print("ci-script-tests-changed: no script test covers this lane's changes")
         return 0
-    failed = []
     # The calling job's selection inputs are not test inputs: a suite that
     # inherits FULL_SET or BASE_SHA classifies its fixtures as the outer run.
     env = {key: value for key, value in os.environ.items() if key not in JOB_INPUTS}
+    runnable = []
     for test, command in selected:
         if test in PROVISIONED_INPUTS and not (args.provisioned or args.all or args.only):
             print(f"ci-script-tests-changed: DEFERRED {test} to the path-scoped CI validation step")
@@ -254,13 +258,8 @@ def main() -> int:
         if args.dry_run:
             print(f"ci-script-tests-changed: would run {command}")
             continue
-        started = time.monotonic()
-        returncode, tail = run_streaming(command, repo, env, shell=True)
-        took = time.monotonic() - started
-        status = "PASS" if returncode == 0 else f"FAIL (exit {returncode})"
-        print(f"ci-script-tests-changed: {status} {command} ({took:.1f}s)", flush=True)
-        if returncode:
-            failed.append((test, tail))
+        runnable.append((test, command))
+    failed = run_suites(runnable, repo, env, args.jobs)
     if failed:
         # cas-5365: later suites push a failure's output out of the gate's row
         # tail, so repeat each failing suite's last lines after the summary.
@@ -273,16 +272,63 @@ def main() -> int:
     return 0
 
 
-def run_streaming(command, cwd, env, shell=False):
-    """Run a suite with its output passed through live; keep its last lines."""
-    tail = collections.deque(maxlen=FAILURE_TAIL_LINES)
-    with subprocess.Popen(command, shell=shell, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, text=True, errors='replace') as child:
-        for line in child.stdout:
-            sys.stdout.write(line)
-            tail.append(line if line.endswith('\n') else line + '\n')
-        sys.stdout.flush()
-    return child.returncode, list(tail)
+def run_logged(command, repo, env, log):
+    """Keep output on disk, and give fixed temporary filenames a suite-local root."""
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="ci-script-suite-") as scratch, log.open("w") as output:
+        result = subprocess.run(command, shell=True, cwd=repo,
+                                env={**env, "TMPDIR": scratch, "TMP": scratch, "TEMP": scratch},
+                                stdout=output, stderr=subprocess.STDOUT)
+    return result.returncode, time.monotonic() - started
+
+
+def run_suites(selected, repo, env, jobs):
+    if not selected:
+        return []
+    # cas-a2a8: logs live outside the checkout; a log under the repo dirties
+    # fixture checkouts that suites push from (the fast-rows pre-push refusal).
+    with tempfile.TemporaryDirectory(prefix="ci-script-suite-logs-",
+                                     dir=os.environ.get("RUNNER_TEMP") or None) as logs:
+        return _run_suites(selected, repo, env, jobs, Path(logs))
+
+
+def _run_suites(selected, repo, env, jobs, logs):
+    pending, running, failed = list(selected), {}, {}
+    # Browser launchers use their own profiles and ephemeral ports, but serializing
+    # this cohort also avoids competing browser processes and shared web tooling.
+    def resource(test):
+        return "browser" if test in WEB_TESTS else None
+
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        while pending or running:
+            busy = {resource(test) for test, _, _ in running.values()} - {None}
+            for test, command in pending[:]:
+                if len(running) == jobs:
+                    break
+                key = resource(test)
+                if key in busy:
+                    continue
+                log = logs / f"{Path(test).name}.log"
+                running[pool.submit(run_logged, command, repo, env, log)] = (test, command, log)
+                pending.remove((test, command))
+                if key:
+                    busy.add(key)
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                test, command, log = running.pop(future)
+                returncode, took = future.result()
+                tail = collections.deque(maxlen=FAILURE_TAIL_LINES)
+                # Replay a complete suite at once so concurrent output cannot
+                # split test lines or hide the failing suite's final diagnostic.
+                with log.open(errors="replace") as output:
+                    for line in output:
+                        sys.stdout.write(line)
+                        tail.append(line if line.endswith('\n') else line + '\n')
+                status = "PASS" if returncode == 0 else f"FAIL (exit {returncode})"
+                print(f"ci-script-tests-changed: {status} {command} ({took:.1f}s)", flush=True)
+                if returncode:
+                    failed[test] = list(tail)
+    return [(test, failed[test]) for test, _ in selected if test in failed]
 
 
 if __name__ == "__main__":

@@ -130,20 +130,23 @@ export class AccountsSheet {
   private syncConfirm(): void {
     this.form.querySelector<HTMLButtonElement>("[data-accounts-confirm]")!.disabled = this.pending || !this.confirmationMatches();
   }
-  /** Keep the editor inside the card or cleanup banner it acts on, across redraws. */
+  /** Keep the editor inside the card, or right under the cleanup banner, it acts on, across redraws. */
   private placeEditor(): void {
     const form = this.form, dialog = this.dialog!;
     const focused = form.contains(this.doc.activeElement);
     let anchor: Element | null | undefined;
+    let banner: Element | null | undefined;
     if (this.edit) {
       const body = this.machineBody(this.edit.machine.id);
-      if ("cleanup" in this.edit) anchor = body?.querySelector(".accounts-cleanup-banner");
+      // The banner is a flex row and the dialog form a zero-intrinsic-width grid (styles.css `dialog form`), so inside it the form collapses to a sliver: sit beside it.
+      if ("cleanup" in this.edit) banner = body?.querySelector(".accounts-cleanup-banner");
       else {
         const key = this.edit.account.key;
         anchor = [...body?.querySelectorAll<HTMLElement>("[data-account]") ?? []].find(node => node.dataset.account === key)?.closest(".accounts-row")?.querySelector(".accounts-card-body");
       }
     }
-    if (anchor) { if (form.parentElement !== anchor) anchor.append(form); }
+    if (banner) { if (form.previousElementSibling !== banner) banner.after(form); }
+    else if (anchor) { if (form.parentElement !== anchor) anchor.append(form); }
     else if (form.parentElement !== dialog) dialog.append(form);
     if (focused && !form.contains(this.doc.activeElement)) this.input().focus();
   }

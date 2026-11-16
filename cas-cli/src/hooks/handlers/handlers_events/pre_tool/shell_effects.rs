@@ -999,6 +999,9 @@ fn collect_script(
     // sees a `cd` from an earlier one and any of them may be the one that ran.
     let mut case_entries: Vec<Directories> = Vec::new();
     let mut continuation = false;
+    // Credential reads: the reader and operands before an unquoted argument
+    // substitution, which the words after it continue.
+    let mut continuation_head = String::new();
     let mut start: usize = 0;
     for end in 0..=tokens.len() {
         let syntax = case_tokens.get(end).copied().unwrap_or(CaseSyntax::Code);
@@ -1083,6 +1086,12 @@ fn collect_script(
         }
         let substitution_scope = separator == Some('(')
             && matches!(statement.last(), Some(ShellToken::Word(word)) if word.ends_with('$'));
+        // The substitution's output stands in as one opaque operand.
+        let substitution_head = substitution_scope.then(|| format!(
+            "{}{}SUBSTITUTION",
+            if continuation { continuation_head.as_str() } else { "" },
+            read_command.strip_suffix('$').unwrap_or(&read_command),
+        ));
         let mut incoming = dirs.clone();
         let and_then =
             separator == Some('&') && tokens.get(end + 1) == Some(&ShellToken::Operator('&'));
@@ -1295,7 +1304,8 @@ fn collect_script(
                 && effects.read_contexts.as_ref().is_some_and(Vec::is_empty);
             if depth == 0 && let Some(contexts) = &mut effects.read_contexts {
                 if dirs.is_empty() { return Err("an unresolved credential working directory"); }
-                contexts.push(ShellReadContext { command: read_command, directories: dirs.clone() });
+                let command = if continuation { format!("{continuation_head}{read_command}") } else { read_command };
+                contexts.push(ShellReadContext { command, directories: dirs.clone() });
             }
             let read_stack = effects.read_contexts.is_some();
             let read_unconditional =
@@ -1547,6 +1557,7 @@ fn collect_script(
                     directory_stack.clone(),
                     list_entry.clone(),
                     previous_dirs.clone(),
+                    (std::mem::take(&mut continuation_head), substitution_head.unwrap_or_default()),
                 ));
                 continuation = false;
             }
@@ -1559,6 +1570,9 @@ fn collect_script(
                 directory_stack = parent.4;
                 list_entry = parent.5;
                 previous_dirs = parent.6;
+                // A substitution's following words continue its command.
+                let (outer, after) = parent.7;
+                continuation_head = if continuation { after } else { outer };
             }
             Some('&') if and_then => {
                 continuation = false;

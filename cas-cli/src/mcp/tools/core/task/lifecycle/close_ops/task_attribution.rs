@@ -77,6 +77,27 @@ pub(super) fn include_superseded_commits(
     Ok(())
 }
 
+/// cas-f45f: the tips Cassy recorded in this task's delivery cycles (the
+/// commit hook's own-branch commits and every park) are this task's commits.
+/// That exact record outranks a commit subject naming another task. An
+/// unreadable store adds nothing, so attribution falls back to the subject rule.
+pub(crate) fn include_cycle_anchors(repo: &Path, task: &Task, identity: &mut TaskCommitIdentity) {
+    let Some(target) = task.deliverables.work_target.as_ref() else { return };
+    let Ok((primary, _)) = crate::mcp::tools::core::task::repo_context::git_layout(repo) else { return };
+    let root = primary.join(".cas");
+    if !root.join("cas.db").is_file()
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(&primary, &target.repo_selector)
+    {
+        return;
+    }
+    let Ok(cycles) = cas_store::delivery_cycles(&root, &task.id) else { return };
+    for anchor in cycles.into_iter().flat_map(|cycle| cycle.anchors) {
+        if !identity.matches_known_commit(&anchor) {
+            identity.known_commits.push(anchor);
+        }
+    }
+}
+
 /// cas-ead0: only the graph after the server's start boundary belongs to
 /// this cycle. Old subjects before it cannot claim the new task's lane.
 /// Bound all probes to immutable SHAs and refuse foreign descendants before
@@ -186,6 +207,7 @@ pub(super) fn validated_started_delivery(
     let upstream = released_trunk_ref(repo, &target).map(|reference| format!("^{reference}"));
     let mut identity = task_commit_identity(task, None);
     include_superseded_commits(repo, task, &mut identity)?;
+    include_cycle_anchors(repo, task, &mut identity);
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
@@ -432,7 +454,8 @@ pub(super) fn commit_claims_another_task(
 /// another task needs no rewrite or cancel-and-recreate. Descendants of the
 /// grant are still judged by the subject rule.
 fn claims_another_task(repo: &Path, sha: &str, message: &str, identity: &TaskCommitIdentity) -> bool {
-    !identity.matches_superseded_commit(sha)
+    // cas-f45f: a commit Cassy recorded for this task is never another task's.
+    !identity.matches_known_commit(sha)
         && subject_claims_another_task(message, identity)
         && !identity
             .approved_merge_parents
@@ -586,7 +609,9 @@ fn merge_brings_foreign_work(
             if identity.matches_known_commit(sha) {
                 continue;
             }
-            if subject_claims_another_task(message, identity) {
+            // cas-f45f (GH #1988): a supervisor grant adopts the named commit
+            // and its ancestors here too, not only at the start-walk check.
+            if claims_another_task(repo, sha, message, identity) {
                 return true;
             }
             let named = identity

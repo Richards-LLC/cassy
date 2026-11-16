@@ -501,16 +501,25 @@ fn reconcile_reused_factory_branch(
                 let sha = metadata.next()?;
                 let parents: Vec<_> = metadata.collect();
                 let subject = message.trim().lines().next().unwrap_or("");
+                // cas-f45f (GH #1976, #1988): a supervisor's merge_source grant
+                // adopts the named commit and its ancestors, as at close.
+                let granted = |commit: &str| {
+                    identity.approved_merge_parents.iter().any(|source| git.is_ancestor(commit, source))
+                };
                 let target_merge = parents.len() > 1
                     && parents[1..]
                         .iter()
-                        .all(|parent| git.is_ancestor(parent, &target_tip));
+                        .all(|parent| git.is_ancestor(parent, &target_tip) || granted(*parent));
                 // Target-sync subjects often name the target epic. Parent
                 // provenance intentionally wins over that subject here; this
                 // also trusts manual merge resolutions as synchronization.
                 // Every off-target ancestor still faces the ownership check.
-                let task_owned =
-                    !close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
+                // cas-f45f (GH #1944): Cassy's own record of a task commit and
+                // a grant answer before the subject rule; unrecorded commits
+                // naming another task stay unattributed.
+                let task_owned = identity.matches_known_commit(sha)
+                    || granted(sha)
+                    || !close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
                         && (identity
                             .task_id
                             .as_deref()

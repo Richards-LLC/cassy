@@ -11,9 +11,9 @@ name: Release
 #   2. adopts the queue run's archives by exact commit or tree id
 #      (scripts/find-release-prebuild.sh), and builds them only on a miss, by
 #      calling release-prebuild.yml;
-#   3. runs the ISA audit and the operator launch smoke on the packaged Linux
-#      archive, and the signature check and launch smoke on the packaged macOS
-#      archive: the bytes that ship;
+#   3. checks the packaged Linux executable against the digest the prebuild's
+#      ISA audit recorded and smokes it, and runs the signature check and
+#      launch smoke on the packaged macOS archive: the bytes that ship;
 #   4. creates the annotated tag v<version> and the GitHub release
 #      (scripts/release-publish.sh), whose notes carry the PR-opened timer;
 #   5. dispatches the install-path proof;
@@ -219,12 +219,13 @@ jobs:
           run-id: ${{ needs.lookup-linux.outputs.found == 'true' && needs.lookup-linux.outputs.run-id || github.run_id }}
           github-token: ${{ github.token }}
 
-      - name: ISA audit of the packaged executable
+      # The prebuild ISA-audited this executable and recorded its digest.
+      - name: Verify the packaged executable is the audited one
         run: |
           set -euo pipefail
           mkdir -p asset
           tar -xzf release/cas-x86_64-unknown-linux-gnu.tar.gz -C asset
-          ./scripts/check-portable-x86_64-isa.sh asset/cas
+          (cd asset && sha256sum --check --strict ../release/cas-x86_64-unknown-linux-gnu.audited.sha256)
           sha256sum release/cas-x86_64-unknown-linux-gnu.tar.gz | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Operator launch smoke of the packaged executable

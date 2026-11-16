@@ -5424,8 +5424,9 @@ impl CasCore {
         let fast_lane_notice = fast_lane.as_ref()
             .map(|(_, _, _, note)| format!("{note}\n\n"))
             .unwrap_or_default();
-        let branch_ci_lookup = fast_lane_lookup
-            .unwrap_or_else(|| frozen_train_ci::lookup(Some(&cas_root), ci_source, &worktree.parent_branch, &cwd));
+        let (branch_ci_lookup, frozen_shortcut) = fast_lane_lookup
+            .map(|lookup| (lookup, false))
+            .unwrap_or_else(|| frozen_train_ci::lookup_with_shortcut(Some(&cas_root), ci_source, &worktree.parent_branch, &cwd));
         let unparked_notice = scoped_task.as_deref()
             .filter(|task| task.status == cas_types::TaskStatus::InProgress
                 && task.task_type != cas_types::TaskType::Epic)
@@ -6428,6 +6429,7 @@ impl CasCore {
             &cas_root, &push_branch, &cwd, branch_ci_lookup.repo.as_deref(), branch_ci_state.sha(),
             matches!(push_outcome, crate::worktree::git::TargetPushOutcome::Pushed { .. }
                 | crate::worktree::git::TargetPushOutcome::AlreadyCurrent { .. }),
+            frozen_shortcut,
         );
         if let (Some(approval), Some(attempted)) = (premerge_approval.as_ref(), reviewed_attempt.as_deref()) {
             if let Some(held) = approval.finish_publication(manager.git(), &push_outcome, attempted)

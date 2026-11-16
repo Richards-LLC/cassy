@@ -4,7 +4,7 @@
 
 For an active release freeze, merge admission requires the repair's exact SHA
   to pass the lane's fast and factory/PR checks. Rust impact jobs defer to the
-  full-set run at the new frozen train tip. Other job failures and pending work
+  full-set run at the new frozen train tip. Completed impact failures still refuse admission. Other job failures and pending work
   retain their normal verdicts. Missing freeze or check evidence retains normal
   lane admission. Existing freeze, repair authorization and main landing gates
   still apply.

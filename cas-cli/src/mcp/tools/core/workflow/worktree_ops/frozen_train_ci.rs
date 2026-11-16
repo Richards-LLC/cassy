@@ -51,6 +51,15 @@ pub(super) fn lookup(
     target: &str,
     cwd: &Path,
 ) -> BranchCiLookup {
+    lookup_with_shortcut(root, branch, target, cwd).0
+}
+
+pub(super) fn lookup_with_shortcut(
+    root: Option<&Path>,
+    branch: &str,
+    target: &str,
+    cwd: &Path,
+) -> (BranchCiLookup, bool) {
     let frozen = || {
         let root = root?;
         if !active_target(root, target, cwd) {
@@ -74,17 +83,27 @@ pub(super) fn lookup(
         }) {
             return None;
         }
-        let retained: Vec<_> = rows.into_iter().filter(|row| !impact(row)).collect();
+        let omitted = rows
+            .iter()
+            .any(|row| impact(row) && check_run_unfinished(row));
+        let retained: Vec<_> = rows
+            .into_iter()
+            .filter(|row| !impact(row) || !check_run_unfinished(row))
+            .collect();
         output.stdout = serde_json::to_vec(&serde_json::json!({"check_runs": retained})).ok()?;
         let state = require_code_validation(classify_code_ci_response(branch, &tip, output));
-        Some(BranchCiLookup {
-            state,
-            repo: Some(repo),
-            repository_lookup_attempted: true,
-            gh_failed: false,
-        })
+        let shortcut = omitted && matches!(&state, BranchCiState::Green { .. });
+        Some((
+            BranchCiLookup {
+                state,
+                repo: Some(repo),
+                repository_lookup_attempted: true,
+                gh_failed: false,
+            },
+            shortcut,
+        ))
     };
-    frozen().unwrap_or_else(|| lookup_branch_ci(branch, target, cwd))
+    frozen().unwrap_or_else(|| (lookup_branch_ci(branch, target, cwd), false))
 }
 
 /// GitHub cancels a workflow, not one job. Only cancel a published repair's
@@ -97,8 +116,9 @@ pub(super) fn cancel_after_merge(
     repo: Option<&str>,
     sha: &str,
     published: bool,
+    frozen_shortcut: bool,
 ) {
-    if !published || !active_target(root, target, cwd) {
+    if !frozen_shortcut || !published || !active_target(root, target, cwd) {
         return;
     }
     let Some(repo) = repo else { return };
@@ -247,7 +267,9 @@ mod tests {
                     "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncat <<'JSON'\n{response}\nJSON\n"
                 ),
             );
-            let state = lookup(Some(&root), &tip, target, repo.path()).state;
+            let (lookup, shortcut) = lookup_with_shortcut(Some(&root), &tip, target, repo.path());
+            assert_eq!(shortcut, expected == "green", "{case}");
+            let state = lookup.state;
             let pending = super::super::delivery_ci_pending(Some(&root), &tip, target, repo.path());
             assert_eq!(pending, expected == "pending", "{case}");
             let retry = super::super::retry_ci_status(Some(&root), &tip, target, repo.path(), &tip);
@@ -288,6 +310,7 @@ mod tests {
         for (case, published, mutation, cancel) in [
             ("unfrozen", true, None, false),
             ("unpublished", false, None, false),
+            ("hotfix fast-lane", true, None, false),
             ("published", true, None, true),
             ("other sha", true, Some(("head_sha", "other")), false),
             (
@@ -343,6 +366,7 @@ mod tests {
                 Some("acme/cas"),
                 &tip,
                 published,
+                case != "hotfix fast-lane",
             );
             assert_eq!(calls.exists(), cancel, "{case}");
             if cancel {

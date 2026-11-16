@@ -510,7 +510,7 @@ fn reconcile_reused_factory_branch(
                 // also trusts manual merge resolutions as synchronization.
                 // Every off-target ancestor still faces the ownership check.
                 let task_owned =
-                    !close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
+                    !close_ops::task_attribution::commit_claims_another_task(worktree_path, sha, identity)
                         && (identity
                             .task_id
                             .as_deref()

@@ -167,6 +167,13 @@ fn codex_exec_args(model: &str, effort: &str, output: &Path) -> Vec<std::ffi::Os
     for value in [
         format!("model_reasoning_effort=\"{effort}\""),
         "project_doc_max_bytes=0".into(),
+        // GH #2023: `exec` runs with approval: never, which refuses every MCP
+        // call that needs approval. Pre-approve only Cassy's canonical server;
+        // its own identity checks still apply. Command and args keep the
+        // table valid when the account's config has no `cs` server.
+        "mcp_servers.cs.command=\"cas\"".into(),
+        "mcp_servers.cs.args=[\"serve\"]".into(),
+        "mcp_servers.cs.default_tools_approval_mode=\"approve\"".into(),
     ] {
         args.push("-c".into());
         args.push(value.into());

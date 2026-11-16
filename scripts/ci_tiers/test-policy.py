@@ -1197,50 +1197,71 @@ else:
                 self.assertEqual(json.loads(lines['runner']), expected)
                 self.assertEqual(lines['mode'], 'self-hosted' if len(expected)>1 else 'hosted')
 
-    def mac_route(self, values):
-        # Fake gh: the dispatch prints a run id (or fails), the jobs query
-        # prints the probe's post-jq "status:conclusion", and every call is logged.
+    # cas-195e (macOS), cas-f0e7 (Linux): both routes share
+    # scripts/route-release-runner.sh. Expected labels are pinned here.
+    RELEASE_ROUTES = {'macos-route': ('build-macos', 'mac-trust', 'macos', ['self-hosted', 'macOS', 'ARM64', 'cas-mac-release'], ['macos-26']),
+                      'linux-route': ('build', 'linux-trust', 'linux', ['self-hosted', 'Linux', 'X64', 'cas-ci-32core'], ['ubuntu-latest'])}
+
+    def release_route(self, route, values):
+        # Fake gh: the dispatch prints a run id (or fails), a jobs query for the
+        # workflow's own probe job prints its post-jq "status:conclusion", and
+        # every call is logged.
         commands = self.root / 'bin'; commands.mkdir(exist_ok=True)
         gh = commands / 'gh'
         gh.write_text('#!/bin/bash\necho "$*" >> "$CALLS"\n'
-                      'case "$*" in *dispatches*) [[ -z "${DISPATCH_FAILS:-}" ]] && echo 42 ;; */jobs*) echo "$PROBE" ;; esac\n')
+                      'case "$*" in *dispatches*) [[ -z "${DISPATCH_FAILS:-}" ]] && echo 42 ;;'
+                      ' */jobs*) [[ "$*" == *"\\"$PROBE_JOB_NAME\\""* ]] && echo "$PROBE" ;; esac; exit 0\n')
         gh.chmod(0o755)
+        script = self.root / 'scripts/route-release-runner.sh'; script.parent.mkdir(exist_ok=True)
+        shutil.copyfile(policy.ROOT / 'scripts/route-release-runner.sh', script); script.chmod(0o755)
         output, calls = self.root / 'route.output', self.root / 'calls'
         output.write_text(''); calls.write_text('')
-        job = policy.load(self.root / '.github/workflows/release-prebuild.yml')['jobs']['macos-route']
-        environment = dict(PATH=f'{commands}:/usr/bin:/bin', CALLS=str(calls), GITHUB_OUTPUT=str(output), REPO='Richards-LLC/cassy',
-                           REF_NAME='main', PLATFORM='', PROBE='queued:null', PROBE_WAIT_SECONDS='1', PROBE_POLL_SECONDS='0.1')
+        jobs = policy.load(self.root / '.github/workflows/release-prebuild.yml')['jobs']
+        step = next(s for s in jobs[route]['steps'] if s.get('id') == 'route')
+        static = {k: str(v) for k, v in step['env'].items() if '${{' not in str(v)}
+        # The probe the route dispatches is the job that runs on its runner.
+        [probe] = [j for j in jobs.values() if j.get('if', '').strip() == f"inputs.platform == '{static['PROBE_INPUT']}'"]
+        self.assertEqual(probe['runs-on'], json.loads(static['SELF_HOSTED_RUNNER']))
+        environment = dict(static, PATH=f'{commands}:/usr/bin:/bin', CALLS=str(calls), GITHUB_OUTPUT=str(output), REPO='Richards-LLC/cassy',
+                           REF_NAME='main', PLATFORM='', PROBE='queued:null', PROBE_JOB_NAME=probe['name'],
+                           PROBE_WAIT_SECONDS='1', PROBE_POLL_SECONDS='0.1')
         environment.update(values)
-        result = self.run_body(job['steps'][0]['run'], environment)
+        result = self.run_body(step['run'], environment)
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = dict(line.split('=', 1) for line in output.read_text().splitlines())
         return lines['mode'], json.loads(lines['runner']), calls.read_text()
 
-    def test_mac_release_runner_takes_only_trusted_refs_cas_195e(self):
+    def test_release_runners_take_only_trusted_refs_cas_195e(self):
         workflow = policy.load(self.root / '.github/workflows/release-prebuild.yml')
-        guard = next(s for s in workflow['jobs']['build-macos']['steps'] if s.get('id') == 'mac-trust')
+        guard_script = self.root / 'scripts/check-cassy-actions-runner-isolation.sh'; guard_script.parent.mkdir(exist_ok=True)
+        shutil.copyfile(policy.ROOT / guard_script.relative_to(self.root), guard_script); guard_script.chmod(0o755)
         trusted = {('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', ''), ('push', 'refs/heads/main', '')}
         refs = ['refs/heads/main', 'refs/heads/gh-readonly-queue/main/pr-1-abc', 'refs/heads/feature', 'refs/pull/1/merge', 'refs/tags/v1.0.0']
-        for event, ref, platform in itertools.product(['merge_group', 'push', 'pull_request', 'workflow_dispatch'], refs, ['', 'macos']):
-            with self.subTest(event=event, ref=ref, platform=platform):
-                values = dict(EVENT_NAME=event, REF=ref, PLATFORM=platform, PROBE='in_progress:null')
-                mode, runner, calls = self.mac_route(values)
-                expected = (event, ref, platform) in trusted
-                self.assertEqual(mode, 'self-hosted' if expected else 'hosted')
-                self.assertEqual(runner, ['self-hosted', 'macOS', 'ARM64', 'cas-mac-release'] if expected else ['macos-26'])
-                self.assertEqual(bool(calls), expected, 'an untrusted run must not dispatch the probe')
-                values.update(GITHUB_REPOSITORY='Richards-LLC/cassy', CARGO_TARGET_DIR='/runner/cargo-target', GITHUB_WORKSPACE='/runner/work/cassy')
-                self.assertEqual(self.run_body(guard['run'], values).returncode == 0, expected)
+        for route, (build, guard_id, platform_input, self_hosted, hosted) in self.RELEASE_ROUTES.items():
+            guard = next(s for s in workflow['jobs'][build]['steps'] if s.get('id') == guard_id)
+            for event, ref, platform in itertools.product(['merge_group', 'push', 'pull_request', 'workflow_dispatch'], refs, ['', platform_input]):
+                with self.subTest(route=route, event=event, ref=ref, platform=platform):
+                    values = dict(EVENT_NAME=event, REF=ref, PLATFORM=platform, PROBE='in_progress:null')
+                    mode, runner, calls = self.release_route(route, values)
+                    expected = (event, ref, platform) in trusted
+                    self.assertEqual(mode, 'self-hosted' if expected else 'hosted')
+                    self.assertEqual(runner, self_hosted if expected else hosted)
+                    self.assertEqual(bool(calls), expected, 'an untrusted run must not dispatch the probe')
+                    # A runner slot's own tuple (ops/systemd/cassy-actions-runner.service).
+                    values.update(GITHUB_REPOSITORY='Richards-LLC/cassy', CARGO_TARGET_DIR='/var/lib/cassy-actions/cache/cargo-target',
+                                  SCCACHE_DIR='/var/lib/cassy-actions/cache/sccache', SCCACHE_SERVER_PORT='4227',
+                                  GITHUB_WORKSPACE='/runner/work/cassy')
+                    self.assertEqual(self.run_body(guard['run'], values).returncode == 0, expected)
 
-    def test_mac_release_build_falls_back_to_hosted_unless_the_runner_starts_the_probe_cas_195e(self):
+    def test_release_build_falls_back_to_hosted_unless_the_runner_starts_the_probe_cas_195e(self):
         trusted = dict(EVENT_NAME='push', REF='refs/heads/main')
-        for probe, dispatch_fails, expected in [('in_progress:null', '', 'self-hosted'), ('completed:success', '', 'self-hosted'),
-                                                ('queued:null', '', 'hosted'), ('', '', 'hosted'), ('in_progress:null', '1', 'hosted')]:
-            with self.subTest(probe=probe, dispatch_fails=dispatch_fails):
-                mode, _, calls = self.mac_route(dict(trusted, PROBE=probe, DISPATCH_FAILS=dispatch_fails))
-                self.assertEqual(mode, expected)
-                # A probe that never started is cancelled so it cannot hold the runner later.
-                self.assertEqual('actions/runs/42/cancel' in calls, expected == 'hosted' and not dispatch_fails)
-
+        for route in self.RELEASE_ROUTES:
+            for probe, dispatch_fails, expected in [('in_progress:null', '', 'self-hosted'), ('completed:success', '', 'self-hosted'),
+                                                    ('queued:null', '', 'hosted'), ('', '', 'hosted'), ('in_progress:null', '1', 'hosted')]:
+                with self.subTest(route=route, probe=probe, dispatch_fails=dispatch_fails):
+                    mode, _, calls = self.release_route(route, dict(trusted, PROBE=probe, DISPATCH_FAILS=dispatch_fails))
+                    self.assertEqual(mode, expected)
+                    # A probe that never started is cancelled so it cannot hold the runner later.
+                    self.assertEqual('actions/runs/42/cancel' in calls, expected == 'hosted' and not dispatch_fails)
 
 if __name__ == '__main__': unittest.main(verbosity=2)

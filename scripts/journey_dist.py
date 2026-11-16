@@ -110,7 +110,8 @@ def admission_refusal(log: Path) -> str | None:
                  if line.startswith(ADMISSION_PREFIX)), None)
 
 
-def build_snapshot(repo: Path, source: str, artifacts: Path, compared: dict | None = None) -> dict:
+def build_snapshot(repo: Path, source: str, artifacts: Path, compared: dict | None = None,
+                   role: str = 'worker') -> dict:
     check_source(repo, source, compared)
     artifacts = artifacts.resolve()
     # Build output must never become a tracked lane input, even when callers
@@ -126,7 +127,7 @@ def build_snapshot(repo: Path, source: str, artifacts: Path, compared: dict | No
     command = ['npm', 'run', 'build', '--', '--outDir', str(dist)]
     admission = repo / 'scripts/worker-memory.py'
     if admission.is_file():
-        command = [sys.executable, str(admission), '--', *command]
+        command = [sys.executable, str(admission), '--role', role, '--', *command]
     # The workflow's Rust wrapper is irrelevant to a Vite snapshot. Inheriting
     # it makes worker-memory start a compiler-cache daemon before this JS build.
     build_env = {key: value for key, value in os.environ.items()
@@ -155,6 +156,7 @@ def main() -> int:
     parser.add_argument('--plan', type=Path)
     parser.add_argument('--manifest', type=Path)
     parser.add_argument('--artifacts', type=Path)
+    parser.add_argument('--admission-role', choices=['worker', 'proof'], default='worker')
     args = parser.parse_args()
     repo = args.repo.resolve()
     plan = json.loads(args.plan.read_text()) if args.plan else {}
@@ -168,7 +170,7 @@ def main() -> int:
         value = verify_build(repo, json.loads(args.manifest.read_text()), source)
     else:
         artifacts = args.artifacts or repo / 'target/journey-dist'
-        value = build_snapshot(repo, source, artifacts, plan.get('comparison'))
+        value = build_snapshot(repo, source, artifacts, plan.get('comparison'), args.admission_role)
     print(json.dumps(value))
     return 0
 

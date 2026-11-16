@@ -209,7 +209,7 @@ def taste_eligible(command, cwd=None, depth=0):
     return estimate(command, cwd, depth) < host_memory.DEFAULT_ESTIMATE_BYTES
 
 
-def run(command, env=None, directory=None):
+def run(command, env=None, directory=None, role='worker'):
     env = dict(os.environ if env is None else env)
     wait = proof.positive_knob(env, 'CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS') or 600
     poll = proof.positive_knob(env, 'CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS') or 1
@@ -217,13 +217,13 @@ def run(command, env=None, directory=None):
     # A compiler-cache server first started inside the suite would inherit the
     # suite's tree and outlive it (cas-7b7b9); start it outside admission.
     host_memory.start_compiler_cache(env)
-    lane = 'taste' if taste_eligible(command) else None
+    lane = 'taste' if role == 'worker' and taste_eligible(command) else None
     # cas-f632: the assembly-headroom stop keeps a local worker suite from
     # starving the supervisor's assembly proof. A CI job runs on a runner with
     # its own budget, and stopping it ejects the PR it validates; it is
     # still admitted (and waits) like any suite, but is never stopped mid-run.
     ci_job = env.get('GITHUB_ACTIONS') == 'true'
-    with host_memory.admission('worker', env, proof.memory_budget, wait, poll, directory,
+    with host_memory.admission(role, env, proof.memory_budget, wait, poll, directory,
                                estimate_bytes=estimate(command), lane=lane) as (admitted_env, fds), \
          host_memory.LeaseHolder(fds) as holder:
         try:
@@ -248,7 +248,7 @@ def run(command, env=None, directory=None):
                     # budget is ~0 by design; protect the floor instead.
                     if memory['available_bytes'] < host_memory.TASTE_FLOOR_BYTES:
                         raise ValueError('taste lane reached the memory floor; stopping its process group')
-                elif not ci_job and memory['budget_bytes'] < proof.GUARD_HEADROOM_BYTES:
+                elif role == 'worker' and not ci_job and memory['budget_bytes'] < proof.GUARD_HEADROOM_BYTES:
                     raise ValueError('worker suite reached assembly memory headroom; stopping its process group')
                 time.sleep(poll)
             return child.returncode if child.returncode >= 0 else 128 - child.returncode
@@ -300,6 +300,8 @@ def background_job(shell_command):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--shell-command', help='literal hook command; classify before running bash -c')
+    # cas-40d4: a supervisor-initiated build (QA candidate) is admitted as proof.
+    parser.add_argument('--role', choices=('worker', 'proof'), default='worker')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = ['bash', '-c', args.shell_command] if args.shell_command is not None else (
@@ -313,7 +315,7 @@ def main():
     if args.shell_command is not None and background_job(args.shell_command):
         print('worker memory admission: ' + BACKGROUND_REFUSAL, file=sys.stderr)
         return 2
-    return run(command)
+    return run(command, role=args.role)
 
 
 if __name__ == '__main__':

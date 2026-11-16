@@ -236,7 +236,7 @@ signal.pause()
             self.assertIn('--candidate-dir', help_output.stdout)
             self.assertNotIn('--task', help_output.stdout)
 
-    def failed_journey_build(self, admission=None):
+    def failed_journey_build(self, admission=None, scripts=(), env=()):
         """Run the real candidate build to its journey step, which fails.
 
         Git, scratch ownership and teardown are real; npm and, when given, the
@@ -255,6 +255,8 @@ signal.pause()
         shutil.copy2(Path(__file__).with_name("journey_dist.py"), repo / "scripts/journey_dist.py")
         if admission:
             (repo / "scripts/worker-memory.py").write_text(admission)
+        for name, text in dict(scripts).items():
+            (repo / "scripts" / name).write_text(text)
         for args in (("init", "-q"), ("config", "user.name", "Fixture"),
                      ("config", "user.email", "fixture@example.invalid"), ("add", "."),
                      ("commit", "-qm", "fixture")):
@@ -272,7 +274,7 @@ if sys.argv[1] == 'run':
 """)
         npm.chmod(0o700)
         destination = root / "artifacts/candidate"
-        env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""))
+        env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""), **dict(env))
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch.object(candidate["release_env"], "resolve_scratch",
                                return_value=SimpleNamespace(base=str(scratch), problem=None, fix="")), \
@@ -299,6 +301,31 @@ if sys.argv[1] == 'run':
         self.assertIsInstance(error, candidate["journey_dist"].NotStarted)
         self.assertIn(line, str(error))
         self.assertEqual(candidate["journey_dist"].admission_refusal(kept), line)
+        self.assertFalse(built.exists(), "the build command never started")
+
+    def test_supervisor_candidate_build_takes_proof_admission_cas_40d4(self):
+        # The real worker-memory.py; only its host_memory records the role and refuses.
+        here = Path(__file__).parent
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        record = Path(directory.name) / "admission-role"
+        shim = f"""import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location('host_memory_real', pathlib.Path(__file__).with_name('host_memory_real.py'))
+real = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(real)
+globals().update({{key: value for key, value in vars(real).items() if not key.startswith('__')}})
+def start_compiler_cache(env):
+    return False
+def admission(role, *args, **kwargs):
+    pathlib.Path({str(record)!r}).write_text(role)
+    raise NotStarted('fixture refusal; command was not started', {{}})
+"""
+        scripts = {name: (here / name).read_text() for name in
+                   ("worker-memory.py", "assembly-proof.py", "proof_target.py", "release_env.py", "release_scratch.py")}
+        scripts.update({"host_memory_real.py": (here / "host_memory.py").read_text(), "host_memory.py": shim})
+        error, _kept, built = self.failed_journey_build(scripts=scripts, env={"CAS_AGENT_ROLE": "supervisor"})
+        self.assertIsInstance(error, candidate["journey_dist"].NotStarted)
+        self.assertEqual(record.read_text(), "proof")
         self.assertFalse(built.exists(), "the build command never started")
 
 

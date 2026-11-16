@@ -232,9 +232,13 @@ def build(repo, revision, candidate_dir):
                 # Use the journey producer's source-bound production build,
                 # then install its bytes only in this disposable checkout.
                 web_artifacts = owned/'web'
+                # cas-40d4: `cas qa candidate build` refuses workers (qa.rs), so
+                # a supervisor or operator build takes proof admission.
+                role = 'worker' if os.environ.get('CAS_AGENT_ROLE') == 'worker' else 'proof'
                 try:
                     run(scope, [sys.executable,checkout/'scripts/journey_dist.py','build',
-                                '--repo',checkout,'--artifacts',web_artifacts],stdout=sys.stderr,stderr=sys.stderr)
+                                '--repo',checkout,'--artifacts',web_artifacts,'--admission-role',role],
+                        stdout=sys.stderr,stderr=sys.stderr)
                 except subprocess.CalledProcessError as error:
                     raise journey_failure(error.returncode, web_artifacts, task_dir, revision) from error
                 snapshot = json.loads((web_artifacts/'journey-build.json').read_text())

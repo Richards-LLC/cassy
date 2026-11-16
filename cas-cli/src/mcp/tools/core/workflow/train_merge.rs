@@ -389,7 +389,7 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
 /// model turn is needed to consume an approved candidate.
 // gate-audit[ci_override]: selector Derived accepted G-114 token forwarded in response; not another request flag.
 pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
-    crate::mcp::tools::core::task::lifecycle::parked_conflicts::scan(root)?;
+    let unchecked = crate::mcp::tools::core::task::lifecycle::parked_conflicts::scan(root)?;
     let paths = match std::fs::read_dir(directory(root)) {
         Ok(paths) => paths,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -412,6 +412,14 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
         let Some(mut queue) = read(&path)? else {
             continue;
         };
+        // GH #2017: only a queue whose own target missed its conflict scan waits.
+        if let Some(reason) = unchecked.get(&queue.target) {
+            if queue.waiting.as_ref() != Some(reason) {
+                queue.waiting = Some(reason.clone());
+                save(&path, &queue)?;
+            }
+            continue;
+        }
         // GH #2018: without a daemon, an entry's verifier dispatch got only a
         // manual worktree_merge handoff, which G-101 refuses during the train.
         let daemon = crate::mcp::daemon::EmbeddedDaemon::new(crate::mcp::daemon::EmbeddedDaemonConfig {
@@ -1031,6 +1039,42 @@ mod tests {
         assert_ne!(approval.is_error, Some(true), "{approval:?}");
         resume_pending(&fixture.root, "queue-session").await.unwrap();
         assert!(operations.is_ancestor(&fixture.shas[0], "origin/epic/train"));
+    }
+
+    /// GH #2017: a delivery still parked on a train whose branch is gone from
+    /// origin must not stop another train's merge from advancing.
+    #[tokio::test]
+    async fn parked_task_on_deleted_train_does_not_stall_other_train_gh_2017() {
+        let fixture = Fixture::build(false);
+        fixture.start().await;
+        git(fixture._repo.path(), &["branch", "epic/deleted", "main"]);
+        let config = fixture.root.join("config.toml");
+        let pinned = std::fs::read_to_string(&config).unwrap() + "[project]\ncanonical_id = 'gh-2017-fixture'\n";
+        std::fs::write(&config, pinned).unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut stale_train = Task::new("cas-stale-train".into(), "cancelled train".into());
+        stale_train.task_type = TaskType::Epic;
+        stale_train.branch = Some("epic/deleted".into());
+        tasks.add(&stale_train).unwrap();
+        let mut stale = Task::new("cas-stale-delivery".into(), "parked on a deleted train".into());
+        stale.status = TaskStatus::AwaitingMerge;
+        stale.deliverables.factory_branch_anchor = Some(fixture.shas[2].clone());
+        stale.deliverables.parked_branch = Some("factory/worker-3".into());
+        stale.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:gh-2017-fixture".into(),
+            target_branch: "epic/deleted".into(),
+        });
+        tasks.create_atomic(&stale, &[], Some(&stale_train.id), None).unwrap();
+
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+
+        let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!queue.active(), "{}", queue.render());
+        assert_eq!(tasks.get(&stale.id).unwrap().status, TaskStatus::AwaitingMerge);
+        let unchecked = crate::mcp::tools::core::task::lifecycle::parked_conflicts::scan(&fixture.root).unwrap();
+        assert!(unchecked.contains_key("epic/deleted"), "{unchecked:?}");
     }
 
     /// A train asks origin about its target once per entry: under the merge

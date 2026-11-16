@@ -376,6 +376,33 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 if proof == 'full-gate':
                     self.assertTrue(self.gh_expr(smoke['if'], route))
 
+    def test_release_ships_only_the_executable_the_prebuild_audited_cas_f0e7(self):
+        prebuild = {s.get('name'): s for s in policy.load(self.root / '.github/workflows/release-prebuild.yml')['jobs']['build']['steps']}
+        release = {s.get('name'): s for s in policy.load(self.root / '.github/workflows/release.yml')['jobs']['audit-linux']['steps']}
+        audit = prebuild['Audit build outputs and packaged Linux executable']['run'].splitlines()
+        isa = next(i for i, line in enumerate(audit) if 'test-check-portable-x86_64-isa.sh package/cas' in line)
+        [digest] = [i for i, line in enumerate(audit) if 'sha256sum' in line]
+        # The digest names the bytes the ISA audit just passed, and it ships in the artifact.
+        self.assertGreater(digest, isa)
+        self.assertIn('cas-x86_64-unknown-linux-gnu.audited.sha256', prebuild['Upload artifact']['with']['path'].split())
+        verify = release['Verify the packaged executable is the audited one']['run']
+        self.assertNotIn('check-portable-x86_64-isa', verify)
+        for case in ('audited', 'tampered', 'missing digest'):
+            with self.subTest(case=case):
+                for leftover in ('package', 'asset', 'release'):
+                    shutil.rmtree(self.root / leftover, ignore_errors=True)
+                (self.root / 'package').mkdir(); (self.root / 'release').mkdir()
+                (self.root / 'package/cas').write_bytes(b'audited executable'); (self.root / 'package/LICENSE').write_text('x')
+                env = dict(GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
+                self.assertEqual(self.run_body(audit[digest], env).returncode, 0)
+                if case == 'tampered':
+                    (self.root / 'package/cas').write_bytes(b'other executable')
+                self.assertEqual(self.run_body(prebuild['Package']['run'], env).returncode, 0)
+                for name in prebuild['Upload artifact']['with']['path'].split():
+                    if case != 'missing digest' or not name.endswith('.sha256'):
+                        shutil.copyfile(self.root / name, self.root / 'release' / name)
+                self.assertEqual(self.run_body(verify, env).returncode == 0, case == 'audited')
+
     def test_train_runs_once_at_freeze_while_factory_runs_cancel_cas_0fc56(self):
         cases = [('push', 'refs/heads/factory/fixture', True, True),
                  ('workflow_dispatch', 'refs/heads/epic/release-train-fixture', False, False),

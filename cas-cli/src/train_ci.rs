@@ -546,15 +546,21 @@ print(json.dumps(state))\n");
         let forge_script = r#"import json, pathlib, subprocess, sys
 args, runs = sys.argv[1:], pathlib.Path('RUNS')
 listed = json.loads(runs.read_text()) if runs.exists() else []
+open('CALLS', 'a').write(' '.join(args) + '\n')
 if args[:2] == ['repo', 'view']: print('fixture/repo')
 elif args[:2] == ['workflow', 'run']:
-    open('CALLS', 'a').write(' '.join(args) + '\n')
     ref = args[args.index('--ref') + 1]
     tip = subprocess.check_output(['git', 'rev-parse', ref], text=True).strip()
-    listed.append(dict(id=100 + len(listed), run_attempt=1, head_sha=tip, head_branch=ref,
+    listed.append(dict(id=max((run['id'] for run in listed), default=99) + 1, run_attempt=1, head_sha=tip, head_branch=ref,
                        event='workflow_dispatch', status='queued', conclusion=None))
     runs.write_text(json.dumps(listed))
-elif args[0] == 'api': print(json.dumps({'workflow_runs': listed}))
+elif args[0] == 'api':
+    endpoint = next(arg for arg in args if arg.startswith('repos/'))
+    if '/actions/runs/' in endpoint:
+        run = next(run for run in listed if str(run['id']) == endpoint.split('/actions/runs/')[1].split('/')[0])
+        print(json.dumps({'total_count': run.get('job_count', 0), 'jobs': []}
+                         if '/jobs' in endpoint else run))
+    else: print(json.dumps({'workflow_runs': listed}))
 else: sys.exit(1)
 "#;
         std::fs::write(&forge, forge_script.replace("RUNS", &runs.display().to_string())
@@ -562,7 +568,8 @@ else: sys.exit(1)
         crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", forge.display()));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         env.set("GH_BIN", &gh);
-        let dispatches = || std::fs::read_to_string(&calls).unwrap_or_default().lines().count();
+        let dispatches = || std::fs::read_to_string(&calls).unwrap_or_default().lines()
+            .filter(|call| call.starts_with("workflow run " )).count();
 
         for merge in ["merge one", "merge two", "merge three"] {
             git(&["commit", "-q", "--allow-empty", "-m", merge]);
@@ -595,6 +602,55 @@ else: sys.exit(1)
             .into_iter().filter(|row| row.prompt.contains("train_ci_red")).count();
         assert_eq!(red, 1, "red at the frozen tip raises train_ci_red");
         assert_eq!(dispatches(), 2);
+
+        // Nov 16: run 43884793330 stayed queued with no jobs. Cancelling it
+        // was refused; a replacement at the same head started normally.
+        git(&["commit", "-q", "--allow-empty", "-m", "next frozen tip"]);
+        observe(&root, "session").unwrap();
+        assert_eq!(dispatches(), 3);
+        let mut listed: Value = serde_json::from_slice(&std::fs::read(&runs).unwrap()).unwrap();
+        let stalled = listed.as_array_mut().unwrap().last_mut().unwrap();
+        stalled["id"] = 43884793330_u64.into();
+        let head = stalled["head_sha"].as_str().unwrap().to_owned();
+        let state_path = directory(&root, "cas-train").unwrap().join("state.json");
+        let read_state = || serde_json::from_slice::<Value>(&std::fs::read(&state_path).unwrap()).unwrap();
+        // Age alone, queued alone, and zero jobs alone are insufficient.
+        for (age, status, jobs, expected) in [
+            (10, "queued", 0, 3),
+            (120, "queued", 1, 3),
+            (120, "in_progress", 0, 3),
+            (120, "queued", 0, 4),
+        ] {
+            listed[2]["created_at"] = (chrono::Utc::now() - chrono::Duration::seconds(age)).to_rfc3339().into();
+            listed[2]["status"] = status.into();
+            listed[2]["job_count"] = jobs.into();
+            std::fs::write(&runs, listed.to_string()).unwrap();
+            observe(&root, "session").unwrap();
+            assert_eq!(dispatches(), expected, "age={age}, status={status}, jobs={jobs}");
+        }
+        let state = read_state();
+        assert_eq!(state["dispatches"][&head]["dead_run_id"], "43884793330");
+        assert!(state["pending_run_id"].is_null());
+        // GitHub may still list only the dead run after accepting dispatch.
+        let with_replacement = std::fs::read(&runs).unwrap();
+        std::fs::write(&runs, listed.to_string()).unwrap();
+        observe(&root, "session").unwrap();
+        assert_eq!(dispatches(), 4);
+        assert!(read_state()["pending_run_id"].is_null());
+
+        std::fs::write(&runs, with_replacement).unwrap();
+        let mut listed: Value = serde_json::from_slice(&std::fs::read(&runs).unwrap()).unwrap();
+        let replacement = listed.as_array_mut().unwrap().last_mut().unwrap();
+        assert_eq!(replacement["head_sha"], head);
+        assert_eq!(replacement["head_branch"], lane);
+        replacement["created_at"] = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339().into();
+        std::fs::write(&runs, listed.to_string()).unwrap();
+        observe(&root, "session").unwrap();
+        observe(&root, "session").unwrap();
+        assert_eq!(dispatches(), 4, "a stalled replacement cannot start a retry chain");
+        assert_eq!(read_state()["dispatches"][&head]["run_id"], "43884793331");
+        assert!(!std::fs::read_to_string(&calls).unwrap().lines().any(|call|
+            call.starts_with("run cancel ") || call.contains("/cancel")));
     }
 
     #[test]

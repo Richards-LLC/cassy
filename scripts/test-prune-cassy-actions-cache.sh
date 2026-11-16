@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Linux-only fixture: GNU tools, mount tables and /proc are the tested runner contracts.
 set -euo pipefail
+if [[ "$(uname -s)" != Linux ]]; then
+    printf 'SKIP cache prune fixture: Linux GNU tools, mount tables and /proc required\n'
+    exit 0
+fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pruner="$script_dir/prune-cassy-actions-cache.sh"

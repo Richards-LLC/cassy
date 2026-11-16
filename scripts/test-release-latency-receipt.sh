@@ -48,7 +48,7 @@ rm "$tmp/run/cut.start.epoch"
 out="$(run)"
 expect FULL_CLOCK_WITHIN_BUDGET true
 # A missing host or missing train merge never claims the full clock met budget.
-sed -i '/host=prowl/d' "$FAKE_BODY"
+sed '/host=prowl/d' "$FAKE_BODY" >"$FAKE_BODY.tmp" && mv "$FAKE_BODY.tmp" "$FAKE_BODY"
 out="$(run)"
 expect FULL_CLOCK_WITHIN_BUDGET unavailable
 printf '{}\n' >"$FAKE_CONTEXT"

@@ -660,25 +660,28 @@ pub(crate) fn implementation_lineage(
     actors.extend(task.assignee.clone());
     // cas-f497: the recorded start still names the implementer once the assignee is cleared.
     actors.extend(task.deliverables.factory_branch_start.as_ref().map(|start| start.assignee.clone()));
-    for branch in task
-        .deliverables
-        .parked_branch
-        .iter()
-        .chain(task.deliverables.handoff_branches.iter())
-    {
-        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
-        if let Some(owner) = branch.strip_prefix("factory/") {
-            actors.push(owner.strip_suffix(&format!("-{id}")).unwrap_or(owner).into());
-        }
-    }
-    for anchor in task
+    let anchors: Vec<String> = task
         .deliverables
         .factory_branch_anchor
         .iter()
         .chain(task.deliverables.historical_factory_branch_anchors.iter())
         .chain(task.deliverables.declined_factory_branch_anchors.iter().flatten())
-    {
-        if let Some(anchor) = commit(repo, anchor) {
+        .filter_map(|anchor| commit(repo, anchor))
+        .collect();
+    let handoffs = task.deliverables.handoff_branches.iter().map(|branch| (branch, true));
+    for (branch, handoff) in task.deliverables.parked_branch.iter().map(|branch| (branch, false)).chain(handoffs) {
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        let Some(owner) = branch.strip_prefix("factory/") else { continue };
+        if let Some(owner) = owner.strip_suffix(&format!("-{id}")) {
+            actors.push(owner.into());
+        } else if !handoff || branch_contributed(repo, branch, &anchors, task) {
+            // cas-1b7d: a bare factory/<agent> handoff is that agent's shared
+            // checkout; it names an implementer only when it carries delivery commits.
+            actors.push(owner.into());
+        }
+    }
+    for anchor in anchors {
+        {
             let out = Command::new("git")
                 .args(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", &anchor])
                 .current_dir(repo)
@@ -691,6 +694,27 @@ pub(crate) fn implementation_lineage(
         }
     }
     Ok(actors)
+}
+
+/// Whether `branch` (local or on origin) shares a commit with a delivery anchor
+/// beyond the task's recorded start base. A missing branch carries nothing; an
+/// unknown start base keeps the owner counted.
+fn branch_contributed(repo: &Path, branch: &str, anchors: &[String], task: &Task) -> bool {
+    let Some(tip) = commit(repo, branch).or_else(|| commit(repo, &format!("origin/{branch}"))) else {
+        return false;
+    };
+    let Some(base) = task.deliverables.factory_branch_start.as_ref().and_then(|start| commit(repo, &start.base_sha)) else {
+        return true;
+    };
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(repo).output().ok();
+    anchors.iter().any(|anchor| {
+        git(&["merge-base", &tip, anchor])
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .is_some_and(|shared| {
+                git(&["merge-base", "--is-ancestor", &shared, &base]).is_some_and(|out| !out.status.success())
+            })
+    })
 }
 
 /// Whether the identity `token` (agent id or name) is one of `actors`.

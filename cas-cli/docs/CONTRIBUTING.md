@@ -4844,8 +4844,20 @@ handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 `factory action=train_freeze id=<train> reason="release-freeze: <reason>"`
 needs a live registered supervisor and a nonempty reason after that explicit
 confirmation prefix. Without it the call refuses before freezing. This is a
-release freeze, not a temporary CI hold: only the operator can lift it in
-Commander, or a published release covering its tip ends it.
+release freeze, not a temporary CI hold. A live registered supervisor can lift
+it with `factory action=train_freeze id=<train> decision="lift" reason="<reason>"`.
+The required reason, actor and time are recorded as a decision on the train,
+sent to the operator in Commander and shown on its release card. Lifting clears
+both the freeze and the cut marker so repairs can merge. The operator can also
+lift it in Commander, or a published release covering its tip ends the freeze.
+For an open epic that is not yet a release train, the refusal returns the exact
+`factory action=train_freeze id=<epic> decision="promote"
+reason="release-freeze: <reason>"` retry payload. This single call validates
+that the lane exists and has not diverged from another open train, then writes
+`release-train`, the repository's integration work target, and the freeze in one
+update. Divergence refuses with the epic ids before changing the task. Promotion
+preserves the epic lane and repository selector. This promotion mode is MCP-only;
+there is no separate CLI train-freeze command.
 Commander's `freeze_train` operation does the same for the operator. Both
 `freeze_train` and `lift_train_freeze` require only a verified pairing's baseline
 `machine:read` scope, without worker-management permissions. Preview pairings
@@ -4856,11 +4868,14 @@ lane (through `check_cut_merge`, before and under the target lock), CI retry
 arming (`factory_ci_retry::arm`) and staffing (`ensure_staffing_allowed`,
 covering spawn, assignment and start of tasks that are still open). A
 `release-repair` task is admitted only while the train is red, and each
-admission is noted on the train. Task create retargets new work aimed at a
+admission is noted on the train. A cut train also admits its own nonterminal
+`release-repair` child while its freeze is active and its red is recorded.
+This leaves both cut and freeze markers intact; ordinary work, another
+train's repair, and repairs without red evidence remain refused. Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
-contains the frozen tip), or through the operator-only Commander
-`lift_train_freeze` operation. There is no supervisor lift.
+contains the frozen tip), or through Commander
+`lift_train_freeze` or the audited supervisor lift above.
 
 ### Temporary CI merge hold follow-up
 

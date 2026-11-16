@@ -180,7 +180,15 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
     {
         reason.insert(
             "description".to_string(),
-            Value::String("loop_cancel reason; worktree_merge audit reason with supervisor_override=true. train_freeze: \"release-freeze: <reason>\"; only Commander operator or publication lifts it. No CI holds; see CONTRIBUTING.".to_string()),
+            Value::String("loop_cancel reason; worktree_merge audit reason with supervisor_override=true. train_freeze: \"release-freeze: <reason>\"; decision=lift requires a nonempty reason and a live supervisor, records the decision and notifies the operator. No CI holds; see CONTRIBUTING.".to_string()),
+        );
+    }
+    if tool_name == "factory"
+        && let Some(Value::Object(decision)) = properties.get_mut("decision")
+    {
+        decision.insert(
+            "description".to_string(),
+            Value::String("train_freeze: lift clears a train cut and freeze with a required reason, audit and operator notice; promote validates and promotes an open epic, then freezes it. epic_split: accept, reject, cancel or status.".to_string()),
         );
     }
     if let Some(Value::Object(action)) = properties.get_mut("action") {

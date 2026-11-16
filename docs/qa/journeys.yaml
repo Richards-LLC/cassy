@@ -641,6 +641,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  CI-LIGHT-RUNNER-CAPACITY:
+    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
+    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
+    bug: {task: cas-91b0}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -1219,8 +1223,8 @@ invariants:
       /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
       endpoint (S1, S2) is verified when those land; the phone part is S6'
   HUB-J17-RELEASE-FREEZE-PAIRING:
-    statement: A verified default pairing without factory-operate or factory-manage can lift and set a freeze from the release card; revoked or preview credentials cannot mutate it, and supervisors have no lift action.
-    check: Run hub::tests::release_freeze_default_pairing_cas_16c0a and the existing fleet-ops view freeze/lift case. In batch QA, use a verified default pairing to lift a frozen disposable train from its release card, read back removal of its freeze label, then freeze it again; worker controls still require their own permissions.
+    statement: A verified default pairing without factory-operate or factory-manage can lift and set a freeze from the release card; revoked or preview credentials cannot mutate it, and a live registered supervisor can lift through train_freeze decision=lift with a required audited reason and operator notice. Every frozen train remains actionable regardless of focus.
+    check: Run hub::tests::release_freeze_default_pairing_cas_16c0a, mcp_supervisor_lift_is_audited_and_notifies_operator_cas_0e54 and the fleet-ops freeze/lift and unfocused-trains cases. In batch QA, use a verified default pairing to lift a frozen disposable train from its release card, read back removal of its freeze label, then freeze it again; worker controls still require their own permissions.
     bug: {task: cas-16c0a}
   HUB-J17-FOCUS-CHOICES:
     statement: Focus epic offers only titled live epics owned by the selected supervisor or its verification identity, excludes the current focus, and orders the release train before priority. Progress, completion and Undo use titles while operations keep exact IDs; the desktop menu scrolls within a short region.
@@ -1422,10 +1426,10 @@ invariants:
     statement: Publication imports the published tag into each open train in one merge or names one repair; a successor waits for publication and starts at its tag. Retargeting unfinished work also replaces its parent atomically.
     check: Run publication_syncs_all_trains_or_names_one_repair_cas_4845, successor_waits_for_publication_and_uses_tag_cas_4845, staffing_refuses_behind_latest_published_release_cas_4845, dep_add_parent_moves_a_trunk_fallback_onto_a_lane_targeted_epic_cas_6fb6 and retarget_parent_and_receipt_commit_or_roll_back_together_cas_4845; inspect conflict replay deduplication, staffing refusal and receipt-failure rollback. Run scripts/test-release.sh for the cut path after deleting cut-time sync.
     bug: {task: cas-4845}
-  CI-LIGHT-RUNNER-CAPACITY:
-    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
-    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
-    bug: {task: cas-91b0}
+  CLI-RELEASE-EPIC-PROMOTION:
+    statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
+    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and exercise the auto-cut poll on a published lane named epic/operator-release, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
+    bug: {task: cas-e49f}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -1490,7 +1494,7 @@ journeys:
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train with lane impact checks, Resolve exact-SHA shipped deliveries and proof references, Preview member decisions before push and refuse unreviewed included deliveries or zero closable members, Enqueue the release tree for full validation, Read older-release missing-review residuals in the cut receipt, Read the release publication receipt]
   owners: [cas-cli/src/qa_batch.rs, cas-cli/src/qa_batch/release_close.rs, cas-cli/src/qa_batch/release_close_tests.rs, scripts/train-ci.py, scripts/test-train-ci.py, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/release_reconcile.rs, crates/cas-store/src/release_reconcile_store.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs, cas-cli/src/cli/release_automation.rs, cas-cli/src/cli/release_automation/cut.rs, cas-cli/tests/cli_test.rs, cas-cli/src/mcp/tools/core/task/release_train.rs, cas-cli/src/cli/release_notice_failure.rs, cas-cli/src/cli/release_adapters.rs, scripts/release.sh, scripts/release-cut.py, scripts/release_changelog.py, scripts/test-release-completion.py, cas-cli/src/finding_triage.rs]
-  invariants: [CLI-RELEASE-TRAIN-SUCCESSION, CLI-RELEASE-CLOCK, CLI-RELEASE-NOTICE-EXHAUSTION, CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
+  invariants: [CLI-RELEASE-EPIC-PROMOTION, CLI-RELEASE-TRAIN-SUCCESSION, CLI-RELEASE-CLOCK, CLI-RELEASE-NOTICE-EXHAUSTION, CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-SPAWN

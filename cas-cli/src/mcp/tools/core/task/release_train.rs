@@ -147,6 +147,52 @@ pub(crate) fn active_trains(store: &dyn cas_store::TaskStore, integration: &str)
     trains
 }
 
+/// Prepare an operator-chosen epic for the same admission consumers as an
+/// ordinary release train. The caller holds the train lock and persists this
+/// together with the freeze, so a failed validation cannot leave half a train.
+pub(crate) fn prepare_promotion(
+    store: &dyn cas_store::TaskStore,
+    repo: &Path,
+    task: &mut Task,
+    tip: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let (_, integration) = super::repo_context::integration_branch(&repo.join(".cas"))
+        .context("Cannot resolve the release integration branch")?;
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let mut divergent = Vec::new();
+    for other in open_trains(store, &integration).into_iter().filter(|other| other.id != task.id) {
+        if !other.deliverables.work_target.as_ref()
+            .is_some_and(|target| super::repo_context::repo_answers_to(repo, &target.repo_selector)) {
+            continue;
+        }
+        let lane = other.effective_epic_branch()
+            .with_context(|| format!("Release train {} has no lane", other.id))?;
+        let other_tip = git.fetch_merge_target(lane).ok().flatten()
+            .or_else(|| branch_tip(repo, lane))
+            .with_context(|| format!("Release train {} lane `{lane}` is unavailable; fetch origin", other.id))?;
+        if !is_ancestor(repo, tip, &other_tip) && !is_ancestor(repo, &other_tip, tip) {
+            divergent.push(other.id);
+        }
+    }
+    if !divergent.is_empty() {
+        divergent.push(task.id.clone());
+        divergent.sort();
+        anyhow::bail!("Divergent release trains: {}. Reconcile their lanes before promotion.", divergent.join(", "));
+    }
+    let mut target = match task.deliverables.work_target.clone() {
+        Some(target) => target,
+        None => super::repo_context::standalone_work_target(&repo.join(".cas"))
+            .map_err(anyhow::Error::msg)?.0.context("Cannot resolve the epic repository selector")?,
+    };
+    target.target_branch = integration;
+    task.deliverables.work_target = Some(target);
+    if !is_release_train(task) {
+        task.labels.push(RELEASE_TRAIN_LABEL.into());
+    }
+    Ok(())
+}
+
 /// Trains still accepting new work. A cut train remains active for its
 /// landing/installation receipts, but the next task opens another train.
 pub(crate) fn open_trains(store: &dyn cas_store::TaskStore, integration: &str) -> Vec<Task> {
@@ -301,6 +347,8 @@ pub(crate) fn mark_cut_trains(
 /// Release tracking takes that same lock before persisting the cut marker.
 /// A frozen train (cas-2f4d) admits only repairs of its red.
 pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
+    use crate::mcp::tools::core::workflow::release_freeze;
+
     let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
     for train in store.list(None).map_err(|error| error.to_string())? {
         if !is_cut_train(&train) {
@@ -310,12 +358,23 @@ pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&st
         if super::repo_context::effective_epic_ref(cas_root, lane) != target {
             continue;
         }
+        // A cut ejected for red CI must still take its own repair. Keep both
+        // control markers and let the freeze gate verify/audit the red below.
+        if release_freeze::active(cas_root, &train).is_some()
+            && let Some(task) = task_id.and_then(|id| store.get(id).ok())
+            && !task.is_terminal()
+            && task.labels.iter().any(|label| label == release_freeze::REPAIR_LABEL)
+            && store.get_parent_epic(&task.id).map_err(|error| error.to_string())?
+                .is_some_and(|parent| parent.id == train.id)
+        {
+            continue;
+        }
         return Err(format!(
             "RELEASE TRAIN CUT: {target} ({}) is frozen and accepts no further merges. No merge was attempted. Retarget unfinished work to the next train before retrying worktree_merge.",
             train.id
         ));
     }
-    crate::mcp::tools::core::workflow::release_freeze::check_merge(cas_root, target, task_id)
+    release_freeze::check_merge(cas_root, target, task_id)
 }
 
 /// A frozen train keeps its own work but takes no new tasks (cas-2f4d).
@@ -414,7 +473,7 @@ pub(crate) fn retire_disabled_trains(cas_root: &Path, store: &dyn cas_store::Tas
 /// Exclusive lock over train lookup, landing and opening (the
 /// `worker_task_queue` pattern): blocks off the runtime until the holder,
 /// in this or another process, releases it by dropping the file.
-fn lock_trains_blocking(cas_root: &Path) -> std::io::Result<File> {
+pub(crate) fn lock_trains_blocking(cas_root: &Path) -> std::io::Result<File> {
     let dir = cas_root.join("locks");
     std::fs::create_dir_all(&dir)?;
     let file = std::fs::OpenOptions::new()

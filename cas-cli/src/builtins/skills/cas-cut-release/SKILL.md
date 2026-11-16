@@ -27,7 +27,9 @@ candidate build, local assembly run or second cut owner.
    Only a task carrying that label and `release-repair` can merge through the
    standing freeze; merging consumes that grant. Corrected notes re-arm the cut.
    Never start a parallel release or lift/reapply the freeze for repair.
-   Commander lets the operator pause auto-cut or explicitly lift the freeze.
+   Commander lets the operator pause auto-cut or explicitly lift the freeze; a live
+   supervisor lifts with `factory action=train_freeze id=<train> decision="lift" reason="<reason>"`,
+   audited and notified to the operator.
 6. The owner prepares versions, changelog and Commander once, persists cut
    tracking, pushes, reuses the PR and checks admission once. Durable SHA/tag
    reminders carry landing and publication; add no CI/PR polling loop.

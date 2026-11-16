@@ -108,6 +108,7 @@ pub(crate) fn task_summary_json(
         updated_at: t.updated_at.map(|at| at.to_rfc3339()),
         tip,
         freeze: None,
+        freeze_lift: None,
         auto_cut_paused: None,
     }
 }
@@ -188,16 +189,14 @@ pub(crate) fn build_status_json(
             .into_iter()
             .map(|epic| {
                 let split = counts.get(&epic.id).copied().unwrap_or_default();
-                // Only a release-train lane can carry a freeze; skip the
-                // store read for every other epic in the catalog.
-                let train = epic.branch.as_deref()
-                    .filter(|branch| branch.contains("release-train"))
-                    .and_then(|_| task_store.get(&epic.id).ok())
+                // Promotion preserves custom lane names; the train label is authoritative.
+                let train = task_store.get(&epic.id).ok()
                     .filter(crate::mcp::tools::core::task::release_train::is_release_train);
                 let freeze = train.as_ref()
                     .and_then(|train| crate::mcp::tools::core::workflow::release_freeze::card(cas_root, train));
+                let freeze_lift = train.as_ref().and_then(crate::mcp::tools::core::workflow::release_freeze::last_lift);
                 let auto_cut_paused = train.as_ref().map(crate::mcp::tools::core::workflow::release_auto_cut::paused);
-                TaskSummaryJson { counts: Some(split), freeze, auto_cut_paused, ..to_task(epic) }
+                TaskSummaryJson { counts: Some(split), freeze, freeze_lift, auto_cut_paused, ..to_task(epic) }
             })
             .collect(),
         focused_epic: crate::ops::fleet::pinned_epic(&session.name),
@@ -1148,6 +1147,7 @@ mod focused_epic_tests {
                 // the release that actually has a staffed in-progress task.
                 historical.status = TaskStatus::Open;
                 historical.epic_verification_owner = Some("supervisor-id".into());
+                historical.labels = vec!["release-train".into(), format!("release-train-frozen:1730000000:{base}")];
             }
             store.add(&historical).unwrap();
             if index == 0 {
@@ -1165,7 +1165,9 @@ mod focused_epic_tests {
         epic.task_type = TaskType::Epic;
         epic.branch = Some("main".into());
         epic.epic_verification_owner = Some("supervisor-id".into());
+        epic.labels = vec!["release-train".into(), format!("release-train-frozen:1730000000:{base}")];
         store.add(&epic).unwrap();
+        crate::mcp::tools::core::workflow::release_freeze::lift(&root, &epic.id, "operator").unwrap();
         let mut children = Vec::new();
         for (index, anchor) in anchors.iter().enumerate() {
             let id = if index == 0 { "cas-landed".into() } else { format!("cas-delivery-{index}") };
@@ -1210,6 +1212,10 @@ mod focused_epic_tests {
         // and no focus. The first refresh must contain the current header.
         let status = fetch_status();
         assert!(status["focused_epic"].is_null());
+        let projected = |id: &str| status["epics"].as_array().unwrap().iter().find(|epic| epic["id"] == id).unwrap();
+        assert_eq!(projected("cas-history-0")["freeze"]["tip"], base);
+        assert_eq!(projected("cas-epic")["freeze_lift"]["actor"], "operator");
+        assert!(projected("cas-epic")["freeze"].is_null());
         assert_eq!(status["epics"].as_array().unwrap().len(), 297);
         let reads = std::fs::read_to_string(&trace).unwrap();
         let first_epic_read = reads

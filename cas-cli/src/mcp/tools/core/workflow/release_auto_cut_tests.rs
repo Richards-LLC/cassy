@@ -42,12 +42,11 @@ fn wait_release(log: &Path, expected: i32) {
     }
 }
 
-/// The Nov 6 design: a green exact tip with fragments is cut by Cassy, inside
-/// the cadence, never while red, paused or queued, and never without the
-/// supervisor's notes, which it waits for with one wake.
+/// A published tip with fragments enters the cut regardless of lane name;
+/// the queue owns full proof. Cadence, pause, queue and notes still gate it.
 #[cfg(unix)]
 #[test]
-fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
+fn published_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     let _env = TestEnvGuard::temp_home();
     let temp = tempfile::TempDir::new().unwrap();
     let repo = temp.path();
@@ -64,6 +63,10 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     run(repo, &["checkout", "-qb", LANE]);
     commit(repo, "work.txt");
     run(repo, &["checkout", "-q", "main"]);
+    let remote = tempfile::TempDir::new().unwrap();
+    run(remote.path(), &["init", "-q", "--bare"]);
+    run(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    run(repo, &["push", "-q", "origin", LANE]);
     let root = crate::store::init_cas_dir(repo).unwrap();
     let mut supervisor = Agent::new_with_role("sup-id".into(), "supervisor".into(), AgentRole::Supervisor);
     supervisor.factory_session = Some("session".into());
@@ -77,10 +80,13 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     let wakes = || open_supervisor_queue_store(&root).unwrap().peek("sup-id", 10).unwrap();
 
     poll(&none);
-    assert!(!frozen(), "green, but no changelog fragments");
+    assert!(!frozen(), "published, but no changelog fragments");
     run(repo, &["checkout", "-q", LANE]);
     commit(repo, "changelog.d/cas-x.md");
     run(repo, &["checkout", "-q", "main"]);
+    poll(&none);
+    assert!(!frozen(), "the new local tip is not published");
+    run(repo, &["push", "-q", "origin", LANE]);
     set_paused(&root, "cas-tr", "operator", true).unwrap();
     poll(&none);
     assert!(!frozen(), "paused in Commander");
@@ -107,12 +113,13 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
 
     poll(&none);
     poll(&none);
-    assert!(frozen(), "green tip with fragments freezes for its cut");
+    assert!(frozen(), "published tip with fragments freezes for its cut");
     assert_eq!(wakes().len(), 1, "a missing notes draft wakes the supervisor once");
     let draft = notes_draft(&root, "cas-tr").unwrap();
     assert!(wakes()[0].payload.contains(&draft.display().to_string()), "{}", wakes()[0].payload);
     assert!(!repo.join("release-ran").exists(), "no cut without notes");
 
+    std::fs::create_dir_all(draft.parent().unwrap()).unwrap();
     std::fs::write(&draft, "bad notes\n").unwrap();
     // cas-80df: a supervisor holding the branch cannot own the cut checkout.
     run(repo, &["checkout", "-q", LANE]);

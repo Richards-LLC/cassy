@@ -377,18 +377,31 @@ fn launch_with_preparation(
 /// The executable recovery after an automatic verifier could not finish: the
 /// call that opened this exact dispatch starts one replacement on it.
 pub(crate) fn recovery(root: &Path, dispatch: &VerificationDispatch) -> String {
-    let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
-    let retry = match candidate_for_dispatch(root, dispatch).ok().flatten() {
-        Some(candidate) => format!(
-            "{prefix}factory action=worktree_merge id={} task_id={}",
-            candidate.source_branch, dispatch.task_id
-        ),
-        None => format!("{prefix}task action=close id={}", dispatch.task_id),
-    };
     format!(
-        "Retry {retry}; one replacement will claim this exact dispatch. {}",
+        "Retry {}; one replacement will claim this exact dispatch. {}",
+        retry_call(root, dispatch),
         direct_verdict(dispatch)
     )
+}
+
+/// The call that starts this dispatch's verifier: the train merge that owns
+/// the target holds single merges (G-101), so it is retried instead.
+pub(crate) fn retry_call(root: &Path, dispatch: &VerificationDispatch) -> String {
+    let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+    match candidate_for_dispatch(root, dispatch).ok().flatten() {
+        Some(candidate) => match crate::mcp::tools::core::workflow::train_merge::owner(
+            root,
+            &candidate.repository,
+            &candidate.target_branch,
+        ) {
+            Some(train) => format!("{prefix}factory action=train_merge id={train}"),
+            None => format!(
+                "{prefix}factory action=worktree_merge id={} task_id={}",
+                candidate.source_branch, dispatch.task_id
+            ),
+        },
+        None => format!("{prefix}task action=close id={}", dispatch.task_id),
+    }
 }
 
 /// The other supported route. A native Task/Agent child on the supervisor's

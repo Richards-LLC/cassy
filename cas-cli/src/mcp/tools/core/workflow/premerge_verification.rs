@@ -1069,6 +1069,7 @@ impl CasCore {
         crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_candidate_verification_handoff(
             &self.cas_root, queue.as_ref(), dispatch, task.assignee.as_deref().unwrap_or("worker"),
             location.as_deref().unwrap_or("Review the exact candidate bound to this dispatch."),
+            &automatic::retry_call(&self.cas_root, dispatch),
         ).map_err(fail)?;
         Ok(None)
     }

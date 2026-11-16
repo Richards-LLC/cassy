@@ -371,7 +371,7 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
 /// model turn is needed to consume an approved candidate.
 // gate-audit[ci_override]: selector Derived accepted G-114 token forwarded in response; not another request flag.
 pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
-    crate::mcp::tools::core::task::lifecycle::parked_conflicts::scan(root)?;
+    let unchecked = crate::mcp::tools::core::task::lifecycle::parked_conflicts::scan(root)?;
     let paths = match std::fs::read_dir(directory(root)) {
         Ok(paths) => paths,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -394,6 +394,14 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
         let Some(mut queue) = read(&path)? else {
             continue;
         };
+        // GH #2017: only a queue whose own target missed its conflict scan waits.
+        if let Some(reason) = unchecked.get(&queue.target) {
+            if queue.waiting.as_ref() != Some(reason) {
+                queue.waiting = Some(reason.clone());
+                save(&path, &queue)?;
+            }
+            continue;
+        }
         let core = CasCore::with_daemon(root.to_path_buf(), None, None);
         core.bind_agent_identity(
             queue.supervisor.clone(),
@@ -953,6 +961,8 @@ mod tests {
             .unwrap();
         assert!(!queue.active(), "{}", queue.render());
         assert_eq!(tasks.get(&stale.id).unwrap().status, TaskStatus::AwaitingMerge);
+        let unchecked = crate::mcp::tools::core::task::lifecycle::parked_conflicts::scan(&fixture.root).unwrap();
+        assert!(unchecked.contains_key("epic/deleted"), "{unchecked:?}");
     }
 
     /// A train asks origin about its target once per entry: under the merge

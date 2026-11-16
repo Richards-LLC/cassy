@@ -1021,12 +1021,31 @@ fn collect_script(
             (CaseSyntax::Code, None) => None,
             (CaseSyntax::Code, _) => continue,
         };
-        // Credential reads: only conditional syntax before a statement can skip
-        // it, including a `{ }` group after `&&` or `||`.
+        // Credential reads: only a conditional block still open before a
+        // statement can skip it, including a `{ }` group after `&&` or `||`.
+        // A closer counts only when spelled unquoted in command position.
         let before = &tokens[..start.min(tokens.len())];
-        let conditional_before = before.iter().any(|token| matches!(token, ShellToken::Word(word)
-                if matches!(word.as_str(), "if" | "while" | "until" | "for" | "select" | "case")))
-            || before.windows(2).any(|pair| matches!(pair, [ShellToken::Operator('&' | '|'), ShellToken::Word(word)] if word == "{"));
+        let mut open_blocks: Vec<bool> = Vec::new();
+        for (at, token) in before.iter().enumerate() {
+            if case_tokens[at] == CaseSyntax::Esac {
+                open_blocks.pop();
+                continue;
+            }
+            let ShellToken::Word(word) = token else { continue };
+            let closer = case_tokens[at] == CaseSyntax::Code
+                && at > 0
+                && matches!(before[at - 1], ShellToken::Operator(';' | '&'))
+                && projected.get(source_ends[at - 1]..source_ends[at]).is_some_and(|source| source.trim_start() == word);
+            match word.as_str() {
+                "if" | "while" | "until" | "for" | "select" | "case" => open_blocks.push(true),
+                "{" => open_blocks.push(at > 0 && matches!(before[at - 1], ShellToken::Operator('&' | '|'))),
+                "fi" | "done" | "}" if closer => {
+                    open_blocks.pop();
+                }
+                _ => {}
+            }
+        }
+        let conditional_before = open_blocks.contains(&true);
         let assignment_may_skip = if read_mode { conditional_before } else { conditional_bindings }
             || matches!(
                 tokens.get(start.wrapping_sub(1)),

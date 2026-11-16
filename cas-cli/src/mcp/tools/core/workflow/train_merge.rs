@@ -471,6 +471,10 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             {
                 // GH #2018: an unclaimed dispatch needs its daemon verifier
                 // requested here; nothing else starts it while the train holds.
+                if dispatch.state == VerificationDispatchState::Pending {
+                    core.emit_premerge_review_handoff(&tasks.get(&entry.task)?, &dispatch)
+                        .map_err(|error| anyhow::anyhow!(error.message.to_string()))?;
+                }
                 queue.waiting = Some(crate::gates::tag("G-115", format!("{} awaiting dispatch {}", entry.task, dispatch.id)));
                 save(&path, &queue)?;
                 break;

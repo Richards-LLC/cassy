@@ -13130,6 +13130,71 @@ fn failed_ancestry_check_warns_without_epic_specific_wording() {
     assert!(!warning.contains("epic stack"), "{warning}");
 }
 
+/// GH #2003 (cas-88d9): a queued successor rebased onto its parked
+/// predecessor shares the predecessor's tip on its own branch. The start
+/// advisory names the predecessor's recorded branch, not the checkout.
+#[tokio::test]
+async fn test_parked_advisory_names_predecessor_branch_after_successor_rebase_gh_2003() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-2003-rebase")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "gh2003-rebase-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    let origin = home.path().join("origin.git");
+    git_stdout(home.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git_stdout(&worker_path, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"gh2003-fixture\"\n",
+    )
+    .unwrap();
+    let predecessor = format!("factory/{worker}-cas-pk03");
+    git_stdout(&worker_path, &["checkout", "-b", &predecessor]);
+    std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
+    git_stdout(&worker_path, &["add", "parked.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "fix(cas-pk03): parked delivery"]);
+    let parked_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+    add_epic_with_id(&env, "cas-2003", TaskStatus::Open, "epic/requested");
+
+    let mut agent = Agent::new("test-agent-id".into(), worker.into());
+    agent.role = AgentRole::Worker;
+    agent.factory_session = Some("session-2003-rebase".into());
+    agent.metadata.insert("clone_path".into(), worker_path.to_string_lossy().into_owned());
+    env.agent_store().register(&agent).unwrap();
+
+    let store = env.task_store();
+    let mut parked = Task::new("cas-pk03".into(), "Parked predecessor".into());
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.assignee = Some(worker.into());
+    parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
+    parked.deliverables.parked_branch = Some(predecessor.clone());
+    store.add(&parked).unwrap();
+
+    let successor = child_task_of_epic(&env, "cas-2003", "queued successor");
+    let mut task = store.get(&successor).unwrap();
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:gh2003-fixture".into(),
+        target_branch: "epic/requested".into(),
+    });
+    store.update(&task).unwrap();
+    assign(&env, &successor, worker).await.expect("successor assignable");
+    // The authorized rebase: the successor's own branch now sits on the
+    // predecessor's parked tip.
+    let own = format!("factory/{worker}-{successor}");
+    git_stdout(&worker_path, &["checkout", "-b", &own, &parked_tip]);
+
+    let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "start", "id": successor,
+    }))
+    .unwrap();
+    let text = get_text(&env.service.task(Parameters(start)).await.expect("successor starts"));
+    assert!(text.contains(&format!("cas-pk03 stays on {predecessor}")), "{text}");
+}
+
 /// GH #1006 item 3: a worker whose branch is frozen at a delivery parked for
 /// merge (under independent QA on another epic) reads as behind any other
 /// epic. Rebasing it would destroy the tip under review, so assignment must

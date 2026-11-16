@@ -73,10 +73,18 @@ case "$1 $2" in
     esac
     printf '{"train_id":"cas-0001","branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
   "release preview")
-    jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" \
+    members="${FAKE_MEMBERS:-$(jq -cn --argjson n "${FAKE_WOULD_CLOSE:-1}" \
       --argjson missing "${FAKE_REVIEW_MISSING:-$(printf '%s' '["cas-dead"]')}" \
       --argjson closed "${FAKE_ALREADY_CLOSED:-0}" --argjson ci "${FAKE_CI_MISSING:-[]}" \
-      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)+($ci|length)),would_close:$n,would_hold:(($missing|length)+($ci|length)),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),LANE_CI_MISSING:($ci|length),ALREADY_CLOSED:$closed},review_missing:$missing,lane_ci_missing:$ci}' ;;
+      '[(range($n) | {key: "cas-c\(.)", value: {closed: {notice: ""}}}), (range($closed) | {key: "cas-k\(.)", value: "already_closed"}),
+        ($missing[] | {key: ., value: {held: "REVIEW_MISSING: no approval"}}), ($ci[] | {key: ., value: {held: "LANE_CI_MISSING: no run"}})] | from_entries')}"
+    jq -n --arg sha "$(git rev-parse HEAD)" --argjson m "$members" '
+      [$m[] | if type == "object" then keys[0] else . end] as $kinds |
+      def count($k): [$kinds[] | select(. == $k)] | length;
+      def held($code): [$m | to_entries[] | select(.value | type == "object" and (.held // "" | startswith($code))) | .key];
+      {scope:{final_release_sha:$sha},members:($m|length),would_close:count("closed"),would_hold:count("held"),
+       already_closed:count("already_closed"),not_eligible:count("not_eligible"),by_reason:{},
+       review_missing:held("REVIEW_MISSING"),lane_ci_missing:held("LANE_CI_MISSING"),members_by_id:$m}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
@@ -736,13 +744,21 @@ cut_preview_gate() {
     write_valid_draft "$tmp/preview-notes.md"
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
-    FAKE_WOULD_CLOSE=0 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
+    # cas-be03: prowl's a201 preview, where 14 legacy holds sat beside closed members.
+    local legacy
+    legacy="$(jq -cn '[(range(12) | {key: "cas-1\(.)", value: {held: "RELEASE_MEMBER_REVERTED: ownership"}}),
+        {key: "cas-1b", value: {held: "InvalidBase"}}, {key: "cas-1c", value: {held: "MissingBase"}},
+        {key: "cas-k0", value: "already_closed"}] | from_entries')"
+    FAKE_MEMBERS="$(jq -c '. + {"cas-000c": {held: "RELEASE_MEMBER_HELD: missing proof"}}' <<<"$legacy")" \
+        run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
     [[ "$status" != 0 ]] &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
         ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
         ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
     : >"$FAKE_CAS_LOG"
-    FAKE_WOULD_CLOSE=1 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
+    FAKE_MEMBERS="$(jq -c '. + {"cas-000c": "already_closed"}' <<<"$legacy")" \
+        run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || return 1
+    grep -q 'cas-1c' "$tmp/preview-cut.log" || return 1
     # cas-a6c8: receipts may already have closed all thirteen members.
     local closed_fixture="$tmp/already-closed-cut"
     clone_epic "$closed_fixture" epic/already-closed-cut already-closed-cut
@@ -756,7 +772,7 @@ cut_preview_gate() {
         grep -q '^CAS_ROOT=/[^ ]*/\.cas release preview$' "$FAKE_CAS_LOG" &&
         grep -q '^CAS_ROOT=/[^ ]*/\.cas release track$' "$FAKE_CAS_LOG"
 }
-check 'cut_preview_gate' 'cut refuses all-held members, permits all-already-closed members and keeps older-release residuals nonblocking'
+check 'cut_preview_gate' 'cut refuses a held included member, permits all-already-closed members and lists legacy holds without refusing'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

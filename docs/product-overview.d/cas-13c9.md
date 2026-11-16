@@ -1,5 +1,0 @@
-## Core Concepts
-
-### Shared callback stability checks
-
-Playwright journeys may place `// cas-stability-identities: ["full runtime title", ...]` immediately above each registration that uses a `const` callback local to the registering function. Each registration declares all of its expanded suite/test titles. Worker checks bind changed callback bodies to those identities, verify the complete expansion at the exact registration location using native Playwright discovery, and require five consecutive passes with retries disabled. Invalid, missing or ambiguous identities refuse proof. Vitest and Jest retain static source discovery.

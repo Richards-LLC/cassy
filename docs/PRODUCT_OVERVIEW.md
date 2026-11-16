@@ -374,6 +374,14 @@ Search returns the last committed results while another writer owns the task sea
 
 A no-code task's close request and portable evidence are saved with its verification dispatch. Approval resumes that same close through the ordinary gates and releases ownership when it completes. A changed assignment, replaced proof or independent hold prevents automatic completion. An identical approval retry preserves the existing terminal state and completion notice.
 
+### Shared callback stability checks
+
+Playwright journeys may place `// cas-stability-identities: ["full runtime title", ...]` immediately above each registration that uses a `const` callback local to the registering function. Each registration declares all of its expanded suite/test titles. Worker checks bind changed callback bodies to those identities, verify the complete expansion at the exact registration location using native Playwright discovery, and require five consecutive passes with retries disabled. Invalid, missing or ambiguous identities refuse proof. Vitest and Jest retain static source discovery.
+
+A merge importing a recorded delivery from an earlier worker retains that task's original changes across replacement and restart. Close gates use the same attributed ranges for source, test stability and release notes while excluding target refreshes and foreign work.
+
+- **CI completion reminders** — A workflow display name that several workflows share resolves to the one with a run for the reminder's commit. Otherwise registration is refused as ambiguous and the refusal names each candidate workflow file and ID to choose from.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

@@ -196,7 +196,8 @@ esac
 "##);
     // The build tool is an external fixture; the CAS binary and release owner are real.
     cas::test_paths::warm_stub(&bin.join("npm"), "#!/bin/sh\nif [ \"$1\" = run ]; then\n if git symbolic-ref --quiet HEAD; then exit 73; fi\n if [ \"$CUT_HOLD\" = 1 ]; then printf 'CUT_READY\\n' >&2; read -r finish; fi\n pwd >> \"$CUT_BUILD_MARKER\"\n mkdir -p dist\n printf 'built\\n' > dist/app.js\nfi\n");
-    env.set("PATH", std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))).unwrap());
+    // Stub tools reach only the spawned cut commands, never the process PATH.
+    let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))).unwrap();
     env.set("CAS_GH_BIN", &gh);
     env.set("GH_BIN", &gh);
     let binary = cas::test_paths::cas_binary();
@@ -211,12 +212,13 @@ esac
     fs::write(repo.join("scripts/release-train-announce.py"), "raise SystemExit(0)\n").unwrap();
     let mut evidence = Vec::new();
     let plan = || {
-        let out = Process::new(&binary).current_dir(&repo).args(["release", "plan", "--train", "cas-a001", "--commit", LANE, "--version", "9.99.1", "--notes"]).arg(&notes).output().unwrap();
+        let out = Process::new(&binary).env("PATH", &path).current_dir(&repo).args(["release", "plan", "--train", "cas-a001", "--commit", LANE, "--version", "9.99.1", "--notes"]).arg(&notes).output().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|error| panic!("plan JSON: {error}; {out:?}"));
         (out.status.success(), value)
     };
     let cut = |dry: bool| {
         let mut command = Process::new("bash");
+        command.env("PATH", &path);
         command.current_dir(&held).args(["scripts/release.sh", "--hotfix", "--notes"]).arg(&notes);
         if dry { command.arg("--dry-run"); }
         command.output().unwrap()
@@ -283,7 +285,7 @@ esac
     assert!(ok, "{fixed}");
     assert!(!marker.exists());
     let held_tip = git(&held, &["rev-parse", "HEAD"]);
-    let mut running = Process::new("bash").current_dir(&held).args(["scripts/release.sh", "--hotfix", "--notes"]).arg(&notes)
+    let mut running = Process::new("bash").env("PATH", &path).current_dir(&held).args(["scripts/release.sh", "--hotfix", "--notes"]).arg(&notes)
         .env("CUT_HOLD", "1").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
     let mut ready = std::io::BufReader::new(running.stderr.take().unwrap());
     loop {

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod frozen_train_ci;
+
 /// A bounded response from the `gh api` invocation used by the merge receipt.
 /// Keeping status, stdout, and stderr together lets classification distinguish
 /// an empty/no-PR response from an authentication or transport failure.
@@ -157,9 +159,9 @@ impl BranchCiState {
 
 /// Reuse admission's exact commit/check classifier, never infer green from a
 /// workflow completing, an empty response or an unavailable forge.
-pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
+pub(crate) fn retry_ci_status(root: Option<&Path>, sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
     use crate::factory_ci_retry::CiStatus;
-    let lookup = lookup_branch_ci(sha, target, cwd);
+    let lookup = frozen_train_ci::lookup(root, sha, target, cwd);
     // GH #1899: a timed-out or failed gh api call is no CI answer. Stay armed
     // for the next watch pass; the two-hour cap still bounds the wait.
     if lookup.gh_failed {
@@ -413,9 +415,9 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
 
 /// cas-207e: whether a parked delivery's lane CI is still running, so the
 /// supervisor-stall relay does not call it a ready merge (cas-6c13).
-pub(crate) fn delivery_ci_pending(branch: &str, target: &str, cwd: &Path) -> bool {
+pub(crate) fn delivery_ci_pending(root: Option<&Path>, branch: &str, target: &str, cwd: &Path) -> bool {
     matches!(
-        lookup_branch_ci(branch, target, cwd).state,
+        frozen_train_ci::lookup(root, branch, target, cwd).state,
         BranchCiState::Pending { .. } | BranchCiState::CodePending { .. }
     )
 }
@@ -5422,8 +5424,9 @@ impl CasCore {
         let fast_lane_notice = fast_lane.as_ref()
             .map(|(_, _, _, note)| format!("{note}\n\n"))
             .unwrap_or_default();
-        let branch_ci_lookup = fast_lane_lookup
-            .unwrap_or_else(|| lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd));
+        let (branch_ci_lookup, frozen_shortcut) = fast_lane_lookup
+            .map(|lookup| (lookup, false))
+            .unwrap_or_else(|| frozen_train_ci::lookup_with_shortcut(Some(&cas_root), ci_source, &worktree.parent_branch, &cwd));
         let unparked_notice = scoped_task.as_deref()
             .filter(|task| task.status == cas_types::TaskStatus::InProgress
                 && task.task_type != cas_types::TaskType::Epic)
@@ -6422,6 +6425,12 @@ impl CasCore {
             &worktree.branch, &push_branch, &push_outcome, task_id,
         );
         record_published_merge(manager.git(), merge_commit.as_deref(), &push_branch, &push_outcome);
+        frozen_train_ci::cancel_after_merge(
+            &cas_root, &push_branch, &cwd, branch_ci_lookup.repo.as_deref(), branch_ci_state.sha(),
+            matches!(push_outcome, crate::worktree::git::TargetPushOutcome::Pushed { .. }
+                | crate::worktree::git::TargetPushOutcome::AlreadyCurrent { .. }),
+            frozen_shortcut,
+        );
         if let (Some(approval), Some(attempted)) = (premerge_approval.as_ref(), reviewed_attempt.as_deref()) {
             if let Some(held) = approval.finish_publication(manager.git(), &push_outcome, attempted)
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
@@ -6964,7 +6973,7 @@ mod tests {
 
     /// `extra_cases` adds shell `case` arms to the fake gh, before its refusal.
     #[cfg(unix)]
-    fn delivery_ci_fixture_with(
+    pub(super) fn delivery_ci_fixture_with(
         code: bool,
         code_response: &str,
         extra_cases: &str,
@@ -7120,7 +7129,7 @@ mod tests {
                 "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{code_sha}/check-runs) printf '%s\\n' '{cancelled}' ;;\n*/{tip}/check-runs) printf '%s\\n' '{tip_response}' ;;\n*) exit 97 ;;\nesac\n"
             ));
             env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
-            assert_eq!(super::retry_ci_status(&tip, "main", repo.path(), &code_sha), expected, "tip CI: {tip_response}");
+            assert_eq!(super::retry_ci_status(None, &tip, "main", repo.path(), &code_sha), expected, "tip CI: {tip_response}");
         }
     }
 

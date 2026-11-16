@@ -245,7 +245,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         archive_i, _ = policy.role(job, 'Build full suite archive', source)
         def valid(candidate):
             probe, disable = candidate['steps'][probe_i], candidate['steps'][disable_i]
-            return probe.get('continue-on-error') is True and "steps.classify-diff.outputs.rust-unaffected != 'true'" in disable['if'] and "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" in disable['if'] and "echo 'RUSTC_WRAPPER='" in policy.uncomment(disable['run']) and disable_i < archive_i
+            return probe.get('continue-on-error') is True and "steps.classify-diff.outputs.rust-unaffected != 'true'" in disable['if'] and "needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted'" in disable['if'] and "echo 'RUSTC_WRAPPER='" in policy.uncomment(disable['run']) and disable_i < archive_i
         self.assertTrue(valid(job), 'positive control for the actual parsed archive contract')
         changed = copy.deepcopy(job);changed['steps'][probe_i].pop('continue-on-error')
         self.assertFalse(valid(changed), 'legacy removed probe fail-open mutation')
@@ -1190,16 +1190,35 @@ else:
         self.assertFalse(log.exists())
 
     def test_real_runner_route_defaults_to_hosted_and_requires_both_opt_ins(self):
-        route = next(s for s in self.ci()['jobs']['fast-validation-runner-route']['steps'] if s.get('id') == 'route')['run']
-        for event, enabled in itertools.product(['merge_group', 'push', 'pull_request', 'schedule'], ['enabled', '', 'disabled']):
-            with self.subTest(event=event, enabled=enabled):
+        jobs = self.ci()['jobs']
+        route = next(s for s in jobs['fast-validation-runner-route']['steps'] if s.get('id') == 'route')['run']
+        guard = next(s for s in jobs['fast-validation-suite-build']['steps'] if s.get('name') == 'Verify self-hosted archive trust boundary')['run']
+        guard_script = self.root / 'scripts/check-cassy-actions-runner-isolation.sh'; guard_script.parent.mkdir(exist_ok=True)
+        shutil.copyfile(policy.ROOT / guard_script.relative_to(self.root), guard_script); guard_script.chmod(0o755)
+        local = ['self-hosted','Linux','X64','cas-ci-32core']
+        events = [('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1'), ('push', 'refs/heads/main'),
+                  ('pull_request', 'refs/pull/1/merge'), ('schedule', 'refs/heads/main'),
+                  ('workflow_dispatch', 'refs/heads/epic/release-train-x'), ('workflow_dispatch', 'refs/heads/factory/x')]
+        for (event, ref), queue, train in itertools.product(events, ['enabled', '', 'disabled'], ['enabled', '']):
+            with self.subTest(event=event, ref=ref, queue=queue, train=train):
                 output = self.root / 'route.output';output.write_text('')
-                result = self.run_body(route, dict(EVENT_NAME=event, SELF_HOSTED_ENABLED=enabled, GITHUB_OUTPUT=str(output)))
+                values = dict(EVENT_NAME=event, REF=ref, REPOSITORY='Richards-LLC/cassy', SELF_HOSTED_ENABLED=queue, TRAIN_ARCHIVE_ENABLED=train)
+                result = self.run_body(route, dict(values, GITHUB_OUTPUT=str(output)))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                expected = ['self-hosted','Linux','X64','cas-ci-32core'] if event == 'merge_group' and enabled == 'enabled' else ['ubuntu-latest']
+                expected = local if event == 'merge_group' and queue == 'enabled' else ['ubuntu-latest']
+                # cas-f0e7: only the archive follows the train's own opt-in.
+                archive = local if expected == local or (ref == 'refs/heads/epic/release-train-x' and train == 'enabled') else ['ubuntu-latest']
                 lines = dict(line.split('=', 1) for line in output.read_text().splitlines())
                 self.assertEqual(json.loads(lines['runner']), expected)
                 self.assertEqual(lines['mode'], 'self-hosted' if len(expected)>1 else 'hosted')
+                self.assertEqual(json.loads(lines['archive-runner']), archive)
+                self.assertEqual(lines['archive-mode'], 'self-hosted' if len(archive)>1 else 'hosted')
+                # The archive job re-checks on the machine; it admits exactly the routed runs.
+                slot = dict(GITHUB_EVENT_NAME=event, GITHUB_REF=ref, GITHUB_REPOSITORY='Richards-LLC/cassy',
+                            SELF_HOSTED_ENABLED=queue, TRAIN_ARCHIVE_ENABLED=train,
+                            CARGO_TARGET_DIR='/var/lib/cassy-actions/cache/cargo-target',
+                            SCCACHE_DIR='/var/lib/cassy-actions/cache/sccache', SCCACHE_SERVER_PORT='4227')
+                self.assertEqual(self.run_body(guard, slot).returncode == 0, len(archive) > 1)
 
     # cas-195e (macOS), cas-f0e7 (Linux): both routes share
     # scripts/route-release-runner.sh. Expected labels are pinned here.

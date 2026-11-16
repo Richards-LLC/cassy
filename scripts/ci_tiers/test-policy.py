@@ -267,6 +267,14 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         checker = jobs['fast-validation-queue-check']
         self.assertNotIn('fast-validation-preflight', checker['needs'])
         self.assertIn('fast-validation-queue-check', jobs['fast-validation']['needs'])
+        # The required rollup admits the adopted queue tree only if the check passed or was not needed.
+        adopted = next(s for s in jobs['fast-validation']['steps'] if s.get('name') == 'Report the adopted train full-set receipt')
+        for result, admitted in [('success', True), ('skipped', True), ('failure', False), ('cancelled', False)]:
+            with self.subTest(queue_check=result):
+                ran = self.run_body(adopted['run'], dict(PREFLIGHT='success', QUEUE_CHECK=result, SLACK_BRIDGE='success',
+                                                         JOURNEYS='success', JOURNEYS_REUSE='false', JOURNEYS_PRIOR_URL='',
+                                                         VALIDATING_RUN_ID='1', PRIOR_RUN_URL='u', GITHUB_STEP_SUMMARY=str(self.root / 'summary')))
+                self.assertEqual(ran.returncode == 0, admitted, ran.stderr)
         check = next(s for s in checker['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
         build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
         self.assertNotIn('--no-default-features', shlex.split(build['run']))

@@ -1,3 +1,4 @@
 ### Changed — Release CI
 
 - **The shipped Linux binary is audited once** — Was: the portable-instruction audit ran in the prebuild and again in the release on the same bytes (134 s + 185 s). Now: the prebuild audits the executable and records its SHA-256 in the artifact; the release checks the digest (under a second) and runs only the launch smoke.
+- **The Linux release builds on our own runner** — Was: the Linux release archive always compiled on a hosted 4-core runner (760 to 813 s on the last three releases), and publication waited for it. Now: trusted queue and main builds route to the self-hosted 32-core runners with a warm per-slot target directory when a probe shows one online, as macOS has since Nov 14, and fall back to hosted otherwise; the audit and launch smoke still gate the release.

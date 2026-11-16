@@ -75,6 +75,7 @@ Park requires five consecutive capped passes for new or changed
 test functions. The Rust runner repeats only those functions in the requested
 selection automatically. For Vitest, Jest or Playwright, use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`.
+It runs from the nearest jest/vitest config, past a nested package.json; a G-61 refusal names the exact command.
 The receipt includes the repeated source identities; park reads it without
 running tests. A failure stops the run: fix or delete the test before a new run.
 Changed tests owe stability in test-only deliveries too. Documentation or

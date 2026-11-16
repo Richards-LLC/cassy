@@ -1605,6 +1605,97 @@ pub fn adopt_orphaned_verification_dispatches(
     Ok(adopted)
 }
 
+/// Recover one missing owner's exact review through its recorded successor.
+/// Unlike same-factory orphan recovery, this crosses factory restarts only
+/// when the retired supervisor's latest session-end was claimed by this epoch.
+/// The caller supplies a positively dead local verifier snapshot, if present;
+/// its exact incarnation is compared again under the transaction lock.
+pub fn adopt_retired_verification_dispatch(
+    cas_dir: &Path,
+    dispatch_id: &str,
+    successor: &Agent,
+    dead_verifier: Option<&Agent>,
+    now: DateTime<Utc>,
+) -> Result<VerificationDispatch> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let owner_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE id=?1)",
+        [&dispatch.owner_agent_id], |row| row.get(0),
+    )?;
+    if owner_exists {
+        tx.commit()?;
+        return Ok(dispatch);
+    }
+    let machine = Agent::get_or_generate_machine_id();
+    let retirement: Option<String> = tx.query_row(
+        "SELECT e.id FROM agent_session_ends e JOIN agents a ON a.id=e.claimed_by
+         WHERE e.id=(SELECT id FROM agent_session_ends WHERE agent_id=?1 ORDER BY ended_at DESC,rowid DESC LIMIT 1)
+           AND e.role='supervisor' AND e.machine_id=?2 AND a.machine_id=?2
+           AND a.id=?3 AND a.registered_at=?4 AND e.claimed_epoch=a.registered_at
+           AND a.role='supervisor' AND a.status IN ('active','idle')
+           AND a.factory_session IS NOT NULL AND trim(a.factory_session)!=''
+           AND a.pid IS ?5 AND a.pid_starttime IS ?6 AND a.factory_session=?7",
+        params![dispatch.owner_agent_id, machine, successor.id,
+            successor.registered_at.to_rfc3339(), successor.pid, successor.pid_starttime.map(|v| v as i64), successor.factory_session],
+        |row| row.get(0),
+    ).optional()?;
+    let Some(retirement) = retirement else {
+        return Err(StoreError::Parse("verification_owner_handoff_scope".into()));
+    };
+    let active_task: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND status IN ('in_progress','awaiting_merge','blocked'))",
+        [&dispatch.task_id], |row| row.get(0),
+    )?;
+    if !active_task
+        || !matches!(dispatch.state, VerificationDispatchState::Pending | VerificationDispatchState::Claimed | VerificationDispatchState::TimedOut)
+        || get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?.as_ref().map(|d| d.id.as_str()) != Some(dispatch_id)
+        || latest_dispatch_status(&tx, dispatch_id)?.is_some_and(|s| !matches!(s, VerificationStatus::Error | VerificationStatus::Pending))
+    {
+        return Err(StoreError::Parse("verification_owner_handoff_not_current".into()));
+    }
+    if dispatch.state == VerificationDispatchState::Claimed || dispatch.verifier_agent_id.is_some() {
+        if dispatch.deadline_at > now {
+            return Err(StoreError::Parse("verification_owner_handoff_claim_active".into()));
+        }
+        if let Some(verifier) = dispatch.verifier_agent_id.as_deref() {
+            let row: Option<(String, String, Option<u32>, Option<i64>, Option<String>)> = tx.query_row(
+                "SELECT status,registered_at,pid,pid_starttime,machine_id FROM agents WHERE id=?1",
+                [verifier], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+            ).optional()?;
+            if let Some((status, epoch, pid, fingerprint, host)) = row
+                && !dead_verifier.is_some_and(|dead| dead.id == verifier
+                    && host.as_deref() == Some(machine.as_str())
+                    && dead.machine_id == host && dead.status.to_string() == status
+                    && dead.registered_at.to_rfc3339() == epoch
+                    && dead.pid == pid && dead.pid_starttime.map(|v| v as i64) == fingerprint)
+            {
+                return Err(StoreError::Parse("verification_owner_handoff_verifier_live_or_unknown".into()));
+            }
+        }
+    }
+    // Revoke every old bearer in the same transaction as the owner/claim change.
+    tx.execute("UPDATE verification_capabilities SET consumed_at=COALESCE(consumed_at,?2) WHERE dispatch_id=?1", params![dispatch_id,now.to_rfc3339()])?;
+    tx.execute("UPDATE verification_handoffs SET state='consumed',consumed_at=COALESCE(consumed_at,?2) WHERE capability_id IN (SELECT id FROM verification_capabilities WHERE dispatch_id=?1) AND state IN ('pending','bound')", params![dispatch_id,now.to_rfc3339()])?;
+    tx.execute(
+        "UPDATE verification_dispatches SET owner_agent_id=?2,state='pending',verifier_agent_id=NULL,capability_id=NULL,resolved_at=NULL,deadline_at=?3 WHERE id=?1",
+        params![dispatch_id, successor.id, dispatch.deadline_at.max(now + Duration::minutes(10)).to_rfc3339()],
+    )?;
+    record_event_with_conn(&tx, &Event::new(
+        EventType::VerificationStarted, EventEntityType::Task, &dispatch.task_id,
+        "Verification dispatch adopted through a claimed supervisor retirement",
+    ).with_metadata(serde_json::json!({
+        "code":"verification_owner_adopted", "dispatch_id":dispatch_id,
+        "previous_owner":dispatch.owner_agent_id, "owner":successor.id,
+        "previous_verifier":dispatch.verifier_agent_id, "previous_state":dispatch.state,
+        "retirement_id":retirement,
+    })))?;
+    let adopted = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    tx.commit()?;
+    Ok(adopted)
+}
+
 /// Mark one exact due dispatch timed out. Other tasks are never touched.
 pub fn timeout_verification_dispatch(
     cas_dir: &Path,
@@ -3829,6 +3920,98 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = SqliteVerificationStore::open(dir.path()).unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn retired_owner_adoption_fences_handoff_and_verifier_incarnations_cas_32c2() {
+        use crate::{AgentStore, SqliteAgentStore};
+        for case in ["pending", "unclaimed", "foreign", "stale-epoch", "revived", "raced-successor-session",
+            "live-child", "dead-child", "missing-child", "raced-child", "unexpired-child",
+            "timedout-live-child", "timedout-dead-child", "terminal-task", "superseded"]
+        {
+            let (_store, dir) = create_test_store();
+            let agents = SqliteAgentStore::open(dir.path()).unwrap();
+            agents.init().unwrap();
+            let tasks = SqliteTaskStore::open(dir.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-32c2-scope".into(), "Retired verifier owner".into());
+            task.status = TaskStatus::AwaitingMerge;
+            tasks.add(&task).unwrap();
+            let mut old = Agent::new_with_role("owner-a".into(), "old".into(), AgentRole::Supervisor);
+            old.machine_id = Some(Agent::get_or_generate_machine_id());
+            old.factory_session = Some("old-factory".into());
+            agents.register(&old).unwrap();
+            let start = Utc::now();
+            let dispatch = create_verification_dispatch_bound(dir.path(), &task.id, &old.id, &old.id,
+                &VerificationProofBoundary::task(), start + Duration::minutes(10), false).unwrap();
+            let claimed = case.ends_with("child");
+            let mut child = Agent::new_sub_agent("old-child".into(), "task-verifier".into(), old.id.clone());
+            child.machine_id = old.machine_id.clone();
+            child.pid = Some(std::process::id());
+            if claimed {
+                issue_server_verifier_handoff(dir.path(), &task.id, &dispatch.id, &old.id, "old-attempt").unwrap();
+                bind_server_verifier_handoff_and_register_child(dir.path(), &old.id, &child).unwrap();
+            }
+            agents.unregister(&old.id).unwrap();
+            let mut next = Agent::new_with_role("owner-b".into(), "new".into(), AgentRole::Supervisor);
+            next.machine_id = if case == "foreign" { Some("another-host".into()) } else { old.machine_id.clone() };
+            next.factory_session = Some("new-factory".into());
+            agents.register(&next).unwrap();
+            if case != "unclaimed" { agents.claim_supervisor_handoffs(&next).unwrap(); }
+            if case == "stale-epoch" {
+                next.registered_at += Duration::seconds(1);
+                agents.update(&next).unwrap();
+            }
+            if case == "revived" { agents.register(&old).unwrap(); }
+            if case == "raced-successor-session" {
+                let mut raced = next.clone();
+                raced.factory_session = Some("raced-factory".into());
+                agents.update(&raced).unwrap();
+            }
+            let dead = if matches!(case, "dead-child" | "raced-child" | "timedout-dead-child") {
+                child.status = AgentStatus::Shutdown;
+                agents.update(&child).unwrap();
+                let snapshot = child.clone();
+                if case == "raced-child" {
+                    child.pid_starttime = Some(123);
+                    agents.update(&child).unwrap();
+                }
+                Some(snapshot)
+            } else { None };
+            if case == "missing-child" { agents.unregister(&child.id).unwrap(); }
+            if case.starts_with("timedout-") {
+                timeout_verification_dispatch(dir.path(), &task.id, start + Duration::minutes(11)).unwrap().unwrap();
+            }
+            if case == "terminal-task" { task.status = TaskStatus::Closed; tasks.update(&task).unwrap(); }
+            if case == "superseded" {
+                // A newer dispatch can only exist once the old one has expired.
+                timeout_verification_dispatch(dir.path(), &task.id, start + Duration::minutes(11)).unwrap();
+                create_verification_dispatch_bound(dir.path(), &task.id, &next.id, &next.id,
+                    &VerificationProofBoundary::task(), start + Duration::minutes(10), true).unwrap();
+            }
+            let before = get_verification_dispatch(dir.path(), &dispatch.id).unwrap();
+            let now = if case == "unexpired-child" { start } else { start + Duration::minutes(11) };
+            let result = adopt_retired_verification_dispatch(dir.path(), &dispatch.id, &next, dead.as_ref(), now);
+            if matches!(case, "pending" | "dead-child" | "missing-child" | "timedout-dead-child") {
+                let after = result.unwrap_or_else(|e| panic!("{case}: {e}"));
+                assert_eq!(after.owner_agent_id, next.id, "{case}");
+                assert_eq!(after.requester_agent_id, old.id, "{case}");
+                assert_eq!(after.repository, before.repository, "{case}");
+                assert_eq!(after.state, VerificationDispatchState::Pending, "{case}");
+                assert!(after.verifier_agent_id.is_none() && after.capability_id.is_none());
+                assert!(after.deadline_at > now);
+                if let Some(capability) = before.capability_id {
+                    let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+                    let consumed: Option<String> = conn.query_row(
+                        "SELECT consumed_at FROM verification_capabilities WHERE id=?1", [&capability], |r| r.get(0)).unwrap();
+                    assert!(consumed.is_some());
+                }
+            } else {
+                assert!(result.is_err() || case == "revived", "{case}");
+                assert_eq!(serde_json::to_value(get_verification_dispatch(dir.path(), &dispatch.id).unwrap()).unwrap(),
+                    serde_json::to_value(before).unwrap(), "{case}");
+            }
+        }
     }
 
     #[test]

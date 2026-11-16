@@ -1766,6 +1766,15 @@ bug_families:
     tasks: [cas-9d2c]
     journeys: [HUB-J4, HUB-J22, HUB-J9]
     invariants: [HUB-J4-IMAGE-INSPECTION, HUB-J22-GOAL, HUB-J9-GOAL]
+  commander-accounts-cleanup-confirm-width:
+    title: The Accounts Clean up confirmation sits under its banner at full sheet width, never squeezed inside the banner's flex row
+    tasks: [cas-9543]
+    journeys: [HUB-J13]
+    invariants: [HUB-J13-ACCOUNT-MANAGEMENT]
+  resumed-delivery-attribution:
+    title: Resumed delivery scope retains implementation and ignores restored journeys
+    tasks: [cas-ded9]
+    journeys: [FACTORY-CLOSE, FACTORY-SPAWN]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

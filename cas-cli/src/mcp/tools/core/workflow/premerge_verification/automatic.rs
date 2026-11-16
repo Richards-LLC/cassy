@@ -826,6 +826,10 @@ if [ "$1" = login ]; then
     echo 'Logged in using ChatGPT'
     exit 0
 fi
+case "$*" in
+    *'mcp_servers.cs.default_tools_approval_mode="approve"'*) ;;
+    *) echo 'MCP tool call requires approval, but approval policy is never'; exit 0 ;;
+esac
 if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ] || [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ] || [ "$CAS_TEST_VERIFIER_STATUS" = malformed ] || [ "$CAS_TEST_VERIFIER_STATUS" = target_move ] || [ "$CAS_TEST_VERIFIER_STATUS" = no_code ]; then
     while [ ! -f "$CAS_TEST_VERIFIER_GATE" ]; do sleep 0.05; done
 fi
@@ -1210,9 +1214,15 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
                 }).to_string()).unwrap();
                 env.set("CAS_TEST_VERIFIER_STATUS", "approved");
-                // Retry the merge's automatic handoff once, retaining its join
-                // handle so completion needs no new timer or polling loop.
-                let handle = core.emit_premerge_review_handoff(&task, &claimed).unwrap().unwrap();
+                // GH #2023: the merge retry itself starts one replacement.
+                let held = core
+                    .prepare_premerge_verification(&task, repo, "factory/worker", "epic/train")
+                    .unwrap_err();
+                assert_eq!(
+                    held.data.as_ref().map(|data| data["reason"].clone()),
+                    Some(serde_json::json!("verifier_replacement_scheduled")),
+                    "{held:?}"
+                );
                 let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
                 assert_eq!(replacement.id, dispatch.id);
                 assert_ne!(replacement.verifier_agent_id.as_deref(), Some(old_child));
@@ -1225,7 +1235,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 })).unwrap();
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 assert!(runtime.block_on(stale.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))).is_err());
-                handle.join().unwrap();
+                for _ in 0..600 {
+                    if child_done() && cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_some() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
                 let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
                 assert_eq!(verdict.status, VerificationStatus::Approved);
                 assert_eq!(verdict.agent_id, replacement.verifier_agent_id);

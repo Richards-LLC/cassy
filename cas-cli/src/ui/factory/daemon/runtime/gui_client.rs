@@ -320,7 +320,11 @@ impl FactoryDaemon {
                 );
                 let reply = match result {
                     Ok(_) => DaemonMessage::VerifierLaunched { dispatch_id },
-                    Err(message) => DaemonMessage::Error { message, client_ref: Some(dispatch_id) },
+                    Err(message) => {
+                        // GH #2023: a refused launch was invisible in the daemon log.
+                        tracing::warn!(%dispatch_id, %message, "verifier launch refused");
+                        DaemonMessage::Error { message, client_ref: Some(dispatch_id) }
+                    }
                 };
                 if let Some(frame) = encode_frame(&reply)
                     && let Some(client) = self.gui_clients.get_mut(&client_id) {

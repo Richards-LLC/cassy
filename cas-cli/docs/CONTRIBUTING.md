@@ -1324,7 +1324,9 @@ process ancestry validate; setting an environment flag does not waive it.
 Waits print `waiting for host memory (proof running), N s` and memory samples.
 `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS` bounds waiting (default 600 s),
 with `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS` resampling (default 1 s).
-Expiry fails before starting the suite. A running worker command is terminated
+Expiry fails before starting the suite: the helper exits 75 and names the sampled
+budget, estimate, headroom and reserve, and journey snapshot builds report that as
+not started rather than as a build failure. A running worker command is terminated
 with its own process group if fresh budget falls inside the 2 GiB headroom.
 These are admission estimates and sampled protection, not OS memory limits;
 other applications remain outside this cooperative protocol.

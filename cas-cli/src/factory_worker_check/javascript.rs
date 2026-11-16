@@ -107,6 +107,9 @@ pub(crate) fn changed_tests(
                 path,
             ],
         )?;
+        // A restored file has no delivered test change. Do not require
+        // runtime identities for callbacks merely present in its final tree.
+        if diff.is_empty() { continue; }
         let old = Command::new("git")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .current_dir(repo)

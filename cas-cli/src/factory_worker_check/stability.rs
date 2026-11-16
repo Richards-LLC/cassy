@@ -60,21 +60,27 @@ pub(crate) fn missing(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Ide
 
 pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     ranges: Option<&[(String, String)]>) -> Result<Vec<Identity>> {
+    let base = git(repo, &["merge-base", target, head])
+        .or_else(|_| git(repo, &["merge-base", &format!("refs/remotes/origin/{target}"), head]))?;
     let fallback;
     let ranges = if let Some(ranges) = ranges { ranges } else {
-        let base = git(repo, &["merge-base", target, head])
-            .or_else(|_| git(repo, &["merge-base", &format!("refs/remotes/origin/{target}"), head]))?;
-        fallback = vec![(base, head.to_owned())];
+        fallback = vec![(base.clone(), head.to_owned())];
         &fallback
     };
     let live = rust::live(repo, head, paths)?;
+    // Historical ranges establish ownership, not whether a test edit survived.
+    // After integration, keep the attributed base rather than collapsing proof
+    // onto the already-landed tip. Otherwise compare with the current target.
+    let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
+    let live_javascript = super::javascript::changed_tests(repo, net_base, head, paths)?
+        .into_iter().collect::<BTreeSet<_>>();
+    let javascript_paths = paths.iter().filter(|path|
+        live_javascript.iter().any(|test| test.path == **path)).cloned().collect::<Vec<_>>();
     let mut required = BTreeSet::new();
     for (from, to) in ranges {
         required.extend(rust::changed(repo, from, to, paths)?.into_iter()
             .map(|test| test.identity).filter(|identity| live.contains(identity)));
-        let live_javascript = super::javascript::changed_tests(repo, from, head, paths)?
-            .into_iter().collect::<BTreeSet<_>>();
-        required.extend(super::javascript::changed_tests(repo, from, to, paths)?.into_iter()
+        required.extend(super::javascript::changed_tests(repo, from, to, &javascript_paths)?.into_iter()
             .filter(|identity| live_javascript.contains(identity)));
     }
     Ok(required.into_iter().collect())

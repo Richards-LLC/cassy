@@ -764,3 +764,78 @@ fn pre_backfill_exact_head_approval_closes_at_release_cas_692a7() {
         }
     }
 }
+
+/// cas-c8ae (GH #1993): verdict rows stay on the machine that reviewed a
+/// delivery. A cut on another machine admits the member through the approval
+/// carried on its task row, bound to that exact anchor and delivery cycle.
+#[test]
+fn approval_carried_on_task_admits_cut_on_another_machine_cas_c8ae() {
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let repo = env.home().join("release");
+    std::fs::create_dir_all(&repo).unwrap();
+    let root = crate::store::init_cas_dir(&repo).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &repo);
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='crossmachine'\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    git(&["remote", "add", "origin", "https://github.com/example/crossmachine.git"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    git(&["add", ".gitignore"]);
+    git(&["commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("app.rs"), "fn reviewed() {}\n").unwrap();
+    git(&["add", "app.rs"]);
+    git(&["commit", "-qm", "reviewed delivery"]);
+    let anchor = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "landed merge"]);
+    let published = git(&["rev-parse", "HEAD"]);
+    let tasks = crate::store::open_task_store(&root).unwrap();
+    let mut expected = BTreeMap::new();
+    // (member, anchor its carried approval reviewed, closes)
+    for (id, approved_anchor, closes) in [
+        ("cas-reviewed-elsewhere", anchor.clone(), true),
+        ("cas-other-anchor", base.clone(), false),
+    ] {
+        let mut task = Task::new(id.into(), id.into());
+        task.origin_project = Some("crossmachine".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget { repo_selector: "project:crossmachine".into(), target_branch: "main".into() },
+            branch: format!("factory/{id}"), assignee: "worker".into(), base_sha: base.clone(),
+        });
+        tasks.add(&task).unwrap();
+        // The task row as pulled from the reviewing machine; no local verdict rows.
+        let mut synced = tasks.get(id).unwrap();
+        synced.deliverables.premerge_approval = Some(cas_types::PortablePremergeApproval {
+            verdict_id: format!("ver-{id}"), dispatch_id: format!("vdispatch-{id}"),
+            approved_anchor, delivery_cycle: synced.deliverables.delivery_cycle,
+        });
+        tasks.update(&synced).unwrap();
+        expected.insert(id.to_string(), closes);
+    }
+    let scope = ReleaseScope {
+        project_id: "crossmachine".into(), repository: "example/crossmachine".into(), release_id: "v9.99.0".into(),
+        reviewed_sha: anchor, final_release_sha: published, promotion_pr: None, release_tag: None,
+        constituent_epic_ids: vec![], included_task_ids: expected.keys().cloned().collect(),
+        no_code_members: BTreeMap::new(), proof_refs: vec![],
+    };
+    let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    let outcomes = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    for (id, closes) in expected {
+        let outcome = outcomes.get(&id);
+        if closes {
+            assert!(matches!(outcome, Some(CassyMergeClose::Closed { .. })), "{id}: {outcome:?}");
+        } else {
+            assert!(matches!(outcome, Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"), "{id}: {outcome:?}");
+        }
+    }
+}

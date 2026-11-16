@@ -54,7 +54,7 @@ post-close summary; after a merge request, wait for the supervisor's response.
 | Detach or checkpoint | [reminders.md](../cas-supervisor/references/reminders.md) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
 | Evidence, sync or resume | [details.md](references/details.md) |
-| Bug filing | [Routing](references/details.md#credentials-and-routing) |
+| Bug filing | [Routing](references/details.md#credentials-and-routing): Cassy defects go to `issues.components.cassy`, others to `issues.repo`, `issues.components.violet` or `issues.components.cloud` |
 
 ## Return contract
 

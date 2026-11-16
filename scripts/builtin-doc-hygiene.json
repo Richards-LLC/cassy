@@ -44,16 +44,6 @@
       "path": "skills/cas-release-report/references/exemplar.md",
       "rule": "operator-org",
       "reason": "Links to the Cassy repo's own release-report sources the exemplar was rendered from; cas-src-only release content (audit M51)."
-    },
-    {
-      "path": "skills/cas-qa-craft/references/matrix-builder.md",
-      "rule": "operator-org",
-      "reason": "Attribution for the Cassy issue the matrix guidance was adapted from; pinned by the builtins and agent_definition_contract_test markers."
-    },
-    {
-      "path": "skills/cas-qa-craft/references/independent-pass.md",
-      "rule": "task-id",
-      "reason": "A concrete base-shared failure illustrates why a defect covered by a delivery's added journey invariant is unmet."
     }
   ],
   "synthetic": {

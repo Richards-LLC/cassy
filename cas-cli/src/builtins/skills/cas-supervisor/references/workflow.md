@@ -9,7 +9,7 @@ Spawn with `isolate=true`: each worker gets its own worktree and branch, and lan
 ## Phase 1: Plan
 
 1. Search for prior art: closed epics (`task action=list task_type=epic status=closed`), memories (`search action=search query="<keywords>" doc_type=entry limit=10`) and code (`doc_type=code` or a grep).
-2. Create the EPIC with `task action=create task_type=epic`, then break it down with [planning.md](planning.md).
+2. Create the EPIC with `task action=create task_type=epic title="<epic>"`, then break it down with [planning.md](planning.md).
 
 **Severity × reach for review findings.** Every finding names its impact, reach and journey with `severity:money|data_loss|broken|awkward|cosmetic`, `reach:main|secondary|theoretical` and `journey:<id>` labels plus `repro` and `affected` for observed failures; see `docs/qa/triage.md`. Priority derives from those labels, so do not hand-pick P0: a code-read finding is theoretical P4 backlog, a reproduced main-journey failure outranks it, and money or data loss on a declared main journey is the only theoretical exception (P2). Declare main journeys in `docs/qa/journeys.yaml` and set `factory.focus_mode` for inherited operator intent. A nit never reopens a merged task. At release prep, `cas qa polish --epic <id>` lists warnings by file; batch observed improvements or leave them in the backlog.
 

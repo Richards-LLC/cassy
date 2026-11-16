@@ -41,6 +41,7 @@ impl LifecycleTransition {
             Self::Blocked => "task_blocked",
             Self::ReadyReopened => "task_ready",
             Self::CloseRejected => "task_close_rejected",
+            // gate[N-24 notice]: Park relay, MERGE REQUIRED (task_awaiting_merge)
             Self::AwaitingMerge => "task_awaiting_merge",
             Self::Closed => "task_closed",
         }
@@ -332,6 +333,7 @@ fn auto_unblock_worker_target(
 /// applies its ordinary idle-gate PTY nudge. The dedupe key is scoped to the
 /// task, worker, blocker, and post-update occurrence, so a replay cannot add a
 /// second prompt while a later unblock cycle can still wake the same worker.
+// gate[N-27 notice]: Auto-unblock worker wake
 pub(crate) fn queue_auto_unblock_worker_wake(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -402,6 +404,7 @@ pub(crate) fn queue_auto_unblock_worker_wake(
 
 /// The exact verdict is durable before this is called. Any remaining ordinary
 /// close belongs to its supervisor, never to a worker forbidden to re-close.
+// gate[N-20 notice]: Approved verdict close recovery
 pub(crate) fn queue_approved_verification_close_recovery(
     cas_root: &Path,
     task: &cas_types::Task,
@@ -452,14 +455,14 @@ pub(crate) enum ApprovedCloseRecovery {
     NotQueued(String),
 }
 
-/// Completion of an explicit no-delivery close is quiet and dispatch-idempotent.
+/// Completion of a saved no-delivery or no-code close is quiet and dispatch-idempotent.
 pub(crate) fn queue_no_delivery_close_notice(
     cas_root: &Path, task: &cas_types::Task, dispatch_id: &str,
 ) -> Result<Option<i64>, String> {
     queue_assignee_notice(cas_root, task, |worker_name| (
         format!("cassy-no-delivery-closed:{}:{dispatch_id}:worker:{worker_name}", task.id),
-        format!("{}Task {} is closed: its exact verdict approved your recorded no_delivery close. No re-close is needed.", cas_store::QUIET_MESSAGE_MARKER, task.id),
-        format!("No-delivery close completed: {}", task.id),
+        format!("{}Task {} is closed: verdict for dispatch {dispatch_id} approved your recorded close. No re-close is needed.", cas_store::QUIET_MESSAGE_MARKER, task.id),
+        format!("Close completed: {}", task.id),
     ))
 }
 
@@ -654,6 +657,7 @@ fn queue_assignee_notice(
 }
 
 /// Enqueue one idempotent prompt for an already-resolved live worker.
+// gate[N-26 notice]: Worker lifecycle notices
 fn enqueue_worker_notice(
     cas_root: &Path,
     worker_name: &str,
@@ -1083,6 +1087,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
 }
 
 #[allow(clippy::too_many_arguments)]
+// gate[N-25 notice]: Supervisor lifecycle pushes (closed, ready, started, blocked)
 fn emit_task_lifecycle_transition_in_project(
     supervisor_queue: &dyn SupervisorQueueStore,
     prompt_queue: Option<&dyn PromptQueueStore>,
@@ -1287,6 +1292,7 @@ fn owned_verification_wait(
 /// one initial receipt and at most one escalation for other blockers. Exact
 /// verification waits use their dispatch/supervisor recovery path instead. Runs on
 /// the daemon's store lane; `now` is injectable.
+// gate[W-41 watchdog]: Blocked-task alert reconcile
 pub(crate) fn reconcile_blocked_task_alert(
     root: &Path,
     task_id: &str,
@@ -1444,6 +1450,7 @@ pub const VERIFICATION_DISPATCH_SOURCE_PREFIX: &str = "verification-dispatch:";
 /// Stamped [`cas_store::QueueOrigin::Daemon`] because CAS composed every byte
 /// of it. Idempotent on the dispatch id: a retried close for the same dispatch
 /// re-uses the row rather than queueing a second copy.
+// gate[N-14 notice]: VERIFICATION REQUIRED dispatch handoff
 pub fn emit_verification_dispatch_handoff(
     cas_root: &Path,
     prompt_queue: &dyn PromptQueueStore,
@@ -1530,6 +1537,7 @@ pub const QA_DISPATCH_SOURCE_PREFIX: &str = "qa-dispatch:";
 /// composes every byte, stamps it Daemon-origin, and dedupes on the pass id
 /// so a retried close never queues a second copy.
 #[allow(clippy::too_many_arguments)]
+// gate[N-21 notice]: Independent QA round handoff
 pub fn emit_qa_dispatch_handoff(
     prompt_queue: &dyn PromptQueueStore,
     pass_id: &str,
@@ -2281,7 +2289,7 @@ mod tests {
         task.notes = format!("[{}] 🚫 BLOCKER {}", Utc::now().format("%Y-%m-%d %H:%M"),
             crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id));
         task.deliverables.no_delivery_close_intent = Some(cas_types::NoDeliveryCloseIntent {
-            dispatch_id:dispatch.id.clone(), reason:"No source change".into(), assignee:Some("previous-worker".into()),
+            dispatch_id:dispatch.id.clone(), reason:"No source change".into(), assignee:Some("previous-worker".into()), no_code_proof: None,
         });
         tasks.update(&task).unwrap();
         let core = CasCore::with_daemon(root.to_path_buf(), None, None);

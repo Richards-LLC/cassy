@@ -1,3 +1,4 @@
+//! Marker syntax is independent of cas-playwright-tests coverage/optional-lane policy.
 //! QA evidence close gate (cas-0cd5).
 //!
 //! Runs on every delivery close, immediately before the factory merge gate.
@@ -210,13 +211,15 @@ pub(crate) fn task_evidence_dir(cas_root: &Path, task: &Task) -> Result<PathBuf,
 
 /// Format preflight before either verification-dispatch path mutates state.
 /// Existing ledgers are checked even for no-code tasks, whose runtime gate skips.
+// gate[G-52 park as-of]: QA ledger rejected and Tier 2 adversarial probe
+// gate-audit[require_missing]: selector Selects the appropriate preflight phase; missing mandatory ledger remains checked at final park.
 pub(crate) fn ledger_preflight(
     cas_root: &Path,
     task: &Task,
     require_missing: bool,
 ) -> Result<(), String> {
-    let config =
-        crate::config::Config::load(cas_root).map_err(|e| format!("QA LEDGER REJECTED: {e}"))?;
+    let config = crate::config::Config::load(cas_root)
+        .map_err(|e| crate::gates::tag("G-52", format!("QA LEDGER REJECTED: {e}")))?;
     let paths = crate::config::resolved_factory_artifact_paths(
         cas_root,
         config.factory().artifacts_root.as_deref(),
@@ -237,9 +240,18 @@ pub(crate) fn ledger_preflight(
     if dir.exists()
         && crate::config::canonical_factory_task_artifact_dir(&paths.base, &dir).is_none()
     {
-        return Err(
-            "QA LEDGER REJECTED: task artifact directory escapes its project namespace".into(),
-        );
+        return Err(crate::gates::tag(
+            "G-52",
+            "QA LEDGER REJECTED: task artifact directory escapes its project namespace",
+        ));
+    }
+    // A no-code audit report may be named LEDGER.md (cas-test-audit). Only a
+    // file that declares the canonical QA matrix is held to it (GH #1766, #1817).
+    if task.execution_note.as_deref() == Some("no-code")
+        && std::fs::read_to_string(&ledger)
+            .is_ok_and(|body| !crate::qa_ledger::declares_canonical(&body))
+    {
+        return Ok(());
     }
     // A covering review owns the canonical evidence for shipped work. Do not
     // apply a newer producer-ledger grammar retroactively to that delivery.
@@ -256,16 +268,27 @@ pub(crate) fn ledger_preflight(
     {
         return Ok(());
     }
+    if let Some(owner) = std::fs::read_to_string(&ledger)
+        .ok()
+        .and_then(|body| crate::qa_ledger::foreign_owner(&body, &task.id))
+    {
+        return Err(format!(
+            "QA LEDGER REJECTED before verification dispatch:\n{} is a canonical ledger for {owner}, not {}.\nRun cas qa ledger init --task {}",
+            ledger.display(),
+            task.id,
+            task.id
+        ));
+    }
     let report = crate::qa_ledger::check(&ledger, crate::qa_ledger::minimum_rows(task));
     if report.ok {
         Ok(())
     } else {
-        Err(format!(
+        Err(crate::gates::tag("G-52", format!(
             "QA LEDGER REJECTED before verification dispatch:\n{}\nRun cas qa ledger check {} --task {}",
             report.refusal(),
             ledger.display(),
             task.id
-        ))
+        )))
     }
 }
 
@@ -286,10 +309,10 @@ fn adversarial_probe_refusal(task_id: &str, ledger: &Path, paths: &[String]) -> 
     {
         return None;
     }
-    Some(format!(
+    Some(crate::gates::tag("G-52", format!(
         "QA EVIDENCE REJECTED: Tier 2 delivery has no adversarial probe. {reason} Run `cas qa ledger init --task {task_id}` if {} is missing, add a row whose cell starts `Adversarial probe:` with what you tried to get past and what happened, then retry the close.",
         ledger.display()
-    ))
+    )))
 }
 
 /// A missing flat citation can outlive the namespace migration in a running
@@ -872,6 +895,36 @@ mod tests {
         std::fs::write(task_dir.join("LEDGER.md"), "malformed evidence").unwrap();
         let _ = ledger_preflight(&root, &task, true)
                 .unwrap_err();
+    }
+
+    #[test]
+    fn no_code_audit_report_named_ledger_is_not_a_qa_matrix() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        env.set_current_dir(dir.path());
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let artifacts = dir.path().join("artifacts");
+        let mut config = crate::config::Config::default();
+        config
+            .set("factory.artifacts_root", artifacts.to_str().unwrap())
+            .unwrap();
+        config.save(&root).unwrap();
+        let mut task = Task::new("cas-audit".into(), "Audit tests".into());
+        task.execution_note = Some("no-code".into());
+        let task_dir =
+            crate::config::project_factory_artifacts_root(&root, &artifacts).join(&task.id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let ledger = task_dir.join("LEDGER.md");
+        let audit = "# Test audit\n\n| layer | cost | where |\n|---|---|---|\n| unit | 3m | ci |\n\n| id | item | verdict | tests | evidence | fix | covering | confidence |\n|---|---|---|---|---|---|---|---|\n| L2 | a.rs:1 | dup | t | e | f | none needed: dead | high |\n";
+        std::fs::write(&ledger, audit).unwrap();
+        assert!(ledger_preflight(&root, &task, true).is_ok());
+        // Declaring the canonical matrix restores validation.
+        std::fs::write(&ledger, format!("schema: 2\n{audit}")).unwrap();
+        assert!(ledger_preflight(&root, &task, true).is_err());
+        // Code tasks keep checking every ledger.
+        task.execution_note = None;
+        std::fs::write(&ledger, audit).unwrap();
+        assert!(ledger_preflight(&root, &task, true).is_err());
     }
 
     #[test]

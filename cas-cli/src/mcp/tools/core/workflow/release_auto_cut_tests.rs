@@ -42,11 +42,23 @@ fn wait_release(log: &Path, expected: i32) {
     }
 }
 
-/// A published tip with fragments enters the cut regardless of lane name;
-/// the queue owns full proof. Cadence, pause, queue and notes still gate it.
+/// The receipt `train_ci::observe` writes for the lane's current tip.
+fn receipt(repo: &Path, root: &Path, outcome: &str) {
+    let dir = crate::train_ci::directory(root, "cas-tr").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = serde_json::json!({"branch": LANE, "head": run(repo, &["rev-parse", LANE]), "outcome": outcome});
+    std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
+}
+
+/// The Nov 6 design: a published train tip with fragments is cut by Cassy,
+/// inside the cadence, never while paused or queued, and never without the
+/// supervisor's notes, which it waits for with one wake. cas-0fc56: the freeze
+/// starts the one train suite; the cut waits for its green. cas-80df: a notes
+/// lint failure re-arms when the draft changes, and a supervisor holding the
+/// branch cannot block the leased detached cut checkout.
 #[cfg(unix)]
 #[test]
-fn published_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
+fn published_train_with_fragments_freezes_then_cuts_on_green_within_guards() {
     let _env = TestEnvGuard::temp_home();
     let temp = tempfile::TempDir::new().unwrap();
     let repo = temp.path();
@@ -75,7 +87,7 @@ fn published_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() 
     store.add(&train_task("cas-tr", &[])).unwrap();
     let now = Utc::now();
     let none = BTreeSet::new();
-    let poll = |queued: &BTreeSet<String>| attempt(&root, &store.get("cas-tr").unwrap(), LANE, &run(repo, &["rev-parse", LANE]), !queued.is_empty(), now).unwrap();
+    let poll = |queued: &BTreeSet<String>| notify_train_cuts(&root, queued, now).unwrap();
     let frozen = || release_freeze::freeze_of(&open_task_store(&root).unwrap().get("cas-tr").unwrap()).is_some();
     let wakes = || open_supervisor_queue_store(&root).unwrap().peek("sup-id", 10).unwrap();
 
@@ -113,16 +125,20 @@ fn published_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() 
 
     poll(&none);
     poll(&none);
-    assert!(frozen(), "published tip with fragments freezes for its cut");
+    assert!(frozen(), "a ready tip with fragments freezes, starting its train suite");
     assert_eq!(wakes().len(), 1, "a missing notes draft wakes the supervisor once");
     let draft = notes_draft(&root, "cas-tr").unwrap();
     assert!(wakes()[0].payload.contains(&draft.display().to_string()), "{}", wakes()[0].payload);
-    assert!(!repo.join("release-ran").exists(), "no cut without notes");
 
     std::fs::create_dir_all(draft.parent().unwrap()).unwrap();
     std::fs::write(&draft, "bad notes\n").unwrap();
     // cas-80df: a supervisor holding the branch cannot own the cut checkout.
     run(repo, &["checkout", "-q", LANE]);
+    poll(&none);
+    receipt(repo, &root, "FAIL");
+    poll(&none);
+    assert!(!repo.join("release-ran").exists(), "no cut before green, nor on red");
+    receipt(repo, &root, "PASS");
     poll(&none);
     let log = draft.with_file_name("auto-cut.log");
     wait_release(&log, 5);
@@ -137,4 +153,101 @@ fn published_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() 
     let notes = open_task_store(&root).unwrap().get("cas-tr").unwrap().notes;
     assert_eq!(notes.matches("AUTO-CUT: started").count(), 2);
     assert_eq!(wakes().len(), 2);
+}
+
+/// Record scope through the real MCP dependency operation, then drive the
+/// daemon poll against Git and SQLite with one incident's landed fragment.
+async fn replay_partial_train_scope(train_id: &str, lane: &str, landed: &str, required: [&str; 8]) {
+    use cas_types::{Dependency, DependencyType, WorkTarget};
+    use rmcp::handler::server::wrapper::Parameters;
+
+    let mut env = TestEnvGuard::temp_home();
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = temp.path();
+    run(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    commit(repo, ".gitignore");
+    commit(repo, "scripts/release.sh");
+    run(repo, &["checkout", "-qb", lane]);
+    commit(repo, &format!("changelog.d/{landed}.md"));
+    run(repo, &["checkout", "-q", "main"]);
+    let root = crate::store::init_cas_dir(repo).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let mut supervisor = Agent::new_with_role("sup-id".into(), "supervisor".into(), AgentRole::Supervisor);
+    supervisor.factory_session = Some("scope-session".into());
+    open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    let store = open_task_store(&root).unwrap();
+    store.add(&train_task(train_id, &[])).unwrap();
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    core.set_agent_id_for_testing("sup-id".into());
+    let service = crate::mcp::CasService::new(core, None);
+    for id in required {
+        let mut member = Task::new(id.into(), "Required delivery".into());
+        member.status = TaskStatus::AwaitingMerge;
+        member.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: lane.into(),
+        });
+        store.add(&member).unwrap();
+        let added = service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "dep_add", "id": train_id, "to_id": id, "dep_type": "blocks",
+        })).unwrap())).await.unwrap();
+        assert!(!added.is_error.unwrap_or(false));
+    }
+    assert_eq!(store.get_dependencies(train_id).unwrap().len(), required.len());
+    assert_eq!(store.get(train_id).unwrap().task_type, TaskType::Epic);
+    let mut optional = Task::new("cas-e074".into(), "Optional test sweep".into());
+    optional.status = TaskStatus::InProgress;
+    store.add(&optional).unwrap();
+    store.add_dependency(&Dependency::new(optional.id, train_id.into(), DependencyType::ParentChild)).unwrap();
+
+    let now = Utc::now();
+    let poll = || notify_train_cuts(&root, &BTreeSet::new(), now).unwrap();
+    let frozen = || release_freeze::freeze_of(&store.get(train_id).unwrap()).is_some();
+    poll();
+    assert!(!frozen(), "one landed fragment cannot freeze the declared unfinished scope");
+    let outcome = attempt(&root, &store.get(train_id).unwrap(), lane,
+        &run(repo, &["rev-parse", lane]), false, false, now).unwrap();
+    let Outcome::Declined(reason) = outcome else { panic!("unfinished scope was accepted") };
+    assert!(required.iter().all(|id| reason.contains(id)), "{reason}");
+
+    let mut cancelled = store.get(required[0]).unwrap();
+    cancelled.status = TaskStatus::Cancelled;
+    store.update(&cancelled).unwrap();
+    let mut retargeted = store.get(required[7]).unwrap();
+    retargeted.deliverables.work_target.as_mut().unwrap().target_branch = "epic/release-train-next".into();
+    store.update(&retargeted).unwrap();
+    for (index, id) in required[1..7].iter().enumerate() {
+        let branch = format!("factory/{id}");
+        run(repo, &["checkout", "-qb", &branch, lane]);
+        commit(repo, &format!("deliveries/{id}.txt"));
+        let source = run(repo, &["rev-parse", "HEAD"]);
+        run(repo, &["checkout", "-q", lane]);
+        run(repo, &["merge", "--no-ff", "-qm", id, &branch]);
+        let merged = run(repo, &["rev-parse", "HEAD"]);
+        cas_store::record_observed_delivery_merge(&root, id, &branch, lane, &source, &merged, "sup-id").unwrap();
+        let mut member = store.get(id).unwrap();
+        member.status = TaskStatus::Closed;
+        member.deliverables.factory_branch_anchor = Some(source);
+        store.update(&member).unwrap();
+        run(repo, &["checkout", "-q", "main"]);
+        poll();
+        assert_eq!(frozen(), index == 5, "freeze only after the last required delivery lands");
+    }
+    assert_eq!(store.get("cas-e074").unwrap().status, TaskStatus::InProgress);
+    assert_eq!(store.get(required[7]).unwrap().status, TaskStatus::AwaitingMerge);
+}
+
+#[tokio::test]
+async fn must_land_scope_blocks_nov13_8fb1_partial_freeze_cas_8695() {
+    // 9a393d45cb held just cas-5a22 when the original must-land set was pending.
+    replay_partial_train_scope("cas-8fb1", "epic/release-train-vnext-cas-8fb1", "cas-5a22",
+        ["cas-7dd6", "cas-5b88", "cas-c896", "cas-1efb", "cas-3126", "cas-cab9", "cas-870d", "cas-e571"]).await;
+}
+
+#[tokio::test]
+async fn must_land_scope_blocks_nov13_1e8a_partial_freeze_cas_8695() {
+    // 8807571a0f held just cas-1efb while new-train deliveries were still pending.
+    replay_partial_train_scope("cas-1e8a", "epic/release-train-vnext-cas-1e8a", "cas-1efb",
+        ["cas-c05a", "cas-94e8", "cas-aeb3", "cas-8695", "cas-343d", "cas-bac4", "cas-195e", "cas-262b"]).await;
 }

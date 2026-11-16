@@ -722,13 +722,14 @@ impl CasService {
                 ));
             }
         };
+        // gate[H-44 mcp]: MCP proxy add/remove of supervisor-only servers
         if let Some(refusal) = supervisor_only_proxy_refusal(
             &raw_name,
             Some(&server_config),
             &config,
             &supervisor_only_mcp(&self.inner.cas_root),
         ) {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("H-44", refusal)));
         }
         config.add_server(raw_name.clone(), server_config);
         config.save_to(&proxy_path).map_err(|e| {
@@ -813,7 +814,7 @@ impl CasService {
             &config,
             &supervisor_only_mcp(&self.inner.cas_root),
         ) {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("H-44", refusal)));
         }
 
         debug_assert!(config.remove_server(&raw_name));

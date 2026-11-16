@@ -140,6 +140,7 @@ impl FactoryDaemon {
         let completions = self.app.mux.advance_injects_at(now).await;
         // Observe separately from completion. Returning an error or releasing
         // the claim on this deadline could retry bytes already partly written.
+        // gate[W-60 watchdog]: PTY write stalled (pty_write_stalled)
         for stalled in self
             .app
             .mux

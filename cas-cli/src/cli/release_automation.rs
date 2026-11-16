@@ -1,5 +1,5 @@
 //! Release script adapters. Train selection and notice delivery stay in core.
-use crate::qa_batch::{ReleaseProofRef, ReleaseScope};
+use crate::qa_batch::ReleaseScope;
 use std::collections::BTreeMap;
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
@@ -31,15 +31,97 @@ pub struct InventoryArgs {
     scope: PathBuf,
 }
 
+/// A cut's own preview is `release plan`; this replays an exact portable scope.
 pub type PreviewArgs = InventoryArgs;
 
-/// No store, receipt, ledger-cache or notification writes.
+/// Writes no task, receipt, operation, sync-queue, ledger-cache or notification
+/// row and leaves every existing store file byte-identical. The store is read
+/// through ordinary SQLite read-only connections with normal locking (never
+/// `immutable`, which is unsafe on a changing live database), so SQLite may
+/// create its `cas.db-shm`/`cas.db-wal` coordination sidecars when they are
+/// absent and the directory is writable (sqlite.org/wal.html#read_only_databases;
+/// GH #1859, cas-632d evidence: only a new 32 KiB SHM and an empty WAL).
 pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
-    let repo = PathBuf::from(git(&std::env::current_dir()?, &["rev-parse", "--show-toplevel"])?);
-    let preview = preview_scope(root, &repo, serde_json::from_slice(&fs::read(&args.scope)?)?)?;
-    println!("{}", serde_json::to_string(&preview)?);
+    println!("{}", serde_json::to_string(&preview_release_close(args, root)?)?);
     Ok(())
 }
+
+fn preview_release_close(args: &PreviewArgs, root: &Path) -> Result<ReleasePreview> {
+    let store = PreviewStore::open(root)?;
+    let root = store.root.as_path();
+    let repo = PathBuf::from(git(&std::env::current_dir()?, &["rev-parse", "--show-toplevel"])?);
+    let mut scope: ReleaseScope = serde_json::from_slice(&fs::read(&args.scope)?)?;
+    scope.bind_reports(root).map_err(anyhow::Error::msg)?;
+    preview_scope(root, &repo, scope)
+}
+
+/// cas-8e1b: a candidate reads with its own schema. When the live store's
+/// applied migrations lag the candidate's, preview reads a private SQLite
+/// backup migrated to that schema; the live store is only read.
+struct PreviewStore {
+    root: PathBuf,
+    _snapshot: Option<tempfile::TempDir>,
+}
+
+impl PreviewStore {
+    fn open(live: &Path) -> Result<Self> {
+        if !crate::migration::check_migrations_read_only(live)?.has_pending() {
+            return Ok(Self { root: live.to_path_buf(), _snapshot: None });
+        }
+        let config = crate::config::Config::load(live)?;
+        let parent = crate::config::resolved_factory_artifact_paths(
+            live, config.factory().artifacts_root.as_deref()).project_root;
+        fs::create_dir_all(&parent)?;
+        let snapshot = tempfile::Builder::new().prefix("release-preview-").tempdir_in(&parent)?;
+        // A relocated store belongs to no repository; its repository is the
+        // caller's (cas-afdf). Stop Git discovery from adopting an enclosing one.
+        fs::write(snapshot.path().join(".git"), "release preview snapshot: not a repository\n")?;
+        let root = snapshot.path().join(".cas");
+        fs::create_dir(&root)?;
+        // Other store files stay the live ones; only the database is private.
+        for entry in fs::read_dir(live)? {
+            let name = entry?.file_name();
+            if ["cas.db", "cas.db-wal", "cas.db-shm", "cas.db-journal"].iter().any(|db| name == *db) { continue; }
+            if name == "verification-candidates" {
+                relocate_candidates(&live.join(&name), &root.join(&name), live, &root)?;
+            } else {
+                crate::accounts::symlink(&live.join(&name), &root.join(&name))?;
+            }
+        }
+        // One consistent read; a paged backup restarts on every live write.
+        rusqlite::Connection::open_with_flags(live.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+            .execute("VACUUM INTO ?1", [root.join("cas.db").to_string_lossy().as_ref()])?;
+        crate::migration::run_migrations(&root, false)?;
+        ensure!(crate::cloud::resolve_canonical_id(&root) == crate::cloud::resolve_canonical_id(live),
+            "release preview snapshot does not resolve the live project identity; pin [project] canonical_id");
+        Ok(Self { root, _snapshot: Some(snapshot) })
+    }
+}
+
+/// A candidate manifest binds the store it was prepared in (cas-afdf replay
+/// contract); rebind only that path so the snapshot validates it unchanged.
+fn relocate_candidates(from: &Path, to: &Path, live: &Path, snapshot: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let name = entry?.file_name();
+        let (source, target) = (from.join(&name), to.join(&name));
+        if source.is_dir() {
+            relocate_candidates(&source, &target, live, snapshot)?;
+            continue;
+        }
+        let mut manifest = fs::read(&source)?;
+        if name == "candidate.json"
+            && let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&manifest)
+            && value["cas_root"] == serde_json::json!(live)
+        {
+            value["cas_root"] = serde_json::json!(snapshot);
+            manifest = serde_json::to_vec(&value)?;
+        }
+        fs::write(target, manifest)?;
+    }
+    Ok(())
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ReleasePreview {
@@ -51,6 +133,11 @@ pub(super) struct ReleasePreview {
     not_eligible: usize,
     by_reason: BTreeMap<String, usize>,
     review_missing: Vec<String>,
+    #[serde(default)]
+    lane_ci_missing: Vec<String>,
+    /// Held members outside this release's included tasks: listed, never refused.
+    #[serde(default)]
+    legacy_held: Vec<String>,
     members_by_id: BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
 }
 
@@ -60,7 +147,7 @@ impl ReleasePreview {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut value = Self { scope, members: members_by_id.len(), would_close: 0,
             would_hold: 0, already_closed: 0, not_eligible: 0, by_reason: BTreeMap::new(),
-            review_missing: vec![], members_by_id };
+            review_missing: vec![], lane_ci_missing: vec![], legacy_held: vec![], members_by_id };
         for (id, outcome) in &value.members_by_id {
             let reason = match outcome {
                 CassyMergeClose::Closed { .. } => { value.would_close += 1; "WOULD_CLOSE" }
@@ -70,6 +157,8 @@ impl ReleasePreview {
                     value.would_hold += 1;
                     let code = reason.split(':').next().unwrap_or(reason).trim();
                     if code == "REVIEW_MISSING" { value.review_missing.push(id.clone()); }
+                    if code == "LANE_CI_MISSING" { value.lane_ci_missing.push(id.clone()); }
+                    if !value.includes(id) { value.legacy_held.push(id.clone()); }
                     if code == "RELEASE_MEMBER_HELD" { reason.as_str() } else { code }
                 }
             };
@@ -78,18 +167,34 @@ impl ReleasePreview {
         value
     }
 
+    /// A release with no audited inclusion list owns every member.
+    fn includes(&self, id: &str) -> bool {
+        self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.iter().any(|included| included == id)
+    }
+
+    /// The one cut-eligibility evaluator: `release plan` reports these before
+    /// preparation and `release track` refuses on them at the cut boundary.
     fn cut_blockers(&self) -> BTreeMap<String, String> {
+        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut blockers = BTreeMap::new();
-        let missing: Vec<_> = self.review_missing.iter().filter(|id| self.scope.included_task_ids.contains(id)).collect();
-        if !missing.is_empty() { blockers.insert("REVIEW_MISSING".into(), format!("Record release review for {missing:?}")); }
-        if !(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0)) {
-            blockers.insert("NO_ELIGIBLE_MEMBERS".into(), format!("Resolve held/ineligible members: {:?}", self.by_reason));
+        for (code, ids) in [("REVIEW_MISSING", &self.review_missing), ("LANE_CI_MISSING", &self.lane_ci_missing)] {
+            let missing: Vec<_> = ids.iter().filter(|id| self.includes(id)).cloned().collect();
+            if !missing.is_empty() { blockers.insert(code.into(), missing.join(", ")); }
+        }
+        // cas-be03: legacy members outside this release's included tasks never refuse its cut.
+        let own: Vec<_> = self.members_by_id.iter().filter(|(id, _)| self.includes(id)).map(|(_, outcome)| outcome).collect();
+        if !own.iter().any(|outcome| matches!(outcome, CassyMergeClose::Closed { .. }))
+            && own.iter().any(|outcome| matches!(outcome, CassyMergeClose::Held(_) | CassyMergeClose::NotEligible))
+        {
+            blockers.insert("NO_ELIGIBLE_MEMBERS".into(), format!(
+                "zero would-close among included members; by_reason {:?}; legacy_held {:?}", self.by_reason, self.legacy_held));
         }
         blockers
     }
 
     fn allow_cut(&self) -> Result<()> {
-        ensure!(self.cut_blockers().is_empty(), "RELEASE_PLAN_BLOCKED: {:?}", self.cut_blockers());
+        let blockers = self.cut_blockers();
+        ensure!(blockers.is_empty(), "RELEASE_PLAN_BLOCKED: {}", serde_json::to_string(&blockers)?);
         Ok(())
     }
 }
@@ -98,16 +203,6 @@ fn preview_scope(root: &Path, repo: &Path, scope: ReleaseScope) -> Result<Releas
     let inventory = crate::qa_batch::resolve_release_inventory(root, repo, &scope).map_err(anyhow::Error::msg)?;
     let members = crate::release_reconcile::preview_release(root, repo, &inventory).map_err(anyhow::Error::msg)?;
     Ok(ReleasePreview::from_members(scope, members))
-}
-
-fn validate_scope_inputs(root: &Path, scope: &ReleaseScope) -> Result<()> {
-    let tasks = open_task_store(root)?;
-    let reports: std::collections::BTreeSet<_> = scope.included_task_ids.iter().chain(scope.no_code_members.keys())
-        .filter(|id| tasks.get(id).is_ok_and(|task| crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some()) || scope.no_code_members.contains_key(*id)).collect();
-    let errors: Vec<_> = reports.into_iter().filter_map(|id| crate::release_reconcile::validate_no_code_proofs(
-        root, scope, id, scope.no_code_members.get(id).map(Vec::as_slice).unwrap_or_default()).err()).collect();
-    ensure!(errors.is_empty(), "{}", errors.join("; "));
-    Ok(())
 }
 
 fn cut_scope(root: &Path, repo: &Path, commit: &str, version: &str, train: Option<&str>, inputs: Option<&Path>) -> Result<ReleaseScope> {
@@ -119,16 +214,16 @@ fn cut_scope(root: &Path, repo: &Path, commit: &str, version: &str, train: Optio
     if let Some(path) = inputs {
         let audit = read_cut_inputs(path, repo, commit)?;
         scope.included_task_ids = audit.included_task_ids;
-        scope.no_code_members = audit.no_code_members;
     }
+    scope.bind_reports(root).map_err(anyhow::Error::msg)?;
     Ok(scope)
 }
 
 fn read_cut_inputs(path: &Path, repo: &Path, commit: &str) -> Result<ReleaseInputs> {
     let audit: ReleaseInputs = serde_json::from_slice(&fs::read(path)?)?;
-    ensure!(!audit.checked_sha.is_empty(), "release input audit has no checked_sha");
+    ensure!(!audit.checked_sha.is_empty(), crate::gates::tag("G-121", "release input audit has no checked_sha"));
     ensure!(audit.checked_sha == commit || git(repo, &["rev-parse", &format!("{commit}^1")]).ok().as_deref() == Some(audit.checked_sha.as_str()),
-        "release input audit is stale; rerun release.sh");
+        crate::gates::tag("G-121", "release input audit is stale; rerun release.sh"));
     Ok(audit)
 }
 
@@ -178,8 +273,6 @@ pub(super) struct ReleaseInputs {
     pub(super) checked_sha: String,
     #[serde(default)]
     pub(super) included_task_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(super) no_code_members: BTreeMap<String, Vec<ReleaseProofRef>>,
     #[serde(flatten)]
     metadata: BTreeMap<String, serde_json::Value>,
 }
@@ -200,10 +293,14 @@ pub(super) struct ReleaseContext {
     publish_reminder: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) release_inputs: Option<ReleaseInputs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) release_scope: Option<ReleaseScope>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    close_preview: Option<ReleasePreview>,
+}
+
+/// A leased detached cut checkout names its train branch explicitly.
+fn cut_branch(repo: &Path) -> Result<String> {
+    match std::env::var("CAS_RELEASE_CUT_BRANCH") {
+        Ok(branch) => Ok(branch),
+        Err(_) => git(repo, &["branch", "--show-current"]),
+    }
 }
 
 fn version_ok(version: &str) -> bool {
@@ -272,7 +369,7 @@ fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
         )?,
         "release checkout belongs to another repository"
     );
-    let branch = std::env::var("CAS_RELEASE_CUT_BRANCH").unwrap_or(git(&caller, &["branch", "--show-current"])?);
+    let branch = cut_branch(&caller)?;
     let explicit = release_train::active_trains(store.as_ref(), &integration)
         .into_iter()
         .find(|train| train.effective_epic_branch() == Some(branch.as_str()));
@@ -315,8 +412,6 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
         landing_reminder: None,
         publish_reminder: None,
         release_inputs: None,
-        release_scope: None,
-        close_preview: None,
     })
 }
 
@@ -340,30 +435,40 @@ pub fn context(args: &ContextArgs, root: &Path) -> Result<()> {
 }
 
 pub fn track(args: &TrackArgs, root: &Path) -> Result<()> {
+    // cas-8e1b: track is the cut's first store write. Bring the store to this
+    // binary's schema first, as the MCP runtime does; a failure stops the cut.
+    crate::migration::run_migrations(root, false)
+        .context("release track could not apply this binary's migrations; nothing tracked")?;
     let (repo, train) = open_train(root)?;
-    track_on_train(args, root, &repo, &train)
+    // cas-80df: the cut evaluates its exact release commit in-process with the
+    // same evaluator `release plan` used before preparation; no candidate build.
+    let scope = cut_scope(root, &repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref())?;
+    let preview = preview_scope(root, &repo, scope)?;
+    track_on_train(args, root, &repo, &train, preview)
 }
+// gate[G-121 release-verdict]: Release track checks (train branch, full SHA, train tip, version owner, input audit)
 fn track_on_train(
     args: &TrackArgs,
     root: &Path,
     repo: &Path,
     train: &cas_types::Task,
+    preview: ReleasePreview,
 ) -> Result<()> {
     let mut expected = new_context(repo, train)?;
     let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
     let canonical_repo = operations.canonical_repo_key()?;
     let _target_lock = crate::worktree::target_lock::lock_delivery_target(root, &canonical_repo, &expected.branch)?;
     ensure!(
-        std::env::var("CAS_RELEASE_CUT_BRANCH").unwrap_or(git(&repo, &["branch", "--show-current"])?) == expected.branch,
-        "release must be cut on the train branch"
+        cut_branch(repo)? == expected.branch,
+        crate::gates::tag("G-121", "release must be cut on the train branch")
     );
     ensure!(
         args.commit.len() == 40 && args.commit.bytes().all(|c| c.is_ascii_hexdigit()),
-        "release commit must be a full SHA"
+        crate::gates::tag("G-121", "release commit must be a full SHA")
     );
     ensure!(
         git(&repo, &["rev-parse", "HEAD"])? == args.commit,
-        "release commit must equal the train tip"
+        crate::gates::tag("G-121", "release commit must equal the train tip")
     );
     let path = receipt_path(root, &args.version)?;
     fs::create_dir_all(path.parent().unwrap())?;
@@ -378,7 +483,7 @@ fn track_on_train(
         expected = serde_json::from_slice(&fs::read(&path)?)?;
         ensure!(
             expected.train_id == train.id,
-            "version already belongs to another train"
+            crate::gates::tag("G-121", "version already belongs to another train")
         );
     }
     if let Some(path) = &args.inputs {
@@ -396,7 +501,7 @@ fn track_on_train(
     if expected.first_child_commit.is_none() {
         ensure!(
             args.first_child.len() == 40 && args.first_child.bytes().all(|b| b.is_ascii_hexdigit()),
-            "first child must be a full SHA"
+            crate::gates::tag("G-121", "first child must be a full SHA")
         );
         git(
             &repo,
@@ -411,11 +516,24 @@ fn track_on_train(
             Some(git(&repo, &["show", "-s", "--format=%ct", &args.first_child])?.parse()?);
         expected.first_child_commit = Some(args.first_child.clone());
     }
-    let scope = cut_scope(root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref())?;
-    validate_scope_inputs(root, &scope)?;
-    let preview = preview_scope(root, repo, scope.clone())?;
-    preview.allow_cut()?;
-    expected.close_preview = Some(preview);
+    let scope = &preview.scope;
+    ensure!(scope.final_release_sha == args.commit && scope.release_id == format!("v{}", args.version)
+        && scope.project_id == crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?
+        && scope.repository == expected.repository && scope.release_tag.is_none() && scope.promotion_pr.is_none()
+        && scope.constituent_epic_ids == [train.id.clone()],
+        crate::gates::tag("G-121", "cut preview does not identify this train, release and commit"));
+    if let Some(inputs) = &expected.release_inputs {
+        ensure!(scope.included_task_ids == inputs.included_task_ids,
+            crate::gates::tag("G-121", "cut preview membership differs from the audited inputs"));
+    }
+    let mut bound = scope.clone();
+    bound.bind_reports(root).map_err(anyhow::Error::msg)?;
+    ensure!(bound.no_code_members == scope.no_code_members,
+        crate::gates::tag("G-121", "cut report proof differs from the recorded member reference"));
+    let mut rebuilt = ReleasePreview::from_members(scope.clone(), preview.members_by_id.clone());
+    rebuilt.allow_cut()?;
+    crate::release_reconcile::record_preview(root, repo, scope, serde_json::to_value(&rebuilt)?)
+        .map_err(anyhow::Error::msg)?;
     // This is the cut boundary, before push/enqueue and independent of
     // reminder availability. New tasks must not join the frozen lane.
     let tasks = open_task_store(root)?;
@@ -605,7 +723,7 @@ fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> b
     let Some(anchor) = crate::qa_batch::delivery_anchor(repo, child) else {
         return false;
     };
-    crate::qa_batch::release_tag_ships_delivery(repo, &anchor, tag_sha, &child.id)
+    crate::qa_batch::release_tag_ships_delivery(repo, child.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()), &anchor, tag_sha, &child.id)
 }
 
 fn published_later_tags(repo: &Path, tag: &str) -> Result<Vec<(String, String)>> {
@@ -885,7 +1003,7 @@ pub(super) mod tests {
         train.labels.push("release-train".into());
         train.branch = Some("epic/train-cas-a001".into());
         train.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:release-fixture".into(),
+            repo_selector: "project:fixture".into(),
             target_branch: "main".into(),
         });
         let mut owner = Agent::new_with_role(
@@ -922,8 +1040,78 @@ pub(super) mod tests {
         (temp, root, train, owner, args)
     }
 
+    fn track(args: &TrackArgs, root: &Path) -> Result<()> {
+        let (repo, train) = open_train(root)?;
+        track_on_train(args, root, &repo, &train)
+    }
+
+    fn track_on_train(args: &TrackArgs, root: &Path, repo: &Path, train: &cas_types::Task) -> Result<()> {
+        let scope = cut_scope(root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref())?;
+        super::track_on_train(args, root, repo, train, preview_scope(root, repo, scope)?)
+    }
+
+    #[test]
+    fn release_inventory_contract_roundtrip() {
+        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+        let (temp, root, train, _, args) = fixture();
+        let scope = serde_json::to_value(cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap()).unwrap();
+        assert!(ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::new()).allow_cut().is_ok());
+        // cas-a6c8: review/QA can close every member before the cut.
+        for (outcome, allowed) in [
+            (CassyMergeClose::AlreadyClosed, true),
+            (CassyMergeClose::Held("RELEASE_MEMBER_HELD: missing proof".into()), false),
+        ] {
+            let members = (0..13).map(|n| (format!("cas-{n:04x}"), outcome.clone())).collect();
+            let preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), members);
+            assert_eq!(preview.allow_cut().is_ok(), allowed);
+        }
+        // cas-be03: prowl's a201 cut held fourteen legacy members outside its two closed ones.
+        let mut members: BTreeMap<String, CassyMergeClose> = (0..14).map(|n| (format!("cas-1{n:03x}"),
+            CassyMergeClose::Held(if n < 12 { "RELEASE_MEMBER_REVERTED: ownership" } else { "MissingBase" }.into()))).collect();
+        members.extend(["cas-a001", "cas-a002"].map(|id| (id.to_string(), CassyMergeClose::AlreadyClosed)));
+        let mut legacy_scope: ReleaseScope = serde_json::from_value(scope.clone()).unwrap();
+        legacy_scope.included_task_ids = vec!["cas-a001".into(), "cas-a002".into()];
+        let legacy = ReleasePreview::from_members(legacy_scope.clone(), members.clone());
+        assert!(legacy.allow_cut().is_ok());
+        assert_eq!(legacy.legacy_held.len(), 14);
+        legacy_scope.included_task_ids.push("cas-1000".into());
+        assert!(ReleasePreview::from_members(legacy_scope, members).cut_blockers().contains_key("NO_ELIGIBLE_MEMBERS"));
+        let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
+            ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
+            ("cas-0002".into(), CassyMergeClose::AlreadyClosed),
+            ("cas-0003".into(), CassyMergeClose::NotEligible),
+        ]));
+        assert!(preview.allow_cut().is_err());
+        preview.members_by_id.insert("cas-0004".into(), CassyMergeClose::Closed { notice: String::new() });
+        preview = ReleasePreview::from_members(preview.scope, preview.members_by_id);
+        preview.scope.included_task_ids = vec!["cas-0001".into(), "cas-0004".into()];
+        assert!(preview.allow_cut().is_err());
+        // Residuals outside this cut remain nonblocking.
+        preview.scope.included_task_ids = vec!["cas-0004".into()];
+        assert!(preview.allow_cut().is_ok());
+        preview.lane_ci_missing = vec!["cas-0004".into()];
+        assert!(preview.allow_cut().is_err());
+        preview.lane_ci_missing.clear();
+        assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (4, 1, 1, 1, 1));
+        assert_eq!(preview.by_reason["REVIEW_MISSING"], 1);
+        super::track_on_train(&args, &root, temp.path(), &train, preview.clone()).unwrap();
+        let tree = crate::release_reconcile::final_tree(temp.path(), &args.commit).unwrap();
+        let key = cas_store::release_reconcile_store::ReleaseOperationKey {
+            project_id: "release-fixture".into(), release_id: format!("v{}", args.version),
+            final_release_sha: tree,
+        };
+        let saved = cas_store::release_reconcile_store::load_release_operation(&root, &key).unwrap().unwrap();
+        assert_eq!(saved["preview"], serde_json::to_value(&preview).unwrap());
+        assert_eq!(saved["members"], serde_json::json!({})); // A dry run never commits a close.
+        assert!(crate::release_reconcile::completed_operation(&root, &key).unwrap().is_none());
+        let mut changed = preview.scope.clone();
+        changed.included_task_ids.push("cas-unshipped".into());
+        assert!(crate::release_reconcile::record_preview(&root, temp.path(), &changed,
+            serde_json::to_value(&preview).unwrap()).unwrap_err().contains("RELEASE_IDENTITY_CHANGED"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn explicit_no_code_proof_tracks_and_closes_once_cas_2ecc() {
+    async fn derived_no_code_proof_tracks_and_closes_once_cas_2ecc() {
         use crate::qa_batch::{ReleaseProofKind, ReleaseProofRef};
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -938,11 +1126,14 @@ pub(super) mod tests {
         env.set("CAS_AGENT_NAME", &owner.name);
         env.set("CAS_AGENT_ROLE", "supervisor");
         let tasks = open_task_store(&root).unwrap();
-        for id in ["cas-e3041", "cas-ef2b", "cas-undeclared"] {
+        for id in ["cas-e3041", "cas-ef2b", "cas-undeclared", "cas-closed"] {
             let mut task = Task::new(id.into(), "No-code report".into());
             task.origin_project = Some("release-fixture".into());
             task.execution_note = Some("no-code".into());
-            task.status = TaskStatus::AwaitingMerge;
+            task.status = if id == "cas-closed" { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
+            if id == "cas-closed" {
+                task.external_ref = Some("https://example.slack.com/archives/reports/p123456789".into());
+            }
             task.risk = vec![cas_types::TaskRisk::None];
             tasks.add(&task).unwrap();
         }
@@ -957,18 +1148,17 @@ pub(super) mod tests {
         }, &path).unwrap().artifact;
         for id in ["cas-e3041", "cas-ef2b", "cas-undeclared"] {
             let mut task = tasks.get(id).unwrap();
-            task.external_ref = Some(artifact.id.clone());
+            task.external_ref = Some(format!("artifact:{}", artifact.id));
             tasks.update(&task).unwrap();
         }
         let proof = ReleaseProofRef {
             kind: ReleaseProofKind::Report, artifact_id: artifact.id.clone(),
-            sha256: artifact.sha256, size_bytes: artifact.size_bytes,
+            sha256: artifact.sha256.clone(), size_bytes: artifact.size_bytes,
             reviewed_sha: args.commit.clone(), receipt_id: None,
         };
         let inputs = root.join("input-audit.json");
         fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
             "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
-            "no_code_members": {"cas-e3041": [proof]},
         })).unwrap()).unwrap();
         args.inputs = Some(inputs.clone());
         let train = tasks.get("cas-a001").unwrap();
@@ -982,27 +1172,23 @@ pub(super) mod tests {
             &tasks.get(&train.id).unwrap()));
         artifacts.mark_uploaded(&artifact.id, "cloud-report").unwrap();
         artifacts.mark_committed(&artifact.id, None).unwrap();
-        let mut hash = proof.clone(); hash.sha256 = "0".repeat(64);
-        let mut size = proof.clone(); size.size_bytes += 1;
-        let mut missing = proof.clone(); missing.artifact_id = "art-absent".into();
-        for (id, proofs) in [
-            ("cas-e3041", vec![]), ("cas-e3041", vec![hash]),
-            ("cas-e3041", vec![size]),
-            ("cas-e3041", vec![missing]), ("cas-ef2b", vec![proof.clone()]),
-        ] {
+        for (id, reference) in [("cas-e3041", None), ("cas-e3041", Some("art-absent")),
+            ("cas-ef2b", Some(artifact.id.as_str()))] {
+            let mut member = tasks.get(id).unwrap();
+            member.external_ref = reference.map(str::to_string);
+            tasks.update(&member).unwrap();
             fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
                 "checked_sha": args.commit, "included_task_ids": [id],
-                "no_code_members": {id: proofs},
             })).unwrap()).unwrap();
-            assert!(track_on_train(&args, &root, repo, &train).unwrap_err().to_string()
-                .starts_with("RELEASE_NO_CODE_PROOF"));
+            assert!(track_on_train(&args, &root, repo, &train).is_err());
             assert!(!receipt_path(&root, &args.version).unwrap().exists());
-            assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(
-                &tasks.get(&train.id).unwrap()));
+            assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(&tasks.get(&train.id).unwrap()));
         }
+        let mut member = tasks.get("cas-e3041").unwrap();
+        member.external_ref = Some(artifact.id.clone());
+        tasks.update(&member).unwrap();
         fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
             "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
-            "no_code_members": {"cas-e3041": [proof]},
         })).unwrap()).unwrap();
         let mut foreign = tasks.get("cas-e3041").unwrap();
         foreign.origin_project = Some("other-project".into());
@@ -1013,6 +1199,16 @@ pub(super) mod tests {
             &tasks.get(&train.id).unwrap()));
         foreign.origin_project = Some("release-fixture".into());
         tasks.update(&foreign).unwrap();
+        // A historical completed report's request link is not rebound as a
+        // new artifact. This does not exempt current members from approvals.
+        fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041", "cas-closed"],
+        })).unwrap()).unwrap();
+        let pending = cut_scope(&root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref()).unwrap();
+        assert!(!pending.no_code_members.contains_key("cas-closed"));
+        fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
+        })).unwrap()).unwrap();
         // Portable report bytes alone do not approve its delivery.
         assert!(track_on_train(&args, &root, repo, &train).is_err());
         let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
@@ -1032,13 +1228,12 @@ pub(super) mod tests {
         ).unwrap();
         let tag = format!("v{}", args.version);
         git(repo, &["tag", &tag]).unwrap();
-        let mut scope = super::super::release_adapters::tag_scope(
+        let scope = super::super::release_adapters::tag_scope(
             &root, repo, Some(&context), &train.id, &tag, &args.commit,
         ).unwrap();
         assert_eq!(scope.no_code_members.get("cas-e3041"), Some(&vec![proof.clone()]));
         // A legacy publication may already contain an explicitly included,
         // unbound report. It remains a residual and cannot borrow external_ref.
-        scope.included_task_ids.push("cas-ef2b".into());
         let inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == "cas-undeclared"));
         assert!(!inventory.exceptions.iter().any(|d| d.task_id == "cas-undeclared"));
@@ -1053,9 +1248,9 @@ pub(super) mod tests {
         let mut undeclared = scope.clone();
         undeclared.no_code_members.insert("cas-undeclared".into(), vec![proof.clone()]);
         let extra = crate::qa_batch::resolve_release_inventory(&root, repo, &undeclared).unwrap();
-        assert_eq!(crate::release_reconcile::reconcile_release(
+        assert!(crate::release_reconcile::reconcile_release(
             &root, &undeclared, &extra, crate::release_reconcile::ReconcileTrigger::Backfill,
-        ).await.unwrap_err(), "RELEASE_IDENTITY_CHANGED");
+        ).await.unwrap_err().starts_with("RELEASE_IDENTITY_CHANGED"));
         // Release close now requires an approval bound to the report's own
         // anchor, independently of the release-wide reviewed commit.
         cas_store::import_qa_batch_receipt(&root, &cas_store::QaBatchReceipt {
@@ -1072,7 +1267,6 @@ pub(super) mod tests {
             &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
         ).await.unwrap();
         assert!(matches!(first.members.get("cas-e3041"), Some(CassyMergeClose::Closed { .. })), "{first:?}");
-        assert!(first.residuals.iter().any(|r| r.task_id == "cas-ef2b" && r.gate.contains("MissingNoCodeProof")));
         let closed = tasks.get("cas-e3041").unwrap();
         assert_eq!(closed.status, TaskStatus::Closed);
         let replay_inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
@@ -1313,10 +1507,17 @@ pub(super) mod tests {
         assert_eq!(shipped.base_sha.as_deref(), Some(base.as_str()));
         assert_eq!(shipped.shipped_commit.as_deref(), Some(mapped.as_str()));
         assert_eq!(shipped.membership, Membership::SquashTree);
-        assert_eq!(
-            shipped.generation,
-            store.get(&code.id).unwrap().updated_at.to_rfc3339()
-        );
+        let mut current = store.get(&code.id).unwrap();
+        assert_eq!(shipped.generation, format!("cycle:{}", current.deliverables.delivery_cycle));
+        current.notes.push_str("Administrative note after inventory");
+        current.updated_at += chrono::Duration::seconds(1);
+        store.update(&current).unwrap();
+        let after_note = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        assert_eq!(after_note.deliveries[0].generation, shipped.generation);
+        current.deliverables.delivery_cycle += 1;
+        store.update(&current).unwrap();
+        let after_cycle = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        assert_ne!(after_cycle.deliveries[0].generation, shipped.generation);
         assert_eq!(shipped.proof_refs.len(), 2);
         assert!(
             shipped
@@ -1500,6 +1701,73 @@ pub(super) mod tests {
         assert!(installed(&InstalledArgs {
             receipt: publication_path, repo: "example/repo".into(), failed_attempts: None,
         }, Some(&root)).is_err());
+    }
+
+    /// cas-8e1b: a candidate one additive column ahead of the live store, as in
+    /// the 4.28 cut, previews exactly what it previews on a current store and
+    /// leaves the live store byte-identical.
+    #[test]
+    fn candidate_preview_of_a_lagging_store_leaves_it_unchanged_cas_8e1b() {
+        use sha2::{Digest, Sha256};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, train, _owner, track) = fixture();
+        let mut child = Task::new("cas-a002".into(), "Child".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.deliverables.factory_branch_anchor = Some(track.commit.clone());
+        let tasks = open_task_store(&root).unwrap();
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&Dependency::new(child.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
+        let scope = root.join("cut-scope.json");
+        fs::write(&scope, serde_json::to_vec(&cut_scope(&root, temp.path(), &track.commit, &track.version,
+            Some(&train.id), None).unwrap()).unwrap()).unwrap();
+        let args = PreviewArgs { scope };
+        let _cwd = env.enter_dir(temp.path());
+        let current = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
+        lag_one_column(&root);
+        let live = || {
+            let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let schema: Vec<String> = conn.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+                .unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+            (schema, format!("{:x}", Sha256::digest(fs::read(root.join("cas.db")).unwrap())))
+        };
+        let before = live();
+        assert!(!before.0.iter().any(|sql| sql.contains("review_dispatch_id")));
+        let lagging = serde_json::to_value(preview_release_close(&args, &root).unwrap()).unwrap();
+        assert_eq!(lagging, current);
+        assert_eq!(live(), before);
+    }
+
+    /// The store as the installed 4.27 CLI left it: m299's column not yet added.
+    fn lag_one_column(root: &Path) {
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+            "ALTER TABLE tasks DROP COLUMN review_dispatch_id; DELETE FROM cas_migrations WHERE id = 299;
+             PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    }
+
+    /// cas-8e1b: `release track` is the cut's first store write; on a lagging
+    /// store it applies the candidate's migrations before reading the train.
+    /// The cut runs in a Cassy worktree and names the live store by CAS_ROOT.
+    #[test]
+    fn candidate_track_migrates_a_lagging_store_cas_8e1b() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, train, _owner, args) = fixture();
+        fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nrelease_train = true\n").unwrap();
+        let worktree = root.join("worktrees").join("cut");
+        git(temp.path(), &["checkout", "main"]).unwrap();
+        git(temp.path(), &["worktree", "add", worktree.to_str().unwrap(), train.branch.as_deref().unwrap()]).unwrap();
+        env.set("CAS_ROOT", &root);
+        let _cwd = env.enter_dir(&worktree);
+        lag_one_column(&root);
+        super::track(&args, &root).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        assert!(conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'review_dispatch_id')",
+            [], |row| row.get::<_, bool>(0)).unwrap());
+        assert_eq!(serde_json::from_slice::<ReleaseContext>(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap())
+            .unwrap().train_id, train.id);
     }
 
     #[test]

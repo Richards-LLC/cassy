@@ -18,10 +18,16 @@ const OVERRIDE_WINDOW_HOURS: i64 = 6;
 /// The note marker an operator's override carries on the epic.
 pub(super) const OVERRIDE_MARKER: &str = "PUBLICATION OVERRIDE:";
 
+#[cfg(test)]
 pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>) -> Option<String> {
+    denial_with_overrides(tool, input, cas_root, &mut Vec::new())
+}
+
+// gate-audit[recent_override]: bypass H-07 A recorded operator publication override authorizes this otherwise-held deliverable post.
+pub(crate) fn denial_with_overrides(tool: &str, input: Option<&Value>, cas_root: Option<&Path>, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
     let posts = violet_posts(tool, input);
     if let Some(root) = cas_root
-        && let Some(reason) = post_release_denial(&posts, root)
+        && let Some(reason) = post_release_denial(&posts, root, accepted_override_codes)
     {
         return Some(reason);
     }
@@ -65,6 +71,7 @@ pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>)
             open.join("; ")
         );
         let _ = store.append_note(&epic.id, &note);
+        accepted_override_codes.push("H-07");
         tracing::warn!(epic = %epic.id, "cas-f6ad: Violet deliverable post allowed by operator publication override");
         return None;
     }
@@ -266,7 +273,7 @@ fn recent_override(notes: &str, now: chrono::DateTime<chrono::Utc>) -> Option<St
 }
 
 /// Release-note announcements have a separate gate from deliverable verification.
-fn post_release_denial(posts: &[Value], root: &Path) -> Option<String> {
+fn post_release_denial(posts: &[Value], root: &Path, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
     if !posts.iter().any(release_notes_post) {
         return None;
     }
@@ -281,7 +288,7 @@ fn post_release_denial(posts: &[Value], root: &Path) -> Option<String> {
         let Some(epic) = epic.and_then(|id| store.get(&id).ok()) else {
             return Some("RELEASE NOTES BLOCKED (post_release_pending): name epic_id (or task_id) so Cassy can check its post-release receipt.".into());
         };
-        if let Some(reason) = crate::qa_post_release::gate(root, &epic, true) {
+        if let Some(reason) = crate::qa_post_release::gate_with_overrides(root, &epic, true, accepted_override_codes) {
             return Some(reason);
         }
     }
@@ -326,6 +333,6 @@ pub(crate) fn release_notes_post(post: &Value) -> bool {
 }
 
 /// CLI text announcements run only this family; deliverable checks stay exempt.
-pub(crate) fn post_release_post_denial(post: &Value, root: Option<&Path>) -> Option<String> {
-    post_release_denial(std::slice::from_ref(post), root?)
+pub(crate) fn post_release_post_denial(post: &Value, root: Option<&Path>, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
+    post_release_denial(std::slice::from_ref(post), root?, accepted_override_codes)
 }

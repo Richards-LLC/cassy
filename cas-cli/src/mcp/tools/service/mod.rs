@@ -436,8 +436,20 @@ impl CasService {
                 "update" => this.task_update(req).await,
                 "start" => this.task_start(req).await,
                 "close" => {
+                    // gate-audit[supervisor_override]: Selects manual-intervention attribution only; override authority is enforced by the delegated close handler.
+                    let manual = if req.supervisor_override.unwrap_or(false) { None }
+                        else { this.inner.resolve_live_supervisor_authority().ok() };
+                    let was_closed = this.inner.open_task_store().ok().and_then(|s| s.get(&event_task_id).ok())
+                        .is_some_and(|task| task.status == cas_types::TaskStatus::Closed);
                     let result = this.task_close(req).await;
                     if result.is_ok() {
+                        if !was_closed && let Some(actor) = manual
+                            && this.inner.open_task_store().ok().and_then(|s| s.get(&event_task_id).ok())
+                                .is_some_and(|task| task.status == cas_types::TaskStatus::Closed) {
+                            crate::quality_ledger::intervention(&this.inner.cas_root, cas_store::InterventionKind::ManualClose,
+                                format!("manual_close|{event_task_id}|{}", chrono::Utc::now().timestamp_millis()),
+                                Some(&event_task_id), Some(&actor.id), None);
+                        }
                         mutation_receipt::task_committed(&event_task_id);
                         this.db_branch_after_task_end(&event_task_id).await;
                     }
@@ -1244,6 +1256,7 @@ fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Ve
 impl CasService {
     /// Shared dispatch behind the `coordination` and `factory` tools. Each
     /// tool decides which actions it accepts before calling this.
+    // gate-audit[input]: Validates and dispatches the requested action; factory policy results remain tagged by their handlers.
     async fn coordination_dispatch(
         &self,
         req: CoordinationRequest,
@@ -1416,7 +1429,7 @@ impl CasService {
                 "train_merge" => {
                     let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_merge requires id=<epic>"))?;
                     let inner = this.inner.clone();
-                    tokio::task::spawn_blocking(move || inner.train_merge(&train, req.task_ids.as_deref()))
+                    tokio::task::spawn_blocking(move || inner.train_merge(&train, req.task_ids.as_deref(), req.supervisor_override.unwrap_or(false), req.reason.as_deref()))
                         .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                         .map(Self::success)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))
@@ -1797,6 +1810,7 @@ mod memory_lifecycle_tests;
 mod pattern_ops;
 mod qa_pass_ops;
 mod server_handler;
+mod merge_response;
 pub(crate) use server_handler::potentially_mutating_call;
 /// cas-7c93 (GH #87): server_start / server_stop / server_list.
 mod server_ops;

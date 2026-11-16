@@ -351,6 +351,18 @@ pub fn build_worker_completion_receipt(
     worker_name: &str,
     created_at: DateTime<Utc>,
 ) -> WorkerCompletionReceipt {
+    build_worker_completion_receipt_in_cycle(input, worker_name, created_at, 1)
+}
+
+/// cas-50b2: the receipt id hashes the task's delivery cycle, so two cycles
+/// parking the same commit get distinct receipts. Cycle 1 keeps the legacy id.
+pub fn build_worker_completion_receipt_in_cycle(
+    input: &WorkerCompletionReceiptInput,
+    worker_name: &str,
+    created_at: DateTime<Utc>,
+    cycle: u32,
+) -> WorkerCompletionReceipt {
+    let cycle = (cycle > 1).then(|| format!("cycle:{cycle}"));
     let mut parts = vec![
         &input.task_id,
         &input.worker_agent_id,
@@ -370,6 +382,7 @@ pub fn build_worker_completion_receipt(
     if let Some(path) = input.artifact_path.as_deref() {
         parts.push(path);
     }
+    parts.extend(cycle.as_deref());
     let hash = digest(&parts);
     WorkerCompletionReceipt {
         id: format!("wcr-{}", &hash[..24]),
@@ -775,14 +788,12 @@ fn exact_receipt_replay_with_conn(
     let Some(transaction) = transaction else {
         return Ok(None);
     };
-    let dispatch = crate::verification_store::get_latest_verification_dispatch_with_conn(
-        conn,
-        &receipt.task_id,
-    )?
-    .filter(|dispatch| {
-        dispatch.receipt_id.as_deref() == Some(receipt.id.as_str())
-            && dispatch.delivery_transaction_id.as_deref() == Some(transaction.id.as_str())
-    });
+    let dispatch = crate::verification_store::get_latest_verification_dispatch_with_conn(conn,&receipt.task_id)?;
+    let dispatch = match dispatch {
+        Some(dispatch) if dispatch.receipt().map_err(StoreError::Parse)?.transaction()
+            == Some((receipt.id.as_str(),transaction.id.as_str())) => Some(dispatch),
+        _ => None,
+    };
     Ok(dispatch.map(|dispatch| (transaction, dispatch)))
 }
 
@@ -997,18 +1008,26 @@ pub fn transition_worker_delivery_verification_with_conn(
     if current.state != WorkerDeliveryState::AwaitingVerification {
         return Ok(None);
     }
+    let dispatch_id: Option<String> = conn.query_row("SELECT dispatch_id FROM verifications WHERE id=?1",
+        [verification_id], |r|r.get(0)).optional()?.flatten();
+    let dispatch = dispatch_id.map(|id| crate::get_verification_dispatch_with_conn(conn,&id)).transpose()?;
+    let Some(dispatch) = dispatch.filter(|dispatch| dispatch.task_id==current.task_id) else {
+        return Err(StoreError::Parse("delivery verification has no exact dispatch".into()));
+    };
+    if dispatch.receipt().map_err(StoreError::Parse)?.transaction()!=Some((current.receipt_id.as_str(),current.id.as_str())) {
+        return Err(StoreError::Parse("delivery verification has a different receipt or transaction".into()));
+    }
     let exact_binding: i64 = conn.query_row(
         "SELECT EXISTS(
             SELECT 1
             FROM verifications v
             JOIN verification_dispatches d ON d.id = v.dispatch_id
-            JOIN worker_completion_receipts r ON r.id = d.receipt_id
+            JOIN worker_completion_receipts r ON r.id = ?4
             WHERE v.id = ?1
               AND v.task_id = ?2
               AND v.agent_id = ?3
               AND d.task_id = ?2
-              AND d.receipt_id = ?4
-              AND d.delivery_transaction_id = ?5
+              AND d.id = ?5
               AND d.state = 'resolved'
               AND r.id = ?4
               AND r.task_id = ?2
@@ -1020,7 +1039,7 @@ pub fn transition_worker_delivery_verification_with_conn(
             current.task_id,
             actor_agent_id,
             current.receipt_id,
-            current.id,
+            dispatch.id,
             approved as i64,
         ],
         |row| row.get(0),
@@ -1146,6 +1165,7 @@ mod tests {
 
     #[test]
     fn supervisor_changes_request_reopens_exact_unmerged_delivery_without_losing_assignee() {
+        for cycle_bound in [false,true] {
         let root = TempDir::new().unwrap();
         let task_store = SqliteTaskStore::open(root.path()).unwrap();
         task_store.init().unwrap();
@@ -1163,6 +1183,18 @@ mod tests {
         task.deliverables.delivery_pr_merged_at = Some(Utc::now());
         task.pending_worktree_merge = true;
         task_store.add(&task).unwrap();
+        // cas-50b2: creating an anchored task mints its open cycle. A delivery
+        // parked before cycles existed gets the same one cycle at store open.
+        let cycles = || crate::delivery_cycles(root.path(), &task.id).unwrap();
+        let shape = || cycles().into_iter().map(|c| (c.cycle, c.anchors, c.ended)).collect::<Vec<_>>();
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], false)]);
+        let forget_cycles = |id: &str| {
+            Connection::open(root.path().join("cas.db")).unwrap()
+                .execute("DELETE FROM delivery_cycles WHERE task_id = ?1", [id]).unwrap();
+        };
+        forget_cycles(&task.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], false)]);
 
         let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
         let (delivery, dispatch) = create_worker_delivery_with_dispatch(
@@ -1185,6 +1217,11 @@ mod tests {
         .unwrap();
         drop(conn);
 
+        if cycle_bound {
+            let connection = Connection::open(root.path().join("cas.db")).unwrap();
+            connection.execute("UPDATE verification_dispatches SET receipt_id=?1,delivery_transaction_id=NULL WHERE id=?2",params![cycles()[0].cycle_id,dispatch.id]).unwrap();
+        }
+
         // GH #1276: deterministically pause a close retry after its read,
         // then let the supervisor commit request_changes before it writes.
         let stale_park = task_store.get(&task.id).unwrap();
@@ -1201,7 +1238,7 @@ mod tests {
             &["d".repeat(40)],
         )
         .unwrap();
-        assert_eq!(outcome.boundary, crate::RequestChangesBoundary::Exact);
+        assert_eq!(outcome.boundary, if cycle_bound { crate::RequestChangesBoundary::UnboundDelivery } else { crate::RequestChangesBoundary::Exact });
         assert_eq!(
             outcome.delivery_transaction_id.as_deref(),
             Some(delivery.id.as_str())
@@ -1225,6 +1262,7 @@ mod tests {
         assert!(reopened.deliverables.delivery_pr_merged_at.is_none());
         assert!(!reopened.pending_worktree_merge);
 
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], true)]);
         assert!(reopened.notes.contains("factory/worker"));
         assert!(reopened.notes.contains("revert the public output change"));
         let sources = &reopened.deliverables.authorized_merge_sources;
@@ -1283,11 +1321,61 @@ mod tests {
         assert_eq!(retained.updated_at, parked_at);
         assert_eq!(retained.deliverables.factory_branch_anchor,
             corrective.deliverables.factory_branch_anchor);
+        // The re-park mints cycle 2; the same commit parked in cycle 2 gets a
+        // receipt id distinct from cycle 1's.
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], true), (2, vec!["c".repeat(40)], false)]);
+        assert_eq!(build_worker_completion_receipt_in_cycle(&input(), "worker", Utc::now(), 1).id, receipt.id);
+        assert_ne!(build_worker_completion_receipt_in_cycle(&input(), "worker", Utc::now(), 2).id, receipt.id);
         // Opposite ordering: when park commits first, request_changes wins.
         crate::request_changes_for_parked_delivery(
             root.path(), &task.id, "supervisor-session", "Corrective delivery also needs changes",
         ).unwrap();
-        assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Open);
+        let current = task_store.get(&task.id).unwrap();
+        assert_eq!(current.status, TaskStatus::Open);
+        // A synced create and a synced update from another machine number the
+        // cycle from the replicated counter, so both machines get the same id;
+        // a backfill honours that counter too.
+        let mut peer = Task::new("cas-synced".into(), "peer delivery".into());
+        peer.deliverables.delivery_cycle = 3;
+        peer.deliverables.mint_or_append(&"e".repeat(40));
+        task_store.add(&peer).unwrap();
+        let peer_shape = || crate::delivery_cycles(root.path(), &peer.id).unwrap()
+            .into_iter().map(|c| (c.cycle_id, c.cycle, c.anchors)).collect::<Vec<_>>();
+        let peer_id = crate::delivery_cycle_id("", &peer.id, 3);
+        assert_eq!(peer_shape(), [(peer_id.clone(), 3, vec!["e".repeat(40)])]);
+        let current = task_store.get(&peer.id).unwrap();
+        let mut synced = current.clone();
+        synced.deliverables.mint_or_append(&"f".repeat(40));
+        synced.updated_at = current.updated_at + chrono::Duration::seconds(1);
+        task_store.update_from_sync(&synced, &current).unwrap().unwrap();
+        assert_eq!(peer_shape(), [(peer_id.clone(), 3, vec!["e".repeat(40), "f".repeat(40)])]);
+        forget_cycles(&peer.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert_eq!(peer_shape(), [(peer_id, 3, vec!["f".repeat(40)])]);
+        // A legacy row with no counter but one declined delivery [A] and a
+        // current B is in cycle 2 whether a sync creates it or a backfill
+        // finds it.
+        let mut legacy = Task::new("cas-legacy".into(), "legacy peer delivery".into());
+        legacy.deliverables.historical_factory_branch_anchors = vec!["a".repeat(40)];
+        legacy.deliverables.declined_factory_branch_anchors = Some(vec!["a".repeat(40)]);
+        legacy.deliverables.mint_or_append(&"b".repeat(40));
+        task_store.add(&legacy).unwrap();
+        let open_cycle = || crate::delivery_cycles(root.path(), &legacy.id).unwrap()
+            .into_iter().filter(|c| !c.ended).map(|c| (c.cycle, c.cycle_id, c.anchors)).collect::<Vec<_>>();
+        let expected = [(2, crate::delivery_cycle_id("", &legacy.id, 2), vec!["b".repeat(40)])];
+        assert_eq!(open_cycle(), expected, "fresh sync creation");
+        forget_cycles(&legacy.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert_eq!(open_cycle(), expected, "backfill");
+        let mut terminal_legacy = task_store.get(&legacy.id).unwrap();
+        terminal_legacy.status = TaskStatus::Closed;
+        task_store.update(&terminal_legacy).unwrap();
+        forget_cycles(&legacy.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert!(crate::delivery_cycles(root.path(), &legacy.id).unwrap().is_empty());
+        crate::backfill_delivery_cycles(root.path(), "").unwrap();
+        assert_eq!(open_cycle(), expected, "explicit terminal delivery history recovery");
+        }
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the
@@ -1640,6 +1728,13 @@ mod tests {
         assert_eq!(replay.id, first.id);
         assert_eq!(replay_dispatch.id, first_dispatch.id);
         assert_eq!(replay_dispatch.repository.as_ref(), Some(&proof));
+        let connection = open(root.path()).unwrap();
+        connection.execute("UPDATE verification_dispatches SET receipt_id='dc-foreign',delivery_transaction_id=NULL WHERE id=?1",[&first_dispatch.id]).unwrap();
+        assert!(exact_receipt_replay_with_conn(&connection,&receipt,"worker-session").unwrap().is_none());
+        connection.execute("UPDATE verification_dispatches SET receipt_id=?1,delivery_transaction_id=?2 WHERE id=?3",
+            params![receipt.id,first.id,first_dispatch.id]).unwrap();
+        drop(connection);
+
         let mut changed = proof.clone();
         changed.state_digest = "a different candidate".into();
         assert!(create_worker_delivery_with_dispatch_for_lease_at_repository(

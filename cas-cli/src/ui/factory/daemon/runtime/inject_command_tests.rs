@@ -421,13 +421,13 @@ pub(super) fn enqueue_urgent_to(cas_dir: &std::path::Path, target: &str, text: &
 }
 
 /// spec §7 `flv2_inject_is_a_command`: an urgent inject with a 1.2 s settle
-/// leaves every control pass under 100 ms, and the redirect still reaches
-/// the pane after the settle.
+/// is a command, not a wait. The control pass that starts it returns while its
+/// settle is still pending, and the redirect still reaches the pane after the
+/// settle.
 ///
 /// cas-a8dc: the passes run on the daemon's job lanes, as `run` drives them.
-/// Inline jobs put the queue's store I/O on the measured pass (247 blocking
-/// SQLite calls), so under a parallel `cargo test` the 100 ms bound timed
-/// disk contention rather than the settle.
+/// cas-ae6ae: the property is observed from the mux, not timed. A 100 ms
+/// wall-clock budget measured the shared runner (260 ms on CI) instead.
 #[tokio::test]
 async fn flv2_inject_is_a_command() {
     let (_root, cas_dir) = project_with_worker();
@@ -443,13 +443,18 @@ async fn flv2_inject_is_a_command() {
     let id = enqueue_urgent(&cas_dir, "urgent redirect C4A-MARKER");
 
     let started = Instant::now();
-    let mut slowest = Duration::ZERO;
+    let mut returned_while_settling = false;
     let mut echoed = String::new();
     while started.elapsed() < Duration::from_secs(6) {
-        let pass = Instant::now();
+        let settling_before = daemon.app.mux.inject_pending(WORKER);
         daemon.process_prompt_queue().await.unwrap();
-        slowest = slowest.max(pass.elapsed());
         echoed.push_str(&drain(&mut daemon));
+        // The pass that starts the urgent inject hands its settle to the mux
+        // and returns: the inject is pending and its payload is not typed yet.
+        if !settling_before && !returned_while_settling && daemon.app.mux.inject_pending(WORKER) {
+            assert!(!echoed.contains("C4A-MARKER"), "the starting pass waited out the settle: {echoed:?}");
+            returned_while_settling = true;
+        }
         // The payload's write receipt, and so the row's bookkeeping, may
         // land a pass after its echo.
         if echoed.contains("C4A-MARKER") && !daemon.app.mux.has_pending_injects() {
@@ -458,8 +463,8 @@ async fn flv2_inject_is_a_command() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        slowest < Duration::from_millis(100),
-        "a control pass waited {slowest:?} for an urgent inject's settle"
+        returned_while_settling,
+        "a control pass returned while the urgent inject's settle was still pending"
     );
     assert!(echoed.contains("C4A-MARKER"), "the redirect reached the pane: {echoed:?}");
     assert!(

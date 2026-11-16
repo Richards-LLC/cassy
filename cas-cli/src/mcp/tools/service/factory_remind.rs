@@ -560,6 +560,42 @@ impl CasService {
             if let Some(filter) = filter.as_mut() {
                 normalize_external_filter(&event_type, filter);
             }
+            if event_type == EXTERNAL_CI_COMPLETED_EVENT
+                && let Some(filter) = filter.as_mut()
+                && let Some(selector) = filter.get("workflow").and_then(serde_json::Value::as_str)
+                    .map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
+            {
+                let project = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root).to_path_buf();
+                let lookup = selector.clone();
+                let sha = filter["sha"].as_str().unwrap_or_default().to_string();
+                let selection = tokio::task::spawn_blocking(move || {
+                    let transport = crate::ui::factory::daemon::runtime::ci_watch::GhCiTransport::from_project(&project)?;
+                    transport.resolve_workflow(&lookup, &sha)
+                }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                        format!("Cannot resolve CI workflow: {error}")))?;
+                use crate::ui::factory::daemon::runtime::ci_watch::WorkflowSelection;
+                let workflow = match selection {
+                    WorkflowSelection::Resolved(id) => id,
+                    WorkflowSelection::Unknown => return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: format!("Unknown workflow selector {selector:?}; use an exact workflow name, file path or numeric ID").into(),
+                        data: Some(serde_json::json!({"error_code": "workflow_selector_invalid", "workflow": selector})),
+                    }),
+                    WorkflowSelection::Ambiguous(candidates) => {
+                        let listed: Vec<String> = candidates.iter().map(|(id, path)| format!("{path} ({id})")).collect();
+                        return Err(McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: format!("Workflow selector {selector:?} matches {} workflows and this commit's runs do not single one out: {}; use one file path or numeric ID", candidates.len(), listed.join(", ")).into(),
+                            data: Some(serde_json::json!({
+                                "error_code": "workflow_selector_ambiguous", "workflow": selector,
+                                "candidates": candidates.iter().map(|(id, path)| serde_json::json!({"id": id, "path": path})).collect::<Vec<_>>(),
+                            })),
+                        });
+                    }
+                };
+                filter["workflow"] = workflow.to_string().into();
+            }
 
             let id = store
                 .create_with_scope(
@@ -894,6 +930,100 @@ fn ended_reminder_desc(reminder: &cas_store::Reminder) -> String {
 #[cfg(test)]
 mod tests {
     use super::validate_external_reminder;
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn ci_workflow_selector_is_resolved_before_registration_cas_4329e() {
+        use crate::ui::factory::daemon::runtime::ci_watch::{
+            GhCiTransport, ci_completed_runs, parse_ci_completed,
+        };
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["remote", "add", "origin", "https://github.com/org/repo.git"],
+        ] {
+            assert!(std::process::Command::new("git").args(args).current_dir(temp.path())
+                .status().unwrap().success());
+        }
+        let workflows = serde_json::json!([{"workflows": [
+            {"id": 17, "name": "Pull request CI", "path": ".github/workflows/ci.yml"},
+            {"id": 18, "name": "Other", "path": ".github/workflows/other.yml"},
+            {"id": 19, "name": "CI", "path": ".github/workflows/lane.yml"},
+            {"id": 20, "name": "CI", "path": ".github/workflows/full-validation.yml"}
+        ]}]);
+        std::fs::write(temp.path().join("workflows.json"), workflows.to_string()).unwrap();
+        let sha = "a".repeat(40);
+        let runs = |status: &str| serde_json::json!({"workflow_runs": [
+            {"id": 101, "workflow_id": 17, "name": "Pull request CI", "head_branch": "main",
+             "head_sha": sha, "html_url": "https://github.test/runs/101", "status": status,
+             "conclusion": null, "event": "push"},
+            {"id": 102, "workflow_id": 18, "name": "Pull request CI", "head_branch": "main",
+             "head_sha": sha, "html_url": "https://github.test/runs/102", "status": "completed",
+             "conclusion": "success", "event": "push"}
+        ]});
+        std::fs::write(temp.path().join("runs.json"), runs("in_progress").to_string()).unwrap();
+        let gh = temp.path().join("gh");
+        crate::test_paths::warm_stub(&gh, &format!(
+            "#!/bin/sh\ncase \"$1 $2 $3\" in\n'repo view org/repo') printf '%s' '{{\"nameWithOwner\":\"org/repo\"}}' ;;\n'api -X GET') case \"$4\" in\nrepos/org/repo/actions/workflows) cat '{dir}/workflows.json' ;;\nrepos/org/repo/actions/runs) cat '{dir}/runs.json' ;;\nrepos/org/repo/commits/*/check-runs) printf '%s' '{{\"check_runs\":[]}}' ;;\n*) exit 97 ;;\nesac ;;\n*) exit 98 ;;\nesac\n",
+            dir = temp.path().display(),
+        ));
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agent = cas_types::Agent::new("ci-owner".into(), "ci-owner".into());
+        core.open_agent_store().unwrap().register(&agent).unwrap();
+        core.set_agent_id_for_testing(agent.id.clone());
+        #[cfg(feature = "mcp-proxy")]
+        let service = crate::mcp::tools::service::CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = crate::mcp::tools::service::CasService::new(core);
+        let request = |selector: &str| serde_json::from_value(serde_json::json!({
+            "action": "remind", "remind_message": "CI completion", "remind_event": "ci_completed",
+            "cross_session": true,
+            "remind_filter": serde_json::json!({"sha": sha, "workflow": selector}).to_string(),
+        })).unwrap();
+        let reminders = crate::store::open_reminder_store(&cas_root).unwrap();
+        for (selector, code) in [("CI", "workflow_selector_ambiguous"), ("missing.yml", "workflow_selector_invalid")] {
+            let error = service.factory_remind(request(selector)).await.unwrap_err();
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(error.data.unwrap()["error_code"], code);
+            assert!(reminders.list_pending_for_target(&agent.id).unwrap().is_empty());
+        }
+        for selector in ["Pull request CI", "ci.yml", "17"] {
+            service.factory_remind(request(selector)).await.unwrap();
+        }
+        let pending = reminders.list_pending_for_target(&agent.id).unwrap();
+        assert_eq!(pending.len(), 3);
+        let transport = GhCiTransport::from_project(temp.path()).unwrap();
+        for reminder in &pending {
+            let filter = reminder.trigger_filter.as_ref().unwrap();
+            assert_eq!(filter["workflow"], "17");
+            let condition = parse_ci_completed(filter).unwrap();
+            assert!(ci_completed_runs(&transport, &condition).unwrap().is_none());
+        }
+        std::fs::write(temp.path().join("runs.json"), runs("completed").to_string()).unwrap();
+        for reminder in &pending {
+            let condition = parse_ci_completed(reminder.trigger_filter.as_ref().unwrap()).unwrap();
+            let completed = ci_completed_runs(&transport, &condition).unwrap().unwrap();
+            assert_eq!(completed.iter().map(|run| run.id).collect::<Vec<_>>(), vec![101]);
+        }
+        // cas-a746: the refusal's own example selector resolves once the
+        // commit has a run under that name, binding the workflow that ran.
+        let example: serde_json::Value = serde_json::from_str(
+            super::external_filter_spec("ci_completed").unwrap().example).unwrap();
+        let mut with_lane = runs("completed");
+        with_lane["workflow_runs"].as_array_mut().unwrap().push(serde_json::json!(
+            {"id": 103, "workflow_id": 19, "name": "CI", "head_branch": "main", "head_sha": sha,
+             "html_url": "https://github.test/runs/103", "status": "completed",
+             "conclusion": "success", "event": "push"}));
+        std::fs::write(temp.path().join("runs.json"), with_lane.to_string()).unwrap();
+        service.factory_remind(request(example["workflow"].as_str().unwrap())).await.unwrap();
+        let bound: Vec<_> = reminders.list_pending_for_target(&agent.id).unwrap().into_iter()
+            .map(|reminder| reminder.trigger_filter.unwrap()["workflow"].clone()).collect();
+        assert!(bound.contains(&serde_json::json!("19")), "{bound:?}");
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn worker_remind_supervisor_target_uses_owning_factory_session() {

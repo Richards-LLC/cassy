@@ -29,6 +29,8 @@ struct Queue {
     next: usize,
     outcomes: Vec<String>,
     waiting: Option<String>,
+    #[serde(default)]
+    ci_override: Option<String>,
 }
 
 impl Queue {
@@ -89,6 +91,7 @@ fn save(path: &Path, queue: &Queue) -> Result<()> {
 /// Checked before preparing a candidate and again under the normal target
 /// lock. The queue creates its reservation under that same lock, so a single
 /// merge already in flight cannot slip between reservation and publication.
+// gate[G-101 merge-admission integrity]: Train merge active reservation
 pub(crate) fn admit(
     root: &Path,
     repo: &Path,
@@ -101,18 +104,20 @@ pub(crate) fn admit(
         ensure!(
             permit == Some(queue.id.as_str())
                 && task == Some(queue.entries[queue.next].task.as_str()),
-            "TRAIN MERGE ACTIVE: {} owns {}; single worktree_merge is held at task {} (position {}/{}). Resume with factory action=train_merge id={}.",
-            queue.id,
-            target,
-            queue.entries[queue.next].task,
-            queue.next + 1,
-            queue.entries.len(),
-            queue.train
+            crate::gates::tag("G-101", format!(
+                "TRAIN MERGE ACTIVE: {} owns {}; single worktree_merge is held at task {} (position {}/{}). Resume with factory action=train_merge id={}.",
+                queue.id,
+                target,
+                queue.entries[queue.next].task,
+                queue.next + 1,
+                queue.entries.len(),
+                queue.train
+            ))
         );
     } else {
         ensure!(
             permit.is_none(),
-            "train merge reservation is no longer active"
+            crate::gates::tag("G-101", "train merge reservation is no longer active")
         );
     }
     Ok(())
@@ -132,36 +137,41 @@ fn driver_lock(
 }
 
 impl CasCore {
+    // gate[G-113 train-merge integrity]: Train merge preconditions (supervisor, epic target, queue, entries)
+    // gate-audit[ci_override]: selector Derived newly accepted G-114 token; final receipt records it.
+    // gate-audit[prior_override]: selector Replayed stored decision token; reuse does not mint another override.
     pub(crate) fn train_merge(
         &self,
         train: &str,
         ordered: Option<&[String]>,
+        supervisor_override: bool,
+        reason: Option<&str>,
     ) -> Result<String> {
         let actor = self
             .resolve_live_supervisor_authority()
-            .map_err(|_| anyhow::anyhow!("train_merge requires a live registered supervisor"))?;
+            .map_err(|_| anyhow::anyhow!(crate::gates::tag("G-113", "train_merge requires a live registered supervisor")))?;
         if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
-            anyhow::bail!(hold);
+            anyhow::bail!(crate::gates::tag("G-92", hold));
         }
         let session = actor
             .factory_session
             .as_deref()
-            .context("train_merge requires a factory session")?;
+            .context(crate::gates::tag("G-113", "train_merge requires a factory session"))?;
         let tasks = self
             .open_task_store()
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let epic = tasks.get(train)?;
         ensure!(
             epic.task_type == TaskType::Epic && !epic.is_terminal(),
-            "train_merge requires an open epic"
+            crate::gates::tag("G-113", "train_merge requires an open epic")
         );
         let target = epic
             .effective_epic_branch()
-            .context("train has no branch")?
+            .context(crate::gates::tag("G-113", "train has no branch"))?
             .to_string();
         ensure!(
             target.starts_with("epic/"),
-            "train_merge requires an epic target, never trunk"
+            crate::gates::tag("G-113", "train_merge requires an epic target, never trunk")
         );
         let repo = match epic.deliverables.work_target.as_ref() {
             Some(work) => {
@@ -176,33 +186,53 @@ impl CasCore {
                 .to_path_buf(),
         };
         let _driver = driver_lock(&self.cas_root, &repo, &target)?
-            .context("train merge is being advanced; retry this request")?;
+            .context(crate::gates::tag("G-113", "train merge is being advanced; retry this request"))?;
         let path = path(&self.cas_root, &repo, &target)?;
         if let Some(mut queue) = read(&path)?.filter(Queue::active) {
-            ensure!(queue.train == train, "another train owns this target");
-            if let Some(ordered) = ordered {
-                ensure!(
-                    ordered
-                        .iter()
-                        .map(String::as_str)
-                        .eq(queue.entries.iter().map(|e| e.task.as_str())),
-                    "active train merge has a different ordered list; resume without task_ids"
-                );
-            }
+            ensure!(queue.train == train, crate::gates::tag("G-113", "another train owns this target"));
             if queue.supervisor != actor.id {
                 let agents = self
                     .open_agent_store()
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 ensure!(
                     !agents.get(&queue.supervisor).is_ok_and(|a| a.is_alive()),
-                    "another live supervisor owns this train merge"
+                    crate::gates::tag("G-113", "another live supervisor owns this train merge")
                 );
-                queue.supervisor = actor.id;
+                queue.supervisor = actor.id.clone();
             }
-            queue.session = session.into();
-            save(&path, &queue)?;
-            return Ok(queue.render());
+            // GH #1819: entries already merged or closed need no daemon pass.
+            settle(&path, &mut queue, &*tasks)?;
+            let prior_override = queue.ci_override.clone();
+            if queue.active() {
+                if let Some(ordered) = ordered {
+                    ensure!(
+                        ordered
+                            .iter()
+                            .map(String::as_str)
+                            .eq(queue.entries.iter().map(|e| e.task.as_str())),
+                        crate::gates::tag("G-113", "active train merge has a different ordered list; resume without task_ids")
+                    );
+                }
+                queue.ci_override = crate::train_ci::guard(
+                    self,
+                    train,
+                    &target,
+                    queue.ci_override.as_deref(),
+                    supervisor_override,
+                    reason,
+                )?;
+                queue.session = session.into();
+            }
+            if queue.active() || ordered.is_none() {
+                save(&path, &queue)?;
+                let receipt = queue.render();
+                return Ok(if queue.ci_override.is_some() && queue.ci_override != prior_override {
+                    crate::gates::override_tag("G-114", receipt)
+                } else { receipt });
+            }
         }
+        let ci_override =
+            crate::train_ci::guard(self, train, &target, None, supervisor_override, reason)?;
         let mut candidates = tasks.list(Some(TaskStatus::AwaitingMerge))?;
         candidates.sort_by(|a, b| (a.updated_at, &a.id).cmp(&(b.updated_at, &b.id)));
         let ids = match ordered {
@@ -227,17 +257,17 @@ impl CasCore {
         let mut entries = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for id in ids {
-            ensure!(seen.insert(id.clone()), "duplicate train delivery {id}");
+            ensure!(seen.insert(id.clone()), crate::gates::tag("G-113", format!("duplicate train delivery {id}")));
             let task = tasks.get(&id)?;
             ensure!(
                 task.status == TaskStatus::AwaitingMerge,
-                "{id} is not parked"
+                crate::gates::tag("G-113", format!("{id} is not parked"))
             );
             ensure!(
                 tasks
                     .get_parent_epic(&id)?
                     .is_some_and(|parent| parent.id == train),
-                "{id} belongs to another train"
+                crate::gates::tag("G-113", format!("{id} belongs to another train"))
             );
             if let Some(owner) = crate::factory_session_scope::foreign_owner_of_merge(
                 &agents,
@@ -246,7 +276,7 @@ impl CasCore {
                 Some(&task),
                 chrono::Utc::now(),
             ) {
-                anyhow::bail!(owner.refusal("train_merge", session));
+                anyhow::bail!(crate::gates::tag("G-93", owner.refusal("train_merge", session)));
             }
             if let Some(work) = task.deliverables.work_target.as_ref() {
                 let context =
@@ -256,7 +286,7 @@ impl CasCore {
                     context.target_branch == target
                         && context.git_common_dir
                             == GitOperations::new(repo.clone()).canonical_repo_key()?,
-                    "{id} targets another repository or branch"
+                    crate::gates::tag("G-113", format!("{id} targets another repository or branch"))
                 );
             }
             entries.push(Entry {
@@ -264,11 +294,11 @@ impl CasCore {
                 branch: task
                     .deliverables
                     .parked_branch
-                    .context("parked delivery lacks branch")?,
+                    .context(crate::gates::tag("G-113", "parked delivery lacks branch"))?,
                 sha: task
                     .deliverables
                     .factory_branch_anchor
-                    .context("parked delivery lacks anchor")?,
+                    .context(crate::gates::tag("G-113", "parked delivery lacks anchor"))?,
             });
         }
         let queue = Queue {
@@ -282,18 +312,54 @@ impl CasCore {
             next: 0,
             outcomes: vec![],
             waiting: None,
+            ci_override,
         };
         let common = GitOperations::new(repo).canonical_repo_key()?;
         let _target = target_lock::try_lock_delivery_target(&self.cas_root, &common, &target)?
-            .context("target merge already in progress; retry train_merge after it finishes")?;
+            .context(crate::gates::tag("G-113", "target merge already in progress; retry train_merge after it finishes"))?;
         save(&path, &queue)?;
-        Ok(queue.render())
+        let receipt = queue.render();
+        Ok(if queue.ci_override.is_some() { crate::gates::override_tag("G-114", receipt) } else { receipt })
     }
 }
 
-fn published(queue: &Queue, entry: &Entry) -> Result<bool> {
+/// Advance past entries that need no merge: already published to the target,
+/// or no longer this exact parked delivery. Each step is durable, so a resume
+/// after a crash repeats nothing.
+fn settle(path: &Path, queue: &mut Queue, tasks: &dyn crate::store::TaskStore) -> Result<()> {
+    while queue.active() {
+        let entry = &queue.entries[queue.next];
+        // gate[G-115 train-merge integrity]: Train entry awaiting dispatch or returned entry skip
+        let outcome = if published(queue, entry, false)? {
+            format!("{} merged {}", entry.task, entry.sha)
+        } else {
+            let task = tasks.get(&entry.task)?;
+            if task.status == TaskStatus::AwaitingMerge
+                && task.deliverables.factory_branch_anchor.as_deref() == Some(&entry.sha)
+                && task.deliverables.parked_branch.as_deref() == Some(&entry.branch)
+            {
+                return Ok(());
+            }
+            crate::gates::tag("G-115", format!(
+                "{} returned or changed; skipped exact parked delivery",
+                entry.task
+            ))
+        };
+        queue.outcomes.push(outcome);
+        queue.next += 1;
+        queue.waiting = None;
+        save(path, queue)?;
+    }
+    Ok(())
+}
+
+/// Publication, rather than a local-only merge, advances the queue. The merge's
+/// origin read and push refresh the tracking ref; ask origin only if it lacks one.
+fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     let git = GitOperations::new(queue.repo.clone());
-    // Publication, rather than a local-only merge, advances the queue.
+    let tracked = git.resolve_commit(&format!("refs/remotes/origin/{}", queue.target))
+        .is_some_and(|tip| git.is_ancestor(&entry.sha, &tip));
+    if tracked || (!merged && git.has_origin_remote()) { return Ok(tracked); }
     let target = git
         .fetch_merge_target(&queue.target)?
         .or_else(|| git.resolve_commit(&queue.target))
@@ -303,7 +369,9 @@ fn published(queue: &Queue, entry: &Entry) -> Result<bool> {
 
 /// Existing daemon scan, off its control loop. No additional CI stage or
 /// model turn is needed to consume an approved candidate.
+// gate-audit[ci_override]: selector Derived accepted G-114 token forwarded in response; not another request flag.
 pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
+    crate::mcp::tools::core::task::lifecycle::parked_conflicts::scan(root)?;
     let paths = match std::fs::read_dir(directory(root)) {
         Ok(paths) => paths,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -333,48 +401,42 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
         )
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let actor = core.resolve_live_supervisor_authority().map_err(|_| {
-            anyhow::anyhow!("train merge owner is no longer live; resume with train_merge")
+            anyhow::anyhow!(crate::gates::tag("G-113", "train merge owner is no longer live; resume with train_merge"))
         })?;
         ensure!(
             actor.role == AgentRole::Supervisor
                 && actor.factory_session.as_deref() == Some(session),
-            "train merge owner session changed"
+            crate::gates::tag("G-113", "train merge owner session changed")
         );
         let tasks = core
             .open_task_store()
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        while queue.active() {
+        loop {
+            // Settled entries advance even while CI holds the next merge.
+            settle(&path, &mut queue, &*tasks)?;
+            if !queue.active() {
+                break;
+            }
+            if let Err(error) = crate::train_ci::guard(
+                &core,
+                &queue.train,
+                &queue.target,
+                queue.ci_override.as_deref(),
+                false,
+                None,
+            ) {
+                queue.waiting = Some(error.to_string());
+                save(&path, &queue)?;
+                break;
+            }
             let entry = &queue.entries[queue.next];
-            if published(&queue, entry)? {
-                queue
-                    .outcomes
-                    .push(format!("{} merged {}", entry.task, entry.sha));
-                queue.next += 1;
-                queue.waiting = None;
-                save(&path, &queue)?;
-                continue;
-            }
-            let task = tasks.get(&entry.task)?;
-            if task.status != TaskStatus::AwaitingMerge
-                || task.deliverables.factory_branch_anchor.as_deref() != Some(&entry.sha)
-                || task.deliverables.parked_branch.as_deref() != Some(&entry.branch)
-            {
-                queue.outcomes.push(format!(
-                    "{} returned or changed; skipped exact parked delivery",
-                    entry.task
-                ));
-                queue.next += 1;
-                queue.waiting = None;
-                save(&path, &queue)?;
-                continue;
-            }
             if let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, &entry.task)?
                 && matches!(
                     dispatch.state,
                     VerificationDispatchState::Pending | VerificationDispatchState::Claimed
                 )
             {
-                queue.waiting = Some(format!("{} awaiting dispatch {}", entry.task, dispatch.id));
+                queue.waiting = Some(crate::gates::tag("G-115", format!("{} awaiting dispatch {}", entry.task, dispatch.id)));
                 save(&path, &queue)?;
                 break;
             }
@@ -395,7 +457,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             };
             let result = core.worktree_merge_queued(&expected, &queue.id).await;
             let current = tasks.get(&entry.task)?;
-            if current.status != TaskStatus::AwaitingMerge || published(&queue, entry)? {
+            if current.status != TaskStatus::AwaitingMerge || published(&queue, entry, true)? {
                 // Re-read the durable result at the top, including a conflict
                 // return or a merge committed just before a previous crash.
                 continue;
@@ -474,6 +536,11 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::build(true)
+        }
+
+        /// `conflict`: the first two deliveries edit the same file.
+        fn build(conflict: bool) -> Self {
             let mut env = crate::test_support::TestEnvGuard::temp_home();
             for key in [
                 "CAS_ROOT",
@@ -539,11 +606,13 @@ mod tests {
                         "epic/train",
                     ],
                 );
-                shas[index] = if index < 2 {
-                    commit(&checkout, "shared.md", &format!("delivery {}\n", index + 1))
-                } else {
-                    commit(&checkout, "third.md", "third delivery\n")
+                let file = match index {
+                    0 => "shared.md",
+                    1 if conflict => "shared.md",
+                    1 => "second.md",
+                    _ => "third.md",
                 };
+                shas[index] = commit(&checkout, file, &format!("delivery {}\n", index + 1));
                 git(&checkout, &["push", "origin", &branch]);
                 let mut agent = Agent::new(worker.clone(), worker.clone());
                 agent.role = AgentRole::Worker;
@@ -652,9 +721,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_finishes_queue_whose_deliveries_already_landed_gh_1819() {
+        let fixture = Fixture::new();
+        fixture.start().await;
+        let ci_dir = crate::train_ci::directory(&fixture.root, "cas-train").unwrap();
+        std::fs::create_dir_all(&ci_dir).unwrap();
+        let red = serde_json::json!({"branch":"epic/train", "head":"bad-tip", "red_head":"bad-tip",
+            "red_since":"bad-tip", "run_id":"17", "run_attempt":1, "outcome":"FAIL"});
+        std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
+        // The first delivery landed through a single merge; the rest closed.
+        let refspec = format!("{}:refs/heads/epic/train", fixture.shas[0]);
+        git(fixture._repo.path(), &["push", "-q", "origin", &refspec]);
+        let tasks = fixture.core.open_task_store().unwrap();
+        for id in &fixture.ids[1..] {
+            let mut task = tasks.get(id).unwrap();
+            task.status = TaskStatus::Closed;
+            tasks.update(&task).unwrap();
+        }
+        let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "train_merge", "id": "cas-train"
+        }))
+        .unwrap();
+        let result = service.factory(Parameters(request)).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!queue.active(), "{}", queue.render());
+        assert_eq!(queue.outcomes.len(), 3, "{:?}", queue.outcomes);
+        admit(&fixture.root, fixture._repo.path(), "epic/train", Some("cas-later"), None)
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn train_merge_returns_conflict_and_preserves_order_across_resume() {
         let fixture = Fixture::new();
         fixture.start().await;
+        let ci_dir = crate::train_ci::directory(&fixture.root, "cas-train").unwrap();
+        std::fs::create_dir_all(&ci_dir).unwrap();
+        let mut red = serde_json::json!({"branch":"epic/train", "head":"bad-tip", "red_head":"bad-tip",
+            "red_since":"bad-tip", "run_id":"17", "run_attempt":1, "outcome":"FAIL", "failures":["fixture::regression"],
+            "complete_log":"complete-workflow-logs.zip"});
+        std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
+        resume_pending(&fixture.root, "queue-session")
+            .await
+            .unwrap();
+        assert!(
+            !GitOperations::new(fixture._repo.path().to_path_buf())
+                .is_ancestor(&fixture.shas[0], "epic/train"),
+            "a running queue must hold on red CI"
+        );
+        let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+        let request = |override_ci, reason| {
+            serde_json::from_value(serde_json::json!({
+            "action":"train_merge", "id":"cas-train", "supervisor_override":override_ci, "reason":reason,
+        })).unwrap()
+        };
+        let _ = service
+                .factory(Parameters(request(false, None::<&str>)))
+                .await
+                .unwrap_err()
+                .message;
+        let _ = service
+                .factory(Parameters(request(true, None)))
+                .await
+                .unwrap_err()
+                .message;
+        service
+            .factory(Parameters(request(true, Some("merge the reviewed repair"))))
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .core
+                .open_task_store()
+                .unwrap()
+                .get("cas-train")
+                .unwrap()
+                .notes
+                .contains("TRAIN SUITE OVERRIDE")
+        );
         // Exercise the ordinary merge entry, rather than just the reservation
         // helper. Singles cannot overtake the queued first delivery.
         let error = fixture
@@ -701,7 +848,7 @@ mod tests {
             held.waiting
                 .as_deref()
                 .is_some_and(|message| message.contains(&dispatch.id)),
-            "pending review retains the queue position"
+            "the exact red override must allow the queue to reach review"
         );
         let service = crate::mcp::CasService::new(fixture.core.clone(), None);
         let request = serde_json::from_value(serde_json::json!({
@@ -711,6 +858,17 @@ mod tests {
         .unwrap();
         let approval = service.verification(Parameters(request)).await.unwrap();
         assert_ne!(approval.is_error, Some(true), "{approval:?}");
+        // A rerun attempt is not covered by the earlier override. Green then
+        // releases the same durable position without another override.
+        red["run_attempt"] = 2.into();
+        std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
+        resume_pending(&fixture.root, "queue-session")
+            .await
+            .unwrap();
+        assert!(!operations.is_ancestor(&fixture.shas[0], "epic/train"));
+        red["outcome"] = "PASS".into();
+        red.as_object_mut().unwrap().remove("red_since");
+        std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
         // Reconstruct the consumer from durable state, as after daemon restart.
         resume_pending(&fixture.root, "queue-session")
             .await
@@ -761,5 +919,35 @@ mod tests {
             before,
             "completed queue is idempotent"
         );
+    }
+
+    /// A train asks origin about its target once per entry: under the merge
+    /// lock, shared by containment, the target sync, publication and the
+    /// close's integration proof.
+    #[tokio::test]
+    async fn train_merge_reads_origin_once_per_entry() {
+        let fixture = Fixture::build(false);
+        fixture.start().await;
+        let reads = fixture.root.join("origin-reads.log");
+        let counter = fixture.root.join("count-upload-pack");
+        std::fs::write(&counter, format!(
+            "#!/bin/sh\ntr '\\0' ' ' < /proc/$(cut -d' ' -f4 /proc/$PPID/stat)/cmdline >> '{}'\necho >> '{}'\nexec git upload-pack \"$@\"\n",
+            reads.display(), reads.display(),
+        )).unwrap();
+        std::fs::set_permissions(&counter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        git(fixture._repo.path(), &["config", "remote.origin.uploadpack", counter.to_str().unwrap()]);
+
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+
+        let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!queue.active(), "{}", queue.render());
+        let operations = GitOperations::new(fixture._repo.path().to_path_buf());
+        for sha in &fixture.shas {
+            assert!(operations.is_ancestor(sha, "origin/epic/train"), "{:?}", queue.outcomes);
+        }
+        let reads = std::fs::read_to_string(&reads).unwrap_or_default();
+        assert_eq!(reads.lines().count(), fixture.ids.len(), "origin reads:\n{reads}");
     }
 }

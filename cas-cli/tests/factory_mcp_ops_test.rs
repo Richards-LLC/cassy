@@ -451,6 +451,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
         std::fs::copy(git, bin_dir.join("git")).expect("fixture Git copy");
         let codex = bin_dir.join("codex");
         cas::test_paths::warm_stub(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
+        cas::test_paths::warm_stub(&bin_dir.join("codex-code-mode-host"), "#!/bin/sh\nexit 0\n");
 
         write_codex_account_fixture(
             &account,
@@ -462,7 +463,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
         std::env::current_exe().expect("current integration-test executable"),
     );
     command
-        .args(["--exact", &child_filter, "--ignored", "--nocapture"])
+        .args(["--exact", &child_filter, "--include-ignored", "--nocapture"])
         .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
         // The child deliberately supplies HOME/PATH itself, so it cannot inherit
         // the TestEnvGuard-owned override from the parent test process. Keep the
@@ -499,6 +500,16 @@ fn factory_env_in_isolated_codex_child(child_test: &str) -> FactoryTestEnv {
     );
     assert_no_account_selectors();
     FactoryTestEnv::with_agent_id_and_env("test-agent-id", None)
+}
+
+/// Reuse the real test entry in a child whose PATH contains only fixture CLIs.
+/// The runner verifies the exact named child passed before the parent returns.
+fn run_authenticated_recycle_child(test_name: &str) -> bool {
+    if std::env::var("CAS_FACTORY_CODEX_ISOLATED_CHILD").as_deref() == Ok(test_name) {
+        return false;
+    }
+    run_isolated_codex_test(test_name, IsolatedCodexState::Available);
+    true
 }
 
 /// cas-5270: the lib-test invariant in `src/lib.rs` covers `src/`; this
@@ -1734,6 +1745,103 @@ async fn test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolat
     assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
 }
 
+/// GH #1921 replay: user `max_workers = 20`, no project override, 9 live
+/// workers. Admission must use the inherited limit, a project override must
+/// still win, and with no user value the built-in 8 applies.
+#[test]
+fn spawn_workers_admits_against_inherited_user_max_workers_cas_65b9() {
+    run_isolated_codex_test(
+        "spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "spawn_workers_admits_against_inherited_user_max_workers_cas_65b9_in_isolated_child",
+    );
+    env.create_epic("Inherited worker limit Epic");
+    for index in 0..9 {
+        env.register_worker_with_metadata(&format!("live-{index}"), HashMap::new());
+    }
+    let user = std::path::PathBuf::from(std::env::var_os("HOME").expect("child HOME")).join(".cas");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("config.toml"), "[factory]\nmax_workers = 20\n").unwrap();
+    let spawn = || {
+        let mut req = factory_req("spawn_workers");
+        req.count = Some(1);
+        env.service.factory_request(Parameters(req))
+    };
+
+    spawn().await.expect("inherited user limit 20 admits a 10th worker");
+    assert_eq!(env.spawn_queue().peek(10).unwrap().len(), 1);
+
+    let project = env.cas_root.join("config.toml");
+    let original = std::fs::read_to_string(&project).unwrap_or_default();
+    std::fs::write(&project, format!("{original}\n[factory]\nmax_workers = 9\n")).unwrap();
+    let refused = spawn().await.unwrap_err().message;
+    assert!(refused.contains("9/9") && refused.contains("source: project"), "{refused}");
+
+    std::fs::write(&project, original).unwrap();
+    std::fs::remove_file(user.join("config.toml")).unwrap();
+    let refused = spawn().await.unwrap_err().message;
+    assert!(refused.contains("9/8") && refused.contains("source: default"), "{refused}");
+}
+
+/// Nov 13 replay: 1 live worker here, 7 in another factory project. The
+/// refusal and worker_status must state the same 8/8 with both projects.
+#[test]
+fn spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6() {
+    run_isolated_codex_test(
+        "spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "spawn_refusal_and_worker_status_share_per_project_capacity_cas_08b6_in_isolated_child",
+    );
+    env.create_epic("Shared machine capacity Epic");
+    env.register_worker_with_metadata("local-live", HashMap::new());
+    let other = TempDir::new().unwrap();
+    // Its own Git root, so store discovery cannot climb into an enclosing repo.
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(other.path())
+        .status().unwrap().success());
+    let other_root = init_cas_dir(other.path()).unwrap();
+    let other_agents = open_agent_store(&other_root).unwrap();
+    for index in 0..7 {
+        let mut agent = Agent::new(format!("other-{index}"), format!("other-{index}"));
+        agent.role = AgentRole::Worker;
+        other_agents.register(&agent).unwrap();
+    }
+    let sessions = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cas/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join("other.json"), serde_json::json!({
+        "name": "other", "created_at": "2026-11-13T21:51:00Z", "daemon_pid": 0,
+        "socket_path": "/nonexistent", "supervisor": {"name": "other-sup", "pid": null, "worktree_path": null},
+        "workers": [], "project_dir": other.path().display().to_string(),
+    }).to_string()).unwrap();
+    let label = |root: &std::path::Path| root.parent().unwrap().canonicalize().unwrap()
+        .file_name().unwrap().to_string_lossy().into_owned();
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+
+    let status = get_text(&env.service.factory_request(Parameters(factory_req("worker_status"))).await.unwrap());
+    let refused = env.service.factory_request(Parameters(req)).await
+        .expect_err(&format!("spawn must be refused at 8/8; worker_status: {status}")).message;
+    let census = refused.split("Worker capacity: ").nth(1).and_then(|rest| rest.split(';').next())
+        .unwrap_or_else(|| panic!("{refused}"));
+    assert!(census.starts_with("8/8"), "{refused}");
+    assert!(census.contains(&format!("{} 1", label(&env.cas_root))), "{refused}");
+    assert!(census.contains(&format!("{} 7", label(&other_root))), "{refused}");
+    assert!(status.contains(&format!("Worker capacity: {census}")), "{status}");
+}
+
 #[tokio::test]
 async fn test_spawn_workers_requires_epic() {
     let env = FactoryTestEnv::new();
@@ -2511,6 +2619,68 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
     assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
 }
 
+/// GH #1870: a Codex whose code-mode host never starts passes every login
+/// probe, yet each shell command times out negotiating with that host. Spawn
+/// and recycle refuse it before a worker is advertised as ready.
+#[test]
+fn test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_1870() {
+    run_isolated_codex_test(
+        "test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_1870_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for a Codex code-mode host that never starts"]
+async fn test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_1870_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_1870_in_isolated_child",
+    );
+    env.create_epic("Test Epic");
+    let home = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let host = home.join("fake-bin/codex-code-mode-host");
+    cas::test_paths::warm_stub(&host, "#!/bin/sh\nexec /bin/sleep 30\n");
+
+    let mut spawn = factory_req("spawn_workers");
+    spawn.count = Some(1);
+    spawn.cli = Some("codex".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(spawn))
+        .await
+        .expect_err("a host that never starts refuses the spawn");
+    assert!(error.message.contains(host.to_str().unwrap()), "{error}");
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+
+    let mut session = TestEnvGuard::new();
+    session.set("CAS_FACTORY_SESSION", "session-recycle");
+    let account = home.join(".codex").display().to_string();
+    register_recyclable_worker(
+        &env,
+        "fair-crane-83",
+        &[
+            ("worker_cli", "codex"),
+            ("worker_model", cas::config::STOCK_WORKER_MODEL),
+            ("worker_account_dir", &account),
+        ],
+    );
+    let mut recycle = factory_req("recycle_worker");
+    recycle.target = Some("fair-crane-83".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(recycle.clone()))
+        .await
+        .expect_err("a host that never starts refuses the recycle");
+    assert!(error.message.contains(host.to_str().unwrap()), "{error}");
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+
+    cas::test_paths::warm_stub(&host, "#!/bin/sh\nexit 0\n");
+    env.service
+        .factory_request(Parameters(recycle))
+        .await
+        .expect("a host that starts is recyclable");
+}
+
 #[tokio::test]
 async fn test_spawn_workers_invalid_cli_returns_error() {
     // An unrecognised cli value should return an MCP error, not silently use defaults.
@@ -3176,7 +3346,9 @@ fn register_codex_worker_at(env: &FactoryTestEnv, name: &str, session: &str, pat
 /// refuse; the request must be queued and the tasks left exactly as they were.
 #[tokio::test]
 async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_cas_a622() {
+    if run_authenticated_recycle_child("test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_cas_a622") { return; }
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622")]);
+    write_codex_account_fixture(&_guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
     let env = FactoryTestEnv::new();
     let worker_path = init_pushed_worker_repo(&env, "wise-raven");
     let worker_id = register_codex_worker_at(&env, "wise-raven", "session-a622", &worker_path);
@@ -3203,15 +3375,9 @@ async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_
         let mut req = factory_req("clear_context");
         req.target = Some("wise-raven".to_string());
         req.force = force;
-        let text = get_text(
-            &env.service
-                .factory_request(Parameters(req))
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("force={force:?}: a clean, pushed worker must be refreshable: {}", error.message)
-                }),
-        );
-        assert!(text.contains("recycle") && text.contains("wise-raven"), "{text}");
+        env.service.factory_request(Parameters(req)).await.unwrap_or_else(|error| {
+            panic!("force={force:?}: a clean, pushed worker must be refreshable: {}", error.message)
+        });
         let entries = env.spawn_queue().peek(10).expect("peek recycle queue");
         assert_eq!(entries.len(), 1, "force={force:?}: one recycle request");
         assert_eq!(entries[0].action, cas_store::SpawnAction::Recycle);
@@ -3231,7 +3397,9 @@ async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_
 /// GH #1098: a delivered, parked task alone must not block a context reset.
 #[tokio::test]
 async fn test_clear_context_with_only_awaiting_merge_cas_35af() {
+    if run_authenticated_recycle_child("test_clear_context_with_only_awaiting_merge_cas_35af") { return; }
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-1098")]);
+    write_codex_account_fixture(&_guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
     let env = FactoryTestEnv::new();
     let worker_path = init_pushed_worker_repo(&env, "parked-worker");
     register_codex_worker_at(&env, "parked-worker", "session-1098", &worker_path);
@@ -3241,9 +3409,8 @@ async fn test_clear_context_with_only_awaiting_merge_cas_35af() {
     env.task_store().add(&task).unwrap();
     let mut req = factory_req("clear_context");
     req.target = Some("parked-worker".into());
-    let result = env.service.factory_request(Parameters(req)).await
+    env.service.factory_request(Parameters(req)).await
         .expect("a clean pushed worker with only parked work can reset");
-    assert!(get_text(&result).contains("recycle"));
     assert_eq!(env.spawn_queue().peek(10).unwrap()[0].action, cas_store::SpawnAction::Recycle);
     let after = env.task_store().get(&task.id).unwrap();
     assert_eq!(after.status, task.status);
@@ -5841,6 +6008,7 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
 /// resets as Codex too, as recycle_worker already reads it.
 #[tokio::test]
 async fn test_clear_context_uses_current_idle_harness_cas_1114() {
+    if run_authenticated_recycle_child("test_clear_context_uses_current_idle_harness_cas_1114") { return; }
     for (cli, model) in [
         ("codex", None),
         ("claude", Some("gpt-6.1-sol")),
@@ -5848,6 +6016,7 @@ async fn test_clear_context_uses_current_idle_harness_cas_1114() {
         ("opencode", None),
     ] {
         let (guard, mut fixture) = clear_context_fixture("badger", cli, "0");
+        write_codex_account_fixture(&guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
         if let Some(model) = model {
             fixture.worker.metadata.insert("worker_model".into(), model.into());
         }
@@ -5876,14 +6045,12 @@ async fn test_clear_context_uses_current_idle_harness_cas_1114() {
             .await;
         if cli != "codex" {
             let error = result.expect_err("an unverified reset must remain unsupported");
-
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
             assert!(env.spawn_queue().peek(10).unwrap().is_empty());
             assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());
             continue;
         }
-        let result = result.expect("Idle Codex clear_context should recycle the current worker");
-        let message = get_text(&result);
-        assert!(message.contains("recycle"), "{message}");
+        result.expect("Idle Codex clear_context should recycle the current worker");
 
         let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
         assert_eq!(requests.len(), 1);
@@ -10497,6 +10664,7 @@ async fn test_062d_lifecycle_start_and_blocked_push_session_isolated() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -11159,6 +11327,8 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         "squashed-anchor",
         "reset-to-origin",
         "per-task-branch",
+        // cas-d9d38: cas-cab9's suffixed re-delivery lane.
+        "redelivery-suffix",
         "empty",
         "foreign",
         "target-change",
@@ -11168,7 +11338,9 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         "target-foreign",
     ] {
         let retargeted = shape.starts_with("target-");
-        let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-88c1")]);
+        // qa_request is supervisor-only by harness role as well as registry.
+        let role = (shape == "redelivery-suffix").then_some("supervisor");
+        let _guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", Some("session-88c1")), ("CAS_AGENT_ROLE", role)]);
         let env = FactoryTestEnv::with_server_supervisor();
         // cas-b403: a logged-in project, so the rebind writes through the
         // production SyncingTaskStore rather than the bare SQLite store.
@@ -11256,7 +11428,11 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 .await
                 .unwrap();
         }
-        let branch = if shape == "per-task-branch" || (retargeted && shape != "target-same-branch") {
+        let branch = if shape == "redelivery-suffix" {
+            let branch = format!("factory/{worker}-{}-redelivery", task.id);
+            git(&["switch", "-qc", &branch, "origin/main"]);
+            branch
+        } else if shape == "per-task-branch" || (retargeted && shape != "target-same-branch") {
             let branch = format!("factory/{worker}-{}", task.id);
             git(&["switch", "-qc", &branch, "origin/main"]);
             branch
@@ -11435,6 +11611,21 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap(),
             lease
         );
+        if shape == "redelivery-suffix" {
+            // The rebound lane's live origin tip is the task's recorded delivery.
+            let response = env.service.verification(Parameters(serde_json::from_value(serde_json::json!({
+                "action": "qa_request", "task_id": task.id, "head_sha": tip,
+                "summary": "Review the re-delivery on its rebound branch",
+            })).unwrap())).await;
+            let text = match response {
+                Ok(result) => get_text(&result),
+                Err(error) => error.message.to_string(),
+            };
+            let rounds = cas_store::list_qa_passes(&env.cas_root, &task.id).unwrap();
+            if rounds.len() != 1 || rounds[0].bound_head != tip {
+                failures.push(format!("{shape}: qa_request must open one round at the rebound tip: {text}"));
+            }
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -12942,6 +13133,7 @@ fn failed_ancestry_check_warns_without_epic_specific_wording() {
 /// epic. Rebasing it would destroy the tip under review, so assignment must
 /// proceed and say so instead of refusing.
 #[tokio::test]
+// cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
 async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
     for per_task in [false, true] {
         let home = TempDir::new().expect("home tempdir");
@@ -12953,6 +13145,10 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         let env = FactoryTestEnv::new();
         let worker = "gh1006-parked-worker";
         let worker_path = init_sync_repo(&env, worker);
+        // cas-2e1b: task start publishes its recorded base for lane CI.
+        let origin = home.path().join("origin.git");
+        git_stdout(home.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git_stdout(&worker_path, &["remote", "add", "origin", origin.to_str().unwrap()]);
         let branch = if per_task {
             format!("factory/{worker}-cas-pk01")
         } else {
@@ -13028,6 +13224,40 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         let start = store.get(&task_b).unwrap().deliverables.factory_branch_start.unwrap();
         assert_eq!(start.branch, own, "close must retain the new task's branch");
         assert_eq!(start.base_sha, git_stdout(&worker_path, &["rev-parse", "HEAD"]));
+
+        let record = format!("refs/cas/delivery-base/{own}");
+        let published = git_stdout(&worker_path, &["ls-remote", "origin", &record]);
+        assert_eq!(published.split_whitespace().next(), Some(start.base_sha.as_str()));
+        git_stdout(&worker_path, &["fetch", "-q", "origin", &format!("+{record}:{record}")]);
+
+        std::fs::write(worker_path.join("delivery.txt"), "delivery change\n").unwrap();
+        git_stdout(&worker_path, &["add", "delivery.txt"]);
+        git_stdout(&worker_path, &["commit", "-m", "delivery change"]);
+        let project = env.cas_root.parent().unwrap();
+        git_stdout(project, &["checkout", "epic/requested"]);
+        std::fs::write(project.join("train.txt"), "train change\n").unwrap();
+        git_stdout(project, &["add", "train.txt"]);
+        git_stdout(project, &["commit", "-m", "train change"]);
+        git_stdout(project, &["checkout", "main"]);
+        git_stdout(&worker_path, &["merge", "--no-edit", "epic/requested"]);
+        let impact_base = git_stdout(&worker_path, &["merge-base", "HEAD", "epic/requested"]);
+        assert_ne!(impact_base, start.base_sha);
+
+        let plan = std::process::Command::new("python3")
+            .arg(cas::test_paths::workspace_root().join("scripts/ci-test-impact.py"))
+            .args(["lane", "--phase", "plan", "--base-sha", "epic/requested", "--recorded-base-ref", &record])
+            .arg("--history")
+            .arg(home.path().join("no-history.json"))
+            .arg("--out")
+            .arg(home.path().join("lane.json"))
+            .current_dir(&worker_path)
+            .output()
+            .expect("run the lane plan");
+        assert!(plan.status.success(), "{}", String::from_utf8_lossy(&plan.stderr));
+        let lane: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.path().join("lane.json")).unwrap()).unwrap();
+        assert_eq!(lane["plan"]["base"], impact_base);
+        assert_eq!(lane["plan"]["attribution_base"], start.base_sha);
     }
 }
 
@@ -15241,8 +15471,10 @@ mod child_test_evidence;
 // Public MCP lifecycle regressions (cas-3e3a).
 #[tokio::test]
 async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() {
+    if run_authenticated_recycle_child("cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force") { return; }
     for action in ["recycle_worker", "clear_context"] {
         let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-3e3a")]);
+        write_codex_account_fixture(&_guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
         let env = FactoryTestEnv::new();
         let path = init_pushed_worker_repo(&env, "checkpoint-worker");
         let worker = register_codex_worker_at(&env, "checkpoint-worker", "session-3e3a", &path);

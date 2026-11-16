@@ -409,7 +409,7 @@ fn record_task(root: &Path, task: &cas_types::Task) -> Result<usize> {
     };
     let mut event = NewQualityEvent::new(
         format!("task_duration|{}|{}", task.id, at.timestamp()),
-        QualityPayload::CheckRun {
+        QualityPayload::CheckRun { review: None,
             check_id: format!("task_duration:{}", task.task_type),
             stage: CheckStage::Lane,
             outcome: CheckOutcome::Pass,
@@ -451,6 +451,8 @@ pub(crate) fn github_history(root: &Path, limit: usize, since: DateTime<Utc>) ->
     };
     let mut inserted = 0;
     for (workflow, event, stage) in [
+        // cas-0fc56: train suites are dispatched at freeze; push rows are history.
+        ("full-validation.yml", "workflow_dispatch", "train_tip_suite"),
         ("full-validation.yml", "push", "train_tip_suite"),
         ("full-validation.yml", "merge_group", "merge_queue"),
         ("ci.yml", "push", "train_tip_suite"),
@@ -548,7 +550,7 @@ pub(crate) fn record_pipeline_completion(
     }
     let mut row = NewQualityEvent::new(
         format!("github_stage|{stage}|{id}"),
-        QualityPayload::CheckRun {
+        QualityPayload::CheckRun { review: None,
             check_id: stage.into(),
             stage: if stage == "merge_queue" {
                 CheckStage::Queue

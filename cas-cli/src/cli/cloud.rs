@@ -935,6 +935,7 @@ fn cached_team_options(config: &CloudConfig) -> String {
     }
 }
 
+// gate-audit[allow_uuid_passthrough]: selector Resolves an already-declared UUID without a network name lookup; no policy permission is waived.
 fn resolve_team_set_target(
     arg: Option<&str>,
     user_config: &CloudConfig,
@@ -2064,6 +2065,8 @@ pub(crate) fn local_knowledge_counts(cas_root: &Path) -> Option<KnowledgeCounts>
 /// no network call and created no vector storage. Failures are reported and
 /// swallowed — knowledge distribution is an enhancement, and it must never
 /// take down a sync that already moved entries and tasks.
+// gate-audit[input]: Non-factory knowledge distribution warning/status, not a refusal of factory work.
+// gate-audit[emit_output]: selector Prints optional knowledge-sync progress; no factory admission changes.
 fn sync_project_knowledge_with_output(
     cli: &Cli,
     cas_root: &Path,
@@ -2685,7 +2688,23 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
 // QUEUE - View and manage sync queue
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, out: &mut dyn io::Write) -> anyhow::Result<()> {
+/// Read-only fetch of the team's current task and dependency rows. Inherited
+/// user credentials are used in memory only: unlike the purge, a migration
+/// preview must not rewrite `cloud.json`. `None` when the team is unreachable.
+fn fetch_team_rows_for_migration(cas_root: &Path, team: &str, project: &str) -> Option<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+    let mut config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    if let Ok(user) = CloudConfig::load_user() { config.inherit_credentials_from(&user); }
+    let syncer = crate::cloud::CloudSyncer::new_for_project(
+        std::sync::Arc::new(SyncQueue::open_read_only(cas_root).ok()?),
+        config,
+        crate::cloud::CloudSyncerConfig::default(),
+        project.to_string(),
+        cas_root,
+    );
+    Some((syncer.fetch_task_snapshot(Some(team), project).ok()?, syncer.fetch_dependency_snapshot(Some(team), project).ok()?))
+}
+
+fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, team_rows: Option<(&[serde_json::Value], &[serde_json::Value])>, out: &mut dyn io::Write) -> anyhow::Result<()> {
     // Deliberately avoid the inheriting loader: its credential cache writes.
     let config = CloudConfig::load_from_cas_dir(cas_root)?;
     let team = config.active_team_id().ok_or_else(|| anyhow::anyhow!("Link this project first with `cas cloud team set <team>`"))?;
@@ -2693,19 +2712,28 @@ fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, out: 
     anyhow::ensure!(!apply || config.team_only,
         "Apply requires an operator-declared team-only project: `cas config set cloud.team_only true`; preview with `cas cloud queue migrate-to-team`");
     let queue = if apply { SyncQueue::open(cas_root)? } else { SyncQueue::open_read_only(cas_root)? };
-    let rows = queue.migrate_personal_to_team(&team, &project, apply)?;
+    let rows = queue.migrate_personal_to_team_checked(&team, &project, apply, team_rows)?;
     let eligible = rows.iter().filter(|row| row.eligible).count();
+    let echoes = rows.iter().filter(|row| row.reason == "already_on_team_purge_pull_echoes").count();
+    let purge = "cas cloud queue --purge-pull-echoes --dry-run";
     if json {
         serde_json::to_writer(&mut *out, &serde_json::json!({
             "operation":"migrate_to_team", "dry_run":!apply, "team_id":team,
             "project_id":project,"team_only":config.team_only,"eligible":eligible,
             "enqueued":if apply {eligible} else {0}, "personal_retired":0,
+            "already_on_team":echoes, "team_rows_checked":team_rows.is_some(),
+            "purge_pull_echoes": if echoes > 0 { Some(purge) } else { None },
             "rows":rows, "next":SyncQueue::personal_backlog_remedy(config.team_only),
         }))?;
         writeln!(out)?;
     } else {
         writeln!(out, "{}: {eligible} eligible; {} retained", if apply {"Enqueued"} else {"Preview"}, rows.len()-eligible)?;
         writeln!(out, "Personal copies remain until itemized team delivery is acknowledged.")?;
+        if echoes > 0 {
+            writeln!(out, "{echoes} already on team, not enqueued; purge with:")?;
+            writeln!(out, "  {purge}")?;
+        }
+        if team_rows.is_none() { writeln!(out, "Team rows not checked; echoes may show as eligible.")?; }
         for row in &rows {
             // Full identifiers are available in JSON; fixed vocabulary is ASCII.
             let id: String = row.entity_id.chars().take(24).collect();
@@ -2839,7 +2867,12 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
     if let Some(CloudQueueCommand::MigrateToTeam { apply }) = args.command {
         anyhow::ensure!(!args.purge_team_owned && !args.clear && !args.retry && args.prune.is_none(),
             "migrate-to-team cannot be combined with queue maintenance flags");
-        return execute_queue_migrate_to_team(cas_root, cli.json, apply, &mut io::stdout());
+        let team_rows = (|| {
+            let team = CloudConfig::load_from_cas_dir(cas_root).ok()?.active_team_id()?;
+            let project = crate::cloud::resolve_canonical_id_for_sync(cas_root).ok()?;
+            fetch_team_rows_for_migration(cas_root, &team, &project)
+        })();
+        return execute_queue_migrate_to_team(cas_root, cli.json, apply, team_rows.as_ref().map(|(t, d)| (t.as_slice(), d.as_slice())), &mut io::stdout());
     }
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
@@ -4878,6 +4911,7 @@ pub fn ensure_team_project_registration(
     ensure_team_project_registration_with_output(cloud_config, cas_root, cli, force, true)
 }
 
+// gate-audit[force]: selector Explicitly selects registration replacement; remote registration authority remains enforced.
 fn ensure_team_project_registration_with_output(
     cloud_config: &CloudConfig,
     cas_root: &Path,
@@ -6746,10 +6780,10 @@ unknown is not safe for a destructive purge"
 cloud (e.g. {}) — the purge would delete them and the re-pull cannot bring them back",
                 sample.join(", ")
             ),
-            PurgeRefusal::TooManyForeignTasks { foreign, total } => format!(
+            PurgeRefusal::TooManyForeignTasks { foreign, total } => crate::gates::tag("G-145",format!(
                 "refusing to purge foreign tasks: {foreign} of {total} local tasks exceed the 50% \
 safety limit — review project attribution before deleting anything"
-            ),
+            )),
             PurgeRefusal::ProvenRule { count } => format!(
                 "refusing to purge {count} proven rule{} — proven rules are protected even with --force",
                 if *count == 1 { "" } else { "s" }
@@ -6789,6 +6823,10 @@ fn evaluate_purge_hard_guards(
     evaluate_purge_hard_guards_with_options(delete_set, total_tasks, proven_rule_count, false)
 }
 
+// gate[G-145 purge]: Majority-foreign task preservation
+// gate-audit[allow_majority_foreign]: bypass G-145 CLI purge tags the accepted majority-foreign deletion decision.
+// gate-audit[accepted_by]: execute_purge_foreign_with_output
+// gate-audit[forward]: G-145 Pure purge-policy classification; execute_purge_foreign_with_output emits the refusal code.
 fn evaluate_purge_hard_guards_with_options(
     delete_set: &PurgeDeleteSet,
     total_tasks: usize,
@@ -6813,6 +6851,7 @@ fn evaluate_purge_hard_guards_with_options(
     refusals
 }
 
+// gate-audit[allow_majority_foreign]: input Validates the required --yes pairing; this helper accepts no deletion or policy waiver.
 fn validate_majority_foreign_override(
     allow_majority_foreign: bool,
     yes: bool,
@@ -7316,6 +7355,11 @@ fn execute_adopt_unknown(
 /// Execute a foreign-row purge while optionally leaving rendering to the
 /// caller. Doctor embeds this operation in its checks array, so a nested
 /// purge must not print a second JSON document (or a second human report).
+// gate[G-144 purge]: Destructive cloud purge safety state
+// gate-audit[force]: bypass G-144 Explicitly accepts recoverability safety refusals; proven-rule and majority limits remain enforced.
+// gate-audit[allow_majority_foreign]: bypass G-145 Explicitly accepts deleting a measured majority of foreign task rows.
+// gate-audit[bypass_tags]: selector Accumulates already accepted G-144/G-145 response tags; not an independent admission input.
+// gate-audit[emit_output]: selector Controls printing after purge; safety policy always runs.
 fn execute_purge_foreign_with_output(
     args: &CloudPurgeForeignArgs,
     cli: &Cli,
@@ -7605,18 +7649,18 @@ fn execute_purge_foreign_with_output(
             .collect::<Vec<_>>()
             .join("\n");
         if refusals.iter().any(PurgeRefusal::is_hard) {
-            anyhow::bail!(
+            anyhow::bail!(crate::gates::tag("G-144",format!(
                 "Refusing to purge {} local rows:\n{reasons}\n\
 These classifier safety limits cannot be overridden with --force.",
                 delete_set.total()
-            );
+            )));
         }
         if !args.force {
-            anyhow::bail!(
+            anyhow::bail!(crate::gates::tag("G-144",format!(
                 "Refusing to purge {} local rows:\n{reasons}\n\
 Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
                 delete_set.total()
-            );
+            )));
         }
         eprintln!("warning: purging despite safety refusal (--force):\n{reasons}");
     }
@@ -7640,6 +7684,12 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
         deleted
     };
 
+    let mut bypass_tags=String::new();
+    if args.force && !refusals.is_empty(){bypass_tags=crate::gates::override_tag("G-144",bypass_tags);}
+    if args.allow_majority_foreign && tasks_before>0 && delete_set.tasks.len().saturating_mul(2)>tasks_before {
+        bypass_tags=crate::gates::override_tag("G-145",bypass_tags);
+    }
+    if !bypass_tags.is_empty(){crate::gates::facts::observe_cli_output(cas_root,&bypass_tags);eprintln!("{bypass_tags}");}
     // Step 3: Re-pull from cloud with project-scoped filtering
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
@@ -7795,6 +7845,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 /// the safety refusals before deleting anything. A refusal is returned as
 /// `false`, so callers cannot accidentally continue to `cas cloud sync` after
 /// a failed or unsafe preview.
+// gate-audit[apply]: selector Chooses dry-run versus performing the requested repair; execute_purge_foreign_with_output still enforces G-144/G-145.
 pub(crate) fn doctor_purge_foreign(
     cli: &Cli,
     cas_root: &Path,
@@ -8571,21 +8622,21 @@ mod team_cmd_tests {
         let before_config = fs::read(root.join("cloud.json")).unwrap();
         let before_queue = serde_json::to_value(queue.list_all(10).unwrap()).unwrap();
         let mut output = Vec::new();
-        execute_queue_migrate_to_team(&root, true, false, &mut output).unwrap();
+        execute_queue_migrate_to_team(&root, true, false, None, &mut output).unwrap();
         let preview: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(preview["dry_run"], true); assert_eq!(preview["enqueued"], 0);
         assert_eq!(preview["eligible"], 1); assert_eq!(preview["rows"][0]["entity_id"], task_id);
-        let _ = execute_queue_migrate_to_team(&root, true, true, &mut Vec::new()).unwrap_err();
+        let _ = execute_queue_migrate_to_team(&root, true, true, None, &mut Vec::new()).unwrap_err();
         assert_eq!(fs::read(root.join("cloud.json")).unwrap(), before_config);
         assert_eq!(serde_json::to_value(queue.list_all(10).unwrap()).unwrap(), before_queue);
         let mut plain = Vec::new();
-        execute_queue_migrate_to_team(&root, false, false, &mut plain).unwrap();
+        execute_queue_migrate_to_team(&root, false, false, None, &mut plain).unwrap();
         assert!(plain.is_ascii());
         assert!(String::from_utf8(plain).unwrap().lines().all(|l|l.len() <= 80));
         let mut local = crate::config::Config::load(&root).unwrap();
         local.set("cloud.team_only", "true").unwrap(); local.save(&root).unwrap();
         let mut applied = Vec::new();
-        execute_queue_migrate_to_team(&root, true, true, &mut applied).unwrap();
+        execute_queue_migrate_to_team(&root, true, true, None, &mut applied).unwrap();
         let applied: serde_json::Value = serde_json::from_slice(&applied).unwrap();
         assert_eq!(applied["enqueued"], 1); assert_eq!(applied["personal_retired"], 0);
         assert_eq!(queue.personal_row_count().unwrap(), 1);

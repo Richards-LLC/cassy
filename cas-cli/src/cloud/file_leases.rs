@@ -343,6 +343,7 @@ fn collision_advice(relative_path: &str) -> CollisionAdvice {
 }
 
 /// The advisory a worker sees before editing a file another agent holds.
+// gate[N-96 notice]: Shared-file lease advisory
 pub fn collision_note(relative_path: &str, holder: &FileHolder) -> String {
     let (who, handoff) = match holder {
         FileHolder::SameSession(worker) => (

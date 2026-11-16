@@ -57,6 +57,7 @@ impl CasCore {
             }).map(|split| split.id)
     }
 
+    // gate-audit[source_claim_override]: selector Replays task-bound source approval already issued by G-133; immutable source identity is rechecked.
     pub(crate) async fn task_source_admission_for(
         &self,
         task: &crate::types::Task,
@@ -121,6 +122,8 @@ impl CasCore {
 
     /// Refuse a known competing owner before local task or staffing writes.
     /// Missing advisory infrastructure is visible, and never grants Slack authority.
+    // gate-audit[override_reason]: bypass G-133 Live supervisor accepts an actual peer-owned source claim.
+    // gate-audit[accepted_by]: cas_task_create_with_delivery_mode,cas_task_update_with_delivery_mode
     pub(crate) async fn task_source_admission(
         &self,
         source: Option<&str>,
@@ -230,6 +233,7 @@ impl CasCore {
                 _fence: fence,
                 ..Default::default()
             }),
+            // gate[G-133 create]: Source claim held by a peer
             Acquire::PeerHolds(hold) => {
                 let conflict = format!(
                     "SOURCE HELD BY A PEER — {source} is owned by {} until {}",
@@ -257,7 +261,7 @@ impl CasCore {
                         supervisor.id
                     );
                     return Ok(SourceAdmission {
-                        notice,
+                        notice: crate::gates::override_tag("G-133", notice),
                         override_grant: Some(cas_types::SourceClaimOverride {
                             source_key,
                             supervisor_id: supervisor.id,
@@ -268,9 +272,9 @@ impl CasCore {
                 }
                 Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
-                    format!(
+                    crate::gates::tag("G-133", format!(
                         "{conflict}. Ask the owner to hand off using factory action=release_claim resource_id=<GitHub URL>. A deliberate second task requires task create/update supervisor_override=true reason=<agreement>; the decision is recorded on that task."
-                    ),
+                    )),
                 ))
             }
             Acquire::StalePeer(hold) => Ok(unchecked(&format!(

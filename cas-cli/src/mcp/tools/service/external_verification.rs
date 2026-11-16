@@ -271,7 +271,7 @@ impl CasService {
         };
         let evidence_reference = run_id
             .as_deref()
-            .map(|run_id| format!("viktor://run/{run_id}"))
+            .map(|run_id| format!("delegation://run/{run_id}"))
             .unwrap_or_else(|| format!("delegation://receipt/{}", receipt.id));
         let terminal = record_assessment(
             &store,
@@ -454,20 +454,20 @@ mod tests {
         let mut config = ProxyConfig::default();
         config.allowlist = vec![
             ExternalToolConfig {
-                server: "viktor".to_string(),
-                tool: "ask_viktor".to_string(),
+                server: "review".to_string(),
+                tool: "start_review".to_string(),
                 supervisor_only: false,
             },
             ExternalToolConfig {
-                server: "viktor".to_string(),
+                server: "review".to_string(),
                 tool: "wait_for_run".to_string(),
                 supervisor_only: false,
             },
         ];
         config.delegation.external_production_verification =
             Some(ExternalProductionVerificationConfig {
-                server: "viktor".to_string(),
-                start_tool: "ask_viktor".to_string(),
+                server: "review".to_string(),
+                start_tool: "start_review".to_string(),
                 wait_tool: "wait_for_run".to_string(),
                 reserved_amount: 1,
                 max_per_run: 1,
@@ -540,31 +540,31 @@ mod tests {
             .create_atomic(&task, &[], Some(&epic.id), Some(&agent.id))
             .unwrap();
 
-        let fixture = crate::test_paths::crate_root()
-            .join("tests/fixtures/mock_mcp_viktor_server.py");
+        let fixture =
+            crate::test_paths::crate_root().join("tests/fixtures/mock_mcp_review_server.py");
         let upstream = ServerConfig::Stdio {
             command: "python3".to_string(),
             args: vec![fixture.to_string_lossy().into_owned()],
             env: HashMap::new(),
         };
         let mut config = ProxyConfig::default();
-        config.add_server("viktor".to_string(), upstream.clone());
+        config.add_server("review".to_string(), upstream.clone());
         config.allowlist = vec![
             ExternalToolConfig {
-                server: "viktor".to_string(),
-                tool: "ask_viktor".to_string(),
+                server: "review".to_string(),
+                tool: "start_review".to_string(),
                 supervisor_only: false,
             },
             ExternalToolConfig {
-                server: "viktor".to_string(),
+                server: "review".to_string(),
                 tool: "wait_for_run".to_string(),
                 supervisor_only: false,
             },
         ];
         config.delegation.external_production_verification =
             Some(ExternalProductionVerificationConfig {
-                server: "viktor".to_string(),
-                start_tool: "ask_viktor".to_string(),
+                server: "review".to_string(),
+                start_tool: "start_review".to_string(),
                 wait_tool: "wait_for_run".to_string(),
                 reserved_amount: 1,
                 max_per_run: 1,
@@ -574,7 +574,7 @@ mod tests {
             });
         config.save_to(&cas_root.join("proxy.toml")).unwrap();
         let engine =
-            cmcp_core::ProxyEngine::from_configs(HashMap::from([("viktor".to_string(), upstream)]))
+            cmcp_core::ProxyEngine::from_configs(HashMap::from([("review".to_string(), upstream)]))
                 .await
                 .unwrap();
         crate::mcp::server::install_proxy_policy(&engine, &config).await;
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(receipt.terminal_verdict, Some(DelegationVerdict::Pass));
         assert_eq!(
             receipt.evidence_reference.as_deref(),
-            Some("viktor://run/run-fixture-1")
+            Some("delegation://run/run-fixture-1")
         );
     }
 }

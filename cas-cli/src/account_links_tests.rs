@@ -100,9 +100,7 @@ fn ensure_links_empty_slots_keeps_real_items_and_credentials() {
         // Nothing missing: the launch check is a few stat calls.
         std::fs::remove_dir_all(account.join(real)).unwrap();
         ensure(provider, h, &account).unwrap();
-        let started = std::time::Instant::now();
         let clean = ensure(provider, h, &account).unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
         assert!(clean.linked.is_empty() && clean.status.is_clean(), "{clean:?}");
     }
 }

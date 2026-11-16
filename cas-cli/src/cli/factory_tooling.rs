@@ -149,6 +149,7 @@ pub fn setup_factory_tooling(cwd: &Path) -> Result<String> {
     setup_factory_tooling_excluding(cwd, &[])
 }
 
+// gate-audit[CAS_SKIP_FACTORY_TOOLING]: selector Suppresses optional generated factory tooling for disposable QA candidates; does not disable hook policy checks.
 pub(crate) fn setup_factory_tooling_excluding(cwd: &Path, excluded: &[std::path::PathBuf]) -> Result<String> {
     let allowed = |path: &str| !excluded.iter().any(|conflict| cwd.join(path).starts_with(conflict));
     if std::env::var("CAS_SKIP_FACTORY_TOOLING").ok().as_deref() == Some("1") {

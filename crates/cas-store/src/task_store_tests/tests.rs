@@ -35,6 +35,32 @@ fn retarget_parent_and_receipt_commit_or_roll_back_together_cas_4845() {
 }
 
 #[test]
+fn direct_write_receipt_binds_current_revision_cas_a836() {
+    let (temp, store) = create_test_store();
+    let mut task = Task::new("cas-a836".into(), "Peer verdict".into());
+    task.status = TaskStatus::AwaitingMerge;
+    store.add(&task).unwrap();
+    crate::request_changes_for_parked_delivery(temp.path(), &task.id, "reviewer", "retry").unwrap();
+    let returned = store.get(&task.id).unwrap();
+
+    store.record_mutation_receipt(&task.id, "peer-verdict").unwrap();
+    // SyncQueue's recovery classifier consumes this binding. Publishing must
+    // not advance the task revision or rewrite its already committed verdict.
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    let (receipt, current): (i64, i64) = conn.query_row(
+        "SELECT r.revision, t.revision FROM task_mutation_receipts r
+         JOIN task_mutation_revisions t ON t.entity_id = r.entity_id
+         WHERE r.receipt_id = ?1",
+        ["peer-verdict"], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(receipt, current);
+    assert_eq!(serde_json::to_value(store.get(&task.id).unwrap()).unwrap(), serde_json::to_value(&returned).unwrap());
+    assert_eq!(returned.status, TaskStatus::Open);
+    store.delete(&task.id).unwrap();
+    assert!(store.record_mutation_receipt(&task.id, "deleted-verdict").is_err());
+}
+
+#[test]
 fn test_task_crud() {
     let (_temp, store) = create_test_store();
 
@@ -1076,16 +1102,23 @@ fn test_task_door_roundtrips_and_clears_without_changing_status() {
     let (_temp, store) = create_test_store();
     let mut task = Task::new("door-task".into(), "record reversibility".into());
     task.door = Some(cas_types::TaskDoor::OneWay);
+    task.review_dispatch_id = Some("vdispatch-first".into());
     store.add(&task).unwrap();
     assert_eq!(store.get(&task.id).unwrap().door, task.door);
     assert_eq!(store.list(None).unwrap()[0].door, task.door);
+    assert_eq!(store.get(&task.id).unwrap().review_dispatch_id.as_deref(), Some("vdispatch-first"));
+    assert_eq!(store.list_ready().unwrap()[0].review_dispatch_id, task.review_dispatch_id);
     task.door = Some(cas_types::TaskDoor::TwoWay);
+    task.review_dispatch_id = Some("vdispatch-second".into());
     store.update(&task).unwrap();
     assert_eq!(store.get(&task.id).unwrap().door, task.door);
+    assert_eq!(store.get(&task.id).unwrap().review_dispatch_id.as_deref(), Some("vdispatch-second"));
     task.door = None;
+    task.review_dispatch_id = None;
     store.update(&task).unwrap();
     let retrieved = store.get(&task.id).unwrap();
     assert_eq!(retrieved.door, None);
+    assert_eq!(retrieved.review_dispatch_id, None);
     assert_eq!(retrieved.status, TaskStatus::Open);
 }
 

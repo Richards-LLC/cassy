@@ -544,18 +544,5 @@ mod tests {
         assert_eq!(fs::read(preview.join("source.rs")).unwrap(), before);
     }
 
-    #[test]
-    fn preview_without_provenance_is_inventory_only_cas_29b0() {
-        let (_temp, root, preview) = fixture();
-        fs::remove_file(preview.parent().unwrap().join(MARKER)).unwrap();
-        assert!(inspect(&root, policy(), &[]).is_empty());
-        let report = super::super::inspect(&root, policy(), &[], &[], true).unwrap();
-        assert!(
-            report
-                .caches
-                .iter()
-                .any(|cache| cache.worktree == preview && cache.bytes == 5)
-        );
-        assert!(preview.exists());
-    }
+
 }

@@ -225,7 +225,14 @@ pub fn coverage(body: &str) -> Report {
 pub fn parse(body: &str, min_rows: usize) -> Report {
     let mut report = coverage(body);
     let mut declared_schema = false;
-    let cited = regex::Regex::new(r"\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[1-9][0-9]*\b").unwrap();
+    // Match complete path:line tokens, including extensionless sources,
+    // without accepting a URL suffix or a clock time as a citation.
+    let cited = regex::Regex::new(r#"(?x)
+        (?:^|[\s(\[`"'])
+        /?(?:[A-Za-z0-9_.-]+/)*
+        [A-Za-z0-9_.-]*[A-Za-z_][A-Za-z0-9_.-]*:[1-9][0-9]*
+        (?:$|[\s)\]`"',.;])
+    "#).unwrap();
     let user_outcome = regex::Regex::new(r"(?:^|;\s*)(?:visible|terminal|http):\s*[^;\s]").unwrap();
     let mut header = false;
     let mut matrix = false;
@@ -575,6 +582,39 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
     report
 }
 
+/// The task a canonical ledger was written for: the id in its
+/// `# QA evidence: <id>` title, unless its `covers:` header names `task_id`.
+/// `None` when the ledger does not name another task.
+pub fn foreign_owner(body: &str, task_id: &str) -> Option<String> {
+    let owner = body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# QA evidence:"))?
+        .trim();
+    let covered = coverage(body).covers.is_some_and(|ids| ids.iter().any(|id| id == task_id));
+    (!owner.is_empty() && owner != task_id && !covered).then(|| owner.to_string())
+}
+
+/// True when `body` declares itself a canonical QA evidence ledger: the
+/// scaffold's `# QA evidence:` title, a `schema:` header or the matrix header.
+/// Any other `LEDGER.md` (a no-code audit report) is ordinary prose and tables.
+pub fn declares_canonical(body: &str) -> bool {
+    let expected = cells(HEADER);
+    let mut fence = false;
+    body.lines().map(str::trim).any(|line| {
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fence = !fence;
+            return false;
+        }
+        !fence
+            && (DECLARATION_MARKERS.iter().any(|marker| line.starts_with(marker))
+                || (line.contains('|') && cells(line) == expected))
+    })
+}
+
+/// Line prefixes that declare a canonical QA ledger. Task start announces
+/// these same markers, so start and close classify a `LEDGER.md` alike.
+pub const DECLARATION_MARKERS: [&str; 2] = ["# QA evidence:", "schema:"];
+
 pub fn minimum_rows(task: &cas_types::Task) -> usize {
     if task.execution_note.as_deref() != Some("no-code") && !task.demo_statement.trim().is_empty() {
         4
@@ -666,6 +706,11 @@ mod tests {
             ("schema: 2", "Revised hook [source: docs/guide.md:17]", "visible: revised card; readback: row saved", "PASS", None),
             ("schema: 2", "Created [source: docs/api.md:9]", "http: 201 created", "PASS", None),
             ("schema: 2", "Usage [source: docs/cli.md:3]", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage (skills/local-image/scripts/gen:213)", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage [source: README:3]", "terminal: Usage: app", "PASS", None),
+            ("schema: 2", "Usage (skills/local-image/scripts/gen:0)", "terminal: Usage: app", "PASS", Some("expectation_source")),
+            ("schema: 2", "Usage at 12:30", "terminal: Usage: app", "PASS", Some("expectation_source")),
+            ("schema: 2", "Usage https://example.com/scripts/gen.py:213", "terminal: Usage: app", "PASS", Some("expectation_source")),
             ("schema: 2", "Hook [source: docs/guide.md:0]", "visible: revised card", "PASS", Some("expectation_source")),
             ("schema: 3", "Hook", "database: row saved", "PASS", Some("ledger_schema")),
             ("schema: 1", "Legacy expectation", "database: row saved", "PASS", None),

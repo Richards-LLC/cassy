@@ -189,7 +189,10 @@ pub(crate) fn ci_completed_runs(
         .runs_for_sha(&condition.sha)?
         .into_iter()
         .filter(|run| match &condition.workflow {
-            Some(workflow) => &run.name == workflow,
+            Some(workflow) => match workflow.parse::<u64>() {
+                Ok(id) => run.workflow_id == Some(id),
+                Err(_) => &run.name == workflow, // Existing reminders retain name matching.
+            },
             None => run.event != "schedule",
         })
         .collect();
@@ -222,6 +225,7 @@ pub(crate) fn ci_completed_runs(
 
 /// Probe each pending `ci_completed` reminder once; a failed read leaves
 /// the row pending for the next poll.
+// gate[W-50 watchdog]: ci_completed reminder
 pub(crate) fn collect_ci_wakes(
     transport: &impl CiTransport,
     candidates: &[(cas_store::Reminder, CiCompleted)],
@@ -290,6 +294,8 @@ impl CiWake {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CiRun {
     pub id: u64,
+    #[serde(default)]
+    pub workflow_id: Option<u64>,
     #[serde(default)]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
@@ -928,6 +934,16 @@ struct MergeQueuePullRequests {
     nodes: Vec<MergeQueuePullRequest>,
 }
 
+/// How a `ci_completed` workflow selector resolved against the repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkflowSelection {
+    Resolved(u64),
+    Unknown,
+    /// Several workflows match and the commit's runs do not single one out:
+    /// `(workflow id, file path)` per candidate.
+    Ambiguous(Vec<(u64, String)>),
+}
+
 /// Real, bounded `gh` transport.  The watcher intentionally uses the CLI so
 /// it inherits the operator's normal `gh auth`/token setup without persisting
 /// credentials in Cassy.
@@ -951,6 +967,48 @@ impl GhCiTransport {
             gh_binary,
             completed: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Bind a selector to GitHub's workflow identity before persisting a wake.
+    /// A display name shared by several workflows (one repository has three
+    /// named "CI") binds to the one that ran for `sha`, the workflow its run
+    /// reports by that name; otherwise the candidates are returned.
+    pub(crate) fn resolve_workflow(
+        &self,
+        selector: &str,
+        sha: &str,
+    ) -> Result<WorkflowSelection, CiWatchError> {
+        #[derive(Deserialize)]
+        struct Workflow { id: u64, name: String, path: String }
+        #[derive(Deserialize)]
+        struct Page { workflows: Vec<Workflow> }
+        let pages: Vec<Page> = self.gh_json(&[
+            "api".into(), "-X".into(), "GET".into(),
+            format!("repos/{}/actions/workflows", self.repo),
+            "-f".into(), "per_page=100".into(), "--paginate".into(), "--slurp".into(),
+        ])?;
+        let matches: Vec<Workflow> = pages.into_iter().flat_map(|page| page.workflows).filter(|workflow| {
+            if let Ok(id) = selector.parse::<u64>() {
+                workflow.id == id
+            } else {
+                workflow.name == selector || workflow.path == selector
+                    || workflow.path.rsplit('/').next() == Some(selector)
+            }
+        }).collect();
+        if let [workflow] = matches.as_slice() {
+            return Ok(WorkflowSelection::Resolved(workflow.id));
+        }
+        if matches.is_empty() {
+            return Ok(WorkflowSelection::Unknown);
+        }
+        let ran: Vec<u64> = self.runs_for_sha(sha)?.into_iter().filter_map(|run| run.workflow_id).collect();
+        let mut ran_matches = matches.iter().filter(|workflow| ran.contains(&workflow.id));
+        if let (Some(workflow), None) = (ran_matches.next(), ran_matches.next()) {
+            return Ok(WorkflowSelection::Resolved(workflow.id));
+        }
+        Ok(WorkflowSelection::Ambiguous(
+            matches.into_iter().map(|workflow| (workflow.id, workflow.path)).collect(),
+        ))
     }
 
     #[track_caller]
@@ -1346,6 +1404,7 @@ pub(crate) fn read_github(
 /// cas-e369: as above, also tracking supervisor-owned epic PRs. An epic PR
 /// that leaves the queue unmerged wakes the supervisor exactly like a parked
 /// delivery does; it has no worker to instruct.
+// gate[W-44 watchdog]: Merge-queue ejection and repair cycle
 pub(crate) fn collect_tracked_merge_queue_ejections(
     transport: &dyn CiTransport,
     deliveries: &[AwaitingMergeDelivery],
@@ -1463,6 +1522,7 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
 /// deliberately not used as the discriminator; the required job name is the
 /// stable check identity. Matching the current PR head prevents a stale red
 /// run from waking a worker after a corrective push.
+// gate[W-43 watchdog]: PR-lane failure (pr_lane_failed)
 pub(crate) fn collect_pr_lane_failures(
     transport: &dyn CiTransport,
     deliveries: &[AwaitingMergeDelivery],
@@ -1527,6 +1587,7 @@ fn is_branch_ci_verdict(run: &CiRun) -> bool {
 /// green run resolves an older failure, while a newer red run replaces it.  We
 /// deliberately do this before looking up failed jobs/logs so a historical
 /// backlog is both silent and cheap to scan.
+// gate[W-42 watchdog]: CI red-run watcher
 pub(crate) fn collect_failures(
     transport: &dyn CiTransport,
     watched_branches: &BTreeSet<String>,
@@ -1937,6 +1998,7 @@ mod tests {
     fn run_with(branch: &str, head_sha: &str, id: u64, conclusion: Option<&str>) -> CiRun {
         CiRun {
             id,
+            workflow_id: None,
             created_at: None,
             name: "CI".to_string(),
             head_branch: branch.to_string(),

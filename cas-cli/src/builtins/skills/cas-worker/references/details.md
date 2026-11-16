@@ -19,9 +19,12 @@ the assignment brief prints the exact path. Leave historical flat
 ## Requested sync
 
 Checkpoint dirty work as a commit (all worktrees share the stash stack), then
-`git rebase <branch>` onto the exact branch the supervisor named; resolve
-conflicts or escalate the affected files. A frozen parked delivery stays on its
-original branch; a new assignment uses its own per-task branch from the target tip.
+`git rebase <branch>` onto the exact branch the supervisor named only while
+its task is InProgress and has no parked completion receipt or active review.
+A commit-captured anchor or a checkpoint push alone is not a park. Publish the
+rebase with an explicit `--force-with-lease=refs/heads/<branch>:<observed-tip>`;
+a changed remote tip refuses. Merge the target into parked/reviewed work instead.
+A frozen parked delivery stays on its original branch; a new assignment uses its own per-task branch from the target tip.
 
 ## Task fields
 
@@ -74,7 +77,7 @@ In qa.mode=batch (the default) the release's batch QA round at the frozen tip is
 `per_task` is the explicit opt-in. A batch park opens no per-task round. Capture
 visual before/after evidence while building. The supervisor owns the release's one
 epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`.
-In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.
+In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.
 Explicit `qa_request` reviews remain available.
 
 ## Worker peer lane

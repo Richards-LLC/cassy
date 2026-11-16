@@ -27,7 +27,7 @@ fn test_truncate_handles_unicode_boundary() {
 
 #[test]
 fn external_mcp_tool_names_are_preserved_on_every_prompt_surface() {
-    let prompt = "external: mcp__viktor__ask_viktor mcp__viktor-shadow__ask_viktor mcp__foreign__read_file; CAS: mcp__cas__task";
+    let prompt = "external: mcp__review__start_review mcp__review-shadow__start_review mcp__foreign__read_file; CAS: mcp__cas__task";
     for (surface, cas_prefix) in [
         ("Claude", "mcp__cas__"),
         ("Codex", "mcp__cs__"),
@@ -35,11 +35,11 @@ fn external_mcp_tool_names_are_preserved_on_every_prompt_surface() {
     ] {
         let rendered = remap_tool_prefix(prompt, cas_prefix);
         assert!(
-            rendered.contains("mcp__viktor__ask_viktor"),
-            "{surface} prompt must preserve the explicit Viktor tool"
+            rendered.contains("mcp__review__start_review"),
+            "{surface} prompt must preserve the explicit Review tool"
         );
         assert!(
-            rendered.contains("mcp__viktor-shadow__ask_viktor"),
+            rendered.contains("mcp__review-shadow__start_review"),
             "{surface} prompt must preserve a lookalike external server"
         );
         assert!(

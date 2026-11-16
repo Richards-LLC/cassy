@@ -131,7 +131,9 @@ export type WorkWorld = {
 
 /** A session's fleet in the double: agents with a spawn generation, tasks, epics and the focused one (cas-a474). */
 export type FleetWorld = {
-  supervisor_phase?: { event_id: string; kind: string; lifecycle: { id: string; stage: string; phase?: string; started_at?: string; ended_at?: string; outcome?: string }; observed_at: string; stale: boolean };
+  supervisor_phase?: { event_id: string; kind: string; lifecycle: { id: string; stage: string; phase?: string; started_at?: string; ended_at?: string; outcome?: string }; step?: string; last_activity_at?: string; observed_at: string; stale: boolean };
+  /** The session's daemon as status reports it; absent reads as an older daemon. */
+  session?: { is_running: boolean };
   agents: Array<{ harness?: string; model?: string; task_started_at?: string; recent_trail?: readonly { step: string; reference: string; at?: string }[]; id?: string; name: string; status: string; current_task?: string | null; generation: number; role?: string; liveness?: string; latest_activity?: { summary: string; created_at_rfc3339?: string } }>;
   tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string; epic_id?: string | null; delivery_state?: string | null }>;
   epics: Array<{ id: string; title?: string; status?: string; assignee?: string | null; epic_verification_owner?: string | null; progress?: { total: number; merged: number; merges_per_hour: number; last_merged_at?: string | null }; counts?: { open: number; in_progress: number; merged: number } }>;
@@ -547,6 +549,7 @@ export class HubDouble {
   private fleetStatus(fleet: FleetWorld): Record<string, unknown> {
     return {
       supervisor_phase: fleet.supervisor_phase ?? null,
+      ...(fleet.session ? { session: fleet.session } : {}),
       agents: fleet.agents,
       tasks_in_progress: fleet.tasks.filter((task) => task.status !== "open"),
       tasks_ready: fleet.tasks.filter((task) => task.status === "open"),
@@ -919,6 +922,15 @@ export class HubDouble {
 
   hasSocket(session: string): boolean {
     return this.sockets.has(session);
+  }
+
+  /**
+   * Resolves when the double holds the socket a reply to `session` rides. The
+   * header turns Live before a multiplexed page subscribes its session, so a
+   * send right after Live can find no socket (cas-9d2c). Event-driven, no polling.
+   */
+  socketOpen(session: string): Promise<void> {
+    return this.waitFor(() => this.sockets.has(session));
   }
 
   /** Resolves when the next SendMessage arrives. */
@@ -1333,6 +1345,7 @@ export class HubDouble {
     if (this.held.has(session) || !this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
     this.legacySocketOpens.set(session, (this.legacySocketOpens.get(session) ?? 0) + 1);
     this.sockets.set(session, ws);
+    this.observed();
     let bucket = this.sessionSocketsByMachine.get(machineId);
     if (!bucket) this.sessionSocketsByMachine.set(machineId, (bucket = new Set()));
     bucket.add(ws);

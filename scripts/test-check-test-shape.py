@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import importlib.util
+import ast
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import shutil
 
 spec = importlib.util.spec_from_file_location('shape', Path(__file__).with_name('check-test-shape.py'))
 shape = importlib.util.module_from_spec(spec)
@@ -11,6 +13,49 @@ spec.loader.exec_module(shape)
 
 
 class Shapes(unittest.TestCase):
+    def test_declared_rule_ids_are_machine_data_cas_fd48(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / 'scripts'
+            scripts.mkdir()
+            for name in ('check-test-shape.py', 'rust_test_source.py'):
+                shutil.copyfile(Path(__file__).with_name(name), scripts / name)
+            source = root / 'cas-cli/src'
+            source.mkdir(parents=True)
+            gate_marker = 'gate'
+            (source / 'rules.rs').write_text(f'// {gate_marker}[H-29 pre-tool]: Workspace boundary\n' + '''
+fn shell() -> Rule { Rule { rule: "shell.unterminated" } }
+fn other() -> Rule { Rule { rule_id: "fixture.changed" } }
+// Rule { rule: "comment.fake" }
+const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
+#[cfg(test)] mod tests {
+    fn fixture() -> Rule { Rule { rule: "test.fake" } }
+}
+''')
+            target = source / 'rules_tests.rs'
+            target.write_text('')
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.email', 'fixture@example.test')
+            git('config', 'user.name', 'fixture')
+            git('add', '.')
+            git('commit', '-qm', 'declared rule fixture')
+            base = git('rev-parse', 'HEAD')
+            for marker, expected in [
+                ('[shell.unterminated]', 0), ('[fixture.changed]', 0), ('[H-29]', 0),
+                ('[shell.undeclared]', 1), ('[comment.fake]', 1), ('[quoted.fake]', 1),
+                ('[test.fake]', 1), ('[please close the shell]', 1),
+            ]:
+                with self.subTest(marker=marker):
+                    target.write_text('#[test] fn check() { assert!(reason.contains(' + repr(marker).replace("'", '"') + ')); }')
+                    result = subprocess.run(
+                        ['python3', str(scripts / 'check-test-shape.py'),
+                         '--messages-only', '--changed-since', base],
+                        cwd=root, capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
     def test_human_message_assertions_use_behavior_or_machine_ids(self):
         cases = [
             ('test_example.py', 'with self.assertRaisesRegex(ValueError, "please try later"): run()', True),
@@ -114,6 +159,33 @@ fn cli_round_trip() {
             code = source.replace('ASSERTION', extra + '\n    ' + assertion)
             self.assertTrue(shape.message_assertions(code, 'src/cli.rs'))
 
+    def test_escaped_python_caller_payload_cas_8447(self):
+        source = r"""def test_entry(self):
+    name = 'Bank *operating* | R&D'
+    self.chart['accounts'][2]['Name'] = name
+    self.model['entries'][1]['lines'][1]['account'] = name
+    self.save('chart.json', self.chart)
+    markdown = self.run_cli(fmt='markdown')
+    self.assertIn(r'Bank \*operating\* \| R&amp;D', markdown.stdout)
+"""
+        cases = [(source, False),
+                 (source.replace('    self.assertIn(', "    label = 'é'; self.assertIn("), False),
+                 (source + "\ndef test_unrelated(self):\n" + source.splitlines()[-1] + '\n', True),
+                 (source.replace(r'Bank \*operating\* \| R&amp;D', 'Bank *operating* | R&amp;D'), False),
+                 (source.replace(r'Bank \*operating\* \| R&amp;D', r'Unrelated \*account\* \| R&amp;D'), True),
+                 (source.replace("    self.chart['accounts'][2]['Name'] = name\n", '').replace(
+                     "    self.model['entries'][1]['lines'][1]['account'] = name\n", ''), True),
+                 (source.replace('    markdown =', "    name = 'Changed account'\n    markdown ="), True),
+                 (source.replace('self.assertIn(', 'self.assertNotIn('), True),
+                 (source.replace('    self.assertIn(', "    # pin: escaped wording\n    self.assertIn(").replace(
+                     r'Bank \*operating\* \| R&amp;D', 'The entry must preserve all wording in this generated report.'), True)]
+        for code, rejected in cases:
+            line = max(i for i, text in enumerate(code.splitlines(), 1) if 'self.assert' in text)
+            for changed in [None, {line}]:
+                with self.subTest(code=code, changed=changed):
+                    self.assertEqual(bool(shape.message_assertions(code, 'tests/test_entry.py', changed)), rejected)
+                    self.assertEqual(bool(shape.lint_text_pins(code, 'tests/test_entry.py', changed_lines=changed)), rejected)
+
     def hits(self, code, path='src/lib.rs'):
         return shape.lint(code, path)
 
@@ -143,6 +215,42 @@ fn cli_round_trip() {
 
     def test_source_read_and_position_check(self):
         self.assertTrue(self.hits('#[test] fn t() { let p = root.join("lib.rs"); let s = fs::read_to_string(&p).unwrap(); assert!(s.find("a") < s.find("b")); }'))
+
+    def test_fixture_source_mutation_cas_81b7(self):
+        # cas-28c5 at 094294333a: editing compiled inputs of a disposable repo
+        # drives Git/MCP behavior; no assertion inspects the fixture's text.
+        source = r'''#[tokio::test]
+async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    let lib = repo.join("crates/widget/src/lib.rs");
+    let body = std::fs::read_to_string(&lib).unwrap();
+    std::fs::write(lib, format!("{body}pub const SYNCED: bool = true;\n")).unwrap();
+    git(repo, &["add", "crates/widget/src/lib.rs"]);
+    git(repo, &["commit", "-q", "-m", "target update"]);
+    let output = call(&f.worker, request).await;
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    assert_eq!(f.task().deliverables.factory_branch_anchor, Some(tip));
+}
+'''
+        write = 'std::fs::write(lib, format!("{body}pub const SYNCED: bool = true;\\n")).unwrap();'
+        cases = [
+            (source, False),
+            (source.replace('std::fs::', 'fs::'), False),
+            (source.replace('{body}pub const', '{}pub const').replace('true;\\n"))', 'true;\\n", body))'), False),
+            ('#[cfg(test)] mod tests {' + source + 'fn other() { let body = unrelated(); } }', False),
+            (source.replace(write, 'std::fs::write(lib, format!("{}", body == expected_source)).unwrap();'), True),
+            (source.replace('std::fs::write(lib,', 'std::fs::write(repo.join("expected.rs"),'), True),
+            (source.replace(write, 'assert!(body.contains("SYNCED")); ' + write), True),
+            (source.replace(write, write + ' assert!(body.contains("SYNCED"));'), True),
+            (source.replace(write, write + ' assert_eq!(body, expected_source);'), True),
+            (source.replace(write, write + ' let alias = body; assert_eq!(alias, expected_source);'), True),
+            (source.replace('std::fs::read_to_string(&lib).unwrap()', 'include_str!("lib.rs")'), True),
+        ]
+        for code, rejected in cases:
+            with self.subTest(code=code):
+                self.assertEqual(bool(self.hits(code)), rejected)
 
     def test_test_only_helper_and_integration_helper(self):
         code = 'fn helper() { let s = include_str!("lib.rs"); }'
@@ -224,6 +332,82 @@ def test_workflow_command():
         for code, expected in cases:
             with self.subTest(code=code):
                 self.assertEqual(len(self.hits(code, 'tests/test_receipt.py')), expected)
+
+    def test_recorded_cli_argv_is_data_without_waiving_prose_cas_632b(self):
+        payload = '["task", "notes", "--notes", "Record config get qa.registry.enforce exactly, including the supplied caller argument boundaries."]'
+        cases = [
+            ('self.assertIn(["config", "get", "qa.registry.enforce"], '
+             '[shlex.split(line) for line in calls.read_text().splitlines()])', False),
+            (f'self.assertEqual(shlex.split(calls.read_text()), {payload})', False),
+            (f'assert {payload} == shlex.split(calls.read_text())', False),
+            (f'self.assertNotIn({payload}, [shlex.split(line) for line in calls.read_text().splitlines()])', False),
+            ('self.assertIn("config get qa.registry.enforce", calls.read_text())', True),
+            (f'self.assertEqual(calls.read_text().split(), {payload})', True),
+            (f'self.assertEqual(shlex.split(result.stderr), {payload})', True),
+            (f'self.assertEqual(render(shlex.split(calls.read_text())), {payload})', True),
+            (f'self.assertIn({payload}, [shlex.split(line.strip()) for line in calls.read_text().splitlines()])', True),
+            (f'label = "é"; self.assertEqual(shlex.split(calls.read_text()), {payload})', False),
+            (f'self.assertEqual(shlex.split(calls.read_text()), {payload}); '
+             'self.assertEqual(calls.read_text(), "Please retry the operation later.")', True),
+            ('# pin: recorded caller payload\n'
+             'self.assertEqual(calls.read_text(), "Please retry the operation later.")', True),
+        ]
+        for code, rejected in cases:
+            line = len(code.splitlines())
+            for changed in [None, {line}]:
+                with self.subTest(code=code, changed=changed):
+                    hits = (shape.lint_text_pins(code, 'tests/test_calls.py', changed_lines=changed)
+                            + shape.message_assertions(code, 'tests/test_calls.py', changed))
+                    self.assertEqual(bool(hits), rejected, hits)
+
+    def test_recorded_cli_argv_local_binding_cas_632b(self):
+        payload = '["task", "notes", "--notes", "Record config get qa.registry.enforce exactly, including the supplied caller argument boundaries."]'
+        records = '[shlex.split(line) for line in calls.read_text().splitlines()]'
+        cases = [
+            (f'argv = {records}\nself.assertIn({payload}, argv)', False),
+            (f'argv = {records}\nassert {payload} not in argv', False),
+            (f'captured = shlex.split(calls.read_text())\nself.assertEqual(captured, {payload})', False),
+            (f'argv = {records}\nargv = generated\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nself.assertIn({payload}, argv)\nargv = generated', False),
+            (f'argv = {records}\nself.assertIn({payload}, argv)\nargv = {records}\nself.assertNotIn({payload}, argv)', False),
+            (f'self.assertIn({payload}, argv)\nargv = {records}', True),
+            (f'argv = render({records})\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nself.assertIn({payload}, other)', True),
+            (f'def nested():\n    argv = {records}\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\ndef nested():\n    self.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nfor argv in generated:\n    pass\nself.assertIn({payload}, argv)', True),
+        ]
+        for body, rejected in cases:
+            code = 'def test_recording():\n' + '\n'.join('    ' + line for line in body.splitlines())
+            for changed in [None, set(range(1, len(code.splitlines()) + 1))]:
+                with self.subTest(body=body, changed=changed):
+                    hits = (shape.lint_text_pins(code, 'tests/test_calls.py', changed_lines=changed)
+                            + shape.message_assertions(code, 'tests/test_calls.py', changed))
+                    self.assertEqual(bool(hits), rejected, hits)
+
+        # Exercise the motivating file itself, including both assignments to
+        # argv in one function, with its actual assertion lines marked changed.
+        path = Path(__file__).with_name('test-fast-release-rows.py')
+        source = path.read_text()
+        function = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.FunctionDef)
+                        and node.name == 'test_legacy_registry_uses_explicit_policy_without_a_store')
+        literals = [node.args[0] for node in ast.walk(function)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ('assertIn', 'assertNotIn') and node.args
+                    and isinstance(node.args[0], ast.List)
+                    and all(isinstance(item, ast.Constant) for item in node.args[0].elts)
+                    and [ast.literal_eval(item) for item in node.args[0].elts]
+                    == ['config', 'get', 'qa.registry.enforce']]
+        self.assertEqual(len(literals), 2)
+        changed = {node.lineno for node in literals}
+        ranges = list(shape.python_runtime_inputs(source))
+        lines = source.splitlines(keepends=True)
+        for operand in literals:
+            for literal in operand.elts:
+                offset = sum(map(len, lines[:literal.lineno - 1])) + literal.col_offset
+                self.assertTrue(any(left <= offset < right for left, right in ranges))
+        self.assertFalse(shape.lint_text_pins(source, str(path), changed_lines=changed))
+        self.assertFalse(shape.message_assertions(source, str(path), changed))
 
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [

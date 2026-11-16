@@ -124,8 +124,8 @@ pub(crate) fn verification_timeout_message(
              verification was cleared and its lease released.\n\n\
              Recovery:\n\
              1. Retry {retry} to mint a verification dispatch.\n\
-             2. Re-dispatch the task-verifier for task {task_id}, or record the verdict \
-             directly: `{supervisor_prefix}verification action=add task_id={task_id} \
+             2. Cassy's daemon-owned verifier takes that dispatch; for mechanical evidence \
+             a registered supervisor may instead record the verdict directly: `{supervisor_prefix}verification action=add task_id={task_id} \
              dispatch_id=<dispatch id named in that response> verification_type={verification_type} \
              status=approved summary=\"...\"`\n\
              3. Then retry {retry}."
@@ -243,7 +243,7 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
 pub(crate) const WORKER_CLOSE_OWNERSHIP: &str = "Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.";
 
 pub(crate) const SUPERVISOR_CLOSE_RECOVERY: &str = "Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.";
-pub(crate) const BATCH_CLOSE_RULE: &str = "In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.";
+pub(crate) const BATCH_CLOSE_RULE: &str = "In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.";
 
 /// cas-5597: a successful park answers the worker as done. It keeps the
 /// `MERGE REQUIRED` head that runtime detectors read, drops the merge/retry
@@ -275,16 +275,20 @@ pub(crate) struct WorkerDispatchGate<'a> {
     pub context: &'a str,
     /// Whether Cassy queued the supervisor handoff itself.
     pub handoff_queued: bool,
+    /// Whether Cassy's daemon-owned verifier is already reviewing it.
+    pub automatic_review: bool,
     pub coord: &'a str,
     pub close_reason_hint: &'a str,
 }
 
 pub(crate) fn worker_dispatch_gate(gate: &WorkerDispatchGate<'_>) -> String {
-    let WorkerDispatchGate { task_id: id, dispatch_id, owner, deadline, context, handoff_queued, coord, close_reason_hint } = gate;
+    let WorkerDispatchGate { task_id: id, dispatch_id, owner, deadline, context, handoff_queued, automatic_review, coord, close_reason_hint } = gate;
     // cas-8725: when CAS queued the handoff itself, say so — a worker told to
     // "forward this" sends a second, free-text copy that cannot wake anyone.
     // cas-abb0: remaining close recovery belongs to the supervisor.
-    let handoff = if *handoff_queued {
+    let handoff = if *automatic_review {
+        format!("Cassy's daemon-owned verifier is reviewing this dispatch; send no {coord} message for it.")
+    } else if *handoff_queued {
         format!("Cassy has already delivered this dispatch to the supervisor; send no {coord} message for it.")
     } else {
         format!(
@@ -309,7 +313,7 @@ pub(crate) fn worker_pending_dispatch(task_id: &str, dispatch_id: &str, owner: &
 
 /// `task action=start` on a clean parked delivery.
 pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> String {
-    format!(
+    crate::gates::tag("G-05", format!(
         "Cannot start a task that is awaiting merge. The worker work is \
          already complete; wait for the supervisor to merge the factory branch; \
          the merge verdict closes the task. If review fails — the supervisor \
@@ -321,21 +325,15 @@ pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> 
          merge-queue conflict dequeue or a moved target), its assigned worker \
          can start task {task_id} to resolve it; Cassy measures the local target and \
          origin/<target>, so `git fetch origin <target>` first if that ref is stale."
-    )
+    ))
 }
 
 /// cas-5597: the one completion signal a worker sends (or does not).
 pub(crate) const PARK_SIGNAL: &str = "The park relay is the completion signal; send merge_request=true only for local_merge.";
 
-/// A Tier 1 delivery in release QA mode, waiting on the one verdict that names it.
-pub(crate) fn waiting_for_release_verdict(task_id: &str, tip: &str, supervisor_prefix: &str) -> String {
-    format!(
-        "⏳ WAITING FOR RELEASE VERDICT\n\nTask {task_id} is Tier 1 in qa.mode=batch at {tip}, so it opens no verifier of its own. The supervisor runs one review of the assembled tip, publishes a report naming every delivery, then records {supervisor_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>. {BATCH_CLOSE_RULE}"
-    )
-}
-
 /// VERIFICATION REQUIRED as a factory worker sees it: the gate line with its
 /// handoff, and nothing addressed to the verifier or the supervisor.
+// gate[N-17 notice]: VERIFICATION REQUIRED gate text
 pub(crate) fn worker_verification_required(task_id: &str, gate_line: &str) -> String {
     format!("⚠️ VERIFICATION REQUIRED\n\nTask {task_id} requires verification before closing.\n\n{gate_line}")
 }
@@ -380,22 +378,22 @@ pub(crate) fn verifier_spawn_denial(
     let (problem, next) = match denial {
         VerifierSpawnDenial::RegistryUnavailable => (
             "Cannot establish verifier authority: the agent registry is unavailable.".to_string(),
-            "run `cas doctor`, then retry the spawn.".to_string(),
+            format!("run `cas doctor`, then retry {close}."),
         ),
         VerifierSpawnDenial::UnregisteredParent => (
             "Cannot establish verifier authority for an anonymous or orphan session.".to_string(),
             format!(
                 "run `{prefix}coordination action=whoami`; only a registered session that owns \
-                 the task's dispatch can spawn its verifier."
+                 the task's dispatch can recover it with {close}."
             ),
         ),
         VerifierSpawnDenial::InactiveParent => (
             "Cannot establish verifier authority for an inactive parent session.".to_string(),
-            format!("run `{prefix}coordination action=heartbeat`, then retry the spawn."),
+            format!("run `{prefix}coordination action=heartbeat`, then retry {close}."),
         ),
         VerifierSpawnDenial::MissingPrompt | VerifierSpawnDenial::NoUniqueTask => (
             "The task-verifier prompt must name exactly one existing Cassy task ID.".to_string(),
-            "retry the spawn with prompt=\"Verify task <task-id>\".".to_string(),
+            format!("retry {close}; Cassy's daemon-owned verifier takes its dispatch."),
         ),
         VerifierSpawnDenial::DispatchOwnedElsewhere => (
             "This task's verification dispatch is owned by another registered session.".to_string(),
@@ -414,32 +412,32 @@ pub(crate) fn verifier_spawn_denial(
         VerifierSpawnDenial::NoActiveDispatch => (
             "No active verification dispatch owned by this session exists for this task."
                 .to_string(),
-            format!("retry {close} to mint the dispatch, then spawn the verifier."),
+            format!("retry {close} to mint the dispatch; Cassy's daemon-owned verifier reviews it."),
         ),
         VerifierSpawnDenial::DispatchUnreadable => (
             "Could not validate task-scoped verification dispatch authority.".to_string(),
-            "retry the spawn; if it fails again, run `cas doctor`.".to_string(),
+            format!("retry {close}; if it fails again, run `cas doctor`."),
         ),
         VerifierSpawnDenial::MissingToolUseId => (
             "Cannot establish verifier authority: PreToolUse did not provide tool_use_id \
              correlation."
                 .to_string(),
-            "retry the spawn from the Task/Agent tool of the session that owns the dispatch."
-                .to_string(),
+            format!("retry {close}; Cassy's daemon-owned verifier reviews the dispatch."),
         ),
         VerifierSpawnDenial::SpawnAlreadyPending => (
             "Another task-verifier spawn is already awaiting SubagentStart for this parent."
                 .to_string(),
-            "wait for it to bind, or retry after the failed spawn is cleaned up or expires."
-                .to_string(),
+            format!("spawn no other verifier; retry {close} after it settles."),
         ),
         VerifierSpawnDenial::HandoffFailed => (
             "Could not establish server-side task-verifier authority for the exact dispatch."
                 .to_string(),
-            format!("retry {close} to refresh the dispatch, then spawn the verifier again."),
+            format!("retry {close} to refresh the dispatch; Cassy's daemon-owned verifier reviews it."),
         ),
     };
-    format!("{problem} Next: {next}")
+    format!(
+        "{problem} Next: {next} A native Task/Agent verifier shares the parent's MCP caller and cannot record a verdict."
+    )
 }
 
 #[cfg(test)]

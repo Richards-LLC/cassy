@@ -181,7 +181,7 @@ impl CasCore {
         Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(
-                "Child registration rejected: this MCP connection already belongs to another caller. Native Codex children share the parent's caller and cannot authenticate an independent review by registering. Use Cassy's daemon-owned verifier for candidate reviews or a separately registered verifier bound to the exact dispatch. The existing caller is unchanged.",
+                "Child registration rejected: this MCP connection already belongs to another caller. Native Task/Agent subagents and Codex children share the parent's caller and cannot authenticate an independent review by registering. Cassy's daemon-owned verifier reviews close and candidate dispatches; retry the close or merge that opened the dispatch to start it. The existing caller is unchanged.",
             ),
             data: Some(serde_json::json!({
                 "rule_id": "shared_mcp_child_identity",
@@ -927,8 +927,16 @@ impl CasCore {
         // session. A SessionStart rebind after /clear is newer, so an MCP
         // reconnect keeps it instead of pointing the row (and the Commander
         // mirror) back at the pre-clear transcript.
+        // The previous MCP's end deletes the row, so a reconnect that finds
+        // none resumes the session that row had been rebound to (GH #1829).
         agent.cc_session_id = (source == AgentIdentitySource::ServerInternal)
-            .then(|| agent_store.get(&canonical_id).ok().and_then(|prior| prior.cc_session_id))
+            .then(|| match agent_store.get(&canonical_id) {
+                Ok(prior) => prior.cc_session_id,
+                Err(_) => cas_store::SqliteAgentStore::open(&self.cas_root)
+                    .and_then(|store| store.retired_cc_session_id(&canonical_id))
+                    .ok()
+                    .flatten(),
+            })
             .flatten()
             .or_else(|| Some(session_id.clone()));
 

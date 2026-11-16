@@ -31,8 +31,13 @@ task or reopens it with findings. Every poll spends your context.
 
 Cassy may already have started a queued successor on its task branch; continue
 it. Checkpoint dirty work before changing history. Merge the target
-into a branch with a recorded parked delivery anchor; never rebase it. Elsewhere,
-checkpoint before an allowed `git rebase <target>`. A fresh task whose checkout
+into a parked delivery or a branch with an active completion receipt or review;
+never rebase those reviewed tips. A pushed checkpoint on an owned InProgress
+task is not a park, even when commit-time branch/anchor capture exists. After an
+explicit supervisor sync request, checkpoint first, rebase onto its named target,
+and push with `--force-with-lease=refs/heads/<branch>:<observed-checkpoint-sha>`.
+H-40 checks task ownership, recorded start ancestry and delivery/review state;
+unknown state refuses. A stale lease refuses rather than replacing a peer push. A fresh task whose checkout
 still holds an earlier PR starts on `factory/<name>-<task>` from the target and
 leaves the earlier branch alone.
 

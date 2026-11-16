@@ -45,11 +45,6 @@ pub enum SupervisorActionableState {
         branches: Vec<(String, String, String)>,
         merged_close_blocked: Vec<MergedCloseBlockedTask>,
     },
-    /// cas-f497: everything left in the epic is merged and waiting for the one
-    /// release verdict. One prompt for the release, never one per delivery.
-    ReleaseVerdictDue {
-        task_ids: Vec<String>,
-    },
     AssignReadyWork {
         task_ids: Vec<String>,
         idle_workers: Vec<String>,
@@ -96,11 +91,6 @@ impl SupervisorActionableState {
                 );
                 format!("{unmerged}\n{merged}")
             }
-            Self::ReleaseVerdictDue { task_ids } => format!(
-                "Drive to the exit: {} merged Tier 1 deliveries wait for one release verdict: {}. Review the assembled tip, publish a report naming each one, then record `{tool_prefix}verification action=batch_receipt verification_type=release task_ids=[...] staging_sha=<tip> ledger_artifact_id=<id> ledger_path=<path> ledger_author=<reviewer>`. The verdict closes them.",
-                task_ids.len(),
-                task_ids.join(", "),
-            ),
             Self::AssignReadyWork {
                 task_ids,
                 idle_workers,
@@ -189,9 +179,6 @@ impl SupervisorActionableState {
     fn wake_once_key(&self) -> Option<String> {
         match self {
             Self::MergeCloseBlocked { .. } => self.merged_close_blocked_relay_key(),
-            Self::ReleaseVerdictDue { task_ids } => {
-                Some(format!("release-verdict-due:{}", task_ids.join("|")))
-            }
             _ => None,
         }
     }
@@ -315,6 +302,7 @@ impl SupervisorStallTracker {
         });
         let assignment_recent = assignment_key.as_ref()
             .is_some_and(|key| self.recent_assignment_wakes.contains_key(key));
+        // gate[W-03 watchdog]: Director SupervisorStalled actionable-idle wake
         let wake = if condition_true && silent && current_secs >= stall_after_secs.max(60) && refire_due && !merged_state_repeated && !assignment_recent {
             self.last_wake_at = Some(now);
             self.last_merged_close_blocked_key = merged_key;
@@ -384,9 +372,7 @@ pub enum DeliveryHold {
     /// not arrived for this task yet. Unknown is never "merge now"; the next
     /// snapshot carries the evidence.
     EvidencePending,
-    /// cas-f497: merged and correctly waiting for the one release verdict, which
-    /// closes it. Not a close failure and not a per-delivery supervisor action.
-    ReleaseVerdictPending,
+
 }
 
 /// cas-03ff: whether the supervisor has a pending external reminder waiting
@@ -897,7 +883,6 @@ fn focused_epic_exit_state(
 ) -> Option<SupervisorActionableState> {
     let mut mergeable = Vec::new();
     let mut merged_close_blocked = Vec::new();
-    let mut awaiting_verdict = Vec::new();
     for task in data.in_progress_tasks.iter().filter(|task| {
         task.epic.as_deref() == Some(epic_id) && task.status == TaskStatus::AwaitingMerge
     }) {
@@ -914,13 +899,8 @@ fn focused_epic_exit_state(
         if held_workers.contains(worker) {
             continue;
         }
-        match classify_delivery_hold(task, worker) {
-            Some(DeliveryHold::ReleaseVerdictPending) => {
-                awaiting_verdict.push(task.id.clone());
-                continue;
-            }
-            Some(_) => continue,
-            None => {}
+        if classify_delivery_hold(task, worker).is_some() {
+            continue;
         }
         let (branch, tip) = resolve_delivery(task, worker);
         // cas-03ff: the supervisor is waiting on this delivery's CI or on it
@@ -973,14 +953,6 @@ fn focused_epic_exit_state(
         .chain(data.in_progress_tasks.iter())
         .filter(|task| task.epic.as_deref() == Some(epic_id))
         .count();
-    // The verdict reviews the assembled tip, so it is due only when nothing else
-    // in the epic can still change that tip.
-    if !awaiting_verdict.is_empty() && active_children == awaiting_verdict.len() {
-        awaiting_verdict.sort();
-        return Some(SupervisorActionableState::ReleaseVerdictDue {
-            task_ids: awaiting_verdict,
-        });
-    }
     if active_children == 0
         && data.epic_closed_counts.get(epic_id).copied().unwrap_or(0) > 0
     {
@@ -2024,6 +1996,7 @@ impl DirectorEventDetector {
     /// Called only for stale checkpoint/activity candidates. An unset cas_root
     /// or failed worker resolution retains the checkpoint fallback; a resolved
     /// worker without transcript telemetry does not confirm a stall.
+    // gate-audit[transcript_age_override]: selector Deterministic test telemetry input; production callers never set it and no work is authorized.
     fn transcript_confirms_stall(
         &mut self, worker: &str, task: &str, now: DateTime<chrono::Utc>, threshold: u64,
     ) -> Option<bool> {
@@ -2362,6 +2335,7 @@ impl DirectorEventDetector {
                             .map(|t| t.title.clone())
                             .unwrap_or_default();
 
+                        // gate[N-02 notice]: TaskAssigned worker notice
                         events.push(DirectorEvent::TaskAssigned {
                             task_id: task_id.clone(),
                             task_title,
@@ -2444,6 +2418,7 @@ impl DirectorEventDetector {
         for (task_id, task_title, worker) in completed_task_ids {
             // Mark before pushing so the borrow on self.last_state is released.
             self.task_completed_announced.insert(task_id.clone());
+            // gate[N-03 notice]: TaskCompleted, lease regressed to Open
             events.push(DirectorEvent::TaskCompleted {
                 task_id,
                 task_title,
@@ -2551,6 +2526,7 @@ impl DirectorEventDetector {
                     },
                 );
 
+                // gate[W-07 watchdog]: WorkerStalled assigned-but-unstarted
                 if has_fresh_heartbeat && elapsed.is_some()
                     && self.transcript_confirms_stall(&resolved_name, &task.id, now_utc, effective_threshold) == Some(true) {
                     if !self.stall_escalated.contains(&agent.id)
@@ -2581,6 +2557,7 @@ impl DirectorEventDetector {
                 self.stall_escalated.remove(&agent.id);
             }
 
+            // gate[W-08 watchdog]: WorkerStalled released-never-woken
             if let Some(task_id) = &agent.current_task
                 && let Some(quiet_secs) =
                     self.released_worker_unwoken(data, agent, &resolved_name, now_utc)
@@ -2717,6 +2694,7 @@ impl DirectorEventDetector {
                                 effective_threshold,
                             )
                         {
+                            // gate[W-05 watchdog]: WorkerStalled nudge to the worker
                             // First detection in this streak: auto-nudge the
                             // worker (re-inject the task prompt) before
                             // paging the supervisor — a single re-poke often
@@ -2739,6 +2717,7 @@ impl DirectorEventDetector {
                                 effective_threshold,
                             )
                         {
+                            // gate[W-06 watchdog]: WorkerStalled escalation to the supervisor (worker_stalled)
                             // Still stalled after the nudge — escalate to
                             // the supervisor.
                             self.stall_episode_start.insert(resolved_name.clone(), effective_activity_ts.unwrap());
@@ -2881,6 +2860,7 @@ impl DirectorEventDetector {
                 .or_insert(0);
             *count += 1;
 
+            // gate[W-09 watchdog]: WorkerIdle with no task (worker_idle)
             if *count >= IDLE_CONSECUTIVE_TICKS && !self.idle_already_emitted.contains(&agent.id) {
                 // `resolved_name` is guaranteed to be a worker (supervisor
                 // was excluded above). Re-use it directly — no re-resolve.
@@ -2933,6 +2913,7 @@ impl DirectorEventDetector {
                     })
                     .unwrap_or(false);
                 if self.is_factory_agent_name(&agent_name) && !already_contacted {
+                    // gate[N-04 notice]: AgentRegistered, worker awaiting first task
                     events.push(DirectorEvent::AgentRegistered {
                         agent_id: agent_id.clone(),
                         agent_name,
@@ -3074,6 +3055,7 @@ impl DirectorEventDetector {
                     .unwrap_or(0);
 
                 if current_count == 0 && previous_count > 0 {
+                    // gate[N-05 notice]: EpicAllSubtasksClosed, epic ready to close
                     events.push(DirectorEvent::EpicAllSubtasksClosed {
                         epic_id: epic.id.clone(),
                         epic_title: epic.title.clone(),

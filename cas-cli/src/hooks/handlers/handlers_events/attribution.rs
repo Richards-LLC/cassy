@@ -567,7 +567,7 @@ fn persist_active_task_factory_anchor(
     if !is_own_delivery_branch(&task, &agent.name, &branch) {
         return false;
     }
-    task.deliverables.factory_branch_anchor = Some(commit_hash.to_string());
+    task.deliverables.mint_or_append(commit_hash);
     // Keep the first recorded branch as the recovery pointer if this task is
     // later reassigned. The current assignee still identifies the live branch,
     // while overwriting this receipt would make prior stranded work invisible.

@@ -4581,7 +4581,23 @@ impl SqlitePromptQueueStore {
                 return Ok(());
             }
         }
-        let next = Self::resolve_stage_transition(current, proposed, prompt_id)?;
+        // GH #1829: an authenticated device receipt that arrives after the
+        // operator-lane deadline proves delivery, so it supersedes that expiry.
+        let late_receipt = current == DeliveryStage::Abandoned
+            && proposed == DeliveryStage::Delivered
+            && tx
+                .query_row(
+                    "SELECT last_pending_reason = 'operator_delivery_expired'
+                     FROM prompt_queue WHERE id = ?",
+                    params![prompt_id],
+                    |row| row.get::<_, Option<bool>>(0),
+                )?
+                .unwrap_or(false);
+        let next = if late_receipt {
+            proposed
+        } else {
+            Self::resolve_stage_transition(current, proposed, prompt_id)?
+        };
         let now = Utc::now().to_rfc3339();
 
         // Full Delivered always stamps transport_delivered_at; partial never does.
@@ -7150,6 +7166,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult> {
         require_operator_session(target, factory_session)?;
+        // gate[N-33 notice]: Operator delivery outbox routing
         if target.trim().eq_ignore_ascii_case("operator") {
             return self
                 .record_operator_turn(&OperatorTurn {

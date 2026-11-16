@@ -18,6 +18,65 @@ pub(crate) struct StartedDelivery {
     pub commits: Vec<String>,
 }
 
+/// A supervisor's typed cancellation link transfers the predecessor's
+/// recorded delivery, never arbitrary commits merely sharing a worker lane.
+/// The current target is excluded so already-integrated history stays upstream.
+pub(super) fn include_superseded_commits(
+    repo: &Path,
+    task: &Task,
+    identity: &mut TaskCommitIdentity,
+) -> Result<(), String> {
+    let Some(target) = task.deliverables.work_target.as_ref() else { return Ok(()) };
+    let Ok((primary, _)) = crate::mcp::tools::core::task::repo_context::git_layout(repo) else { return Ok(()) };
+    let root = primary.join(".cas");
+    if !root.join("cas.db").is_file()
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(&primary, &target.repo_selector)
+    {
+        return Ok(());
+    }
+    let store = crate::store::open_task_store_local(&root).map_err(|error| error.to_string())?;
+    let target = preferred_diff_target_ref_for_delivery(repo, &target.target_branch, task.delivery_mode);
+    for previous in store.list(Some(TaskStatus::Cancelled)).map_err(|error| error.to_string())? {
+        if previous.id == task.id || !matches!(
+            &previous.terminal_outcome,
+            Some(cas_types::TaskTerminalOutcome::Cancelled { superseded_by: Some(id) }) if id == &task.id
+        ) || !previous.deliverables.work_target.as_ref().is_some_and(|target|
+            crate::mcp::tools::core::task::repo_context::repo_answers_to(&primary, &target.repo_selector))
+        {
+            continue;
+        }
+        let receipt = cas_store::get_latest_worker_delivery(&root, &previous.id)
+            .ok().flatten().map(|(receipt, _)| receipt.commit_sha);
+        let previous_identity = task_commit_identity(&previous, receipt);
+        for anchor in &previous_identity.known_commits {
+            if !matches!(anchor.len(), 40 | 64) || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || resolve_branch_sha(repo, anchor).is_none()
+            {
+                continue;
+            }
+            let history = git_text(repo, &[
+                "log", "-n", "201", "--format=%H%x1f%B%x1e", anchor, &format!("^{target}"), "--",
+            ]).ok_or_else(|| format!("Cannot inspect superseded delivery {} at {anchor}.", previous.id))?;
+            let records: Vec<_> = history.split('\u{1e}').map(str::trim)
+                .filter(|record| !record.is_empty()).collect();
+            if records.len() > 200 {
+                return Err(format!("Superseded delivery {} exceeds the 200-commit attribution limit.", previous.id));
+            }
+            for record in records {
+                let Some((sha, message)) = record.split_once('\u{1f}') else { continue };
+                if (previous_identity.matches_known_commit(sha)
+                    || (!subject_claims_another_task(message, &previous_identity)
+                        && message_references_task(message, &previous.id)))
+                    && !identity.superseded_commits.iter().any(|known| known == sha)
+                {
+                    identity.superseded_commits.push(sha.to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// cas-ead0: only the graph after the server's start boundary belongs to
 /// this cycle. Old subjects before it cannot claim the new task's lane.
 /// Bound all probes to immutable SHAs and refuse foreign descendants before
@@ -125,7 +184,8 @@ pub(super) fn validated_started_delivery(
     // cas-985f: a worker told to merge the released trunk into its lane brings
     // in other tasks' already-released commits. They are upstream, not foreign.
     let upstream = released_trunk_ref(repo, &target).map(|reference| format!("^{reference}"));
-    let identity = task_commit_identity(task, None);
+    let mut identity = task_commit_identity(task, None);
+    include_superseded_commits(repo, task, &mut identity)?;
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
@@ -206,7 +266,7 @@ pub(super) fn validated_started_delivery(
         {
             continue;
         }
-        if subject_claims_another_task(message, &identity) {
+        if claims_another_task(repo, sha, message, &identity) {
             // cas-aa98: a no-code task delivers no commits, so the worker's
             // next task committing on this lane is that task's work, not
             // foreign work inside this delivery.
@@ -215,7 +275,9 @@ pub(super) fn validated_started_delivery(
             }
             let subject = message.trim().lines().next().unwrap_or("");
             return Err(refuse(&format!(
-                "foreign commit {sha} ({subject}) follows the base"
+                "foreign commit {sha} ({subject}) follows the base. If this task should deliver \
+                 that commit, a supervisor adopts it with `task action=request_changes` and \
+                 `merge_source={sha}` in the reason"
             )));
         }
         if on_lane
@@ -360,7 +422,22 @@ pub(super) fn commit_claims_another_task(
 ) -> bool {
     is_safe_git_refname(commit)
         && git_text(repo, &["log", "-1", "--format=%B", commit, "--"])
-            .is_some_and(|message| subject_claims_another_task(&message, identity))
+            .is_some_and(|message| claims_another_task(repo, commit, &message, identity))
+}
+
+/// The subject rule yields to explicit authority: a cancelled predecessor's
+/// successor link (cas-aacc) or a supervisor's `merge_source` grant. cas-8144:
+/// the grant adopts the named commit and its ancestors whether they arrived by
+/// merge or by fast-forward, so a lane moved onto a commit whose subject names
+/// another task needs no rewrite or cancel-and-recreate. Descendants of the
+/// grant are still judged by the subject rule.
+fn claims_another_task(repo: &Path, sha: &str, message: &str, identity: &TaskCommitIdentity) -> bool {
+    !identity.matches_superseded_commit(sha)
+        && subject_claims_another_task(message, identity)
+        && !identity
+            .approved_merge_parents
+            .iter()
+            .any(|source| git_commit_is_ancestor(repo, sha, source))
 }
 
 /// GH #1133, #1151: whether every commit `lane` holds beyond `target` (and
@@ -413,7 +490,7 @@ pub(super) fn lane_commits_all_claim_other_tasks(
     Some(records.iter().all(|record| {
         record
             .split_once('\u{1f}')
-            .is_some_and(|(_, message)| subject_claims_another_task(message, identity))
+            .is_some_and(|(sha, message)| claims_another_task(repo, sha, message, identity))
     }))
 }
 
@@ -446,7 +523,7 @@ pub(crate) fn branch_task_claims(
         let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
             continue;
         };
-        if subject_claims_another_task(message, identity) {
+        if claims_another_task(repo, sha, message, identity) {
             if foreign.is_none() {
                 let subject = message.trim().lines().next().unwrap_or("").trim();
                 foreign = Some(format!("{} {subject}", &sha[..sha.len().min(9)]));
@@ -687,8 +764,14 @@ fn task_delivery_selection(
             }
             let sha = fields[0].to_string();
             let message = fields[3];
+            let parents: Vec<&str> = fields[1].split_whitespace().collect();
             let owned = (historical_receipt && sha == tip)
                 || window.identity.matches_known_commit(&sha)
+                // A replacement can merge the recorded earlier delivery before
+                // its latest lease. That merge still carries this task's work,
+                // even when its subject only names the worker branches. Keep
+                // the target-sync and foreign-import checks below (cas-2a80).
+                || parents.iter().skip(1).any(|parent| window.identity.matches_known_commit(parent))
                 || (window
                     .identity
                     .task_id
@@ -708,7 +791,6 @@ fn task_delivery_selection(
                                     && id.bytes().all(|byte| byte.is_ascii_hexdigit())
                             })
                     });
-            let parents: Vec<&str> = fields[1].split_whitespace().collect();
             Some(Commit {
                 sha,
                 parent: parents.first().copied().unwrap_or("").into(),
@@ -1287,6 +1369,131 @@ pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<
     }
 }
 
+/// Measure a parked delivery using only its own first-parent content commits.
+/// Target-sync imports never become delivery obligations.
+pub(super) fn first_parent_delivery_content_presence(
+    repo: &Path, base: &str, anchor: &str, shipped: &str, target: &str, task_id: &str,
+) -> Option<DeliveryContentPresence> {
+    if [base, anchor, shipped, target].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
+    let history = git_text(repo, &["rev-list", "--first-parent", "--no-merges", "--reverse", &format!("{base}..{anchor}")])?;
+    let mut identity = TaskCommitIdentity {
+        task_id: Some(task_id.into()), start_base: Some(base.into()), ..Default::default()
+    };
+    let (mut commits, mut foreign) = (Vec::new(), Vec::new());
+    for commit in history.lines().filter(|commit| !commit.is_empty()) {
+        let message = git_text(repo, &["show", "-s", "--format=%B", commit])?;
+        let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
+        let paths = git_text(repo, &["diff", "--name-only", &parent, commit, "--", ".", ":(exclude).cas", ":(exclude).cas/**"])?;
+        if paths.is_empty() { continue; }
+        if subject_claims_another_task(&message, &identity) { foreign.push(commit.to_string()); }
+        else { commits.push(commit.to_string()); }
+    }
+    if commits.is_empty() { return None; }
+    identity.known_commits = commits.clone();
+    identity.known_commits.push(anchor.into());
+    let mut paths = Vec::new();
+    for commit in &commits {
+        append_unique(&mut paths, changed_paths(repo, &format!("{commit}^1"), commit)?);
+    }
+    if anchor != shipped {
+        // The squash has the exact source snapshot. Limit its comparison to
+        // the task's own first-parent paths, excluding target-sync imports.
+        return Some(super::delivery_content_presence_on_target_for_paths(
+            repo, shipped, target, Some(&paths), false, &[task_id], Some(base),
+        ));
+    }
+    // cas-2430: a path only the task's own commits touched is judged by its
+    // net base..anchor effect, so a change the task itself reverted or
+    // rewrote is not a loss. A path a target-sync merge also touched keeps
+    // the per-commit proof: the sync's content is never the task's own
+    // restoration (a delivery reverted on the target and re-merged by a
+    // sync stays reverted).
+    let mut synced = Vec::new();
+    // A first-parent commit naming another task is not the task's own work
+    // either, so the paths it touches keep the per-commit proof too.
+    let merges = git_text(repo, &["rev-list", "--first-parent", "--merges", &format!("{base}..{anchor}")])?;
+    for merge in merges.lines().filter(|merge| !merge.is_empty()).chain(foreign.iter().map(String::as_str)) {
+        append_unique(&mut synced, changed_paths(repo, &format!("{merge}^1"), merge)?
+            .into_iter().filter(|path| paths.contains(path)).collect());
+    }
+    let net = changed_paths(repo, base, anchor)?;
+    let clean: Vec<String> = paths.iter()
+        .filter(|path| !synced.contains(path) && net.contains(path)).cloned().collect();
+    let synced_commits: Vec<String> = commits.iter().filter(|commit| {
+        changed_paths(repo, &format!("{commit}^1"), commit)
+            .is_some_and(|changed| changed.iter().any(|path| synced.contains(path)))
+    }).cloned().collect();
+    let clean_proof = (!clean.is_empty()).then(|| super::delivery_content_presence_on_target_for_paths(
+        repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
+    ));
+    let synced_proof = if synced_commits.is_empty() { None } else {
+        Some(merge_tip_content_presence_selected(
+            repo, target, anchor, None, &identity, None, Some((synced_commits.as_slice(), synced.as_slice())),
+        )?)
+    };
+    judge_presence(clean_proof, synced_proof, |paths| {
+        paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
+            && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
+    })
+}
+
+/// Join the net proof of the task's own-only paths with the per-commit proof
+/// of synced paths. An unfinished proof leaves the delivery unknown. cas-baf7,
+/// shared by close and release: rebuilt bundle output among the own-only
+/// paths is not a revert when every other delivered path, and some source,
+/// is proven (`rebuilt_bundles_only`).
+fn judge_presence(
+    clean: Option<DeliveryContentPresence>,
+    synced: Option<DeliveryContentPresence>,
+    rebuilt_bundles_only: impl Fn(&[String]) -> bool,
+) -> Option<DeliveryContentPresence> {
+    if clean.is_none() && synced.is_none() { return None; }
+    if let Some(DeliveryContentPresence::Unknown { reason }) = [&clean, &synced].into_iter().flatten()
+        .find(|proof| matches!(proof, DeliveryContentPresence::Unknown { .. }))
+    {
+        return Some(DeliveryContentPresence::Unknown { reason: reason.clone() });
+    }
+    // Per-commit drops of synced paths always stand.
+    let clean = match clean {
+        Some(DeliveryContentPresence::Dropped { paths }) if rebuilt_bundles_only(&paths) => {
+            Some(DeliveryContentPresence::Present { paths: Vec::new() })
+        }
+        other => other,
+    };
+    Some(combine_presence(clean.into_iter().chain(synced).collect()))
+}
+
+fn changed_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", from, to, "--"])?;
+    Some(changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect())
+}
+
+/// Any drop wins, then any unknown, then any supersession.
+fn combine_presence(proofs: Vec<DeliveryContentPresence>) -> DeliveryContentPresence {
+    let (mut present, mut superseded, mut commits, mut dropped, mut unknown) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None);
+    for proof in proofs {
+        match proof {
+            DeliveryContentPresence::Present { paths } => append_unique(&mut present, paths),
+            DeliveryContentPresence::Superseded { paths, commits: by } => {
+                append_unique(&mut superseded, paths);
+                append_unique(&mut commits, by);
+            }
+            DeliveryContentPresence::Dropped { paths } => append_unique(&mut dropped, paths),
+            DeliveryContentPresence::Unknown { reason } => { unknown.get_or_insert(reason); }
+        }
+    }
+    if !dropped.is_empty() {
+        DeliveryContentPresence::Dropped { paths: dropped }
+    } else if let Some(reason) = unknown {
+        DeliveryContentPresence::Unknown { reason }
+    } else if !superseded.is_empty() {
+        DeliveryContentPresence::Superseded { paths: superseded, commits }
+    } else {
+        DeliveryContentPresence::Present { paths: present }
+    }
+}
+
 /// Prove a merge or empty checkpoint delivery from the task's attributed
 /// content commits rather than from the tip itself.
 ///
@@ -1310,6 +1517,20 @@ pub(super) fn merge_tip_content_presence(
     identity: &TaskCommitIdentity,
     validated_receipt: Option<&str>,
 ) -> Option<DeliveryContentPresence> {
+    merge_tip_content_presence_selected(repo, target, merge_tip, window, identity, validated_receipt, None)
+}
+
+fn merge_tip_content_presence_selected(
+    repo: &Path,
+    target: &str,
+    merge_tip: &str,
+    window: Option<&TaskCommitReceiptWindow>,
+    identity: &TaskCommitIdentity,
+    validated_receipt: Option<&str>,
+    explicit: Option<(&[String], &[String])>,
+) -> Option<DeliveryContentPresence> {
+    let explicit_commits = explicit.map(|(commits, _)| commits);
+    let explicit_paths = explicit.map(|(_, paths)| paths);
     let full_tip = git_text(repo, &["rev-parse", &format!("{merge_tip}^{{commit}}")])?;
     let merge_tip = full_tip.as_str();
     let has_work_window = window.is_some();
@@ -1330,8 +1551,13 @@ pub(super) fn merge_tip_content_presence(
         .filter(|commit| !commit.is_empty())
         .collect::<Vec<_>>();
 
-    let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
-    let mut commits = attributed_content_commits(repo, merge_tip, window, identity, &ranges)?;
+    let mut commits = match explicit_commits {
+        Some(commits) => commits.to_vec(),
+        None => {
+            let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
+            attributed_content_commits(repo, merge_tip, window, identity, &ranges)?
+        }
+    };
 
     if let Some(receipt) = validated_receipt
         .and_then(|receipt| super::resolve_task_commit_receipt_sha(repo, receipt).ok())
@@ -1551,8 +1777,8 @@ pub(super) fn merge_tip_content_presence(
             // minified bundle through every rebuilt epic commit. In the
             // cas-cee5 replay this loop spent 295 bundle diffs and 77 blames
             // reaching the same "dropped" the rule decides on.
-            let artifact =
-                super::artifact_left_to_regeneration_rule(repo, merge_tip, &path, &carries_source);
+            let artifact = explicit_commits.is_none()
+                && super::artifact_left_to_regeneration_rule(repo, merge_tip, &path, &carries_source);
             plan.push((resolution.clone(), path, artifact));
         }
     }
@@ -1595,6 +1821,14 @@ pub(super) fn merge_tip_content_presence(
     let measurements: Vec<_> = commits
         .iter()
         .map(|commit| {
+            if explicit_commits.is_some() {
+                // Measure this selected commit directly; the public task seam
+                // may expand the release anchor into this same delivery range.
+                return super::delivery_content_presence_on_target_for_paths(
+                    repo, commit, target, explicit_paths, false,
+                    &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(), None,
+                );
+            }
             super::delivery_content_presence_in_parent_leaving_artifacts(
                 repo,
                 commit,
@@ -1615,7 +1849,7 @@ pub(super) fn merge_tip_content_presence(
             }
             DeliveryContentPresence::Dropped { paths } => {
                 for path in paths {
-                    if super::artifact_left_to_regeneration_rule(
+                    if explicit_commits.is_none() && super::artifact_left_to_regeneration_rule(
                         repo,
                         merge_tip,
                         &path,
@@ -2215,6 +2449,17 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+
+    #[test]
+    fn rebuilt_bundle_drop_never_hides_an_unfinished_proof_cas_2430() {
+        let bundle = DeliveryContentPresence::Dropped { paths: vec!["hub-web/dist/app.js".into()] };
+        let unknown = DeliveryContentPresence::Unknown { reason: "ancestry not proven".into() };
+        assert!(matches!(
+            judge_presence(Some(bundle), Some(unknown), |_| true),
+            Some(DeliveryContentPresence::Unknown { .. })
+        ));
+    }
+
     fn git(repo: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .args(args)
@@ -2257,6 +2502,7 @@ mod tests {
             task_floor: floor,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-taskb".into()),
@@ -3489,6 +3735,7 @@ mod tests {
             &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
         );
         let identity = TaskCommitIdentity {
+            superseded_commits: Vec::new(),
             approved_merge_parents: Vec::new(),
             start_base: None,
             task_id: Some("cas-taskb".into()),
@@ -3886,6 +4133,75 @@ mod tests {
         let unmerged = commit(p, "other.rs", "unmerged\n", "another change");
         let _ = validate_task_commit_receipt(p, &unmerged, "main", &scope)
                 .unwrap_err();
+    }
+
+    /// cas-aacc: a cancelled delivery explicitly assigned to a successor can
+    /// be re-landed unchanged, including a port whose subject names its sources.
+    #[test]
+    fn cancelled_delivery_transfers_only_to_its_successor_cas_aacc() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for (status, successor, repo_selector, foreign_tail, integrated, allowed) in [
+            (TaskStatus::Cancelled, Some("cas-bbbb"), "project:handoff", false, false, true),
+            (TaskStatus::Cancelled, Some("cas-bbbc"), "project:handoff", false, false, false),
+            (TaskStatus::Cancelled, Some("cas-bbbb5"), "project:handoff", false, false, false),
+            (TaskStatus::Cancelled, None, "project:handoff", false, false, false),
+            (TaskStatus::Open, Some("cas-bbbb"), "project:handoff", false, false, false),
+            (TaskStatus::Cancelled, Some("cas-bbbb"), "project:another", false, false, false),
+            (TaskStatus::Cancelled, Some("cas-bbbb"), "project:handoff", true, false, false),
+            (TaskStatus::Cancelled, Some("cas-bbbb"), "project:handoff", false, true, true),
+        ] {
+            let dir = fixture();
+            let repo = dir.path();
+            std::fs::write(repo.join(".git/info/exclude"), ".cas/\n").unwrap();
+            let root = crate::store::init_cas_dir(repo).unwrap();
+            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='handoff'\n").unwrap();
+            let base = git(repo, &["rev-parse", "main"]);
+            let first = commit(repo, "one.rs", "first\n", "fix(cas-aaaa): repair part one");
+            let port = commit(repo, "two.rs", "second\n", "fix: reviewed port (cas-cccc)");
+            git(repo, &["update-ref", "refs/remotes/origin/factory/old-cas-aaaa", &port]);
+            if integrated {
+                git(repo, &["branch", "-f", "main", &port]);
+            }
+            git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+            let target = cas_types::WorkTarget { repo_selector: "project:handoff".into(), target_branch: "main".into() };
+            let mut previous = Task::new("cas-aaaa".into(), "Cancelled repair".into());
+            previous.status = status;
+            previous.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Cancelled {
+                superseded_by: successor.map(str::to_owned),
+            });
+            previous.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: repo_selector.into(), target_branch: "main".into() });
+            previous.deliverables.historical_factory_branch_anchors = vec![port.clone()];
+            // The incident's invalid old start boundary cannot be reused as
+            // the successor's boundary or prevent exact-receipt handoff.
+            previous.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target.clone(), assignee: "old".into(), branch: "factory/old-cas-aaaa".into(), base_sha: "a".repeat(40),
+            });
+            let store = crate::store::open_task_store(&root).unwrap();
+            store.add(&previous).unwrap();
+            let previous_snapshot = serde_json::to_value(store.get(&previous.id).unwrap()).unwrap();
+            let mut task = Task::new("cas-bbbb".into(), "Successor repair".into());
+            task.assignee = Some("worker".into());
+            task.deliverables.work_target = Some(target.clone());
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target, assignee: "worker".into(), branch: "factory/worker".into(),
+                base_sha: if integrated { port.clone() } else { base },
+            });
+            if status == TaskStatus::Open {
+                task.deliverables.factory_branch_anchor = Some(port.clone());
+            }
+            if foreign_tail {
+                commit(repo, "foreign.rs", "foreign\n", "fix(cas-dddd): unrelated delivery");
+            } else if integrated {
+                commit(repo, "new.rs", "new\n", "fix(cas-bbbb): new successor work");
+            }
+            let result = task_commit_identity_in_repo(repo, &task, None);
+            assert_eq!(result.is_ok(), allowed, "{status:?}, {successor:?}, foreign={foreign_tail}, integrated={integrated}: {result:?}");
+            if let Ok(identity) = result {
+                assert_eq!(identity.matches_known_commit(&first), !integrated);
+                assert_eq!(identity.matches_known_commit(&port), !integrated);
+            }
+            assert_eq!(serde_json::to_value(store.get(&previous.id).unwrap()).unwrap(), previous_snapshot);
+        }
     }
 
     #[tokio::test]

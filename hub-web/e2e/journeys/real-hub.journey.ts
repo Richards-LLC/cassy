@@ -636,6 +636,16 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
 test("HUB-J24 real hub composer decodes a local raster preview and stores the picked file", {
   annotation: { type: "journey-part", description: "real hub, parsed fixture config, host file readback" },
 }, async ({ page }, info) => {
+  let welcomes = 0;
+  const commandPhases: string[] = [];
+  page.on("websocket", socket => socket.on("framereceived", ({ payload }) => {
+    try {
+      const frame = JSON.parse(typeof payload === "string" ? payload : payload.toString());
+      if (frame.message?.Welcome) welcomes++;
+      const receipt = frame.message?.SupervisorCommandReceipt?.receipt;
+      if (receipt?.command === "compact") commandPhases.push(receipt.phase);
+    } catch { /* Pane output is not a control receipt. */ }
+  }));
   try {
     const fixture = await command("reset", { messageControl: true, nativeCommander: true });
     const pairing = new URL(fixture!.pairUrl);
@@ -664,6 +674,22 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
       expect(await page.evaluate(() => (window as unknown as { chapterStyleViolations: string[] }).chapterStyleViolations)).toEqual([]);
     }
     await expect(page.getByText("M01 Choose a local image", { exact: true })).toHaveCount(0);
+    // cas-ef33: the same pairing must remain authoritative after a real
+    // daemon adoption rotates its private hub relay token.
+    const before = welcomes;
+    await command("daemon-reexec");
+    const adopted = performance.now();
+    await expect.poll(() => welcomes).toBeGreaterThan(before);
+    // Adopted panes retain the native startup injection grace (pane/mod.rs:1424).
+    // Browser fake time cannot advance the native process's admission grace.
+    await expect.poll(() => performance.now() - adopted).toBeGreaterThan(5_000);
+    await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live");
+    const input = page.getByRole("textbox", { name: "Your message", exact: true });
+    await input.fill("/compact");
+    await input.press("Enter");
+    // The inert provider does not implement compaction. The daemon receipt
+    // proves the authenticated slash request reached its native input path.
+    await expect.poll(() => commandPhases.includes("submitted")).toBe(true);
     const imageViolations: string[] = [];
     await page.exposeFunction("recordImageViolation", (blocked: string) => imageViolations.push(blocked));
     await page.evaluate(() => document.addEventListener("securitypolicyviolation", event => {
@@ -694,7 +720,19 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
     const stored = await response.json();
     expect(await readFile(stored.path)).toEqual(bytes);
     await expect(page.locator(".composer-uploads")).toBeHidden();
+    const sentImage = page.locator('.thread [role="log"]').getByRole("img", { name: "fixture.png", exact: true });
+    await expect.poll(() => sentImage.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1);
+    await expect.poll(async () => (await command("messages"))[0]?.operator_verified).toBe(1);
+    await expect.poll(async () => Boolean((await command("messages"))[0]?.transport_delivered_at)).toBe(true);
+    const delivered = (await command("messages"))[0];
+    expect(Date.parse(delivered.transport_delivered_at) - Date.parse(delivered.created_at)).toBeLessThan(10_000);
+    await writeFile(info.outputPath("verified-message.json"), JSON.stringify({ delivered, commandPhases }, null, 2));
+    await page.screenshot({ path: info.outputPath("verified-upload-after-reexec.png") });
+    await page.reload();
+    await expect.poll(() => sentImage.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1);
+    expect(imageViolations).toEqual([]);
   } finally {
+    await writeFile(info.outputPath("native-evidence.json"), JSON.stringify(await command("evidence").catch(() => null), null, 2));
     if (RECORD) await page.screencast.stop().catch(() => undefined);
     await command("cleanup");
   }

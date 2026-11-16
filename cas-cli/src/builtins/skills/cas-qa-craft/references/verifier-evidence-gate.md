@@ -154,7 +154,7 @@ Compare the change with how neighbouring code solves the same problem (`rg '<pat
 - design: follows existing patterns, sensible abstraction;
 - performance: redundant work, unbounded queries, quadratic loops;
 - security: input validation at boundaries, parameterized queries, secrets;
-- tests: each added or changed test against cas-tdd's `Test hygiene` rules: a CSS or source-text assertion, a real sleep or back-off, a dynamic `import()` in a test body, expensive setup rebuilt per test, a screenshot-only end-to-end test, or a deleted "duplicate" that another test imports.
+- tests: review the caller-visible promise and independent expectations with cas-writing-tests; browser specs follow cas-playwright-tests and its accessibility-property exception. Preserve module/mock isolation imports and immutable shared setup. Flag unasserted screenshots, source/style pins, missing required coverage and deletion of imported helpers.
 
 Rate each finding `critical`, `high`, `medium`, or `low`; name its file and line, observed effect, evidence, and exact fix. Apply the verdict threshold below. Skip style nits and sweeping refactors.
 

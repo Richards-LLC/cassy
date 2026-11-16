@@ -434,3 +434,5 @@ changed final content fail containment. The original delivery anchor remains
 its QA and executable-hook identity; batch containment supplies merge evidence
 and does not waive review or evidence requirements. `commit_receipt=<squash>`
 can name the integration explicitly; it does not require `supervisor_override`.
+
+A cas-allow-skip reason satisfies the static marker check only. It does not approve missing required coverage or focused tests in CI. Follow cas-playwright-tests: required fixture/auth/data failures fail, declared optional lanes report their reasons, and the merged full report rejects unexplained skips or zero required execution. CI forbidOnly remains independent.

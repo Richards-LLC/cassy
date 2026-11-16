@@ -1,6 +1,12 @@
-//! One cut per train input snapshot. The same leased owner serves manual
-//! and automatic entry; corrected notes or repaired task inputs re-arm it.
-//! The queue is the only full proof. Cassy never writes or posts notes.
+//! One cut per train input snapshot (cas-e060). The daemon's cut-notice poll
+//! calls [`attempt`] for each uncut train with a published tip, unfrozen or
+//! frozen. When the tip carries changelog fragments, no merge-queue run is in
+//! flight, the operator has not paused auto-cut in Commander and the cadence
+//! allows it, Cassy freezes the train (cas-2f4d), which starts its one train
+//! suite (cas-0fc56). On that run's green the same leased owner that serves
+//! manual cuts runs `scripts/release.sh` with the supervisor's notes draft;
+//! corrected notes or repaired task inputs re-arm it. Cassy never writes or
+//! posts notes: without a draft it waits, and wakes the supervisor once per tip.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -51,6 +57,12 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git").arg("-C").arg(repo).args(args).output()?;
     ensure!(output.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Whether auto-cut can act on this train at all: it is on, not paused, and
+/// the repository cuts with its own `scripts/release.sh`.
+pub(crate) fn enabled(root: &Path, train: &Task) -> bool {
+    declined_setup(root, train).is_none()
 }
 
 fn declined_setup(root: &Path, train: &Task) -> Option<String> {
@@ -106,9 +118,13 @@ fn cadence(root: &Path, train: &Task, now: DateTime<Utc>) -> Result<Option<Strin
     Ok(None)
 }
 
-/// One poll for a published train tip. `queue_busy` is true
-/// while any merge-queue run is in flight.
-pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_busy: bool, now: DateTime<Utc>) -> Result<Outcome> {
+// gate[C-36 release]: Auto-cut of green release trains (daemon)
+/// One poll for a published train tip; `green` is its train-suite verdict
+/// there. `queue_busy` is true while any merge-queue run is in flight.
+// gate-audit[queue_busy]: input Measured merge-queue state prevents release; never an override.
+// gate-audit[green]: input Measured train-suite verdict at the tip; never an override.
+pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: bool, queue_busy: bool, now: DateTime<Utc>) -> Result<Outcome> {
+    // gate[G-122 release-verdict]: Auto-cut preconditions (setup, owner, fragments, queue, cadence, notes draft)
     if let Some(reason) = declined_setup(root, train) {
         return Ok(Outcome::Declined(reason));
     }
@@ -148,6 +164,22 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
     if queue_busy {
         return Ok(Outcome::Declined("a merge-queue run is in flight".into()));
     }
+    // A train's Blocks dependencies are its declared must-land scope. Ordinary
+    // task closure resolves landed work; a delivery retargeted off this train
+    // no longer holds its cut. Read this before applying the release freeze.
+    let target = crate::mcp::tools::core::task::repo_context::effective_epic_ref(root, lane);
+    let mut pending: Vec<_> = crate::store::open_task_store(root)?
+        .get_blockers(&train.id)?
+        .into_iter()
+        .filter(|member| member.deliverables.work_target.as_ref().is_none_or(|work| {
+            crate::mcp::tools::core::task::repo_context::effective_epic_ref(root, &work.target_branch) == target
+        }))
+        .map(|member| member.id)
+        .collect();
+    pending.sort();
+    if !pending.is_empty() {
+        return Ok(Outcome::Declined(format!("must-land deliveries are still pending: {}", pending.join(", "))));
+    }
     if release_freeze::active(root, train).is_none() {
         if let Some(reason) = cadence(root, train, now)? {
             return Ok(Outcome::Declined(reason));
@@ -167,14 +199,19 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             train,
             ReleaseNoticePhase::CutReady,
             &format!("auto-cut-notes:{tip}"),
-            &format!(
+            &crate::gates::tag("G-122", format!(
                 "Release train {lane} ({}) is published at {tip} with {count} changelog fragments and is frozen for its \
                  auto-cut. Write the release-notes draft at {} by {deadline} (docs/release-notes/RUBRIC.md; \
-                 `{{{{VERSION}}}}` becomes the version). Cassy cuts once it exists, and never writes or posts notes.",
+                 `{{{{VERSION}}}}` becomes the version). Cassy cuts once it exists and the train suite at the tip \
+                 is green, and never writes or posts notes.",
                 train.id,
                 draft.display()
-            ),
+            )),
         )?;
+        return Ok(Outcome::Handled);
+    }
+    if !green {
+        // The freeze just started the tip's one train suite.
         return Ok(Outcome::Handled);
     }
     let log = train_dir(root, &train.id)?.join("auto-cut.log");

@@ -1,11 +1,12 @@
 name: CI
 
+# cas-0fc56: a merge into a release train starts no train suite; lane CI
+# already proved that delivery. Cassy dispatches this workflow once per frozen
+# train tip (train_ci::observe), and a frozen train accepts no merges that could
+# supersede the run, so there is no cancellation group.
 on:
+  workflow_dispatch:
   merge_group:
-
-concurrency:
-  group: full-gate-${{ github.run_id }}
-  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -13,7 +14,7 @@ permissions:
 
 jobs:
   validation:
-    name: Merge-queue proof
+    name: Shared train and queue graph
     uses: ./.github/workflows/ci.yml
     with:
       full-set: true

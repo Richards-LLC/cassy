@@ -13,6 +13,7 @@ use crate::ui::theme::ActiveTheme;
 use crate::worktree::{GitOperations, WorktreeConfig, WorktreeManager};
 
 /// Execute cleanup of worker worktree directories
+// gate-audit[force]: bypass G-138 Dirty-source preservation; confirmation on a clean tree is an execution selector.
 pub(super) fn execute_cleanup(args: &FactoryArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
@@ -115,7 +116,7 @@ pub(super) fn execute_cleanup(args: &FactoryArgs) -> Result<()> {
             StatusLine::warning("Some worktrees have uncommitted changes.").render(&mut fmt)?;
             fmt.info("Use --force to remove anyway, or commit changes first.")?;
             fmt.newline()?;
-            bail!("Cleanup aborted due to uncommitted changes.");
+            bail!(crate::gates::tag("G-138","Cleanup aborted due to uncommitted changes."));
         }
         StatusLine::warning("Forcing cleanup despite uncommitted changes.").render(&mut fmt)?;
         fmt.newline()?;
@@ -141,6 +142,11 @@ pub(super) fn execute_cleanup(args: &FactoryArgs) -> Result<()> {
     }
 
     let report = manager.cleanup_workers(true)?;
+    if args.force && has_uncommitted && !report.cleaned.is_empty() {
+        let tag=crate::gates::override_tag("G-138", "");
+        if let Ok(root)=find_cas_root(){crate::gates::facts::observe_cli_output(&root,&tag);}
+        fmt.write_raw(&tag)?;
+    }
 
     // cas-df97: live external symlinks (e.g. a dotfile stow/install step
     // mistakenly run inside a worktree) resolve into a worktree we would

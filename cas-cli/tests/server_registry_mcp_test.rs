@@ -693,8 +693,7 @@ async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
         }
         if allowed {
             // Clean up on the red path only. Re-stopping an already reaped
-            // wrapper without a cgroup correctly refuses unverifiable legacy
-            // descendants (as on macOS); it is not an ownership failure.
+            // wrapper reports it already exited; it is not an ownership failure.
             let cleanup = if result.contains("Stopped server") {
                 String::new()
             } else {

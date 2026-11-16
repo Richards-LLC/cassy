@@ -9,7 +9,7 @@ metadata:
 
 Use this skill for implementation craft. Read the approved concept brief and
 the target `DESIGN.md` ([DESIGN.md first](../design-spec/references/design-md-first.md)) before editing UI. `cas-ui-craft` owns visual direction and critique;
-`cas-playwright-debug` and `cas-nuxt-playwright` own harness setup and debugging.
+`cas-playwright-tests` owns browser authoring/configuration; `cas-playwright-debug` owns failure diagnosis.
 This skill turns their intent into a maintainable, measurable implementation.
 
 ## Procedure
@@ -53,12 +53,9 @@ This skill turns their intent into a maintainable, measurable implementation.
 
 7. **Cover the concept brief's hero first.** Add a Playwright journey for the
    hero's heading, primary action, media treatment, and first meaningful state.
-   Assert user-visible roles and state, exercise the primary action by keyboard,
-   and cover loading/error/empty behavior when the hero depends on data. Build
-   it from the assertions in
-   [references/playwright-acceptance.md](references/playwright-acceptance.md). Wait for a
-   user-visible condition, never a timeout or network idle. Screenshots never
-   replace semantic checks.
+   Follow [cas-playwright-tests](../cas-playwright-tests/SKILL.md) for its Faith contract,
+   semantic assertions, keyboard/recovery paths, config and accessibility checks.
+   The final assertion must fulfill the hero journey's user-visible promise.
 
 8. **Write the handoff and critique record.** Link the brief, `DESIGN.md`, and
    token source. List the component map, state table, accessibility evidence,
@@ -68,15 +65,11 @@ This skill turns their intent into a maintainable, measurable implementation.
 
 ## Playwright acceptance
 
-Each contract the brief makes becomes one assertion from
-[references/playwright-acceptance.md](references/playwright-acceptance.md) (named controls, ARIA
-snapshot, keyboard path, reduced motion, forced colors, loading/error/empty, component states).
-Read it at step 7.
-
-When the task has a `demo_statement`, the traces, captures, and ledger are
-evidence for [cas-qa-craft](../cas-qa-craft/SKILL.md). Follow its ledger and
-labels; do not keep a second evidence format here. `cas-nuxt-playwright` covers
-Nuxt harness setup, locks, and retries.
+Use [cas-playwright-tests](../cas-playwright-tests/SKILL.md) at step 7; its
+[accessibility reference](../cas-playwright-tests/references/locators-and-accessibility.md)
+owns the single browser acceptance table and CSS accessibility exception.
+When the task has a demo statement, retain evidence through
+[cas-qa-craft](../cas-qa-craft/SKILL.md); do not keep a second evidence format here.
 
 ## Framework notes
 

@@ -146,6 +146,11 @@ jobs:
     name: Build Linux release artifact (fallback)
     needs: lookup-linux
     if: needs.lookup-linux.result == 'success' && needs.lookup-linux.outputs.found != 'true'
+    # GitHub validates the called macos-route job's grant even though a
+    # fallback call always builds on hosted macOS.
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/release-prebuild.yml
     with:
       platform: linux
@@ -180,6 +185,11 @@ jobs:
     name: Build macOS release artifact (fallback)
     needs: lookup-macos
     if: needs.lookup-macos.result == 'success' && needs.lookup-macos.outputs.found != 'true'
+    # GitHub validates the called macos-route job's grant even though a
+    # fallback call always builds on hosted macOS.
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/release-prebuild.yml
     with:
       platform: macos

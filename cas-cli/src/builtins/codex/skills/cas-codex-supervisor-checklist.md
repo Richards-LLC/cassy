@@ -32,7 +32,7 @@ Run the [intake gate](../cas-supervisor/references/intake.md); log any user over
 
 - Leave the next exit rung owned by a worker or an event reminder each turn.
 - Run the [closure pass](../cas-supervisor/references/workflow.md#wall-clock-is-a-resource) before new noncritical dispatch; for a revised delivery, use [correction proof](../cas-supervisor/references/correction-proof.md).
-- Shape and review subtasks with [planning.md](../cas-supervisor/references/planning.md), asking for the [fewest tests](../cas-tdd/SKILL.md#fewest-tests) that fail without the change.
+- Shape and review subtasks with [planning.md](../cas-supervisor/references/planning.md), asking for the [fewest tests](../cas-writing-tests/SKILL.md#fewest-tests) that fail without the change.
 - Close overrides: [`supervisor_override`](../cas-supervisor/references/reference.md#supervisor-override).
 
 ## Before Closing an EPIC

@@ -191,7 +191,7 @@ impl SplitHold {
     /// Refusal for a start, claim or spawn of the peer's child. `prefix` is
     /// the caller's tool prefix.
     pub fn refusal(&self, task_id: &str, prefix: &str) -> String {
-        format!(
+        crate::gates::tag("G-07", format!(
             "⛔ SPLIT TO A PEER — {task_id} belongs to peer supervisor {} under epic split {} of {} ({}).\n\
              Starting it here would duplicate their work. Ask them first: \
              {prefix}coordination action=message target={} summary=\"{task_id}\" message=\"...\"\n\
@@ -205,7 +205,7 @@ impl SplitHold {
             self.state,
             self.describe(),
             self.split_id,
-        )
+        ))
     }
 
     /// Receipt for the worker consuming a supervisor-authorized takeover.

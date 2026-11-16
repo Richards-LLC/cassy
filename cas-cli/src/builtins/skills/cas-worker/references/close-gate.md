@@ -66,7 +66,7 @@ A successful park reads `PARKED <sha> on <branch>; awaiting merge verdict; nothi
 Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
 The park relay is the completion signal; send merge_request=true only for local_merge.
 A dispatched verifier reviews the candidate before publication; PASS publishes
-and closes, FAIL reopens it to you with findings. In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.
+and closes, FAIL reopens it to you with findings. In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.
 MERGE REQUIRED is a genuine refusal, such as unpushed or unattributable work:
 
 1. Drain `coordination action=inbox_poll` to `No unread messages`; act on
@@ -86,14 +86,12 @@ unpublished tip for candidate verification. A following task starts its own
 branch from the epic tip (`factory/<name>-<task-id>`), preserving the parked
 one. Never set `status=closed` or invent a verification record to bypass close.
 
-## Upkeep refusals at park
+## Shared docs
 
-At park, close checks that the delivery kept the journey registry, `.claude/CODEMAP.md`
-and `docs/PRODUCT_OVERVIEW.md` true for the paths it changed. Fix a refusal in
-this branch. When the change truly needs no upkeep, record the gate's token from
-the [escape vocabulary](../../cas-qa-craft/references/journeys.md#escape-vocabulary)
-as a decision note with a specific reason; reviewers see each escape. Never
-hand-write the `UPKEEP ESCAPE` or `UPKEEP OBSERVE` notes.
+Never edit `.claude/CODEMAP.md` or `docs/PRODUCT_OVERVIEW.md`; release prep
+regenerates them. Add a bug case as its own `docs/qa/bug-families/<slug>.yaml`
+and, where `docs/product-overview.d/` exists, product changes as
+`docs/product-overview.d/<task-id>.md`. Park does not check these files.
 
 ## Changelog at park
 

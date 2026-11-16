@@ -4,6 +4,15 @@
 # excluded here.
 set -euo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[W-63]"' EXIT
+
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=watchdog-policy.sh
 source "$script_dir/watchdog-policy.sh"
@@ -29,6 +38,7 @@ while IFS=$'\t' read -r run_id attempt_started_at event head_branch; do
         continue
     fi
     age_seconds=$((now_epoch - attempt_epoch))
+    # gate[W-63 watchdog]: GitHub stale queued-run watchdog
     (( age_seconds > queue_seconds )) || continue
 
     # The list endpoint is eventually consistent. Re-read status so a run

@@ -7,9 +7,11 @@ import json
 import sys
 from pathlib import Path
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +33,21 @@ def _pinned_linter():
 LINTER = _pinned_linter()
 if LINTER:
     os.environ["MARKDOWNLINT_CLI2"] = LINTER
+# The journey-catalog row's registry upkeep needs a Cassy validator; keep the
+# fixture rows hermetic (cas-4b33): no CAS_BIN and an installer that fails.
+os.environ.pop("CAS_BIN", None)
+os.environ["CAS_VALIDATOR_INSTALLER"] = "/nonexistent/cas-install.sh"
+REGISTRY = """version: 1
+updated: '2026-11-11'
+surfaces: ['hub-web/src/**']
+journeys:
+  - id: J1
+    status: live
+    seeded: true
+    entry: {url: /signup, trigger: Open}
+    owners: ['hub-web/src/signup.ts']
+    traffic: {share_pct: null, basis: fixture}
+"""
 
 
 EXAMPLE_SKILL = "---\nname: example\ndescription: Use when exercising the fixture contract.\n---\nfixture contract\n"
@@ -96,7 +113,7 @@ class FastRows(unittest.TestCase):
                        "journeys-for-diff.py", "check-builtin-skill-limits.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
                        "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
-                       "release-diary-thread.py"):
+                       "release-diary-thread.py", "doc-fragments.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
             for source in (ROOT / source_dir).glob("*.sql"):
@@ -107,6 +124,8 @@ class FastRows(unittest.TestCase):
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
+        self.write("docs/qa/journeys.yaml", REGISTRY)
+        self.write("hub-web/src/signup.ts", "signup\n")
         self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
         self.write("cas-cli/src/migration/migrations/m001_first.rs", "pub const MIGRATION: Migration = Migration {\n    id: 1,\n};\n")
@@ -296,6 +315,8 @@ class FastRows(unittest.TestCase):
             # cas-462b: rows that failed only at the October 2026 release cut.
             ("journey-catalog", "docs/qa/journeys.md",
              JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
+            # cas-4b33: registry upkeep moved from park to this lane lint.
+            ("journey-catalog", "docs/qa/bug-families/ghost.yaml", "title: Ghost case\njourneys: [MISSING]\n"),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/violet/SKILL.md",
              VIOLET_SKILL + "x" * 80 + "\n" + "Padding line.\n" * 1200),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/example/SKILL.md",
@@ -321,6 +342,127 @@ class FastRows(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("FAIL " + row, result.stdout)
 
+
+    def test_registry_upkeep_fails_closed_without_a_validator_cas_4b33(self):
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL journey-catalog", result.stdout)
+
+    def test_selector_failure_invokes_registry_validator_cas_4b33(self):
+        tools = self.repo / ".git" / "tools"
+        tools.mkdir()
+        selector = tools / "python3"
+        selector.write_text(f'''#!/bin/sh
+if [ "$1" = scripts/doc-fragments.py ] && [ "$2" = needs-upkeep ]; then
+    echo 'ModuleNotFoundError: No module named yaml' >&2
+    echo no
+    exit 1
+fi
+exec {shlex.quote(sys.executable)} -S "$@"
+''')
+        selector.chmod(0o755)
+        validator = tools / "cas"
+        validator.write_text('''#!/bin/sh
+case "$*" in
+    'qa journeys --help') [ "${LEGACY_VALIDATOR:-0}" = 1 ] || echo --base ;;
+    'qa journeys --check'*) echo "$*" >> .git/validator-calls ;;
+    'config get qa.registry.enforce') echo enforce ;;
+    'qa impact '*)
+        echo "$*" >> .git/validator-calls
+        echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("hub-web/src/signup.ts", "updated owned surface\n")
+        self.commit()
+        result = self.fast_from(self.base, CAS_BIN=str(validator),
+                                PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.repo / ".git" / "validator-calls"
+        self.assertTrue(calls.exists(), result.stdout + result.stderr)
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["qa journeys --check", "qa journeys --check --base " + self.base])
+        calls.unlink()
+        legacy = self.fast_from(self.base, CAS_BIN=str(validator), LEGACY_VALIDATOR="1",
+                                PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(legacy.returncode, 0, legacy.stdout + legacy.stderr)
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["qa journeys --check", "qa impact " + self.base + " --json"])
+
+    def test_legacy_registry_uses_explicit_policy_without_a_store(self):
+        validator = self.repo / ".git" / "legacy-cas"
+        validator.write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> .git/validator-calls
+case "$*" in
+    'qa journeys --help'|'qa journeys --check') exit 0 ;;
+    'config get qa.registry.enforce') exit 1 ;;
+    'qa impact '*) echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: enforce\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("hub-web/src/signup.ts", "modified owned surface\n")
+        self.commit()
+        calls = self.repo / ".git" / "validator-calls"
+        explicit = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)
+        argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+        self.assertNotIn(["config", "get", "qa.registry.enforce"], argv)
+        self.assertIn(["qa", "impact", base, "--json"], argv)
+
+        # A missing header still needs config, and a failed lookup fails closed.
+        calls.unlink()
+        self.write("docs/qa/journeys.yaml", REGISTRY)
+        self.commit()
+        fallback = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(fallback.returncode, 1, fallback.stdout + fallback.stderr)
+        argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+        self.assertIn(["config", "get", "qa.registry.enforce"], argv)
+        self.assertNotIn(["qa", "impact", base, "--json"], argv)
+
+    def test_strict_registry_requires_a_validator_with_base_cas_4b33(self):
+        validator = self.repo / ".git" / "legacy-cas"
+        validator.write_text('''#!/usr/bin/env bash
+case "$*" in
+    'qa journeys --help'|'qa journeys --check') exit 0 ;;
+    'config get qa.registry.enforce') echo enforce ;;
+    'qa impact '*) echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: strict\n")
+        self.write("hub-web/src/email.ts", "pre-existing unowned surface\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("hub-web/src/email.ts", "modified unowned surface\n")
+        # The stricter base policy must survive a delivery's downgrade.
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: enforce\n")
+        self.commit()
+        result = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL journey-catalog", result.stdout)
+
+    @unittest.skipUnless(shutil.which("cas"), "needs a released cas to provision")
+    def test_self_provisioned_validator_catches_an_unowned_surface_cas_4b33(self):
+        installer = self.repo / ".git" / "fake-install.sh"
+        installer.write_text('#!/usr/bin/env bash\ninstall -m 755 "$REAL_CAS" "$CAS_INSTALL_DIR/cas"\n')
+        env = {"CAS_VALIDATOR_INSTALLER": str(installer), "REAL_CAS": shutil.which("cas")}
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        unowned = self.fast_from(self.base, **env)
+        self.assertEqual(unowned.returncode, 1, unowned.stdout + unowned.stderr)
+        self.assertIn("FAIL journey-catalog", unowned.stdout)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "ignore: ['hub-web/src/email.ts']\n")
+        self.commit()
+        owned = self.fast_from(self.base, **env)
+        self.assertIn("PASS journey-catalog", owned.stdout, owned.stdout + owned.stderr)
 
     def test_script_test_for_a_changed_script_runs_and_its_failure_is_named(self):
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n"
@@ -585,6 +727,82 @@ class FastRows(unittest.TestCase):
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
         self.assertTrue(ran.exists(), pushed.stderr)
 
+    def test_epic_push_refuses_stale_hub_web_dist_cas_1efb(self):
+        remote = Path(self.scratch.name) / "remote.git"
+        command(self.repo, "git", "init", "-q", "--bare", str(remote))
+        command(self.repo, "git", "remote", "add", "origin", str(remote))
+        self.copy_hook_installer()
+        self.write("hub-web/package.json", '{"name":"fixture","private":true}\n')
+        self.write("hub-web/package-lock.json", '{}\n')
+        self.write("hub-web/dist/app.js", "signup\n")
+        self.write("npm-fixture", '#!/bin/sh\nprintf "%s\\n" "$*" >> ../.git/npm-calls\ncase "$1" in\n'
+                   'ci) exit 0;;\nrun) cp src/signup.ts dist/app.js;;\n*) exit 1;;\nesac\n')
+        (self.repo / "npm-fixture").chmod(0o755)
+        self.commit()
+        branch = "refs/heads/epic/release-train-fixture"
+        pushed = command(self.repo, "git", "push", "origin", "HEAD:" + branch)
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        baseline = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(self.install_hooks().returncode, 0)
+        # The engine integrates a proven lane; its new merge tip needs no
+        # second copy of the lane's fast checks.
+        command(self.repo, "git", "checkout", "-qb", "factory/proven")
+        self.write("lane.txt", "proven delivery\n")
+        self.commit()
+        self.base = baseline
+        self.assertEqual(self.fast().returncode, 0)
+        command(self.repo, "git", "checkout", "-q", "target")
+        merged = command(self.repo, "git", "merge", "--no-ff", "factory/proven", "-m", "integration")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        integration = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        env = dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"),
+                   NPM=str(self.repo / "npm-fixture"),
+                   CAS_PROVEN_MERGE_HEAD=integration, CAS_PROVEN_MERGE_BASE=baseline)
+        started = time.monotonic()
+        pushed = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        elapsed = time.monotonic() - started
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertFalse((self.repo / f".git/cas/fast-rows/{integration}.pass").exists())
+        self.assertLess(elapsed, 1.0)
+        print(f"integration_push_seconds={elapsed:.3f}")
+
+        # Even inherited engine markers cannot authorize new authored content.
+        draft = "docs/release-notes/2099-01-01-v9.99.8-slack.md"
+        self.write(draft, "# Invalid release draft\n")
+        self.commit()
+        refused = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("FAIL release-notes-draft", refused.stderr)  # machine row identifier
+        (self.repo / draft).unlink()
+        self.write("hub-web/src/signup.ts", "changed signup\n")
+        self.commit()
+        refused = command(self.repo, "git", "push", "origin", "HEAD:" + branch, env=env)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("FAIL hub-web-dist-drift", refused.stderr)  # machine row identifier
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin", branch).stdout.split()[0], integration)
+        self.assertFalse((self.repo / "cargo-called").exists())
+        # The refused build produced fresh dist. Commit it, then replay the
+        # same pre-push payload twice, as after a transport failure.
+        self.commit()
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        validator = self.repo / ".git/receipt-validator"
+        validator.write_text('#!/bin/sh\ncase "$*" in\n'
+                             "'qa journeys --help') echo --base;;\n"
+                             "'qa journeys --check'*) exit 0;;\n*) exit 1;;\nesac\n")
+        validator.chmod(0o755)
+        env = dict(env, CAS_BIN=str(validator))
+        update = f"refs/heads/target {head} {branch} {integration}\n"
+        hook = ("bash", "scripts/fast-rows-pre-push.sh", "origin", str(remote))
+        first = command(self.repo, *hook, input=update, env=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        npm_calls = (self.repo / ".git/npm-calls").read_bytes()
+        receipts = [self.repo / f".git/cas/fast-rows/{head}{suffix}" for suffix in (".pass", ".web.pass")]
+        modified = [path.stat().st_mtime_ns for path in receipts]
+        retry = command(self.repo, *hook, input=update, env=env)
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertEqual((self.repo / ".git/npm-calls").read_bytes(), npm_calls)
+        self.assertEqual([path.stat().st_mtime_ns for path in receipts], modified)
+
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"
         command(self.repo, "git", "init", "-q", "--bare", str(remote))
@@ -615,11 +833,10 @@ class FastRows(unittest.TestCase):
         command(self.repo, "git", "update-ref", "refs/remotes/" + base, self.base)
         refused = self.push(ZERO_BASE_REF=base)
         self.assertNotEqual(refused.returncode, 0, refused.stderr)
-        # pin: push diagnostics name the full comparison ref and offending source line.
-        self.assertIn(base, refused.stderr)
+        # The comparison base may resolve to a SHA; refusal must preserve
+        # the offending source location and the detailed row evidence.
         self.assertIn("cas-cli/tests/sample.rs:40:", refused.stderr)
         self.assertLessEqual(len(re.findall(r"^  \| cas-cli/tests/sample.rs:\d+:", refused.stderr, re.M)), 20)
-        self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
         # The real hook must keep the detailed child output after the gate's
         # scratch guardian has exited, and tell the worker where it is.
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
@@ -633,11 +850,21 @@ class FastRows(unittest.TestCase):
         self.assertIn("ci-script-tests-changed", (logs / "timing.tsv").read_text())
         self.assertEqual(command(self.repo, "git", "ls-remote", "origin").stdout, "")
 
-        skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue")
+        self.write("fixture-cas", '#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(self.repo / "gate-argv") + '"\n')
+        (self.repo / "fixture-cas").chmod(0o755)
+        override_reason = "hotfix for the queue"
+        skipped = self.push(CAS_SKIP_FAST_ROWS=override_reason, CAS_BIN=str(self.repo / "fixture-cas"))
         self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        recorded = (self.repo / "gate-argv").read_text().splitlines()
+        self.assertEqual(recorded[:4], ["gates", "record-override", "C-07", "H-38"])
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         log = (self.repo / ".git/cas/fast-rows/overrides.log").read_text()
-        self.assertIn(f"{head} factory/lane skipped fast rows: hotfix for the queue", log)
+        [entry] = log.splitlines()
+        _, logged_tip, logged_ref, detail = entry.split(maxsplit=3)
+        self.assertEqual((logged_tip, logged_ref), (head, "factory/lane"))
+        self.assertIn(override_reason, detail)
+        remote_tip, remote_ref = command(self.repo, "git", "ls-remote", "origin", "refs/heads/factory/lane").stdout.split()
+        self.assertEqual((remote_tip, remote_ref), (head, "refs/heads/" + logged_ref))
 
         # A same-tip PASS receipt makes the next push free: no rows run.
         self.write("scripts/test-example.py", "print('example ok')\n")

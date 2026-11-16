@@ -139,6 +139,20 @@ impl SyncQueue {
         project: &str,
         apply: bool,
     ) -> Result<Vec<TeamBackfillRow>, CasError> {
+        self.migrate_personal_to_team_checked(team, project, apply, None)
+    }
+
+    /// As [`Self::migrate_personal_to_team`]; with the team's current
+    /// `(tasks, dependencies)` rows, a task or edge already equal to its team
+    /// row is a pull echo (`already_on_team_purge_pull_echoes`): never
+    /// enqueued, never removed, left for `--purge-pull-echoes`.
+    pub fn migrate_personal_to_team_checked(
+        &self,
+        team: &str,
+        project: &str,
+        apply: bool,
+        team_rows: Option<(&[serde_json::Value], &[serde_json::Value])>,
+    ) -> Result<Vec<TeamBackfillRow>, CasError> {
         if team.trim().is_empty() || project.trim().is_empty() {
             return Err(CasError::Other(
                 "An active team and canonical project are required".into(),
@@ -155,10 +169,17 @@ impl SyncQueue {
             stmt.query_map([], Self::map_row)?
                 .collect::<Result<Vec<_>, _>>()?
         };
+        let edges = team_rows.map(|(_, dependencies)| super::team_delivery::live_team_edges(dependencies));
         let mut decisions = Vec::with_capacity(rows.len());
         let mut planned = BTreeSet::new();
         for row in &rows {
             let mut reason = eligibility(&tx, row, team, project);
+            if let (Some((tasks, _)), Some(edges)) = (team_rows, &edges)
+                && reason == "enqueue_team_snapshot"
+                && super::team_delivery::pull_echo_reason(row, tasks, edges) == "matches_cloud_team_row"
+            {
+                reason = "already_on_team_purge_pull_echoes";
+            }
             if reason == "enqueue_team_snapshot"
                 && !planned.insert((row.entity_type.as_str().to_string(), row.entity_id.clone()))
             {
@@ -200,9 +221,9 @@ impl SyncQueue {
 
     pub(crate) fn personal_backlog_remedy(team_only: bool) -> &'static str {
         if team_only {
-            "Review `cas cloud queue migrate-to-team`; apply with `cas cloud queue migrate-to-team --apply`, then run `cas cloud sync`."
+            "Review `cas cloud queue migrate-to-team`; apply with `cas cloud queue migrate-to-team --apply`, then run `cas cloud sync`. Rows reported as already on the team are pull echoes: preview `cas cloud queue --purge-pull-echoes --dry-run`."
         } else {
-            "If this project is team-only, run `cas config set cloud.team_only true`, review `cas cloud queue migrate-to-team`, then apply with `cas cloud queue migrate-to-team --apply` and run `cas cloud sync`."
+            "If this project is team-only, run `cas config set cloud.team_only true`, review `cas cloud queue migrate-to-team`, then apply with `cas cloud queue migrate-to-team --apply` and run `cas cloud sync`. Rows reported as already on the team are pull echoes: preview `cas cloud queue --purge-pull-echoes --dry-run`."
         }
     }
 }
@@ -422,5 +443,55 @@ mod tests {
         let reopened = SyncQueue::open(&root).unwrap();
         assert_eq!(reopened.neutralize_team_only_personal("t", "p").unwrap(), 1);
         assert_eq!(reopened.personal_row_count().unwrap(), 11);
+    }
+
+    /// GH #1776: rows equal to the team's current row are reported as echoes and
+    /// never enqueued; edited and unsynced rows still migrate; the purge then
+    /// removes exactly the echo.
+    #[test]
+    fn cas_cb0e_migration_reports_team_equal_rows_as_echoes_not_enqueued_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut cloud_tasks = Vec::new();
+        for (id, cloud_title) in [("echo", Some("same")), ("edited", Some("cloud")), ("unsynced", None)] {
+            let mut task = crate::types::Task::new(id.into(), "same".into());
+            task.origin_project = Some("p".into());
+            tasks.add(&task).unwrap();
+            if let Some(title) = cloud_title {
+                let mut row = serde_json::to_value(&task).unwrap();
+                row["title"] = title.into();
+                row["updated_at"] = "2026-10-01T00:00:00Z".into();
+                row["project_id"] = "p".into();
+                row["team_id"] = "t".into();
+                row["revision"] = "7".into();
+                cloud_tasks.push(row);
+            }
+            queue
+                .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some(&serde_json::to_string(&task).unwrap()))
+                .unwrap();
+        }
+        let team_rows = Some((cloud_tasks.as_slice(), &[][..]));
+        let preview = queue.migrate_personal_to_team_checked("t", "p", false, team_rows).unwrap();
+        let verdicts: Vec<_> = preview.iter().map(|row| (row.entity_id.as_str(), row.reason)).collect();
+        assert_eq!(
+            verdicts,
+            [
+                ("echo", "already_on_team_purge_pull_echoes"),
+                ("edited", "enqueue_team_snapshot"),
+                ("unsynced", "enqueue_team_snapshot"),
+            ]
+        );
+        let applied = queue.migrate_personal_to_team_checked("t", "p", true, team_rows).unwrap();
+        assert_eq!(applied.iter().filter(|row| row.eligible).count(), 2);
+        let pending: Vec<_> = queue.pending_for_team("t", 10, 5).unwrap().into_iter().map(|row| row.entity_id).collect();
+        assert_eq!(pending, ["edited", "unsynced"]);
+        assert_eq!(queue.personal_row_count().unwrap(), 3, "nothing is dropped by a migration");
+        let purge = queue.purge_personal_pull_echoes(&cloud_tasks, &[], &[], true).unwrap();
+        let echoes: Vec<_> = purge.iter().filter(|row| row.eligible).map(|row| row.entity_id.as_str()).collect();
+        assert_eq!(echoes, ["echo"], "the purge names the same row the migration reported");
     }
 }

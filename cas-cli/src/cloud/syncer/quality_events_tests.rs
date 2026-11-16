@@ -302,7 +302,7 @@ async fn rejected_turns_do_not_block_other_quality_events_or_pull() {
             cas_store::record_quality_event(&root, &friction).unwrap();
             let turn = NewQualityEvent::new(
                 "native turn",
-                QualityPayload::Turn {
+                QualityPayload::Turn { supersedes: None, notice_kind: None,
                     woken_by: cas_store::WakeChannel::Director,
                     actions: vec![],
                     no_op: true,
@@ -392,7 +392,7 @@ async fn unrelated_turn_batch_errors_surface_after_pull() {
             let syncer = machine(&root, &endpoint, "acme/this");
             let turn = NewQualityEvent::new(
                 "native turn",
-                QualityPayload::Turn {
+                QualityPayload::Turn { supersedes: None, notice_kind: None,
                     woken_by: cas_store::WakeChannel::Director,
                     actions: vec![],
                     no_op: true,

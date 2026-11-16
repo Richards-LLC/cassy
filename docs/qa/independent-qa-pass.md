@@ -241,7 +241,7 @@ reusing its matrix and ledger discipline. Order of work:
    Walk each one from its real entry point to the user's goal with
    `scripts/journey-eval.sh <dir> --grep <ID>`. Then judge the experience:
    dead ends, copy, steps, lost context, waits (scored 0–3). Where the
-   catalog has no suite, walk the journey by hand with Playwright 1.63
+   catalog has no suite, walk the journey by hand with the latest stable locked Playwright
    (`playwright-cli`) and record a trace.
 3. **Check correctness paths.** Walk the demo_statement end to end, then the
    adjacent paths:

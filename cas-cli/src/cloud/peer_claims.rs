@@ -2689,13 +2689,14 @@ mod tests {
         let budget = PeerBudget::new(Duration::from_millis(150));
         let worker = budget.run(|| std::thread::current().id()).await.unwrap();
         assert_ne!(worker, std::thread::current().id(), "not on the runtime thread");
-        let started = Instant::now();
-        let slow = budget.run(|| std::thread::sleep(Duration::from_millis(600))).await;
-        assert!(slow.unwrap_err().contains("no answer"));
-        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
-        let spent = Instant::now();
-        assert!(budget.run(|| 1).await.is_err(), "a spent budget answers at once");
-        assert!(spent.elapsed() < Duration::from_millis(50));
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let slow = budget.run(move || blocked.recv()).await;
+        drop(release);
+        assert!(slow.is_err());
+        let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&invoked);
+        assert!(budget.run(move || observed.store(true, std::sync::atomic::Ordering::SeqCst)).await.is_err());
+        assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -2743,7 +2744,6 @@ mod tests {
                 retired_local: HashMap::new(),
                 budget: None,
             };
-            let started = Instant::now();
             let answer = tokio::task::spawn_blocking(move || {
                 let observed = PeerHold {
                     agent_id: "old".into(),
@@ -2765,11 +2765,6 @@ mod tests {
             .await
             .unwrap();
             assert!(matches!(answer, Acquire::Unavailable(_)), "{answer:?}");
-            assert!(
-                started.elapsed() < Duration::from_millis(300),
-                "{:?}",
-                started.elapsed()
-            );
             assert!(
                 server
                     .received_requests()

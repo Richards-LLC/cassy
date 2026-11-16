@@ -1,0 +1,4 @@
+title: Cut plans report refusals before build, scoped to included members, and one detached lease serves manual and automatic entry
+tasks: [cas-80df, cas-be03]
+journeys: [CLI-RELEASE]
+invariants: [FACTORY-RELEASE-CLOSEOUT]

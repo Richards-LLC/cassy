@@ -149,7 +149,7 @@ const BOX_TOLERANCE = 1;
 
 // A rendered document and a screenshot do not prove the application rendered.
 // Keep this separate from visual findings: an allowlist cannot waive readiness.
-const PAGE_READINESS = ({ readySelector }) => {
+const PAGE_READINESS = ({ readySelector, waiting = false }) => {
   const visible = (element) => {
     const box = element.getBoundingClientRect();
     return box.width > 1 && box.height > 1 && element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
@@ -198,16 +198,16 @@ const PAGE_READINESS = ({ readySelector }) => {
   const hasContent = contentTextNodes > 0 || contentElements > 0;
   const reason = !targetVisible ? 'ready-selector-not-visible'
     : dominantLoadingSurface || !hasContent ? (indicators.length ? 'loading-or-placeholder-surface' : 'empty-surface') : null;
-  return { ready: !reason, reason, textNodes, textCharacters, mainLandmarks, contentElements, loadingIndicators: indicators.length, dominantLoadingSurface };
+  return waiting ? !reason : { ready: !reason, reason, textNodes, textCharacters, mainLandmarks, contentElements, loadingIndicators: indicators.length, dominantLoadingSurface };
 };
 
 async function waitForPageReadiness(page, { readySelector, readyTimeoutMs }) {
-  const deadline = Date.now() + readyTimeoutMs;
-  for (;;) {
-    const measured = await page.evaluate(PAGE_READINESS, { readySelector });
-    if (measured.ready || Date.now() >= deadline) return measured;
-    await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+  try {
+    await page.waitForFunction(PAGE_READINESS, { readySelector, waiting: true }, { timeout: readyTimeoutMs });
+  } catch (error) {
+    if (error.name !== 'TimeoutError') throw error;
   }
+  return page.evaluate(PAGE_READINESS, { readySelector });
 }
 
 const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolerance, allowlistEntries = [] }) => {
@@ -1022,13 +1022,12 @@ function markdownReport(result) {
  * Routes answer matching requests (status, json | body, contentType, headers,
  * delayMs), hold them open (loading), or abort them. `offline` goes offline
  * after the page has loaded, before the steps. Steps: fill (+value), click,
- * press (+on), focus, hover, check, select (+value), waitFor (+state), wait
- * (ms), offline (true/false), expect (+visible, hidden, text, focused). A step
+ * press (+on), focus, hover, check, select (+value), waitFor (+state), offline (true/false), expect (+visible, hidden, text, focused). A step
  * that cannot run is a `journey-step-failed` finding; an expectation that does
  * not hold is a `journey-expectation` finding; either fails a strict run. The
  * page is then inspected exactly as a resting page is.
  */
-const STEP_ACTIONS = ['fill', 'click', 'press', 'focus', 'hover', 'check', 'select', 'waitFor', 'wait', 'offline', 'expect'];
+const STEP_ACTIONS = ['fill', 'click', 'press', 'focus', 'hover', 'check', 'select', 'waitFor', 'offline', 'expect'];
 
 function stepAction(step) {
   const actions = STEP_ACTIONS.filter((action) => Object.hasOwn(step, action));
@@ -1039,7 +1038,6 @@ function stepAction(step) {
 function describeStep(step) {
   const action = stepAction(step);
   const target = step[action];
-  if (action === 'wait') return `wait ${target}ms`;
   if (action === 'offline') return `offline ${target}`;
   const extras = ['value', 'on', 'state', 'text', 'visible', 'hidden', 'focused'].filter((key) => Object.hasOwn(step, key)).map((key) => `${key}=${JSON.stringify(step[key])}`);
   return [action, typeof target === 'string' ? target : JSON.stringify(target), ...extras].join(' ');
@@ -1093,24 +1091,23 @@ async function installRoute(page, route, holds) {
 async function runStep(page, context, step, timeout) {
   const action = stepAction(step);
   const target = step[action];
-  const locator = typeof target === 'string' ? page.locator(target).first() : undefined;
+  const locator = typeof target === 'string' ? page.locator(target) : undefined;
   switch (action) {
     case 'fill': await locator.fill(String(step.value ?? ''), { timeout }); return undefined;
     case 'click': await locator.click({ timeout }); return undefined;
-    case 'press': if (step.on) await page.locator(step.on).first().press(target, { timeout }); else await page.keyboard.press(target); return undefined;
+    case 'press': if (step.on) await page.locator(step.on).press(target, { timeout }); else await page.keyboard.press(target); return undefined;
     case 'focus': await locator.focus({ timeout }); return undefined;
     case 'hover': await locator.hover({ timeout }); return undefined;
     case 'check': await locator.check({ timeout }); return undefined;
     case 'select': await locator.selectOption(String(step.value ?? ''), { timeout }); return undefined;
     case 'waitFor': await locator.waitFor({ state: step.state ?? 'visible', timeout }); return undefined;
-    case 'wait': await page.waitForTimeout(Number(target) || 0); return undefined;
     case 'offline': await context.setOffline(target !== false); return undefined;
     case 'expect': {
-      const deadline = Date.now() + timeout;
-      let last = '';
-      for (;;) {
-        last = await page.evaluate(({ selector, expected }) => {
-          const element = document.querySelector(selector);
+      const check = ({ selector, expected, waiting = false }) => {
+          const matches = document.querySelectorAll(selector);
+          const element = matches[0];
+          const reason = (() => {
+          if (matches.length > 1) return 'is ambiguous';
           const shown = Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden');
           if (expected.hidden === true) return shown ? 'is visible' : '';
           if (!element) return 'is missing';
@@ -1121,10 +1118,16 @@ async function runStep(page, context, step, timeout) {
             return `is not focused (focus is on ${active === document.body || !active ? 'the page body' : active.tagName.toLowerCase() + (active.id ? '#' + active.id : '')})`;
           }
           return '';
-        }, { selector: target, expected: step });
-        if (!last || Date.now() >= deadline) break;
-        await page.waitForTimeout(50);
+          })();
+          return waiting ? !reason : reason;
+        };
+      const args = { selector: target, expected: step };
+      try {
+        await page.waitForFunction(check, { ...args, waiting: true }, { timeout });
+      } catch (error) {
+        if (error.name !== 'TimeoutError') throw error;
       }
+      const last = await page.evaluate(check, args);
       return last ? `${target} ${last}` : undefined;
     }
     default: throw new Error(`Unknown journey step ${action}.`);

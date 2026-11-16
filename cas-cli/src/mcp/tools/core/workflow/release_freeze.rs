@@ -1,10 +1,12 @@
 //! The standing train freeze admits only a repair naming a recorded cut
-//! blocker at the exact frozen target tip. A repair moves that tip, consuming
-//! its grant without lifting the freeze. Publication, the operator in
-//! Commander, or a live supervisor with an audited reason ends it.
+//! blocker at the exact frozen target tip, or a repair of a red train suite at
+//! or after that tip. A named repair moves the tip, consuming its grant without
+//! lifting the freeze. Publication, the operator in Commander, or a live
+//! supervisor with an audited reason ends it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
@@ -14,7 +16,7 @@ use crate::mcp::tools::core::task::release_train::{is_cut_train, is_release_trai
 use crate::types::Task;
 
 const FROZEN_LABEL: &str = "release-train-frozen:";
-/// A repair must also name a current release-cut-blocker label.
+/// Marks a repair; it must name a current release-cut-blocker label or repair a red train.
 pub(crate) const REPAIR_LABEL: &str = "release-repair";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,8 +26,8 @@ pub(crate) struct Freeze {
 }
 
 /// The freeze recorded on an open release train, published or not. `freeze`
-/// writes exactly one label; task updates only append labels, so the first
-/// one is authoritative and a later appended label cannot move its tip.
+/// writes exactly one label. The first valid label is authoritative if legacy
+/// stored data contains multiple freeze labels.
 pub(crate) fn freeze_of(train: &Task) -> Option<Freeze> {
     if !is_release_train(train) || train.is_terminal() {
         return None;
@@ -99,10 +101,53 @@ pub(crate) fn record_cut_blockers(root: &Path, train_id: &str, tip: &str, blocke
     Ok(())
 }
 
+/// Evidence that the frozen train is red: the train-suite receipt names a red
+/// at or after the frozen tip, or GitHub's latest train run at that tip
+/// failed. Either one admits a repair; a missing receipt never locks it out.
+fn red_evidence(root: &Path, train: &Task, freeze: &Freeze) -> Option<String> {
+    let lane = train.effective_epic_branch()?;
+    let repo = repo_of(root, train)?;
+    let receipt = crate::train_ci::directory(root, &train.id)
+        .ok()
+        .and_then(|dir| std::fs::read(dir.join("state.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if let Some(state) = receipt
+        && state["branch"].as_str() == Some(lane)
+        && state["red_since"].is_string()
+        && let Some(head) = state["red_head"].as_str()
+        && is_ancestor(&repo, &freeze.tip, head)
+    {
+        return Some(format!(
+            "train_ci_red run {} at {}",
+            state["run_id"].as_str().unwrap_or("unknown"),
+            short(head)
+        ));
+    }
+    let mut command = Command::new(crate::github_repo::gh_binary());
+    command
+        .args(["run", "list", "--workflow", "full-validation.yml", "--branch", lane])
+        .args(["--commit", &freeze.tip, "--event", "workflow_dispatch", "--limit", "1"])
+        .args(["--json", "databaseId,conclusion"])
+        .current_dir(&repo);
+    let timeout = Duration::from_secs(15);
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(timeout),
+        timeout,
+    )
+    .ok()
+    .filter(|output| output.status.success())?;
+    let runs: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let run = runs.as_array()?.first()?;
+    (run["conclusion"] == "failure").then(|| {
+        format!("GitHub run {} failed at frozen tip {}", run["databaseId"], short(&freeze.tip))
+    })
+}
+
 fn refusal(train: &Task, freeze: &Freeze, subject: &str) -> String {
     format!(
         "TRAIN FROZEN: train frozen for release, parked for the next train. {}; {subject}. \
-         No merge was attempted. Only a `{REPAIR_LABEL}` task naming the current cut blocker may merge. \
+         No merge was attempted. Only a `{REPAIR_LABEL}` task naming the current cut blocker, or repairing a red train, may merge. \
          The freeze ends on publication or an operator or audited supervisor lift.",
         frozen_since(train, freeze),
     )
@@ -127,7 +172,7 @@ pub(crate) fn frozen_since(train: &Task, freeze: &Freeze) -> String {
 }
 
 /// The merge gate: worktree_merge (before and under the target lock) and CI
-/// retry arming. An exact-blocker repair is noted on the train once.
+/// retry arming. An admitted repair is noted on the train once.
 pub(crate) fn check_merge(root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
     let store = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
     let tasks = store.list(None).map_err(|error| error.to_string())?;
@@ -135,12 +180,15 @@ pub(crate) fn check_merge(root: &Path, target: &str, task_id: Option<&str>) -> R
     let task = task_id.and_then(|id| store.get(id).ok());
     let Some(task) = task.filter(is_repair) else {
         let subject = task_id.map_or("this merge names no task".to_string(), |id| format!("{id} stays parked"));
-        return Err(refusal(&train, &freeze, &subject));
+        return Err(crate::gates::tag("G-100", refusal(&train, &freeze, &subject)));
     };
     let tip = repo_of(root, &train).and_then(|repo| crate::qa_batch::commit(&repo, target));
     let prefix = format!("{CUT_BLOCKER_LABEL}{}:", tip.unwrap_or_default());
-    let Some(blocker) = train.labels.iter().find(|label| label.starts_with(&prefix) && task.labels.contains(label)) else {
-        return Err(refusal(&train, &freeze, "repair must name a current release-cut-blocker label"));
+    let named = train.labels.iter().find(|label| label.starts_with(&prefix) && task.labels.contains(label)).cloned();
+    // A red train suite at or after the frozen tip also admits its repair.
+    let Some(blocker) = named.or_else(|| red_evidence(root, &train, &freeze)) else {
+        return Err(crate::gates::tag("G-100", refusal(&train, &freeze, &format!(
+            "{} must name a current release-cut-blocker label, or the train must be red at or after the frozen tip", task.id))));
     };
     let line = format!("FREEZE REPAIR: {} admitted into frozen {} for {blocker}; freeze remains active after merge", task.id, train.id);
     if !train.notes.contains(&line) {
@@ -166,14 +214,15 @@ pub(crate) fn check_staffing(root: &Path, task_id: &str) -> Result<()> {
         return Ok(());
     };
     match active(root, &train) {
-        Some(freeze) => anyhow::bail!(refusal(&train, &freeze, &subject).replace(" No merge was attempted.", "")),
+        Some(freeze) => anyhow::bail!(crate::gates::tag("G-06", refusal(&train, &freeze, &subject).replace(" No merge was attempted.", ""))),
         None => Ok(()),
     }
 }
 
 /// Median minutes of each release stage still ahead, from the friction
-/// ledger: the merge queue and publication. `None` names the stage that has no measurement.
-pub(crate) fn remaining_minutes(root: &Path, now: DateTime<Utc>) -> Result<f64, &'static str> {
+/// ledger: the train suite (unless the tip is already green), the merge
+/// queue and publication. `None` names the stage that has no measurement.
+pub(crate) fn remaining_minutes(root: &Path, train: &Task, now: DateTime<Utc>) -> Result<f64, &'static str> {
     use cas_store::QualityPayload;
     let events = cas_store::quality_events_between(root, Some(now - chrono::Duration::days(60)), Some(now))
         .unwrap_or_default();
@@ -194,6 +243,20 @@ pub(crate) fn remaining_minutes(root: &Path, now: DateTime<Utc>) -> Result<f64, 
                 .collect(),
         )
     };
+    let green = crate::train_ci::directory(root, &train.id)
+        .ok()
+        .and_then(|dir| std::fs::read(dir.join("state.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|state| {
+            state["outcome"] == "PASS"
+                && state["branch"].as_str() == train.effective_epic_branch()
+                && repo_of(root, train).zip(state["head"].as_str()).is_some_and(|(repo, head)| {
+                    train.effective_epic_branch().is_some_and(|lane| {
+                        crate::worktree::GitOperations::new(repo).resolve_commit(lane).as_deref() == Some(head)
+                    })
+                })
+        });
+    let suite = if green { 0.0 } else { check("train_full_gate").ok_or("train suite")? };
     let queue = check("merge_queue").ok_or("merge queue")?;
     let publish = median(
         events
@@ -206,12 +269,12 @@ pub(crate) fn remaining_minutes(root: &Path, now: DateTime<Utc>) -> Result<f64, 
             .collect(),
     )
     .ok_or("publish")?;
-    Ok(queue + publish)
+    Ok(suite + queue + publish)
 }
 
 /// "Frozen 2:05 PM ET · ETA 2:50 PM ET", or the stage that is unmeasured.
 pub(crate) fn summary(root: &Path, train: &Task, freeze: &Freeze, now: DateTime<Utc>) -> String {
-    let eta = match remaining_minutes(root, now) {
+    let eta = match remaining_minutes(root, train, now) {
         Ok(minutes) => format!("ETA {}", eastern(now + chrono::Duration::seconds((minutes * 60.0) as i64))),
         Err(stage) => format!("ETA unmeasured: no {stage} timing"),
     };
@@ -222,7 +285,7 @@ pub(crate) fn summary(root: &Path, train: &Task, freeze: &Freeze, now: DateTime<
 pub(crate) fn card(root: &Path, train: &Task) -> Option<Value> {
     let freeze = active(root, train)?;
     let now = Utc::now();
-    let eta = remaining_minutes(root, now).ok().map(|minutes| (now + chrono::Duration::seconds((minutes * 60.0) as i64)).to_rfc3339());
+    let eta = remaining_minutes(root, train, now).ok().map(|minutes| (now + chrono::Duration::seconds((minutes * 60.0) as i64)).to_rfc3339());
     Some(serde_json::json!({
         "frozen_at": freeze.at.to_rfc3339(),
         "tip": freeze.tip,
@@ -598,6 +661,47 @@ mod tests {
         check_staffing(&root, "cas-feat").unwrap();
     }
 
+    /// GH #1919: G-100 says to retarget parked work to the next train. That
+    /// one proof_scope_fix update now moves the parent too, so the re-park
+    /// start is not refused G-06 by the frozen train.
+    #[tokio::test]
+    async fn retarget_to_next_train_moves_parent_so_start_is_not_refused_gh_1919() {
+        let _env = TestEnvGuard::temp_home();
+        let (temp, root) = fixture();
+        let next = "epic/release-train-vnext-cas-tr2";
+        git(temp.path(), &["branch", next]);
+        let store = crate::store::open_task_store(&root).unwrap();
+        let mut train = store.get("cas-tr").unwrap();
+        train.id = "cas-tr2".into();
+        train.branch = Some(next.into());
+        train.labels = vec!["release-train".into()];
+        store.add(&train).unwrap();
+        let mut parked = store.get("cas-feat").unwrap();
+        parked.status = crate::types::TaskStatus::AwaitingMerge;
+        parked.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:freeze-test".into(),
+            target_branch: "epic/release-train-vnext-cas-tr".into(),
+        });
+        store.update(&parked).unwrap();
+        freeze(&root, "cas-tr", "operator", None).unwrap();
+
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role(
+            "retarget-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let req = serde_json::from_value(serde_json::json!({"id": "cas-feat"})).unwrap();
+        core.cas_task_update_with_delivery_mode(
+            req, None, Some(next), true, Some("cas-tr froze; next train"), None, None, None, false,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+
+        assert_eq!(store.get_parent_epic("cas-feat").unwrap().map(|epic| epic.id).as_deref(), Some("cas-tr2"));
+        check_staffing(&root, "cas-feat").unwrap();
+    }
+
     /// The operator lift clears the same gate as the audited supervisor lift.
     #[test]
     fn operator_lift_reopens_the_train() {
@@ -693,21 +797,26 @@ mod tests {
         assert_eq!(prompts[0].factory_session.as_deref(), Some("connected-commander"));
     }
 
-    /// ETA = now + median queue + publish minutes.
+    /// ETA = now + median train suite + queue + publish minutes.
     #[test]
     fn eta_adds_measured_stage_medians() {
         let _env = TestEnvGuard::temp_home();
         let (_temp, root) = fixture();
+        let store = crate::store::open_task_store(&root).unwrap();
+        let train = store.get("cas-tr").unwrap();
         let now = Utc::now();
-        assert_eq!(remaining_minutes(&root, now), Err("merge queue"));
+        assert_eq!(remaining_minutes(&root, &train, now), Err("train suite"));
         for (key, payload) in [
-            ("d", cas_store::QualityPayload::CheckRun { check_id: "merge_queue".into(), stage: cas_store::CheckStage::Queue, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(10.0) }),
+            ("a", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(20.0) }),
+            ("b", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(30.0) }),
+            ("c", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(90.0) }),
+            ("d", cas_store::QualityPayload::CheckRun { review: None, check_id: "merge_queue".into(), stage: cas_store::CheckStage::Queue, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(10.0) }),
             ("e", cas_store::QualityPayload::Release { commit_to_main_minutes: None, main_to_published_minutes: Some(5.0), ejections: 0, rescues: 0 }),
         ] {
             let mut event = cas_store::NewQualityEvent::new(key, payload);
             event.occurred_at = now - chrono::Duration::hours(1);
             cas_store::record_quality_event(&root, &event).unwrap();
         }
-        assert_eq!(remaining_minutes(&root, now), Ok(15.0));
+        assert_eq!(remaining_minutes(&root, &train, now), Ok(45.0));
     }
 }

@@ -315,8 +315,7 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
     );
     assert!(
         banner.contains("unpushed=1")
-            && banner.contains("dirty=1")
-            && banner.contains("push origin"),
+            && banner.contains("dirty=1"),
         "{banner}"
     );
     assert!(
@@ -325,6 +324,9 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
             && line.contains("dirty=1")),
         "{banner}"
     );
+    let inventory = crate::worktree::retained::scan(&root);
+    assert_eq!(inventory.entries.len(), retained.len());
+    assert!(inventory.entries.iter().all(|entry| entry.push_remote.as_deref() == Some("origin")));
     let gc = text(
         service
             .factory(Parameters(

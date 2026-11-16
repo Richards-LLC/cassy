@@ -44,7 +44,9 @@ impl ReleaseClose {
     /// Resolve membership afresh before granting any lifecycle authority.
     /// The caller keeps per-delivery exceptions; one bad member does not erase
     /// other shipped facts or make the release appear successfully finalized.
-    pub(crate) fn prepare(
+    // gate-audit[author_override]: selector Revalidates the release-bound evidence issued under G-116; replay does not mint a new author override.
+// gate-audit[release_author_waiver]: selector Revalidates previously issued release verdict evidence; no new author approval is issued.
+pub(crate) fn prepare(
         root: &Path,
         repo: &Path,
         inventory: &ReleaseInventory,
@@ -54,7 +56,8 @@ impl ReleaseClose {
         let receipts = read_receipts(root, &inventory.scope.project_id)?;
         let mut reviews = Vec::new();
         for proof in inventory.scope.proof_refs.iter().filter(|p| p.kind == ReleaseProofKind::Review) {
-            let Some(receipt) = receipts.iter().find(|r| proof_matches(proof, r)) else { continue; };
+            let Some(receipt) = receipts.iter().find(|r| proof_matches(proof, r)
+                && r.staging_sha == inventory.scope.reviewed_sha) else { continue; };
             let Ok(body) = std::fs::read_to_string(&receipt.ledger_path) else { continue; };
             if body.len() as u64 == receipt.ledger_size_bytes
                 && format!("{:x}", Sha256::digest(body.as_bytes())) == receipt.ledger_sha256 {
@@ -76,13 +79,11 @@ impl ReleaseClose {
         task: &Task,
         receipt: &QaBatchReceipt,
     ) -> Self {
+        let anchor = resolved_delivery_anchor(repo, task, &receipt.staging_sha);
         let proofs = release_proof_refs(
             std::slice::from_ref(receipt),
             &task.id,
-            task.deliverables
-                .factory_branch_anchor
-                .as_deref()
-                .unwrap_or(""),
+            anchor.as_deref().unwrap_or(""),
         );
         Self {
             root: root.to_path_buf(),
@@ -108,8 +109,8 @@ impl ReleaseClose {
                 },
                 deliveries: vec![ReleaseDelivery {
                     task_id: task.id.clone(),
-                    generation: task.updated_at.to_rfc3339(),
-                    anchor: delivery_anchor(repo, task),
+                    generation: delivery_generation(task),
+                    anchor,
                     base_sha: task
                         .deliverables
                         .factory_branch_start
@@ -128,6 +129,13 @@ impl ReleaseClose {
         self.member_errors.get(id).map(String::as_str)
     }
 
+    pub(crate) fn ledger_reverts(&self, id: &str, anchor: Option<&str>) -> bool {
+        self.reviews.iter().any(|(receipt, body)| {
+            receipt.task_heads.get(id).is_some_and(|head| anchor.is_none_or(|anchor| head == anchor))
+                && ledger_marks_reverted(body, id)
+        })
+    }
+
     pub(crate) async fn scope<F: std::future::Future>(self, future: F) -> F::Output {
         CURRENT.scope(self, future).await
     }
@@ -135,6 +143,34 @@ impl ReleaseClose {
     fn delivery(&self, id: &str) -> Option<&ReleaseDelivery> {
         self.inventory.deliveries.iter().find(|d| d.task_id == id)
     }
+}
+
+fn ledger_marks_reverted(body: &str, id: &str) -> bool {
+    let reverted = |text: &str| text.trim().split(|c: char| !c.is_alphanumeric()).next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("reverted"));
+    // The incident's canonical ledger used a journey ID, the task in `cell`,
+    // and NOT A ROUTE with a Reverted disposition in `expected`.
+    if crate::qa_ledger::parse(body, 0).rows.iter().any(|row| {
+        row.verdict == crate::qa_ledger::Verdict::NotARoute
+            && report_names(&row.cell, id)
+            && (reverted(&row.expected) || reverted(&row.observed))
+    }) { return true; }
+    // Older release reports use a compact task/verdict table instead.
+    let mut fence = None;
+    body.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let marker = line.chars().next().unwrap();
+            fence = if fence == Some(marker) { None } else { Some(marker) };
+            return false;
+        }
+        if fence.is_some() || !line.starts_with('|') { return false; }
+        let cells: Vec<_> = line.trim_matches('|').split('|')
+            .map(|cell| cell.trim().trim_matches('`')).collect();
+        cells.first() == Some(&id) && cells.iter().skip(1).any(|cell| {
+            cell.strip_prefix("NOT A ROUTE:").is_some_and(reverted)
+        })
+    })
 }
 
 pub(crate) fn parse_manifest(body: &str) -> Result<Option<ReleaseTransformations>, String> {
@@ -188,7 +224,7 @@ pub(crate) fn validate_task(root: &Path, task: &Task) -> Result<(), String> {
             if let Some(error) = context.member_error(&task.id) {
                 return Err(error.to_string());
             }
-            if delivery.generation != task.updated_at.to_rfc3339()
+            if delivery.generation != delivery_generation(task)
                 || delivery.base_sha.as_deref()
                     != task
                         .deliverables
@@ -557,13 +593,15 @@ pub(crate) fn parent_dispatch_covered(root: &Path, id: &str) -> bool {
     CURRENT.try_with(|c| {
         c.root == root && c.parent.as_ref().is_some_and(|p| p.task_id == id && p.review.is_some())
             && cas_store::get_latest_verification_dispatch(root, id).is_ok_and(|dispatch| dispatch.is_none_or(|d| {
-                d.receipt_id.is_none() && d.delivery_transaction_id.is_none()
+                d.receipt().is_ok_and(|receipt| receipt.transaction().is_none())
                     && d.repository.as_ref().is_some_and(|r| r.head_commit == c.inventory.scope.final_release_sha)
             }))
     }).unwrap_or(false)
 }
 
 /// Open an existing store without schema initialization, sync repair or cache writes.
+/// A read-only WAL reader keeps normal locking and may create absent `-shm`/`-wal`
+/// sidecars; existing bytes are never changed (GH #1859).
 pub(crate) fn read_connection(root: &Path) -> Result<rusqlite::Connection, String> {
     rusqlite::Connection::open_with_flags(root.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| e.to_string())
@@ -616,46 +654,6 @@ pub(crate) fn read_artifact(root: &Path, id: &str) -> Result<cas_store::Publishe
     found.ok_or_else(|| "ARTIFACT_METADATA_MISSING".into())
 }
 
-/// Recorded verdicts already validated their ledger and author. Publication
-/// consumes that immutable fact and never grants approval by itself.
-fn approved_at(root: &Path, repo: &Path, task: &Task, anchor: &str, published: &str, receipts: &[QaBatchReceipt]) -> Result<bool, String> {
-    use rusqlite::OptionalExtension;
-    let conn = read_connection(root)?;
-    if conn.table_exists(None, "verification_dispatches").map_err(|e| e.to_string())? {
-        if let Some(dispatch) = cas_store::get_latest_verification_dispatch_with_conn(&conn, &task.id).map_err(|e| e.to_string())? {
-            // Peer admission records the landed head and binds the approved
-            // source in anchor_commits; that immutable source is the delivery.
-            let head_matches = dispatch.repository.as_ref().is_some_and(|r| {
-                r.head_commit == anchor || r.anchor_commits.iter().any(|head| head == anchor)
-            });
-            let status: Option<String> = conn.query_row(
-                "SELECT status FROM verifications WHERE dispatch_id=? AND task_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
-                rusqlite::params![dispatch.id, task.id], |row| row.get(0),
-            ).optional().map_err(|e| e.to_string())?;
-            if dispatch.state == cas_types::VerificationDispatchState::Resolved && status.as_deref() == Some("approved") {
-                if head_matches { return Ok(true); }
-                // Local premerge verdicts review a synthetic commit. Its
-                // immutable manifest binds the delivery source and tree;
-                // only a reviewed tree in the published history grants close.
-                if let Some(candidate) = crate::mcp::tools::core::workflow::premerge_verification::candidate_for_dispatch(root, &dispatch)?
-                    && candidate.source_sha == anchor
-                {
-                    let trees = Command::new("git").current_dir(repo)
-                        .args(["log", "--format=%T", published, "--"])
-                        .output().map_err(|e| e.to_string())?;
-                    if trees.status.success() && String::from_utf8_lossy(&trees.stdout).lines().any(|tree| tree == candidate.tree) {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-    }
-    Ok(receipts.iter().any(|receipt| {
-        matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
-            && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)
-    }))
-}
-
 /// Preview and apply share every decision; only the guarded close write differs.
 pub(crate) fn reconcile_members(
     root: &Path, repo: &Path, inventory: &ReleaseInventory, write: bool,
@@ -666,21 +664,27 @@ pub(crate) fn reconcile_members(
     use crate::mcp::tools::core::task::lifecycle::{merge_close::CassyMergeClose, review_tier::{self, VerificationTier}};
     let tasks = read_tasks(root)?;
     let receipts = read_receipts(root, &inventory.scope.project_id)?;
+    let review = ReleaseClose::prepare(root, repo, inventory)?;
     let ids: std::collections::BTreeSet<_> = inventory.deliveries.iter().map(|d| d.task_id.clone())
         .chain(inventory.exceptions.iter().map(|e| e.task_id.clone()))
         .chain(inventory.scope.included_task_ids.iter().cloned())
         .chain(inventory.scope.no_code_members.keys().cloned()).collect();
     let mut outcomes = BTreeMap::new();
+    let mut legacy_approvals = 0usize;
     for id in ids {
-        let evaluate = || -> Result<CassyMergeClose, String> {
+        let mut evaluate = || -> Result<CassyMergeClose, String> {
             let task = match tasks.get(&id) { Ok(task) => task, Err(_) => return Ok(CassyMergeClose::NotEligible) };
-            if task.status == TaskStatus::Closed { return Ok(CassyMergeClose::AlreadyClosed); }
-            if task.is_terminal() { return Ok(CassyMergeClose::NotEligible); }
-            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id) {
-                return Err(format!("RELEASE_MEMBER_HELD: {:?}", exception.code));
+            let already_closed = task.status == TaskStatus::Closed;
+            if task.is_terminal() && !already_closed { return Ok(CassyMergeClose::NotEligible); }
+            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id)
+                .filter(|e| !already_closed || matches!(e.code, ReleaseInventoryCode::Reverted | ReleaseInventoryCode::UnprovenContent)) {
+                return Err(exception.code.close_gate());
             }
             let delivery = inventory.deliveries.iter().find(|d| d.task_id == id).ok_or("RELEASE_MEMBERSHIP_MISSING")?;
-            if task.updated_at.to_rfc3339() != delivery.generation { return Err("RELEASE_GENERATION_CHANGED".into()); }
+            if delivery_generation(&task) != delivery.generation { return Err("RELEASE_GENERATION_CHANGED".into()); }
+            if review.ledger_reverts(&id, delivery.anchor.as_deref()) {
+                return Err(ReleaseInventoryCode::Reverted.close_gate());
+            }
             let mut anchors = Vec::new();
             if delivery.membership == ReleaseMembership::ExplicitNoCode {
                 crate::release_reconcile::validate_no_code_proofs(root, &inventory.scope, &id, &delivery.proof_refs)?;
@@ -690,6 +694,8 @@ pub(crate) fn reconcile_members(
                 if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|current| current != anchor) {
                     return Err("RELEASE_GENERATION_CHANGED".into());
                 }
+                release_delivery_effect(repo, delivery.base_sha.as_deref(), anchor,
+                    &inventory.scope.final_release_sha, &id).map_err(|code| code.close_gate())?;
                 anchors.push(anchor);
             }
             let tier_zero = delivery.anchor.as_deref().is_some_and(|anchor| {
@@ -697,14 +703,44 @@ pub(crate) fn reconcile_members(
                     && (delivery.base_sha.as_deref() == Some(anchor)
                         || review_tier::tier_for_delivery(&task, repo).is_some_and(|d| d.tier == VerificationTier::Mechanical))
             });
+            let conn = read_connection(root)?;
+            let mut no_review = true;
+            for table in ["verification_dispatches", "verifications"] {
+                if conn.table_exists(None, table).map_err(|e| e.to_string())? {
+                    no_review &= !conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE task_id=?)"),
+                        [&task.id], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string())?;
+                }
+            }
+            let exempt = delivery.membership != ReleaseMembership::ExplicitNoCode && no_review
+                && !task.labels.iter().any(|label| label == review_tier::FORCE_VERIFIER_LABEL)
+                && (tier_zero || task.depth == cas_types::TaskDepth::Light
+                    || crate::rapid_response::verification_was_exempted(root, repo, &task));
             let mut approved = !anchors.is_empty();
             for anchor in anchors {
                 if ancestor(repo, anchor, &inventory.scope.final_release_sha) != Some(true) {
                     return Err("RELEASE_ANCHOR_NOT_SHIPPED".into());
                 }
-                approved &= tier_zero || approved_at(root, repo, &task, anchor, &inventory.scope.final_release_sha, &receipts)?;
+                let dispatch_approval = crate::mcp::tools::core::workflow::premerge_verification::cycle::approved(
+                    root, repo, &task, anchor, &inventory.scope.final_release_sha)?;
+                if let Some(approval) = &dispatch_approval {
+                    legacy_approvals += usize::from(approval.legacy);
+                    // The stamp is read only after the exact verdict resolves.
+                    let _registry_version = &approval.registry_version;
+                }
+                if exempt && !task.deliverables.green_merge_commit.as_deref().is_some_and(|merge| {
+                    task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Green
+                        && ancestor(repo, anchor, merge) == Some(true)
+                        && ancestor(repo, merge, &inventory.scope.final_release_sha) == Some(true)
+                }) {
+                    return Err("LANE_CI_MISSING".into());
+                }
+                approved &= exempt || dispatch_approval.is_some() || (delivery.membership == ReleaseMembership::ExplicitNoCode && receipts.iter().any(|receipt| {
+                    matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
+                        && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)
+                }));
             }
             if !approved { return Err("REVIEW_MISSING".into()); }
+            if already_closed { return Ok(CassyMergeClose::AlreadyClosed); }
             if write {
                 let mut closed = task.clone();
                 closed.status = TaskStatus::Closed;
@@ -721,6 +757,10 @@ pub(crate) fn reconcile_members(
         let outcome = evaluate().unwrap_or_else(CassyMergeClose::Held);
         checkpoint(&id, outcome.clone())?;
         outcomes.insert(id, outcome);
+    }
+    if !write {
+        // Portable replay receipt: preview bypasses logging so it writes no store rows.
+        eprintln!("approval_lookup: legacy_candidate_approvals={legacy_approvals}");
     }
     Ok(outcomes)
 }

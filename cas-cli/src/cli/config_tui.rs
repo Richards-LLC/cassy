@@ -530,6 +530,7 @@ impl ConfigTuiApp {
         }
     }
 
+    // gate-audit[has_override]: selector Existing config value determines whether reset is offered; no policy exemption.
     fn reset_selected_option(&mut self) -> anyhow::Result<()> {
         if let Some(i) = self.option_state.selected() {
             if let Some(key) = self.option_keys.get(i) {
@@ -832,7 +833,7 @@ mod tests {
         std::fs::create_dir_all(&host_root).unwrap();
         std::fs::write(
             host_root.join("config.toml"),
-            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n\n[viktor]\nenabled = false\n",
+            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
         )
         .unwrap();
         let project = env.home().join("projects/config-tui-editor");
@@ -848,11 +849,6 @@ mod tests {
             app.values.get("hub.transport_mode").map(String::as_str),
             Some("required"),
             "the editor should show the host-scoped value"
-        );
-        assert_eq!(
-            app.values.get("viktor.enabled").map(String::as_str),
-            Some("false"),
-            "the editor should show the host-scoped Viktor value"
         );
         app.current_section = Some("sync".into());
         app.option_keys = vec!["sync.enabled".into()];

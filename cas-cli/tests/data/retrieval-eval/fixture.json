@@ -921,7 +921,7 @@
    "harmful_count": 0,
    "age_days": 14,
    "title": "Release discipline: notes describe what the BINARY does (verify enforcement claims in code), and rehearse the tag mechanics before the finish line",
-   "body": "Two release-latency lessons from 2026-08-16 (operator: \"it is now over two hours to RELEASE A BUILD\"), complementing the batching rule (2026-08-16-2): 1. WRITE RELEASE NOTES AGAINST THE SHIPPED BINARY'S BEHAVIOUR, NOT THE EPIC'S DELIVERABLES. The v2.71.0 changelog claimed the Viktor gateway \"attributes every external MCP call... refused before anything leaves the machine\" while the landed code was contract-only (proxy default AllowAllProxyPolicy, set_policy called only in tests, receipt store constructed nowhere). A reviewer filed GH #447 and the honest rewording to \"groundwork\" cost an entire extra required-check cycle at the worst possible moment. Before writing any \"Added\" claim, grep for"
+   "body": "Two release-latency lessons from 2026-08-16 (operator: \"it is now over two hours to RELEASE A BUILD\"), complementing the batching rule (2026-08-16-2): 1. WRITE RELEASE NOTES AGAINST THE SHIPPED BINARY'S BEHAVIOUR, NOT THE EPIC'S DELIVERABLES. The v2.71.0 changelog claimed the external delegation gateway \"attributes every external MCP call... refused before anything leaves the machine\" while the landed code was contract-only (proxy default AllowAllProxyPolicy, set_policy called only in tests, receipt store constructed nowhere). A reviewer filed GH #447 and the honest rewording to \"groundwork\" cost an entire extra required-check cycle at the worst possible moment. Before writing any \"Added\" claim, grep for"
   },
   {
    "id": "2026-08-16-2",

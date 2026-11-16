@@ -1625,6 +1625,7 @@ impl VioletWatchStatus {
     }
 
     /// Doctor's verdict on the claim loop and its watches.
+    // gate[W-57 watchdog]: Violet watch health
     pub(crate) fn doctor(&self, now: DateTime<Utc>) -> (WatchHealth, String) {
         if let Some(path) = self.quarantined_book.as_ref().filter(|path| path.exists()) {
             return (
@@ -1837,6 +1838,7 @@ pub(crate) fn parse_violet_activity_envelope(prompt: &str) -> Option<VioletActiv
     })
 }
 
+// gate[W-54 watchdog]: Violet v1 claim and ack poll wake
 fn enqueue_wake(
     queue: &dyn PromptQueueStore,
     factory_session: &str,
@@ -2318,6 +2320,7 @@ impl VioletWakeRuntime {
         state.end_session(Utc::now())
     }
 
+    // gate[W-56 watchdog]: Violet channel watch sweep and idle stop
     /// Run the due sweeps: read through Violet, then apply the results.
     /// Returns how many sweeps queued a wake.
     #[cfg(feature = "mcp-proxy")]

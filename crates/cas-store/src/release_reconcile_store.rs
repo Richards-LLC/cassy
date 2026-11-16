@@ -163,8 +163,7 @@ pub fn retire_closed_parent_dispatch(root: &Path, task_id: &str, final_sha: &str
         tx.commit()?;
         return Ok(false);
     };
-    if dispatch.receipt_id.is_some()
-        || dispatch.delivery_transaction_id.is_some()
+    if dispatch.receipt().map_err(crate::StoreError::Parse)?.transaction().is_some()
         || !dispatch
             .repository
             .as_ref()

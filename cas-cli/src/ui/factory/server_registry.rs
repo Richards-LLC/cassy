@@ -117,6 +117,12 @@ pub(crate) struct RegisteredServer {
     /// kills nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pgid: Option<u32>,
+    /// The session and process group `setsid` created for this launch
+    /// (GH #1850). It is the containment scope on hosts without a delegated
+    /// cgroup, so a finite workload whose root exited can still be retired
+    /// once the scope is empty. Legacy records lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_group_scope: Option<u32>,
     /// `/proc` start-time fingerprint, the guard against pid reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_starttime: Option<u64>,
@@ -575,6 +581,8 @@ fn start_inner(
         cwd: spec.cwd.clone(),
         pid,
         pgid,
+        // The launcher called setsid, so its pid names the group it created.
+        process_group_scope: cfg!(unix).then_some(launcher_pid),
         pid_starttime: crate::mcp::daemon::read_pid_starttime(pid),
         expected_port: spec.expected_port,
         owner_task: spec.owner_task.clone(),
@@ -736,6 +744,21 @@ fn stop_inner(
             pid: record.pid,
             ports: Vec::new(),
         },
+        // GH #1850: without a cgroup, the recorded setsid group is the scope.
+        // An empty scope proves a finite workload exited; a live member is
+        // reported, never signalled, because its group cannot be re-proven.
+        ServerLiveness::Gone if record.process_group_scope.is_some() => {
+            let survivors = scope_survivors(&record);
+            if !survivors.is_empty() {
+                return Err(io::Error::other(format!(
+                    "registered pid {} for server '{}' exited, but its process group still                      holds {}; nothing was signalled",
+                    record.pid,
+                    record.name,
+                    survivor_detail(&record, &survivors)
+                )));
+            }
+            StopOutcome::AlreadyGone
+        }
         ServerLiveness::Gone => {
             return Err(io::Error::other(format!(
                 "registered pid {} for server '{}' is gone, but this legacy record has no \
@@ -1012,6 +1035,17 @@ fn remaining_processes(
         }
     }
     survivors
+}
+
+/// Live members of the groups this launch created or the server joined,
+/// excluding the caller's own group.
+fn scope_survivors(record: &RegisteredServer) -> Vec<ProcessDetails> {
+    let own = process_group_of(std::process::id());
+    let snapshot = process_snapshot();
+    let mut groups: Vec<u32> = record.process_group_scope.into_iter().chain(record.pgid)
+        .filter(|group| Some(*group) != own).collect();
+    groups.dedup();
+    groups.into_iter().flat_map(|group| process_group_members(group, &snapshot)).collect()
 }
 
 fn survivor_detail(record: &RegisteredServer, survivors: &[ProcessDetails]) -> String {

@@ -1,25 +1,17 @@
 # CI tier contracts
 
-`../test-ci-test-tiers.sh` runs three independent checks:
+`../test-ci-test-tiers.sh` runs two behavioral suites:
 
-1. `policy.py check` parses the workflow YAML and the branch-protection JSON.
-   Since cas-a1b0, `policy.json` holds only the required-context contract: each
-   context the main ruleset requires (`Fast Validation`) is
-   required exactly once and is produced by a CI job of that name. It no longer
-   pins workflow text, step layout or gate-row parity: those pins (564 `text`
-   and 112 `absent` needles) caught no recorded defect and failed 59 of 90
-   ci.yml edits (cas-a677 report §4). Removing or moving a CI check now fails
-   only if it breaks a required context.
-2. `executable-contracts.sh` runs the real classifier, admission/receipt guards,
+1. `executable-contracts.sh` runs the real classifier, admission/receipt guards,
    watchdogs, publication retry body, cache isolation and fallback scripts with
    isolated Git/HTTP-command/process fixtures.
-3. `test-policy.py` executes real workflow step bodies (the required rollup,
+2. `test-policy.py` executes real workflow step bodies (the required rollup,
    runner route, Markdown filter, parser provisioning) and the shared rustup
-   helper, plus the required-context mutations.
+   helper.
 
-`prose-pins.json` is separate: each entry names its consumer and reason. Markdown
-contracts still check the named document; annotations are never executable
-evidence.
+`policy.py` supplies parsed YAML/JSON selectors to those fixtures. The policy
+and prose pin registries are retired. GitHub's required-status ruleset enforces
+queue admission; the suites exercise actual command behavior.
 
 The parser requires `pyyaml==6.0.3` from `requirements.txt`. Missing PyYAML is a
 hard failure, with an installation message. The CI tiers job reuses importable

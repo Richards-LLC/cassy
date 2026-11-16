@@ -619,6 +619,7 @@
         "proposal_id",
         "reason",
         "repro",
+        "review_dispatch_id",
         "risk",
         "scope",
         "search_manifest",

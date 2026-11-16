@@ -5,23 +5,6 @@ use anyhow::{Context, Result};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Canonical Viktor streamable-HTTP upstream. The credential is resolved at
-/// connection time so it is safe to place this managed default on disk.
-pub const VIKTOR_MCP_URL: &str = "https://api.viktor.com/mcp";
-pub const VIKTOR_API_KEY_ENV: &str = "VIKTOR_API_KEY";
-pub const VIKTOR_SERVER: &str = "viktor";
-pub const VIKTOR_CONVERSATION_TOOLS: [&str; 9] = [
-    "ask_viktor",
-    "create_thread",
-    "send_message",
-    "wait_for_run",
-    "get_run",
-    "get_run_result",
-    "list_threads",
-    "list_messages",
-    "whoami",
-];
-
 /// Canonical Violet hub upstream. Credentials are referenced by environment
 /// variable name, never stored in proxy configuration.
 pub const VIOLET_SERVER: &str = "violet";
@@ -118,8 +101,7 @@ pub const DEFAULT_WORKER_READ_ROUTES: [(&str, &str); 7] = [
 /// [`Config::worker_access`]. Server definitions are an internally tagged
 /// enum that ignores unknown keys, so the per-server spelling is read from the
 /// raw document. A per-server value wins over a top-level entry.
-fn lift_server_worker_access(content: &str, config: &mut Config) -> Result<()> {
-    let document: toml::Table = toml::from_str(content).context("failed to parse proxy config")?;
+fn lift_server_worker_access(document: &toml::Table, config: &mut Config) -> Result<()> {
     let Some(servers) = document.get("servers").and_then(toml::Value::as_table) else {
         return Ok(());
     };
@@ -265,7 +247,6 @@ pub struct DelegationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalProductionVerificationConfig {
     pub server: String,
-    #[serde(default = "default_start_tool")]
     pub start_tool: String,
     #[serde(default = "default_wait_tool")]
     pub wait_tool: String,
@@ -279,10 +260,6 @@ pub struct ExternalProductionVerificationConfig {
     pub max_active_per_epic: u64,
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
-}
-
-fn default_start_tool() -> String {
-    "ask_viktor".to_string()
 }
 
 fn default_wait_tool() -> String {
@@ -307,52 +284,6 @@ fn default_max_active_per_epic() -> u64 {
 
 fn default_timeout_seconds() -> u64 {
     120
-}
-
-fn is_viktor_server_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case(VIKTOR_SERVER)
-}
-
-fn canonical_viktor_server_name(name: &str) -> String {
-    if is_viktor_server_name(name) {
-        VIKTOR_SERVER.to_string()
-    } else {
-        name.to_string()
-    }
-}
-
-fn normalize_viktor_map_entries<T>(entries: &mut HashMap<String, T>) -> bool {
-    let mut aliases: Vec<String> = entries
-        .keys()
-        .filter(|name| is_viktor_server_name(name) && name.as_str() != VIKTOR_SERVER)
-        .cloned()
-        .collect();
-    if aliases.is_empty() {
-        return false;
-    }
-
-    aliases.sort();
-    if !entries.contains_key(VIKTOR_SERVER)
-        && let Some(alias) = aliases.first()
-        && let Some(value) = entries.remove(alias)
-    {
-        entries.insert(VIKTOR_SERVER.to_string(), value);
-    }
-    for alias in aliases {
-        entries.remove(&alias);
-    }
-    true
-}
-
-fn normalize_viktor_route_names(routes: &mut [ExternalToolConfig]) -> bool {
-    let mut changed = false;
-    for route in routes {
-        if is_viktor_server_name(&route.server) && route.server != VIKTOR_SERVER {
-            route.server = VIKTOR_SERVER.to_string();
-            changed = true;
-        }
-    }
-    changed
 }
 
 /// Configuration for a single upstream MCP server.
@@ -411,6 +342,57 @@ fn dirs_config_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 }
 
+/// Ignore retired upstream configuration in memory, without changing user files.
+/// Return whether anything was discarded, also used to leave legacy files alone
+/// during passive managed-registration refreshes.
+fn discard_retired_upstream(document: &mut toml::Table) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let retired = |name: &str| name.eq_ignore_ascii_case("viktor");
+    let mut changed = false;
+    for key in ["servers", "worker_access"] {
+        if let Some(entries) = document.get_mut(key).and_then(toml::Value::as_table_mut) {
+            let before = entries.len();
+            entries.retain(|name, _| !retired(name));
+            changed |= entries.len() != before;
+        }
+    }
+    for key in ["allowlist", "worker_read_routes"] {
+        if let Some(routes) = document.get_mut(key).and_then(toml::Value::as_array_mut) {
+            let before = routes.len();
+            routes.retain(|route| {
+                let server = route.get("server").and_then(toml::Value::as_str);
+                if server.is_some_and(&retired) {
+                    return false;
+                }
+                !route
+                    .as_str()
+                    .and_then(|entry| ExternalToolConfig::parse_allowlist_entry(entry).ok())
+                    .is_some_and(|route| retired(&route.server))
+            });
+            changed |= routes.len() != before;
+        }
+    }
+    if let Some(delegation) = document
+        .get_mut("delegation")
+        .and_then(toml::Value::as_table_mut)
+        && delegation
+            .get("external_production_verification")
+            .and_then(|gateway| gateway.get("server"))
+            .and_then(toml::Value::as_str)
+            .is_some_and(&retired)
+    {
+        delegation.remove("external_production_verification");
+        changed = true;
+    }
+    if changed && !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[Cassy] Viktor integration has been removed; ignoring its stale upstream and policy entries. Your configuration files are unchanged."
+        );
+    }
+    changed
+}
+
 impl Config {
     /// The client-side upstream call timeout (cas-53ce): the configured
     /// `call_timeout_secs` (at least one second), else 90 s.
@@ -438,9 +420,14 @@ impl Config {
             return Ok(Config::default());
         }
 
-        let mut config: Config = toml::from_str(&content)
+        let mut document: toml::Table = toml::from_str(&content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
-        lift_server_worker_access(&content, &mut config)
+        discard_retired_upstream(&mut document);
+        let mut config: Config = document
+            .clone()
+            .try_into()
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        lift_server_worker_access(&document, &mut config)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         Ok(config)
     }
@@ -522,27 +509,12 @@ impl Config {
 
     /// Add or replace a server configuration.
     pub fn add_server(&mut self, name: String, config: ServerConfig) {
-        self.normalize_viktor_server_names();
-        let name = canonical_viktor_server_name(&name);
         self.servers.insert(name, config);
     }
 
     /// Remove a server configuration. Returns true if it existed.
     pub fn remove_server(&mut self, name: &str) -> bool {
-        self.normalize_viktor_server_names();
-        self.servers
-            .remove(&canonical_viktor_server_name(name))
-            .is_some()
-    }
-
-    /// Fold persisted case variants of the managed Viktor server into its
-    /// canonical lowercase name, including per-server policy and routes.
-    pub fn normalize_viktor_server_names(&mut self) -> bool {
-        let mut changed = normalize_viktor_map_entries(&mut self.servers);
-        changed |= normalize_viktor_map_entries(&mut self.worker_access);
-        changed |= normalize_viktor_route_names(&mut self.allowlist);
-        changed |= normalize_viktor_route_names(&mut self.worker_read_routes);
-        changed
+        self.servers.remove(name).is_some()
     }
 
     /// An alias must inherit worker restrictions, not provide a second spelling
@@ -585,85 +557,10 @@ impl Config {
         changed
     }
 
-    /// Install the credential-free Viktor default in a user-scoped config.
-    ///
-    /// A pre-existing Viktor server is operator-owned and therefore retained,
-    /// while its dispatch surface is refreshed to the deliberately small
-    /// conversation contract. Project configuration remains authoritative for
-    /// policy because [`Self::load_merged`] replaces (rather than unions) the
-    /// user allowlist when `.cas/proxy.toml` exists.
-    pub fn ensure_viktor_managed_default(&mut self) -> bool {
-        let mut changed = self.normalize_viktor_server_names();
-        if !self.servers.contains_key(VIKTOR_SERVER) {
-            self.servers.insert(
-                VIKTOR_SERVER.to_string(),
-                ServerConfig::Http {
-                    url: VIKTOR_MCP_URL.to_string(),
-                    auth: Some(format!("env:{VIKTOR_API_KEY_ENV}")),
-                    headers: HashMap::new(),
-                    oauth: false,
-                },
-            );
-            changed = true;
-        }
-
-        let desired = VIKTOR_CONVERSATION_TOOLS
-            .iter()
-            .map(|tool| ExternalToolConfig {
-                server: VIKTOR_SERVER.to_string(),
-                tool: (*tool).to_string(),
-                supervisor_only: false,
-            })
-            .collect::<Vec<_>>();
-        if self
-            .allowlist
-            .iter()
-            .filter(|route| route.server == VIKTOR_SERVER)
-            .ne(desired.iter())
-        {
-            self.allowlist.retain(|route| route.server != VIKTOR_SERVER);
-            self.allowlist.extend(desired);
-            changed = true;
-        }
-        changed
-    }
-
-    /// Remove every user-scoped Viktor server and route when the operator opts out.
-    pub fn disable_viktor_managed_default(&mut self) -> bool {
-        let mut changed = self.normalize_viktor_server_names();
-        changed |= self.servers.remove(VIKTOR_SERVER).is_some();
-        changed |= self.worker_access.remove(VIKTOR_SERVER).is_some();
-
-        let route_count = self.allowlist.len();
-        self.allowlist.retain(|route| route.server != VIKTOR_SERVER);
-        changed |= self.allowlist.len() != route_count;
-
-        let read_route_count = self.worker_read_routes.len();
-        self.worker_read_routes
-            .retain(|route| route.server != VIKTOR_SERVER);
-        changed |= self.worker_read_routes.len() != read_route_count;
-        changed
-    }
-
-    /// Reconcile the machine-managed Viktor entry with the persisted opt-out.
-    pub fn reconcile_viktor_managed_default(path: &Path, enabled: bool) -> Result<bool> {
-        let mut config = Self::load_from(path)?;
-        let changed = if enabled {
-            config.ensure_viktor_managed_default()
-        } else {
-            config.disable_viktor_managed_default()
-        };
-        if changed {
-            config.save_to(path)?;
-        }
-        Ok(changed)
-    }
-
     /// Install (or correct) the Violet hub registration, referencing both
     /// credentials by environment-variable name only.
     ///
-    /// Unlike [`Self::ensure_viktor_managed_default`], a pre-existing server
-    /// entry is *replaced*: the operator ran `cas integrate violet` with
+    /// A pre-existing server entry is replaced: the operator ran `cas integrate violet` with
     /// explicit variable names, so those names are authoritative. The
     /// allowlist keeps unrelated routes untouched while the
     /// Violet routes are reduced to exactly [`VIOLET_TOOLS`], which
@@ -806,6 +703,12 @@ impl Config {
 
     /// Migrate an existing file without adding routes to a project's policy.
     pub fn retire_legacy_hub_file(path: &Path) -> Result<bool> {
+        if path.exists() {
+            let mut document = toml::from_str(&std::fs::read_to_string(path)?)?;
+            if discard_retired_upstream(&mut document) {
+                return Ok(false);
+            }
+        }
         if !path.exists() {
             return Ok(false);
         }
@@ -819,6 +722,12 @@ impl Config {
 
     /// Bootstrap a fresh machine, or retire its former production registration.
     pub fn refresh_violet_managed_default(path: &Path) -> Result<bool> {
+        if path.exists() {
+            let mut document = toml::from_str(&std::fs::read_to_string(path)?)?;
+            if discard_retired_upstream(&mut document) {
+                return Ok(false);
+            }
+        }
         let mut config = Self::load_from(path)?;
         let mut changed = config.retire_legacy_hub_registration();
         if !config.servers.contains_key(VIOLET_SERVER) {
@@ -855,12 +764,6 @@ impl Config {
                 .and_then(|value| value.strip_prefix("env:"))
                 .map(str::to_string),
         ))
-    }
-
-    /// Refresh the user-scoped managed Viktor default without copying a
-    /// credential into configuration.
-    pub fn refresh_viktor_managed_default(path: &Path) -> Result<bool> {
-        Self::reconcile_viktor_managed_default(path, true)
     }
 }
 
@@ -921,6 +824,89 @@ mod tests {
         let loaded = Config::load_from(&path).unwrap();
 
         assert_eq!(config, loaded);
+    }
+
+    #[test]
+    fn retired_upstream_load_is_read_only_and_warns_once() {
+        const CHILD: &str = "CAS_RETIRED_CONFIG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::retired_upstream_load_is_read_only_and_warns_once",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            // One note across repeated user/project loads and passive refreshes;
+            // no dependency on the note's human-readable wording.
+            assert_eq!(String::from_utf8_lossy(&output.stderr).lines().count(), 1);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("proxy.toml");
+        let retired = "viktor";
+        for routes in [
+            format!(
+                r#"["{retired}.*", "supervisor:VIKTOR:ask", "mcp__Viktor__wait", "review.start_review"]"#
+            ),
+            format!(
+                r#"[{{server="{retired}",tool="ask"}}, {{server="review",tool="start_review"}}]"#
+            ),
+        ] {
+            let raw = format!(
+                r#"# user comments survive
+allowlist = {routes}
+worker_read_routes = ["{retired}.read", "review.read"]
+[worker_access]
+{retired} = "read-only"
+review = "read-only"
+[servers.VIKTOR]
+transport = "retired-and-invalid"
+worker_access = "retired-and-invalid"
+[servers.review]
+transport = "stdio"
+command = "review-fixture"
+[delegation.external_production_verification]
+server = "Viktor"
+"#
+            );
+            std::fs::write(&user, &raw).unwrap();
+            std::fs::write(&project, &raw).unwrap();
+            for project_path in [None, Some(project.as_path())] {
+                let (config, sources) =
+                    Config::load_merged_with_sources_from(Some(&user), project_path).unwrap();
+                assert_eq!(config.servers.len(), 1);
+                assert!(config.servers.contains_key("review"));
+                assert_eq!(sources.len(), 1);
+                assert_eq!(
+                    sources.get("review"),
+                    Some(&project_path.unwrap_or(&user).to_path_buf())
+                );
+                assert_eq!(
+                    config.allowlist,
+                    vec![ExternalToolConfig {
+                        server: "review".into(),
+                        tool: "start_review".into(),
+                        supervisor_only: false,
+                    }]
+                );
+                assert_eq!(config.worker_access.len(), 1);
+                assert_eq!(config.worker_read_routes.len(), 1);
+                assert!(config.delegation.external_production_verification.is_none());
+            }
+            assert!(!Config::refresh_violet_managed_default(&user).unwrap());
+            assert!(!Config::retire_legacy_hub_file(&user).unwrap());
+            assert_eq!(std::fs::read_to_string(&user).unwrap(), raw);
+            assert_eq!(std::fs::read_to_string(&project).unwrap(), raw);
+        }
     }
 
     #[test]
@@ -1103,10 +1089,12 @@ worker_access = "write"
             r#"
 [[allowlist]]
 server = "personal"
+start_tool = "start_review"
 tool = "write_everything"
 
 [delegation.external_production_verification]
 server = "personal"
+start_tool = "start_review"
 "#,
         )
         .unwrap();
@@ -1114,8 +1102,8 @@ server = "personal"
             &project,
             r#"
 [[allowlist]]
-server = "viktor"
-tool = "ask_viktor"
+server = "review"
+tool = "start_review"
 "#,
         )
         .unwrap();
@@ -1125,8 +1113,8 @@ tool = "ask_viktor"
         assert_eq!(
             merged.allowlist,
             vec![ExternalToolConfig {
-                server: "viktor".to_string(),
-                tool: "ask_viktor".to_string(),
+                server: "review".to_string(),
+                tool: "start_review".to_string(),
                 supervisor_only: false,
             }]
         );
@@ -1184,7 +1172,7 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
     #[test]
     fn allowlist_parses_supervisor_scoped_entries() {
         let config: Config = toml::from_str(
-            r#"allowlist = ["supervisor:neon.*", "supervisor:neon:run_sql", "supervisor:mcp__neon__list_projects", "supervisor:ask", "viktor.ask_viktor"]"#,
+            r#"allowlist = ["supervisor:neon.*", "supervisor:neon:run_sql", "supervisor:mcp__neon__list_projects", "supervisor:ask", "review.start_review"]"#,
         )
         .unwrap();
         let parsed = config
@@ -1205,7 +1193,7 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
                 ("neon", "run_sql", true),
                 ("neon", "list_projects", true),
                 ("supervisor", "ask", false),
-                ("viktor", "ask_viktor", false),
+                ("review", "start_review", false),
             ]
         );
         let serialized = toml::to_string(&config).unwrap();
@@ -1527,54 +1515,6 @@ auth = "env:{token}"
     }
 
     #[test]
-    fn managed_viktor_default_is_credential_free_and_exactly_allowlisted() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-[[allowlist]]
-server = "github"
-tool = "list_issues"
-
-[[allowlist]]
-server = "viktor"
-tool = "get_file_download_url"
-"#,
-        )
-        .unwrap();
-
-        assert!(Config::refresh_viktor_managed_default(&path).unwrap());
-        assert!(!Config::refresh_viktor_managed_default(&path).unwrap());
-        let config = Config::load_from(&path).unwrap();
-        assert_eq!(
-            config.servers.get(VIKTOR_SERVER),
-            Some(&ServerConfig::Http {
-                url: VIKTOR_MCP_URL.to_string(),
-                auth: Some(format!("env:{VIKTOR_API_KEY_ENV}")),
-                headers: HashMap::new(),
-                oauth: false,
-            })
-        );
-        assert_eq!(
-            config
-                .allowlist
-                .iter()
-                .filter(|route| route.server == VIKTOR_SERVER)
-                .map(|route| route.tool.as_str())
-                .collect::<Vec<_>>(),
-            VIKTOR_CONVERSATION_TOOLS
-        );
-        assert!(
-            config
-                .allowlist
-                .iter()
-                .any(|route| { route.server == "github" && route.tool == "list_issues" })
-        );
-        assert!(!toml::to_string(&config).unwrap().contains("zt_live"));
-    }
-
-    #[test]
     fn user_level_violet_registration_reaches_a_project_without_its_own_proxy_file() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user.toml");
@@ -1634,26 +1574,5 @@ allowlist = ["neon.run_sql"]
         // declares its own allowlist must name the hub routes itself. This is
         // the exact condition `cas doctor`'s Violet row has to report.
         assert!(merged.violet_allowlisted_tools().is_empty());
-    }
-
-    #[test]
-    fn managed_viktor_default_preserves_an_operator_owned_upstream() {
-        let mut config = Config::default();
-        config.add_server(
-            VIKTOR_SERVER.to_string(),
-            ServerConfig::Http {
-                url: "https://operator.example/mcp".to_string(),
-                auth: Some("env:OPERATOR_VIKTOR_KEY".to_string()),
-                headers: HashMap::new(),
-                oauth: false,
-            },
-        );
-        assert!(config.ensure_viktor_managed_default());
-        assert!(matches!(
-            config.servers.get(VIKTOR_SERVER),
-            Some(ServerConfig::Http { url, auth, .. })
-                if url == "https://operator.example/mcp"
-                    && auth.as_deref() == Some("env:OPERATOR_VIKTOR_KEY")
-        ));
     }
 }

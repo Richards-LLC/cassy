@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-34 release-script]: One-command release cut (scripts/release.sh)
 # One cut owner: manual and automatic calls acquire the same lease, plan all
 # policy refusals, then prepare a pinned detached tree and submit it once.
 # The queue proves and builds the release; publication owns train catch-up.
@@ -7,6 +8,22 @@
 # Exit 0: admitted/dry run; 1: blocked; 3: queue refusal; 71: cut lease busy.
 
 set -Eeuo pipefail
+
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then
+        printf '\n%s\n' "$@" >&2
+        # Reporting is best effort and must preserve the refusal's exit code.
+        local bin="${CAS_BIN:-cas}"
+        if command -v "$bin" >/dev/null 2>&1; then
+            "$bin" gates record-refusal --message "script exit $status $*" >/dev/null 2>&1 || :
+        fi
+    fi
+}
+trap 'gate_exit "$?" "[C-34]"' EXIT
+
 # prepare runs in a command substitution; keep errexit there too.
 shopt -s inherit_errexit
 # Include commands inside prepare's substitution: Git and gh can fail without
@@ -14,7 +31,7 @@ shopt -s inherit_errexit
 trap 'printf "error: command failed (exit %s) at line %s: %s\n" "$?" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 usage() {
-    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
 Options:
   --hotfix            bump the patch version instead of the minor version
@@ -62,6 +79,9 @@ remote="${RELEASE_REMOTE:-origin}"
 gh_bin="${GH_BIN:-gh}"
 cas_bin="${CAS_BIN:-cas}"
 release_input_report="$(git rev-parse --path-format=absolute --git-path cas/release-inputs.json)"
+# cas-8e1b: name the live store explicitly. The cut runs in a Cassy-owned
+# detached checkout, which must not adopt or migrate a checkout-local store.
+export CAS_ROOT="${CAS_ROOT:-$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.cas}"
 release_date() { printf '%s\n' "${RELEASE_DATE:-$(date -u +%Y-%m-%d)}"; }
 
 release_manifests=(
@@ -203,7 +223,8 @@ prepare() {
     current="$(version_at HEAD)"
     prepared_commit="$(git log -1 --format=%H --grep="^release: v${version//./[.]}$" "$remote/$base..HEAD")"
     if [[ -n "$prepared_commit" && "$current" == "$version" ]] && grep -q "^## \[$version\] - " CHANGELOG.md \
-        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]]; then
+        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]] \
+        && git diff --quiet HEAD -- .claude/CODEMAP.md; then
         say "v$version is already prepared on $branch"
         printf '%s\n' "$version"
         return 0
@@ -219,14 +240,30 @@ prepare() {
         || die "Commander build failed; release was not committed"
     python3 "$script_dir/release_changelog.py" promote CHANGELOG.md "$version" "$(release_date)" "$base_version" \
         || die "CHANGELOG.md promotion failed"
+    # cas-4b33: deliveries add per-task doc fragments; fold them in once here.
+    python3 "$script_dir/doc-fragments.py" compile >&2 \
+        || die "doc fragment compile failed; fix what scripts/doc-fragments.py check reports"
     place_draft "$version" "$source"
+    # A supervisor's pending /codemap refresh rides this commit, so it never
+    # moves the tested train tip or requires its own CI run.
+    if git ls-files --error-unmatch .claude/CODEMAP.md >/dev/null 2>&1; then
+        git add -- .claude/CODEMAP.md
+    fi
     git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}" hub-web/dist
+    local doc
+    for doc in docs/qa/journeys.yaml docs/qa/bug-families docs/PRODUCT_OVERVIEW.md docs/product-overview.d; do
+        if git ls-files --error-unmatch "$doc" >/dev/null 2>&1; then
+            git add -A -- "$doc"
+        fi
+    done
     # Promotion deleted the changelog.d fragments it folded in (cas-f2be).
     if git ls-files --error-unmatch changelog.d >/dev/null 2>&1; then
         git add -- changelog.d
     fi
+    local ci_trailer=()
+    [[ -z "${train_ci_start:-}" ]] || ci_trailer=(-m "Train-CI-Head: $train_ci_start")
     git -c core.hooksPath=/dev/null commit --quiet -m "release: v$version" \
-        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version."
+        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version." "${ci_trailer[@]}"
     say "committed release v$version on $branch ($(git rev-parse --short HEAD))"
     printf '%s\n' "$version"
 }
@@ -322,7 +359,8 @@ if "$print_only"; then
     exit 0
 fi
 
-[[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "the worktree has uncommitted changes; commit or stash them first"
+[[ -z "$(git status --porcelain --untracked-files=no -- . ':(exclude).claude/CODEMAP.md')" ]] \
+    || die "the worktree has uncommitted changes; commit or stash them first"
 
 # Train membership is advisory: explicit hotfix/non-train branches retain the
 # caller's --base (main by default). The canonical CLI owns the branch check.
@@ -342,13 +380,28 @@ fetch_base
 train_base="$(git merge-base "$remote/$base" HEAD)"
 first_child="$(git log --format=%H --no-merges "$train_base..HEAD" | tail -1)"
 plan_cut
+# The starting train tip, before version preparation, must already have its
+# CI suite receipt. The queue alone proves the subsequent release commit.
+if [[ "$branch" == epic/release-train-* ]]; then
+    train_ci_start="$(git rev-parse HEAD)"
+    # A retry of this same prepared release reuses its original starting-tip
+    # receipt. The version-only commit is proved by the final queue, not again
+    # by the train suite. A new product commit must earn its own receipt.
+    if prior_ci_start="$(python3 "$script_dir/train-ci.py" prepared --repo "$repo_root")"; then
+        train_ci_start="$prior_ci_start"
+    fi
+    python3 "$script_dir/train-ci.py" check --repo "$repo_root" --branch "$branch" --head "$train_ci_start" --gh "$gh_bin" \
+        || die "train full-set receipt is not green; no release commit was prepared"
+else
+    say "no train receipt: the merge queue will run the full check set"
+fi
 version="$(prepare)"
 if "$dry_run"; then
     say "dry run: v$version committed locally on $branch; nothing pushed"
     exit 0
 fi
 # Best-effort measured history; an older installed CLI cannot block a cut.
-for estimate_stage in merge_queue release_publish; do
+for estimate_stage in train_tip_suite merge_queue release_publish; do
     "$cas_bin" ledger estimate pipeline "$estimate_stage" --preview >&2 \
         || say "$estimate_stage ETA unavailable; no measured range"
 done

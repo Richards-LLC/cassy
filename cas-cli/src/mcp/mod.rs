@@ -48,8 +48,6 @@ mod server;
 pub(crate) use server::memory::configure_allocator as configure_serve_allocator;
 pub mod socket;
 pub mod tools;
-#[cfg(feature = "mcp-proxy")]
-pub(crate) mod viktor_watch;
 
 pub use server::CasCore;
 pub(crate) use server::AgentIdentitySource;

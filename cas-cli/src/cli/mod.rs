@@ -10,6 +10,7 @@ pub(crate) mod claude;
 mod claude_md;
 pub(crate) mod codex;
 mod codemap_cmd;
+pub(crate) mod gates_cmd;
 mod history_cmd;
 mod install_on_publish;
 mod artifact_cmd;
@@ -91,7 +92,6 @@ pub mod store_choice;
 mod sync;
 mod update;
 pub mod update_transaction;
-pub(crate) mod viktor;
 mod violet_cmd;
 pub(crate) use violet_cmd::hub as violet_hub;
 pub(crate) use violet_cmd::channels::session_start_summary as session_start_channels;
@@ -125,7 +125,6 @@ pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
 pub use sync::SyncCommands;
 pub use update::{UpdateArgs, startup_config_notices};
-pub use viktor::ViktorArgs;
 
 /// Build version string including git hash and date
 fn build_version() -> String {
@@ -313,9 +312,6 @@ pub enum Commands {
     /// Run diagnostics
     Doctor(DoctorArgs),
 
-    /// Show credential-safe provisioning status for the managed Viktor gateway
-    Viktor(ViktorArgs),
-
     /// Inspect channel bindings, or read and post Slack through the Violet hub
     Violet(violet_cmd::VioletArgs),
 
@@ -412,6 +408,10 @@ pub enum Commands {
     #[command(subcommand)]
     Codemap(codemap_cmd::CodemapCommands),
 
+    /// Factory check registry: stable codes and per-code refusal facts
+    #[command(subcommand)]
+    Gates(gates_cmd::GatesCommands),
+
     /// Project QA registry and checks
     #[command(subcommand)]
     Qa(qa::QaCommand),
@@ -479,7 +479,7 @@ pub enum ReleaseCommands {
     Track(release_automation::TrackArgs),
     /// Resolve shipped deliveries and portable proof references at an exact SHA
     Inventory(release_automation::InventoryArgs),
-    /// Preview per-member close decisions without changing the release store
+    /// Preview per-member close decisions without changing existing release-store data
     Preview(release_automation::PreviewArgs),
     /// Reconcile a published release once, from the host's publication read
     Published(release_adapters::PublishedArgs),
@@ -520,7 +520,6 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Setup(_)
         | Commands::Open(_)
         | Commands::Doctor(_)
-        | Commands::Viktor(_)
         | Commands::Violet(_)
         | Commands::Update(_)
         | Commands::Changelog(_)
@@ -553,6 +552,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::ClaudeMd(_)
         | Commands::Qa(_)
         | Commands::Codemap(_)
+        | Commands::Gates(_)
         | Commands::History(_)
         | Commands::Index(_)
         | Commands::Artifact(_)
@@ -883,7 +883,6 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Hub(_) => "hub".to_string(),
         Commands::Serve(_) => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
-        Commands::Viktor(_) => "viktor".to_string(),
         Commands::Violet(_) => "violet".to_string(),
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
@@ -912,6 +911,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::ClaudeMd(_) => "claude-md".to_string(),
         Commands::Qa(_) => "qa".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
+        Commands::Gates(_) => "gates".to_string(),
         Commands::History(_) => "history".to_string(),
         Commands::Index(_) => "index".to_string(),
         Commands::Artifact(_) => "artifact".to_string(),
@@ -1026,7 +1026,6 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Hub(args) => hub::execute(args, cli),
         Commands::Serve(args) => serve_execute(args),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
-        Commands::Viktor(args) => viktor::execute(args, cli, cas_root),
         Commands::Violet(args) => violet_cmd::execute(args, cli, cas_root),
         Commands::Config(cmd) => {
             let root = guarded_write_root(config_store_guard(cmd), require_cas_root(cas_root)?)?;
@@ -1075,6 +1074,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
         Commands::Qa(cmd) => qa::execute(cmd, cli, cas_root),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
+        Commands::Gates(cmd) => gates_cmd::execute(cmd, cli, cas_root),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Index(cmd) => index_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Artifact(cmd) => artifact_cmd::execute(cmd, cli, require_cas_root(cas_root)?),

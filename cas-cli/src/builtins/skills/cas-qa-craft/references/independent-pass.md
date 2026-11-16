@@ -76,7 +76,7 @@ lockfile and execution environment. Cite the original receipt/log paths in the
 round bundle and ledger; preserve their producer and timestamps. Reuse matching
 unit/typecheck receipts as well. Run independent adjacent/demo/visual cells in
 steps 3–4; the automated selection is the worker's responsibility. Read the
-tests the delivery adds against [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
+tests the delivery adds against [Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests):
 bloat, restated implementation, sleeps and retry-wrapped flakes are Normal findings.
 Rate a delivery test that steps around its asserted invariant at least Normal.
 For example, re-picking the sender after a 409 masks whether the chosen sender
@@ -84,7 +84,7 @@ survived the conflict; judge the masked failure under §3.
 
 Where the project has a journey registry, the QA task's journey table is the
 park-time impact for the reviewed head: every live journey in it needs its own
-ledger row ([journey rows](journeys.md#journey-rows)), and each upkeep escape
+ledger row ([journey rows](journeys.md#journey-rows)), and each escape
 the task lists is a claim to check against the diff. A reason that does not
 hold is a Normal finding.
 

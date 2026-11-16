@@ -719,6 +719,12 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declined_factory_branch_anchors: Option<Vec<String>>,
 
+    /// cas-50b2: the delivery cycle request-changes or a reopen last
+    /// started (0 until one does). It travels with the row, so every machine
+    /// numbers the task's `DeliveryCycle` rows the same way.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delivery_cycle: u32,
+
     /// cas-a844: the `factory/<assignee>` branch name recorded alongside
     /// `factory_branch_anchor` at commit time, with MERGE REQUIRED parking as
     /// a fallback. `factory_branch_anchor` is only useful if you already know
@@ -769,12 +775,20 @@ pub struct TaskDeliverables {
     pub merge_ci_admission: Option<MergeCiAdmission>,
 }
 
-/// An explicit no-delivery close waiting on one exact verdict, not a sticky methodology.
+/// A no-delivery or portable no-code close waiting on one exact verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoDeliveryCloseIntent {
     pub dispatch_id: String,
     pub reason: String,
     pub assignee: Option<String>,
+    /// Present for an ordinary no-code close; absent retains the explicit
+    /// no_delivery declaration used by older intents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_code_proof: Option<String>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// The object-shaped representation used by current task payloads.
@@ -833,6 +847,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     declined_factory_branch_anchors: Option<Vec<String>>,
     #[serde(default)]
+    delivery_cycle: u32,
+    #[serde(default)]
     parked_branch: Option<String>,
     #[serde(default)]
     handoff_branches: Vec<String>,
@@ -875,6 +891,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             authorized_merge_sources: value.authorized_merge_sources,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             declined_factory_branch_anchors: value.declined_factory_branch_anchors,
+            delivery_cycle: value.delivery_cycle,
             parked_branch: value.parked_branch,
             handoff_branches: value.handoff_branches,
             merge_conflicted: value.merge_conflicted,
@@ -1231,16 +1248,26 @@ impl TaskDeliverables {
         {
             self.record_handoff_branch(&previous);
             self.retain_factory_branch_anchor_as_history();
-            self.factory_branch_anchor = Some(tip.to_string());
+            self.mint_or_append(tip);
             self.parked_branch = Some(branch.to_string());
             return;
         }
-        if self.factory_branch_anchor.is_none() {
-            self.factory_branch_anchor = measured_tip.map(str::to_string);
+        if self.factory_branch_anchor.is_none()
+            && let Some(tip) = measured_tip
+        {
+            self.mint_or_append(tip);
         }
         if self.parked_branch.is_none() {
             self.parked_branch = branch;
         }
+    }
+
+    /// cas-50b2: the only production setter of `factory_branch_anchor`.
+    /// Persisting the task mints its `DeliveryCycle` row, or appends this tip
+    /// to the current cycle (`SqliteTaskStore`). A new cycle starts only after
+    /// request-changes or a reopen; every other anchor move appends.
+    pub fn mint_or_append(&mut self, tip: &str) {
+        self.factory_branch_anchor = Some(tip.to_string());
     }
 
     /// Move the active factory anchor out of close authority while retaining
@@ -1392,6 +1419,11 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
 
+    /// Exact verification dispatch this task reviews. This names evidence,
+    /// never grants verdict authority. Ordinary workers cannot accept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_dispatch_id: Option<String>,
+
     /// Optional labels for categorization
     #[serde(default)]
     pub labels: Vec<String>,
@@ -1525,6 +1557,7 @@ impl Task {
             task_type: TaskType::Task,
             risk: Vec::new(),
             door: None,
+            review_dispatch_id: None,
             proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
@@ -1570,6 +1603,7 @@ impl Task {
             && self.closed_at == other.closed_at
             && self.close_reason == other.close_reason
             && self.assignee == other.assignee
+            && self.review_dispatch_id == other.review_dispatch_id
             && self.branch == other.branch
             && self.worktree_id == other.worktree_id
             && self.pending_verification == other.pending_verification
@@ -1591,6 +1625,8 @@ impl Task {
 
     /// Effective terminal outcome, including read-side interpretation of
     /// legacy NULL rows. This never mutates or backfills persistence.
+    // gate-audit[evidence_only]: selector Reads already-recorded disposition metadata; cannot authorize or change a close.
+    // gate-audit[negative_result]: selector Reads already-recorded negative-result metadata; cannot authorize or change a close.
     pub fn effective_terminal_outcome(&self) -> Option<TaskTerminalOutcome> {
         self.terminal_outcome.clone().or_else(|| match self.status {
             TaskStatus::Closed if self.deliverables.evidence_only.is_some() => {
@@ -1668,6 +1704,7 @@ impl Default for Task {
             task_type: TaskType::Task,
             risk: Vec::new(),
             door: None,
+            review_dispatch_id: None,
             proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
@@ -1874,8 +1911,13 @@ mod tests {
                         serde_json::Value::String(serde_json::json!({"no_delivery_close_intent":intent}).to_string())] {
             let parsed: TaskDeliverables = serde_json::from_value(payload).unwrap();
             assert_eq!(parsed.no_delivery_close_intent.as_ref().unwrap().dispatch_id, "dispatch-1");
+            assert!(parsed.no_delivery_close_intent.as_ref().unwrap().no_code_proof.is_none());
             assert_eq!(serde_json::to_value(parsed).unwrap()["no_delivery_close_intent"], intent);
         }
+        let mut no_code = serde_json::from_value::<NoDeliveryCloseIntent>(intent).unwrap();
+        no_code.no_code_proof = Some("artifact:portable-report".into());
+        let encoded = serde_json::to_value(&no_code).unwrap();
+        assert_eq!(serde_json::from_value::<NoDeliveryCloseIntent>(encoded).unwrap(), no_code);
         assert_eq!(deliverables.effective_merge_ci_admission(), MergeCiAdmission::Green);
         let eval = serde_json::json!({"target":{"dataset":"reader-v1","thresholds":{"accuracy":{"min":95}}},"receipt":null,"artifact":null});
         let parsed: TaskDeliverables = serde_json::from_value(serde_json::json!({"model_eval":eval})).unwrap();
@@ -2074,9 +2116,16 @@ mod tests {
 
         let encoded = serde_json::to_value(&task).unwrap();
         assert!(encoded.get("origin_project").is_none());
+        assert!(encoded.get("review_dispatch_id").is_none());
 
         let decoded: Task = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.origin_project, None);
+        assert_eq!(decoded.review_dispatch_id, None);
+        let mut review = decoded;
+        review.review_dispatch_id = Some("vdispatch-e17ce9129b337ebcc86c8a0383080009".into());
+        assert!(!task.lifecycle_matches(&review));
+        let decoded: Task = serde_json::from_value(serde_json::to_value(&review).unwrap()).unwrap();
+        assert_eq!(decoded.review_dispatch_id, review.review_dispatch_id);
     }
 
     #[test]

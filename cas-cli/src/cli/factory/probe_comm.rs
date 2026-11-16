@@ -297,6 +297,7 @@ pub(crate) fn run_probe_comm(config: ProbeCommConfig) -> Result<ProbeReport> {
     run_probe_comm_with_parent(config, None)
 }
 
+// gate-audit[allow_active_cas_root]: bypass G-146 Authorizes the measured active-parent probe; final CLI result emits its tag.
 pub(crate) fn run_probe_comm_with_parent(
     config: ProbeCommConfig,
     parent_cas_root: Option<&Path>,
@@ -339,6 +340,11 @@ pub(crate) fn run_probe_comm_with_parent(
         }
     };
     guard_active_parent_root(&run_root, parent_cas_root, allow_active_cas_root)?;
+    if allow_active_cas_root && parent_cas_root.is_some_and(|parent|equivalent_paths(&run_root,parent)) {
+        let tag=crate::gates::override_tag("G-146", "");
+        crate::gates::facts::observe_cli_output(parent_cas_root.unwrap(),&tag);
+        eprintln!("{tag}");
+    }
     crate::temp_hygiene::guard_isolated_root(&run_root, &crate::temp_hygiene::HostMountProbe)?;
     fs::create_dir_all(&run_root)
         .with_context(|| format!("failed to create isolated Cassy root {}", run_root.display()))?;
@@ -1138,6 +1144,9 @@ impl Drop for ScratchRootGuard {
     }
 }
 
+// gate[G-146 probe]: Active-parent probe isolation
+// gate-audit[allow_active_cas_root]: bypass G-146 The probe setup producer records an accepted active-parent override.
+// gate-audit[accepted_by]: run_probe_comm_with_parent
 fn guard_active_parent_root(
     run_root: &Path,
     parent_cas_root: Option<&Path>,
@@ -1152,10 +1161,10 @@ fn guard_active_parent_root(
     };
 
     if equivalent_paths(run_root, parent) {
-        bail!(
+        bail!(crate::gates::tag("G-146",format!(
             "refusing to run probe-comm in the active parent Cassy root {}; pass the explicit safe override only for disposable roots",
             run_root.display()
-        );
+        )));
     }
 
     Ok(())

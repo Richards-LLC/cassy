@@ -558,6 +558,68 @@ fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
     assert_eq!(wire[2]["lifecycle"]["outcome"], "unknown", "turn_duration reports completion without a success verdict");
 }
 
+/// Nov 13 8:33-8:46 AM ET: one supervisor turn ran many tools, including three
+/// three-minute release.sh runs. Each tool's end replaced the open turn, so
+/// Commander read the supervisor as done between steps (cas-c3377).
+#[test]
+fn supervisor_phase_follows_the_native_turn_across_its_tools() {
+    for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+        let claude = cli == cas_mux::SupervisorCli::Claude;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("native.jsonl");
+        let call = |id: &str, second: u32| if claude {
+            json!({"type":"assistant","timestamp":at(second),"message":{"content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":"scripts/release.sh --private"}}]}})
+        } else {
+            json!({"type":"response_item","timestamp":at(second),"payload":{"type":"function_call","call_id":id,"name":"exec_command","arguments":"{\"cmd\":\"scripts/release.sh --private\"}"}})
+        };
+        let result = |id: &str, second: u32| if claude {
+            json!({"type":"user","timestamp":at(second),"message":{"content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]}})
+        } else {
+            json!({"type":"response_item","timestamp":at(second),"payload":{"type":"function_call_output","call_id":id,"output":"ok"}})
+        };
+        let prompt = |second: u32| if claude {
+            json!({"type":"user","timestamp":at(second),"message":{"role":"user","content":"[cas #1 agent-authored] cut the release"}})
+        } else {
+            json!({"type":"event_msg","timestamp":at(second),"payload":{"type":"task_started","turn_id":format!("turn-{second}")}})
+        };
+        let scope = scope(cli);
+        let mut index = WorkEventIndex::default();
+        let resolve = |_: &SupervisorSource| Some(path.clone());
+        let mut phase = |lines: &[Value]| {
+            write_lines(&path, lines);
+            serde_json::to_value(index.supervisor_phase(&scope, &resolve).unwrap()).unwrap()
+        };
+        let time = |value: &Value| DateTime::parse_from_rfc3339(value.as_str().unwrap()).unwrap();
+        let turn_start = time(&json!(at(1)));
+        // A previous tool and turn already ended; the new prompt starts work.
+        let thinking = phase(&[call("old", 0), result("old", 0), prompt(1)]);
+        assert_eq!((thinking["lifecycle"]["stage"].as_str(), time(&thinking["lifecycle"]["started_at"])), (Some("start"), turn_start));
+        let running = phase(&[call("quick", 2), result("quick", 3), call("release", 4)]);
+        assert_eq!(running["lifecycle"]["stage"], "start");
+        assert_eq!(time(&running["lifecycle"]["started_at"]), turn_start, "elapsed is the turn's, not the step's");
+        assert_eq!(running["step"], if claude { "Bash" } else { "exec_command" });
+        assert!(!running.to_string().contains("release.sh"), "the step is a tool name, never its input");
+        let between = phase(&[result("release", 50)]);
+        assert_eq!(between["lifecycle"]["stage"], "start", "a finished tool leaves its turn open");
+        assert!(between["step"].is_null());
+        assert_eq!(time(&between["last_activity_at"]), time(&json!(at(50))));
+        let ended = phase(&[if claude {
+            json!({"type":"system","subtype":"turn_duration","timestamp":at(55)})
+        } else {
+            json!({"type":"event_msg","timestamp":at(55),"payload":{"type":"task_complete","turn_id":"turn-1"}})
+        }]);
+        assert_eq!(ended["lifecycle"]["stage"], "end");
+        assert_eq!((time(&ended["lifecycle"]["started_at"]), time(&ended["lifecycle"]["ended_at"])), (turn_start, time(&json!(at(55)))));
+        if claude {
+            // Esc writes an interrupt record and no turn_duration.
+            phase(&[prompt(56), call("long", 57)]);
+            let interrupted = phase(&[json!({"type":"user","timestamp":at(58),"message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}})]);
+            assert_eq!(interrupted["lifecycle"]["stage"], "end");
+            assert!(interrupted["step"].is_null());
+        }
+    }
+}
+
 #[test]
 fn v2_reasoning_publishes_only_recorded_summary_and_detail() {
     let temp = tempfile::tempdir().unwrap();

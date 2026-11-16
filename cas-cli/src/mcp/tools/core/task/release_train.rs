@@ -346,6 +346,7 @@ pub(crate) fn mark_cut_trains(
 /// Checked at target resolution and again under the delivery-target lock.
 /// Release tracking takes that same lock before persisting the cut marker.
 /// A frozen train (cas-2f4d) admits only repairs of its red.
+// gate[G-100 merge-admission integrity]: Release train cut or frozen (merge refused)
 pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
     use crate::mcp::tools::core::workflow::release_freeze;
 
@@ -369,10 +370,10 @@ pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&st
         {
             continue;
         }
-        return Err(format!(
+        return Err(crate::gates::tag("G-100", format!(
             "RELEASE TRAIN CUT: {target} ({}) is frozen and accepts no further merges. No merge was attempted. Retarget unfinished work to the next train before retrying worktree_merge.",
             train.id
-        ));
+        )));
     }
     release_freeze::check_merge(cas_root, target, task_id)
 }

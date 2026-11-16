@@ -26,7 +26,7 @@ fn stop_payload(reentrant: Option<bool>) -> HookInput {
         "prompt_id": "d323a56b-73b1-4afc-8b3f-32605be51b91",
         "permission_mode": "default",
         "hook_event_name": "Stop",
-        "last_assistant_message": "DONE",
+        "last_assistant_message": "Checking wake sources",
         "background_tasks": [],
         "session_crons": [],
     });

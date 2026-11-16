@@ -236,11 +236,7 @@ pub(crate) fn render(report: &Impact, markdown: bool) -> String {
     if !report.ignored.is_empty() {
         out.push_str(&format!("\n{} ignored path(s).\n", report.ignored.len()));
     }
-    for (name, item) in [
-        ("CODEMAP", &report.upkeep.codemap),
-        ("PRODUCT_OVERVIEW", &report.upkeep.product_overview),
-        ("registry", &report.upkeep.registry),
-    ] {
+    for (name, item) in [("registry", &report.upkeep.registry)] {
         if item.required {
             out.push_str(&format!("\nRequired upkeep ({name}):\n"));
             for reason in &item.reasons {

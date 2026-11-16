@@ -815,3 +815,75 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1);
     assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1);
 }
+
+// cas-8ea3: a Claude worker's row names the `cas serve --backend` grandchild as
+// `pid` and the harness as `ppid`, with the `cas serve` frontend between them.
+// Through the director's stall probe: a capped build burning CPU under the
+// harness is not a stall; the same tree sitting idle still is.
+// bash keeps the argv[0] it is given; python re-execs and loses it on macOS.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn stall_probe_sees_capped_build_under_cas_serve_frontend_cas_8ea3() {
+    use crate::ui::factory::{run_worker_health_probe, WorkerHealthRequest};
+    use cas_types::{Agent, AgentRole, Task, TaskStatus};
+    use std::io::BufRead;
+    use std::os::unix::process::CommandExt;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    const SESSION: &str = "stall-probe-cas-8ea3";
+    env.set("CAS_FACTORY_SESSION", SESSION);
+    let repo = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(repo.path()).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let rollout = env.home().join("sessions/2026/11/12/rollout-cas-8ea3.jsonl");
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let now = Utc::now();
+    let cold = now - chrono::Duration::hours(3);
+    // The `cas serve` frontend owns the backend; the second child stands in for
+    // the capped build under the harness, busy or asleep.
+    let run = |busy: bool| {
+        let build = if busy { "end=$((SECONDS+60)); while ((SECONDS<end)); do :; done" } else { "sleep 60" };
+        let script = format!("(exec -a cas bash -c 'sleep 60 & echo $!; wait' cas serve) &\n({build}) &\nwait");
+        let mut harness = std::process::Command::new("bash")
+            .arg0("claude")
+            .args(["-c", &script])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(harness.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let backend: u32 = line.trim().parse().unwrap();
+        let name = format!("worker-8ea3-{}", harness.id());
+        let mut agent = Agent::new(format!("id-{name}"), name.clone());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some(SESSION.into());
+        agent.pid = Some(backend);
+        agent.pid_starttime = crate::mcp::daemon::read_pid_starttime(backend);
+        agent.ppid = Some(harness.id());
+        agent.metadata.insert("worker_cli".into(), "codex".into());
+        agent.metadata.insert("clone_path".into(), repo.path().display().to_string());
+        agent.metadata.insert("worker_account_dir".into(), env.home().display().to_string());
+        agents.register(&agent).unwrap();
+        let mut task = Task::new(format!("cas-8ea3-{busy}"), "Capped build".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(agent.id.clone());
+        tasks.add(&task).unwrap();
+        let meta = serde_json::json!({"type":"session_meta","payload":{"session_id":agent.id,"cwd":repo.path(),"originator":"codex_cli_rs","source":"cli"}});
+        let start = serde_json::json!({"timestamp":cold.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started"}});
+        std::fs::write(&rollout, format!("{meta}\n{start}\n")).unwrap();
+        std::fs::File::open(&rollout).unwrap().set_modified(cold.into()).unwrap();
+        let probe = |at| run_worker_health_probe(Some(&root), &WorkerHealthRequest {
+            worker: name.clone(), task: task.id.clone(), threshold_secs: 300, delay_secs: 5, requested_at: at,
+        }).confirmed;
+        probe(now); // Cold sample: no delta yet.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let confirmed = probe(now + chrono::Duration::seconds(1));
+        // SAFETY: signals only the process group this test created.
+        unsafe { libc::killpg(harness.id() as libc::pid_t, libc::SIGKILL) };
+        harness.wait().unwrap();
+        confirmed
+    };
+    assert!(!run(true), "a busy capped build under the harness is not a stall");
+    assert!(run(false), "an idle tree must not suppress a genuine stall");
+}

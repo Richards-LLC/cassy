@@ -45,44 +45,26 @@ registry exists. The scaffold and check own the row grammar.
 
 ## Escape vocabulary
 
-Upkeep gates refuse at park, before the merge request. Fix the named problem
-in the same branch, or copy the refusal's complete `task action=notes` command.
-Keep `<token> delivery=<sha> finding=<id>`, replace `<reason>` with a non-empty
-reason, record the decision after the delivery commit, then retry close. An escape
-applies only to that delivery and finding; renew it from a new refusal after edits.
+Park does not check the journey registry, CODEMAP or PRODUCT_OVERVIEW. Add a
+bug case as `docs/qa/bug-families/<slug>.yaml` naming the task, own new surface
+files that `cas qa impact` lists, and leave the shared docs for release prep.
+<!-- cas-src:begin -->
+The `journey-catalog` lane lint (`scripts/doc-fragments.py check`) refuses a
+broken registry or bug family.
+<!-- cas-src:end -->
 
-| Gate | Refusal heading | Escape token |
+| Gate | Refusal heading | Escape |
 | --- | --- | --- |
-| G1 | `JOURNEY REGISTRY BROKEN BY THIS DELIVERY` | `registry unchanged:` |
-| G2 | `UNOWNED USER-FACING FILE` | `no journey impact:` (or own the file: owner glob, owner group or `ignore`) |
-| G3 | `BUG FIX WITHOUT A CASE` | `no case:` (or add a `bug_families` entry whose `tasks` names the task) |
-| G5 | `CODEMAP DRIFT` | `codemap unchanged:` |
-| G6 | `PRODUCT_OVERVIEW DRIFT` | `overview unchanged:` |
 | G8 | `QA RECORD REJECTED` | a `NOT EXERCISED: <reason>` row |
 | G9 | `RELEASE NOTES BLOCKED`, `POST-RELEASE CHECK` | operator only: `POST-RELEASE OVERRIDE: <their words>` on the epic |
 
-Cassy records the outcome as notes that start `UPKEEP ESCAPE G1|G2|G3|G5|G6:
-<token> delivery=<sha> finding=<id> <reason>`, or `UPKEEP OBSERVE <gate>:` for a would-be refusal when the
-gate's stage is `observe` (`qa.registry.enforce`, `upkeep.codemap`,
-`upkeep.product_overview`). Those notes are accounting; quoting a token there
-waives nothing. The QA task lists the delivery's escapes: an independent
-reviewer challenges a reason that does not hold.
-
 ## Run them and keep the evidence
 
+Release batch QA runs the affected journeys through the project's established runner.
 <!-- cas-src:begin -->
-Workers run the project's journey suite, for example
-`scripts/journey-eval.sh <artifacts_root>/<project-key>/<task-id>`. It resolves
-the task target, selects affected journeys itself and runs four workers.
-`--affected <base>` sets an explicit base. The producer owns the native ID
-filter, including supplemental specs and parts. No selected IDs writes an
-explicit empty receipt without launching a browser. Independent QA first
-<!-- cas-src:else -->
-Workers run the project's journey suite, selecting the journeys the diff
-affects with the command its CLAUDE.md or AGENTS.md names. Independent QA first
+Use `scripts/journey-eval.sh <task-artifact-dir>`; its source selection and native ID filter remain authoritative.
 <!-- cas-src:end -->
-consumes matching worker receipts under [independent-pass.md](independent-pass.md).
-Factory workers and QA cannot use `--full` or an unfiltered Playwright run.
+Consume matching receipts before missing checks. Workers may iterate a named failing spec while preserving the original failure, and run touched unit/type checks. Factory workers and QA cannot use --full or unfiltered Playwright.
 
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 

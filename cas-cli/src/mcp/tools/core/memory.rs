@@ -478,6 +478,7 @@ impl CasCore {
     // ========================================================================
 
     /// Store a new memory
+    // gate-audit[bypass]: selector Non-factory personal-memory data quality, excluded by supervisor decision 564718; does not guard factory work.
     pub async fn cas_remember(
         &self,
         Parameters(req): Parameters<RememberRequest>,

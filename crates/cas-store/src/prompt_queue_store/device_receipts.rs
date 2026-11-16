@@ -35,13 +35,16 @@ impl SqlitePromptQueueStore {
             // Match the daemon's authoritative notice classification, not
             // browser-supplied metadata. Neither receipt can consume the other
             // lane, even if the client supplies a valid queue ID.
-            let row: Option<(Option<String>, Option<String>)> = tx.query_row(
-                "SELECT recipient_device_id, processed_at FROM prompt_queue
+            let row: Option<(Option<String>, Option<String>, bool)> = tx.query_row(
+                "SELECT recipient_device_id, processed_at,
+                        COALESCE(highest_stage = 'abandoned'
+                                 AND last_pending_reason = 'operator_delivery_expired', 0)
+                 FROM prompt_queue
                  WHERE id=? AND factory_session=? AND lower(target)='operator'
                    AND (source != 'supervisor' AND COALESCE(origin_kind, '') = 'daemon') = ?",
-                params![prompt_id, factory_session, notice], |row| Ok((row.get(0)?, row.get(1)?)),
+                params![prompt_id, factory_session, notice], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional()?;
-            let Some((recipient, processed_at)) = row else {
+            let Some((recipient, processed_at, expired)) = row else {
                 return Err(StoreError::Other(
                     "application receipt does not match this session's operator row class".into(),
                 ));
@@ -53,7 +56,10 @@ impl SqlitePromptQueueStore {
             // Every authenticated viewer can store a reply. Only its addressee
             // (or one viewer of an unaddressed/"*" broadcast) closes the delivery lane.
             // Other devices replay durable history, with independent receipts.
-            let closes = processed_at.is_none()
+            // A receipt that lands after the delivery deadline proves the reply
+            // was received, so it supersedes the expiry instead of leaving the
+            // row reported abandoned (GH #1829).
+            let closes = (processed_at.is_none() || expired)
                 && recipient.as_deref().is_none_or(|recipient| recipient == "*" || recipient == device_id);
             if closes {
                 Self::atomic_stage_stamp_in_tx(
@@ -177,4 +183,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_late_addressee_receipt_supersedes_operator_delivery_expiry_gh_1829() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqlitePromptQueueStore::open(directory.path()).unwrap();
+        store.init().unwrap();
+        let id = store.enqueue_with_session("supervisor", "operator", "reply", "session-a").unwrap();
+        store.stamp_recipient_device(id, "phone").unwrap();
+        store.record_selected(id).unwrap();
+        let after = Utc::now() + chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1);
+        store.expire_stale_pending_at(PROMPT_QUEUE_STALE_TTL_SECS, after).unwrap();
+        let stage = || store.message_delivery_report(id).unwrap().unwrap().stage;
+        assert_eq!(stage(), DeliveryStage::Abandoned);
+        // Another viewer's stored copy is not the addressee's receipt.
+        assert!(!store.record_operator_reply_persisted(id, "session-a", "desktop").unwrap());
+        assert_eq!(stage(), DeliveryStage::Abandoned);
+        assert!(store.record_operator_reply_persisted(id, "session-a", "phone").unwrap());
+        assert_eq!(stage(), DeliveryStage::Delivered);
+        // A settled row is never selected for a replay.
+        assert!(store.peek_operator_replies_at("session-a", 10, after).unwrap().is_empty());
+    }
 }

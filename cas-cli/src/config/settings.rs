@@ -70,19 +70,6 @@ pub struct SlackConfig {
     pub stakeholder_contacts: Vec<StakeholderContactPolicy>,
 }
 
-/// Machine-wide managed Viktor upstream setting. Absence keeps the default on.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ViktorConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-}
-
-impl ViktorConfig {
-    pub fn enabled(&self) -> bool {
-        self.enabled.unwrap_or(true)
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StakeholderContactPolicy {
@@ -464,7 +451,7 @@ pub struct SyncConfig {
 /// even when stack detection does not find their usual language/framework.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillsConfig {
-    /// Optional builtin skill ids, such as `fallow`, `cas-nuxt-playwright`, or
+    /// Optional builtin skill ids, such as `fallow`, the legacy `cas-nuxt-playwright` redirect, or
     /// `cas-playwright-debug`.
     #[serde(default)]
     pub optional: Vec<String>,
@@ -1024,6 +1011,11 @@ pub struct FactoryConfig {
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 
+    /// Machine-wide live worker cap used by local admission and peer routing.
+    /// Unset inherits `~/.cas/config.toml`, then 8; read it via `max_workers()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<usize>,
+
     /// Route spawned build tasks to a fresh same-account, same-repository
     /// peer when local admission is saturated. Disable to release routes.
     #[serde(default = "default_true")]
@@ -1212,6 +1204,11 @@ pub struct FactoryConfig {
 }
 
 impl FactoryConfig {
+    /// Effective machine-wide live worker cap.
+    pub fn max_workers(&self) -> usize {
+        self.max_workers.unwrap_or_else(default_max_workers)
+    }
+
     /// Retired `[factory]` keys this config file still carries.
     pub(crate) fn retired_keys(&self) -> Vec<&'static str> {
         [
@@ -1281,6 +1278,10 @@ fn default_auto() -> String {
 
 fn default_max_concurrent_builders() -> usize {
     4
+}
+
+fn default_max_workers() -> usize {
+    8
 }
 
 fn default_spawn_min_free_gib() -> u32 {
@@ -1408,6 +1409,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            max_workers: None,
             auto_route_builds: true,
             build_guard: BuildGuardConfig::default(),
             worker_memory_high_gib: 0,

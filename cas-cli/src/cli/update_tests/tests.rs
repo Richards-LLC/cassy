@@ -2642,7 +2642,7 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
     }
     let builtin = crate::builtins::BUILTIN_SKILLS
         .iter()
-        .find(|f| f.path == "skills/cas-tdd/SKILL.md")
+        .find(|f| f.path == "skills/cas-writing-tests/SKILL.md")
         .unwrap();
     let path = project.join(".claude").join(builtin.path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2918,7 +2918,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     assert_eq!(cas_6718_git(&project, &["log", "-1", "--format=%s"]).trim(), format!("chore(cas): sync managed files to v{}", env!("CARGO_PKG_VERSION")));
     for path in [
         ".claude/skills/cas/SKILL.md",
-        ".claude/skills/cas-tdd/SKILL.md",
+        ".claude/skills/cas-writing-tests/SKILL.md",
         ".claude/rules/cas/rule-fixture.md",
         "AGENTS.md",
     ] {
@@ -3124,7 +3124,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             cas_6718_git(&project, &["add", path]);
         }
         let index = cas_6718_git(&project, &["ls-files", "--stage"]);
-        let builtin = project.join(".claude/skills/cas-tdd/SKILL.md");
+        let builtin = project.join(".claude/skills/cas-writing-tests/SKILL.md");
         std::fs::remove_file(&builtin).unwrap();
         let (result, output) =
             capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));

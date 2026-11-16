@@ -24,6 +24,7 @@ fn create_req(title: &str, depth: Option<&str>) -> TaskCreateRequest {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

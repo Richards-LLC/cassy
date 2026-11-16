@@ -216,6 +216,7 @@ test-ci-tiers:
 	cd .. && bash scripts/test-prune-cassy-actions-cache.sh
 	cd .. && bash scripts/test-cassy-actions-cache-job-lock.sh
 	cd .. && python3 scripts/test-model-boundary.py
+	cd .. && python3 scripts/test-test-audit.py
 	cd .. && node --test scripts/test-walk-kit.mjs
 	cd .. && bash scripts/test-cas-image-generate.sh
 	cd .. && bash scripts/test-check-changelog-lint.sh
@@ -252,6 +253,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-review-pr-body.py
 	cd .. && bash scripts/test-hitl-loop-template.sh
 	cd .. && python3 scripts/test-fast-release-rows.py
+	cd .. && python3 scripts/test-doc-fragments.py
 	cd .. && python3 scripts/test-check-call-shapes.py
 	cd .. && python3 scripts/test-live-check-peer-collab.py
 	cd .. && python3 scripts/test-hub-web-gate.py

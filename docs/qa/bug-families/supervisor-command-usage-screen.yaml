@@ -1,4 +1,0 @@
-title: Claude Usage is observed from native usage sections with or without Current session, and an unconfirmed Usage can be closed without resending or interrupting a turn
-tasks: [cas-95a1]
-invariants: [HUB-J27-ALLOWLIST]
-journeys: [HUB-J27]

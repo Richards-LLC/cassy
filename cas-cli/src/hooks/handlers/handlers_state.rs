@@ -335,20 +335,9 @@ pub(crate) fn cleanup_agent_leases_for_end(
 
 /// Cleanup orphaned tasks on session start
 ///
-/// Finds in_progress tasks that have no active lease (from crashed/interrupted sessions)
-/// and resets them to Open status so they can be worked on again.
-///
-/// cas-85d9: this is the most consequential consumer of `list_active_leases`
-/// found while auditing the "task leases are never renewed" gap (cas-d165).
-/// Before task leases renewed on heartbeat, ANY task held past its ~30min
-/// claim duration would have "no active lease" here even though its worker
-/// was alive, heartbeating, and actively working — and this function would
-/// silently reopen it to `Open` on the very next `SessionStart` of ANY
-/// agent in the factory (not just the task's own worker), letting a second
-/// worker pick up and duplicate work the first was still doing. Task-lease
-/// heartbeat renewal (`agent_heartbeat` in
-/// `crates/cas-store/src/agent_store/ops_agent.rs`) is what keeps this
-/// function's "no active lease ⇒ orphaned" assumption true in practice now.
+/// Reopen abandoned local work only when its lease history proves ownership.
+/// Peer tasks have no local lease: absence alone cannot distinguish an orphan
+/// from an active task pulled from another machine (GH #1896).
 pub(crate) fn cleanup_orphaned_tasks(cas_root: &std::path::Path) -> usize {
     let task_store = match open_task_store(cas_root) {
         Ok(store) => store,
@@ -371,22 +360,39 @@ pub(crate) fn cleanup_orphaned_tasks(cas_root: &std::path::Path) -> usize {
     }
 
     // Get all active leases
-    let active_leases = agent_store.list_active_leases().unwrap_or_default();
+    let Ok(active_leases) = agent_store.list_active_leases() else {
+        return 0;
+    };
     let claimed_task_ids: std::collections::HashSet<_> =
         active_leases.iter().map(|l| l.task_id.as_str()).collect();
 
-    // Find orphaned tasks (in_progress but no active lease)
+    let local_machine = Agent::get_or_generate_machine_id();
     let mut reopened = 0;
-    for task in in_progress {
-        if !claimed_task_ids.contains(task.id.as_str()) {
-            // Reopen the task by setting status back to Open
-            if let Ok(mut t) = task_store.get(&task.id) {
-                t.status = TaskStatus::Open;
-                t.updated_at = chrono::Utc::now();
-                if task_store.update(&t).is_ok() {
-                    reopened += 1;
-                }
-            }
+    for mut task in in_progress {
+        if claimed_task_ids.contains(task.id.as_str()) {
+            continue;
+        }
+        let Ok(history) = agent_store.get_lease_history(&task.id, Some(1)) else {
+            continue;
+        };
+        let Some(previous) = history.first() else {
+            continue;
+        };
+        let Ok(holder) = agent_store.get(&previous.agent_id) else {
+            continue;
+        };
+        // A past local lease cannot authorize resetting a later peer binding.
+        // Legacy local registrations may lack machine_id; foreign ones may not.
+        if task.assignee.as_deref().is_none_or(|assignee| {
+            assignee != holder.id && assignee != holder.name
+        }) || holder.machine_id.as_deref().is_some_and(|machine| machine != local_machine)
+        {
+            continue;
+        }
+        let expected = task.clone();
+        task.status = TaskStatus::Open;
+        if task_store.update_if_current(&task, &expected).is_ok() {
+            reopened += 1;
         }
     }
 
@@ -436,6 +442,7 @@ impl ExitBlockers {
     }
 
     /// Format a message describing the blockers
+    // gate[N-97 notice]: Exit blockers notice
     pub fn format_message(&self) -> String {
         let mut lines = vec!["⚠️ Cannot exit - you have remaining work:".to_string()];
 
@@ -518,7 +525,7 @@ impl ExitBlockers {
                 lines.push(format!("  {open_count} open task(s): Start with {prefix}task action: start, implement, then close"));
             }
             if in_progress_count > 0 {
-                lines.push(format!("  {in_progress_count} in_progress task(s): Verify before close (spawn 'task-verifier' directly, or ask supervisor if workers are Codex)"));
+                lines.push(format!("  {in_progress_count} in_progress task(s): Close when done; Cassy's daemon-owned verifier reviews the close dispatch"));
             }
         }
 
@@ -659,24 +666,31 @@ pub(crate) fn get_exit_blockers(
     Ok(blockers)
 }
 
+fn native_subagent_marker(root: &Path, parent: &str, child: &str) -> Option<std::path::PathBuf> {
+    if parent.trim().is_empty() || child.trim().is_empty() || parent == child {
+        return None;
+    }
+    use sha2::Digest;
+    Some(root.join("native-subagents").join(format!("{:x}-{:x}",
+        sha2::Sha256::digest(parent.as_bytes()), sha2::Sha256::digest(child.as_bytes()))))
+}
+
+pub(crate) fn owns_native_subagent(root: &Path, parent: &str, child: &str) -> bool {
+    native_subagent_marker(root, parent, child).is_some_and(|path| path.is_file())
+}
+
 /// Handle SubagentStop hook - minimal cleanup for subagent completion
 ///
 /// Called when a Claude Code subagent (Task tool call) finishes.
 ///
-/// IMPORTANT: The session_id in SubagentStop is the PARENT's session_id, not the
-/// subagent's. We do NOT have the subagent's agent ID, and subagents spawned via
-/// Task tool may not even be registered as Cassy agents. Therefore, we do NOT
-/// perform any agent cleanup here - that would incorrectly shut down the parent!
-///
-/// Only the parent's Stop hook should clean up agents and PID mappings.
+/// Completion preserves the parent/child ownership recorded at SubagentStart:
+/// native SendMessage can resume a completed child by its ID. These markers
+/// grant no CAS identity or verifier authority. Never clean up the parent's
+/// CAS identity here; only the parent's Stop hook owns that cleanup.
 pub fn handle_subagent_stop(
     _input: &HookInput,
-    cas_root: Option<&Path>,
+    _cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    if cas_root.is_none() {
-        return Ok(HookOutput::empty());
-    }
-
     // NOTE: Do NOT call cleanup_subagent_leases or any agent cleanup here!
     // The session_id is the parent's, not the subagent's.
 
@@ -724,6 +738,7 @@ pub fn handle_verifier_spawn_cleanup(
 /// A verifier spawn claims only the named task's durable dispatch. It never
 /// clears `pending_verification`; only a legitimate verdict may resolve that
 /// exact task transition.
+// gate[N-102 notice]: Verifier binding failures
 pub fn handle_subagent_start(
     input: &HookInput,
     cas_root: Option<&Path>,
@@ -732,6 +747,13 @@ pub fn handle_subagent_start(
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
     };
+
+    if let Some(child) = input.agent_id.as_deref()
+        && let Some(path) = native_subagent_marker(cas_root, &input.session_id, child)
+    {
+        let _ = std::fs::create_dir_all(path.parent().expect("marker directory"))
+            .and_then(|()| std::fs::write(path, b""));
+    }
 
     // Official SubagentStart carries the parent session plus distinct child
     // agent_id/agent_type, but no Agent prompt or PreToolUse tool_use_id. Bind
@@ -834,6 +856,42 @@ mod cas_85d9_lease_renewal_tests {
         let tmp = tempfile::tempdir().expect("TempDir");
         let root = init_cas_dir(tmp.path()).expect("init_cas_dir");
         CasDir { _tmp: tmp, root }
+    }
+
+    /// A pulled InProgress task has no lease on this machine. SessionStart
+    /// must not turn that replica into a new Open write (GH #1896).
+    #[test]
+    fn session_start_preserves_peer_tasks_without_local_ownership_cas_0ff3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for case in ["no_local_lease", "reassigned_to_peer", "foreign_holder"] {
+            let cas = setup_cas();
+            let agents = open_agent_store(&cas.root).unwrap();
+            let tasks = open_task_store(&cas.root).unwrap();
+            let mut task = Task::new("cas-peer-task".into(), "peer work".into());
+            task.status = TaskStatus::InProgress;
+            task.assignee = Some("peer-worker".into());
+            tasks.add(&task).unwrap();
+            if case != "no_local_lease" {
+                let mut holder = Agent::new("old-holder".into(), "peer-worker".into());
+                holder.machine_id = Some(if case == "foreign_holder" {
+                    format!("peer-{}", Agent::get_or_generate_machine_id())
+                } else {
+                    Agent::get_or_generate_machine_id()
+                });
+                if case == "reassigned_to_peer" {
+                    holder.name = "previous-local-worker".into();
+                }
+                agents.register(&holder).unwrap();
+                agents.try_claim(&task.id, &holder.id, 60, None).unwrap();
+                agents.release_lease(&task.id, &holder.id).unwrap();
+            }
+            let before = tasks.get(&task.id).unwrap();
+            assert_eq!(cleanup_orphaned_tasks(&cas.root), 0, "{case}");
+            let after = tasks.get(&task.id).unwrap();
+            assert_eq!(after.status, TaskStatus::InProgress, "{case}");
+            assert_eq!(after.assignee, before.assignee, "{case}");
+            assert_eq!(after.updated_at, before.updated_at, "{case}");
+        }
     }
 
     /// cas-85d9 AC3: a task held by a live, heartbeating worker past the

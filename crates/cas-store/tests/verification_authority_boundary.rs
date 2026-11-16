@@ -71,7 +71,7 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
               scope_summary, created_at)
              VALUES (?1, ?2, 'worker', 'worker', 'repo', 'source', 'commit', 'base',
                      'target', 'tip', 'proof', 'scope', ?3)",
-            params![format!("receipt-{suffix}"), format!("task-{suffix}"), now],
+            params![format!("wcr-{suffix}"), format!("task-{suffix}"), now],
         )
         .unwrap();
         conn.execute(
@@ -80,7 +80,7 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
              VALUES (?1, ?2, ?3, 'awaiting_verification', ?4, ?4)",
             params![
                 format!("delivery-{suffix}"),
-                format!("receipt-{suffix}"),
+                format!("wcr-{suffix}"),
                 format!("task-{suffix}"),
                 now
             ],
@@ -91,7 +91,7 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
         "INSERT INTO verification_dispatches
          (id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
           owner_agent_id, state, requested_at, deadline_at, resolved_at, recovery_action)
-         VALUES ('dispatch-a', 'task-a', 'receipt-a', 'delivery-a', 'worker',
+         VALUES ('dispatch-a', 'task-a', 'wcr-a', 'delivery-a', 'worker',
                  'supervisor', 'resolved', ?1, ?1, ?1, 'supervisor_redispatch_or_direct')",
         params![now],
     )
@@ -136,6 +136,13 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
         .unwrap(),
         event_count
     );
+
+    // DC, mixed DC+transaction and a partial WCR cannot project a worker receipt.
+    for (receipt, transaction) in [("dc-other",None),("dc-other",Some("delivery-a")),("wcr-a",None)] {
+        conn.execute("UPDATE verification_dispatches SET receipt_id=?1,delivery_transaction_id=?2 WHERE id='dispatch-a'",params![receipt,transaction]).unwrap();
+        assert!(transition_worker_delivery_verification_with_conn(&conn,"delivery-a","verification-a",true,"supervisor").is_err());
+    }
+    conn.execute("UPDATE verification_dispatches SET receipt_id='wcr-a',delivery_transaction_id='delivery-a' WHERE id='dispatch-a'",[]).unwrap();
 
     // A matching transaction still cannot project the opposite verdict or
     // let a different actor borrow the supervisor's stored verification.
@@ -194,7 +201,7 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
         "INSERT INTO verification_dispatches
          (id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
           owner_agent_id, state, requested_at, deadline_at, resolved_at, recovery_action)
-         VALUES ('dispatch-b', 'task-b', 'receipt-b', 'delivery-b', 'worker',
+         VALUES ('dispatch-b', 'task-b', 'wcr-b', 'delivery-b', 'worker',
                  'supervisor', 'resolved', ?1, ?1, ?1, 'supervisor_redispatch_or_direct')",
         params![now],
     )

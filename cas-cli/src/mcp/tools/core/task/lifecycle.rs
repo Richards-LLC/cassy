@@ -49,10 +49,29 @@ impl TaskLifecycleGateError {
 }
 
 pub(crate) mod close_ops;
+pub(crate) mod parked_conflicts;
 pub(crate) mod epic_lane;
 mod epic_overlap;
 mod recall_terms;
 pub(crate) mod merge_close;
+
+/// Publish a newly recorded delivery start base as
+/// `refs/cas/delivery-base/<branch>` on origin, where lane CI reads it
+/// (cas-2e1b). Best effort: a missing remote or a failed push leaves lane CI
+/// on its inferred base, which it logs.
+fn publish_delivery_base(repo: &std::path::Path, branch: &str, base_sha: &str) {
+    let refspec = format!("+{base_sha}:refs/cas/delivery-base/{branch}");
+    let pushed = std::process::Command::new("git")
+        .args(["push", "--quiet", "--no-verify", "origin", &refspec])
+        .current_dir(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output();
+    if !pushed.as_ref().is_ok_and(|output| output.status.success()) {
+        tracing::debug!(branch, "delivery start base not published; lane CI will use its inferred base");
+    }
+}
+
 #[cfg(test)]
 mod gate_error_tests;
 pub(crate) mod proof_scope;
@@ -229,6 +248,14 @@ fn foreign_task_branch_start_refusal(
 
 /// A parked ref may back an open PR. Switch the new task to its own lane
 /// without moving that ref or publishing a replacement for the parked task.
+/// A worker joins published target history. A supervisor's shared local epic
+/// may contain an unpublished cut commit that must not become its start base.
+/// Keep the resolved SHA immutable across branch preparation and checkout.
+fn worker_start_target_base(git: &GitOperations, target: &str) -> Result<String, String> {
+    let fresh = git.resolve_fresh_base(target).map_err(|error| error.to_string())?;
+    Ok(git.resolve_commit(&format!("refs/remotes/origin/{target}")).unwrap_or(fresh.sha))
+}
+
 fn checkout_task_beside_parked_delivery(
     checkout: &std::path::Path,
     worker: &str,
@@ -247,9 +274,9 @@ fn checkout_task_beside_parked_delivery(
     }
     let branch = crate::factory_isolation::worker_task_branch(worker, task_id);
     if require_fresh_base {
-        let base = git.resolve_fresh_base(target)
+        let base = worker_start_target_base(&git, target)
             .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?;
-        let expected = git.resolve_commit(&base.branch_ref);
+        let expected = git.resolve_commit(&base);
         if crate::factory_isolation::branch_at(checkout).is_none()
             && (expected.is_none() || git.resolve_commit("HEAD") != expected)
         {
@@ -269,9 +296,8 @@ fn checkout_task_beside_parked_delivery(
         let base = if git.resolve_commit(&remote).is_some() {
             remote
         } else {
-            git.resolve_fresh_base(target)
+            worker_start_target_base(&git, target)
                 .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?
-                .branch_ref
         };
         git.create_branch_from(&branch, &base)
             .map_err(|error| format!("Cannot create task branch {branch}: {error}"))?;
@@ -312,6 +338,7 @@ fn reconcile_reused_factory_branch(
     expected_branch: &str,
     target_branch: &str,
     task_identity: Option<&close_ops::TaskCommitIdentity>,
+    recorded_start_branch: Option<&str>,
     parked_task_for_tip: impl Fn(&str) -> Option<String>,
 ) -> Result<ReusedFactoryBranchStart, String> {
     if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
@@ -325,6 +352,22 @@ fn reconcile_reused_factory_branch(
     let factory_tip = git.ref_sha(expected_branch).map_err(|error| {
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
+
+    // GH #1843: before its first commit, an accepted same-task start is
+    // the provenance for dirty work. Identity validation already checked the
+    // task's assignee, target and graph; also require this exact source branch.
+    // Keep its original boundary while edits remain, even if the target advanced.
+    // A clean lane still refreshes to the target before recording a new boundary.
+    // The base remains a boundary, never an owned delivery commit.
+    if recorded_start_branch == Some(expected_branch)
+        && task_identity.and_then(|identity| identity.start_base.as_deref())
+            == Some(factory_tip.as_str())
+        && git.has_uncommitted_changes(worktree_path).map_err(|error| {
+            format!("Cannot inspect reused factory branch {expected_branch}: {error}")
+        })?
+    {
+        return Ok(ReusedFactoryBranchStart::Unchanged);
+    }
 
     // cas-09cf: a matching target alone does not prove this is a resume.
     // Recorded anchors, or named work already on the target before first
@@ -388,10 +431,7 @@ fn reconcile_reused_factory_branch(
     // cas-21db: another merge can land after assignment or the worker's
     // manual sync. Resolve the current target before deciding to reset,
     // using the existing bounded fetch and local-only/offline fallback.
-    let target = git.resolve_fresh_base(target_branch).map_err(|error| {
-        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
-    })?;
-    let target_tip = git.ref_sha(&target.branch_ref).map_err(|error| {
+    let target_tip = worker_start_target_base(&git, target_branch).map_err(|error| {
         format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
     })?;
 
@@ -581,7 +621,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -605,7 +645,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
             .expect("unrelated prior delivery is reported, not reset");
         let ReusedFactoryBranchStart::Occupied { commit } = result else {
             panic!("unrelated prior delivery must occupy the lane: {result:?}");
@@ -623,7 +663,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -642,7 +682,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
             .expect_err("tracked changes must block reset");
 
     }
@@ -663,7 +703,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -700,7 +740,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -712,6 +752,10 @@ mod reused_factory_branch_tests {
     }
 }
 
+// gate[G-130 create]: User-facing task demo statement required
+// gate-audit[supervisor_override]: bypass G-130 The create/proposal producer tags an accepted missing-demo waiver.
+// gate-audit[is_supervisor]: input Authenticated role; supervisor waiver is tagged G-130 by the accepting create producer.
+// gate-audit[accepted_by]: cas_task_create_with_delivery_mode,cas_task_proposal_create_with_delivery_mode
 pub(crate) fn validate_demo_statement_requirement(
     task_type: TaskType,
     labels: &[String],
@@ -755,12 +799,13 @@ pub(crate) fn validate_demo_statement_requirement(
         .map(|label| label.trim())
         .collect::<Vec<_>>()
         .join(", ");
-    Err(format!(
+    Err(crate::gates::tag("G-130", format!(
         "TASK CREATE REJECTED: label(s) [{matched_labels}] mark this as user-facing, so a non-empty demo_statement is required. Expected shape: \"As a <user>, I <do X> and see <Y>\". Add demo_statement=... or ask a supervisor to use supervisor_override=true."
-    ))
+    )))
 }
 
 /// cas-5f28: refusal for a start whose task a peer on another machine holds.
+// gate-audit[forward]: G-15 Pure renderer; task-start caller tags the peer-claim refusal.
 fn peer_claim_refusal(task_id: &str, hold: &crate::cloud::peer_claims::PeerHold) -> String {
     let prefix = crate::mcp::tools::core::guidance::caller_prefix();
     format!(
@@ -780,20 +825,25 @@ fn shared_epic_note(epic_id: &str, hold: &crate::cloud::peer_claims::PeerHold) -
     hold.shared_epic_note(epic_id, &crate::mcp::tools::core::guidance::caller_prefix())
 }
 
-fn no_code_external_ref_guidance(task: &Task) -> &'static str {
-    if task.execution_note.as_deref() == Some("no-code") {
-        "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references."
-    } else {
-        ""
+fn no_code_external_ref_guidance(task: &Task) -> String {
+    if task.execution_note.as_deref() != Some("no-code") {
+        return String::new();
     }
+    let [title, schema] = crate::qa_ledger::DECLARATION_MARKERS;
+    format!(
+        "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references.\n\
+         QA ledger: a `LEDGER.md` in the task artifacts must pass `cas qa ledger check` only when it declares the canonical QA matrix with a `{title}` title, a `{schema}` header or the matrix header row; any other report is not parsed as QA evidence."
+    )
 }
 
 /// Task start carries the no-code close requirement, or for any other task
 /// the one-line test principle (cas-5a52).
 fn start_guidance(task: &Task) -> String {
-    match no_code_external_ref_guidance(task) {
-        "" => format!("\n\n🧪 {}", crate::task_assignment::TEST_PRINCIPLE),
-        no_code => no_code.to_string(),
+    let no_code = no_code_external_ref_guidance(task);
+    if no_code.is_empty() {
+        format!("\n\n🧪 {}", crate::task_assignment::TEST_PRINCIPLE)
+    } else {
+        no_code
     }
 }
 
@@ -1343,6 +1393,9 @@ impl CasCore {
         .await
     }
 
+    // gate-audit[supervisor_override]: bypass G-129,G-130 Missing-risk and missing-demo waivers use the same policy validators for attribution.
+    // gate-audit[confirm_warning]: bypass G-147,G-148 Explicitly accepts a measured competing plan or duplicate create refusal.
+    // gate-audit[override_grant]: selector Newly issued source-claim approval from G-133; final creation response retains its tag.
     pub(crate) async fn cas_task_create_with_delivery_mode(
         &self,
         req: TaskCreateRequest,
@@ -1351,6 +1404,8 @@ impl CasCore {
         confirm_warning: bool,
         delivery_mode: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        let review_dispatch_id = self.normalize_review_dispatch_id(req.review_dispatch_id.as_deref())?;
+        self.ensure_review_assignee(review_dispatch_id.as_deref(), req.assignee.as_deref())?;
         if let Some(message) = [req.notes.as_deref(), req.reason.as_deref()]
             .into_iter()
             .flatten()
@@ -1414,6 +1469,15 @@ impl CasCore {
             data: None,
         })?;
 
+        let mut policy_override_tags = String::new();
+        if supervisor_override {
+            if crate::mcp::tools::types::validate_task_risk_declaration(task_type,
+                req.risk.as_deref(), req.proof_targets.as_deref(), false, true, None).is_err()
+            { policy_override_tags = crate::gates::override_tag("G-129", policy_override_tags); }
+            if validate_demo_statement_requirement(task_type, &labels, req.demo_statement.as_deref(),
+                false, true, &self.load_config().qa().user_facing_labels).is_err()
+            { policy_override_tags = crate::gates::override_tag("G-130", policy_override_tags); }
+        }
         let status = TaskStatus::Open;
         let blocked_by_ids: Vec<String> = req
             .blocked_by
@@ -1522,12 +1586,13 @@ impl CasCore {
                     message: Cow::from(format!("Failed to inspect recent epic planning: {error}")),
                     data: None,
                 })? {
+                    // gate[G-147 create]: Concurrent epic-planning admission
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!(
+                        message: Cow::from(crate::gates::tag("G-147",format!(
                             "PLANNING RACE WARNING: supervisor {other_creator} created children under epic {epic} at {planned_at}. \
                              Review that plan before adding another child; if this is intentional, retry with confirm_warning=true."
-                        )),
+                        ))),
                         data: None,
                     });
                 }
@@ -1571,10 +1636,23 @@ impl CasCore {
             if !blocking_warnings.is_empty() {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(blocking_warnings.join("\n\n")),
+                    // gate[G-148 create]: Duplicate task or epic admission
+                    message: Cow::from(crate::gates::tag("G-148",blocking_warnings.join("\n\n"))),
                     data: None,
                 });
             }
+        }
+
+        // Measurement only: a confirmation never adds a new failure path.
+        if confirm_warning {
+            if let (Some(epic),Some(creator),None)=(epic_id.as_deref(),created_by.as_deref(),release_train.as_deref())
+                && matches!(recent_other_epic_planner(task_store.as_ref(),epic,creator,chrono::Utc::now()),Ok(Some(_)))
+            {policy_override_tags=crate::gates::override_tag("G-147",policy_override_tags);}
+            let epic_overlap=task_type==TaskType::Epic && matches!(epic_overlap::warning(self,task_store.as_ref(),&req.title,
+                req.description.as_deref().unwrap_or_default()).await,Ok(Some(_)));
+            let duplicate=matches!(open_task_similarity(task_store.as_ref(),&req.title,req.description.as_deref().unwrap_or_default(),
+                epic_id.as_deref().filter(|_|release_train.is_none()),task_type==TaskType::Epic),Ok(overlap) if overlap.blocking.is_some());
+            if epic_overlap||duplicate{policy_override_tags=crate::gates::override_tag("G-148",policy_override_tags);}
         }
 
         // Reject the case where the epic and a blocker are the same task (cas-6009).
@@ -1796,6 +1874,7 @@ impl CasCore {
             task_type,
             risk,
             door,
+            review_dispatch_id,
             proof_targets,
             assignee: req.assignee,
             labels,
@@ -1921,10 +2000,14 @@ impl CasCore {
         let triage_notice = if task.assignee.is_some() {
             crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id))
         } else { String::new() };
-        let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
+        let mut assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
             Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
         };
+
+        if task.assignee.is_some() {
+            assignment_warning.push_str(&epic_lane::assignment_branch_note(&self.cas_root, task_store.as_ref(), &task));
+        }
 
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.
@@ -2244,7 +2327,7 @@ impl CasCore {
             task.created_at,
         );
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}{}{}{}{}",
+            "Created task: {} - {} (P{}){}{}{}{}{}{}",
             id,
             task.title,
             task.priority.0,
@@ -2253,6 +2336,7 @@ impl CasCore {
             branch_info.unwrap_or_default() + &related_context,
             no_code_external_ref_guidance(&task),
             assignment_warning,
+            policy_override_tags,
         )))
     }
 
@@ -2398,6 +2482,7 @@ impl CasCore {
         self.start_task_with_principal(req, Some(principal)).await
     }
 
+    // gate-audit[force]: bypass G-15 Starts despite an actual peer claim; peer_notes carries the successful tag.
     async fn start_task_with_principal(
         &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
     ) -> Result<CallToolResult, McpError> {
@@ -2431,24 +2516,25 @@ impl CasCore {
         }
         let queue_enabled = worker_queue.as_ref().is_some_and(|queue|
             queue.current_task.is_some() || queue.starting || !queue.pending.is_empty());
+        // gate[G-09 start]: Queued-start consistency (fresh context, snapshot changed, declared target)
         if let (Some(queue), Some(worker)) = (worker_queue.as_ref(), worker.as_ref())
             && queue.current_task.as_deref() == Some(req.id.as_str())
             && queue.context_reset_from.as_deref() == Some(crate::worker_task_queue::conversation_generation(worker).as_str())
         {
             return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                "Queued successor is waiting for a fresh context; the daemon will restart this worker before it starts that task"));
+                crate::gates::tag("G-09", "Queued successor is waiting for a fresh context; the daemon will restart this worker before it starts that task")));
         }
         if !queued_start && let Some(queue) = worker_queue.as_ref() {
             if queue.starting && queue.current_task.as_deref() == Some(req.id.as_str()) {
                 queued_start = true;
             } else if queue.starting && !queue.current_started {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "The worker has a reserved queue task; resolve or start that task before starting another"));
+                    crate::gates::tag("G-09", "The worker has a reserved queue task; resolve or start that task before starting another")));
             }
         }
         if queued_start {
             let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
-                "Queued start requires its registered worker"))?;
+                crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
             crate::worker_task_queue::ensure_owned_queue_checkout(worker)?;
         }
         let task_store = self.open_task_store()?;
@@ -2466,14 +2552,15 @@ impl CasCore {
                 .map(|lease| lease.task_id));
             active.sort();
             active.dedup();
+            // gate[G-08 start]: Single active WIP per worker
             if !active.is_empty() {
                 let prefix = self.guidance_prefix();
                 let holds = active.iter().map(|id|
                     format!("{prefix}task action=update id={id} status=blocked"))
                     .collect::<Vec<_>>().join("\n");
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-08", format!(
                     "Cannot start task {} while {} has active work: {}. Finish active work before starting unrelated work. For returned-delivery recovery, checkpoint the unfinished branch and put its task on hold:\n{holds}\nThen switch to the returned task's recorded branch (see `{prefix}task action=show id={} full=true`) and retry `{prefix}task action=start id={}`. The held successor keeps its queue slot. After the returned delivery is parked, switch back, set the held task open and start it again.",
-                    req.id, worker.name, active.join(", "), req.id, req.id)));
+                    req.id, worker.name, active.join(", "), req.id, req.id))));
             }
         }
 
@@ -2482,6 +2569,11 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        crate::task_assignment::ensure_review_assignment(
+            task.review_dispatch_id.as_deref(),
+            agents.get(&agent_id).ok().filter(|agent| agent.is_alive()).map(|agent| agent.role),
+        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         let mut queued_start_snapshot = queued_start.then(|| task.clone());
         let branch_start_snapshot = task.clone();
@@ -2503,9 +2595,10 @@ impl CasCore {
             // a worker must not.
             // cas-b269 review: do NOT clear halt_task_work here — failed
             // starts must preserve the urgent-stop halt.
+            // gate[G-04 start]: Terminal task cannot start
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                if crate::harness_policy::is_supervisor_from_env() {
+                crate::gates::tag("G-04", if crate::harness_policy::is_supervisor_from_env() {
                     "Cannot start a terminal task. Use reopen first if this task \
                      genuinely needs rework."
                         .to_string()
@@ -2516,7 +2609,7 @@ impl CasCore {
                          this task needs rework.",
                         req.id, task.status
                     )
-                },
+                }),
             ));
         }
 
@@ -2535,6 +2628,7 @@ impl CasCore {
         // Use the commit guard's identity predicate before claiming QA or
         // mutating the task, lease or checkout. A foreign factory ref must not
         // silently fall back to the reusable worker lane (cas-b153).
+        // gate[G-10 start]: Worker lane identity (foreign, occupied, parked, dirty or unresolved lane)
         if let Some(worker) = worker.as_ref()
             && let Some(checkout) = worker.metadata.get("clone_path")
                 .map(std::path::Path::new)
@@ -2550,11 +2644,11 @@ impl CasCore {
                 .unwrap_or_else(|| crate::factory_isolation::expected_worker_branch(&worker.name));
             let [switch] = GitOperations::git_remedies([&["switch", "-c", &own, &base]])
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-10", format!(
                 "Cannot start task {}: '{branch}' is not worker '{}'s factory branch.\n\
                  Use your own per-task branch '{own}' before starting:\n{switch}",
                 task.id, worker.name,
-            )));
+            ))));
         }
 
         // cas-619f: a QA work item may never be started by the implementer of
@@ -2573,7 +2667,7 @@ impl CasCore {
                 comparable.updated_at = expected.updated_at;
                 if serde_json::to_value(&comparable).ok() != serde_json::to_value(&*expected).ok() {
                     return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                        "Queued task changed during QA preflight; retry before preparing Git"));
+                        crate::gates::tag("G-09", "Queued task changed during QA preflight; retry before preparing Git")));
                 }
                 *expected = fresh.clone();
             }
@@ -2585,7 +2679,7 @@ impl CasCore {
         let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
         super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;
         super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;
-        let blocker_warning = if open_blocker_ids.is_empty() {
+        let mut blocker_warning = if open_blocker_ids.is_empty() {
             qa_claim_note
         } else {
             format!(
@@ -2599,13 +2693,13 @@ impl CasCore {
             if snapshot.status != TaskStatus::Open || snapshot.assignee.as_deref()
                 != worker.as_ref().map(|a| a.name.as_str())
                 || serde_json::to_value(snapshot).ok() != serde_json::to_value(&fresh).ok() {
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, "Queued task changed before start; no Git or lease mutation was applied"));
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-09", "Queued task changed before start; no Git or lease mutation was applied")));
             }
         }
 
         if queued_start && declared_repo_context.is_none() {
             return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                "Queued task needs a declared work target before its branch can be allocated"));
+                crate::gates::tag("G-09", "Queued task needs a declared work target before its branch can be allocated")));
         }
 
         // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
@@ -2634,6 +2728,7 @@ impl CasCore {
                     paths.join(", "),
                 );
             } else if !task.deliverables.merge_conflicted {
+                // gate[G-05 start]: Clean AwaitingMerge task cannot be restarted by worker
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     close_ops::gate_text::awaiting_merge_start_refusal(
@@ -2663,6 +2758,7 @@ impl CasCore {
         // A supervisor may grant exactly this registration one start. Check
         // before worker-assignee checks or worktree mutation; force is not
         // authority to take a child promised to a peer.
+        // gate[G-07 start]: Epic split hold (supervisor-granted start)
         let split_note = match crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.id) {
             Some(hold) => {
                 let agent = agent_store.get(&agent_id).ok();
@@ -2679,7 +2775,7 @@ impl CasCore {
                         })
                 });
                 match authorization {
-                    Some(authorization) => hold.override_note(&req.id, authorization),
+                    Some(authorization) => crate::gates::override_tag("G-07", hold.override_note(&req.id, authorization)),
                     None => return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         hold.refusal(&req.id, &crate::mcp::tools::core::guidance::caller_prefix()),
@@ -2714,6 +2810,7 @@ impl CasCore {
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
         let mut factory_branch_start = None;
+        let mut delivery_base_repo = None;
         let mut reassigned_branch = None;
         let mut current_checkout_branch = None;
         let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
@@ -2737,11 +2834,12 @@ impl CasCore {
                                 format!("Cannot inspect worker checkout before task start: {error}"),
                             )
                         })?;
+                    // gate[G-11 start]: Worker checkout belongs to another repository
                     if !super::repo_context::repo_answers_to(&worker_repo_root, &context.repo_selector)
                     {
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
-                            "Cannot start task: worker checkout belongs to another repository",
+                            crate::gates::tag("G-11", "Cannot start task: worker checkout belongs to another repository"),
                         ));
                     }
                     // A completed per-task lane is owned just like the base
@@ -2757,9 +2855,9 @@ impl CasCore {
                         let own = task.deliverables.factory_branch_start.as_ref()
                             .map(|start| start.branch.clone())
                             .unwrap_or_else(|| crate::factory_isolation::worker_task_branch(&worker.name, &task.id));
-                        return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                        return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-10", format!(
                             "Cannot resume task from detached HEAD. Preserve detached work and switch to its recorded branch `{own}` before retrying task start."
-                        )));
+                        ))));
                     }
                     let mut worker_branch = checkout_branch
                         .filter(|branch| {
@@ -2832,14 +2930,14 @@ impl CasCore {
                         if !fresh_start {
                             return Err(Self::error(
                                 ErrorCode::INVALID_PARAMS,
-                                foreign_task_branch_start_refusal(
+                                crate::gates::tag("G-10", foreign_task_branch_start_refusal(
                                     worker_checkout,
                                     &worker.name,
                                     &worker_branch,
                                     owner_task,
                                     &task.id,
                                     target_branch,
-                                ),
+                                )),
                             ));
                         }
                         let owner_task = owner_task.to_string();
@@ -2878,14 +2976,14 @@ impl CasCore {
                     {
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
-                            foreign_task_branch_start_refusal(
+                            crate::gates::tag("G-10", foreign_task_branch_start_refusal(
                                 worker_checkout,
                                 &worker.name,
                                 &worker_branch,
                                 owner_task,
                                 &task.id,
                                 target_branch,
-                            ),
+                            )),
                         ));
                     }
                     let mut reset_start_base = false;
@@ -2899,6 +2997,7 @@ impl CasCore {
                             &worker_branch,
                             &target_branch,
                             Some(&identity),
+                            task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()),
                             |tip| {
                                 crate::mcp::tools::parked_delivery_at_tip(
                                     task_store.as_ref(),
@@ -2949,11 +3048,11 @@ impl CasCore {
                             Ok(ReusedFactoryBranchStart::Occupied { commit }) => {
                                 return Err(Self::error(
                                     ErrorCode::INVALID_PARAMS,
-                                    occupied_lane_refusal(&worker_branch, &commit, target_branch),
+                                    crate::gates::tag("G-10", occupied_lane_refusal(&worker_branch, &commit, target_branch)),
                                 ));
                             }
                             Err(message) => {
-                                return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+                                return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-10", message)));
                             }
                         }
                     } else {
@@ -2982,6 +3081,7 @@ impl CasCore {
                                 worker_checkout.to_path_buf(), worker.clone(), worker_branch,
                             ));
                         } else if task.deliverables.factory_branch_start.is_none() || reset_start_base {
+                            delivery_base_repo = Some(worker_repo_root.clone());
                             let base_sha = GitOperations::new(worker_repo_root)
                                 .ref_sha(&worker_branch)
                                 .map_err(|error| {
@@ -3030,9 +3130,10 @@ impl CasCore {
                     let assigned_identity =
                         super::agent_identity_label(agent_store.as_ref(), assignee);
                     let caller_identity = format!("{} ({})", agent.name, agent.id);
+                    // gate[G-12 start]: Assignee mismatch (no self-dispatch)
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
-                        format!(
+                        crate::gates::tag("G-12", format!(
                             "Task {} is assigned to {}, not you ({}). Do not self-dispatch — \
                             wait for an explicit assignment, or ask the supervisor to \
                             reassign it: {tool_prefix}task action=transfer id={} to_agent=<your-agent-id>",
@@ -3041,7 +3142,7 @@ impl CasCore {
                             caller_identity,
                             req.id,
                             tool_prefix = self.supervisor_guidance_prefix().unwrap_or("")
-                        ),
+                        )),
                     ));
                 }
             }
@@ -3109,6 +3210,7 @@ impl CasCore {
                         ),
                     )
                 })?;
+            // gate[G-13 start]: Task start deferred for unread supervisor messages
             if !corrections.is_empty() {
                 let rendered = corrections
                     .iter()
@@ -3122,13 +3224,13 @@ impl CasCore {
                     .join("\n\n---\n\n");
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
-                    format!(
+                    crate::gates::tag("G-13", format!(
                         "TASK START DEFERRED: {} queued supervisor message(s) must be read before task {} starts. No lease or task status transition was applied. Act on the message(s) below, then retry the task start for {}.\n\n{}",
                         corrections.len(),
                         req.id,
                         req.id,
                         rendered
-                    ),
+                    )),
                 ));
             }
         }
@@ -3137,6 +3239,7 @@ impl CasCore {
         // Gate is the deliberate narrow exception: the authority check above
         // already proved the caller is a live registered supervisor.
         if let Ok(agent) = agent_store.get(&agent_id) {
+            // gate[G-14 start]: Supervisors cannot start non-epic tasks
             if agent.role == cas_types::AgentRole::Supervisor
                 && !matches!(
                     task.task_type,
@@ -3145,7 +3248,7 @@ impl CasCore {
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
+                    message: Cow::from(crate::gates::tag("G-14", format!(
                         "Supervisors cannot start non-epic tasks. To delegate work:\n\n\
                         1. Assign to existing worker:\n\
                            {tool_prefix}task action=update id=<task_id> assignee=<worker_name>\n\
@@ -3154,7 +3257,7 @@ impl CasCore {
                            {tool_prefix}factory action=spawn_workers count=1 task_id=<task_id>\n\n\
                         Supervisors coordinate and review; workers execute tasks.",
                         tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
-                    )),
+                    ))),
                     data: None,
                 });
             }
@@ -3302,13 +3405,15 @@ impl CasCore {
                 // The consumed supervisor decision also authorizes proceeding
                 // past this split peer's claim; leave their Cloud lease intact.
                 Acquire::PeerHolds(_) if !split_note.is_empty() => {}
+                // gate[G-15 start]: Held by a peer (Cloud claim)
                 Acquire::PeerHolds(hold) if !req.force.unwrap_or(false) => {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
-                        peer_claim_refusal(&req.id, &hold),
+                        crate::gates::tag("G-15", peer_claim_refusal(&req.id, &hold)),
                     ));
                 }
                 Acquire::PeerHolds(hold) => {
+                    peer_notes = crate::gates::override_tag("G-15", peer_notes);
                     peer_notes.push_str(&format!(
                         "\n\n⚠️  PEER CLAIM OVERRIDE — {} holds the claim on {} until {}; started anyway (force=true). Tell your supervisor to coordinate the handoff: {}coordination action=message target=supervisor summary=\"took over {}\" message=\"...\"",
                         hold.describe(),
@@ -3385,9 +3490,10 @@ impl CasCore {
                         .get(&held_by)
                         .map(|a| format!("{} ({})", a.name, held_by))
                         .unwrap_or_else(|_| held_by.clone());
+                    // gate[G-16 start]: Local task lease lock / lease refused
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
-                        format!(
+                        crate::gates::tag("G-16", format!(
                             "Task is locked by {} until {}. A registered live supervisor can release it: {tool_prefix}task action=release id={}",
                             holder_display,
                             expires_at.format("%H:%M"),
@@ -3395,13 +3501,13 @@ impl CasCore {
                             tool_prefix = self.supervisor_guidance_prefix().unwrap_or_else(
                                 crate::mcp::tools::core::guidance::caller_prefix,
                             ),
-                        ),
+                        )),
                     ));
                 }
             }
             Ok(refused) => return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                format!("Cannot start task: local lease refused: {refused:?}"),
+                crate::gates::tag("G-16", format!("Cannot start task: local lease refused: {refused:?}")),
             )),
             Err(error) => return Err(Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -3661,6 +3767,17 @@ impl CasCore {
                 return Err(Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to update: {error}")));
             }
         };
+        if is_worker {
+            blocker_warning.push_str(&epic_lane::assignment_branch_note(&self.cas_root, task_store.as_ref(), &task));
+        }
+        // cas-2e1b: lane CI binds its impact selection to this newly recorded
+        // start base. A repeated start without a new record leaves the ref.
+        if let (Some(repo), Some(start)) = (
+            delivery_base_repo.as_deref(),
+            task.deliverables.factory_branch_start.as_ref(),
+        ) {
+            publish_delivery_base(repo, &start.branch, &start.base_sha);
+        }
         // cas-b269 review 2: clear urgent-stop halt ONLY after start fully
         // succeeds, and only if halt gen is not newer than this start's
         // ceiling (concurrent urgent stop must win).
@@ -3775,15 +3892,16 @@ impl CasCore {
                     supervisor_push::LifecycleTransition::Started,
                     &occurrence,
                 );
+                // gate[G-18 start]: Lifecycle outbox push failure on start
                 return Err(Self::error(
                     ErrorCode::INTERNAL_ERROR,
-                    supervisor_push::lifecycle_push_failure_message(
+                    crate::gates::tag("G-18", supervisor_push::lifecycle_push_failure_message(
                         &req.id,
                         TaskStatus::InProgress,
                         supervisor_push::LifecycleTransition::Started,
                         &key,
                         &e,
-                    ),
+                    )),
                 ));
             }
         };
@@ -4571,6 +4689,7 @@ mod related_recall_response_tests {
             task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4596,6 +4715,7 @@ mod related_recall_response_tests {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4621,6 +4741,7 @@ mod related_recall_response_tests {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -6245,8 +6366,10 @@ mod related_recall_response_tests {
             endpoint: server.uri(), token: Some("fixture-token".into()),
             team_id: Some("team-1".into()), ..Default::default()
         }.save_to_cas_dir(root).unwrap();
+        // The refusal reads the inventory once; the confirmed create reads it
+        // again to audit its G-148 override (cas-b5cd, dc1d07bac9).
         Mock::given(method("GET")).respond_with(ResponseTemplate::new(503))
-            .expect(1).mount(&server).await;
+            .expect(2).mount(&server).await;
         let request = epic_request("Restore the product search index", "Rebuild missing conversation search documents.");
         let warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
         for required in ["EPIC INVENTORY WARNING", "DUPLICATE EPIC WARNING", "cas-local-search", "search-supervisor", "confirm_warning=true"] {

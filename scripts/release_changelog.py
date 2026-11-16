@@ -15,12 +15,6 @@
       under the same `### ` title share one heading, in first-seen order
       (cas-7f95), so same-area fragments cannot fail MD024.
 
-      Resolve a CHANGELOG merge conflict with the base branch: the result is
-      the base file with this branch's unreleased entries (as `promote` reads
-      them, relative to <merge-base-version>) under its [Unreleased] heading.
-      Blocks the base already carries are dropped, so entries that reached
-      this branch through an earlier merge of the base are not duplicated.
-
   release_changelog.py section <file> <version>
       Print the body of the <version> section.
 
@@ -212,13 +206,9 @@ def verify_deliveries(base_ref, notes=None, tip="HEAD"):
             raise ChangelogError('declare release inputs once in the draft')
         if blocks:
             declared = json.loads(blocks[0])
-            if not isinstance(declared, dict) or set(declared) - {'epic_refs', 'deferred_tasks', 'no_code_members'}:
-                raise ChangelogError('draft inputs accept only epic_refs, deferred_tasks and no_code_members')
+            if not isinstance(declared, dict) or set(declared) - {'epic_refs', 'deferred_tasks'}:
+                raise ChangelogError('draft inputs accept only epic_refs and deferred_tasks')
             inputs.update(declared)
-    no_code_members = inputs.get('no_code_members', {})
-    if not isinstance(no_code_members, dict) or not all(re.fullmatch(r'cas-[0-9a-f]+', task)
-            and isinstance(proofs, list) and proofs for task, proofs in no_code_members.items()):
-        raise ChangelogError('no_code_members needs task IDs with non-empty explicit proof lists')
     refs = inputs.get('epic_refs', [])
     deferred = inputs.get('deferred_tasks', {})
     if not isinstance(refs, list) or not all(isinstance(ref, str) and ref.strip() for ref in refs):
@@ -250,18 +240,28 @@ def verify_deliveries(base_ref, notes=None, tip="HEAD"):
     included.update(Path(path).stem for path in git('log', f'{floor}..{tip}', '--format=',
         '--diff-filter=A', '--name-only', '--', 'changelog.d/').splitlines()
         if re.fullmatch(r'cas-[0-9a-f]+\.md', Path(path).name))
-    included.update(no_code_members)
     common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
     root = Path(os.environ.get('CAS_ROOT') or common.parent / '.cas').expanduser().resolve()
     rows = []
     try:
         with sqlite3.connect((root / 'cas.db').as_uri() + '?mode=ro', uri=True) as db:
-            rows = db.execute('SELECT id, task_type, deliverables FROM tasks').fetchall()
+            rows = db.execute('SELECT id, task_type, deliverables, execution_note, status FROM tasks').fetchall()
+            members = set(inputs.get('included_task_ids', []))
+            pending = [context['train_id']] if context.get('train_id') else []
+            while pending:
+                parent = pending.pop()
+                children = {row[0] for row in db.execute(
+                    "SELECT from_id FROM dependencies WHERE to_id=? AND dep_type='parent-child'", (parent,))}
+                pending.extend(children - members)
+                members.update(children)
+            included.update(task for task, _, _, method, state in rows if method == 'no-code'
+                            and (state == 'awaiting_merge' or task in inputs.get('included_task_ids', []))
+                            and task in members and task not in deferred)
     except sqlite3.Error as error:
         if refs:
             raise ChangelogError(f'cannot audit declared epics without the project task store ({root}): {error}') from error
     missing = []
-    for task, kind, raw in rows:
+    for task, kind, raw, _, _ in rows:
         data = json.loads(raw or '{}')
         if isinstance(data, str):
             data = json.loads(data)
@@ -288,7 +288,7 @@ def verify_deliveries(base_ref, notes=None, tip="HEAD"):
     if missing:
         raise ChangelogError('release omits declared constituent deliveries:\n' + '\n'.join(sorted(missing)))
     return {'checked_sha': git('rev-parse', tip), 'inventory_base': git('rev-parse', floor),
-            'epic_refs': refs, 'deferred_tasks': deferred, 'included_task_ids': sorted(included), 'no_code_members': no_code_members}
+            'epic_refs': refs, 'deferred_tasks': deferred, 'included_task_ids': sorted(included)}
 
 
 def main(argv):

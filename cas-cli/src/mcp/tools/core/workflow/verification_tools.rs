@@ -563,6 +563,7 @@ impl CasCore {
         // next task-only repository cycle. Preserve exact capability and
         // child-handoff authority, but let a direct supervisor verdict follow
         // an unchanged proof boundary to the current pending dispatch.
+        let mut answered_question = None;
         if supervisor_direct {
             requested_dispatch_id = cas_store::resolve_verification_dispatch_for_add(
                 &self.cas_root,
@@ -654,6 +655,8 @@ impl CasCore {
                     data: None,
                 },
             )?;
+        let proof_receipt = proof_dispatch.receipt()
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         // cas-5c33: the boundary that matters is the delivered commit
         // identity. A branch that moved on to the next task keeps the verdict
         // valid while every delivered commit is still reachable; the moved
@@ -714,6 +717,7 @@ impl CasCore {
                         )),
                         data: None,
                     })?;
+                    let _ = crate::store::publish_direct_task_write(&self.cas_root, &req.task_id);
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(format!(
@@ -801,13 +805,21 @@ impl CasCore {
                     // The verdict may have committed while the best-effort
                     // post-commit wake failed. An identical supervisor retry
                     // repairs that wake without recording a second verdict.
-                    let retry_note = if super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
+                    let retry_note = if existing.status == VerificationStatus::SupervisorCall
+                        && proof_dispatch.state == cas_types::VerificationDispatchState::Pending
+                    {
+                        self.emit_premerge_review_handoff(&task, &proof_dispatch)?;
+                        "; answer recorded; verifier continuation scheduled on the same dispatch".into()
+                    } else if super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_some()
                     {
                         self.continue_premerge_after_verdict(&proof_dispatch, existing.status).await.unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
                     } else if existing.status == VerificationStatus::Approved
                         && existing.verification_type == VerificationType::Task
-                        && proof_dispatch.delivery_transaction_id.is_none()
+                        && proof_receipt.transaction().is_none()
+                        && cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                            .is_some_and(|dispatch| dispatch.id == requested_dispatch_id)
                     {
                         if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
                             outcome
@@ -837,15 +849,23 @@ impl CasCore {
                 }
                 // A question is retained as history, not a final verdict. The
                 // supervisor answers it using this exact proof boundary.
-                if existing.status != VerificationStatus::SupervisorCall {
+                if !matches!(existing.status, VerificationStatus::SupervisorCall | VerificationStatus::Error) {
+                    // gate[G-155 verification]: Conflicting terminal supervisor verification verdict
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(concat!(
+                        message: Cow::from(crate::gates::tag("G-155", concat!(
                             "Supervisor-direct verification rejected: the exact dispatch was ",
                             "already resolved with a different verdict."
-                        )),
+                        ))),
                         data: None,
                     });
+                }
+                if status == VerificationStatus::SupervisorCall
+                    && existing.provenance == cas_types::VerificationProvenance::TaskVerifier
+                    && existing.agent_id.is_some()
+                    && existing.agent_id == proof_dispatch.verifier_agent_id
+                {
+                    answered_question = Some(existing.id);
                 }
             }
         }
@@ -853,7 +873,8 @@ impl CasCore {
         // Atomically persist the review record and authority. A terminal
         // verdict also resolves the exact dispatch and pending task transition.
         // If any step fails, all authority and lifecycle writes roll back.
-        {
+        let mut resume_verifier = false;
+        let (task_row_changed, is_current_dispatch) = {
             let db_path = self.cas_root.join("cas.db");
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -886,8 +907,19 @@ impl CasCore {
                     data: None,
                 })?;
 
+            // Historical exact-dispatch verdicts remain recordable (including
+            // epic timeout recovery). Only the current cycle owns task flags
+            // and close continuation; measure that under this write transaction.
+            let is_current_dispatch = cas_store::get_latest_verification_dispatch_with_conn(&tx, &req.task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .is_some_and(|dispatch| dispatch.id == requested_dispatch_id);
+            if supervisor_direct {
+                cas_store::recover_errored_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
+                    .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+            }
             let mut review_bound_at = None;
             let mut review_consumed_at = None;
+            let mut task_row_changed = false;
             let dispatch = if let Some(capability_token) = req.verifier_capability.as_deref() {
                 let capability = cas_store::consume_verifier_capability_with_conn(
                     &tx,
@@ -1024,10 +1056,39 @@ impl CasCore {
                 data: None,
             })?;
 
+            if let Some(question) = answered_question.as_deref() {
+                // cas-d5bb: the question spent the child's authority. Release
+                // only that exact claim, atomically with its supervisor answer;
+                // the existing launcher supplies a fresh sealed child handoff.
+                let now = chrono::Utc::now();
+                let deadline = (now + chrono::Duration::minutes(10))
+                    .min(dispatch.requested_at + chrono::Duration::minutes(60));
+                let changed = tx.execute(
+                    "UPDATE verification_dispatches
+                     SET state='pending', verifier_agent_id=NULL, capability_id=NULL, deadline_at=?5
+                     WHERE id=?1 AND state='claimed' AND verifier_agent_id=?2 AND deadline_at>?6 AND ?5>?6
+                       AND id=(SELECT id FROM verification_dispatches WHERE task_id=?7 ORDER BY requested_at DESC, id DESC LIMIT 1)
+                       AND ?3=(SELECT id FROM verifications WHERE dispatch_id=?1 AND id<>?4 ORDER BY created_at DESC, id DESC LIMIT 1)",
+                    rusqlite::params![dispatch.id, dispatch.verifier_agent_id, question,
+                        verification.id, deadline.to_rfc3339(), now.to_rfc3339(), task.id],
+                ).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if changed != 1 {
+                    // gate[G-154 verification]: Supervisor-answer exact verifier claim binding
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        crate::gates::tag("G-154",
+                            "Supervisor answer rejected: the question's exact verifier claim changed or expired; inspect the current dispatch.")));
+                }
+                resume_verifier = true;
+            }
+
             // A question transfers the decision to the supervisor. The child
             // authority is spent, but the dispatch, delivery and pending task
             // remain unchanged until the supervisor records the answer/verdict.
-            if verification.status != VerificationStatus::SupervisorCall {
+            if verification.status == VerificationStatus::Error {
+                cas_store::retry_verification_dispatch_after_error_with_conn(
+                    &tx, &dispatch.id, &caller_id, verification.capability_id.as_deref(), supervisor_direct,
+                ).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+            } else if verification.status != VerificationStatus::SupervisorCall {
                 cas_store::resolve_verification_dispatch_with_conn(
                     &tx,
                     &dispatch.id,
@@ -1047,8 +1108,8 @@ impl CasCore {
                     verification.status,
                     VerificationStatus::Approved | VerificationStatus::Skipped
                 );
-                let delivery_transitioned = if let Some(delivery_transaction_id) =
-                    dispatch.delivery_transaction_id.as_deref()
+                let delivery_transitioned = if let Some((_, delivery_transaction_id)) =
+                    dispatch.receipt().map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.transaction()
                     && cas_store::transition_worker_delivery_verification_with_conn(
                         &tx,
                         delivery_transaction_id,
@@ -1071,7 +1132,7 @@ impl CasCore {
                 };
 
                 if delivery_transitioned {
-                    tx.execute(
+                    task_row_changed = tx.execute(
                         "UPDATE tasks
                          SET status = ?2, pending_verification = 0, updated_at = ?3
                          WHERE id = ?1 AND status IN ('in_progress', 'awaiting_merge')",
@@ -1091,10 +1152,10 @@ impl CasCore {
                             "Failed to project delivery verification state: {e}"
                         )),
                         data: None,
-                    })?;
+                    })? > 0;
                 }
 
-                if task.pending_verification {
+                if task.pending_verification && is_current_dispatch {
                     cas_store::clear_pending_verification_with_conn(&tx, &req.task_id).map_err(
                         |e| McpError {
                             code: ErrorCode::INTERNAL_ERROR,
@@ -1104,8 +1165,15 @@ impl CasCore {
                             data: None,
                         },
                     )?;
+                    task_row_changed = true;
                 }
             }
+
+            let event = super::premerge_verification::cycle::event(&tx, &self.cas_root, &task,
+                &dispatch, &verification).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?
+                .with_session(&caller_id);
+            cas_store::record_event_with_conn(&tx, &event)
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
 
             tx.commit().map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -1116,51 +1184,19 @@ impl CasCore {
                 &req.task_id,
                 &verification.id,
             );
+            (task_row_changed, is_current_dispatch)
+        };
+        // The verdict transaction bypasses SyncingTaskStore. Publish before
+        // any later close/notice can mask its pending flag or delivery state.
+        if task_row_changed {
+            let _ = crate::store::publish_direct_task_write(&self.cas_root, &req.task_id);
         }
 
-        if verification.status != VerificationStatus::SupervisorCall {
+        if !matches!(verification.status, VerificationStatus::SupervisorCall | VerificationStatus::Error) {
             let _phase = crate::mcp::tools::service::mutation_receipt::phase(
                 "verification_reclaim_targets",
             );
             crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
-        }
-
-        // Emit VerificationAdded event for task lifecycle tracking
-        if let Ok(event_store) = cas_store::SqliteEventStore::open(&self.cas_root) {
-            use cas_store::EventStore;
-            use cas_types::{Event, EventEntityType, EventType};
-            let status_str = match verification.status {
-                VerificationStatus::Approved => "approved",
-                VerificationStatus::Rejected => "rejected",
-                VerificationStatus::SupervisorCall => "supervisor_call",
-                VerificationStatus::Pending => "pending",
-                VerificationStatus::Error => "error",
-                VerificationStatus::Skipped => "skipped",
-            };
-            let event = Event::new(
-                EventType::VerificationAdded,
-                EventEntityType::Verification,
-                &id,
-                format!(
-                    "Verification {}: {} - {}",
-                    status_str, req.task_id, verification.summary
-                ),
-            )
-            .with_metadata(serde_json::json!({
-                "task_id": req.task_id,
-                "status": status_str,
-                "verification_type": verification.verification_type.to_string(),
-                "provenance": verification.provenance.to_string(),
-                "capability_id": verification.capability_id,
-                "dispatch_id": verification.dispatch_id,
-            }));
-            // Add session ID if available for linking to the verifying agent
-            let event = if let Some(Some(agent_id)) = self.agent_id.get() {
-                event.with_session(agent_id)
-            } else {
-                event
-            };
-            let _ = event_store.record(&event);
         }
 
         let status_emoji = verification_status_emoji(verification.status);
@@ -1175,7 +1211,14 @@ impl CasCore {
                 != cas_types::MergeCiAdmission::Override;
         let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-        let close_retry = if candidate.is_some() {
+        let close_retry = if resume_verifier {
+            let current = cas_store::get_verification_dispatch(&self.cas_root, &requested_dispatch_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            self.emit_premerge_review_handoff(&task, &current)?;
+            "\nSupervisor answer recorded; verifier continuation scheduled on the same dispatch.".to_string()
+        } else if verification.status == VerificationStatus::Error {
+            format!("\nReview infrastructure failed; dispatch {} remains pending. Retry the original review request, or its supervisor can record a verdict on this exact dispatch.", requested_dispatch_id)
+        } else if candidate.is_some() {
             let _phase = crate::mcp::tools::service::mutation_receipt::phase(
                 "verification_continuation",
             );
@@ -1190,7 +1233,8 @@ impl CasCore {
         } else if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
             && (task.pending_verification || cassy_merged)
-            && proof_dispatch.delivery_transaction_id.is_none()
+            && is_current_dispatch
+            && proof_receipt.transaction().is_none()
         {
             if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
                 outcome
@@ -1230,29 +1274,15 @@ impl CasCore {
         } else if verification.status == VerificationStatus::Rejected
             && verification.verification_type == VerificationType::Task
             && cassy_merged
-            && proof_dispatch.delivery_transaction_id.is_none()
+            && is_current_dispatch
+            && proof_receipt.transaction().is_none()
         {
             self.return_rejected_merged_delivery(&req.task_id, &verification)
         } else {
             String::new()
         };
 
-        if let Some(outcome) = crate::quality_ledger::verifier_outcome(verification.status) {
-            crate::quality_ledger::check_run(
-                &self.cas_root,
-                crate::quality_ledger::Check {
-                    natural_key: format!("verifier|{id}"),
-                    check_id: "task_verifier",
-                    stage: cas_store::CheckStage::Verifier,
-                    outcome,
-                    task_id: Some(&req.task_id),
-                    sha: None,
-                    minutes: verification.duration_ms.map(|ms| ms as f64 / 60_000.0),
-                    link: None,
-                    actor: Some(&caller_id),
-                },
-            );
-        }
+        crate::quality_ledger::verification_recorded(&self.cas_root, &verification);
 
         Ok(Self::success(format!(
             "{} Verification {} for task {} - {}: {}{}",
@@ -1460,6 +1490,7 @@ impl CasCore {
         }
     }
 
+    // gate[N-13 notice]: Supervisor recovery re-dispatch
     fn recover_parked_verification_dispatch(
         &self,
         task: &Task,
@@ -1634,7 +1665,10 @@ mod lifecycle_friction_tests {
             &task.id,
             "implementer",
             "review-supervisor",
-            &VerificationProofBoundary::task(),
+            &VerificationProofBoundary {
+                receipt_id: Some(cas_store::delivery_cycles(&root, &task.id).unwrap().pop().unwrap().cycle_id),
+                ..VerificationProofBoundary::task()
+            },
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
@@ -1709,6 +1743,14 @@ mod lifecycle_friction_tests {
             .unwrap()
             .unwrap();
         assert_eq!(recorded.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+        let conn = rusqlite::Connection::open(core.cas_root.join("cas.db")).unwrap();
+        let stamp = super::super::premerge_verification::cycle::stamp(&conn, &recorded.id).unwrap().unwrap();
+        assert_eq!(stamp.registry_version, Some(crate::gates::registry_version_in_force()));
+        assert_eq!(stamp.cycle_id, dispatch.receipt_id.clone().unwrap());
+        assert_eq!(stamp.approved_anchor, task.deliverables.factory_branch_anchor.clone().unwrap());
+        assert_eq!(stamp.dispatch_id, dispatch.id);
+        assert_eq!(stamp.verdict_id, recorded.id);
+
         let text = |result: CallToolResult| {
             result
                 .content

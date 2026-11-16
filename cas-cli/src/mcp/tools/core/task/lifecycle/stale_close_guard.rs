@@ -71,7 +71,7 @@ pub fn verification_on_closed_message(task_id: &str) -> String {
 /// which one.
 pub fn halt_blocks_task_work_message(tool: &str, prompt_id: Option<i64>) -> String {
     let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-    match prompt_id {
+    crate::gates::tag("G-36", match prompt_id {
         Some(id) => format!(
             "WORK HALTED: supervisor issued an urgent stop (notification {id}). \
              Refusing `{tool}` until you answer it. \
@@ -85,7 +85,7 @@ pub fn halt_blocks_task_work_message(tool: &str, prompt_id: Option<i64>) -> Stri
              Send `{prefix}coordination action=message target=supervisor summary=\"...\" message=\"...\"` with your acknowledgement or question, then retry `{tool}`. \
              If you cannot respond, call `{prefix}task action=mine` and only start a task that is assigned to you."
         ),
-    }
+    })
 }
 
 /// Whether a worker's reply to the supervisor discharges the halt bound to an

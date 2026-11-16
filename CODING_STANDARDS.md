@@ -76,9 +76,9 @@ framework vocabulary and public compatibility can justify an apparent smell.
 
 ## Provenance
 
-Test and mock criteria adapt `cas-tdd` and its worked examples, MIT © 2026 Matt
+Test and mock criteria adapt `cas-writing-tests` and its worked examples, MIT © 2026 Matt
 Pocock; the smell baseline adapts his `code-review` skill under the same
-[MIT notice](cas-cli/src/builtins/skills/cas-tdd/LICENSE). The Cassy test audit
+[MIT notice](cas-cli/src/builtins/skills/cas-writing-tests/LICENSE). The Cassy test audit
 adds source-text, source-order and prose-contract distinctions.
 Promoted rule-172's wire-shape incidents inform the boundary-evidence criterion.
 Promoted rule-026 (environment guard) and rule-175 (release completeness) route

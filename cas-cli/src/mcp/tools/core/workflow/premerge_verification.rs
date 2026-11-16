@@ -249,6 +249,11 @@ struct Promotion {
 
 mod peer;
 mod automatic;
+#[cfg(unix)]
+mod factory_launch;
+#[cfg(unix)]
+pub(crate) use factory_launch::launch as launch_factory_verifier;
+pub(crate) mod cycle;
 pub(crate) use peer::{PeerReceiptIngested, TAG as PEER_PREMERGE_TAG, ingest_peer_receipt};
 
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
@@ -265,17 +270,6 @@ fn proof_candidate_key(proof: &RepositoryProofBoundary) -> Result<Option<String>
         return Err("candidate context identity is invalid".into());
     }
     Ok(Some(key.to_string()))
-}
-
-/// Outputs scripts/regenerate-generated-artifacts.sh commits after a merge.
-fn is_regenerated_output(path: &str) -> bool {
-    path.starts_with("hub-web/dist/")
-        || matches!(
-            path,
-            "cas-cli/src/builtins/reference-history.json"
-                | "cas-cli/src/builtins/codex/agents/task-verifier.toml"
-                | ".codex/agents/task-verifier.toml"
-        )
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
@@ -434,7 +428,9 @@ fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
 fn fail(message: impl std::fmt::Display) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
-        format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
+        crate::gates::tag("G-104",
+            format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
+        ),
     )
 }
 
@@ -710,9 +706,14 @@ impl Candidate {
             .collect::<Vec<_>>();
         let reviewed_changes = |paths: Vec<String>| paths.into_iter()
             .filter(|path| !unchanged_upkeep.contains(&path.as_str())).collect::<Vec<_>>();
+        // cas-c5db (cas-c9ec): commits the target gained that the source
+        // already carries are target content, not delivered paths. Deliveries
+        // are measured from the current merge base; target movement stays
+        // measured from the reviewed target (cas-192b0).
+        let delivered_base = git(&self.repository, &["merge-base", target, &self.source_sha])?;
         let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
-            &base,
+            &delivered_base,
             &self.source_sha,
             &self.target_sha,
             target,
@@ -755,7 +756,7 @@ impl Candidate {
                 &["diff", "--name-only", "--no-renames", parent, &landed],
             )?
             .lines()
-            .all(is_regenerated_output);
+            .all(crate::qa_pass::is_generated_artifact);
             if !generated_only
                 || git(
                     &self.repository,
@@ -802,7 +803,7 @@ impl Candidate {
             &["diff", "--name-only", "--no-renames", &expected, landed],
         )?;
         if changed.lines().any(|path| {
-            !is_regenerated_output(path) || path.starts_with("hub-web/dist/")
+            !crate::qa_pass::is_generated_artifact(path) || path.starts_with("hub-web/dist/")
         }) {
             return Err(
                 "landed tree differs from the recomputed approved delivery; publication refused"
@@ -861,12 +862,13 @@ impl Approval {
         }
         let candidate = &self.candidate;
         // A local merge whose push failed is not a landed mapping. With an
-        // origin, only fetched remote history can repair an interrupted write.
+        // origin, only its tracking ref (refreshed by push and merge) can repair.
         let operations = crate::worktree::GitOperations::new(candidate.repository.clone());
-        let target = operations
+        let tracked = format!("refs/remotes/origin/{}", candidate.target_branch);
+        let target = if operations.resolve_commit(&tracked).is_some() { tracked } else { operations
             .fetch_merge_target(&candidate.target_branch)
             .map_err(|error| format!("publication could not be confirmed: {error}"))?
-            .unwrap_or_else(|| candidate.target_branch.clone());
+            .unwrap_or_else(|| candidate.target_branch.clone()) };
         let commits = git(
             &candidate.repository,
             &[
@@ -895,9 +897,9 @@ impl Approval {
                 verdict.id == self.verdict_id && verdict.status == VerificationStatus::Approved
             })
         {
-            return Err("the exact candidate approval is no longer current".into());
+            return Err(crate::gates::tag("G-104", "the exact candidate approval is no longer current"));
         }
-        self.candidate.validate(root, task)
+        self.candidate.validate(root, task).map_err(|error| crate::gates::tag("G-104", error))
     }
 
     /// Reconciled delivery can close on its original mapping after other
@@ -906,10 +908,7 @@ impl Approval {
         &self,
         operations: &crate::worktree::GitOperations,
     ) -> Result<Option<(String, String)>, String> {
-        if !self.reconcile_promotion()? {
-            return Ok(None);
-        }
-        let record = self.promotion()?.ok_or("published mapping missing")?;
+        // One origin read, before reconciliation reads its tracking ref.
         let target = operations
             .fetch_merge_target(&self.candidate.target_branch)
             .map_err(|error| error.to_string())?
@@ -917,6 +916,10 @@ impl Approval {
                 &self.candidate.repository,
                 &["rev-parse", &self.candidate.target_branch],
             )?);
+        if !self.reconcile_promotion()? {
+            return Ok(None);
+        }
+        let record = self.promotion()?.ok_or("published mapping missing")?;
         git(
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
@@ -1041,6 +1044,7 @@ impl CasCore {
         Ok(())
     }
 
+    // gate[N-15 notice]: Candidate verification handoff or automatic verifier launch
     pub(crate) fn emit_premerge_review_handoff(
         &self,
         task: &Task,
@@ -1051,7 +1055,7 @@ impl CasCore {
             return match automatic::launch(self, task, dispatch) {
                 Ok(handle) => Ok(handle),
                 Err(error) => {
-                    automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}"))
+                    automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}. {}", automatic::recovery(&self.cas_root, dispatch)))
                         .map_err(fail)?;
                     Ok(None)
                 }
@@ -1153,6 +1157,7 @@ impl CasCore {
 
     /// Return a reusable approval, or dispatch this delivery's existing task
     /// verifier and return a hold. This runs before acquiring the target lock.
+    // gate[G-104 merge-admission as-of]: Pre-merge verification hold on the candidate
     pub(crate) fn prepare_premerge_verification(
         &self,
         task: &Task,
@@ -1184,9 +1189,8 @@ impl CasCore {
                 .is_some();
         if !recorded
             && !fast_lane
-            && (review_tier::tier_for_delivery(task, repo)
+            && review_tier::tier_for_delivery(task, repo)
                 .is_some_and(|tier| tier.tier == review_tier::VerificationTier::Mechanical)
-                || review_tier::release_verdict_owns(&self.cas_root, task, repo))
         {
             return Ok(None);
         }
@@ -1207,19 +1211,20 @@ impl CasCore {
         {
             return Ok(None);
         }
-        refresh_review_target(repo, target).map_err(fail)?;
         // A peer machine's committed evidence lands where the verifier reads,
         // before the digest so a restored LEDGER.md is part of this candidate.
-        crate::artifacts::proof::materialize_peer_evidence(&self.cas_root, task);
+        crate::artifacts::proof::materialize_peer_evidence(&self.cas_root, task).map_err(fail)?;
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
         let mut inherited_supervisor_call = None;
+        let mut drifted_dispatch = None;
         if let Some(dispatch) = latest.as_ref()
             && let Some(candidate) =
                 candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         {
+            let receipt = dispatch.receipt().map_err(fail)?;
             let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                 .map_err(fail)?;
             if dispatch.state == cas_types::VerificationDispatchState::Resolved
@@ -1247,13 +1252,31 @@ impl CasCore {
                 && candidate.source_branch == source
                 && candidate.target_branch == target
                 && (candidate.validate(&self.cas_root, task).is_ok()
-                    || (dispatch.delivery_transaction_id.is_some()
+                    || (receipt.transaction().is_some()
                         && repository_proof::verify_repository_proof(&candidate.proof).is_ok()))
             {
                 if dispatch.state == cas_types::VerificationDispatchState::Resolved
                     && let Some(verdict) =
                         verdict.filter(|verdict| verdict.status == VerificationStatus::Approved)
                 {
+                    let target_sha = review_target(repo, target).map_err(fail)?;
+                    if target_sha != candidate.target_sha {
+                        let base = git(repo, &["merge-base", &candidate.target_sha, &candidate.source_sha])
+                            .map_err(fail)?;
+                        if repository_proof::delivery_paths_changed(repo, &base,
+                            &candidate.source_sha, &candidate.target_sha, &target_sha)
+                            .map_err(fail)?.is_empty()
+                        {
+                            let receipt = format!(
+                                "approval carried: disjoint train delta; dispatch={} verdict={} target={} -> {}.",
+                                dispatch.id, verdict.id, candidate.target_sha, target_sha,
+                            );
+                            let store = self.open_task_store()?;
+                            if !store.get(&task.id).map_err(fail)?.notes.lines().any(|line| line == receipt) {
+                                store.append_note(&task.id, &receipt).map_err(fail)?;
+                            }
+                        }
+                    }
                     return Ok(Some(Approval {
                         candidate,
                         dispatch_id: dispatch.id.clone(),
@@ -1269,12 +1292,9 @@ impl CasCore {
                 }
                 if dispatch.state == cas_types::VerificationDispatchState::TimedOut {
                     return Err(fail(format!(
-                        "exact dispatch {} timed out. A registered supervisor must recover it. Re-dispatch task-verifier for task {} on this dispatch, or record its verdict directly: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<review and verdict>\". Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
+                        "exact dispatch {} timed out. A registered supervisor must recover it. {} Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
                         dispatch.id,
-                        task.id,
-                        crate::mcp::tools::core::guidance::supervisor_prefix(),
-                        task.id,
-                        dispatch.id,
+                        automatic::direct_verdict(dispatch),
                         crate::mcp::tools::core::guidance::supervisor_prefix(),
                         source,
                         task.id,
@@ -1285,15 +1305,10 @@ impl CasCore {
                     task.id, dispatch.id, dispatch.state
                 )));
             }
-            if dispatch.delivery_transaction_id.is_some() {
+            if receipt.transaction().is_some() {
                 return Err(fail(
                     "transactional candidate drifted; request changes and submit a fresh receipt against the current target before another review",
                 ));
-            }
-            if let Some(approval) =
-                self.rebind_unchanged_patch(task, repo, source, target, &digest, dispatch, &candidate)?
-            {
-                return Ok(Some(approval));
             }
             inherited_supervisor_call = self.inherited_supervisor_call_for_target(
                 task,
@@ -1304,11 +1319,7 @@ impl CasCore {
                 dispatch,
                 &candidate,
             )?;
-            cas_store::invalidate_verification_dispatch_for_repository_drift(
-                &self.cas_root,
-                &dispatch.id,
-            )
-            .map_err(fail)?;
+            drifted_dispatch = Some(&dispatch.id);
         }
         crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::ledger_preflight(
             &self.cas_root,
@@ -1316,6 +1327,8 @@ impl CasCore {
             true,
         )
         .map_err(fail)?;
+        // Only a new review reads origin before the merge lock.
+        refresh_review_target(repo, target).map_err(fail)?;
         let candidate = self.build_verification_candidate(
             task,
             repo,
@@ -1323,7 +1336,19 @@ impl CasCore {
             target,
             digest,
             inherited_supervisor_call,
-        )?;
+        );
+        // cas-c896: bounded preparation is not drift. Keep the approval until
+        // preparation settles; a real error or changed delivery still retires it.
+        if let Err(error) = &candidate
+            && error.data.as_ref().is_some_and(|data| data["reason"] == "candidate_preparation_pending")
+        {
+            return Err(error.clone());
+        }
+        if let Some(id) = drifted_dispatch {
+            cas_store::invalidate_verification_dispatch_for_repository_drift(&self.cas_root, id)
+                .map_err(fail)?;
+        }
+        let candidate = candidate?;
         candidate.validate(&self.cas_root, task).map_err(fail)?;
         if let Some(inherited) = &candidate.inherited_supervisor_call {
             let store = self.open_task_store()?;
@@ -1343,12 +1368,13 @@ impl CasCore {
         }
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;
+        // gate[N-12 notice]: Premerge candidate verification dispatch
         let dispatch = cas_store::create_verification_dispatch_bound(
             &self.cas_root,
             &task.id,
             &requester,
             &owner,
-            &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
+            &cycle::boundary(&self.cas_root, task, candidate.proof.clone()).map_err(fail)?,
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
@@ -1360,114 +1386,11 @@ impl CasCore {
             )));
         }
         Err(fail(format!(
-            "task {}: merge held on verification dispatch {}. Spawn task-verifier: prompt=\"Verify task {}\"; read `{}verification action=latest task_id={}`",
-            task.id, dispatch.id, task.id,
-            crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
+            "task {}: merge held on verification dispatch {}. {}",
+            task.id, dispatch.id, automatic::direct_verdict(&dispatch)
         )))
     }
 
-    /// cas-d4b7: the target moved under an approved candidate, so the reviewed
-    /// tree no longer recomputes. When the source tip, plan context and the
-    /// patch the merge adds to the new target are all unchanged, the approval
-    /// is rebound to the new candidate with a receipt and no verifier runs.
-    /// Any mismatch returns None and the caller dispatches a fresh review.
-    #[allow(clippy::too_many_arguments)]
-    fn rebind_unchanged_patch(
-        &self,
-        task: &Task,
-        repo: &Path,
-        source: &str,
-        target: &str,
-        digest: &str,
-        dispatch: &VerificationDispatch,
-        prior: &Candidate,
-    ) -> Result<Option<Approval>, McpError> {
-        let Some(verdict) = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
-            .map_err(fail)?
-            .filter(|verdict| verdict.status == VerificationStatus::Approved)
-        else {
-            return Ok(None);
-        };
-        let repository = repo.canonicalize().map_err(|error| {
-            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
-        })?;
-        if dispatch.state != cas_types::VerificationDispatchState::Resolved
-            || dispatch.receipt_id.is_some()
-            || prior.context_digest != digest
-            || prior.repository != repository
-            || prior.source_branch != source
-            || prior.target_branch != target
-            || task.deliverables.factory_branch_anchor.as_deref() != Some(prior.source_sha.as_str())
-            || git(repo, &["rev-parse", source]).ok().as_deref() != Some(prior.source_sha.as_str())
-            || review_target(repo, target).ok().as_deref() == Some(prior.target_sha.as_str())
-        {
-            return Ok(None);
-        }
-        let Ok(approved) = delivered_patch_id(repo, &prior.target_sha, &prior.tree) else {
-            return Ok(None);
-        };
-        // The fresh-review path enforces this gate; a rebind may not skip it.
-        if crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::ledger_preflight(
-            &self.cas_root,
-            task,
-            true,
-        )
-        .is_err()
-        {
-            return Ok(None);
-        }
-        // cas-d4b7 requires a proven patch match. A conflicting/unbuildable
-        // candidate must fall through so the caller invalidates the old approval
-        // before the fresh-review path reports the candidate error.
-        let Ok(candidate) =
-            self.build_verification_candidate(task, repo, source, target, digest.to_string(), None)
-        else {
-            return Ok(None);
-        };
-        if candidate.validate(&self.cas_root, task).is_err() {
-            return Ok(None);
-        }
-        let Ok(current) = delivered_patch_id(repo, &candidate.target_sha, &candidate.tree) else {
-            return Ok(None);
-        };
-        if current != approved {
-            return Ok(None);
-        }
-        let matched = format!("full-context patch-id {current}");
-        let receipt = format!(
-            "VERDICT REBIND: approved verdict {} (dispatch {}) carried to candidate {} with no verifier; source {} unchanged, target {} -> {}, delivered {matched} identical.",
-            verdict.id,
-            dispatch.id,
-            candidate.proof.head_commit,
-            candidate.source_sha,
-            prior.target_sha,
-            candidate.target_sha,
-        );
-        let requester = self.get_agent_id()?;
-        let owner = self.verification_dispatch_owner(&requester)?;
-        let (rebound, approval) = cas_store::rebind_approved_verification_dispatch(
-            &self.cas_root,
-            &dispatch.id,
-            &verdict.id,
-            &requester,
-            &owner,
-            &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
-            &receipt,
-        )
-        .map_err(fail)?;
-        let store = self.open_task_store()?;
-        let mut current = store.get(&task.id).map_err(fail)?;
-        let expected = current.clone();
-        current.notes.push_str(&format!("\n\n{receipt} Rebound dispatch {}.", rebound.id));
-        if let Err(error) = store.update_if_current(&current, &expected) {
-            tracing::warn!(task_id = %task.id, %error, "cas-d4b7: verdict rebind receipt note not written");
-        }
-        Ok(Some(Approval {
-            candidate,
-            dispatch_id: rebound.id,
-            verdict_id: approval.id,
-        }))
-    }
 
     pub(crate) fn build_completion_candidate(
         &self,
@@ -1525,9 +1448,13 @@ impl CasCore {
                 &notice_source, &notice_key, result),
         ) {
             CandidatePreparation::Ready(result) => result,
-            CandidatePreparation::Pending(_) => Err(fail(format!(
-                "task {}: candidate preparation continues in the background; merge held. A supervisor notice reports completion. Retry factory action=worktree_merge id={source} task_id={}; the immutable cache is reused and exact review is still required before publication",
-                task.id, task.id))),
+            CandidatePreparation::Pending(_) => {
+                let mut error = fail(format!(
+                    "task {}: candidate preparation continues in the background; merge held. A supervisor notice reports completion. Retry factory action=worktree_merge id={source} task_id={}; the immutable cache is reused and exact review is still required before publication",
+                    task.id, task.id));
+                error.data = Some(serde_json::json!({"reason": "candidate_preparation_pending"}));
+                Err(error)
+            },
         }
     }
 
@@ -2107,6 +2034,7 @@ mod tests {
         let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
         run(repo, &["checkout", "-q", "main"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='fixture'\n[qa]\nmode='batch'\n[verification]\nenabled=true\n").unwrap();
         env.set("CAS_ROOT", &root);
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("candidate-owner".into());
@@ -2114,8 +2042,13 @@ mod tests {
             "candidate-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
         )).unwrap();
         let mut task = Task::new("cas-352b".into(), "Slow immutable candidate".into());
+        task.origin_project = Some("fixture".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(source.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() },
+            branch: "factory/w".into(), assignee: "worker".into(), base_sha: target.clone(),
+        });
         core.open_task_store().unwrap().add(&task).unwrap();
         let digest = context_digest(&root, &task).unwrap();
         let key = bound_candidate_key(&task.id, &repo.canonicalize().unwrap(),
@@ -2171,6 +2104,85 @@ mod tests {
             row.summary.as_deref() == Some("premerge_candidate_ready")).collect();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].target, "supervisor");
+        // Standard code in batch mode must get its review before publication.
+        assert_eq!(review_tier::tier_for_delivery(&task, repo).unwrap().tier,
+            review_tier::VerificationTier::Standard);
+        assert!(core.prepare_premerge_verification(&task, repo, "factory/w", "main").is_err());
+        assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_merge_candidate_returns_durable_receipt_and_later_notice_cas_f39e() {
+        use crate::mcp::tools::service::CasService;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        let target = commit_file(repo, ".gitignore", ".cas/\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
+        run(repo, &["checkout", "-q", "main"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("merge-owner".into());
+        core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+            "merge-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        )).unwrap();
+        let mut task = Task::new("cas-f39e".into(), "Slow merge candidate".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(source.clone());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let digest = context_digest(&root, &task).unwrap();
+        let key = bound_candidate_key(&task.id, &repo.canonicalize().unwrap(),
+            "factory/w", &source, "main", &target, &digest, None).unwrap();
+        let directory = root.join("verification-candidates").join(key);
+        let held = crate::worktree::target_lock::lock_delivery_target(
+            &root, repo, &format!("candidate:{}", directory.display()),
+        ).unwrap();
+        let service = CasService::new(core.clone(), #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({"action":"worktree_merge", "id":"factory/w", "task_id":task.id});
+        let worker = core.clone();
+        let build_repo = repo.to_path_buf();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let future = async move {
+            crate::mcp::tools::service::mutation_receipt::run_on_blocking_pool(async move {
+                let result = worker.build_verification_candidate_sync(&task, &build_repo,
+                    "factory/w", "main", digest, None).map(|candidate| {
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(candidate.source_sha)])
+                });
+                let _ = done.send(());
+                result
+            }).await.unwrap()
+        };
+        let answer = service.call_with_deadline_and_grace("factory", arguments.as_object(),
+            std::time::Duration::from_millis(20), std::time::Duration::ZERO, future).await;
+        let pending = answer.as_ref().ok().and_then(|answer| answer.structured_content.as_ref())
+            .and_then(|data| data["receipt_path"].as_str())
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        // Release the real candidate lock before any assertion, including red.
+        drop(held);
+        finished.await.unwrap();
+        service.tool_work.wait_idle().await;
+        let data = answer.expect("slow merge must return a receipt, not UNKNOWN").structured_content.unwrap();
+        assert_eq!(data["mutation_outcome"], "IN_PROGRESS");
+        assert_eq!(data["state"], "preparing");
+        let pending = pending.expect("receipt must exist before candidate preparation finishes");
+        assert_eq!(pending["state"], "preparing");
+        assert_eq!(pending["receipt_id"], data["receipt_id"]);
+        let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            data["receipt_path"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(stored["state"], "completed");
+        assert_eq!(stored["result"]["ok"]["content"][0]["text"], source);
+        let rows = crate::store::open_supervisor_queue_store(&root).unwrap().poll("merge-owner", 10).unwrap();
+        let notices: Vec<serde_json::Value> = rows.iter().map(|row| serde_json::from_str(&row.payload).unwrap()).collect();
+        assert!(notices.iter().any(|notice| notice["kind"] == "merge_outcome"
+            && notice["context"]["receipt_id"] == data["receipt_id"]));
+        assert!(directory.join("candidate.json").exists());
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
     }
 
     #[test]

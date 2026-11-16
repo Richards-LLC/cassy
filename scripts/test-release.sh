@@ -36,6 +36,14 @@ case "$1 $2" in
   "pr merge") [[ "${FAKE_MERGE_EXIT:-0}" == 0 ]] && touch "$state/admitted"; exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
+  "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
+  "api -X")
+    case "$4" in
+      */pulls?*) echo '[]' ;;
+      */artifacts?*) echo '{"artifacts":[]}' ;;
+      */jobs) echo '{"jobs":[{"name":"Shared train and queue graph / Full-set gate","conclusion":"success"}]}' ;;
+      *) cat "${FAKE_TRAIN_RUN:-/dev/null}" ;;
+    esac ;;
   "api graphql")
     if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
     elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}'
@@ -48,6 +56,7 @@ chmod +x "$tmp/bin/gh"
 cat >"$tmp/bin/cas" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${FAKE_CAS_LOG:?}"
+[[ "$1" == release ]] && printf 'CAS_ROOT=%s release %s\n' "${CAS_ROOT:-}" "$2" >>"$FAKE_CAS_LOG"
 case "$1 $2" in
   "release context")
     case "${FAKE_CONTEXT_MODE:-}" in
@@ -80,6 +89,8 @@ chmod +x "$tmp/bin/cas"
 export CAS_BIN="$tmp/bin/cas" FAKE_CAS_LOG="$tmp/cas.log"
 # The real CLI/lease replay lives in cli_test.rs.
 export CAS_RELEASE_CUT_OWNED=1
+# The cut derives the live store root itself (cas-8e1b); never inherit one.
+unset CAS_ROOT
 
 export GH_BIN="$tmp/bin/gh"
 export FAKE_GH_LOG="$tmp/gh.log"
@@ -117,7 +128,7 @@ write_tree() {
 
 - The base release.
 EOF2
-    cp "$script_dir/release.sh" "$script_dir/release-cut.py" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$root/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/release-cut.py" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/doc-fragments.py" "$root/scripts/"
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
@@ -327,6 +338,34 @@ dry_release_rebuilds_commander() {
 }
 check 'dry_release_rebuilds_commander' 'cas-56bbc: dry release commits Commander dist identical to a fresh post-bump build'
 
+# Shared docs join the release commit without a separate train push.
+docs_generated_at_the_cut() {
+    local fixture="$tmp/docs-cut" before status=0
+    clone_epic "$fixture" epic/docs-cut docs-cut
+    mkdir -p "$fixture/.claude" "$fixture/docs/product-overview.d"
+    printf '# Map\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" add .claude && git -C "$fixture" commit --quiet -m 'map'
+    printf '# Overview\n\n## Pitch\n\nBase pitch.\n' >"$fixture/docs/PRODUCT_OVERVIEW.md"
+    printf '## Pitch\n\nFragment pitch line.\n' >"$fixture/docs/product-overview.d/cas-0006.md"
+    git -C "$fixture" add docs && git -C "$fixture" commit --quiet -m 'overview and fragment'
+    write_valid_draft "$tmp/docs-cut-draft.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    printf '# Map\n\n- docs/ - overview\n' >"$fixture/.claude/CODEMAP.md"
+    # Only the map may be pending; unrelated source edits still refuse prep.
+    echo 'uncommitted source' >>"$fixture/docs-cut.txt"
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    git -C "$fixture" checkout -- docs-cut.txt
+    # A pending map refresh must ride the release commit, without its own CI.
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD^)" == "$before" ]] &&
+        git -C "$fixture" show HEAD:.claude/CODEMAP.md | grep -q 'docs/ - overview' || return 1
+    git -C "$fixture" show HEAD:docs/PRODUCT_OVERVIEW.md | grep -q 'Fragment pitch line.' &&
+        ! git -C "$fixture" cat-file -e HEAD:docs/product-overview.d/cas-0006.md 2>/dev/null &&
+        [[ -z "$(git -C "$fixture" status --porcelain)" ]]
+}
+check 'docs_generated_at_the_cut || { cat "$tmp/docs-cut.log"; false; }' 'release commit folds a pending CODEMAP refresh and compiled doc fragments together'
+
 commander_build_failure_stops_release() {
     local fixture="$tmp/web-failure" before status=0
     clone_epic "$fixture" epic/web-failure web-failure
@@ -452,6 +491,72 @@ hotfix_fallback() {
         ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&
         ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
+train_receipt_cut() {
+    local fixture="$tmp/train-ci-cut" status=0 before after
+    clone_epic "$fixture" epic/release-train-fixture train-ci
+    mkdir -p "$fixture/docs/product-overview.d"
+    printf '# Overview\n\n## Pitch\n\nBase pitch.\n' >"$fixture/docs/PRODUCT_OVERVIEW.md"
+    printf '## Pitch\n\nCompiled at the cut.\n' >"$fixture/docs/product-overview.d/report.md"
+    git -C "$fixture" add docs
+    git -C "$fixture" commit --quiet -m 'overview inputs before green train receipt'
+    write_valid_draft "$tmp/train-ci-notes.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    mkdir -p "$tmp/train-ci-artifact"
+    export FAKE_TRAIN_ARTIFACT="$tmp/train-ci-artifact" FAKE_TRAIN_RUN="$tmp/train-ci-run.json" FAKE_TRAIN_LOG_ZIP="$tmp/train-ci-logs.zip"
+    echo '{"workflow_runs":[]}' >"$FAKE_TRAIN_RUN"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    python3 - "$before" "$fixture" <<'PY'
+import json, os, pathlib, subprocess, sys, zipfile
+head=sys.argv[1]
+repo=sys.argv[2]
+json.dump({'workflow_runs':[{'id':123,'run_attempt':1,'head_sha':head,'head_branch':'epic/release-train-fixture','event':'workflow_dispatch','status':'completed','conclusion':'success'}]},open(os.environ['FAKE_TRAIN_RUN'],'w'))
+jobs={name:'success' for name in ('fast-validation-preflight','fast-validation-ci-tiers','fast-validation-web','fast-validation-suite','fast-validation-docs','queue-flake-publication')}
+receipt={'schema':2,'scope':'full-set','head':head,'branch':'epic/release-train-fixture','run_id':'123','run_attempt':1,'outcome':'PASS','failures':[],
+         'tree':subprocess.check_output(['git','-C',repo,'rev-parse','HEAD^{tree}'],text=True).strip(),
+         'main_baseline':subprocess.check_output(['git','-C',repo,'rev-parse','origin/main'],text=True).strip(),
+         'required_jobs':list(jobs),'jobs':jobs,'elapsed_seconds':12,'journeys_required':False,'bridge_required':False}
+json.dump(receipt,open(pathlib.Path(os.environ['FAKE_TRAIN_ARTIFACT'])/'receipt.json','w'))
+with zipfile.ZipFile(os.environ['FAKE_TRAIN_LOG_ZIP'],'w') as archive: archive.writestr('full.log','Complete fixture log')
+PY
+    cp "$FAKE_TRAIN_ARTIFACT/receipt.json" "$tmp/train-ci-green.json"
+    python3 - "$FAKE_TRAIN_ARTIFACT/receipt.json" <<'PY'
+import json,sys
+p=sys.argv[1]; row=json.load(open(p)); row['jobs']['fast-validation-ci-tiers']='skipped'; json.dump(row,open(p,'w'))
+PY
+    status=0
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    cp "$tmp/train-ci-green.json" "$FAKE_TRAIN_ARTIFACT/receipt.json"
+    rm -rf "$fixture/.git/cas/train-ci"
+    mkdir -p "$fixture/.claude"
+    printf '# Updated map\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" add .claude/CODEMAP.md
+    git -C "$fixture" commit --quiet -m 'CODEMAP-only follow-up to green train'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --no-watch --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    after="$(git -C "$fixture" rev-parse HEAD)"
+    [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
+    # There is deliberately no Y run/artifact: retry must fetch X again.
+    rm -rf "$fixture/.git/cas/train-ci"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]] || return 1
+    # A refresh supplied on a prepared retry still joins that release commit.
+    printf '# Refreshed map on retry\n' >"$fixture/.claude/CODEMAP.md"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD^)" == "$after" && -z "$(git -C "$fixture" status --porcelain)" ]] || return 1
+    after="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]] || return 1
+    echo 'source needs fresh CI' >>"$fixture/train-ci.txt"
+    git -C "$fixture" commit --quiet -am 'source after green receipt'
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    status=0
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]]
+}
+check 'train_receipt_cut' 'train cut reuses green proof after CODEMAP-only work and prepared retries; source requires fresh proof'
+unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
 freeze_failure_stops_publication() {

@@ -769,6 +769,8 @@ pub(crate) fn configure_codex_project_files(project_root: &Path, skip_config: bo
     configure_codex_dir_excluding(&project_root.join(".codex"), CodexHookLayer::Project, skip_config, skip_hooks)
 }
 
+// gate-audit[skip_config]: selector Preserves existing Codex configuration while projecting other tooling.
+// gate-audit[skip_hooks]: selector Preserves existing Codex hook configuration while projecting other tooling.
 fn configure_codex_dir_excluding(codex_dir: &Path, layer: CodexHookLayer, skip_config: bool, skip_hooks: bool) -> anyhow::Result<bool> {
     if skip_config {
         return if skip_hooks { Ok(false) } else { configure_codex_tool_hooks(codex_dir, layer) };
@@ -950,6 +952,8 @@ fn configure_codex_dir_excluding(codex_dir: &Path, layer: CodexHookLayer, skip_c
 /// hash is trusted. Both registrations are durable, locked transactions in
 /// `cas_pty::codex_trust`; neither leaves an interactive prompt for the first
 /// Codex session to resolve.
+// gate-audit[skip_config]: selector Chooses which configuration files to provision; no request policy is relaxed.
+// gate-audit[skip_hooks]: selector Chooses which hook files to provision; no runtime hook decision is changed.
 pub(crate) fn provision_codex_project_excluding(project_root: &Path, skip_config: bool, skip_hooks: bool) -> anyhow::Result<bool> {
     if !skip_config && !skip_hooks { return provision_codex_project(project_root); }
     let configured = configure_codex_project_files(project_root, skip_config, skip_hooks)?;
@@ -1150,10 +1154,11 @@ mod codex_provision_tests {
 
     #[test]
     fn codex_pre_tool_hook_also_guards_apply_patch_cas_49c0() {
-        assert_eq!(
-            codex_hook_matcher("PreToolUse", CodexHookLayer::Project),
-            "^(Bash|apply_patch)$"
-        );
+        let project = regex::Regex::new(&codex_hook_matcher("PreToolUse", CodexHookLayer::Project)).unwrap();
+        for tool in ["Bash", "apply_patch"] {
+            assert!(project.is_match(tool));
+        }
+        assert!(!project.is_match("mcp__cs__coordination"));
         assert_eq!(
             codex_hook_matcher("PostToolUse", CodexHookLayer::User),
             "^Bash$"
@@ -1167,6 +1172,7 @@ mod codex_provision_tests {
             "apply_patch",
             "mcp__violet__violet_post",
             "mcp__cs__artifact",
+            "mcp__cs__coordination",
         ] {
             assert!(
                 re.is_match(tool),

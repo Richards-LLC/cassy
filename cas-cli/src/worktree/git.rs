@@ -1115,6 +1115,7 @@ impl GitOperations {
     }
 
     /// Remove a worktree
+    // gate-audit[force]: selector Selects Git removal opcode after the caller preservation guard; does not grant policy authority.
     pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         if !path.exists() {
             return Err(GitError::WorktreeNotFound(path.to_path_buf()));
@@ -1151,6 +1152,7 @@ impl GitOperations {
     }
 
     /// Delete a branch
+    // gate-audit[force]: selector Selects Git deletion opcode after caller preservation policy; does not grant factory authority.
     pub fn delete_branch(&self, branch: &str, force: bool) -> Result<()> {
         let flag = if force { "-D" } else { "-d" };
 

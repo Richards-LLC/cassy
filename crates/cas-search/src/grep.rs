@@ -175,6 +175,7 @@ impl GrepSearch {
     }
 
     /// Search for matches in files under the root directory
+    // gate-audit[override_builder]: selector ripgrep builder for matching semantics, not a factory policy exception.
     pub fn search(&self, opts: &GrepOptions) -> Result<Vec<GrepMatch>> {
         if opts.pattern.is_empty() {
             return Err(SearchError::Query("grep pattern cannot be empty".into()));

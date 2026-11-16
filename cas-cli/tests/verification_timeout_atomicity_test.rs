@@ -41,12 +41,18 @@ async fn close_recovery_names_only_the_dispatch_it_atomically_timed_out() {
     task.status = TaskStatus::InProgress;
     task.pending_verification = true;
     task_store.add(&task).expect("add task");
-    let due = cas_store::create_verification_dispatch(
+    // Receipt-bound recovery must retain the exact timeout; task-only expiry renews.
+    let due = cas_store::create_verification_dispatch_bound(
         &cas_root,
         &task.id,
         "requester-original",
         "owner-original",
+        &cas::types::VerificationProofBoundary {
+            receipt_id: Some("dc-timeout-public".into()),
+            ..Default::default()
+        },
         chrono::Utc::now() - chrono::Duration::minutes(1),
+        false,
     )
     .expect("create due dispatch");
 

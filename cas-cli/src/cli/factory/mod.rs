@@ -741,6 +741,11 @@ pub enum TrainCommand {
         epic: String,
         /// Explicit order; omit to select parked deliveries by updated time.
         tasks: Vec<String>,
+        /// Visibly accept this observed red CI run; never waives a later red.
+        #[arg(long, requires = "reason")]
+        supervisor_override: bool,
+        #[arg(long, requires = "supervisor_override")]
+        reason: Option<String>,
     },
     /// Revert children's merges off their release train in one batch, return
     /// each task to its worker and re-enqueue the train PR once. One repair
@@ -808,7 +813,7 @@ pub enum FactoryCommands {
     RecordTestReceipt {
         #[arg(long)]
         task_id: String,
-        /// JSON evidence: head, repo, cargo_args, log_path and exit_code.
+        /// Path to the JSON request file. Fields: head, repo, cargo_args (array of argv strings), log_path and exit_code.
         #[arg(long)]
         request: std::path::PathBuf,
     },
@@ -1334,10 +1339,11 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 println!("{}", crate::gh_budget::ci_watch_dry_run(root, session, *minutes)?);
                 Ok(())
             }
-            FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks } } => {
+            FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks, supervisor_override, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train merge requires a Cassy project"))?;
                 let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
-                let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()))?;
+                let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()), *supervisor_override, reason.as_deref())?;
+                crate::gates::facts::observe_cli_output(root, &receipt);
                 if cli.json { println!("{}", serde_json::json!({"receipt": receipt})); }
                 else { println!("{receipt}"); }
                 Ok(())
@@ -1380,12 +1386,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::RecordTestReceipt { task_id, request } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("test receipt requires a Cassy project"))?;
-                if std::fs::metadata(request)?.len() > 512 * 1024 {
-                    anyhow::bail!("test receipt request exceeds 512 KiB");
-                }
-                let payload = std::fs::read_to_string(request)?;
-                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
-                println!("{}", crate::factory_worker_check::record_supervisor_test(&core, task_id, &payload)?);
+                println!("{}", crate::factory_worker_check::record_supervisor_test_from_cli(root, task_id, &request)?);
                 Ok(())
             }
             FactoryCommands::WorkerCheck {
@@ -1659,7 +1660,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 msg.push_str(&format!("\n  - {hint}"));
             }
         }
-        bail!(msg);
+        bail!(crate::gates::tag("G-150",msg));
     }
     // cas-3c26: a PTY wrapper (`script -qc`) satisfies the terminal check above,
     // so an agent could still stand up its own factory. Launching one is the
@@ -2441,6 +2442,8 @@ fn record_factory_launch_diagnostics(
     Ok(path)
 }
 
+// gate-audit[forward]: Factory launch collects initialization/input failures and target capacity policy; the preflight adapter preserves those diagnostics.
+// gate[G-150 launch]: Factory launch preflight policy
 fn check_factory_launch(
     args: &FactoryArgs,
     cwd: &std::path::Path,
@@ -2464,6 +2467,14 @@ fn check_factory_launch(
     };
 
     if let Some(cas_root) = resolved_cas_root.as_deref() {
+        // The shared store identifies the supervisor's main checkout even
+        // when launch was requested from a linked worktree with private hooks.
+        let project = cas_root.parent().unwrap_or(cwd);
+        if GitOperations::detect_repo_root(project).is_ok()
+            && let Err(error) = crate::cli::doctor::verify_git_hooks_path(project)
+        {
+            failures.push(error);
+        }
         let config = Config::load(cas_root).unwrap_or_default();
         let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
         // cas-3f93: worker targets on `[factory] scratch_root` fill that

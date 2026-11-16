@@ -25,7 +25,7 @@ pub(super) struct CutPlan {
 
 fn capture<T>(blockers: &mut BTreeMap<String, String>, code: &str, result: Result<T>) -> Option<T> {
     result.map_err(|error| {
-        let fix = match code { "NOTES_LINT" => "correct the draft using the pinned train linter", "NO_CODE_PROOF" => "declare and publish the report proof in CAS_RELEASE_INPUTS", "VERSION_RECEIPT" => "choose an unowned version above the integration version", "IDENTITY" => "select the canonical repository and current open train tip", _ => "repair the named input and re-run release plan" };
+        let fix = match code { "NOTES_LINT" => "correct the draft using the pinned train linter", "NO_CODE_PROOF" => "record the no-code member's published report reference at park", "VERSION_RECEIPT" => "choose an unowned version above the integration version", "IDENTITY" => "select the canonical repository and current open train tip", _ => "repair the named input and re-run release plan" };
         let message = format!("{error}; fix: {fix}");
         blockers.entry(code.into()).and_modify(|old| { old.push_str("; "); old.push_str(&message); }).or_insert(message);
     }).ok()
@@ -88,8 +88,8 @@ pub(super) fn evaluate(args: &PlanArgs, root: &Path, repo: &Path) -> CutPlan {
     })());
     let scope = capture(&mut blockers, "IDENTITY", cut_scope(root, repo, &tip, &version, args.train.as_deref(), None));
     let preview = scope.and_then(|mut scope| {
-        if let Some(inputs) = &inputs { scope.included_task_ids = inputs.included_task_ids.clone(); scope.no_code_members = inputs.no_code_members.clone(); }
-        capture(&mut blockers, "NO_CODE_PROOF", validate_scope_inputs(root, &scope));
+        if let Some(inputs) = &inputs { scope.included_task_ids = inputs.included_task_ids.clone(); }
+        capture(&mut blockers, "NO_CODE_PROOF", scope.bind_reports(root).map_err(anyhow::Error::msg));
         capture(&mut blockers, "MEMBER_STATE", preview_scope(root, repo, scope))
     });
     if let Some(preview) = &preview { blockers.extend(preview.cut_blockers()); }

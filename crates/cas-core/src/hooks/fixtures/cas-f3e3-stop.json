@@ -1,0 +1,7 @@
+{"session_id":"fc70e6f3","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
+                "prompt_id":"d323a56b","permission_mode":"default","hook_event_name":"Stop",
+                "stop_hook_active":false,"last_assistant_message":"DONE",
+                "background_tasks":[{"id":"a24c4ba99866d62e3","type":"subagent",
+                    "status":"running","description":"Reply with pong",
+                    "agent_type":"general-purpose"}],
+                "session_crons":[]}

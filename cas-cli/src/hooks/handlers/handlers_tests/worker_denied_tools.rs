@@ -38,6 +38,7 @@ fn denial(output: HookOutput) -> Option<String> {
 
 fn assert_operator_credential_refusal(output: HookOutput, attempt: &str) {
     let reason = denial(output).unwrap_or_else(|| panic!("worker access was allowed: {attempt}"));
+    assert!(reason.contains("[H-09]"), "{attempt}: {reason}");
 }
 
 fn role_env(role: &str) -> (TestEnvGuard, tempfile::TempDir) {
@@ -275,6 +276,60 @@ PY"#;
     let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
     let reason = denial(output);
     assert!(reason.is_none(), "{reason:?}");
+}
+
+#[test]
+fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
+    let (mut env, _config_home) = role_env("worker");
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let store = home.join(".config/neonctl");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("credentials.json"), r#"{"token":"fixture-only"}"#).unwrap();
+    // From a project dir, as a worker runs it; the fixture's config home is
+    // itself a store parent.
+    let project = tempfile::tempdir().unwrap();
+    env.set("CAS_CLONE_PATH", project.path());
+    let cwd = &project;
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    // GH #1838 and GH #1700: names only, no file is opened.
+    for listing in [
+        "rg --files /Applications/Postgres.app /opt /usr/local ~/.local/share ~/Library/pnpm 2>/dev/null",
+        "find ~ -path '*cas-worker/references/discipline.md' 2>/dev/null",
+    ] {
+        for redirect in ["", " > discovery.txt"] {
+            let command = format!("{listing}{redirect}");
+            let output = handle_pre_tool_use(&bash(&command, cwd.path()), Some(&cas_root)).unwrap();
+            let reason = denial(output);
+            assert!(reason.is_none(), "{command}: {reason:?}");
+        }
+    }
+    // A listed name that reaches a reader is still a credential read.
+    for command in [
+        "find ~ -name credentials.json -print0 | sort --files0-from=-",
+        "rg --files ~/.local/share | rg codex",
+        "find ~ -path '*cas-worker/references/discipline.md' | head -3",
+        "find ~ -name credentials.json | xargs cat",
+        "find ~ -name auth.json -exec cat {} +",
+        "cat $(rg --files ~ | rg credentials.json)",
+        "cat $(find ~ -name credentials.json)",
+        "sort <(find ~ -name credentials.json)",
+        "find ~ -name credentials.json > >(sort)",
+        "find ~ -name credentials.json | while read -r f; do cat \"$f\"; done",
+        // `--files` as an option value or after `--` is not the listing form.
+        "rg -uuu -e --files -e . ~/.config",
+        "rg -uuu --regexp=--files -e . ~/.config",
+        "rg -uuu -- --files ~/.config",
+        "cd ~/.config && rg fixture-only",
+        // The same audit, for recursion and payload flags that were matched
+        // by presence (each allowed by v4.20).
+        "tar czf x.tgz --exclude --no-recursion ~/.config",
+        "grep -d recurse token ~/.config",
+        "cd ~/.config && zip -R x.zip '*.json'",
+        "bash -oc pipefail 'cat ~/.config/neonctl/credentials.json'",
+    ] {
+        let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+        assert_operator_credential_refusal(output, command);
+    }
 }
 
 #[test]

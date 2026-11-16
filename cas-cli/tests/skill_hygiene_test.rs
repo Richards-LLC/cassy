@@ -89,12 +89,6 @@ fn optional_stack_skills_follow_detection_and_explicit_enable() {
     }
 }
 
-/// cas-5e54: the Playwright debugging skill teaches the 1.59+ agent tooling
-/// (trace CLI, `--debug=cli` + session-scoped `playwright cli`) with command
-/// shapes verified against @playwright/test 1.63, and never recommends the
-/// idioms Playwright discourages inside a runnable example.
-
-
 /// cas-5e54: cas-playwright-debug is an optional stack skill selected by a
 /// Playwright Test dependency, a playwright config file, or explicit opt-in.
 #[test]

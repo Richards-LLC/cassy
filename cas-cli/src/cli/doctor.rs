@@ -30,6 +30,7 @@ mod idle_sync;
 mod slack_transport;
 mod communication;
 mod git_hooks;
+pub(crate) use git_hooks::verify_git_hooks_path;
 mod journeys;
 #[cfg(feature = "mcp-proxy")]
 mod retired_tools;
@@ -5982,7 +5983,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
     let remediation = if let Some(backlog) = &unlinked_backlog {
         backlog.next_step
     } else if held_notice.is_some() && rejections.is_empty() {
-        "Resolve the held personal rows above by reviewing `cas cloud queue migrate-to-team`; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+        "Resolve the held personal rows above by reviewing `cas cloud queue migrate-to-team` (rows it reports as already on the team are pull echoes: preview `cas cloud queue --purge-pull-echoes --dry-run`); `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
     } else if rejections.is_empty()
         || rejections
             .iter()
@@ -6410,6 +6411,39 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn review_dispatch_schema_bootstrap_and_reconciliation_gh1908() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let legacy = cas_types::Task::new("cas-legacy-review".into(), "legacy".into());
+        tasks.add(&legacy).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute_batch("ALTER TABLE tasks DROP COLUMN review_dispatch_id;
+            DELETE FROM cas_migrations WHERE id=299;").unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Warning));
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        assert_eq!(tasks.get(&legacy.id).unwrap().review_dispatch_id, None);
+        // A recorded-but-missing additive column is repaired, with its
+        // reconciliation receipt, rather than trusted from the ledger alone.
+        // The migration wrote through a different connection; use a fresh
+        // DDL connection rather than its pre-migration cached schema.
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute_batch("ALTER TABLE tasks DROP COLUMN review_dispatch_id;").unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Warning));
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        assert_eq!(tasks.get(&legacy.id).unwrap().title, legacy.title);
+        assert_eq!(conn.query_row(
+            "SELECT count(*) FROM cas_migration_reconciliations WHERE migration_id=299",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+    }
 
     #[test]
     fn cas_4d39_unlinked_personal_backlog_is_visible_without_mutation() {
@@ -9067,14 +9101,13 @@ mod tests {
         fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
         fs::write(
             &user_proxy,
-            "[servers.viktor]\ntransport = 'http'\n\
-             url = 'https://viktor.invalid/mcp'\n\
-             auth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n",
-        ).unwrap();
-        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
-            "XDG_CONFIG_HOME",
-            inherited.path(),
-        );
+            "[servers.review]\ntransport = 'http'\n\
+             url = 'https://review.invalid/mcp'\n\
+             auth = 'env:CAS_7401_MISSING_REVIEW_KEY'\n",
+        )
+        .unwrap();
+        let _ambient =
+            crate::test_env_guard::AmbientEnvRestore::set("XDG_CONFIG_HOME", inherited.path());
         // The shared guard redirects XDG and scrubs provider credentials;
         // keep the poisoned ambient config above to prove that boundary.
         let _env = crate::test_support::TestEnvGuard::temp_home();

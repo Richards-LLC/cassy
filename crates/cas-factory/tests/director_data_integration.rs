@@ -7,7 +7,7 @@
 //! - Epic grouping logic is correct
 //! - Fast loading mode skips git changes
 
-use cas_factory::{AgentSummary, DirectorData, EpicGroup, TaskSummary};
+use cas_factory::{DirectorData, TaskSummary};
 use cas_store::{
     AgentStore, EventStore, SqliteAgentStore, SqliteEventStore, SqliteTaskStore, TaskStore,
 };

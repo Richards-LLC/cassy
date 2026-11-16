@@ -9,6 +9,31 @@ use cas::store::{
 };
 use cas::types::{Agent, AgentRole};
 
+/// Seed the capped adapter's receipt envelope for tests of the close consumer.
+/// These fixture tests exercise QA/marker contracts, not test execution.
+pub(crate) fn fixture_stability_receipt(repo: &Path, runner: &str, path: &str, name: &str) {
+    use sha2::{Digest, Sha256};
+    #[derive(serde::Serialize)]
+    struct Identity<'a> { path: &'a str, name: &'a str }
+    let repo = repo.canonicalize().unwrap();
+    let output = std::process::Command::new("git").args(["rev-parse", "HEAD"])
+        .current_dir(&repo).output().unwrap();
+    assert!(output.status.success());
+    let head = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    let tests = [Identity { path, name }];
+    let key = hex::encode(Sha256::digest(serde_json::to_vec(&tests).unwrap()));
+    let filter = format!("test(stability_{key})");
+    let selection = hex::encode(Sha256::digest(serde_json::to_vec(&(runner, None::<String>, &filter)).unwrap()));
+    let directory = repo.join(".cas/worker-checks")
+        .join(hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes())));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join(format!("{head}-test-{selection}.json")), serde_json::to_vec(&serde_json::json!({
+        "head": head, "repo": repo, "packages": [],
+        "test": { "filter": filter, "harness": null, "count": 1,
+            "stability": { "runner": runner, "tests": tests, "consecutive_passes": 5, "elapsed_ms": 0 } }
+    })).unwrap()).unwrap();
+}
+
 /// Initialize a CAS fixture under the caller's canonical environment guard.
 /// Acquire `TestEnvGuard::temp_home()` before setup and retain it through all
 /// handler awaits. Helpers borrow this owner; none acquires another lock.

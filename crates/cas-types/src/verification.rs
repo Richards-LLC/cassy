@@ -555,6 +555,10 @@ impl FromStr for VerificationRecoveryAction {
 /// verifier capabilities deliberately never cross the mailbox boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerPremergeReceipt {
+    /// Portable serde RegistryVersion, owned and validated by the gate registry.
+    /// Old peers have no stamp; receiving one must never invent today's version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_version: Option<serde_json::Value>,
     /// Explicit verdict; missing and unknown status must never grant authority.
     pub status: VerificationStatus,
     pub project_id: String,
@@ -615,10 +619,55 @@ pub struct RepositoryProofBoundary {
     pub anchor_commits: Vec<String>,
 }
 
+/// The existing receipt field names either a delivery cycle or a transaction's
+/// immutable worker receipt. Unknown namespaces never become legacy authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationReceipt<'a> {
+    DeliveryCycle(&'a str),
+    TransactionReceipt {
+        receipt_id: &'a str,
+        transaction_id: &'a str,
+    },
+    None,
+}
+
+impl<'a> VerificationReceipt<'a> {
+    /// Parse the complete boundary once; a cycle has no worker transaction.
+    /// Partial or mixed namespaces never become task-only authority.
+    pub fn parse(receipt: Option<&'a str>, transaction: Option<&'a str>) -> Result<Self, String> {
+        match (receipt, transaction) {
+            (None, None) => Ok(Self::None),
+            (Some(id), None) if id.strip_prefix("dc-").is_some_and(|s| !s.is_empty()) => {
+                Ok(Self::DeliveryCycle(id))
+            }
+            (Some(id), Some(transaction_id))
+                if id.strip_prefix("wcr-").is_some_and(|s| !s.is_empty())
+                    && !transaction_id.is_empty() =>
+            {
+                Ok(Self::TransactionReceipt {
+                    receipt_id: id,
+                    transaction_id,
+                })
+            }
+            _ => Err("INCONSISTENT_VERIFICATION_RECEIPT".into()),
+        }
+    }
+
+    pub fn transaction(self) -> Option<(&'a str, &'a str)> {
+        match self {
+            Self::TransactionReceipt {
+                receipt_id,
+                transaction_id,
+            } => Some((receipt_id, transaction_id)),
+            _ => None,
+        }
+    }
+}
+
 /// Immutable external identity attached to a verification proof cycle.
 ///
-/// A task-only close has neither delivery field; the dispatch ID itself is
-/// still the exact proof boundary. Delivery verification binds both IDs.
+/// Nontransactional review carries a delivery-cycle receipt or no receipt.
+/// Worker delivery verification binds a WCR receipt and its transaction together.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationProofBoundary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -630,6 +679,13 @@ pub struct VerificationProofBoundary {
 }
 
 impl VerificationProofBoundary {
+    pub fn receipt(&self) -> Result<VerificationReceipt<'_>, String> {
+        VerificationReceipt::parse(
+            self.receipt_id.as_deref(),
+            self.delivery_transaction_id.as_deref(),
+        )
+    }
+
     pub fn task() -> Self {
         Self::default()
     }
@@ -658,7 +714,7 @@ impl VerificationProofBoundary {
 pub struct VerificationDispatch {
     pub id: String,
     pub task_id: String,
-    /// Exact immutable delivery receipt, when this dispatch verifies delivery.
+    /// Delivery cycle (`dc-`) or immutable transactional worker receipt (`wcr-`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_id: Option<String>,
     /// Exact delivery transaction advanced by this dispatch's verdict.
@@ -681,6 +737,15 @@ pub struct VerificationDispatch {
     pub resolved_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub recovery_action: VerificationRecoveryAction,
+}
+
+impl VerificationDispatch {
+    pub fn receipt(&self) -> Result<VerificationReceipt<'_>, String> {
+        VerificationReceipt::parse(
+            self.receipt_id.as_deref(),
+            self.delivery_transaction_id.as_deref(),
+        )
+    }
 }
 
 /// Status of a verification
@@ -1279,6 +1344,40 @@ impl Default for Verification {
 #[cfg(test)]
 mod tests {
     use crate::verification::*;
+
+    #[test]
+    fn verification_receipt_identity_cas_e01f() {
+        for ((receipt, transaction), expected) in [
+            ((None, None), VerificationReceipt::None),
+            (
+                (Some("dc-cycle"), None),
+                VerificationReceipt::DeliveryCycle("dc-cycle"),
+            ),
+            (
+                (Some("wcr-receipt"), Some("wdt-receipt")),
+                VerificationReceipt::TransactionReceipt {
+                    receipt_id: "wcr-receipt",
+                    transaction_id: "wdt-receipt",
+                },
+            ),
+        ] {
+            assert_eq!(
+                VerificationReceipt::parse(receipt, transaction).unwrap(),
+                expected
+            );
+        }
+        for (receipt, transaction) in [
+            (Some("unknown"), None),
+            (Some("dc-"), None),
+            (Some("wcr-"), Some("wdt")),
+            (Some("wcr-receipt"), None),
+            (Some("dc-cycle"), Some("wdt")),
+            (None, Some("wdt")),
+            (Some("wcr-receipt"), Some("")),
+        ] {
+            assert!(VerificationReceipt::parse(receipt, transaction).is_err());
+        }
+    }
 
     #[test]
     fn finding_triage_defaults_to_theoretical_and_is_persisted() {

@@ -130,6 +130,7 @@ impl CasCore {
         .await
     }
 
+    // gate-audit[supervisor_override]: bypass G-129,G-130 Foreign proposal creation preserves accepted create-policy waiver tags.
     pub(crate) async fn cas_task_proposal_create_with_delivery_mode(
         &self,
         req: TaskCreateRequest,
@@ -197,6 +198,14 @@ impl CasCore {
                 })?;
         }
 
+        let mut bypass_tags=String::new();
+        if supervisor_override {
+            if req.risk.as_deref().is_none_or(|risk|risk.trim().is_empty()) && matches!(task_type,TaskType::Task|TaskType::Bug|TaskType::Feature)
+            {bypass_tags=crate::gates::override_tag("G-129",bypass_tags);}
+            if super::lifecycle::validate_demo_statement_requirement(task_type,&labels,req.demo_statement.as_deref(),false,true,
+                &self.load_config().qa().user_facing_labels).is_err()
+            {bypass_tags=crate::gates::override_tag("G-130",bypass_tags);}
+        }
         let task = serde_json::json!({
             "title": req.title,
             "description": req.description.unwrap_or_default(),
@@ -211,6 +220,7 @@ impl CasCore {
             "delivery_mode": delivery_mode,
             "risk": risk,
             "door": door,
+            "review_dispatch_id": self.normalize_review_dispatch_id(req.review_dispatch_id.as_deref())?,
             "proof_targets": proof_targets,
         });
         let client_request_id = validate_proposal_attempt_id(proposal_attempt_id)?;
@@ -246,8 +256,8 @@ impl CasCore {
 
         let proposal = proposal_from_create(response.provenance, response.state);
         Ok(Self::success(format!(
-            "Created cross-project task proposal. No foreign task was inserted locally.\n\n{}",
-            render_proposal(&proposal)
+            "Created cross-project task proposal. No foreign task was inserted locally.\n\n{}{}",
+            render_proposal(&proposal), bypass_tags
         )))
     }
 
@@ -735,6 +745,7 @@ mod tests {
             task_type: "task".into(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

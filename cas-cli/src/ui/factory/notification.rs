@@ -169,6 +169,7 @@ impl Notifier {
     }
 
     /// Send a notification about a worker crash
+    // gate[N-105 notice]: Desktop and terminal notifications
     pub fn notify_crash(&self, worker: &str, exit_info: &str) {
         if !self.config.enabled {
             return;

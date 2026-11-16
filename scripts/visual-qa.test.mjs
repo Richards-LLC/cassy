@@ -632,7 +632,7 @@ test('a step that cannot run fails the state and skips the rest', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-journey-broken-'));
   const result = await runVisualQa({
     urls: [fixture('clean.html')],
-    journey: { name: 'broken', timeoutMs: 300, states: [{ name: 'missing', steps: [{ click: '#nope' }, { wait: 10 }] }] },
+    journey: { name: 'broken', timeoutMs: 300, states: [{ name: 'missing', steps: [{ click: '#nope' }, { waitFor: '#next' }] }] },
     artifactDir,
     strict: true,
     schemes: ['light'],
@@ -642,6 +642,22 @@ test('a step that cannot run fails the state and skips the rest', async () => {
   const [run] = result.journeyRuns;
   assert.deepEqual(run.steps.map((step) => step.status), ['failed', 'skipped']);
   assert.ok(result.findings.some((finding) => finding.type === 'journey-step-failed' && /click #nope/.test(finding.reason)));
+});
+
+test('journey steps reject fixed sleeps', async () => {
+  await assert.rejects(runBuiltinVisualQa({ urls: [fixture('clean.html')],
+    journey: { states: [{ name: 'sleep', steps: [{ wait: 10 }] }] } }));
+});
+
+test('ambiguous journey actions fail without clicking', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'visual-qa-strict-step-'));
+  const page = join(dir, 'ambiguous.html');
+  await writeFile(page, '<!doctype html><html lang="en"><title>Fixture</title><main><button>One</button><button>Two</button></main></html>');
+  const result = await runBuiltinVisualQa({ urls: [page], artifactDir: dir,
+    journey: { timeoutMs: 100, states: [{ name: 'ambiguous', steps: [{ click: 'button' }] }] },
+    strict: true, schemes: ['light'], viewports: [{ name: 'desktop', width: 1280, height: 800 }] });
+  assert.equal(result.status, 'FAIL');
+  assert.ok(result.findings.some(f => f.type === 'journey-step-failed'));
 });
 
 test('journey files are checked before anything renders', async () => {

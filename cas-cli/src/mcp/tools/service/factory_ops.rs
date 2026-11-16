@@ -328,7 +328,30 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
             crate::capability::probe_account_auth(cli, account_dir, deadline)
         },
         || installed_codex_version(deadline),
-    )
+    )?;
+    preflight_codex_exec_host(specs, deadline)
+}
+
+/// GH #1870: a logged-in account still cannot run a command when Codex's
+/// shell-execution host never starts. Refused as its own failure, so it never
+/// reads as a login problem.
+fn preflight_codex_exec_host(
+    specs: &[cas_mux::WorkerSpec],
+    deadline: crate::bounded_process::Deadline,
+) -> Result<(), String> {
+    if !specs.iter().any(|spec| spec.cli == cas_mux::SupervisorCli::Codex) {
+        return Ok(());
+    }
+    let host = crate::capability::probe_codex_exec_host(deadline);
+    if host.availability != cas_factory::CapabilityAvailability::Unavailable {
+        return Ok(());
+    }
+    Err(format!(
+        "spawn refused: Codex shell execution is unavailable — {}. {} \
+         No worktree was created and no task was assigned.",
+        host.reason.unwrap_or_default(),
+        host.remediation.unwrap_or_default(),
+    ))
 }
 
 /// Probe-injected core of [`preflight_account_auth`], so the refusal policy is
@@ -2330,13 +2353,14 @@ fn format_spawn_lifecycle_section(
     out
 }
 
+// gate-audit[is_supervisor]: input Authenticated supervisor role enforcing worker-hold authority.
 fn worker_hold_role_gate(is_supervisor: bool, action: &str) -> Result<(), String> {
     if is_supervisor {
         Ok(())
     } else {
-        Err(format!(
+        Err(crate::gates::tag("H-45", format!(
             "coordination {action} rejected: only supervisors may change a worker's director hold state"
-        ))
+        )))
     }
 }
 
@@ -2654,6 +2678,14 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         mut req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        let tasks = self.inner.open_task_store()?;
+        for id in req.task_ids.as_deref().unwrap_or_default().iter().map(String::as_str)
+            .chain(req.task_id.as_deref())
+        {
+            let task = tasks.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            crate::task_assignment::ensure_review_assignment(task.review_dispatch_id.as_deref(), None)
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
         if let Some(ids) = req.task_ids.as_ref() {
             let distinct = ids.iter().collect::<std::collections::HashSet<_>>();
             if req.task_id.is_some() || ids.is_empty() || distinct.len() != ids.len()
@@ -2710,6 +2742,8 @@ impl CasService {
             &mut || crate::orchestration::names::generate_unique(1).remove(0)).await
     }
 
+    // gate-audit[force_build_guard]: bypass G-135 Admits a spawn despite measured builder-capacity refusal.
+    // gate-audit[force_peer_claim]: bypass G-142 Admits a duplicate spawn despite a current peer claim.
     async fn factory_spawn_workers_in_with_name_source(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
@@ -2997,17 +3031,19 @@ impl CasService {
         }
         if let Some(check) = peer_check {
             if let Some((task_id, hold)) = check.task {
+                // gate[G-142 spawn]: Peer task claim blocks duplicate spawn
                 if !force_peer_claim {
                     return Err(Self::error(
                         ErrorCode::INVALID_REQUEST,
-                        format!(
+                        crate::gates::tag("G-142", format!(
                             "⛔ HELD BY A PEER — task {task_id} is claimed by {} (a session of this repository on another machine or clone) until {}. A worker spawned for it would duplicate their work, so nothing was queued. Ask them first: {prefix}coordination action=message target={} summary=\"{task_id}\" message=\"Are you still on {task_id}?\". To spawn anyway: {prefix}factory action=spawn_workers task_id={task_id} force=true",
                             hold.describe(),
                             hold.until(),
                             hold.name(),
-                        ),
+                        )),
                     ));
                 }
+                peer_notice = crate::gates::override_tag("G-142", peer_notice);
                 peer_notice.push_str(&format!(
                     "\n⚠️  PEER CLAIM OVERRIDE — {} claims {task_id} until {}; spawned anyway (force=true). The worker's start will be refused unless it is forced too. Tell them: {prefix}coordination action=message target={} summary=\"took over {task_id}\" message=\"...\"",
                     hold.describe(),
@@ -3122,11 +3158,9 @@ impl CasService {
         // so a request cannot bypass the fleet cap by queueing four workers at
         // once. `force=true` is an explicit operator override and remains
         // visible in the queued receipt.
-        let factory_config = {
-            use crate::config::Config;
-            Config::load(&self.inner.cas_root)
-                .unwrap_or_default()
-                .factory()
+        let (factory_config, max_workers_source) = {
+            let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+            (config.factory(), config.max_workers_source())
         };
         let build_guard = crate::factory_build_guard::inspect_for_task(
             &self.inner.cas_root,
@@ -3136,8 +3170,7 @@ impl CasService {
         );
         let force_build_guard = req.force.unwrap_or(false);
         // Route only a single task, never silently split an ordered worker queue.
-        // Run even after admission recovers: an earlier routed request must
-        // replay its existing ask rather than queue a second local worker.
+        // Accepted asks retain ownership; unsent asks yield to recovered local capacity.
         if req.task_ids.is_none()
             && let Some(task_id) = req.task_id.as_deref()
         {
@@ -3163,13 +3196,25 @@ impl CasService {
                 if let Some(receipt) = routed { return Ok(Self::success(receipt)) }
             }
         }
+        // gate[G-135 spawn]: Local builder capacity admission
         if !build_guard.violations().is_empty() && !force_build_guard {
             return Err(Self::error(
                 ErrorCode::INVALID_REQUEST,
-                build_guard.refusal_message(),
+                crate::gates::tag("G-135", build_guard.refusal_message()),
             ));
         }
-        let build_guard_notice = build_guard.receipt_notice(force_build_guard);
+        let live_workers = crate::factory_build_routing::live_workers(&self.inner.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
+        if live_workers.total().saturating_add(slots) > factory_config.max_workers() && !force_build_guard {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
+                "Worker capacity: {}; {slots} requested (factory.max_workers source: {max_workers_source})",
+                live_workers.render(factory_config.max_workers()),
+            )));
+        }
+        let mut build_guard_notice = build_guard.receipt_notice(force_build_guard);
+        if build_guard.disabled || (force_build_guard && !build_guard.violations().is_empty()) {
+            build_guard_notice = crate::gates::override_tag("G-135", build_guard_notice);
+        }
         let throttle_notice =
             crate::factory_build_guard::throttle_notice(&factory_config, slots, &build_guard);
         // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
@@ -3660,6 +3705,7 @@ impl CasService {
     /// [`Self::factory_shutdown_workers`] with the factory context passed in rather than read
     /// from this process's environment, so the Commander hub's operator
     /// facade runs the same body (cas-9b08).
+    // gate-audit[force]: bypass G-136 Accepts stopping an active worker only after preserving work.
     pub(crate) async fn factory_shutdown_workers_in(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
@@ -3955,17 +4001,18 @@ impl CasService {
             .iter()
             .filter(|snapshot| snapshot.requires_force())
             .collect();
+        // gate[G-136 shutdown]: Active worker work must be preserved before forced shutdown
         if !force && !unsafe_snapshots.is_empty() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                format!(
+                crate::gates::tag("G-136", format!(
                     "shutdown_workers refused: selected worker state requires force=true. Nothing was queued.\n{}",
                     unsafe_snapshots
                         .iter()
                         .map(|snapshot| format!("- {}\n  {}", snapshot.render(), snapshot.remedy()))
                         .collect::<Vec<_>>()
                         .join("\n")
-                ),
+                )),
             ));
         }
 
@@ -4194,7 +4241,7 @@ impl CasService {
                 .join("\n")
         );
 
-        Ok(Self::success(msg))
+        Ok(Self::success(if force && !unsafe_snapshots.is_empty() {crate::gates::override_tag("G-136", msg)} else {msg}))
     }
 
     /// Recycle one idle worker without losing its isolated checkout. The
@@ -4380,6 +4427,24 @@ impl CasService {
                 ),
             ));
         }
+        // GH #1870: a relaunch on an account or Codex install that cannot run
+        // commands only advertises another dead worker; refuse it like a spawn.
+        // Unlike a spawn, the recorded account is not re-selected: only an
+        // affirmative probe verdict refuses.
+        let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+        let specs = std::slice::from_ref(&spec);
+        preflight_account_auth_with(
+            specs,
+            |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+            || installed_codex_version(deadline),
+        )
+        .and_then(|()| preflight_codex_exec_host(specs, deadline))
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("recycle_worker refused for {worker_name}: {error} Nothing was stopped or queued."),
+            )
+        })?;
         let mut spec_payload = serde_json::to_value(&spec).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -4568,6 +4633,7 @@ impl CasService {
     /// [`Self::factory_set_worker_hold`] with the factory context passed in rather than read
     /// from this process's environment, so the Commander hub's operator
     /// facade runs the same body (cas-9b08).
+    // gate-audit[held]: selector Chooses hold versus release operation; both enforce the same supervisor authority.
     pub(crate) async fn factory_set_worker_hold_in(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
@@ -4745,6 +4811,12 @@ impl CasService {
             .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
             .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
         if !qa_progress.is_empty() { binary_versions.push_str(&format!("\n{qa_progress}")); }
+        // The same machine-wide census spawn admission refuses against.
+        let max_workers = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default().factory().max_workers();
+        binary_versions.push_str(&match crate::factory_build_routing::live_workers(&self.inner.cas_root) {
+            Ok(live) => format!("\nWorker capacity: {}", live.render(max_workers)),
+            Err(error) => format!("\nWorker capacity unavailable: {error}"),
+        });
         match cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.inner.cas_root) {
             Ok(queues) => for worker in store.list(None).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))? {
                 if worker.role != AgentRole::Worker || !worker.visible_to_factory_session(factory_session.as_deref()) { continue; }
@@ -7195,6 +7267,9 @@ impl CasService {
         outcomes
     }
 
+    // gate-audit[force]: bypass G-137 Admits stale-worker dirty/mid-task synchronization; live workers and active rebases remain protected.
+    // gate-audit[explicitly_targeted]: bypass G-149 Explicit worker selection can override measured branch affinity.
+    // gate-audit[affinity_override]: selector Derived accepted branch-affinity exception from explicit force; final G-149 tag is authoritative.
     pub(super) async fn factory_sync_all_workers(
         &self,
         req: FactoryRequest,
@@ -7295,6 +7370,9 @@ impl CasService {
 
             // cas-5884: branch affinity first — it is decided from task state
             // alone and is the most decisive reason not to touch a worktree.
+            let affinity_override=explicitly_targeted && matches!(sync_affinity_gate(
+                &worker.name, binding.map(|b|b.label.as_str()), binding.map_or(&BranchAffinity::Unknown,|b|&b.affinity),
+                &sync_ref,&default_branch,false),SyncGate::Refuse(_));
             if let SyncGate::Refuse(reason) = sync_affinity_gate(
                 &worker.name,
                 binding.map(|b| b.label.as_str()),
@@ -7334,6 +7412,7 @@ impl CasService {
             let in_progress = binding
                 .filter(|b| b.blocks_rebase)
                 .map(|b| b.label.as_str());
+            // gate[G-137 sync]: Stale-worker dirty or in-progress worktree sync guard
             if let SyncGate::Refuse(reason) = sync_gate_for_worker(
                 &worker.name,
                 dirty_files,
@@ -7341,12 +7420,18 @@ impl CasService {
                 in_progress,
                 force,
             ) {
-                skipped.push(reason);
+                skipped.push(crate::gates::refusal_tag("G-137",reason));
                 continue;
             }
 
             match sync_worker_clone(&path, &sync_ref) {
-                Ok(details) => synced.push(format!("{} ({})", worker.name, details)),
+                Ok(details) => {
+                    let mut row=format!("{} ({})", worker.name, details);
+                    if affinity_override{row=crate::gates::override_tag("G-149",row);}
+                    synced.push(if force && (dirty_files > 0 || in_progress.is_some()) {
+                        crate::gates::override_tag("G-137",row)
+                    } else {row});
+                },
                 Err(failure) => {
                     // A stranded stash or an unfinished rebase is invisible to
                     // the worker whose directory it is — push it to them and to
@@ -7444,10 +7529,6 @@ impl CasService {
             )
         })?;
         let pending_prompts = prompt_queue.pending_count().unwrap_or(0);
-        let live_viktor_watches = cas_store::SqliteViktorWatchStore::open(&self.inner.cas_root)
-            .and_then(|store| store.list_live())
-            .unwrap_or_default();
-
         let worktree_store = open_worktree_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -7514,11 +7595,10 @@ impl CasService {
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
-            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nLive Viktor watches: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\nOrphan processes in worktrees: {}\nStale server registrations: {}\nReapable orphans: {}\n",
+            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\nOrphan processes in worktrees: {}\nStale server registrations: {}\nReapable orphans: {}\n",
             stale_after,
             stale_agents.len(),
             pending_prompts,
-            live_viktor_watches.len(),
             active_worktrees.len(),
             orphan_worktrees.len(),
             orphan_process_groups.len(),
@@ -7630,22 +7710,6 @@ impl CasService {
             }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Simulator inventory worker failed: {error}")))?;
             host.push_str(&text);
-        }
-
-        if !live_viktor_watches.is_empty() {
-            out.push_str("\nLive Viktor watches:\n");
-            for watch in &live_viktor_watches {
-                out.push_str(&format!(
-                    "  - #{} thread={} run={} requester={} task={} polls={} expires={}\n",
-                    watch.id,
-                    watch.thread_id,
-                    watch.run_id,
-                    watch.requesting_agent_name,
-                    watch.task_id.as_deref().unwrap_or("-"),
-                    watch.poll_count,
-                    watch.expires_at.to_rfc3339(),
-                ));
-            }
         }
 
         if !stale_agents.is_empty() {
@@ -8101,6 +8165,7 @@ impl CasService {
         Ok(Self::success(format!("{text}{shared}")))
     }
 
+    // gate-audit[force]: selector With dry_run=false selects explicit garbage-collection execution; live-owner and retention checks remain enforced.
     pub(super) async fn factory_gc_cleanup(
         &self,
         req: FactoryRequest,
@@ -10409,6 +10474,8 @@ pub(crate) enum SyncGate {
 /// stale worker record with a mid-task. It deliberately does NOT cover a live
 /// worker or an in-flight rebase: a second rebase on top of an in-flight
 /// resolution destroys progress, and no automated recovery is safe.
+// gate-audit[force]: bypass G-137 Pure consent classification; successful sync producer tags only actual dirty/mid-task waivers.
+// gate-audit[accepted_by]: factory_sync_all_workers
 pub(crate) fn sync_gate_for_worker(
     worker_name: &str,
     dirty_files: usize,
@@ -10456,6 +10523,9 @@ pub(crate) fn sync_gate_for_worker(
 /// rebasing under a live agent, neither of which says anything about the
 /// branch being correct, and a fleet sweep with `force=true` is exactly the
 /// call that caused this bug.
+// gate[G-149 sync]: Worker branch-affinity preservation
+// gate-audit[explicitly_targeted]: bypass G-149 Successful sync producer tags only an otherwise-refused target mismatch.
+// gate-audit[accepted_by]: factory_sync_all_workers
 pub(crate) fn sync_affinity_gate(
     worker_name: &str,
     task_label: Option<&str>,
@@ -10475,25 +10545,25 @@ pub(crate) fn sync_affinity_gate(
             if normalize_branch_ref(branch) == sync {
                 SyncGate::Proceed
             } else {
-                SyncGate::Refuse(format!(
+                SyncGate::Refuse(crate::gates::refusal_tag("G-149",format!(
                     "{worker_name} (branch affinity mismatch — {task} integrates into `{branch}`, \
                      not the requested sync target `{sync_ref}`; rebasing it would graft foreign \
                      commits onto its factory branch and corrupt close accounting. Name it in \
                      worker_names= to sync it anyway)"
-                ))
+                )))
             }
         }
         BranchAffinity::Trunk => {
             if normalize_branch_ref(default_branch) == sync {
                 SyncGate::Proceed
             } else {
-                SyncGate::Refuse(format!(
+                SyncGate::Refuse(crate::gates::refusal_tag("G-149",format!(
                     "{worker_name} (branch affinity mismatch — {task} is standalone and \
                      integrates into trunk `{default_branch}`, not the requested sync target \
                      `{sync_ref}`; rebasing it would graft foreign commits onto its factory \
                      branch and corrupt close accounting. Name it in worker_names= to sync it \
                      anyway)"
-                ))
+                )))
             }
         }
     }

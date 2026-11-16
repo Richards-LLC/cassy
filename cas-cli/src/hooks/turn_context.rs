@@ -372,6 +372,7 @@ pub(crate) fn fallback_context_within(
     // "already shown". A Claude Teams copy is a pointer, and its teammate turn
     // fires no UserPromptSubmit; a pointer turn whose turn-start hook failed
     // or ran out of room is retried here until its rows resolve.
+    // gate[N-91 notice]: CAS-wake pointer rows
     if let Some((key, prompt, started_at)) = &turn {
         let first_boundary = !receipt.state.delivered.contains(key);
         let pending = names_wake_pointer(prompt) && !receipt.state.pointers_resolved.contains(key);
@@ -406,10 +407,13 @@ pub(crate) fn fallback_context_within(
         changed = true;
     }
 
+    // GH #1924: inclusive. Mail committed after the query but stamped in its
+    // millisecond equals the cursor; re-checking is safe because the store's
+    // receipts never show a row twice.
     if let Some(signal) = signal
-        && signal > receipt.state.mail_checked_at
+        && signal >= receipt.state.mail_checked_at
     {
-        // Taken before the query: later mail stamps a newer signal. Commit
+        // Taken before the query: later mail stamps an equal or newer signal. Commit
         // this cursor only after every selected body fits; otherwise the next
         // tool boundary must retry the overflow even without another enqueue.
         let checked_at = chrono::Utc::now().timestamp_millis();

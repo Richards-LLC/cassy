@@ -125,8 +125,10 @@ async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_rep
         let elapsed = sent.elapsed();
         let at = Utc::now();
         let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
-        writeln!(file, "{}\n{}", serde_json::json!({"type":"user","uuid":"terminal-checkpoint","timestamp":at,"message":{"role":"user","content":"Terminal checkpoint"}}),
-            serde_json::json!({"type":"assistant","timestamp":at+chrono::Duration::milliseconds(1),"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Fixture supervisor answer"}]}})).unwrap();
+        // Real Claude settles every answer with Stop-hook verdict records.
+        writeln!(file, "{}\n{}\n{}", serde_json::json!({"type":"user","uuid":"terminal-checkpoint","timestamp":at,"message":{"role":"user","content":"Terminal checkpoint"}}),
+            serde_json::json!({"type":"assistant","timestamp":at+chrono::Duration::milliseconds(1),"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Fixture supervisor answer"}]}}),
+            serde_json::json!({"type":"system","subtype":"turn_duration","timestamp":at+chrono::Duration::milliseconds(2)})).unwrap();
         let reply = loop {
             if let DaemonMessage::OperatorReply { notification_id, device_id, message, .. } = next(&mut socket).await {
                 assert_eq!(device_id, "*");
@@ -321,8 +323,18 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
         "UPDATE prompt_queue SET created_at=?1, first_attempt_at=?1, delivery_attempts=119 WHERE id=?2",
         rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(16)).to_rfc3339(), id],
     ).unwrap();
-    daemon.process_prompt_queue().await.unwrap();
-    settle_injected_writes(&mut daemon).await;
+    // Selection and its admission probe finish on different daemon turns.
+    // Wait for the durable safety hold, then inspect its outcome once.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            settle_injected_writes(&mut daemon).await;
+            if queue.message_delivery_report(id).unwrap().unwrap().stage == cas_store::DeliveryStage::Gated {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("the protected draft reaches its durable hold");
     let report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(report.stage, cas_store::DeliveryStage::Gated, "protected draft must not abandon a relay: {report:?}");
     assert!(report.delivered_at.is_none() && report.confirmed_at.is_none());

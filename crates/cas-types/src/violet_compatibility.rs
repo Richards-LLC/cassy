@@ -48,6 +48,7 @@ pub fn canonical_violet_credential_name(name: &str) -> String {
 
 /// Canonical credential first, corresponding installed-machine fallback second.
 /// Custom variable names retain their original semantics.
+// gate-audit[legacy_bypass_env]: selector Names a legacy credential key; it is not an admission bypass.
 pub fn violet_credential_names(name: &str) -> Vec<String> {
     let contract = violet_compatibility();
     let suffix = name

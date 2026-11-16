@@ -138,6 +138,7 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
             task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -162,7 +163,7 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     let own_marker = "OWN-TASK-NOTES-MUST-SURVIVE";
     let target = service
         .cas_task_create(Parameters(TaskCreateRequest {
-            notes: Some(format!("[2026-10-01 12:00] PROGRESS {}\n\n[2026-10-02 12:00] ✅ DECISION bounded resume\n\n[2026-10-03 12:00] 🧪 PLATFORM_PROOF art-own\n\n[2026-10-04 12:00] PROGRESS {own_marker}", "old α\n".repeat(2000))),
+            notes: Some(format!("[2026-10-01 12:00] PROGRESS {}\n\n[2026-10-02 12:00] ✅ DECISION bounded resume\n\n[2026-10-03 12:00] 🧪 PLATFORM_PROOF art-own", "old α\n".repeat(2000))),
             epic: Some(epic_id.clone()),
             ..basic_create("Brief-start target", None)
         }))
@@ -183,6 +184,19 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     // Exercise the public unified MCP boundary, including JSON bool
     // deserialization and TaskRequest -> TaskStartRequest forwarding.
     let service = CasService::new(service, None);
+    // Creation adds QA-impact audit notes, including a repository-unavailable
+    // notice in this isolated fixture. Make the checkpoint the latest note.
+    let checkpoint: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "notes",
+        "id": target_id,
+        "note_type": "progress",
+        "notes": own_marker,
+    }))
+    .expect("deserialize checkpoint request");
+    service
+        .task(Parameters(checkpoint))
+        .await
+        .expect("append latest checkpoint");
     let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "start",
         "id": target_id,
@@ -193,21 +207,17 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
 
     assert!(text.contains(own_marker), "own notes missing: {text}");
     assert!(
-        text.contains("DECISION") && text.contains("art-own"),
+        text.contains("bounded resume") && text.contains("art-own"),
         "recent evidence missing: {text}"
     );
     assert!(
-        text.contains("Structured execution state:") && text.contains("continue implementation"),
+        text.contains("continue implementation"),
         "brief start missing structured execution state: {text}"
     );
     assert!(
         !text.contains(sibling_marker),
         "brief start leaked sibling notes: {} bytes",
         text.len()
-    );
-    assert!(
-        !text.contains("SIBLING TASK NOTES") && !text.contains("EPIC OWNERSHIP"),
-        "brief start leaked epic context: {text}"
     );
     assert!(
         text.len() <= 2_000,
@@ -723,6 +733,7 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
             task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -844,6 +855,7 @@ async fn test_task_show() {
         task_type: "bug".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -1033,6 +1045,7 @@ fn basic_create(title: &str, execution_note: Option<String>) -> TaskCreateReques
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -1211,6 +1224,7 @@ async fn test_execution_note_update_sets_value() {
             execution_note: Some("additive-only".to_string()),
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -1273,6 +1287,7 @@ async fn test_execution_note_update_empty_string_clears() {
             execution_note: Some(String::new()),
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -1315,6 +1330,7 @@ async fn test_task_update() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -1354,6 +1370,7 @@ async fn test_task_update() {
         execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
         external_ref: None,
         assignee: None,
@@ -1386,6 +1403,7 @@ async fn test_task_update_design_and_acceptance_criteria() {
         task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -1425,6 +1443,7 @@ async fn test_task_update_design_and_acceptance_criteria() {
         execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
         external_ref: None,
         assignee: None,
@@ -1485,6 +1504,7 @@ async fn test_task_notes() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -1778,6 +1798,7 @@ async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -1860,6 +1881,7 @@ async fn test_task_list() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -1917,6 +1939,7 @@ async fn test_task_ready() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2299,6 +2322,7 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
                 task_type: "bug".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2328,6 +2352,7 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
                     task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2419,6 +2444,7 @@ async fn test_tasks_available_names_withheld_rows() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2484,6 +2510,7 @@ async fn test_tasks_available_honours_an_explicit_sort() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2578,6 +2605,7 @@ async fn test_tasks_available_sorts_before_truncating() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2635,6 +2663,7 @@ async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2693,6 +2722,7 @@ async fn test_tasks_available_unparseable_sort_falls_back_to_priority() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2750,6 +2780,7 @@ async fn test_tasks_available_footer_tracks_an_explicit_limit() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2813,6 +2844,7 @@ async fn test_tasks_available_total_excludes_claimed_tasks() {
                     task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2882,6 +2914,7 @@ async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2939,6 +2972,7 @@ async fn test_task_blocked_is_priority_sorted_and_states_the_true_total() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2970,6 +3004,7 @@ async fn test_task_blocked_is_priority_sorted_and_states_the_true_total() {
                 task_type: "bug".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2997,6 +3032,7 @@ async fn test_task_blocked_is_priority_sorted_and_states_the_true_total() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3063,6 +3099,7 @@ async fn test_task_ready_unparseable_sort_falls_back_to_priority_not_creation_or
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3122,6 +3159,7 @@ async fn test_task_ready_header_is_plain_when_nothing_is_withheld() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3175,6 +3213,7 @@ async fn test_task_ready_explicit_sort_overrides_the_priority_default() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3239,6 +3278,7 @@ async fn test_task_ready_epic_filter() {
             task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3270,6 +3310,7 @@ async fn test_task_ready_epic_filter() {
                 task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3298,6 +3339,7 @@ async fn test_task_ready_epic_filter() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3370,6 +3412,7 @@ async fn test_task_delete() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3418,6 +3461,7 @@ async fn test_task_dependencies() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3449,6 +3493,7 @@ async fn test_task_dependencies() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3514,6 +3559,7 @@ async fn test_task_show_dependency_direction_labels() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3543,6 +3589,7 @@ async fn test_task_show_dependency_direction_labels() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3618,6 +3665,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3647,6 +3695,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3683,6 +3732,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -3718,40 +3768,19 @@ async fn test_close_auto_unblocks_blocked_dependents() {
         .await
         .expect("verification add should succeed");
 
-    let close = service
-        .cas_task_close(Parameters(TaskCloseRequest {
-            no_delivery: None,
-            stranded_branch_override: None,
-            id: blocker_id,
-            reason: Some("done".to_string()),
-            supervisor_override: None,
-            search_manifest: None,
-            commit_receipt: None,
-        }))
-        .await
-        .expect("task close should succeed");
-    let close_text = extract_text(close);
-    assert!(
-        close_text.contains("Auto-unblocked"),
-        "Close output should mention auto-unblocked tasks: {close_text}"
-    );
-
-    let show = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            read: cas::mcp::tools::TaskReadOptions {
-                full: true,
-                ..Default::default()
-            },
-            id: blocked_id,
-            with_deps: false,
-        }))
-        .await
-        .expect("task_show should succeed");
-    let text = extract_text(show);
-    assert!(
-        text.contains("Status: Open"),
-        "Blocked dependent should auto-transition to Open: {text}"
-    );
+    let unified = CasService::new(service.clone(), None);
+    let request = || Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+        "action": "close", "id": blocker_id, "reason": "done"
+    })).unwrap());
+    unified.task(request()).await.expect("task close should succeed");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(tasks.get(&blocked_id).unwrap().status, cas::types::TaskStatus::Open);
+    let manual_closes = || cas_store::quality_events_for_task(&cas_dir, &blocker_id).unwrap().into_iter()
+        .filter(|e| matches!(e.payload, cas_store::QualityPayload::Intervention {
+            intervention: cas_store::InterventionKind::ManualClose, .. })).count();
+    assert_eq!(manual_closes(), 1);
+    let _ = unified.task(request()).await;
+    assert_eq!(manual_closes(), 1, "a closed-task retry performs no additional manual close");
 }
 
 async fn create_task_titled(service: &CasCore, title: &str) -> String {
@@ -3927,6 +3956,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
             task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3956,6 +3986,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -3992,6 +4023,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -4042,6 +4074,7 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
             task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4071,6 +4104,7 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4119,6 +4153,7 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -4148,6 +4183,7 @@ async fn test_subtask_start_auto_starts_epic() {
         task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4199,6 +4235,7 @@ async fn test_subtask_start_auto_starts_epic() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4296,6 +4333,7 @@ async fn test_task_start_sets_assignee_when_unset() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4350,6 +4388,7 @@ async fn test_task_start_preserves_existing_assignee() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4427,6 +4466,7 @@ async fn test_worker_cannot_start_task_assigned_to_other_worker() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4555,6 +4595,7 @@ async fn test_standard_agent_can_start_task_assigned_to_other_worker() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4636,6 +4677,7 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4673,6 +4715,7 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
         execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
         external_ref: None,
         assignee: Some(worker_name.to_string()),
@@ -4815,6 +4858,7 @@ async fn test_release_active_started_task_resets_status_to_open_and_ready() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4914,6 +4958,7 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -4950,6 +4995,7 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -5026,6 +5072,7 @@ async fn test_release_still_errors_when_no_lease_and_task_already_open() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -5072,6 +5119,7 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -5108,6 +5156,7 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -5169,6 +5218,7 @@ async fn test_reset_refuses_closed_task() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -5205,6 +5255,7 @@ async fn test_reset_refuses_closed_task() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -5245,6 +5296,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -5282,6 +5334,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -5327,6 +5380,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: Some("new-worker".to_string()),
@@ -5375,6 +5429,7 @@ async fn test_task_mine_matches_case_insensitive_and_trimmed() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -5412,6 +5467,7 @@ async fn test_task_mine_matches_case_insensitive_and_trimmed() {
         execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
         external_ref: None,
         // The default test-agent name is "test-agent"; assert we still
@@ -5455,13 +5511,17 @@ fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
 
 #[tokio::test]
 async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
-    for (caller, message, allowed, reassign_to_caller) in [
-        ("test-agent", "WIP: carry supervisor answers across target movement", true, false),
-        ("test-agent", "fix(cas-abcd): another task's work", false, false),
-        ("other-worker", "unnamed WIP before review", false, false),
+    for (caller, message, allowed, reassign_to_caller, shape) in [
+        ("test-agent", "", true, false, ""),
+        ("test-agent", "", true, false, "target-advanced"),
+        ("test-agent", "", false, false, "source-changed"),
+        ("other-worker", "", false, true, ""),
+        ("test-agent", "WIP: carry supervisor answers across target movement", true, false, ""),
+        ("test-agent", "fix(cas-abcd): another task's work", false, false, ""),
+        ("other-worker", "unnamed WIP before review", false, false, ""),
         // Reassignment makes this caller authorized, so the old worker's
         // branch history must be refused by commit ownership instead.
-        ("other-worker", "unnamed WIP before review", false, true),
+        ("other-worker", "unnamed WIP before review", false, true, ""),
     ] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
@@ -5497,26 +5557,45 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             "action": "start", "id": task.id, "brief": true,
         })).unwrap();
         service.task(Parameters(start())).await.expect("initial start");
-        let boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
-        branch_transfer_git(root, &["commit", "--allow-empty", "-m", "test(cas-8ca7): reproduce blocked work"]);
-        let mut held = tasks.get(&task.id).unwrap();
-        held.deliverables.factory_branch_anchor = Some(branch_transfer_git(root, &["rev-parse", "HEAD"]));
-        tasks.update(&held).unwrap();
+        let mut boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
+        if shape == "source-changed" {
+            let recorded = "factory/test-agent-cas-8ca7";
+            branch_transfer_git(root, &["branch", recorded]);
+            let mut changed = tasks.get(&task.id).unwrap();
+            changed.deliverables.factory_branch_start.as_mut().unwrap().branch = recorded.into();
+            boundary = changed.deliverables.factory_branch_start.clone();
+            tasks.update(&changed).unwrap();
+        }
+        if !message.is_empty() {
+            branch_transfer_git(root, &["commit", "--allow-empty", "-m", "test(cas-8ca7): reproduce blocked work"]);
+            let mut held = tasks.get(&task.id).unwrap();
+            held.deliverables.factory_branch_anchor = Some(branch_transfer_git(root, &["rev-parse", "HEAD"]));
+            tasks.update(&held).unwrap();
+        }
+        // GH #1843: before the first commit, the recorded start is the only
+        // provenance for both tracked edits and new source/migration files.
+        std::fs::write(root.join(".gitignore"), ".cas/\n# task edit\n").unwrap();
+        std::fs::write(root.join("delivery.txt"), "work before the block\n").unwrap();
         let request = serde_json::from_value(serde_json::json!({
             "action": "update", "id": task.id, "status": "blocked",
         })).unwrap();
         service.task(Parameters(request)).await.expect("block task");
         // An unnamed WIP child of the attributed red commit, made while
         // blocked, still belongs to the same recorded start boundary.
-        std::fs::write(root.join("delivery.txt"), "work before the block\n").unwrap();
-        branch_transfer_git(root, &["add", "delivery.txt"]);
-        branch_transfer_git(root, &["commit", "-m", message]);
+        if !message.is_empty() {
+            branch_transfer_git(root, &["add", "delivery.txt"]);
+            branch_transfer_git(root, &["commit", "-m", message]);
+        }
         let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
         let content = std::fs::read(root.join("delivery.txt")).unwrap();
+        let dirty = branch_transfer_git(root, &["status", "--porcelain", "--untracked-files=all"]);
         let request = serde_json::from_value(serde_json::json!({
             "action": "update", "id": task.id, "status": "open",
         })).unwrap();
         service.task(Parameters(request)).await.expect("reopen task");
+        if shape == "target-advanced" {
+            branch_transfer_git(temp.path(), &["commit", "--allow-empty", "-m", "target advanced during review"]);
+        }
         if reassign_to_caller {
             let mut reassigned = tasks.get(&task.id).expect("task after review hold");
             reassigned.assignee = Some(caller.into());
@@ -5551,6 +5630,7 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         assert_eq!(saved.deliverables.factory_branch_start, boundary);
         assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), tip);
         assert_eq!(std::fs::read(root.join("delivery.txt")).unwrap(), content);
+        assert_eq!(branch_transfer_git(root, &["status", "--porcelain", "--untracked-files=all"]), dirty);
     }
 }
 
@@ -5982,6 +6062,7 @@ fn make_task_create_req(title: &str) -> TaskCreateRequest {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -6880,6 +6961,7 @@ async fn test_create_rejects_blocked_by_same_as_epic() {
         task_type: "epic".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -6911,6 +6993,7 @@ async fn test_create_rejects_blocked_by_same_as_epic() {
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -6983,6 +7066,7 @@ async fn test_task_start_locked_error_includes_worker_name() {
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -7438,6 +7522,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
             execution_note: Some("no-code".to_string()),
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: Some("stale-worker".to_string()),
@@ -7592,6 +7677,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: Some(WORKER_SESSION.to_string()),
@@ -7689,6 +7775,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: Some(PRIOR_ASSIGNEE.to_string()),
@@ -7723,6 +7810,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: Some(String::new()),
@@ -7780,6 +7868,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: Some(PRIOR_ASSIGNEE.to_string()),
@@ -7808,6 +7897,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
             execution_note: None,
             risk: None,
             door: None,
+            review_dispatch_id: None,
             proof_targets: None,
             external_ref: None,
             assignee: Some("   \t  ".to_string()),

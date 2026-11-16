@@ -640,6 +640,27 @@ impl TaskStore for SyncingTaskStore {
         self.inner.update_from_sync(task, expected)
     }
 
+    /// cas-a836: request_changes, reopen and proof-scope corrections commit
+    /// through cas-store directly, so no intent was staged and the peer
+    /// never saw the change. Stage one now and bind it to the committed
+    /// revision; a crash before the receipt leaves a provably pre-commit
+    /// intent rather than an ambiguous one.
+    fn publish_current_row(&self, task_id: &str) -> Result<()> {
+        let _sync_guard = self
+            .queue
+            .lock_task_sync_mutations(&[task_id])
+            .map_err(queue_error_before_local_commit)?;
+        let current = self.inner.get(task_id)?;
+        let updated_at = current.updated_at.to_rfc3339();
+        let intent = self.stage_upsert(&current, "publish", Some(&updated_at), Some(&current))?;
+        if let Err(error) = self.inner.record_mutation_receipt(task_id, &intent.mutation_id) {
+            self.cancel_staged_after_local_failure(&intent);
+            return Err(error);
+        }
+        self.fulfill_upsert(&intent)?;
+        Ok(())
+    }
+
     /// cas-eda0: `green_merge_commit` is local merge coordination consumed by
     /// this machine's verdict path; it rides the next ordinary upsert.
     fn record_merge_admission(
@@ -1166,7 +1187,8 @@ mod tests {
         let (temp, store) = create_test_store();
         let queue = SyncQueue::open(temp.path()).unwrap();
 
-        let task = Task::new("task-001".to_string(), "Test task".to_string());
+        let mut task = Task::new("task-001".to_string(), "Test task".to_string());
+        task.review_dispatch_id = Some("vdispatch-e17ce9129b337ebcc86c8a0383080009".into());
         store.add(&task).unwrap();
 
         let pending = queue.pending(10, 5).unwrap();
@@ -1174,6 +1196,8 @@ mod tests {
         assert_eq!(pending[0].entity_type, EntityType::Task);
         assert_eq!(pending[0].entity_id, task.id);
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
+        let pulled: Task = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(pulled.review_dispatch_id, task.review_dispatch_id);
     }
 
     #[tokio::test]

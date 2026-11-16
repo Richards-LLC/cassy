@@ -597,6 +597,7 @@ pub fn import_peer_premerge_verification(
     expected_task: &Task,
     dispatch: &VerificationDispatch,
     verification: &Verification,
+    approval_event: &Event,
 ) -> Result<bool> {
     let fail = || StoreError::Parse("peer pre-merge proof does not match the current delivery cycle".into());
     let attestation = dispatch.repository.as_ref()
@@ -665,15 +666,16 @@ pub fn import_peer_premerge_verification(
     if has_verdict && superseded.is_none() { return Err(fail()); }
     tx.execute(
         "INSERT INTO verification_dispatches
-         (id,task_id,repository_proof,requester_agent_id,owner_agent_id,state,requested_at,deadline_at,resolved_at,recovery_action)
-         VALUES (?1,?2,?3,?4,?5,'resolved',?6,?7,?8,?9)",
+         (id,task_id,receipt_id,repository_proof,requester_agent_id,owner_agent_id,state,requested_at,deadline_at,resolved_at,recovery_action)
+         VALUES (?1,?2,?10,?3,?4,?5,'resolved',?6,?7,?8,?9)",
         params![dispatch.id,dispatch.task_id,
             serde_json::to_string(&dispatch.repository).map_err(|_| fail())?,
             dispatch.requester_agent_id,dispatch.owner_agent_id,
             dispatch.requested_at.to_rfc3339(),dispatch.deadline_at.to_rfc3339(),
-            dispatch.resolved_at.map(|at| at.to_rfc3339()),dispatch.recovery_action.to_string()],
+            dispatch.resolved_at.map(|at| at.to_rfc3339()),dispatch.recovery_action.to_string(),dispatch.receipt_id],
     )?;
     insert_verification_with_conn(&tx, verification)?;
+    record_event_with_conn(&tx, approval_event)?;
     if let Some(prior) = superseded {
         let event = Event::new(EventType::VerificationAdded, EventEntityType::Task, &expected_task.id,
             "Peer approval replaced after source review of repaired delivery")
@@ -1080,10 +1082,10 @@ pub fn resolve_verification_dispatch_for_add_with_conn(
     else {
         return Ok(requested);
     };
-    let same_task_only_proof = requested.receipt_id.is_none()
-        && requested.delivery_transaction_id.is_none()
-        && current.receipt_id.is_none()
-        && current.delivery_transaction_id.is_none()
+    let requested_receipt = requested.receipt().map_err(StoreError::Parse)?;
+    let current_receipt = current.receipt().map_err(StoreError::Parse)?;
+    let same_task_only_proof = requested_receipt == current_receipt
+        && requested_receipt.transaction().is_none()
         && requested.repository.is_some()
         && requested.repository == current.repository;
     if current.id != requested.id
@@ -1195,8 +1197,7 @@ fn create_verification_dispatch_bound_in_transaction(
     {
         if existing.requester_agent_id == requester_agent_id
             && existing.owner_agent_id == owner_agent_id
-            && existing.receipt_id == boundary.receipt_id
-            && existing.delivery_transaction_id == boundary.delivery_transaction_id
+            && existing.receipt().map_err(StoreError::Parse)? == boundary.receipt().map_err(StoreError::Parse)?
             && existing.repository == boundary.repository
         {
             return Ok(existing);
@@ -1208,6 +1209,11 @@ fn create_verification_dispatch_bound_in_transaction(
     if let Some(existing) = get_latest_verification_dispatch_with_conn(&conn, task_id)?
         && existing.state == VerificationDispatchState::TimedOut
         && !supervisor_recovery
+        // A task-only retry requests a new review; it grants no approval and
+        // leaves the expired row available for audit. Delivery receipt recovery
+        // still requires supervisor authority, including partial boundaries.
+        && (existing.receipt_id.is_some() || existing.delivery_transaction_id.is_some()
+            || boundary.receipt_id.is_some() || boundary.delivery_transaction_id.is_some())
     {
         return Err(StoreError::Parse(format!(
             "verification dispatch {} timed out; registered-supervisor recovery must name it",
@@ -1262,8 +1268,8 @@ fn create_verification_dispatch_bound_in_transaction(
 
 /// Backward-compatible task-only dispatch creation.
 ///
-/// This cannot recover a timed-out cycle; registered-supervisor recovery must
-/// use the explicit bound API and server-derived authority.
+/// A timed-out task-only cycle may request a fresh pending review. Receipt-bound
+/// delivery recovery requires the explicit bound API and supervisor authority.
 pub fn create_verification_dispatch(
     cas_dir: &Path,
     task_id: &str,
@@ -1346,6 +1352,24 @@ pub fn resolve_verification_dispatch_with_conn(
     capability_id: Option<&str>,
     supervisor_direct: bool,
 ) -> Result<Option<VerificationDispatch>> {
+    finish_verification_dispatch_with_conn(conn, dispatch_id, verifier_agent_id, capability_id, supervisor_direct, true)
+}
+
+/// An infrastructure failure consumes the failed child's authority, not the review.
+pub fn retry_verification_dispatch_after_error_with_conn(
+    conn: &Connection, dispatch_id: &str, verifier_agent_id: &str,
+    capability_id: Option<&str>, supervisor_direct: bool,
+) -> Result<Option<VerificationDispatch>> {
+    if latest_dispatch_status(conn, dispatch_id)? != Some(VerificationStatus::Error) {
+        return Err(StoreError::Parse("only an infrastructure ERROR can release review authority".into()));
+    }
+    finish_verification_dispatch_with_conn(conn, dispatch_id, verifier_agent_id, capability_id, supervisor_direct, false)
+}
+
+fn finish_verification_dispatch_with_conn(
+    conn: &Connection, dispatch_id: &str, verifier_agent_id: &str,
+    capability_id: Option<&str>, supervisor_direct: bool, terminal: bool,
+) -> Result<Option<VerificationDispatch>> {
     let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
     let now = Utc::now();
     // A server handoff consumed by the same atomic verdict transaction has
@@ -1388,12 +1412,15 @@ pub fn resolve_verification_dispatch_with_conn(
             "verification dispatch is owned by another verifier".to_string(),
         ));
     }
-    let resolved_at = now;
+    if !terminal { retire_dispatch_claim(conn, &dispatch)?; }
     let changed = conn.execute(
         "UPDATE verification_dispatches
-         SET state = 'resolved', resolved_at = ?2
+         SET state = ?2, resolved_at = ?3,
+             verifier_agent_id = CASE WHEN ?4 THEN verifier_agent_id ELSE NULL END,
+             capability_id = CASE WHEN ?4 THEN capability_id ELSE NULL END
          WHERE id = ?1 AND state IN ('pending', 'claimed', 'timed_out')",
-        params![dispatch.id, resolved_at.to_rfc3339()],
+        params![dispatch.id, if terminal { "resolved" } else { "pending" },
+            terminal.then(|| now.to_rfc3339()), terminal],
     )?;
     if changed != 1 {
         return Err(StoreError::Parse(
@@ -1401,6 +1428,37 @@ pub fn resolve_verification_dispatch_with_conn(
         ));
     }
     get_verification_dispatch_with_conn(conn, dispatch_id).map(Some)
+}
+
+fn latest_dispatch_status(conn: &Connection, id: &str) -> Result<Option<VerificationStatus>> {
+    let row: Option<(String, Option<String>)> = conn.query_row(
+        "SELECT status,status_detail FROM verifications WHERE dispatch_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1",
+        [id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    Ok(row.map(|(status, detail)| VerificationStatus::from_storage(&status, detail.as_deref())))
+}
+
+fn retire_dispatch_claim(conn: &Connection, dispatch: &VerificationDispatch) -> Result<()> {
+    if let Some(capability) = &dispatch.capability_id {
+        let now = Utc::now().to_rfc3339();
+        conn.execute("UPDATE verification_capabilities SET consumed_at=COALESCE(consumed_at,?2) WHERE id=?1", params![capability,now])?;
+        conn.execute("UPDATE verification_handoffs SET state='consumed',consumed_at=COALESCE(consumed_at,?2) WHERE capability_id=?1 AND state IN ('pending','bound')", params![capability,now])?;
+    }
+    Ok(())
+}
+
+/// Repair the old writer's resolved ERROR only at an authorized write boundary.
+/// A real terminal verdict or a newer dispatch can never be reopened here.
+pub fn recover_errored_verification_dispatch_with_conn(conn: &Connection, id: &str) -> Result<()> {
+    let dispatch = get_verification_dispatch_with_conn(conn, id)?;
+    if dispatch.state == VerificationDispatchState::Resolved
+        && latest_dispatch_status(conn, id)? == Some(VerificationStatus::Error)
+        && get_latest_verification_dispatch_with_conn(conn, &dispatch.task_id)?.is_some_and(|d| d.id == id)
+    {
+        retire_dispatch_claim(conn, &dispatch)?;
+        conn.execute("UPDATE verification_dispatches SET state='pending',resolved_at=NULL,verifier_agent_id=NULL,capability_id=NULL WHERE id=?1 AND state='resolved'", [id])?;
+    }
+    Ok(())
 }
 
 /// Current dispatches awaiting expiry recovery (pending, claimed or timed out)
@@ -1442,6 +1500,7 @@ pub fn expired_verification_dispatches(
 /// supplies positively dead process snapshots; status/PID/fingerprint are
 /// compared again under the write lock so a revived owner is never displaced.
 /// Missing registry rows require matching machine/session retirement evidence.
+// gate[W-40 watchdog]: Orphaned verification dispatch adoption
 pub fn adopt_orphaned_verification_dispatches(
     cas_dir: &Path,
     supervisor_id: &str,
@@ -1626,82 +1685,6 @@ pub fn extend_verification_dispatch_deadline(
     Ok(extended)
 }
 
-/// cas-d4b7: carry one exact approved verdict to a new candidate proof whose
-/// delivered patch the caller proved identical. In one transaction the prior
-/// cycle is retired, a new dispatch is bound to `boundary` and resolved, and a
-/// system-provenance approval naming the prior verdict (the `receipt`) is
-/// recorded on it. No verifier is dispatched. Only the latest task-only
-/// repository cycle, resolved with that exact approval, can be rebound.
-pub fn rebind_approved_verification_dispatch(
-    cas_dir: &Path,
-    prior_dispatch_id: &str,
-    prior_verdict_id: &str,
-    requester_agent_id: &str,
-    owner_agent_id: &str,
-    boundary: &VerificationProofBoundary,
-    receipt: &str,
-) -> Result<(VerificationDispatch, Verification)> {
-    let store = SqliteVerificationStore::open(cas_dir)?;
-    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
-    let prior = get_verification_dispatch_with_conn(&tx, prior_dispatch_id)?;
-    let latest = get_latest_verification_dispatch_with_conn(&tx, &prior.task_id)?;
-    let verdict: Option<(String, String)> = tx
-        .query_row(
-            "SELECT id, status FROM verifications WHERE dispatch_id = ?1
-             ORDER BY created_at DESC, id DESC LIMIT 1",
-            params![prior.id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    if latest.as_ref().map(|latest| latest.id.as_str()) != Some(prior.id.as_str())
-        || prior.state != VerificationDispatchState::Resolved
-        || prior.receipt_id.is_some()
-        || prior.delivery_transaction_id.is_some()
-        || prior.repository.is_none()
-        || boundary.receipt_id.is_some()
-        || boundary.delivery_transaction_id.is_some()
-        || boundary.repository.is_none()
-        || verdict.as_ref().map(|(id, status)| (id.as_str(), status.as_str()))
-            != Some((prior_verdict_id, VerificationStatus::Approved.storage_status()))
-    {
-        return Err(StoreError::Parse(
-            "verdict rebind requires the latest task-only dispatch resolved with this exact approval"
-                .to_string(),
-        ));
-    }
-    let now = Utc::now();
-    tx.execute(
-        "UPDATE verification_dispatches SET state = 'invalidated' WHERE id = ?1 AND state = 'resolved'",
-        params![prior.id],
-    )?;
-    let mut dispatch = create_verification_dispatch_bound_in_transaction(
-        &tx,
-        &prior.task_id,
-        requester_agent_id,
-        owner_agent_id,
-        boundary,
-        now,
-        false,
-    )?;
-    tx.execute(
-        "UPDATE verification_dispatches SET state = 'resolved', resolved_at = ?2 WHERE id = ?1",
-        params![dispatch.id, now.to_rfc3339()],
-    )?;
-    dispatch.state = VerificationDispatchState::Resolved;
-    dispatch.resolved_at = Some(now);
-    let mut verification = Verification::new(store.generate_id()?, prior.task_id.clone());
-    verification.agent_id = Some(owner_agent_id.to_string());
-    verification.issuer_agent_id = Some(requester_agent_id.to_string());
-    verification.provenance = VerificationProvenance::System;
-    verification.dispatch_id = Some(dispatch.id.clone());
-    verification.status = VerificationStatus::Approved;
-    verification.summary = receipt.to_string();
-    verification.created_at = now;
-    insert_verification_with_conn(&tx, &verification)?;
-    tx.commit()?;
-    Ok((dispatch, verification))
-}
-
 /// Release only the exact failed child's current claim for a supported retry.
 /// Revocation, claim reset and failure audit share the verdict transaction lock:
 /// a late verdict, replacement claim or settled task can never be overwritten.
@@ -1719,11 +1702,8 @@ pub fn release_failed_verifier_dispatch(
         "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1 AND status NOT IN ('closed', 'cancelled'))",
         params![dispatch.task_id], |row| row.get(0),
     )?;
-    let has_verdict: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM verifications WHERE dispatch_id = ?1)",
-        params![dispatch_id],
-        |row| row.get(0),
-    )?;
+    let has_verdict = latest_dispatch_status(&tx, dispatch_id)?
+        .is_some_and(|status| !matches!(status, VerificationStatus::Error | VerificationStatus::Pending));
     if dispatch.state != VerificationDispatchState::Claimed
         || dispatch.verifier_agent_id.as_deref() != Some(verifier_agent_id)
         || dispatch.deadline_at <= Utc::now()
@@ -1734,18 +1714,7 @@ pub fn release_failed_verifier_dispatch(
         tx.commit()?;
         return Ok(false);
     }
-    let now = Utc::now().to_rfc3339();
-    if let Some(capability) = &dispatch.capability_id {
-        tx.execute(
-            "UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2) WHERE id = ?1",
-            params![capability, now],
-        )?;
-        tx.execute(
-            "UPDATE verification_handoffs SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
-             WHERE capability_id = ?1 AND state IN ('pending', 'bound')",
-            params![capability, now],
-        )?;
-    }
+    retire_dispatch_claim(&tx, &dispatch)?;
     tx.execute(
         "UPDATE verification_dispatches SET state = 'pending', verifier_agent_id = NULL, capability_id = NULL
          WHERE id = ?1 AND state = 'claimed' AND verifier_agent_id = ?2",
@@ -1797,8 +1766,7 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
     let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?
         .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
     if latest.id != dispatch.id
-        || dispatch.receipt_id.is_some()
-        || dispatch.delivery_transaction_id.is_some()
+        || matches!(dispatch.receipt().map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt { .. })
         || dispatch.repository.is_none()
     {
         return Err(StoreError::Parse(
@@ -2030,8 +1998,7 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
     let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
     let selected = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
     if selected.task_id != task.id
-        || selected.receipt_id.is_some()
-        || selected.delivery_transaction_id.is_some()
+        || matches!(selected.receipt().map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt { .. })
         || selected.state != VerificationDispatchState::Resolved
     {
         return Err(StoreError::Parse(
@@ -2196,6 +2163,7 @@ pub fn correct_parked_delivery_execution_note(
     )
 }
 
+// gate-audit[allow_merged_delivery]: selector Selects the distinct authorized merged-delivery correction transaction; record ownership/CAS checks remain enforced.
 fn correct_parked_delivery_proof_scope_inner(
     cas_dir: &Path,
     corrected_task: &Task,
@@ -2356,11 +2324,31 @@ fn correct_parked_delivery_proof_scope_inner(
 
     let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![corrected_task.id], |row| row.get(0))?;
     let safe_notes = crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
+    let cleared_artifact_scope = corrected_task.execution_note.as_deref() == Some("no-code")
+        && corrected_task.external_ref.as_deref().is_some_and(|reference| !reference.trim().is_empty())
+        && corrected_task.deliverables.work_target.is_none()
+        && corrected_task.deliverables.work_target_cleared
+        && corrected_task.deliverables.factory_branch_anchor.is_none()
+        && corrected_task.deliverables.historical_factory_branch_anchors.is_empty()
+        && corrected_task.deliverables.files_changed.is_empty()
+        && corrected_task.deliverables.commit_hash.is_none()
+        && corrected_task.deliverables.merge_commit.is_none()
+        && corrected_task.deliverables.delivery_pr_merge_commit.is_none();
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
          , execution_note = ?8, external_ref = ?9
-         WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress', 'blocked') AND updated_at = ?7",
+         WHERE id = ?1 AND updated_at = ?7 AND (
+           status IN ('awaiting_merge', 'in_progress', 'blocked') OR (
+             status = 'open' AND ?10 AND execution_note = 'no-code'
+             AND json_extract(deliverables, '$.work_target') IS NULL
+             AND json_extract(deliverables, '$.work_target_cleared') = 1
+             AND (json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL
+               OR json_array_length(deliverables, '$.historical_factory_branch_anchors') > 0
+               OR json_array_length(deliverables, '$.files_changed') > 0
+               OR json_extract(deliverables, '$.commit_hash') IS NOT NULL
+               OR json_extract(deliverables, '$.merge_commit') IS NOT NULL
+               OR json_extract(deliverables, '$.delivery_pr_merge_commit') IS NOT NULL)))",
         params![
             corrected_task.id,
             safe_notes.as_ref(),
@@ -2386,11 +2374,12 @@ fn correct_parked_delivery_proof_scope_inner(
             expected_updated_at.to_rfc3339(),
             corrected_task.execution_note,
             corrected_task.external_ref,
+            cleared_artifact_scope,
         ],
     )?;
     if changed != 1 {
         return Err(StoreError::Other(
-            "proof-scope correction requires the unchanged AwaitingMerge, InProgress, or Blocked task".to_string(),
+            "proof-scope correction requires an unchanged active delivery or previously cleared artifact scope".to_string(),
         ));
     }
     let event = Event::new(
@@ -2497,8 +2486,8 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
             Some((transaction_id, receipt_id, WorkerDeliveryState::AwaitingMerge)),
             Some(dispatch),
         ) if dispatch.state == VerificationDispatchState::Resolved
-            && dispatch.delivery_transaction_id.as_deref() == Some(transaction_id.as_str())
-            && dispatch.receipt_id.as_deref() == Some(receipt_id.as_str()) =>
+            && dispatch.receipt().map_err(StoreError::Parse)?.transaction()
+                == Some((receipt_id.as_str(), transaction_id.as_str())) =>
         {
             RequestChangesBoundary::Exact
         }
@@ -2653,6 +2642,11 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     }
     let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0))?;
     let safe_notes = crate::task_note_markers::neutralize_new_markers(&notes, Some(&prior_notes));
+    // cas-50b2: request-changes ends the delivery cycle; the corrective
+    // delivery's first anchor write mints the next one.
+    deliverables.delivery_cycle = crate::delivery_cycle::end_delivery_cycle_with_conn(
+        &tx, task_id, deliverables.delivery_cycle, now,
+    )?;
     let task_changed = tx.execute(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,
@@ -3476,6 +3470,9 @@ impl VerificationStore for SqliteVerificationStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(VERIFICATION_SCHEMA)?;
+            // Approval stamps use the existing event table in the verdict's
+            // transaction, including stores opened without the task/event UI.
+            conn.execute_batch(crate::event_store::EVENT_SCHEMA)?;
             crate::shared_db::ensure_column(
                 &conn,
                 "verification_issues",
@@ -3832,6 +3829,38 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = SqliteVerificationStore::open(dir.path()).unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn open_artifact_scope_repair_keeps_status_and_revision_guards_cas_3ff6() {
+        for (reviewed, raced) in [(true, false), (false, false), (true, true)] {
+            let dir = TempDir::new().unwrap();
+            let store = SqliteTaskStore::open(dir.path()).unwrap();
+            store.init().unwrap();
+            let mut task = Task::new("cas-8156".into(), "Artifact design".into());
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some("artifact:art-current-design".into());
+            task.deliverables.work_target_cleared = reviewed;
+            task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+            store.add(&task).unwrap();
+            let mut corrected = store.get(&task.id).unwrap();
+            let expected = corrected.updated_at;
+            corrected.deliverables.factory_branch_anchor = None;
+            corrected.deliverables.work_target_cleared = true;
+            corrected.updated_at = Utc::now();
+            if raced {
+                let mut newer = store.get(&task.id).unwrap();
+                newer.title = "Concurrent update".into();
+                store.update(&newer).unwrap();
+            }
+            let result = correct_parked_delivery_proof_scope(
+                dir.path(), &corrected, expected, "supervisor", "Retire measured documentation source",
+            );
+            assert_eq!(result.is_ok(), reviewed && !raced, "{result:?}");
+            let saved = store.get(&task.id).unwrap();
+            assert_eq!(saved.status, TaskStatus::Open);
+            assert_eq!(saved.deliverables.factory_branch_anchor.is_none(), reviewed && !raced);
+        }
     }
 
     #[test]
@@ -5053,6 +5082,7 @@ mod tests {
 
     #[test]
     fn superseded_task_dispatch_resolves_to_current_cycle_when_proof_is_unchanged() {
+        for receipt_id in [None, Some("dc-cycle"), Some("wcr-receipt")] {
         let (_store, dir) = create_test_store();
         let repository = cas_types::RepositoryProofBoundary {
         peer_premerge: None,
@@ -5063,7 +5093,9 @@ mod tests {
             target_branch: None,
             anchor_commits: vec!["delivered-a".to_string()],
         };
-        let boundary = cas_types::VerificationProofBoundary::task_at(repository);
+        let mut boundary = cas_types::VerificationProofBoundary::task_at(repository);
+        boundary.receipt_id = receipt_id.map(str::to_string);
+        boundary.delivery_transaction_id = (receipt_id==Some("wcr-receipt")).then(|| "wdt-receipt".to_string());
         let first = create_verification_dispatch_bound(
             dir.path(),
             "cas-superseded-add",
@@ -5095,7 +5127,9 @@ mod tests {
         let conn = Connection::open(dir.path().join("cas.db")).expect("db");
         let effective = resolve_verification_dispatch_for_add_with_conn(&conn, &first.id)
             .expect("superseded dispatch should resolve");
-        assert_eq!(effective.id, replacement.id);
+        assert_eq!(effective.id, if receipt_id==Some("wcr-receipt") { first.id } else { replacement.id });
+        }
+
     }
 
     #[test]
@@ -5287,13 +5321,38 @@ mod tests {
                 .state,
             VerificationDispatchState::Pending
         );
-        create_verification_dispatch_bound(
+        // Task-only expiry must never become a route around receipt-bound
+        // recovery, including an inconsistent partial boundary on either side.
+        for (receipt, transaction) in [(true, false), (false, true), (true, true)] {
+            let boundary = VerificationProofBoundary {
+                receipt_id: receipt.then(|| "receipt-bound".into()),
+                delivery_transaction_id: transaction.then(|| "transaction-bound".into()),
+                repository: None,
+            };
+            assert!(create_verification_dispatch_bound(
+                dir.path(), "cas-timeout-a", "worker-a", "supervisor-a",
+                &boundary, future, false,
+            ).is_err());
+            let id = format!("cas-bound-{receipt}-{transaction}");
+            create_verification_dispatch_bound(
+                dir.path(), &id, "worker-a", "supervisor-a", &boundary, past, false,
+            ).unwrap();
+            timeout_verification_dispatch(dir.path(), &id, Utc::now()).unwrap().unwrap();
+            assert!(create_verification_dispatch_bound(
+                dir.path(), &id, "worker-a", "supervisor-a",
+                &VerificationProofBoundary::task(), future, false,
+            ).is_err());
+        }
+        let renewed = create_verification_dispatch_bound(
             dir.path(), "cas-timeout-a", "worker-a", "supervisor-a",
-            &VerificationProofBoundary::default(), future, true,
-        ).expect("supervisor recovery starts a fresh cycle");
+            &VerificationProofBoundary::default(), future, false,
+        ).expect("a task-only timeout starts a fresh pending cycle without approval");
+        assert_ne!(renewed.id, timed_out.id);
+        assert_eq!(renewed.state, VerificationDispatchState::Pending);
         assert!(expired_verification_dispatches(
             dir.path(), past - Duration::seconds(1), Utc::now(), 10,
-        ).unwrap().is_empty(), "a superseded timeout must not page for the new cycle");
+        ).unwrap().iter().all(|dispatch| dispatch.task_id != "cas-timeout-a"),
+            "a superseded timeout must not page for the new cycle");
     }
 
     #[test]

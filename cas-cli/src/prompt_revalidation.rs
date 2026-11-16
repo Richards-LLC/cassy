@@ -1401,7 +1401,7 @@ pub(crate) fn parse_worker_action_envelope(prompt: &str) -> Option<WorkerActionE
     })
 }
 
-const VERIFIER_CALLER_GUIDANCE: &str = "Native Codex children share the parent's MCP caller and cannot independently record this verdict. Use Cassy's daemon-owned verifier for candidate reviews or a separately registered verifier bound to this exact dispatch. Do not register a native child on the shared connection.";
+const VERIFIER_CALLER_GUIDANCE: &str = "Native Task/Agent subagents and Codex children share the parent's MCP caller and cannot record this verdict; do not spawn or register one for it.";
 
 /// Build the verification-dispatch handoff CAS enqueues for the supervisor
 /// when a worker's close creates a dispatch (cas-8725).
@@ -1433,7 +1433,8 @@ pub(crate) fn verification_dispatch_envelope(
          delivered by {worker}.\n\
          {reason}\
          {VERIFIER_CALLER_GUIDANCE}\n\
-         Hand the verifier dispatch_id={dispatch}. Record with verification action=add task_id={task} dispatch_id={dispatch}. \
+         Retry task action=close id={task} to start Cassy's daemon-owned verifier on this exact dispatch. \
+         For mechanical evidence only, record it directly with verification action=add task_id={task} dispatch_id={dispatch}. \
          Do not message {worker} to close: a PASS closes an eligible merged delivery (otherwise its supervisor owns ordinary close recovery), \
          and a FAIL on a merged delivery returns it to {worker} with the findings.\n\
          {VERIFICATION_DISPATCH_ENVELOPE_CLOSE}",
@@ -1460,7 +1461,8 @@ pub(crate) fn candidate_verification_dispatch_envelope(
          Task {task}, delivered by {worker}, awaits its required pre-merge candidate review.\n\
          {reason}\n\
          {VERIFIER_CALLER_GUIDANCE}\n\
-         Hand the verifier dispatch_id={id}. Record with verification action=add task_id={task} dispatch_id={id}. \
+         Retry factory action=worktree_merge with task_id={task} to start Cassy's daemon-owned verifier on this exact dispatch. \
+         For mechanical evidence only, record it directly with verification action=add task_id={task} dispatch_id={id}. \
          A PASS continues the merge; a FAIL or unresolved verdict holds this delivery.\n\
          {VERIFICATION_DISPATCH_ENVELOPE_CLOSE}",
         id = xml_attribute_value(&dispatch.id), task = xml_attribute_value(&dispatch.task_id),

@@ -50,6 +50,17 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     // documented brake; it is not a fix for a measured incident.
     let stop_is_reentrant = input.stop_hook_is_reentrant();
 
+    // Stop is the pane fallback for harnesses without MessageDisplay. Never
+    // re-block a continuation; retain a visible uncertainty notice instead.
+    if let Some(reason) = crate::hooks::handlers::operator_evidence::pane_denial(input) {
+        return Ok(if stop_is_reentrant {
+            HookOutput::with_system_context(format!("[unverified] {}", crate::gates::tag("H-47", reason)))
+        } else {
+            HookOutput::block_stop(crate::gates::tag("H-47", reason))
+        });
+    }
+
+
     // Check for exit blockers (open tasks, active children) before allowing stop
     // Skip for factory agents (Worker, Supervisor, Director) - supervisor manages task reassignment
     let config = Config::load(cas_root).unwrap_or_default();
@@ -83,10 +94,11 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                 }
                 blockers
             }) {
+                // gate[H-36 stop]: Exit blockers
                 Ok(blockers) if blockers.has_blockers() => {
                     // Use decision: "block" to prevent Claude from stopping
                     // This tells Claude to continue working on the remaining tasks
-                    return Ok(HookOutput::block_stop(blockers.format_message()));
+                    return Ok(HookOutput::block_stop(crate::gates::tag("H-36", blockers.format_message())));
                 }
                 Ok(_) => {} // No blockers, continue with stop
                 Err(e) => {
@@ -750,12 +762,6 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         }
     }
 
-    // Best-effort codemap reminder
-    let codemap_reminder = crate::hooks::handlers::handlers_events::codemap_stop_reminder(cas_root);
-    if let Some(ref reminder) = codemap_reminder {
-        eprintln!("cas: {reminder}");
-    }
-
     // cas-5c0a (B3): Emit final git-state event for factory workers so the
     // supervisor can see branch/HEAD/pushed-ref/PR without manual forensics.
     // Fires on the normal-stop path (i.e. not on blocked loop-iteration returns).
@@ -786,7 +792,6 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     // Stop hooks don't support hookSpecificOutput.additionalContext in Claude
     // Code's schema — route via systemMessage instead.
     let notices = [
-        codemap_reminder,
         supervisor_turn_ends_without_wake_source(cas_root, input),
         supervisor_turn_leaves_messaged_workers_uncovered(cas_root, input),
     ]
@@ -805,6 +810,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
 /// pending reminder has no wake source of its own; overnight that left two
 /// supervisors idle for 11–12 h. Warn (never block: a supervisor with nothing
 /// open may legitimately stop) so it sets one before going quiet.
+// gate[N-100 notice]: No wake source
 fn supervisor_turn_ends_without_wake_source(cas_root: &Path, input: &HookInput) -> Option<String> {
     let is_supervisor = std::env::var("CAS_AGENT_ROLE").ok().as_deref() == Some("supervisor");
     let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
@@ -862,6 +868,7 @@ fn factory_session_has_open_work(cas_root: &Path, session: &str) -> bool {
 /// with no event reminder bound to that worker or its task, so only the
 /// worker's reply can start the next turn (gabber, Nov 3: 8 h idle). Warn
 /// once per turn, naming each worker. Advisory: it never blocks the stop.
+// gate[N-101 notice]: Uncovered worker
 fn supervisor_turn_leaves_messaged_workers_uncovered(
     cas_root: &Path,
     input: &HookInput,

@@ -209,6 +209,7 @@ impl Round {
             Err("shadow round is sealed to its two registered children".into())
         }
     }
+    // gate-audit[internal]: input Trusted server-internal execution identity; public callers still require a registered supervisor.
     fn require_supervisor(&self, caller: &Agent, internal: bool) -> ReviewResult<()> {
         require_supervisor(caller, internal)?;
         if caller.id != self.supervisor_agent_id {
@@ -218,9 +219,10 @@ impl Round {
     }
 }
 
+// gate-audit[internal]: input Validates the trusted server-internal identity as part of mandatory H-45 authority.
 fn require_supervisor(caller: &Agent, internal: bool) -> ReviewResult<()> {
     if caller.role != AgentRole::Supervisor || !internal || !caller.is_alive() {
-        return Err("shadow start/show/apply requires an active registered supervisor with server-internal identity".into());
+        return Err(crate::gates::tag("H-45", "shadow start/show/apply requires an active registered supervisor with server-internal identity"));
     }
     Ok(())
 }

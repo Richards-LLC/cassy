@@ -303,10 +303,11 @@ impl ReviewedDelivery {
             }
             git_commit_is_ancestor(repo, &self.repository.head_commit, &reference)
         };
-        (!contained).then(|| format!(
+        // gate[G-65 close-after-merge integrity]: Exact approved SHA must land (verified delivery)
+        (!contained).then(|| crate::gates::tag("G-65", format!(
             "MERGE REQUIRED: task {} was verified at exact head {} (dispatch {}), which is not contained in {reference}. An earlier merged anchor cannot authorize this correction. Merge this exact verified delivery into {target}, then retry close.",
             task.id, self.repository.head_commit, self.dispatch,
-        ))
+        )))
     }
 }
 
@@ -390,7 +391,7 @@ impl CasCore {
                 .record_park(Some(&branch), Some(head), Some(assignee));
             if next.deliverables.factory_branch_anchor.as_deref() != Some(head) {
                 next.deliverables.retain_factory_branch_anchor_as_history();
-                next.deliverables.factory_branch_anchor = Some(head.clone());
+                next.deliverables.mint_or_append(head);
             }
             next.notes.push_str(&format!(
                 "\n\n[{}] Reviewed correction: dispatch {} approved {head}; delivery now follows measured ref {pushed}, replacing merged anchor {previous}. Preservation refs were not pushed.",

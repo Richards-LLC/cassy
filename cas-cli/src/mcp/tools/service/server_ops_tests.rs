@@ -16,6 +16,7 @@ fn record(name: &str, shared: bool) -> RegisteredServer {
         cwd: std::path::PathBuf::from("/repo/app"),
         pid: 1234,
         pgid: Some(1234),
+        process_group_scope: None,
         pid_starttime: Some(42),
         expected_port: Some(5173),
         owner_task: Some("cas-7c93".to_string()),

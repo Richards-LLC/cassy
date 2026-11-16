@@ -121,7 +121,7 @@ pub use task::{
 pub use verification::{
     FindingReach, FindingSeverity, FindingTriage, IssueSeverity, PeerPremergeAttestation, PeerPremergeReceipt, RepositoryProofBoundary, Verification, VerificationDispatch,
     VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
-    VerificationProvenance, VerificationRecoveryAction, VerificationStatus, VerificationType,
+    VerificationProvenance, VerificationReceipt, VerificationRecoveryAction, VerificationStatus, VerificationType,
     VerifierCapability,
 };
 pub use worktree::{GitContext, Worktree, WorktreeStatus};

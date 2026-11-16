@@ -31,7 +31,7 @@ fail-fast = false
 status-level = "fail"
 final-status-level = "slow"
 
-# Queue recovery is explicit in ci-queue-flakes.py, not a native retry policy.
+# Queue reports preserve first failures for P0 repair issues.
 # Reporting alone is added here; workers and lane CI never select this profile.
 [profile.queue]
 retries = 0

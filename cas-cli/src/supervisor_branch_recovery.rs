@@ -401,7 +401,7 @@ pub(crate) fn recover(core: &CasCore, task_id: &str, payload: &str) -> Result<Re
         next.assignee = Some(actor.name.clone());
         next.deliverables.record_handoff_branch(&request.branch);
         next.deliverables.parked_branch = Some(branch.clone());
-        next.deliverables.factory_branch_anchor = Some(request.head.clone());
+        next.deliverables.mint_or_append(&request.head);
         next.notes.push_str(&format!(
             "\n\n[{}] BRANCH RECOVERED by {} ({}): {} at {} -> {} on origin",
             chrono::Utc::now().to_rfc3339(),

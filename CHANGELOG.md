@@ -7,6 +7,685 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.30.0] - 2026-11-16
+
+### Fixed — Factory checks
+
+- **Shared journey stability identities** — Existing Playwright journeys can declare the expanded runtime identities of a local shared callback. The capped worker check validates those declarations against native discovery before collecting five passes with retries disabled; unknown or ambiguous bindings remain refused.
+
+### Fixed — Release
+
+- **Shipped members are no longer held as reverted** — Release closeout and task close now judge a delivery's own paths by their net effect. A change the task itself reverted, a fragment draft it rewrote, or a bundle the release rebuilt no longer reads as `RELEASE_MEMBER_REVERTED`. A delivery reverted on the target and brought back only by a sync merge is still held.
+
+### Fixed — Factory
+
+- **Adopted deliveries retain their original proof scope** — Closing a replacement worker's delivery includes a recorded predecessor imported by merge, preserving its source changes and release note after a restart.
+- **CI reminder workflow names shared by several workflows** — A `ci_completed` reminder whose workflow name matches several workflows, such as the suggested `"CI"`, binds to the workflow that ran for the commit. When the commit's runs do not single one out, the refusal lists each candidate's file path and ID.
+- **Epic retarget keeps source identity aligned** — Unchanged no-delivery lanes now rebind their recorded start to the new train with an audit; changed or mismatched sources require explicit supervisor recovery.
+
+### Changed — CI
+
+- **Bubblewrap installs only where sandbox tests run** — Build-only Linux jobs no longer install bubblewrap through the shared Rust setup, and jobs that run verifier sandbox tests install it exactly once.
+
+### Fixed — Developer tooling
+
+- **Cancelled journey runs free their server port** — The journey snapshot server exits when the Playwright runner that launched it dies. A cancelled or killed journey run no longer leaves the server listening, so the next run in the same checkout starts instead of failing EADDRINUSE.
+
+### Fixed — CI
+
+- **Lane impact no longer blames a delivery for a one-off failure** — A test that fails at the delivery but passes at its base is rerun once at the delivery: only a repeat failure is reported as caused by the delivery; otherwise it is unattributed. Both still fail the lane.
+
+### Fixed — Merge reconciliation
+
+- **Queue landings over newer target work reconcile** — when the merge queue
+  lands an approved delivery on top of other work, reconciliation keeps the
+  approval instead of holding the merge for a second review. A target change
+  to the delivered files is still refused.
+
+## [4.29.0] - 2026-11-14
+
+### Fixed — Factory
+
+- **Close parks the lane the worker is on** — Was: a worker that started on
+  its lane, pushed a throwaway proof branch under its per-task name, then
+  switched back and closed got the proof branch parked for merge, extra
+  commits included. Now: when the recorded lane is checked out, carries the
+  task's work and the per-task branch is not checked out, close parks the
+  lane's tip. A worker that moved onto its per-task branch still parks that
+  branch.
+- **Worker capacity names every project on the machine** — Was: a spawn
+  refused at "8/8 live on this machine" while `worker_status` listed one live
+  worker, because the limit counts other projects' workers too. Now: the
+  refusal and `worker_status` show the same machine-wide count with a
+  per-project breakdown, for example "8/8 live on this machine: cassy 1,
+  gabber-studio 7".
+- **Capacity waits show the load measured now** — Was: `worker_status` and
+  the 20-minute supervisor notice repeated the figure from the last refusal,
+  so a wait could still say "1-minute load 52.36" after the load had fallen
+  well below the limit. Now: both show the refusal's figure as "cause at last
+  refusal" next to a fresh "now" reading of load, builders and disk.
+- **The user-level worker limit applies to every project** — Was: a project
+  without its own `factory.max_workers` ignored `~/.cas/config.toml`, so
+  `cas config get`, `list` and `reset` showed 8 and spawns were refused at
+  9/8. Now: the limit resolves project, then user, then 8 in config readback,
+  reset and spawn admission, and each names where the value came from.
+- **Conflicts caught before merge admission** — Parking refuses deliveries that conflict with the current train and names the paths. When the train advances, conflicting parked siblings return to their workers with their existing branch and ownership.
+- **Conflict admission policy change** — Conflicting deliveries now stay with their worker when parking is refused, with an explicit merge alternative. This retires the former park-then-flag recovery contract. Historical batch reconciliation failures retain their existing delivery state and are not treated as new merge candidates.
+- **A returned delivery's start names the tip it must keep** — Was: after a
+  parked delivery came back on a merge conflict, its start listed only the
+  pushed-tip requirement, and the push guard let a rebase force-push over the
+  reviewed tip. Now: the start's close checks list the returned delivery tip
+  and say to merge the target in, and the push guard refuses any rewrite that
+  drops that tip. Ordinary unparked checkpoints can still be rebased.
+- **QA can be requested for a rebound re-delivery** — Was: after a
+  supervisor rebound a task to a new branch such as
+  `factory/<worker>-<task>-redelivery`, `verification qa_request` with that
+  branch's pushed tip was refused as "not the live pushed tip", so the close
+  stayed stuck. Now: the task's recorded delivery branch from the rebind is
+  checked too, and the round opens at its live origin tip.
+- **Finish approved no-code closes** — Approval of an eligible no-code close dispatch now completes the saved close through the ordinary gates and releases the worker claim. The continuation binds the assignment, exact dispatch and portable proof; independent holds and stale or foreign approvals retain their guards.
+
+### Fixed — Search
+
+- **Shell flags are searchable keywords** — Conceptual queries containing flags such as `--files0-from` and `-f` return search results instead of an internal parser error. Structured filters and quoted phrases retain their meaning.
+- **Search during task refresh** — Conceptual searches read the committed index when another writer is refreshing it. Task reconciliation resumes when the writer is available, without removing locks or retrying the query.
+
+### Fixed — Releases
+
+- **Reuse shared delivery proofs during release preview** — Release previews
+  reuse successful proofs for the same immutable merge edge and live line
+  positions across deliveries, avoiding repeated Git blame and lexical work
+  while preserving ownership and review verdicts.
+- **Release preview states its real read-only boundary** — Was: `cas release
+  preview` promised no store writes, yet on a copied store without WAL files
+  SQLite added a 32 KiB `cas.db-shm` and an empty `cas.db-wal`. Now: the
+  command help, source contract and release-inventory docs say preview leaves
+  every existing store file unchanged and writes no store data, while SQLite
+  may create those coordination files. Locking and approval checks are
+  unchanged.
+
+### Fixed — Test hygiene
+
+- **Declared rule IDs remain testable** — The test-shape checker recognizes bracketed machine IDs from production rule declarations, including shell parser rules, while rejecting undeclared IDs, test-only examples and bracketed prose.
+
+## [4.28.0] - 2026-11-14
+
+### Changed — Factory
+
+- **One delivery identity check per question** — Was: an approval could be
+  rebound to a new candidate when a target move touched a delivered file but
+  the delivery's own patch-id (minus five generated paths) stayed equal;
+  rebased deliveries were compared commit by commit; release membership read
+  three anchor orders; a member's generation was the task row's last edit.
+  Now: the only pre-merge carry is the candidate tree still validating, so a
+  target move on a delivered path gets a fresh review. A rebased delivery is
+  the same delivery when its whole change has the same patch-id (merge
+  commits and other tasks' commits still refuse). Membership uses the one
+  delivery anchor, and a member's generation is its delivery cycle.
+  Generated output is excluded through one list.
+
+### Fixed — Storage
+
+- **Faster schema migrations** — New stores and schema upgrades use the existing WAL+NORMAL SQLite policy, avoiding a full disk sync for every migration commit while preserving migration transactions and rollback.
+
+### Fixed — Release pipeline
+
+- **Reduce dependency cache eviction** — Factory, train and queue builds reuse main's compiler cache without writing branch-specific objects into the shared cache quota. Main continues to seed compiler and release dependency caches, whose keys exclude workspace version bumps.
+
+### Fixed — Commander
+
+- **One reply per supervisor answer** — Was: when a Stop hook blocked a
+  supervisor's draft, Commander showed the blocked draft, and sometimes the
+  rewrite too. Now: a Claude answer reaches Commander only after its Stop hooks
+  accept it, so the operator sees the accepted rewrite once (GH #1938).
+- **The supervisor's working line follows its whole turn** — Was: each
+  finished tool replaced the open turn, so a long supervisor turn read as done
+  between steps, and a stopped daemon or status that stopped arriving kept its
+  last state. Now: the line stays busy from the prompt to the harness's own turn
+  end, names the running tool without its input, shows the turn's duration and
+  the last transcript activity, and reads unknown once status is over fifteen
+  seconds old or the daemon has stopped. Claude's Esc ends the turn.
+
+### Fixed — Factory
+
+- **Recover verifier infrastructure failures** — Verifier ERROR verdicts retain the pending review and retire the failed child's authority, allowing a replacement verifier or a supervisor verdict on the same dispatch. Factory reviews launch from the daemon outside worker credential isolation. Linux startup probes the real read-only bubblewrap sandbox and reports namespace policy diagnostics and the corresponding remedy when it cannot start.
+- **Syntax checks after owned edits** — A preceding heredoc edit no longer makes a plain `bash -n` check look like unresolved shell execution. Existing command-scope and write-ownership checks still apply.
+
+### Added — Factory
+
+- **JavaScript test stability evidence** — New or changed Vitest, Jest and Playwright tests must pass five consecutive executions. The runner selects changed test functions, stops at the first failure and records exact-commit receipts for park.
+- **Catch unstable tests before park** — A delivery's new or changed tests need five consecutive capped passes, including test-only corrections. The existing receipt gate reads that evidence without running tests. Rust repeats only changed functions in the requested selection; Vitest, Jest and Playwright use the same receipt contract. A failure stops the run and leaves park held for a fix or deletion.
+- **Preserve proof after documentation changes** — Stability shares crate proof's input and ancestry checks, so a documentation or changelog commit can retain its five-pass receipt. Test and build changes require fresh evidence; target merges keep the existing resolution checks.
+
+### Fixed — Release
+
+- **Release close counts reviews recorded before delivery cycles existed** — A delivery approved at its exact shipped commit before Cassy backfilled its delivery cycles now closes at release instead of staying held as missing review. A verdict recorded after a cycle exists, or one for a commit that was later sent back, still requires a fresh review.
+
+### Fixed — CLI
+
+- **Factory test receipt requests identify missing files** — The command now
+  reports the request path when its JSON evidence file cannot be opened and
+  resolves the active harness session before applying the shared gate.
+
+### Fixed — Factory verification
+
+- **Check review authority before staffing** — Was: a supervisor could assign an independent verdict to an ordinary worker that could not record it. Now: tasks can name their exact review dispatch, and worker assignment, spawn and start refuse incompatible authority before accepting work, with the daemon or supervisor route available.
+
+### Fixed — Releases
+
+- **A release that adds a column no longer breaks its own cut** — Was: the
+  candidate's `release preview` read the live store on the installed CLI's
+  older schema and failed with "no such column" whenever the release added a
+  column to an existing table; `release track` then reported "no open release
+  train" for the same reason. Now: preview reads a private, migrated backup of
+  the store and leaves the live store byte-identical; track, the cut's first
+  write, applies the candidate's migrations before reading the train and
+  stops the cut if one fails. `scripts/release.sh` names the live store with
+  `CAS_ROOT` for both candidate calls, so a cut from a Cassy worktree works.
+
+### Fixed — Release closeout
+
+- **Reverted deliveries stay open** — Release inventory and closeout verify the task's own content at the release tag, excluding train imports and recognizing metadata folded into release documents. Reverted changes and bound review rows marked as reverted remain held for re-delivery instead of being closed as shipped.
+- **Queue landing preserves release proof** — Public content checks measure the whole task-owned delivery at the release cut, so a later loss cannot hide behind an intact final commit while genuinely landed deliveries still close. Reconciliation retains delivery-cycle identity alongside the scoped content and reverted-review checks.
+
+## [4.27.0] - 2026-11-14
+
+### Changed — Release
+
+- **macOS prebuild runs on the operator's Mac** — Was: every macOS release
+  prebuild compiled all dependencies cold on hosted macOS (Build step 30.7
+  min). Now: trusted merge-queue and `main` builds run on a self-hosted Apple
+  Silicon runner with a persistent target directory and fall back to hosted
+  macOS when that runner does not start a probe within 90 s.
+  `scripts/install-mac-release-runner.sh` installs the runner as a launchd
+  user agent.
+
+### Fixed — Release trains
+
+- **Wait for the declared cut scope** — Auto-cut waits for the train's blocking deliveries and names those still pending before freezing. Cancelled or retargeted deliveries clear the scope; optional children and trains without a declared scope retain their existing behavior.
+
+### Fixed — Hooks
+
+- **H-11 allows command help** — Was: `cas config grant-write --help` was
+  blocked as a policy mutation. Now: help and version output are recognized as
+  non-mutating by the CLI parser before H-11 evaluates the command.
+
+### Fixed — Commander
+
+- **Show work from fresh supervisor activity** — Recent output lights the working indicator even when no named phase is available. A delivery receipt alone stays quiet, and unknown phases still show no placeholder.
+- **Read conversation history while the daemon is busy** — history uses its own read-only WAL connection, so daemon writes cannot make the conversation fail to load or force repeated retries. Phase status appears only when a phase or a waiting question is known.
+- **Keep history recovery in reach** — An older-page error keeps its Retry control visible through pending activity updates and reconnect layout. Fresh supervisor output still shows working independently of named phases.
+
+### Fixed — Release train
+
+- **One train-suite run per frozen tip** — Was: when a run was already under
+  way at the frozen tip, the daemon dispatched a second one, and a newer
+  cancelled duplicate hid the green receipt from the cut. Now: the daemon
+  dispatches only when no run is queued or running at that tip, and a
+  cancelled run never outranks a finished one at the same tip.
+
+## [4.26.0] - 2026-11-14
+
+### Fixed — Release delivery
+
+- **Check supervisor train pushes** — Supervisor commits run fast admission checks, release-notes lint and Commander dist checks before pushing. Integration publication reuses checked delivery content through an exact head/base marker, avoiding a second fast-row run and the merge push timeout. Doctor and supervisor startup detect missing hook directories.
+
+## [4.25.0] - 2026-11-13
+
+### Fixed — Release flow
+
+- **Reuse delivery approvals at release** — Tier 1 code receives review before merge in batch mode. Release cuts use existing merge approvals and the green train receipt, name missing approvals, and need no separate code-review ledger or recorder. Deliberate light, sampled and Tier 0 exemptions use green lane CI alongside the train run.
+
+### Fixed — Releases
+
+- **Reuse green train proof after release documentation changes** — CODEMAP, changelog, release notes and reports can follow a green train run without another full train CI. Pending CODEMAP edits join the release commit. The release verdict uses existing member approvals and the green frozen-train receipt, without a separate batch release review. Missing required approvals still refuse the cut.
+
+- **Prepared retries and completed reports** — Compiled product overview and journey docs retain green train proof on cut retries. Already closed no-code members keep their original external links without being rebound to artifact metadata. Open report deliveries still require valid artifact proof and remain open until approved.
+
+### Fixed — CI
+
+- **Reuse exact-base failure proof** — Lane attribution reuses configuration-matched failing-test receipts before rebuilding the base, publishes failures early, and keeps incomplete attribution red within a bounded replay budget.
+- **Delivery-only lane selection** — Select changes against the live target merge-base, keep recorded bases for attribution, and run only file-reading Rust contracts for script/workflow changes. Agent configuration and documentation no longer widen Rust selection.
+
+### Fixed — Factory
+
+- **Same-millisecond mail reaches the next tool boundary** — Was: a message
+  whose inbox signal shared the millisecond of the worker's last tool-boundary
+  check stayed hidden until unrelated mail arrived. Now: an equal signal
+  triggers one more check, and already shown mail is never repeated.
+
+### Fixed — Factory merges
+
+- **Keep approval while a candidate rebuild continues** — an unchanged delivery's approval now survives a candidate rebuild that exceeds the response deadline. Retrying the merge reuses the existing approval after preparation finishes. Disjoint train changes retain the original dispatch and record the carried approval on the task; changed deliveries and conflicts retain their existing review checks.
+
+### Fixed — Factory routing
+
+- **Routed builds ship their evidence to the reviewing machine** — Was: a delivery built on another machine (a routed build) left its LEDGER.md and logs in that machine's artifacts root, so the routing machine's pre-merge verifier found no evidence directory and a supervisor copied the files by hand. Now: parking a routed build publishes every file in the task evidence directory, including nested `qa/` captures and empty files, through the artifact path and records a sha256 manifest; the reviewing machine restores those exact bytes where its verifier reads before dispatch. If a file cannot be published or restored, park or review refuses and names both machines' evidence directories.
+
+## [4.24.0] - 2026-11-13
+
+### Changed — Release validation
+
+- **Train suite runs once per release, at the freeze** — Merges into a release train no longer start the full train suite or cancel the one in progress; lane CI already proves each delivery. Freezing the train starts exactly one run at the frozen tip, its green receipt is what the cut consumes, and a red still raises the train-red notice. Auto-cut now freezes a ready train first and cuts on that run's green.
+
+### Fixed — Supervisor replies
+
+- **Accept verified Claude Code replies** — The operator evidence guard now matches numbers and SHAs against successful results from the current turn without requiring hidden tool-use IDs. Exact commands can be named in backticks. Unsupported facts and clipboard claims without a fresh read remain refused.
+
+### Fixed — Release trains
+
+- **Retargeting to the next train moves the parent too** — Was: retargeting a
+  parked task from a frozen train to the next train's branch left it under the
+  frozen train, so its next start was refused until a separate epic update.
+  Now: the same update moves the parent to the next train.
+
+### Fixed — Commander
+
+- **Slash commands sent during a supervisor turn wait instead of failing** — A command such as `/mcp`, `/model` or `/usage` sent from Commander while the supervisor's turn is still open is now queued and typed once when that turn ends. Its card shows Queued until then. Before, Commander showed "Not sent" and the operator had to watch for the turn to end and resend. Drafts in the native prompt and open native dialogs still refuse the command.
+
+### Added — Test audit
+
+- **One test value and flake audit** — The shipped audit now scans Rust and JS/Playwright tests for timing guesses, instant teardown checks, shared resources, order dependence and unseeded randomness alongside dead/duplicate, style/wording and slow candidates. The same report includes bounded thirty-day CI and issue history, with native evidence and explicit uncertainty instead of guessing flake rates.
+
+### Fixed — Release delivery
+
+- **Skip prepared release push validation** — Prepared release pushes start no train workflow under freeze-only dispatch. Cut retries use the green source receipt named by `Train-CI-Head` without requiring a run or adoption artifact at the release head. PR admission, merge queue validation and Release Prebuild continue normally.
+
+## [4.23.0] - 2026-11-13
+
+### Fixed — Release validation
+
+- **Run the source suite once per release** — Plumbing-only prepared train pushes and merge-queue entries adopt the train's verified full-set receipt, including compiled documentation and release reports. A durable adoption record binds the release head to the original source proof for retries. Source changes retain the full suite; release compilation, launch, asset and packaging checks still run.
+
+## [4.22.0] - 2026-11-13
+
+### Changed — Browser testing
+
+- **Locked, isolated Playwright** — Commander tests use Playwright 1.65.0. Both repository MCP registrations use the same locked core in headless managed Chromium, with isolated contexts and explicit storage-state opt-in. Worker launchers no longer inject a shared profile, bundled MCP processes retain correct liveness classification, and the healer agent stays out of the committed test agents.
+
+### Fixed — Release reports
+
+- **Readable release sources** — Was: JSON Slack drafts leaked serialized payloads into verdicts, and CHANGELOG fallbacks repeated changes across both audiences and lost explicit Was/Now pairs. Now: reports read message and reply text, preserve source pairs and clean headings, and list each fallback category once.
+
+### Fixed — Factory
+
+- **Link quiet peer answers** — A peer reply carrying an exact `in_reply_to` now resolves its outgoing ask even when delivered quietly. Answered questions no longer remain open in the merge gate; unrelated quiet and status messages retain their existing behavior.
+- **Worker startup headroom** — Shortened inline recovery guidance to fit the existing startup budget. The peer verdict sync regression now records the delivery anchor required by the real park path.
+- **Publish epic lanes on first child assignment** — Creating or assigning a child to a worker, or starting it, now checks and publishes its local epic branch even when the worker was spawned without a task. Existing remote branches, recorded ownership and explicit child targets remain protected.
+- **CI reminder workflow selectors** — CI completion reminders resolve workflow names, file paths and numeric IDs before registration. Unknown or ambiguous selectors are refused; accepted reminders follow the workflow ID even when another run shares its display name.
+- **Declare peer merge holds explicitly** — Peer asks hold merges only when their first content line supplies `CAS_MERGE_HOLD` JSON with the task ID or PR number. Contextual mentions and legacy prose-only questions remain advisory; scoped holds retain answer correlation and audited overrides.
+- **Train merges finish over landed deliveries** — Was: a train merge whose
+  deliveries were already merged or closed stayed at 0 of N and held every later
+  single merge on the epic. Now: resuming it, or the next daemon pass, records
+  those entries as processed and releases the epic once the list is done.
+- **No false worker_stalled during a long capped build** — Was: a Claude worker's foreground `worker-check` build read as silent and paged the supervisor at 10 minutes, because its child processes were never matched to the worker. Now: child CPU and output count as activity for Claude workers. (cas-8ea3)
+- **Fresh worker capacity for task placement** — Peer routing now checks live workers against the machine cap (eight by default), reports the observation and its age, and uses a recovered local slot before retrying an unsent ask. Repeated spawns retain accepted or in-flight deliveries without sending a second route for the task.
+- **A Codex that cannot run shell commands is refused before a worker is assigned** — Was: when Codex's code-mode host never started, a worker passed every login check, took its task, and then every shell command failed with "timed out negotiating with the code-mode host"; recycling relaunched it the same way, and the error read like an account problem. Now: spawn and recycle start the host first and refuse with its path and a reinstall remedy, stated as separate from the account login; recycle also refuses an account its login check reports logged out (GH #1870).
+- **Resume uncommitted review work** — A worker can resume the same task after a blocked review without stashing or committing its own edits. The original validated source boundary survives target movement; changed source or assignee and foreign work remain guarded.
+- **Refresh clean task lanes after review holds** — A task with no uncommitted work adopts the current target tip when restarted; unfinished edits retain their original start boundary.
+- **Keep worker guidance within its startup budget** — Shortened redundant guidance and restored project-specific journey instructions to Cassy's own checkout.
+
+### Fixed — Factory task ownership
+
+- **Preserve peer task status during session startup** — Startup no longer reopens another machine's tasks merely because they have no local lease. Orphan recovery requires a previous local holder matching the assignment and retains tasks that change during recovery.
+
+### Fixed — Task updates
+
+- **Replace task labels** — Updating `labels` replaces ordinary labels and removes duplicates, allowing supervisors to remove `release-train-cut`. Omitted labels remain unchanged; finding provenance and omitted triage axes remain protected.
+
+### Changed — Test authoring
+
+- **Tests that keep their promises** — Added discoverable general and Playwright authoring skills with outcome assertions, meaningful red controls, isolated fixtures and honest coverage. Consolidated browser configuration, locators, accessibility, agents and audit guidance; old names redirect for one release. Visual journey helpers reject fixed sleeps and ambiguous actions.
+
+### Fixed — Factory delivery
+
+- **Read recovered worker test receipts** — Merged delivery close now reads supervisor-recorded tests from the assigned worker's registered checkout, including recovered paths and branches, so passing receipts satisfy the blast-radius scope gate without an override.
+
+### Fixed — Factory workers
+
+- **Park proof follows the delivered tip after a rebase** — An ancestry-preserving rebase merge now uses the existing delivery ownership and patch checks. Park reads proof at the accepted delivery boundary and reports unattributable restored checkpoints before asking for stale proof. First-parent checkpoints, stacked delivery boundaries and generated-output safeguards retain their existing ownership and proof checks.
+- **Rebase a live checkpoint without treating it as parked** — H-40 checks authoritative task, completion and review state before accepting a checkpoint rewrite. Parked and reviewed deliveries retain their history protection; worker recovery guidance requires an explicit lease for an authorized checkpoint rebase.
+
+### Fixed — Verification
+
+- **Automatic verifier reads a wrapped Claude verdict** — Was: the Claude
+  fallback stopped with "invalid verifier response: expected value at line 1
+  column 1" whenever the model's final text did not start with the JSON object,
+  and the printed output was discarded. Now: the verifier takes the last JSON
+  object printed, keeps the full stdout beside its stderr log, and a refused
+  response's stdout and stderr tails appear in the notice and the dispatch
+  audit.
+- **Resume review after a supervisor answer** — Answering a verifier's question on its existing dispatch now schedules a fresh sealed reviewer with the question and answer attached. The original dispatch and proof boundary stay in place until the reviewer records its final verdict.
+- **No-code closes get an independent verifier** — Was: a no-code close
+  dispatch told the supervisor to spawn a Task/Agent `task-verifier`, which
+  shares the supervisor's MCP caller and cannot record, so the dispatch ran to
+  its deadline. Now: Cassy's daemon-owned verifier reviews the exact close
+  dispatch as it does merge candidates, a held verdict notifies the owner, and
+  retry notices name only a retried close or merge or the supervisor's direct
+  verdict.
+  Rejected-verdict, timed-out, spawn-refusal and non-worker close relays now
+  name the same supported routes instead of a Task/Agent spawn.
+
+### Fixed — CI
+
+- **First failures stay failed** — Removed queue retries, test exclusions and cleanup-to-success conversion. Native failures now create deduplicated P0 repair issues with a next-working-day fix-or-delete deadline, preserved on later observations.
+- **Keep subprocess contracts in source-change lanes** — Rust impact selection now follows shared integration helpers and retains `command()` callers when any `cas-cli/src/` input changes. Existing lane receipts list the discovered subprocess suites, alongside the selected tests and elapsed time.
+
+### Fixed — Factory guard
+
+- **Workers can list Playwright tests** — Was: the browser test tier refused
+  `playwright test --list` as an unfiltered suite run, though it only collects
+  tests. Now: a collection-only `--list` is allowed; a run, `--full`, or an
+  option that could consume `--list` as its value is still refused.
+- **Workers can list file names under home** — Was: the credential guard
+  refused `rg --files` and `find` over a directory above an operator credential
+  store as a credential read, though neither opens a file. Now: a name-only
+  listing is allowed when its argv parses as `rg --files` or a `find` with only
+  name tests, used alone or redirected to a file. Pipelines and command/process
+  substitutions retain normal credential inspection, including
+  `sort --files0-from=-` and `xargs cat`. `--files` given as an option value
+  or after `--`, `find -exec`, and any read of a store itself are still refused.
+- **Credential guard recursion and payload checks parse their flags** — Was:
+  `tar --exclude --no-recursion`, `grep -d recurse` and `zip -R` over a store's
+  parent were allowed, and `bash -oc pipefail '<cmd>'` hid its command. Now:
+  they count as recursive reads, and every word after a shell's command flag is
+  inspected.
+- **Commit guard reads heredocs and substitutions like the shell** — Was: when
+  any heredoc in a worker command expanded, the commit guard read every
+  heredoc body, including quoted source and Markdown, as shell and refused it,
+  while a commit inside `$(…)` was never checked. Now: heredoc bodies are data,
+  every command substitution is checked in the directory it runs in, and a
+  substitution the guard cannot bound is refused.
+
+### Fixed — Factory guards
+
+- **Playwright optional values preserve the browser test tier** — Named-spec runs accept `--shuffle 42`, string or negative seeds, and Playwright 1.65’s other optional-value flags. Values consumed by options never count as named specs; unfiltered runs and `--full` stay refused, and unsupported tokens are named in the refusal.
+
+### Fixed — Artifact-only task close
+
+- **Retire the old documentation delivery during scope correction** — An authorized no-code target clear measures retained delivery paths and retires the old source and proof inputs atomically. Closing the new artifact no longer waits for a release verdict at the previous documentation SHA; retained code produces a scope conflict instead.
+
+### Fixed — Pre-merge review
+
+- **Report a complete simplicity finding class together** — When a verifier finds unnecessary code, it checks the rest of that file for the same class and reports all instances in one verdict, avoiding a separate re-park for each instance.
+
+### Fixed — Releases
+
+- **Release closeout leaves other projects' issues alone** — Was: a task's
+  external reference to a third-party GitHub issue was treated as permission
+  to close it. Now: closeout only closes issues in the project's configured
+  issue repositories and reports every other reference as skipped.
+
+### Fixed — Commander
+
+- **Slash command cleanup and Finish status** — Choosing a slash suggestion clears its typed prefix and closes the palette. Header and composer commands share a compact receipt, and a long Finish turn can resolve automatically when the harness completes after the initial confirmation timeout.
+- **Received supervisor replies are no longer reported abandoned** — Was: a device receipt that arrived after the delivery deadline, or a transport receipt for a reply sent to any Commander device, left the reply marked abandoned. Now: the authenticated receipt settles it as delivered.
+- **Pane replies keep reaching Commander after an MCP reconnect** — Was: the old MCP's exit deleted the supervisor row, so the new MCP resumed the pre-`/clear` transcript and every pane reply went unmirrored. Now: the reconnect resumes the session the row was last bound to.
+- **Verified operator messages after updates** — A daemon reconnect can refresh its relay credential when an update rotates it during connection. Commands retain operator authentication and messages use prompt delivery without re-pairing. Stale relay credentials are refused before any command or message is forwarded.
+
+### Fixed — Factory servers
+
+- **Finished background jobs can be stopped cleanly** — Was: after a finite
+  `server_start` job exited normally on a host without cgroups (macOS),
+  `server_stop` called the new record legacy and refused to retire it. Now:
+  the record keeps the process group created at start; `server_stop` retires
+  it once that group is empty, and names any process still in the group
+  without signalling it.
+
+### Fixed — Factory recovery
+
+- **Accurate local-only retained-work warnings** — Clean checkouts already at their local task target no longer appear as wholly unpushed history when no remote exists. Dirty or ahead worker work stays visible; push recovery names a configured remote and is omitted when none exists.
+
+### Removed — Integrations
+
+- **Viktor integration removed** — Cassy no longer provisions its upstream, accepts `cas viktor`, installs its skill, watches runs or emits its session warning. Stale upstream and policy entries load with one deprecation note and stay unchanged on disk. Shared proxy and delegation services remain available.
+
+### Fixed — Developer checks
+
+- **Disposable Rust fixture edits** — Was: test-shape lint refused a source read used only to append to a disposable runtime fixture. Now: an immediate same-path formatted rewrite is accepted when the read value has no other use; source assertions, comparisons and aliases remain refused.
+
+### Fixed — Developer tooling
+
+- **Preserve encoded caller data assertions** — Test-shape lint accepts exact HTML/Markdown-escaped account values supplied to fixture fields before a positive substring assertion, while still rejecting unrelated, unsupplied or reassigned prose expectations.
+
+### Fixed — Peer delivery refs
+
+- **Follow an anchored peer re-park automatically** — Merge preparation fast-forwards a stale local factory ref when origin matches the task anchor. Divergent local work still refuses G-96, and the existing checkout and concurrent-update protections apply.
+
+### Fixed — Task close
+
+- **No-code audit reports close** — Was: a cas-test-audit report named LEDGER.md was parsed as a QA matrix and refused at close. Now: a no-code task's LEDGER.md is validated only when it declares the canonical QA matrix.
+
+### Fixed — QA
+
+- **Extensionless source citations** — QA ledgers accept source lines in extensionless scripts and files such as README. URLs, clock times and line zero do not supply a source citation.
+- **A bug family's statement counts as its case** — Was: extending an existing
+  bug family's `statement` was silently dropped, so close refused G3 and asked
+  for the change already made. Now: `statement` is a supported bug-family
+  field, and any other bug-family field is refused by registry validation
+  (`unsupported_bug_family_field`) in close, lint and impact alike, naming the
+  field and the supported ones.
+
+### Fixed — Cloud sync
+
+- **Review verdicts reach the machine that owns the task** — Was: when a
+  supervisor on one machine ran `request_changes` on a task parked on another
+  machine, the change was never queued for sync. The owning machine kept the
+  task awaiting merge, so its worker could not restart. Now: `request_changes`,
+  reopens, standalone approval/rejection task changes and proof-scope corrections are queued like any other task write,
+  so the owning machine sees the task reopened after its next sync.
+
+### Fixed — Batch QA
+
+- **A failing ledger no longer records a Batch QA PASS** — Was: a structurally
+  valid ledger with FAIL cells produced an immutable PASS receipt. Now: the
+  receipt is refused and names each failed cell; the ledger artifact itself
+  stays published as evidence.
+
+### Fixed — Supervisor messages
+
+- **Same-turn evidence for operator claims** — Supervisor messages with numbers, times or completion claims now require a citation to a successful tool result from the current turn, or an explicit uncertainty label. Clipboard claims require a fresh paste read after any overwrite. Pane replies receive an uncertainty label or a Stop refusal when evidence is missing.
+
+### Fixed — Task verification
+
+- **Expired task reviews can be requested again** — Was: a verifier timeout
+  blocked every later close and left a corrected no-code report behind the
+  proof scope lock. Now: close requests a fresh pending review for an expired,
+  unparked task-only cycle; a corrected portable `external_ref` can be supplied
+  inline and is saved with that dispatch. Active reviews, shipped or receipt-bound
+  deliveries and epic recovery keep their existing protections.
+
+### Fixed — Skills
+
+- **`cas update` and `cas doctor` agree on built-in skill directories** — Was: a legacy database skill such as `playwright-debug` was written over the built-in `cas-playwright-debug`, so doctor kept reporting drift that `cas update` recreated. Now: the built-in owns its directory, and the sync names the skipped database skill so it can be archived.
+- **Playwright runtime and test guidance** — Require Playwright 1.65 or newer on Node 26, check versions before QA, isolate shared fixture servers with test locks, and document upgrade changes and trace-off triage. Dependency and runtime updates use existing suites; copy, timer and library restatement tests stay out. (#1875)
+
+### Fixed — Cloud queue
+
+- **migrate-to-team stops re-enqueueing pull echoes** — Was: task and dependency rows already equal to the team's row were "enqueued" and nothing changed. Now: they are reported as already on the team and point at `cas cloud queue --purge-pull-echoes --dry-run`. (GH #1776)
+
+### Fixed — Factory merges
+
+- **Automatic CI merge retry survives a GitHub lookup timeout** — when a parked merge is waiting for lane CI, a timed-out or failed `gh api` lookup no longer stops the armed retry or reports the worker as blocked. The retry keeps waiting for the next CI watch pass and still ends on a red or green result, a moved lane, or the two-hour limit.
+
+### Fixed — Merge response receipts
+
+- **Return merge state before the MCP deadline** — Slow candidate preparation and CI queries continue outside the response worker. Merge calls return a durable state receipt after a short wait, followed by a saved result and supervisor notice; fast calls retain their existing result.
+- **Retain delayed close results** — Completion receipts and supervisor notices include the task status and the close’s own outcome, including failure after publication.
+
+## [4.21.0] - 2026-11-12
+
+### Changed — Factory
+
+- **Approvals survive train moves** — Was: every target move that touched a
+  reviewed file re-dispatched pre-merge review unless the full patch the merge
+  added, generated output included, kept its patch-id; on Nov 10 three
+  deliveries were reviewed 2–3 times each only because siblings landed. Now: an
+  approval carries forward, with an audit note and no new dispatch, when the
+  delivery's own patch-id (generated output excluded) is unchanged and the new
+  candidate merges cleanly. A conflict or a changed delivery patch still gets a
+  fresh review.
+- **Shared docs are generated at the release cut** — Was: every delivery had to
+  edit `docs/qa/journeys.yaml`, `.claude/CODEMAP.md` and
+  `docs/PRODUCT_OVERVIEW.md`, park refused with CODEMAP DRIFT, PRODUCT_OVERVIEW
+  DRIFT or registry upkeep findings, and parallel deliveries conflicted on those
+  files. Now: deliveries add their own `docs/qa/bug-families/<slug>.yaml` and
+  `docs/product-overview.d/<task-id>.md` fragments, `scripts/release.sh` folds
+  them in once, the `journey-catalog` lane lint checks the registry and
+  fragments, and park, the supervisor task-create gate and the stop hook no
+  longer check CODEMAP.
+
+### Changed — Release inputs
+
+- **Derived release inputs** — Release cuts bind report proof from each member's recorded external reference. Release review receipts can derive member IDs and the reviewed commit from their published ledger. Candidate previews flow directly into tracking and are saved on the release operation, whose identity uses the final tree and permits a later review of that tree.
+
+### Added — Friction ledger
+
+- **Delivery review and intervention detail** — The ledger shows review rounds by delivery cycle and verdict provenance, wakes by authenticated notice kind, and Commander/manual supervisor interventions. Backfill preserves sourced manual repairs and enriches legacy facts without counting them twice. Commit-to-main measures individual deliveries inside a release train.
+- **Scorers with cited hits** — Was: the ledger report listed review rounds, verdicts and notices, and nobody graded them. Now: `cas ledger report` scores five rubrics per release. They cover review rounds per delivery, decision verdicts graded by the supervisor alone, hold notices per release receipt, minutes a train sat green and uncut, and minutes workers sat held or idle while their epic had ready work. Each rubric has four scored labels, and every hit names its delivery, receipt, train or worker with evidence ids. The scorers only measure; nothing gates or refuses on them.
+
+### Fixed — Release checks
+
+- **Registry validation in clean checkouts** — Legacy validators use the registry's explicit policy without requiring a local Cassy store. Missing policy still needs configuration, and strict policy still requires a validator supporting base comparisons.
+
+### Fixed — Release preview
+
+- **Linked worktree project identity** — Release previews in linked worktrees without local Cassy configuration inherit the main checkout's canonical project identity through Git's common directory, avoiding false foreign-scope holds. An explicit local project pin keeps precedence.
+- **Replay stores outside Git** — Release preview can read a relocated copied store from the original repository without losing the repository, candidate key, source or tree validation.
+
+### Fixed — CI
+
+- **Journey-catalog row explains a missing registry policy** — Was: in a
+  checkout with no Cassy store, a registry file without an `enforce:` header
+  failed the journey-catalog row with no message once the store lookup
+  failed, and an unrecognised stored policy failed the same silent way.
+  Registries that declare the header already skip the store. Now: both
+  failures still fail closed, and they name the revision whose header is
+  missing (or the bad value) and the fix: add the header, or run where the
+  store answers.
+
+### Added — Factory
+
+- **Approval policy registry API** — Delivery-stage checks now declare integrity or as-of policy. Approval writers can capture a registry membership version and use the stamp-based applicability reader to retain integrity checks while excluding later requirements. Approval-by-cycle persistence and runtime integration follow separately.
+- **Every factory check has a stable code** — Was: refusals were free-text
+  headings with no way to count them per check. Now: each gate, guard,
+  watchdog, notice and CI check declares a code at its source, `cas gates list`
+  prints the registry measured from code, refusals end with their `[CODE]`, and
+  `cas gates report --since <tag>` counts refusals, overrides and
+  `cas gates false-positive` declarations per code.
+
+- **Count script and merge decisions** — Script failures emit their registered
+  codes; merge CI refusals and accepted overrides, including pre-push fast-row
+  skips, record typed per-code facts. One MCP router boundary observes every
+  tool's coded refusal or tagged accepted override; one outer hook entry covers
+  ordinary and native fast paths. Release/pre-push reporters retain refusal exits.
+
+- **Measure actual policy exceptions** — Successful accepting producers emit
+  explicit override tags, including stored operator approvals; quoted codes and
+  read-only approval replay add no facts. A test-only AST inventory generates
+  refusal/override sites, candidate exclusions and recording boundaries, and
+  rejects unclassified or uncovered factory-policy candidates.
+
+### Changed — CI
+
+- **Lane CI runs the delivery's impacted tests** — Was: a factory push proved
+  only the tests its worker named; the train's impact selection ran after
+  merge, so a change that broke a test outside its own module showed up as a
+  train red about 35 minutes later. Now: the slim lane runs that same
+  selection for the delivery's range, from the start base recorded at task
+  start, on hosted runners, the changed modules'
+  own tests first and the remaining selected tests in up to three shards only
+  after those pass. When the selector cannot narrow a change (build policy,
+  scripts or workflow edits), the lane runs the whole suite in the same order.
+  A test that already fails on the branch the delivery started from is named
+  as inherited and does not block that delivery.
+
+### Fixed — Factory
+
+- **Checkout refusals name the checkout fix** — Was: a worker `git checkout`
+  outside its assigned worktree was refused with commit guidance ("switch to
+  your lane, then retry your commit"). Now: the refusal
+  (`WORKER_CHECKOUT_OUTSIDE_WORKTREE`) gives the checkout to run inside the
+  assigned worktree, for a revision or a path restore (`git checkout -- <path>`).
+  Commit refusals keep their commit guidance, and the ownership rule is
+  unchanged.
+- **Adopt a commit named for another task** — Was: when a follow-up task's lane
+  was fast-forwarded onto a commit whose subject named the original task, close
+  and merge refused it as foreign work. The push guard also blocked rewriting the
+  lane, so the only way out was to cancel and recreate the task. Separately, a
+  logged-in supervisor's `merge_source` grant on an active task failed before it
+  was saved. Now: the grant is saved through the syncing store's guarded update,
+  and a supervisor's `merge_source=<full SHA>` change-request grant adopts that
+  commit and its ancestors. Later commits on the lane are still checked.
+
+### Added — Delivery identity
+
+- **Every delivery records its cycle** — Was: an ordinary park left no
+  per-delivery record, so each stage re-derived identity from task fields and
+  live Git. Now: every anchor write, including a task created or updated by
+  sync, records the task's delivery cycle and appends later tips to it, and
+  open deliveries parked earlier are backfilled. Request-changes and reopen
+  start the next cycle, machines that sync the task number its cycles the same
+  way, and a completion receipt from a later cycle gets its own id.
+
+### Fixed — Ledger
+
+- **Release check rates count real runs** — Was: `cas ledger report` added
+  every project's `worktree_merge` admissions and success-only duration samples
+  to the lane pass/fail row, and counted one failed merge-queue run once per
+  ejected delivery plus every unlinked ejection notice; v4.0.0 read lane 153/34
+  and queue 23/13 with no failed lane workflow. Now: `checks` holds only this
+  project's workflow, job and review results, a failed queue run counts once,
+  and each row shows observed minutes with an explicit untimed count.
+  `check_runs` keeps each run's id, workflow/job title and link, and
+  `check_cohorts` lists merge admissions, queue notices, duration samples and
+  downstream projects' rows separately.
+
+### Fixed — Developer checks
+
+- **Recorded CLI arguments** — Test-shape lint recognizes explicit `shlex.split` projections of recorded caller arguments, including quoted payload text, while continuing to reject raw prose pins.
+- **Gate token assertions** — Named test admission and test-shape lint accept bracketed gate codes declared in the registry while continuing to reject unknown tokens and prose assertions.
+
+### Fixed — Task delivery
+
+- **Published start bases and successor deliveries** — Worker starts use the origin target when a local epic has unpublished commits. A cancelled task's recorded unmerged commits can be delivered unchanged by its explicitly named successor, while unrelated work keeps its ownership checks.
+
+### Changed — Merge admission
+
+- **One origin read per merge** — Was: a merge asked origin about its target up to four times, and a three-entry train merge made 24 origin reads (8 per entry). Now: the fetch under the target lock is the only merge read. The target sync, its containment re-check, the train's publication check, promotion recovery and the close's integration proof reuse it. The close reads origin only when the tracking ref cannot prove the delivery, and then at most once. The same train makes 3 reads (1 per entry). A new pre-merge review still refreshes the target before it is dispatched.
+- **Session ownership checked once** — Was: the foreign-session check ran before and after parked-delivery inference. Now: it runs once, after inference, and still comes before any effect or inference refusal.
+- **Registry** — The containment-freshness code G-105 is folded into G-110. Both reported the target's freshness from the same read. The registry drops from 401 to 400 checks.
+
+### Fixed — Release
+
+- **No-code report deliveries can close at release again** — Was: once
+  verdicts were bound to delivery cycles, an explicit no-code delivery (which
+  never has a cycle) could not be approved by its verifier, so the release
+  cut held it as missing review and refused with "zero would-close". Now: a
+  delivery with no cycle is approved by the verdict for the commit its
+  dispatch reviewed, as before; cycle-bound deliveries are unchanged. The
+  cut refusal also lists the hold reasons and the members missing review.
+
+### Fixed — Friction ledger
+
+- **Count rebinds once** — Live branch rebinds and retained audit backfills share one identity. Reports recognize historical duplicate aliases without deleting ledger history or merging unrelated actions.
+
+### Fixed — Factory gate audit
+
+- **Ratchet uncoded caller-authority refusals** — The mechanical gate audit traces caller identity into refusal conditions, while excluding ordinary errors and unrelated role/owner metadata. Mutable, shadowed and destructured bindings retain their provenance at each scope and read position. Existing uncoded sites are recorded in a counted landed baseline that can only shrink, including after file deletion; new uncoded sites fail the audit. No gate codes or runtime policy are added.
+
+### Fixed — Delivery approvals
+
+- **Keep approvals attached to their delivery cycle** — New candidate approvals retain their cycle and registry version when carried. Release close finds the approved delivery even when a newer task review exists; historical candidate approvals retain their source and shipped-tree checks.
+
+### Fixed — Factory checks
+
+- **Count each surviving rule once** — Test-shape lint stays in CI instead of rerunning at park. Shared proof-scope and independent-QA guards use one stable code each. Retired CI prose pins and repeated per-prompt role reminders no longer add friction. Workers can message their own recorded native subagent IDs while factory traffic remains on Cassy coordination.
+
+### Fixed — Repository identity
+
+- **One project resolver** — Selector stamping now uses the same ordered repository identities as scope matching, including the primary project pin for linked worktrees without local configuration.
+
 ## [4.20.0] - 2026-11-12
 
 ### Fixed — Release trains

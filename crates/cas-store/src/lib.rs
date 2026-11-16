@@ -52,6 +52,7 @@ mod code_vector_store;
 mod commit_link_store;
 pub mod communication_slo;
 mod delegation_receipt_store;
+mod delivery_cycle;
 mod delivery_store;
 mod entity_store;
 mod epic_split_store;
@@ -89,8 +90,6 @@ pub mod trace_archive;
 pub mod tracing;
 mod verification_store;
 mod version_store;
-mod viktor_inbound_store;
-mod viktor_watch_store;
 mod worktree_store;
 
 // Mock stores for testing
@@ -148,8 +147,13 @@ pub use delegation_receipt_store::{
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
 };
+pub use delivery_cycle::{
+    DELIVERY_CYCLE_SCHEMA, DeliveryCycle, current_delivery_cycle, current_delivery_cycle_with_conn,
+    delivery_cycle_id, delivery_cycles, backfill_delivery_cycles,
+};
 pub use delivery_store::{
-    DELIVERY_SCHEMA, build_worker_completion_receipt, clear_pending_observed_delivery_merge,
+    DELIVERY_SCHEMA, build_worker_completion_receipt, build_worker_completion_receipt_in_cycle,
+    clear_pending_observed_delivery_merge,
     create_worker_delivery, create_worker_delivery_with_dispatch,
     create_worker_delivery_with_dispatch_for_lease, create_worker_delivery_with_dispatch_for_lease_at_repository, get_latest_worker_delivery,
     get_worker_delivery_by_receipt, has_pending_observed_delivery_merge,
@@ -190,8 +194,8 @@ pub use qa_pass_store::{
 pub use quality_event_store::{
     CheckOutcome, CheckStage, FeedbackSource, FeedbackVerdict, InterventionKind, NewQualityEvent,
     QUALITY_EVENT_BATCH_LIMIT, QUALITY_EVENT_SCHEMA_STATEMENTS, QualityEvent, QualityEventWire,
-    EstimateReference, QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
-    normalize_release_version, quality_events_after, quality_events_between,
+    EstimateReference, ReviewEvidence, QualityPayload, WakeChannel, TurnAction, QUALITY_EVENT_TURN_UPGRADE_STATEMENTS, QUALITY_EVENT_FRICTION_UPGRADE_STATEMENTS, QUALITY_EVENT_ESTIMATE_UPGRADE_STATEMENTS, FrictionSource, ensure_quality_event_schema, import_quality_events,
+    normalize_release_version, quality_event_by_id, quality_events_after, quality_events_between,
     quality_open_estimates, quality_check_samples, quality_events_for_task, quality_interventions_since, quality_release_events,
     record_quality_event, quality_event_recorded, sanitize_quality_link, sanitize_quality_title,
 };
@@ -262,7 +266,7 @@ pub use verification_store::{
     correct_parked_delivery_proof_scope, correct_parked_delivery_proof_targets,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
-    extend_verification_dispatch_deadline, rebind_approved_verification_dispatch,
+    extend_verification_dispatch_deadline,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
     has_active_verification_dispatch, import_peer_premerge_verification, inspect_bound_server_verifier_handoff,
@@ -274,13 +278,8 @@ pub use verification_store::{
     request_changes_for_parked_delivery, request_changes_for_parked_delivery_with_merge_sources,
     resolve_verification_dispatch_for_add,
     resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
+    retry_verification_dispatch_after_error_with_conn, recover_errored_verification_dispatch_with_conn,
     save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
-};
-
-// Durable Viktor thread watches used by the embedded daemon's inbound bridge.
-pub use viktor_inbound_store::{SqliteViktorInboundStore, ViktorInboundMessage};
-pub use viktor_watch_store::{
-    DEFAULT_VIKTOR_WATCH_TTL_SECS, SqliteViktorWatchStore, ViktorThreadWatch, ViktorWatchStatus,
 };
 
 // Worktree store for git worktree tracking
@@ -644,6 +643,22 @@ pub trait TaskStore: Send + Sync {
         Err(StoreError::Other(
             "atomic task mutation receipts are unsupported by this store".to_string(),
         ))
+    }
+
+    /// Bind a mutation receipt to the row's current revision. A syncing
+    /// wrapper uses it to publish a lifecycle write that another store module
+    /// committed directly (cas-a836).
+    fn record_mutation_receipt(&self, _task_id: &str, _receipt_id: &str) -> Result<()> {
+        Err(StoreError::Other(
+            "task mutation receipts are unsupported by this store".to_string(),
+        ))
+    }
+
+    /// Queue the row's current state for cloud sync after a write that
+    /// bypassed this store, such as `request_changes` (cas-a836). Stores
+    /// without cloud sync have nothing to publish.
+    fn publish_current_row(&self, _task_id: &str) -> Result<()> {
+        Ok(())
     }
 
     /// Canonical project identity attached to this store, when available.

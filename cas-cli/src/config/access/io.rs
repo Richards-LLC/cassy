@@ -200,7 +200,8 @@ fn qa_value(qa: Option<&QaConfig>) -> toml::Value {
         .unwrap_or_else(empty_qa_table)
 }
 
-fn read_qa_source(dir: &Path) -> Result<toml::Value, MemError> {
+/// The user layer is `[qa]` plus the machine-wide `factory.max_workers`.
+fn read_user_source(dir: &Path) -> Result<(toml::Value, Option<usize>), MemError> {
     let toml_path = dir.join("config.toml");
     let yaml_path = dir.join("config.yaml");
     let document: toml::Value = if toml_path.exists() {
@@ -209,12 +210,23 @@ fn read_qa_source(dir: &Path) -> Result<toml::Value, MemError> {
     } else if yaml_path.exists() {
         serde_yaml::from_str(&fs::read_to_string(yaml_path)?)?
     } else {
-        return Ok(empty_qa_table());
+        return Ok((empty_qa_table(), None));
     };
     let qa = document.get("qa").cloned().unwrap_or_else(empty_qa_table);
     // Fail on invalid user policy rather than silently changing its QA mode.
     let _: QaConfig = qa.clone().try_into().map_err(|error| MemError::Parse(format!("Invalid [qa] at {}: {error}", dir.display())))?;
-    Ok(qa)
+    let raw = document.get("factory").and_then(|factory| factory.get("max_workers"));
+    let max_workers = raw.and_then(toml::Value::as_integer)
+        .and_then(|n| usize::try_from(n).ok()).filter(|n| *n >= 1);
+    if let (Some(value), None) = (raw, max_workers) {
+        // An invalid limit must not also discard the user's valid [qa] defaults.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| eprintln!(
+            "Warning: invalid factory.max_workers = {value} in {}; using the project value or 8.",
+            dir.display()
+        ));
+    }
+    Ok((qa, max_workers))
 }
 
 fn overlay_qa(base: &mut toml::Value, overrides: &toml::Value) {
@@ -329,7 +341,7 @@ impl Config {
         let user = if let Some(host) = host.filter(|host| {
             host != cas_dir && host.canonicalize().ok() != cas_dir.canonicalize().ok()
         }) {
-            read_qa_source(&host).unwrap_or_else(|_| {
+            read_user_source(&host).unwrap_or_else(|_| {
                 // A broken optional user layer must not disable every project.
                 // Local project errors are still returned by the loader above.
                 static WARNED: std::sync::Once = std::sync::Once::new();
@@ -339,11 +351,13 @@ impl Config {
                     } else { host.join("config.yaml") };
                     eprintln!("Warning: unreadable or invalid user QA defaults in {}\n  User defaults ignored; project and built-in settings apply.\n  Repair this file to restore inheritance.", path.display());
                 });
-                empty_qa_table()
+                (empty_qa_table(), None)
             })
         } else {
-            empty_qa_table()
+            (empty_qa_table(), None)
         };
+        let (user, user_max_workers) = user;
+        config.user_max_workers = user_max_workers;
         if let Some(layers) = &mut config.qa_layers {
             layers.user = user;
         } else {
@@ -479,7 +493,7 @@ impl Config {
 
     /// Load project config with host-level `~/.cas/config.toml` staging defaults.
     ///
-    /// QA keys inherit user defaults in `load`. Project config wins when it
+    /// QA keys and `factory.max_workers` inherit user defaults in `load`. Project config wins when it
     /// sets `[staging]`; other sections remain project-local to avoid
     /// leaking operator-level hooks, telemetry, LLM, or factory settings into
     /// arbitrary repositories.

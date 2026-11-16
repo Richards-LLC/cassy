@@ -163,7 +163,7 @@ pub use detect::{
 open_reminder_store, open_rule_store, open_rule_store_local,
     open_skill_store, open_skill_store_local, open_spawn_queue_store, open_spec_store, open_store,
     open_store_local, open_supervisor_queue_store, open_task_store, open_task_store_local,
-    open_verification_store, open_worktree_store,
+    open_verification_store, open_worktree_store, publish_direct_task_write,
 };
 pub(crate) use detect::find_cas_root_ignoring_env;
 pub use quarantine_task::QuarantineFilteringTaskStore;

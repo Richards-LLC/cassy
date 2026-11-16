@@ -127,8 +127,11 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 .as_ref()
                 .map(|start| start.branch.as_str())
                 .or(task.deliverables.parked_branch.as_deref());
-            let revision = match source {
-                Some(branch) => {
+            let release = release_scope.as_deref()
+                .map(|scope| super::release_adapters::review_blocks_for_scope(cas_root, scope)).transpose()?;
+            let revision = match (release.as_ref(), source) {
+                (Some((inventory, _)), _) => inventory.scope.final_release_sha.clone(),
+                (None, Some(branch)) => {
                     // A local source remains authoritative for ongoing work.
                     // After branch cleanup, use the same immutable delivery
                     // identity as batch receipts, never a movable tag or HEAD.
@@ -138,21 +141,25 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                             format!("resolve recorded task source branch {branch:?} for {id}")
                         })?
                 }
-                None if task.deliverables.factory_branch_anchor.is_some()
+                (None, None) if task.deliverables.factory_branch_anchor.is_some()
                     || !task.deliverables.historical_factory_branch_anchors.is_empty() =>
                 {
                     crate::qa_batch::delivery_anchor(&repo, &task)
                         .with_context(|| format!("resolve recorded delivery anchor for {id}"))?
                 }
-                None => crate::qa_impact::io::resolve_ref(&repo, "HEAD")?,
+                (None, None) => crate::qa_impact::io::resolve_ref(&repo, "HEAD")?,
             };
-            let mut covers = if covers.is_empty() { vec![id.clone()] } else { covers.clone() };
+            let mut covers = match &release {
+                Some((inventory, _)) => inventory.deliveries.iter().map(|d| d.task_id.clone()).collect(),
+                None if covers.is_empty() => vec![id.clone()],
+                None => covers.clone(),
+            };
             covers.sort_unstable();
             covers.dedup();
             let mut body = crate::qa_ledger::scaffold_with_coverage(&task, &journeys, revision.trim(), &covers);
-            if let Some(scope) = release_scope {
+            if let Some((_, blocks)) = release {
                 body.push_str("\n## Release review blocks\n\nRemove any epic whose acceptance this review did not verify.\n\n");
-                body.push_str(&super::release_adapters::review_blocks_for_scope(cas_root, scope)?);
+                body.push_str(&blocks);
             }
             let paths = crate::config::resolved_factory_artifact_paths(
                 cas_root,

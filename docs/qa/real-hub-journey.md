@@ -1,5 +1,7 @@
 # Real disposable hub recovery
 
+Historical evidence only; current authoring policy is `cas-playwright-tests`. Older version numbers below record the measured run and are not supported-version advice.
+
 ## Native recording chapters
 
 Use `showRecordingChapter` from

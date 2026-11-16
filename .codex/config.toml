@@ -33,22 +33,28 @@ url = "https://api.githubcopilot.com/mcp/"
 bearer_token_env_var = "GITHUB_TOKEN"
 
 # =============================================================================
-# playwright — stdio (npx). No auth required; Playwright selects its
-# platform-native persistent profile under the worker's HOME when no explicit
-# user-data directory is supplied.
+# playwright — bundled with the hub-web lockfile, launched from the checkout
+# root. Isolated headless contexts never share a persistent browser profile.
+# Set PLAYWRIGHT_MCP_STORAGE_STATE to an explicit state file when auth is needed.
 # =============================================================================
 [mcp_servers.playwright]
 command = "npx"
 args = [
-    "-y",
-    "@playwright/mcp@0.0.70",
+    "--prefix",
+    "hub-web",
+    "--no-install",
+    "playwright",
+    "mcp",
+    "--isolated",
+    "--headless",
     "--browser",
-    "chrome",
+    "chromium",
+    "--output-dir",
+    "target/artifacts/playwright-mcp",
 ]
 env_vars = [
     "PATH",
     "HOME",
     "USER",
-    "DISPLAY",
-    "PLAYWRIGHT_MCP_USER_DATA_DIR",
+    "PLAYWRIGHT_MCP_STORAGE_STATE",
 ]

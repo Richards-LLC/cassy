@@ -285,6 +285,7 @@ fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
             row.action.as_str(),
         );
     }
+    // gate[W-18 watchdog]: Spawn queue stall scan
     let stalled = if request.scan_stalls {
         queue.peek(50).ok().map(|pending| {
             super::queue_and_events::stalled_spawn_requests(&pending, chrono::Utc::now(),

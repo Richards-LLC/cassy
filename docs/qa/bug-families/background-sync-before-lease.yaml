@@ -1,4 +1,0 @@
-title: Background sync performed cloud discovery before checking the held store lease
-tasks: [cas-de92]
-invariants: [FACTORY-PEER-PULL-CADENCE]
-journeys: [FACTORY-SUPERVISE]

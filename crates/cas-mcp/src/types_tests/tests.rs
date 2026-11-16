@@ -204,6 +204,14 @@ fn test_task_request_with_options() {
     assert_eq!(req.title, Some("Test task".to_string()));
     assert_eq!(req.priority, Some(1));
     assert_eq!(req.task_type.as_deref(), Some("bug"));
+    assert_eq!(req.review_dispatch_id, None);
+    for action in ["create", "update"] {
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action":action, "review_dispatch_id":"vdispatch-e17ce9129b337ebcc86c8a0383080009",
+        })).unwrap();
+        assert_eq!(request.review_dispatch_id.as_deref(), Some("vdispatch-e17ce9129b337ebcc86c8a0383080009"));
+        assert_eq!(serde_json::to_value(request).unwrap()["review_dispatch_id"], "vdispatch-e17ce9129b337ebcc86c8a0383080009");
+    }
 }
 
 #[test]

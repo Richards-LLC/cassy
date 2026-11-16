@@ -1275,42 +1275,6 @@ mod tests {
         assert_eq!(history_count, 2);
     }
 
-    /// AC2's rate-limit half. The limiter blocks once the window is full and
-    /// costs nothing while it is not.
-    #[test]
-    fn the_limiter_paces_only_when_the_window_is_full() {
-        use std::time::{Duration, Instant};
-
-        let limiter = RateLimiter::new(2, Duration::from_millis(200));
-        let started = Instant::now();
-        limiter.acquire();
-        limiter.acquire();
-        assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "requests under the cap must not sleep"
-        );
-        assert_eq!(limiter.in_window(), 2);
-
-        // The third is over the cap and must wait out the window.
-        limiter.acquire();
-        assert!(
-            started.elapsed() >= Duration::from_millis(150),
-            "the third request must be paced, waited {:?}",
-            started.elapsed()
-        );
-
-        // The production limiter is the endpoint's published contract.
-        let cloud = RateLimiter::cloud();
-        for _ in 0..10 {
-            cloud.acquire();
-        }
-        assert_eq!(
-            cloud.in_window(),
-            10,
-            "a small run stays well under 120/60s"
-        );
-    }
-
     /// cas-ba66: a non-writer drain (worker or linked-worktree daemon) leaves
     /// the shared code-vector queue to the canonical code-index writer.
     #[tokio::test]

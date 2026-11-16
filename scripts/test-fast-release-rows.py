@@ -736,7 +736,7 @@ esac
         self.write("hub-web/package.json", '{"name":"fixture","private":true}\n')
         self.write("hub-web/package-lock.json", '{}\n')
         self.write("hub-web/dist/app.js", "signup\n")
-        self.write("npm-fixture", '#!/bin/sh\nprintf "%s\\n" "$*" >> ../.git/npm-calls\ncase "$1" in\n'
+        self.write("npm-fixture", f'#!/bin/sh\nprintf "%s\\n" "$*" >> {self.repo}/.git/npm-calls\ncase "$1" in\n'
                    'ci) exit 0;;\nrun) cp src/signup.ts dist/app.js;;\n*) exit 1;;\nesac\n')
         (self.repo / "npm-fixture").chmod(0o755)
         self.commit()
@@ -798,8 +798,13 @@ esac
         self.assertIn("FAIL hub-web-dist-drift", refused.stderr)  # machine row identifier
         self.assertEqual(command(self.repo, "git", "ls-remote", "origin", branch).stdout.split()[0], published)
         self.assertFalse((self.repo / "cargo-called").exists())
-        # The refused build produced fresh dist. Commit it, then replay the
-        # same pre-push payload twice, as after a transport failure.
+        # The comparison built a disposable checkout of the pushed tip, so
+        # this checkout keeps its committed bytes and stays clean.
+        self.assertEqual((self.repo / "hub-web/dist/app.js").read_text(), "hand-edited bundle\n")
+        self.assertEqual(command(self.repo, "git", "status", "--porcelain").stdout, "")
+        # Prepare matching output explicitly, then replay the same pre-push
+        # payload twice, as after a transport failure.
+        self.write("hub-web/dist/app.js", (self.repo / "hub-web/src/signup.ts").read_text())
         self.commit()
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         update = f"refs/heads/target {head} {branch} {published}\n"

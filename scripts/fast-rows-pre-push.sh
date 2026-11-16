@@ -150,9 +150,18 @@ PY
         continue
     fi
     if [[ "$dist_needed" == true && "$web_proved" == false ]]; then
-        version="$(sed -n 's/^version = "\([^" ]*\)".*/\1/p' cas-cli/Cargo.toml | head -n1)"
-        if ! CAS_RELEASE_GATE_LOG_DIR="$attempt_logs" bash scripts/release-gate.sh "$version" --only hub-web-dist-drift \
-            </dev/null >"$attempt_logs/gate.log" 2>&1; then
+        # cas-5a04: build the pushed tip in a disposable checkout, so a refused
+        # comparison never leaves generated output in this one.
+        dist_tree="$attempt_logs/tree"
+        drift=1
+        if git worktree add -q --detach "$dist_tree" "$local_sha" >"$attempt_logs/gate.log" 2>&1; then
+            version="$(sed -n 's/^version = "\([^" ]*\)".*/\1/p' "$dist_tree/cas-cli/Cargo.toml" 2>/dev/null | head -n1)"
+            (cd "$dist_tree" && CAS_RELEASE_GATE_LOG_DIR="$attempt_logs" bash scripts/release-gate.sh "$version" --only hub-web-dist-drift) \
+                </dev/null >"$attempt_logs/gate.log" 2>&1
+            drift=$?
+        fi
+        git worktree remove --force "$dist_tree" >/dev/null 2>&1 || { rm -rf "$dist_tree"; git worktree prune; }
+        if (( drift != 0 )); then
             cat "$attempt_logs/gate.log" >&2
             printf 'FIX: run npm --prefix hub-web ci --no-audit --no-fund && npm --prefix hub-web run build, then commit hub-web/dist and retry the push\n' >&2
             printf 'pre-push: web build logs: %s\n' "$attempt_logs" >&2

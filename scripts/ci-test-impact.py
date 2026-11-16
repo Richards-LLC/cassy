@@ -541,7 +541,7 @@ def base_failure_proof(base, configuration, failures):
 
 
 # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
-def lane_attribute(root, base, failures, destination, configuration=None):
+def lane_attribute(root, base, failures, destination, configuration=None, base_source="no attribution base"):
     """Reuse exact-base failures, replay misses, and fail closed on incomplete work."""
     started = time.monotonic()
     # Twenty minutes for lookup/preparation/build/test, within the existing
@@ -587,7 +587,11 @@ def lane_attribute(root, base, failures, destination, configuration=None):
         finally:
             result["timings"][phase] = time.monotonic() - phase_start
             save()
-    if pending:
+    if pending and not base:
+        # cas-0e97: nothing to replay at; never pass git an empty ref.
+        result["error"] = f"base unresolved: {base_source}"
+        print(f"Lane impact: {result['error']}", file=sys.stderr)
+    elif pending:
         try:
             preparation = time.monotonic()
             try:
@@ -657,7 +661,8 @@ def lane_attribute(root, base, failures, destination, configuration=None):
     lines = [f"Lane impact: inherited from base {base[:12]} (fails there too): {f['binary']} {f['test']}" for f in result["inherited"]]
     lines += [f"Lane impact: caused by this delivery (fails again on a rerun here, passes or is absent at base): {f['binary']} {f['test']}" for f in result["caused"]]
     lines += [f"Lane impact: unattributed (passed on a rerun here and at base {base[:12]}; not proof this delivery caused it): {f['binary']} {f['test']}" for f in result["unattributed"]]
-    lines += [f"Lane impact: unresolved at base: {f['binary']} {f['test']}" for f in result["unresolved"]]
+    lines += [f"Lane impact: own failure, base unresolved ({base_source}): {f['binary']} {f['test']}" if not base
+              else f"Lane impact: unresolved at base: {f['binary']} {f['test']}" for f in result["unresolved"]]
     print("\n".join(lines))
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
@@ -690,13 +695,17 @@ def lane(root, args):
     out = Path(args.out)
     outputs = {}
     if args.phase == "plan":
-        base, source = lane_base(root, args.recorded_base_ref, args.base_sha)
         selection = plan(root, args.base_sha, args.zero_base_ref, args.history, delivery=True)
+        # cas-0e97: infer from the resolved merge-base, never the raw BASE_SHA,
+        # which is empty or all zeros on a branch's first push.
+        base, source = lane_base(root, args.recorded_base_ref, selection.get("base", ""))
+        if not base:
+            source = "unresolved: neither a recorded start base nor a target merge-base resolved"
         selection["attribution_base"] = base
         selection["base_source"] = "live target merge-base"
         selection["attribution_base_source"] = source
         print(f"Lane impact base: {selection.get('base', args.base_sha)} (live target merge-base)")
-        print(f"Lane attribution base: {base or args.zero_base_ref} ({source})")
+        print(f"Lane attribution base: {base or 'none'} ({source})")
         selection["configuration"] = proof_configuration(root)
         split = lane_split(root, selection)
         write(out, {"plan": selection, "split": split})
@@ -709,7 +718,8 @@ def lane(root, args):
         selection, split = saved["plan"], saved["split"]
         if args.phase == "attribute":
             receipt = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())
-            return lane_attribute(root, selection.get("attribution_base", selection["base"]), receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"), receipt.get("configuration"))
+            return lane_attribute(root, selection.get("attribution_base", selection.get("base", "")), receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"),
+                                  receipt.get("configuration"), selection.get("attribution_base_source", "no attribution base"))
         source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
         receipt = out.with_name(f"{args.phase}-receipt.json")
         status, failed = 0, False

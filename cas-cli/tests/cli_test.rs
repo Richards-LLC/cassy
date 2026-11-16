@@ -171,6 +171,10 @@ fn release_plan_and_leased_cut_replay_incidents_cas_80df() {
     member.origin_project = Some("cut-entry".into());
     member.status = TaskStatus::Closed;
     member.closed_at = Some(chrono::Utc::now());
+    // A light delivery with green lane CI needs no verifier approval (cas-5a22).
+    member.depth = cas_types::TaskDepth::Light;
+    member.deliverables.green_merge_commit = Some(anchor.clone());
+    member.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Green);
     member.deliverables.factory_branch_anchor = Some(anchor);
     member.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cut-entry".into(), target_branch: LANE.into() });
     tasks.add(&member).unwrap();
@@ -259,6 +263,8 @@ esac
     artifacts.mark_committed(&artifact.id, None).unwrap();
     // The park-recorded report reference is the member's proof (cas-0226).
     report.external_ref = Some(format!("artifact:{}", artifact.id));
+    report.status = TaskStatus::Closed;
+    report.closed_at = Some(chrono::Utc::now());
     tasks.update(&report).unwrap();
     git(&held, &["add", "notes.md"]);
     git(&held, &["commit", "-qm", "release input notes"]);

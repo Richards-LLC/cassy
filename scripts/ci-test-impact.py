@@ -700,7 +700,7 @@ def lane(root, args):
         # which is empty or all zeros on a branch's first push.
         base, source = lane_base(root, args.recorded_base_ref, selection.get("base", ""))
         if not base:
-            source = "unresolved: neither a recorded start base nor a target merge-base resolved"
+            source = "neither a recorded start base nor a target merge-base resolved"
         selection["attribution_base"] = base
         selection["base_source"] = "live target merge-base"
         selection["attribution_base_source"] = source

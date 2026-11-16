@@ -102,8 +102,7 @@ pub(crate) fn launch(
     session: &str,
     dispatch_id: &str,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
-    let dispatch =
-        cas_store::get_verification_dispatch(root, dispatch_id).map_err(|e| e.to_string())?;
+    let dispatch = super::automatic::launch_dispatch(root, dispatch_id, Some(session))?;
     let owner = crate::store::open_agent_store(root)
         .map_err(|e| e.to_string())?
         .get(&dispatch.owner_agent_id)
@@ -181,6 +180,71 @@ mod authority_tests {
         release.send(()).unwrap();
         holder.join().unwrap();
         assert!(refused.starts_with("verifier_factory_store_busy:"), "{refused}");
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    #[test]
+    fn retired_supervisor_dispatch_launches_for_claimed_successor_cas_32c2() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("owner-handoff");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        // No real provider/account is needed to prove the synchronous launch
+        // and owner binding; provider preparation is asynchronous and isolated.
+        env.set("CAS_TEST_HUB_PATH", env.home().join("no-provider"));
+        let agents = cas_store::SqliteAgentStore::open(&root).unwrap();
+        use cas_store::AgentStore;
+        let mut previous = cas_types::Agent::new_with_role(
+            "supervisor-a".into(), "previous".into(), cas_types::AgentRole::Supervisor,
+        );
+        previous.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        previous.factory_session = Some("retired-factory".into());
+        agents.register(&previous).unwrap();
+        let mut task = Task::new("cas-32c2-launch".into(), "Owner handoff".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.pending_verification = true;
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &previous.id, &previous.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() - chrono::Duration::minutes(1), false,
+        ).unwrap();
+        agents.unregister(&previous.id).unwrap();
+        let mut successor = cas_types::Agent::new_with_role(
+            "supervisor-b".into(), "successor".into(), cas_types::AgentRole::Supervisor,
+        );
+        successor.machine_id = previous.machine_id.clone();
+        successor.factory_session = Some("successor-factory".into());
+        agents.register(&successor).unwrap();
+        let handoffs = agents.claim_supervisor_handoffs(&successor).unwrap();
+        assert!(handoffs.iter().any(|handoff| handoff.agent_id == previous.id));
+        assert!(agents.get(&previous.id).is_err());
+        assert!(super::super::automatic::recovery_retry(&root, &dispatch).is_none());
+        assert!(launch(&root, "unrelated-factory", &dispatch.id).is_err());
+        assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().owner_agent_id, previous.id);
+        let launched = launch(&root, "successor-factory", &dispatch.id)
+            .expect("retired owner must resolve through its claimed handoff")
+            .expect("an unresolved dispatch must launch once");
+        launched.join().unwrap();
+        let current = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(current.owner_agent_id, successor.id);
+        assert_eq!(current.requester_agent_id, previous.id);
+        assert_eq!(current.repository, dispatch.repository);
+        assert!(current.deadline_at > chrono::Utc::now());
+        assert!(super::super::automatic::recovery_retry(&root, &dispatch).is_some());
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let metadata: String = conn.query_row(
+            "SELECT metadata FROM events WHERE json_extract(metadata,'$.code') = 'verification_owner_adopted' AND json_extract(metadata,'$.dispatch_id') = ?1",
+            [&dispatch.id], |row| row.get(0),
+        ).unwrap();
+        let audit: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(audit["previous_owner"], previous.id);
+        assert_eq!(audit["owner"], successor.id);
     }
 }
 

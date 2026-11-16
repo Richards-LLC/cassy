@@ -818,7 +818,10 @@ pub enum FactoryCommands {
         request: std::path::PathBuf,
     },
     /// Internal capped runner installed by the worker PreToolUse guard.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        after_help = "Examples:\n  cas factory worker-check --cas-root \"$CAS_ROOT\" -- nextest run -p <crate> --lib -E 'test(<name>)'\n  cas factory worker-check --cas-root \"$CAS_ROOT\" -- jest path/to/file.test.ts\n\nJavaScript runners: vitest, jest or playwright, then repository-relative test files."
+    )]
     WorkerCheck {
         #[arg(long)]
         cas_root: std::path::PathBuf,
@@ -834,7 +837,8 @@ pub enum FactoryCommands {
         /// Allowlisted child-only NAME=value or -NAME test input.
         #[arg(long, hide = true, allow_hyphen_values = true)]
         test_env: Vec<String>,
-        #[arg(last = true, required = true)]
+        /// Cargo arguments, or vitest|jest|playwright followed by test files
+        #[arg(last = true, required = true, value_name = "RUNNER_ARGS")]
         cargo_args: Vec<String>,
     },
     /// Create a disposable task-owned detached checkout; print its absolute path.

@@ -236,9 +236,44 @@ fn request_with_retry(
 
 /// Claim synchronously, then do provider work off the MCP/control loop. The
 /// existing dispatch claim prevents a second launch, including manual races.
+pub(super) fn launch_dispatch(root: &Path, id: &str, session: Option<&str>) -> Result<VerificationDispatch, String> {
+    let dispatch = cas_store::get_verification_dispatch(root, id).map_err(|e| e.to_string())?;
+    let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
+    if agents.get(&dispatch.owner_agent_id).is_ok() {
+        return Ok(dispatch);
+    }
+    let machine = cas_types::Agent::get_or_generate_machine_id();
+    let retired = cas_store::SqliteAgentStore::open(root).map_err(|e| e.to_string())?;
+    let dead = |agent: &cas_types::Agent| {
+        agent.machine_id.as_deref() == Some(machine.as_str())
+            && (agent.status == cas_types::AgentStatus::Shutdown || matches!(
+                crate::mcp::daemon::evaluate_liveness(agent,
+                    crate::mcp::daemon::pid_alive, crate::mcp::daemon::pid_matches_fingerprint),
+                crate::mcp::daemon::LivenessOutcome::Dead { .. }
+            ))
+    };
+    for successor in agents.list(None).map_err(|e| e.to_string())? {
+        if successor.role != cas_types::AgentRole::Supervisor || !successor.is_alive()
+            || successor.machine_id.as_deref() != Some(machine.as_str()) || dead(&successor)
+            || session.is_some_and(|session| successor.factory_session.as_deref() != Some(session))
+        { continue; }
+        if retired.supervisor_handoffs_claimed_by(&successor).map_err(|e| e.to_string())?
+            .iter().any(|handoff| handoff.agent_id == dispatch.owner_agent_id)
+        {
+            let verifier = dispatch.verifier_agent_id.as_deref()
+                .and_then(|id| agents.get(id).ok()).filter(&dead);
+            return cas_store::adopt_retired_verification_dispatch(
+                root, id, &successor, verifier.as_ref(), chrono::Utc::now(),
+            ).map_err(|e| e.to_string());
+        }
+    }
+    Err("verification_owner_handoff_scope: missing owner's claimed local successor is unavailable".into())
+}
+
 pub(super) fn launch(
     core: &CasCore, task: &Task, dispatch: &VerificationDispatch,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    let dispatch = launch_dispatch(&core.cas_root, &dispatch.id, None)?;
     #[cfg(unix)]
     if let Some(session) = core.open_agent_store().map_err(|e| e.to_string())?
         .get(&dispatch.owner_agent_id).map_err(|e| e.to_string())?.factory_session
@@ -262,7 +297,7 @@ pub(super) fn launch(
                 }
             }).map(Some).map_err(|e| e.to_string());
     }
-    launch_local(core, task, dispatch)
+    launch_local(core, task, &dispatch)
 }
 
 pub(super) fn launch_local(
@@ -378,16 +413,28 @@ fn launch_with_preparation(
     Ok(Some(handle))
 }
 
-/// The executable recovery after an automatic verifier could not finish: the
-/// call that opened this exact dispatch starts one replacement on it.
-pub(crate) fn recovery(root: &Path, dispatch: &VerificationDispatch) -> String {
+/// A retry is executable only while its recorded owner can launch it.
+pub(super) fn recovery_retry(root: &Path, dispatch: &VerificationDispatch) -> Option<String> {
+    let owner_available = cas_store::get_verification_dispatch(root, &dispatch.id).ok()
+        .and_then(|live| crate::store::open_agent_store(root).ok()?.get(&live.owner_agent_id).ok())
+        .is_some_and(|owner| owner.role == cas_types::AgentRole::Supervisor && owner.is_alive());
+    if !owner_available {
+        return None;
+    }
     let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
-    let retry = match candidate_for_dispatch(root, dispatch).ok().flatten() {
+    Some(match candidate_for_dispatch(root, dispatch).ok().flatten() {
         Some(candidate) => format!(
             "{prefix}factory action=worktree_merge id={} task_id={}",
             candidate.source_branch, dispatch.task_id
         ),
         None => format!("{prefix}task action=close id={}", dispatch.task_id),
+    })
+}
+
+/// The executable recovery after an automatic verifier could not finish.
+pub(crate) fn recovery(root: &Path, dispatch: &VerificationDispatch) -> String {
+    let Some(retry) = recovery_retry(root, dispatch) else {
+        return format!("Dispatch {} needs its recorded supervisor handoff repaired. Inspect the retired owner's session-end claim and live successor before launching; ownership could not be established.", dispatch.id);
     };
     format!(
         "Retry {retry}; one replacement will claim this exact dispatch. {}",

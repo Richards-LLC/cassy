@@ -87,7 +87,11 @@ pub(crate) fn recheck_target(root: &Path, repo: &Path, target: &str, target_tip:
     Ok(())
 }
 
-pub(crate) fn scan(root: &Path) -> Result<()> {
+/// Targets this scan could not check, by target branch, with the reason.
+/// One unfetchable train (for example a cancelled train whose branch was
+/// deleted) is skipped and reported; it never stops the other targets
+/// (GH #2017).
+pub(crate) fn scan(root: &Path) -> Result<HashMap<String, String>> {
     let store = crate::store::open_task_store_cached(root)?;
     let mut targets = BTreeSet::new();
     for task in store.list(Some(TaskStatus::AwaitingMerge))? {
@@ -102,17 +106,37 @@ pub(crate) fn scan(root: &Path) -> Result<()> {
             Err(error) => tracing::debug!(task_id = %task.id, %error, "parked conflict scan has no local repository"),
         }
     }
+    let reported = REPORTED.get_or_init(Default::default);
+    let mut skipped = HashMap::new();
     for (repo, target) in targets {
-        let git = GitOperations::new(repo.clone());
-        if git.has_origin_remote() {
-            anyhow::ensure!(
-                crate::git_evidence::fetch_parent_branch_result(&repo, &target) == crate::git_evidence::BoundedFetch::Succeeded,
-                "could not refresh train {target}",
-            );
+        let checked = (|| {
+            let git = GitOperations::new(repo.clone());
+            if git.has_origin_remote() {
+                anyhow::ensure!(
+                    crate::git_evidence::fetch_parent_branch_result(&repo, &target) == crate::git_evidence::BoundedFetch::Succeeded,
+                    "could not refresh train {target}",
+                );
+            }
+            let reference = close_ops::freshest_target_ref(&repo, &target);
+            let tip = git.resolve_commit(&reference).context("train tip unavailable")?;
+            recheck_target(root, &repo, &target, &tip, "cassy-conflict-preflight")
+        })();
+        let key = (root.to_path_buf(), repo, target.clone());
+        let mut reported = reported.lock().unwrap_or_else(|e| e.into_inner());
+        match checked {
+            Ok(()) => { reported.remove(&key); }
+            Err(error) => {
+                let reason = format!("parked conflict scan skipped {target}: {error:#}");
+                if reported.insert(key, reason.clone()).as_ref() != Some(&reason) {
+                    tracing::warn!(%target, %error, "parked conflict scan skipped an unavailable train target");
+                }
+                skipped.insert(target, reason);
+            }
         }
-        let reference = close_ops::freshest_target_ref(&repo, &target);
-        let tip = git.resolve_commit(&reference).context("train tip unavailable")?;
-        recheck_target(root, &repo, &target, &tip, "cassy-conflict-preflight")?;
     }
-    Ok(())
+    Ok(skipped)
 }
+
+// Each skipped target is logged once until it changes or recovers.
+type Reported = HashMap<(PathBuf, PathBuf, String), String>;
+static REPORTED: OnceLock<Mutex<Reported>> = OnceLock::new();

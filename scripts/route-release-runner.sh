@@ -10,8 +10,8 @@
 # pull_request trigger.
 #
 # Environment: GH_TOKEN, REPO, EVENT_NAME, REF, REF_NAME, PLATFORM (the
-# workflow's platform input), PLATFORM_LABEL (for messages), PROBE_INPUT
-# (the platform input that runs the probe job), PROBE_JOB (its job name),
+# workflow's platform input), PLATFORM_LABEL (for messages), PROBE (the
+# platform input that runs the probe job), PROBE_JOB (its job name),
 # SELF_HOSTED_RUNNER and HOSTED_RUNNER (runs-on JSON). Writes runner= and
 # mode= to GITHUB_OUTPUT.
 set -euo pipefail
@@ -27,7 +27,7 @@ case "$EVENT_NAME:$REF:$PLATFORM" in
     *) route "$HOSTED_RUNNER" hosted ;;
 esac
 if ! run_id="$(gh api -X POST "repos/$REPO/actions/workflows/release-prebuild.yml/dispatches" \
-        -f ref="$REF_NAME" -f "inputs[platform]=$PROBE_INPUT" -F return_run_details=true \
+        -f ref="$REF_NAME" -f "inputs[platform]=$PROBE" -F return_run_details=true \
         --jq .workflow_run_id)" || [[ -z "$run_id" ]]; then
     echo "::warning::$PLATFORM_LABEL runner probe dispatch failed; building hosted"
     route "$HOSTED_RUNNER" hosted

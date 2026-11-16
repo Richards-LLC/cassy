@@ -127,7 +127,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           PLATFORM: ${{ inputs.platform }}
           PLATFORM_LABEL: Linux
-          PROBE_INPUT: linux-runner-probe
+          PROBE: linux-runner-probe
           PROBE_JOB: Linux release runner probe
           SELF_HOSTED_RUNNER: '["self-hosted","Linux","X64","cas-ci-32core"]'
           HOSTED_RUNNER: '["ubuntu-latest"]'
@@ -167,7 +167,6 @@ jobs:
       # The routing guard runs again after assignment, on the machine itself,
       # so a future expression edit cannot hand the runner untrusted input.
       - name: Verify the self-hosted Linux trust boundary
-        id: linux-trust
         if: env.SELF_HOSTED == 'true'
         env:
           REF: ${{ github.ref }}
@@ -411,7 +410,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           PLATFORM: ${{ inputs.platform }}
           PLATFORM_LABEL: macOS
-          PROBE_INPUT: mac-runner-probe
+          PROBE: mac-runner-probe
           PROBE_JOB: Mac release runner probe
           SELF_HOSTED_RUNNER: '["self-hosted","macOS","ARM64","cas-mac-release"]'
           HOSTED_RUNNER: '["macos-26"]'

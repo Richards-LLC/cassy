@@ -1,0 +1,4 @@
+title: The Accounts Clean up confirmation sits under its banner at full sheet width, never squeezed inside the banner's flex row
+tasks: [cas-9543]
+journeys: [HUB-J13]
+invariants: [HUB-J13-ACCOUNT-MANAGEMENT]

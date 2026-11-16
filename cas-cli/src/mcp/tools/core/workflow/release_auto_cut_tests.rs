@@ -172,6 +172,11 @@ async fn replay_partial_train_scope(train_id: &str, lane: &str, landed: &str, re
     run(repo, &["checkout", "-qb", lane]);
     commit(repo, &format!("changelog.d/{landed}.md"));
     run(repo, &["checkout", "-q", "main"]);
+    // Only a published lane tip enters the cut; publish each landing.
+    let remote = tempfile::TempDir::new().unwrap();
+    run(remote.path(), &["init", "-q", "--bare"]);
+    run(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    run(repo, &["push", "-q", "origin", lane]);
     let root = crate::store::init_cas_dir(repo).unwrap();
     env.set("CAS_ROOT", &root);
     env.set("CAS_AGENT_ROLE", "supervisor");
@@ -226,6 +231,7 @@ async fn replay_partial_train_scope(train_id: &str, lane: &str, landed: &str, re
         run(repo, &["checkout", "-q", lane]);
         run(repo, &["merge", "--no-ff", "-qm", id, &branch]);
         let merged = run(repo, &["rev-parse", "HEAD"]);
+        run(repo, &["push", "-q", "origin", lane]);
         cas_store::record_observed_delivery_merge(&root, id, &branch, lane, &source, &merged, "sup-id").unwrap();
         let mut member = store.get(id).unwrap();
         member.status = TaskStatus::Closed;

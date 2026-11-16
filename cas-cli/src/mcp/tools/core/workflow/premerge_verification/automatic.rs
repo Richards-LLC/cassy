@@ -136,26 +136,7 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
     match cli {
         cas_mux::SupervisorCli::Codex => {
             sandbox_preflight()?;
-            command
-                .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"])
-                .arg("--model")
-                .arg(model)
-                .arg("-c")
-                .arg(format!("model_reasoning_effort=\"{}\"", effort.as_str()))
-                // GH #2023: `exec` runs with approval: never, which refuses
-                // every MCP call that needs approval. Pre-approve only Cassy's
-                // canonical server; its own identity checks still apply.
-                .args([
-                    "-c",
-                    "mcp_servers.cs.command=\"cas\"",
-                    "-c",
-                    "mcp_servers.cs.args=[\"serve\"]",
-                    "-c",
-                    "mcp_servers.cs.default_tools_approval_mode=\"approve\"",
-                ])
-                .args(["-c", "project_doc_max_bytes=0", "--output-last-message"])
-                .arg(output)
-                .arg("-");
+            command.args(codex_exec_args(&model, effort.as_str(), output));
         }
         cas_mux::SupervisorCli::Claude => {
             command.args(["-p", "--model"]).arg(model).args([
@@ -175,6 +156,25 @@ fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), Stri
         command.env_remove(key);
     }
     Ok((command, notice))
+}
+
+/// The Codex verifier's `exec` arguments, after the sandbox preflight.
+fn codex_exec_args(model: &str, effort: &str, output: &Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "--model"]
+        .map(std::ffi::OsString::from)
+        .into();
+    args.push(model.into());
+    for value in [
+        format!("model_reasoning_effort=\"{effort}\""),
+        "project_doc_max_bytes=0".into(),
+    ] {
+        args.push("-c".into());
+        args.push(value.into());
+    }
+    args.push("--output-last-message".into());
+    args.push(output.into());
+    args.push("-".into());
+    args
 }
 
 /// Probe the same namespace primitive before paying for a model that cannot read.
@@ -633,6 +633,154 @@ pub(super) async fn approved(
 mod tests {
     use super::*;
 
+    /// GH #2023: Codex `exec` runs with approval: never, so the verifier's
+    /// Cassy server must be pre-approved and launchable from its own overrides.
+    #[test]
+    fn codex_verifier_preapproves_only_the_cassy_server_gh_2023() {
+        let args = codex_exec_args("model", "high", Path::new("/out/verdict.json"));
+        let mut config = toml::Table::new();
+        for pair in args.windows(2).filter(|pair| pair[0] == "-c") {
+            let (key, value) = pair[1].to_str().unwrap().split_once('=').unwrap();
+            let value: toml::Table = toml::from_str(&format!("v = {value}")).unwrap();
+            let mut table = &mut config;
+            let path: Vec<_> = key.split('.').collect();
+            for part in &path[..path.len() - 1] {
+                table = table
+                    .entry(*part)
+                    .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                    .as_table_mut()
+                    .unwrap();
+            }
+            table.insert(path[path.len() - 1].into(), value["v"].clone());
+        }
+        let servers = config.get("mcp_servers").and_then(|v| v.as_table());
+        let cs = servers.and_then(|servers| servers.get("cs"));
+        assert_eq!(
+            cs.cloned(),
+            Some(toml::Value::Table(
+                toml::from_str(
+                    "command = \"cas\"\nargs = [\"serve\"]\ndefault_tools_approval_mode = \"approve\"",
+                )
+                .unwrap()
+            )),
+            "{config:?}"
+        );
+        assert_eq!(servers.map(|servers| servers.len()), Some(1), "{config:?}");
+        assert!(args.windows(2).any(|pair| pair[0] == "--sandbox" && pair[1] == "read-only"));
+    }
+
+    /// GH #2023: after a harness failure, the merge retry starts exactly one
+    /// replacement through the factory daemon and reports it as scheduled.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn merge_retry_after_harness_failure_schedules_one_replacement_gh_2023() {
+        use crate::ui::factory::{
+            ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, PROTOCOL_VERSION, SessionState,
+            decode_length, encode_message, gui_socket_path, local_gui_capabilities,
+        };
+        use std::io::{Read, Write};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let run = |args: &[&str]| super::super::tests::run(repo, args);
+        run(&["init", "-q", "-b", "epic/train"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
+        std::fs::write(root.join("config.toml"), "[worktrees]\nenabled = true\n[qa]\nmode = 'batch'\n[verification]\nenabled = true\n[code_review]\nowner = 'worker'\n").unwrap();
+        super::super::tests::commit_file(repo, "README.md", "base\n", "base");
+        let lane = root.join("worktrees/worker");
+        run(&["worktree", "add", "-q", "-b", "factory/worker", lane.to_str().unwrap()]);
+        let source = super::super::tests::commit_file(&lane, "README.md", "delivery\n", "delivery");
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let daemon = crate::mcp::daemon::EmbeddedDaemon::new(crate::mcp::daemon::EmbeddedDaemonConfig {
+            cas_root: root.clone(),
+            ..Default::default()
+        });
+        let core = CasCore::with_daemon(root.clone(), None, Some(std::sync::Arc::new(daemon)));
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        owner.factory_session = Some("gh-2023".into());
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+        let mut task = Task::new("cas-2023-retry".into(), "Retry after harness failure".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.depth = cas_types::TaskDepth::Deep;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some(source);
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        // The factory daemon's control socket: count each launch request.
+        let socket = gui_socket_path("gh-2023");
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (launched, launches) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline {
+                let Ok((mut client, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                };
+                client.set_nonblocking(false).unwrap();
+                client.write_all(&encode_message(&DaemonMessage::Welcome {
+                    session_name: "gh-2023".into(),
+                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                        epic_title: None, cols: 80, rows: 24 },
+                    scrollback: None, protocol_version: PROTOCOL_VERSION,
+                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+                }).unwrap()).unwrap();
+                let mut header = [0; FRAME_HEADER_SIZE];
+                client.read_exact(&mut header).unwrap();
+                let mut body = vec![0; decode_length(&header)];
+                client.read_exact(&mut body).unwrap();
+                let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+                else {
+                    panic!("unexpected factory control");
+                };
+                client.write_all(&encode_message(&DaemonMessage::VerifierLaunched {
+                    dispatch_id: dispatch_id.clone(),
+                }).unwrap()).unwrap();
+                let _ = launched.send(dispatch_id);
+            }
+        });
+        let wait = std::time::Duration::from_secs(10);
+
+        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
+        let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        assert_eq!(launches.recv_timeout(wait).unwrap(), dispatch.id);
+        // The attempt's harness fails; its claim is released for one retry.
+        let directory = root.join("verification-runs").join(&dispatch.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut failing = Command::new("sh");
+        failing.args(["-c", "exit 1"]);
+        launch_with_preparation(&core, &task, &dispatch, directory.join("verdict.json"),
+            move |_| Ok((failing, None)))
+            .unwrap()
+            .unwrap()
+            .join()
+            .unwrap();
+        let released = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(released.state, cas_types::VerificationDispatchState::Pending);
+
+        let held = core
+            .prepare_premerge_verification(&task, repo, "factory/worker", "epic/train")
+            .err()
+            .expect("an unreviewed delivery stays held");
+
+        assert_eq!(
+            held.data.as_ref().map(|data| data["reason"].clone()),
+            Some(serde_json::json!("verifier_replacement_scheduled")),
+            "{held:?}"
+        );
+        assert_eq!(launches.recv_timeout(wait).unwrap(), dispatch.id);
+        assert!(launches.recv_timeout(std::time::Duration::from_secs(2)).is_err());
+    }
+
     #[test]
     fn failed_launch_is_retried_unless_permanent_cas_d824() {
         let calls = std::cell::Cell::new(0);
@@ -837,10 +985,6 @@ if [ "$1" = login ]; then
     echo 'Logged in using ChatGPT'
     exit 0
 fi
-case "$*" in
-    *'mcp_servers.cs.default_tools_approval_mode="approve"'*) ;;
-    *) echo 'MCP tool call requires approval, but approval policy is never'; exit 0 ;;
-esac
 if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ] || [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ] || [ "$CAS_TEST_VERIFIER_STATUS" = malformed ] || [ "$CAS_TEST_VERIFIER_STATUS" = target_move ] || [ "$CAS_TEST_VERIFIER_STATUS" = no_code ]; then
     while [ ! -f "$CAS_TEST_VERIFIER_GATE" ]; do sleep 0.05; done
 fi
@@ -1225,15 +1369,9 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
                 }).to_string()).unwrap();
                 env.set("CAS_TEST_VERIFIER_STATUS", "approved");
-                // GH #2023: the merge retry itself starts one replacement.
-                let held = core
-                    .prepare_premerge_verification(&task, repo, "factory/worker", "epic/train")
-                    .unwrap_err();
-                assert_eq!(
-                    held.data.as_ref().map(|data| data["reason"].clone()),
-                    Some(serde_json::json!("verifier_replacement_scheduled")),
-                    "{held:?}"
-                );
+                // Retry the merge's automatic handoff once, retaining its join
+                // handle so completion needs no new timer or polling loop.
+                let handle = core.emit_premerge_review_handoff(&task, &claimed).unwrap().unwrap();
                 let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
                 assert_eq!(replacement.id, dispatch.id);
                 assert_ne!(replacement.verifier_agent_id.as_deref(), Some(old_child));
@@ -1246,12 +1384,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 })).unwrap();
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 assert!(runtime.block_on(stale.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))).is_err());
-                for _ in 0..600 {
-                    if child_done() && cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().is_some() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
+                handle.join().unwrap();
                 let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
                 assert_eq!(verdict.status, VerificationStatus::Approved);
                 assert_eq!(verdict.agent_id, replacement.verifier_agent_id);

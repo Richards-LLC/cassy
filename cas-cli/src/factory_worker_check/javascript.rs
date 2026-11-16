@@ -125,11 +125,19 @@ pub(crate) fn changed_tests(
         let mut lines = changed_lines(&diff)?;
         if let Some(owned) = owned {
             let authored = authored_lines(repo, base, head, path, owned)?;
-            lines.retain(|(start, end)| {
-                // A pure deletion has no surviving line to blame.
-                start == end && !authored.contains(start) && diff_deletes_at(&diff, *start)
-                    || (*start..=*end).any(|line| authored.contains(&line))
-            });
+            lines = lines
+                .into_iter()
+                .flat_map(|(start, end)| {
+                    if start == end && diff_deletes_at(&diff, start) {
+                        // A pure deletion has no surviving line to blame.
+                        return vec![(start, end)];
+                    }
+                    (start..=end)
+                        .filter(|line| authored.contains(line))
+                        .map(|line| (line, line))
+                        .collect()
+                })
+                .collect();
         }
         if lines.is_empty() {
             continue;
@@ -390,10 +398,33 @@ fn source_tree(path: &str, source: &str) -> Result<tree_sitter::Tree> {
     let tree = parser
         .parse(source, None)
         .context("JavaScript test parse")?;
-    if tree.root_node().has_error() {
-        bail!("cannot resolve changed tests in {path}: JavaScript parse error");
+    // Valid TypeScript the grammar cannot parse (GH #1973) must not block
+    // discovery. Recovery keeps the rest of the tree, so only an unparsed
+    // region that could hide a test registration fails closed.
+    let mut unparsed = Vec::new();
+    unparsed_regions(tree.root_node(), &mut unparsed);
+    let registration = regex::Regex::new(r"\b(?:it|test|describe)\b|\.each\b")?;
+    if let Some(region) = unparsed
+        .iter()
+        .find(|region| region.is_missing() || registration.is_match(text(**region, source)))
+    {
+        bail!(
+            "cannot resolve changed tests in {path}: JavaScript parse error at line {}",
+            region.start_position().row + 1
+        );
     }
     Ok(tree)
+}
+
+fn unparsed_regions<'a>(node: Node<'a>, regions: &mut Vec<Node<'a>>) {
+    if node.is_error() || node.is_missing() {
+        regions.push(node);
+    } else if node.has_error() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            unparsed_regions(child, regions);
+        }
+    }
 }
 
 fn declared_identities<'a>(

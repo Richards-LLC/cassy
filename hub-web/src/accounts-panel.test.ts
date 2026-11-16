@@ -123,6 +123,10 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   expect(groups[0]!.textContent).toContain("62%");
   expect(groups[1]!.textContent).toBeTruthy();
   click("[data-cleanup]");
+  // The shared dialog form is a zero-intrinsic-width grid container; inside the banner's flex row it was squeezed to a sliver.
+  const editor = document.querySelector(".accounts-editor")!;
+  expect(editor.closest(".accounts-cleanup-banner")).toBeNull();
+  expect(editor.previousElementSibling).toBe(document.querySelector(".accounts-cleanup-banner"));
   const input = document.querySelector<HTMLInputElement>(".accounts-editor input")!;
   input.value = "clean up"; input.dispatchEvent(new Event("input"));
   document.querySelector(".accounts-editor")!.dispatchEvent(new Event("submit", { cancelable: true }));

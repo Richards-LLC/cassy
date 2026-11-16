@@ -1182,8 +1182,13 @@ fn service_publication_failure_keeps_loopback_and_recovers_without_restart() {
     };
     let endpoint = format!("http://127.0.0.1:{}", fallback.port);
     assert!(ureq::get(&format!("{endpoint}/v1/health")).timeout(Duration::from_secs(1)).call().is_ok());
-    let log = fs::read_to_string(paths.root().join("hub.log")).unwrap();
-    assert!(log.contains("permission-denied"), "{log}");
+    // The background loop writes the record before its hub.log line.
+    loop {
+        let log = fs::read_to_string(paths.root().join("hub.log")).unwrap_or_default();
+        if log.contains("permission-denied") { break; }
+        assert!(Instant::now() < deadline, "hub.log never recorded the denial: {log}");
+        thread::sleep(Duration::from_millis(20));
+    }
     let status = cas_process_command(home.path(), bin.as_os_str()).args(["hub", "status", "--json"]).output().unwrap();
     assert!(status.status.success());
     let status: Value = serde_json::from_slice(&status.stdout).unwrap();

@@ -113,7 +113,10 @@ pub(super) fn validated_started_delivery(
         ).starts_with("project:")
             || crate::cloud::canonical_id_from_config_toml(&repo.join(".cas"))
                 .is_some_and(|id| !id.trim().is_empty()));
-    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
+    let Some(current_target) = task.deliverables.work_target.as_ref() else { return Ok(None); };
+    // Retargeting nonempty work preserves the original start for audit. Its
+    // repository, assignee and base still fence ownership; upstream is current.
+    if current_target.repo_selector != start.work_target.repo_selector
         || task.assignee.as_deref() != Some(start.assignee.as_str())
         || !(checkout_identity_matches
             || crate::mcp::tools::core::task::repo_context::git_layout(repo)
@@ -145,7 +148,7 @@ pub(super) fn validated_started_delivery(
         .ok_or_else(|| refuse("the delivery tip cannot be read"))?;
     let target = preferred_diff_target_ref_for_delivery(
         repo,
-        &start.work_target.target_branch,
+        &current_target.target_branch,
         task.delivery_mode,
     );
     // Once parked, later tasks may reuse the lane. Its immutable anchor ends
@@ -415,7 +418,7 @@ fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> 
 
 /// GH #1151: whether `commit` is another task's work under the subject rule
 /// above. An unreadable commit is not shown to be foreign.
-pub(super) fn commit_claims_another_task(
+pub(crate) fn commit_claims_another_task(
     repo: &Path,
     commit: &str,
     identity: &TaskCommitIdentity,
@@ -778,19 +781,9 @@ fn task_delivery_selection(
                     .as_deref()
                     .is_some_and(|id| message_references_task(message, id))
                     && !subject_claims_another_task(message, &window.identity));
-            let foreign = !owned
-                && message
-                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                    .any(|word| {
-                        // TaskStore::generate_hash_id emits hexadecimal IDs.
-                        // Crate/path words such as cas-cli are not task claims.
-                        word.get(..4)
-                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cas-"))
-                            && word.get(4..).is_some_and(|id| {
-                                (4..=8).contains(&id.len())
-                                    && id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                            })
-                    });
+            // Contextual mentions of a port's source task do not claim
+            // ownership. Use the same subject/authorization fence as start.
+            let foreign = !owned && claims_another_task(repo, &sha, message, &window.identity);
             Some(Commit {
                 sha,
                 parent: parents.first().copied().unwrap_or("").into(),

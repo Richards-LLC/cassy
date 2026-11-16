@@ -139,6 +139,8 @@ pub(crate) fn changed_tests(
                 })
                 .collect();
         }
+        // A restored file has no delivered test change. Do not require
+        // runtime identities for callbacks merely present in its final tree.
         if lines.is_empty() {
             continue;
         }

@@ -7,6 +7,63 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.32.0] - 2026-11-16
+
+### Fixed — Factory
+
+- **QA candidate build failures keep their evidence** — When the journey snapshot step fails, `cas qa candidate build` copies its build log under the task's artifacts directory before removing scratch and prints that path. A step refused by memory admission is reported as not started, with the sampled budget, estimate and reserve, instead of as a build failure. A supervisor- or operator-initiated candidate build now takes proof memory admission instead of worker admission.
+- **Source-only Commander pushes no longer demand generated dist** — The pre-push hook requires committed Commander output to match a fresh build only where the merge queue does: a version change, a dist change or an unreadable version. An unchanged-version source lane pushes without committing `hub-web/dist` and leaves the checkout clean; release preparation still rebuilds and commits the bundle. When the check does run, it builds the pushed tip in a disposable checkout, so a refusal no longer leaves rebuilt files in yours.
+
+### Changed — CI
+
+- **Six Rust suite shards and fewer CI handoffs** — Full validation partitions the Rust suite into six shards, combines classification with runner routing and reuse checks, and collects reports and repair issues in the existing full-set gate. The required Fast Validation job and default-feature queue check continue to gate the release.
+
+### Fixed — CI
+
+- **Reuse unchanged full-set job inputs after repairs** — Frozen-train Commander web and journey proof can survive unrelated Rust repairs, and Rust proof can survive unrelated web source repairs. Shared dependencies and unknown inputs still invalidate proof; queue job receipts keep exact-tree keys, and the full-set gate retains every required job and records the original producer.
+- **Script-suite logs stay out of the checkout** — The parallel script-suite runner wrote per-suite logs under `target/ci-script-suite-logs` in the repository it ran in, which left fixture checkouts dirty and made the fast-rows pre-push hook refuse a clean push. Logs now go to a temporary directory (under `RUNNER_TEMP` in CI); each suite's complete output is still replayed at once and failing suites still repeat their last lines after the summary.
+
+### Fixed — Release trains
+
+- **Recover jobless train runs** — Was: a queued train run with no jobs could stall a frozen release indefinitely. Now: after ninety seconds, Cassy dispatches one replacement at the same frozen head and remembers the abandoned run without cancelling it.
+
+### Fixed — Commander
+
+- **Accounts "Clean up" confirmation spans the sheet** — Pressing Clean up now shows the confirmation full width under the banner instead of a one-word-per-line sliver inside it, with a usable input at desktop and phone widths.
+
+### Fixed — Release flow
+
+- **Frozen train repairs reuse the full set** — A repair targeting an actively
+  frozen train can merge after the lane's fast and factory/PR checks pass,
+  without waiting for its duplicate Rust impact jobs. After publication, Cassy
+  attempts to cancel the exact repair lane if only impact jobs remain. The
+  frozen tip's full set supplies Rust proof; ordinary targets keep existing
+  admission.
+
+### Fixed — Factory checks
+
+- **Resumed deliveries retain their complete scope** — Nonempty delivery retargets keep their original start audit while checking ownership against the current target. References to another task as port context no longer drop intervening implementation or changelog commits. Reverted journey edits do not require stability identities; surviving ambiguous edits still refuse.
+
+### Changed — Release CI
+
+- **The shipped Linux binary is audited once** — Was: the portable-instruction audit ran in the prebuild and again in the release on the same bytes (134 s + 185 s). Now: the prebuild audits the executable and records its SHA-256 in the artifact; the release checks the digest (under a second) and runs only the launch smoke.
+- **The merge queue compiles the release tree in parallel** — Was: on a release the train had already proven, the queue's preflight ran `cargo check -p cas` (185 to 362 s, median 241 s over seven queue runs) and only then the no-default-features build. Now: the default-feature check runs in its own job beside the build, and the required Fast Validation rollup requires it to pass or skip. Neither compile was dropped.
+- **The train's Rust test archive can build on our own runner** — Was: the full-set run built the suite archive on a hosted 4-core runner (467 s, the head of its critical path). Now: with `CASSY_TRAIN_ARCHIVE_SELF_HOSTED=enabled`, a train dispatch builds that one archive on the already-registered self-hosted 32-core runners (103 to 107 s there in October), with the same on-machine trust and slot checks as the merge queue; unset or disabled keeps it hosted. The test shards stay hosted.
+
+## [4.31.0] - 2026-11-16
+
+### Fixed — Factory
+
+- **Large stores no longer stall the factory on task reads** — The director's two-second refresh reads task headers only, and migration m300 indexes the task list's sort order, so ordered task lists stop sorting every task body under the shared store connection. On a 767 MB store each read drops from about 1.2 s to under 0.3 s, so closes and verifier launches no longer wait behind it.
+
+### Fixed — Releases
+
+- **Old held deliveries no longer block every release cut** — The cut's zero-would-close check now counts only the tasks this release includes. Older deliveries still held from earlier releases are listed in the cut output and no longer refuse it, so a train whose own tasks all close or are already closed can cut. A held task inside the release still refuses.
+
+### Fixed — Verification
+
+- **Parked deliveries no longer sit Pending behind a refused verifier start** — Was: the factory daemon launching a pre-merge verifier re-checked the owning supervisor as if it were an inherited-environment caller. A live supervisor's own harness process is a different process, so the check refused exactly the live supervisor (`verifier_factory_owner: live registered supervisor required`), and a transient failure (a spent store wait budget) was reported once and never retried, leaving the dispatch Pending and every merge held. Now: an owner identity the server bound itself is trusted as a live supervisor; a failed start is retried up to four times with a growing delay, the notice names the attempt, and the refusal reason is included instead of a fixed sentence.
+
 ## [4.30.0] - 2026-11-16
 
 ### Fixed — Factory checks

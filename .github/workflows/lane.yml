@@ -48,7 +48,9 @@ jobs:
     if: vars.CAS_LANE_SLIM != 'true'
     permissions:
       # Reusable-workflow ceiling: GitHub validates even skipped queue jobs.
-      # ci.yml still defaults to read-only; only its merge_group publisher writes.
+      # ci.yml defaults to read-only; its hosted rollup requests write access
+      # for repair publication on merge-group and frozen-train runs. Non-slim
+      # lanes inherit that ceiling even when publication steps are skipped.
       contents: write
       issues: write
       actions: read

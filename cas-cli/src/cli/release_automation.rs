@@ -184,7 +184,13 @@ impl ReleasePreview {
         let missing: Vec<_> = self.lane_ci_missing.iter().filter(|id|
             self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.contains(id)).collect();
         ensure!(missing.is_empty(), "LANE_CI_MISSING: {}", missing.into_iter().cloned().collect::<Vec<_>>().join(", "));
-        ensure!(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0),
+        // Legacy members outside this release's included tasks never refuse its cut.
+        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+        let own: Vec<_> = self.members_by_id.iter().filter(|(id, _)|
+            self.scope.included_task_ids.is_empty() || self.scope.included_task_ids.contains(id)).map(|(_, o)| o).collect();
+        let closes = own.iter().any(|o| matches!(o, CassyMergeClose::Closed { .. }));
+        let stuck = own.iter().any(|o| matches!(o, CassyMergeClose::Held(_) | CassyMergeClose::NotEligible));
+        ensure!(closes || !stuck,
             "release cut refused: {} members, zero would-close; by_reason {:?}; review_missing {:?}",
             self.members, self.by_reason, self.review_missing);
         Ok(())
@@ -1045,6 +1051,15 @@ pub(super) mod tests {
             let preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), members);
             assert_eq!(preview.allow_cut().is_ok(), allowed);
         }
+        // cas-be03: prowl's a201 cut held fourteen legacy members outside its two closed ones.
+        let mut members: BTreeMap<String, CassyMergeClose> = (0..14).map(|n| (format!("cas-1{n:03x}"),
+            CassyMergeClose::Held(if n < 12 { "RELEASE_MEMBER_REVERTED: ownership" } else { "MissingBase" }.into()))).collect();
+        members.extend(["cas-a001", "cas-a002"].map(|id| (id.to_string(), CassyMergeClose::AlreadyClosed)));
+        let mut legacy = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), members);
+        legacy.scope.included_task_ids = vec!["cas-a001".into(), "cas-a002".into()];
+        assert!(legacy.allow_cut().is_ok());
+        legacy.scope.included_task_ids.push("cas-1000".into());
+        assert!(legacy.allow_cut().is_err());
         let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
             ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
             ("cas-0002".into(), CassyMergeClose::AlreadyClosed),

@@ -85,8 +85,8 @@ class PolicyTests(unittest.TestCase):
                   'needs.ci-diff.outputs.bridge-check-needed':'true',
                   'needs.ci-diff.outputs.script-tests-needed':'true',
                   'needs.ci-diff.result':'success',
-                  'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':'true',
-                  'needs.fast-validation-runner-route.outputs.mode':'hosted',
+                  'needs.ci-diff.outputs.run-fast-validation':'true',
+                  'needs.ci-diff.outputs.mode':'hosted',
                   'github.repository':'Richards-LLC/cassy',
                   'github.event.repository.default_branch':'main'}
         def selected(event, ref):
@@ -95,7 +95,7 @@ class PolicyTests(unittest.TestCase):
         queue = selected('merge_group','refs/heads/gh-readonly-queue/main/pr-1')
         precheck = selected('workflow_dispatch','refs/heads/precheck/'+'a'*40)
         # Publication writes queue-only flake evidence; precheck runs every producer.
-        self.assertEqual(precheck-{'macos-check'},queue-{'queue-flake-publication'})
+        self.assertEqual(precheck-{'macos-check'},queue)
         self.assertIn('fast-validation-suite-shards',precheck)
         self.assertIn('fast-validation-journeys',precheck)
         action = policy.load(policy.ROOT/'.github/actions/classify-required-diff/action.yml')
@@ -123,8 +123,8 @@ class PolicyTests(unittest.TestCase):
                   'needs.ci-diff.outputs.journeys-check-needed': 'true',
                   'needs.ci-diff.outputs.bridge-check-needed': 'true',
                   'needs.ci-diff.outputs.script-tests-needed': 'true',
-                  'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'true',
-                  'needs.fast-validation-runner-route.outputs.mode': 'hosted',
+                  'needs.ci-diff.outputs.run-fast-validation': 'true',
+                  'needs.ci-diff.outputs.mode': 'hosted',
                   'needs.fast-validation-suite-shards.result': 'success'}
         def selected(event, ref):
             context = {**common, 'github.event_name': event, 'github.ref': ref}
@@ -135,22 +135,21 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue({'fast-validation-preflight', 'fast-validation-ci-tiers',
                          'fast-validation-web', 'fast-validation-journeys',
                          'fast-validation-suite-build', 'fast-validation-suite-shards',
-                         'fast-validation-suite', 'fast-validation-docs',
-                         'queue-flake-publication', 'fast-validation'}.issubset(train))
+                         'fast-validation-docs', 'fast-validation'}.issubset(train))
         self.assertNotIn('scoped-validation-fast', train)
         # The existing full-set consumer's adoption outputs must reach every
         # suite producer while keeping exact-tree compile/launch preflight.
         common.update({
-            'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false',
-            'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'full-gate',
-            'needs.fast-validation-main-push-dedupe.outputs.journeys-reuse': 'true'})
+            'needs.ci-diff.outputs.run-fast-validation': 'false',
+            'needs.ci-diff.outputs.reuse-source': 'full-gate',
+            'needs.ci-diff.outputs.journeys-reuse': 'true'})
         adopted = selected('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1')
         self.assertEqual(selected('workflow_dispatch', 'refs/heads/epic/release-train-fixture'), adopted)
         self.assertTrue({'fast-validation-suite-build', 'fast-validation-suite-shards',
-                         'fast-validation-suite', 'fast-validation-ci-tiers',
+                         'fast-validation-ci-tiers',
                          'fast-validation-web', 'fast-validation-docs'}.isdisjoint(adopted))
         self.assertTrue({'fast-validation-preflight', 'fast-validation'}.issubset(adopted))
-        publication = next(step for step in jobs['fast-validation-main-push-dedupe']['steps']
+        publication = next(step for step in jobs['ci-diff']['steps']
                            if step.get('with', {}).get('name') == 'train-full-gate')
         for event, ref, proof, expected in [
             ('workflow_dispatch', 'refs/heads/epic/release-train-fixture', 'full-gate', True),
@@ -166,6 +165,47 @@ class PolicyTests(unittest.TestCase):
         status = next(step for job in jobs.values() for step in job.get('steps', [])
                       if 'context=cas/full-gate' in step.get('run', ''))
         self.assertTrue(self.gh_expr(status['if'], {'inputs.full-set': True, 'github.event_name': 'workflow_dispatch'}))
+
+    def test_six_shards_and_folded_plumbing_preserve_failure_protocol(self):
+        jobs=self.ci()['jobs']
+        removed={'fast-validation-runner-route','fast-validation-main-push-dedupe',
+                 'fast-validation-suite','queue-flake-publication'}
+        self.assertTrue(removed.isdisjoint(jobs))
+        gate=jobs['fast-validation']
+        self.assertEqual(self.gh_value(gate['name'], {'inputs.full-set':True}), 'Full-set gate')
+        self.assertTrue({'ci-diff','fast-validation-suite-build','fast-validation-suite-shards',
+            'fast-validation-queue-check'}.issubset(gate['needs']))
+        self.assertEqual(policy.load(self.root/'.github/workflows/full-validation.yml')['jobs']['fast-validation']['name'],
+            'Fast Validation')
+        for name,job in jobs.items():
+            dependencies=job.get('needs',[])
+            if isinstance(dependencies,str): dependencies=[dependencies]
+            self.assertTrue(set(dependencies).issubset(jobs),name)
+            self.assertNotIn(name,dependencies)
+        self.assertTrue({'runner','mode','archive-runner','archive-mode','run-fast-validation',
+            'reuse-source','receipt-tree'}.issubset(jobs['ci-diff']['outputs']))
+        shards=jobs['fast-validation-suite-shards']
+        self.assertEqual(shards['strategy']['matrix']['shard'],list(range(1,7)))
+        body=next(s['run'] for s in shards['steps'] if 'SHARD' in s.get('env',{}) and 'INSTA_WORKSPACE_ROOT' in s.get('env',{}))
+        bin_dir=self.root/'bin';bin_dir.mkdir()
+        python=bin_dir/'python3'
+        python.write_text(f'#!{sys.executable}\nimport json,os,sys\n'
+            'with open(os.environ["CALLS"],"a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n'
+            'sys.exit(int(os.environ["NATIVE_STATUS"]) if sys.argv[1].endswith("ci-queue-flakes.py") else 0)\n')
+        python.chmod(0o755)
+        calls=self.root/'calls'
+        for slot,native in itertools.product(range(1,7),(0,1)):
+            with self.subTest(slot=slot,native=native):
+                calls.write_text('')
+                result=self.run_body(body,{'PATH':f'{bin_dir}:{os.environ["PATH"]}', 'CALLS':str(calls),
+                    'NATIVE_STATUS':str(native),'SHARD':str(slot),'GITHUB_EVENT_NAME':'workflow_dispatch',
+                    'GITHUB_REF':'refs/heads/epic/release-train-fixture','IMPACT_BASE_SHA':''})
+                self.assertEqual(result.returncode,native,result.stderr)
+                argv=[json.loads(line) for line in calls.read_text().splitlines()]
+                self.assertEqual(len(argv),2)
+                self.assertEqual(argv[0][argv[0].index('--shard')+1],f'{slot}/6')
+                self.assertEqual(argv[1][argv[1].index('--shard')+1],f'{slot}/6')
+                self.assertEqual(argv[1][argv[1].index('--status')+1],str(native))
 
 
     def test_parser_dependency_absence_is_a_hard_failure(self):
@@ -245,7 +285,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         archive_i, _ = policy.role(job, 'Build full suite archive', source)
         def valid(candidate):
             probe, disable = candidate['steps'][probe_i], candidate['steps'][disable_i]
-            return probe.get('continue-on-error') is True and "steps.classify-diff.outputs.rust-unaffected != 'true'" in disable['if'] and "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" in disable['if'] and "echo 'RUSTC_WRAPPER='" in policy.uncomment(disable['run']) and disable_i < archive_i
+            return probe.get('continue-on-error') is True and "steps.classify-diff.outputs.rust-unaffected != 'true'" in disable['if'] and "needs.ci-diff.outputs.archive-mode == 'self-hosted'" in disable['if'] and "echo 'RUSTC_WRAPPER='" in policy.uncomment(disable['run']) and disable_i < archive_i
         self.assertTrue(valid(job), 'positive control for the actual parsed archive contract')
         changed = copy.deepcopy(job);changed['steps'][probe_i].pop('continue-on-error')
         self.assertFalse(valid(changed), 'legacy removed probe fail-open mutation')
@@ -263,7 +303,19 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         jobs = self.ci()['jobs']
         preflight = jobs['fast-validation-preflight']
         archive = jobs['fast-validation-suite-build']
-        check = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
+        # cas-f0e7: the check runs in its own job, beside preflight's build.
+        checker = jobs['fast-validation-queue-check']
+        self.assertNotIn('fast-validation-preflight', checker['needs'])
+        self.assertIn('fast-validation-queue-check', jobs['fast-validation']['needs'])
+        # The required rollup admits the adopted queue tree only if the check passed or was not needed.
+        adopted = next(s for s in jobs['fast-validation']['steps'] if s.get('name') == 'Report the adopted train full-set receipt')
+        for result, admitted in [('success', True), ('skipped', True), ('failure', False), ('cancelled', False)]:
+            with self.subTest(queue_check=result):
+                ran = self.run_body(adopted['run'], dict(PREFLIGHT='success', QUEUE_CHECK=result, SLACK_BRIDGE='success',
+                                                         JOURNEYS='success', JOURNEYS_REUSE='false', JOURNEYS_PRIOR_URL='',
+                                                         VALIDATING_RUN_ID='1', PRIOR_RUN_URL='u', GITHUB_STEP_SUMMARY=str(self.root / 'summary')))
+                self.assertEqual(ran.returncode == 0, admitted, ran.stderr)
+        check = next(s for s in checker['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
         build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
         self.assertNotIn('--no-default-features', shlex.split(build['run']))
         portable = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-5:] == ['cargo','build','-p','cas','--no-default-features'])
@@ -271,7 +323,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         context = {'github.event_name': 'merge_group',
                    'github.ref': 'refs/heads/gh-readonly-queue/main/pr-1',
                    'needs.ci-diff.outputs.class': 'rust-touched',
-                   'needs.fast-validation-runner-route.outputs.mode': 'hosted',
+                   'needs.ci-diff.outputs.mode': 'hosted',
                    'steps.classify-diff.outputs.rust-unaffected': 'false'}
         for reuse, unaffected, expected_check, expected_archive, expected_portable in [
             ('', 'false', False, True, True),
@@ -280,13 +332,16 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         ]:
             with self.subTest(reuse=reuse, unaffected=unaffected):
                 case = {**context,
-                        'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
-                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                        'needs.ci-diff.outputs.run-fast-validation': 'false' if reuse else 'true',
+                        'needs.ci-diff.outputs.reuse-source': reuse,
+                        # The check follows preflight's own classifier, not ci-diff's.
+                        'needs.ci-diff.outputs.rust-unaffected': 'true',
+                        'steps.proven.outputs.identical': 'false',
                         'steps.classify-diff.outputs.rust-unaffected': unaffected}
                 # These functions are GitHub job status, not routing inputs.
                 selected = lambda job, step: self.gh_expr(job['if'], case) and self.gh_expr(
                     step.get('if', 'true').replace('cancelled()', 'False').replace('success()', 'True'), case)
-                self.assertEqual(selected(preflight, check), expected_check)
+                self.assertEqual(selected(checker, check), expected_check)
                 self.assertEqual(selected(archive, build), expected_archive)
                 self.assertEqual(selected(preflight, portable), expected_portable)
                 self.assertEqual(selected(preflight, consumer), expected_portable and not reuse)
@@ -316,13 +371,12 @@ out = pathlib.Path(args[args.index('--dir')+1]); out.mkdir(parents=True, exist_o
 shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
 ''')
         gh.chmod(0o755)
-        check = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-4:] == ['cargo', 'check', '-p', 'cas'])
         build = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-5:] == ['cargo', 'build', '-p', 'cas', '--no-default-features'])
         smoke = next(s for s in job['steps'] if 'npm run --prefix hub-web build' in s.get('run', ''))
         context = {'steps.job-receipt.outputs.reused': 'false',
-                   'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'full-gate',
-                   'needs.fast-validation-main-push-dedupe.outputs.validating-run-id': '101',
-                   'needs.fast-validation-main-push-dedupe.outputs.receipt-tree': tree}
+                   'needs.ci-diff.outputs.reuse-source': 'full-gate',
+                   'needs.ci-diff.outputs.validating-run-id': '101',
+                   'needs.ci-diff.outputs.receipt-tree': tree}
         for proof, receipt_tree, cached, available, runnable, expected_run in [
             ('full-gate', tree, '', True, True, '101'),
             ('full-gate', tree, '100', True, True, '100'),
@@ -337,8 +391,8 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 binary.write_text('#!/bin/sh\nexit '+('0' if runnable else '1')+'\n')
                 case = {**context, 'steps.job-receipt.outputs.reused': 'true' if cached else 'false',
                         'steps.job-receipt.outputs.producer_run': cached,
-                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source': proof,
-                        'needs.fast-validation-main-push-dedupe.outputs.receipt-tree': receipt_tree}
+                        'needs.ci-diff.outputs.reuse-source': proof,
+                        'needs.ci-diff.outputs.receipt-tree': receipt_tree}
                 output = self.root/'cli-output'; output.write_text('')
                 calls.unlink(missing_ok=True)
                 runner_temp = self.root/'runner-temp'; runner_temp.mkdir(exist_ok=True)
@@ -357,11 +411,37 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                     self.assertEqual(subprocess.run([runner_temp/'preflight-cli/cas', '--version']).returncode, 0)
                 route = {**case, 'steps.cli-restore.outputs.restored': outputs['restored'],
                          'steps.classify-diff.outputs.rust-unaffected': 'false',
-                         'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false'}
-                self.assertEqual(self.gh_expr(check['if'], route), not restored)
+                         'needs.ci-diff.outputs.run-fast-validation': 'false'}
                 self.assertEqual(self.gh_expr(build['if'], route), not restored)
                 if proof == 'full-gate':
                     self.assertTrue(self.gh_expr(smoke['if'], route))
+
+    def test_release_ships_only_the_executable_the_prebuild_audited_cas_f0e7(self):
+        prebuild = {s.get('name'): s for s in policy.load(self.root / '.github/workflows/release-prebuild.yml')['jobs']['build']['steps']}
+        release = {s.get('name'): s for s in policy.load(self.root / '.github/workflows/release.yml')['jobs']['audit-linux']['steps']}
+        audit = prebuild['Audit build outputs and packaged Linux executable']['run'].splitlines()
+        isa = next(i for i, line in enumerate(audit) if 'test-check-portable-x86_64-isa.sh package/cas' in line)
+        [digest] = [i for i, line in enumerate(audit) if 'sha256sum' in line]
+        # The digest names the bytes the ISA audit just passed, and it ships in the artifact.
+        self.assertGreater(digest, isa)
+        self.assertIn('cas-x86_64-unknown-linux-gnu.audited.sha256', prebuild['Upload artifact']['with']['path'].split())
+        verify = release['Verify the packaged executable is the audited one']['run']
+        self.assertNotIn('check-portable-x86_64-isa', verify)
+        for case in ('audited', 'tampered', 'missing digest'):
+            with self.subTest(case=case):
+                for leftover in ('package', 'asset', 'release'):
+                    shutil.rmtree(self.root / leftover, ignore_errors=True)
+                (self.root / 'package').mkdir(); (self.root / 'release').mkdir()
+                (self.root / 'package/cas').write_bytes(b'audited executable'); (self.root / 'package/LICENSE').write_text('x')
+                env = dict(GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
+                self.assertEqual(self.run_body(audit[digest], env).returncode, 0)
+                if case == 'tampered':
+                    (self.root / 'package/cas').write_bytes(b'other executable')
+                self.assertEqual(self.run_body(prebuild['Package']['run'], env).returncode, 0)
+                for name in prebuild['Upload artifact']['with']['path'].split():
+                    if case != 'missing digest' or not name.endswith('.sha256'):
+                        shutil.copyfile(self.root / name, self.root / 'release' / name)
+                self.assertEqual(self.run_body(verify, env).returncode == 0, case == 'audited')
 
     def test_train_runs_once_at_freeze_while_factory_runs_cancel_cas_0fc56(self):
         cases = [('push', 'refs/heads/factory/fixture', True, True),
@@ -449,7 +529,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                         step.get('with',{}).get('phase')=='save' or
                         step.get('with',{}).get('name','').startswith('train-suite-shard-'))
                     self.assertEqual(runs,evidence,(name,shard,step))
-        self.assertEqual(len(cached),8)
+        self.assertEqual(len(cached),9)
         # Cross-run archive reuse must point consumers at its original run.
         download=next(s for s in jobs['fast-validation-suite-shards']['steps']
             if s.get('with',{}).get('name')=='fast-validation-suite-archive')
@@ -545,8 +625,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 for off in ('', 'disabled'):
                     self.assertEqual(runner(off), 'ubuntu-latest')
         for name, job in ci['jobs'].items():
-            if name != 'fast-validation-runner-route':
-                self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
+            self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
 
     # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
     def test_lane_runs_only_selected_commander_journeys_and_names_failures_cas_6a42(self):
@@ -623,27 +702,26 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 ids = [re.findall(r'\b[A-Z]+-J\d+\b', title) for title, _ in errors]
                 self.assertEqual([(i, message.split()[0] if i else None) for i, (_, message) in zip(ids, errors)], named)
 
-    def test_suite_fanin_reuses_classification_without_source_checkout(self):
-        job = self.ci()['jobs']['fast-validation-suite']
-        for step in job['steps']:
-            if step.get('uses'):
-                self.assertFalse(self.gh_expr(step['if'], {'github.event_name':'merge_group', 'github.ref':'refs/heads/gh-readonly-queue/main/pr-1'}))
-        report = next(step for step in job['steps'] if 'DIFF_CLASS' in step.get('env', {}))
-        assertion = next(step for step in job['steps'] if 'SHARDS' in step.get('env', {}))
-        for unaffected in ('true', 'false'):
-            context = {'needs.ci-diff.outputs.rust-unaffected': unaffected,
-                       'needs.ci-diff.outputs.class': 'hub-web-only'}
-            self.assertEqual(self.gh_expr(report['if'], context), unaffected == 'true')
-            self.assertEqual(self.gh_value(report['env']['DIFF_CLASS'], context), 'hub-web-only')
-        for result in ('success', 'failure', 'cancelled', 'skipped'):
-            run = subprocess.run(['bash', '-c', assertion['run']], env={**os.environ, 'SHARDS': result})
-            self.assertEqual(run.returncode == 0, result == 'success', result)
+    def test_folded_fanin_collects_only_executed_train_shards(self):
+        jobs=self.ci()['jobs']
+        job=jobs['fast-validation']
+        self.assertEqual(sum(s.get('uses')=='actions/checkout@v4' for s in job['steps']),1)
+        collect=next(s for s in job['steps'] if 'BUILD_RESULT' in s.get('env',{}))
+        self.assertEqual(collect['env']['BUILD_RESULT'],'${{ needs.fast-validation-suite-build.result }}')
+        self.assertEqual(collect['env']['SHARDS_RESULT'],'${{ needs.fast-validation-suite-shards.result }}')
+        for event,ref,run,expected in [
+            ('workflow_dispatch','refs/heads/epic/release-train-fixture','true',True),
+            ('workflow_dispatch','refs/heads/epic/release-train-fixture','false',False),
+            ('merge_group','refs/heads/gh-readonly-queue/main/pr-1','true',False),
+        ]:
+            self.assertEqual(self.gh_expr(collect['if'],{'github.event_name':event,'github.ref':ref,
+                'needs.ci-diff.outputs.run-fast-validation':run}),expected)
 
     def test_green_queue_receipt_cannot_skip_clippy(self):
         job = self.ci()['jobs']['clippy']
         context = {'github.event_name': 'push', 'github.ref': 'refs/heads/main',
                    'needs.ci-diff.outputs.class': 'rust-touched',
-                   'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'merge-queue',
+                   'needs.ci-diff.outputs.reuse-source': 'merge-queue',
                    'steps.tree-dedupe.outputs.run-heavy': 'false'}
         self.assertTrue(self.gh_expr(job['if'], context))
         for step in job['steps']:
@@ -698,9 +776,9 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                         'needs.ci-diff.outputs.class':'rust-touched',
                         'needs.ci-diff.outputs.rust-unaffected':'false',
                         'steps.classify-diff.outputs.rust-unaffected':'false',
-                        'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':run,
-                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source':reuse,
-                        'needs.fast-validation-runner-route.outputs.mode':'hosted',
+                        'needs.ci-diff.outputs.run-fast-validation':run,
+                        'needs.ci-diff.outputs.reuse-source':reuse,
+                        'needs.ci-diff.outputs.mode':'hosted',
                         'steps.rust-setup.outputs.cache-hit':hit}
                     self.assertEqual(self.gh_value(action['outputs']['cache-hit']['value'],
                         {f'steps.{cache["id"]}.outputs.cache-hit':hit}),hit)
@@ -735,8 +813,8 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         for name in ('fast-validation','macos-check'):
             self.assertNotIn('fast-validation-suite-cache',dependencies(name))
         docs = {**context,'github.event_name':'push','github.ref':'refs/heads/main',
-                'needs.fast-validation-main-push-dedupe.outputs.reuse-source':'merge-queue',
-                'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation':'false',
+                'needs.ci-diff.outputs.reuse-source':'merge-queue',
+                'needs.ci-diff.outputs.run-fast-validation':'false',
                 'needs.ci-diff.outputs.class':'docs-only'}
         self.assertFalse(self.gh_expr(prime['if'],docs))
         self.assertFalse(self.gh_expr(prime['if'],{**docs,
@@ -765,8 +843,8 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 context = {'github.event_name': event, 'github.ref': ref,
                            'github.base_ref': 'main', 'github.event.repository.default_branch': 'main',
                            'needs.ci-diff.outputs.class': 'rust-touched',
-                           'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
-                           'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                           'needs.ci-diff.outputs.run-fast-validation': 'false' if reuse else 'true',
+                           'needs.ci-diff.outputs.reuse-source': reuse,
                            'steps.classify-diff.outputs.rust-unaffected': 'false'}
                 self.assertTrue(self.gh_expr(job['if'], context))
                 self.assertEqual(self.gh_value(cache['with']['lookup-only'], context), reuse == 'merge-queue')
@@ -798,8 +876,8 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             self.assertFalse(self.gh_expr(job['if'], {**context,
                 'github.event_name': 'merge_group',
                 'github.ref': 'refs/heads/gh-readonly-queue/main/pr-1-abc',
-                'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': run,
-                'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse}))
+                'needs.ci-diff.outputs.run-fast-validation': run,
+                'needs.ci-diff.outputs.reuse-source': reuse}))
         self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',
             'github.ref': 'refs/heads/factory/x'}))
         self.assertFalse(self.gh_expr(job['if'], {**context, 'github.event_name': 'push',
@@ -1040,29 +1118,25 @@ else:
             self.assertEqual(self.run_body(pr['run'], {'CI_DIFF': 'success', 'SCOPED': state}).returncode == 0,
                              state in ['success', 'skipped'])
         step = next(s for s in job['steps'] if 'test "$PREFLIGHT" = success' in s.get('run', ''))
-        healthy = dict(PREFLIGHT='success', SUITE='success', DOCS='success',
+        healthy = dict(PREFLIGHT='success', SUITE_BUILD='success', SHARDS='success', QUEUE_CHECK='success', DOCS='success',
                        CI_TIERS='success', SLACK_BRIDGE='success', WEB='success', JOURNEYS='success')
         self.assertEqual(self.run_body(step['run'], healthy).returncode, 0)
         for key, value in itertools.product(healthy, ['failure', 'cancelled']):
             with self.subTest(dependency=key, verdict=value):
                 self.assertNotEqual(self.run_body(step['run'], {**healthy, key:value}).returncode, 0)
         # Input-gated lanes may be skipped; the always-on lanes may not.
-        for key in ['CI_TIERS', 'SLACK_BRIDGE', 'WEB', 'JOURNEYS']:
+        for key in ['CI_TIERS', 'SLACK_BRIDGE', 'WEB', 'JOURNEYS', 'QUEUE_CHECK']:
             with self.subTest(skipped=key):
                 self.assertEqual(self.run_body(step['run'], {**healthy, key: 'skipped'}).returncode, 0)
-        for key in ['PREFLIGHT', 'SUITE', 'DOCS']:
+        for key in ['PREFLIGHT', 'SUITE_BUILD', 'SHARDS', 'DOCS']:
             with self.subTest(skipped=key):
                 self.assertNotEqual(self.run_body(step['run'], {**healthy, key: 'skipped'}).returncode, 0)
         # Every red input-gated lane is reported in the same run, not just the first.
         result = self.run_body(step['run'], {**healthy, 'WEB': 'failure', 'JOURNEYS': 'failure'})
         self.assertIn('WEB', result.stdout)
         self.assertIn('JOURNEYS', result.stdout)
-        shard = next(s for s in self.ci()['jobs']['fast-validation-suite']['steps'] if 'test "$SHARDS" = success' in s.get('run', ''))
-        self.assertEqual(self.run_body(shard['run'], {'SHARDS':'success'}).returncode, 0)
-        for result in ['failure', 'cancelled']:
-            self.assertNotEqual(self.run_body(shard['run'], {'SHARDS':result}).returncode, 0)
         publication = next(s for s in job['steps'] if 'PUBLICATION' in s.get('env', {}))
-        self.assertIn('queue-flake-publication',job['needs'])
+        self.assertEqual(publication['env']['PUBLICATION'], '${{ steps.queue-publication.outcome }}')
         for result in ['success','skipped','failure','cancelled','']:
             with self.subTest(publication=result):
                 self.assertEqual(self.run_body(publication['run'],{'PUBLICATION':result}).returncode == 0,
@@ -1163,6 +1237,90 @@ else:
                 git('reset', '--hard', 'HEAD^')
                 output.unlink()
 
+    def test_script_suite_concurrency_keeps_logs_failures_and_browser_isolation(self):
+        from contextlib import closing
+        import sqlite3
+        import time
+
+        action = policy.load(self.root / '.github/actions/run-script-suite-tests/action.yml')
+        run = action['runs']['steps'][-1]['run']
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        shutil.copyfile(policy.ROOT / 'scripts/ci-script-tests-for-diff.py',
+                        scripts / 'ci-script-tests-for-diff.py')
+        # Registered provisioned names exercise the action's real selection.
+        names = ['test-journey-bundles.py', 'test-release-budget-breach.py',
+                 'test-release-report-post.py', 'visual-qa.test.mjs',
+                 'visual-qa-secrets.test.mjs', 'test_factory_model_history.py']
+        (self.root / 'cas-cli').mkdir()
+        (self.root / 'cas-cli/Makefile').write_text('test-ci-tiers:\n' + ''.join(
+            f'\tcd .. && {shlex.quote(sys.executable)} scripts/{name}\n' for name in names))
+        probe = r'''import os, pathlib, sqlite3, sys, time
+from contextlib import closing
+name = pathlib.Path(__file__).name
+with closing(sqlite3.connect(os.environ['STATE'], timeout=10, isolation_level=None)) as db:
+    db.execute('insert into events values (?, ?, ?, ?)', (name, 'start', time.monotonic_ns(), os.environ.get('TMPDIR')))
+# A fixed temp filename must be isolated per suite.
+marker = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / 'suite-marker'
+marker.write_text(name)
+deadline = time.monotonic() + 15
+while not pathlib.Path(os.environ['RELEASE']).exists():
+    if time.monotonic() > deadline: raise RuntimeError('release barrier timed out')
+    time.sleep(.01)
+assert marker.read_text() == name
+for i in range(80): print(f'{name}:{i}')
+with closing(sqlite3.connect(os.environ['STATE'], timeout=10, isolation_level=None)) as db:
+    db.execute('insert into events values (?, ?, ?, ?)', (name, 'end', time.monotonic_ns(), os.environ.get('TMPDIR')))
+sys.exit(17 if name == 'test-release-report-post.py' else 0)
+'''
+        for name in names:
+            (scripts / name).write_text(probe)
+        for mode, body in [('action', run), ('full-tier',
+                'python3 scripts/ci-script-tests-for-diff.py --all')]:
+            with self.subTest(mode=mode):
+                state = self.root / f'{mode}.sqlite'
+                release = self.root / f'{mode}.release'
+                with closing(sqlite3.connect(state, isolation_level=None)) as db:
+                    db.execute('create table events (name, event, stamp, tmp)')
+                env = dict(os.environ, STATE=str(state), RELEASE=str(release), FULL_SET='true', BASE_SHA='')
+                child = subprocess.Popen(['bash', '-euo', 'pipefail', '-c', body], cwd=self.root,
+                    env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                started = []
+                try:
+                    deadline = time.monotonic() + 10
+                    while child.poll() is None and time.monotonic() < deadline:
+                        with closing(sqlite3.connect(state, isolation_level=None)) as db:
+                            started = db.execute("select name from events where event='start'").fetchall()
+                        if len(started) >= 4: break
+                        time.sleep(.01)
+                    self.assertEqual(len(started), 4, 'four suites must reach the completion barrier')
+                finally:
+                    release.touch()
+                    output, _ = child.communicate(timeout=20)
+                self.assertEqual(child.returncode, 1, output)
+                with closing(sqlite3.connect(state, isolation_level=None)) as db:
+                    events = db.execute('select name, event, tmp from events order by stamp').fetchall()
+                starts = [(name, tmp) for name, event, tmp in events if event == 'start']
+                self.assertCountEqual([name for name, _ in starts], names)
+                self.assertEqual(len({tmp for _, tmp in starts}), len(names))
+                active = browsers = peak = 0
+                for name, event, _ in events:
+                    delta = 1 if event == 'start' else -1
+                    active += delta
+                    browsers += delta if name.startswith('visual-qa') else 0
+                    peak = max(peak, active)
+                    self.assertLessEqual(active, 4)
+                    self.assertLessEqual(browsers, 1)
+                self.assertEqual((active, peak), (0, 4))
+                self.assertFalse((self.root / 'target').exists(), 'suite logs stay outside the checkout')
+                for name in names:
+                    expected = [f'{name}:{i}' for i in range(80)]
+                    self.assertIn('\n'.join(expected), output)
+                excerpt = output.split('failed: scripts/test-release-report-post.py\n', 1)[1]
+                self.assertIn('test-release-report-post.py:79', excerpt)
+                self.assertNotIn('test-release-report-post.py:19\n', excerpt)
+                self.assertNotIn('test-journey-bundles.py:79', excerpt)
+
     def test_real_markdown_step_filters_assets_and_skips_an_asset_only_diff(self):
         source = {'file': '.github/workflows/ci.yml', 'job': 'docs-lint'}
         _, step = policy.role(self.ci()['jobs']['docs-lint'], 'Markdown lint', source)
@@ -1186,16 +1344,35 @@ else:
         self.assertFalse(log.exists())
 
     def test_real_runner_route_defaults_to_hosted_and_requires_both_opt_ins(self):
-        route = next(s for s in self.ci()['jobs']['fast-validation-runner-route']['steps'] if s.get('id') == 'route')['run']
-        for event, enabled in itertools.product(['merge_group', 'push', 'pull_request', 'schedule'], ['enabled', '', 'disabled']):
-            with self.subTest(event=event, enabled=enabled):
+        jobs = self.ci()['jobs']
+        route = next(s for s in jobs['ci-diff']['steps'] if s.get('id') == 'route')['run']
+        guard = next(s for s in jobs['fast-validation-suite-build']['steps'] if s.get('name') == 'Verify self-hosted archive trust boundary')['run']
+        guard_script = self.root / 'scripts/check-cassy-actions-runner-isolation.sh'; guard_script.parent.mkdir(exist_ok=True)
+        shutil.copyfile(policy.ROOT / guard_script.relative_to(self.root), guard_script); guard_script.chmod(0o755)
+        local = ['self-hosted','Linux','X64','cas-ci-32core']
+        events = [('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1'), ('push', 'refs/heads/main'),
+                  ('pull_request', 'refs/pull/1/merge'), ('schedule', 'refs/heads/main'),
+                  ('workflow_dispatch', 'refs/heads/epic/release-train-x'), ('workflow_dispatch', 'refs/heads/factory/x')]
+        for (event, ref), queue, train in itertools.product(events, ['enabled', '', 'disabled'], ['enabled', '']):
+            with self.subTest(event=event, ref=ref, queue=queue, train=train):
                 output = self.root / 'route.output';output.write_text('')
-                result = self.run_body(route, dict(EVENT_NAME=event, SELF_HOSTED_ENABLED=enabled, GITHUB_OUTPUT=str(output)))
+                values = dict(EVENT_NAME=event, REF=ref, REPOSITORY='Richards-LLC/cassy', SELF_HOSTED_ENABLED=queue, TRAIN_ARCHIVE_ENABLED=train)
+                result = self.run_body(route, dict(values, GITHUB_OUTPUT=str(output)))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                expected = ['self-hosted','Linux','X64','cas-ci-32core'] if event == 'merge_group' and enabled == 'enabled' else ['ubuntu-latest']
+                expected = local if event == 'merge_group' and queue == 'enabled' else ['ubuntu-latest']
+                # cas-f0e7: only the archive follows the train's own opt-in.
+                archive = local if expected == local or (ref == 'refs/heads/epic/release-train-x' and train == 'enabled') else ['ubuntu-latest']
                 lines = dict(line.split('=', 1) for line in output.read_text().splitlines())
                 self.assertEqual(json.loads(lines['runner']), expected)
                 self.assertEqual(lines['mode'], 'self-hosted' if len(expected)>1 else 'hosted')
+                self.assertEqual(json.loads(lines['archive-runner']), archive)
+                self.assertEqual(lines['archive-mode'], 'self-hosted' if len(archive)>1 else 'hosted')
+                # The archive job re-checks on the machine; it admits exactly the routed runs.
+                slot = dict(GITHUB_EVENT_NAME=event, GITHUB_REF=ref, GITHUB_REPOSITORY='Richards-LLC/cassy',
+                            SELF_HOSTED_ENABLED=queue, TRAIN_ARCHIVE_ENABLED=train,
+                            CARGO_TARGET_DIR='/var/lib/cassy-actions/cache/cargo-target',
+                            SCCACHE_DIR='/var/lib/cassy-actions/cache/sccache', SCCACHE_SERVER_PORT='4227')
+                self.assertEqual(self.run_body(guard, slot).returncode == 0, len(archive) > 1)
 
     def mac_route(self, values):
         # Fake gh: the dispatch prints a run id (or fails), the jobs query

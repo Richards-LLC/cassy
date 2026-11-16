@@ -1324,7 +1324,9 @@ process ancestry validate; setting an environment flag does not waive it.
 Waits print `waiting for host memory (proof running), N s` and memory samples.
 `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS` bounds waiting (default 600 s),
 with `CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS` resampling (default 1 s).
-Expiry fails before starting the suite. A running worker command is terminated
+Expiry fails before starting the suite: the helper exits 75 and names the sampled
+budget, estimate, headroom and reserve, and journey snapshot builds report that as
+not started rather than as a build failure. A running worker command is terminated
 with its own process group if fresh budget falls inside the 2 GiB headroom.
 These are admission estimates and sampled protection, not OS memory limits;
 other applications remain outside this cooperative protocol.
@@ -3244,6 +3246,11 @@ frozen train accepts no merge that could supersede it. That dispatched run and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.
+The archive feeds six disjoint `count:N/6` shards. Classification, runner routing
+and tree reuse share one classifier job. The hosted Full-set gate collects Rust
+reports, publishes repairs and checks every direct producer, including the
+default-feature queue check. Its receipt records gate and repair-publication
+step outcomes. The separate required `Fast Validation` wrapper stays a job check.
 Both preserve the first failure, publish P0 repair issues and run without retries
 or test exclusions. The schema-2 `train-full-gate` artifact
 binds every required job to the source tree and main baseline; train cuts refuse
@@ -3256,14 +3263,25 @@ friction ledger once per immutable run attempt. CI retains complete native logs;
 the daemon still holds a red train and wakes its supervisor once.
 
 Each full-set test/build job also publishes a schema-2 job receipt through
-`.github/actions/full-gate-job`. Its key binds the Git tree, stable job/matrix
-identity, workflow/actions, effective selection, main baseline and runner inputs.
+`.github/actions/full-gate-job`. Its key binds the job's input content, stable
+job/matrix identity, workflow/actions, effective selection, main baseline and
+runner inputs. Commander web/journeys can reuse successful proof across Rust-only
+repairs that do not touch web dependencies; web inputs include the hub asset list,
+preview CSP and Rust crypto fixtures. The Rust archive, shards and doctests can reuse across unrelated web
+source repairs. Rust inputs retain scripts, docs, embedded dist, public assets,
+web fixtures and journey instrumentation. Script tiers and preflight retain
+whole-tree keys because their tests read source across subsystems. Unknown paths
+invalidate every scope, and unknown jobs retain whole-tree keys. Web keys also
+bind the CLI version embedded in their build. Full-set coverage stays exhaustive.
+Content-based keys apply only to full-set dispatches on release-train branches;
+merge-group and other job receipts retain exact-tree keys.
 A requeue can reuse a successful producer job from a failed overall run; it
 validates the completed producer workflow and that particular job through GitHub.
 Failed jobs, changed inputs, missing proof and lookup errors execute normally.
 The Rust archive must still exist before its builder can skip; remaining shards
-download from the original producer run. Reused native train reports feed the
-existing full-suite collector. Cached flake observations retain their original
+download from the original producer run. Reused receipts bind the current evaluated
+tree while retaining their original producer and source tree. Reused native train
+reports feed the existing full-suite collector. Cached flake observations retain their original
 run identity, so reuse cannot count as another independent failure. The final
 full-set receipt still requires every selected job and durable flake publication;
 a per-job receipt alone never authorizes a release.
@@ -4047,7 +4065,7 @@ once with retries disabled. Every nonzero exit fails the shard, including cleanu
 errors after a passing test summary. The queue never excludes tests based on
 issue labels. Native reports and original output remain in the shard artifacts.
 
-The hosted `queue-flake-publication` fan-in reads those artifacts and creates or
+The hosted Full-set gate's repair-publication step reads those artifacts and creates or
 updates one `priority:p0`, `flaky` repair issue per failed native test identity in
 the configured route (`Richards-LLC/cassy` here). The issue names the test, links
 the run and failure output, and carries a fix-or-delete deadline on the next

@@ -2879,6 +2879,12 @@ Cargo output, including ANSI bytes; automatic guards remain in the original
 producer log. Each attempt keeps a separate capture beside the redirected
 producer log, or under the receipt directory's `logs/` for foreground runs.
 Use that selected path as `log_path`; no extraction or filtering is needed.
+When a changed test can only run on the peer machine, add
+`"repeat_log_paths"` with that run's four repeat captures
+(`<selected>.repeat-2` to `.repeat-5`). Each must be a distinct run whose one
+summary shows exactly the changed tests the selection owns, all passing; the
+receipt then carries the five-pass stability proof that park requires.
+Short, failed, reused or mismatched log sets are refused.
 A failed recorded retry removes
 that exact command's previous receipt. An active worker run refuses recording.
 The action writes the normal worker-check receipt key and adds

@@ -418,6 +418,7 @@ for (const { width, height } of SIDEWAYS) test.describe(`sideways with a notch $
     await journey.stage("Open a conversation that waits on me", async () => {
       await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
       await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+      await hub.socketOpen(PELICAN);
       hub.supervisorSays(PELICAN, "Fix the warning in-train, or ship allowlisted?", { kind: "ask", options: ["Fix in-train", "Ship allowlisted"] });
       await expect(page.getByRole("region", { name: `Waiting on you: question from ${PELICAN}` })).toBeVisible();
       await page.getByRole("textbox", { name: "Your message" }).fill("Looking now");

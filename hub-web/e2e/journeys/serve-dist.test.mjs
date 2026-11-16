@@ -67,6 +67,30 @@ out.mkdir(parents=True)
   assert.match(response.headers.get('x-cassy-dist-sha256'), /^[a-f0-9]{64}$/);
   assert.equal(git('status', '--porcelain'), '');
   child.kill('SIGTERM'); await once(child, 'exit');
+
+  // cas-5873: cancelling a run kills Playwright's runner, which launched the
+  // server as a shell command in its own process group with a stdin pipe.
+  const runner = spawn(process.execPath, ['-e', `
+    const server = require('node:child_process').spawn(process.argv[1],
+      { shell: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    server.stdout.on('data', (bytes) => { if (String(bytes).includes('/commander/')) console.log(server.pid); });
+  `, `'${process.execPath}' hub-web/e2e/journeys/serve-dist.mjs ${port}`], {
+    cwd: repo, env: { ...process.env, PATH: `${join(repo, 'tools')}:${process.env.PATH}`, JOURNEY_BUILD_MANIFEST: '' },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  const [line] = await once(runner.stdout, 'data');
+  const group = Number(String(line).trim());
+  const alive = () => { try { process.kill(-group, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; } };
+  t.after(() => { if (alive()) process.kill(-group, 'SIGKILL'); });
+  runner.kill('SIGKILL'); await once(runner, 'exit');
+  for (const deadline = Date.now() + 10_000; alive() && Date.now() < deadline;) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(alive(), false, 'the cancelled run left its webServer process group running');
+  const rebind = createServer();
+  rebind.listen(port, '127.0.0.1'); await once(rebind, 'listening');
+  await new Promise((resolve) => rebind.close(resolve));
+
   const manifest = join(repo, 'target/journey-dist/journey-build.json');
   const snapshot = JSON.parse(await readFile(manifest, 'utf8'));
   for (const [field, value, message] of [

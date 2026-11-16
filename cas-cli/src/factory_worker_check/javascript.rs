@@ -231,19 +231,7 @@ fn parsed_tests(
     lines: &[(usize, usize)],
     strict: bool,
 ) -> Result<Vec<(Identity, String)>> {
-    let mut parser = Parser::new();
-    let language = if path.ends_with("tsx") || path.ends_with("jsx") {
-        tree_sitter_typescript::LANGUAGE_TSX
-    } else {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT
-    };
-    parser.set_language(&language.into())?;
-    let tree = parser
-        .parse(source, None)
-        .context("JavaScript test parse")?;
-    if tree.root_node().has_error() {
-        bail!("cannot resolve changed tests in {path}: JavaScript parse error");
-    }
+    let tree = source_tree(path, source)?;
     let mut aliases = BTreeMap::new();
     imported_aliases(tree.root_node(), source, &mut aliases);
     if strict {
@@ -262,7 +250,232 @@ fn parsed_tests(
         &aliases,
         &mut tests,
     )?;
+    let mut unique = BTreeSet::new();
+    if tests.iter().any(|(identity, _)| !unique.insert(identity)) {
+        bail!("ambiguous source-to-runtime test identity in {path}");
+    }
     Ok(tests)
+}
+
+#[derive(Debug)]
+struct DeclaredSite {
+    line: usize,
+    column: usize,
+    names: Vec<String>,
+}
+
+fn source_tree(path: &str, source: &str) -> Result<tree_sitter::Tree> {
+    let mut parser = Parser::new();
+    let language = if path.ends_with("tsx") || path.ends_with("jsx") {
+        tree_sitter_typescript::LANGUAGE_TSX
+    } else {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+    };
+    parser.set_language(&language.into())?;
+    let tree = parser
+        .parse(source, None)
+        .context("JavaScript test parse")?;
+    if tree.root_node().has_error() {
+        bail!("cannot resolve changed tests in {path}: JavaScript parse error");
+    }
+    Ok(tree)
+}
+
+fn declared_identities<'a>(
+    node: Node<'a>,
+    source: &str,
+) -> Result<Option<(Node<'a>, Vec<String>)>> {
+    let statement = node
+        .parent()
+        .filter(|parent| parent.kind() == "expression_statement")
+        .unwrap_or(node);
+    let Some(comment) = statement
+        .prev_named_sibling()
+        .filter(|prev| prev.kind() == "comment")
+    else {
+        return Ok(None);
+    };
+    let Some(raw) = text(comment, source).strip_prefix("// cas-stability-identities:") else {
+        return Ok(None);
+    };
+    if comment.end_position().row + 1 != statement.start_position().row {
+        bail!("stability identities must immediately precede their registration");
+    }
+    let names: Vec<String> =
+        serde_json::from_str(raw.trim()).context("invalid stability identity declaration")?;
+    let unique: BTreeSet<_> = names.iter().collect();
+    if names.is_empty()
+        || unique.len() != names.len()
+        || names.iter().any(|name| name.trim().is_empty())
+    {
+        bail!("stability identities must be nonempty and unique");
+    }
+    Ok(Some((comment, names)))
+}
+
+fn contains_binding(node: Node<'_>, name: &str, source: &str) -> bool {
+    if matches!(
+        node.kind(),
+        "identifier" | "shorthand_property_identifier_pattern"
+    ) {
+        return text(node, source) == name;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| contains_binding(child, name, source))
+}
+
+/// Resolve only a directly initialized lexical const. Unsupported nearer bindings
+/// are terminal: never search past a shadowing parameter, let, import or pattern.
+fn callback_binding<'a>(call: Node<'a>, callback: Node<'a>, source: &str) -> Result<Node<'a>> {
+    if callback.kind() != "identifier" {
+        bail!("declared stability callback must be a local const identifier");
+    }
+    let name = text(callback, source);
+    let mut parent = call.parent();
+    while let Some(scope) = parent {
+        if matches!(scope.kind(), "program" | "statement_block") {
+            let mut matches = Vec::new();
+            let mut cursor = scope.walk();
+            for statement in scope.named_children(&mut cursor) {
+                if matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                ) {
+                    let mut cursor = statement.walk();
+                    for binding in statement.named_children(&mut cursor) {
+                        if binding.kind() == "variable_declarator"
+                            && binding
+                                .child_by_field_name("name")
+                                .is_some_and(|pattern| contains_binding(pattern, name, source))
+                        {
+                            matches.push((statement, binding));
+                        }
+                    }
+                } else if statement
+                    .child_by_field_name("name")
+                    .is_some_and(|binding| text(binding, source) == name)
+                    || (statement.kind() == "import_statement"
+                        && contains_binding(statement, name, source))
+                {
+                    bail!("unsupported lexical stability callback binding: {name}");
+                }
+            }
+            if !matches.is_empty() {
+                if matches.len() != 1 {
+                    bail!("ambiguous lexical stability callback binding: {name}");
+                }
+                let (statement, binding) = matches[0];
+                if statement
+                    .child(0)
+                    .is_none_or(|keyword| keyword.kind() != "const")
+                    || binding
+                        .child_by_field_name("name")
+                        .is_none_or(|id| id.kind() != "identifier")
+                    || binding.child_by_field_name("value").is_none_or(|value| {
+                        !matches!(value.kind(), "arrow_function" | "function_expression")
+                    })
+                {
+                    bail!(
+                        "stability callback must be initialized directly as a const function: {name}"
+                    );
+                }
+                return Ok(binding);
+            }
+        }
+        if matches!(
+            scope.kind(),
+            "arrow_function" | "function_expression" | "function_declaration"
+        ) {
+            // Do not infer captured callbacks across a function boundary. A var
+            // in a nested block can hoist and shadow an outer lexical binding.
+            bail!("stability callback must be local to the registering function: {name}");
+        }
+        if matches!(
+            scope.kind(),
+            "for_in_statement" | "for_statement" | "catch_clause"
+        ) && ["left", "initializer", "parameter"]
+            .into_iter()
+            .any(|field| {
+                scope
+                    .child_by_field_name(field)
+                    .is_some_and(|binding| contains_binding(binding, name, source))
+            })
+        {
+            bail!("stability callback is shadowed by a control binding: {name}");
+        }
+        parent = scope.parent();
+    }
+    bail!("unresolved local stability callback: {name}")
+}
+
+fn control_headers<'a>(
+    node: Node<'a>,
+    source: &'a str,
+    aliases: &BTreeMap<String, String>,
+) -> Vec<(usize, usize, &'a str)> {
+    let mut headers = Vec::new();
+    let mut parent = node.parent();
+    while let Some(scope) = parent {
+        let body = match scope.kind() {
+            "for_in_statement" | "for_statement" | "while_statement" | "switch_statement" => {
+                scope.child_by_field_name("body")
+            }
+            "if_statement" => scope.child_by_field_name("consequence"),
+            "call_expression"
+                if declaration(scope, source, aliases).is_some_and(|(suite, _)| suite) =>
+            {
+                scope.child_by_field_name("arguments").and_then(|args| {
+                    let mut cursor = args.walk();
+                    args.named_children(&mut cursor)
+                        .find(|arg| matches!(arg.kind(), "arrow_function" | "function_expression"))
+                })
+            }
+            _ => None,
+        };
+        if let Some(body) = body {
+            headers.push((
+                scope.start_position().row + 1,
+                body.start_position().row + 1,
+                &source[scope.start_byte()..body.start_byte()],
+            ));
+        }
+        parent = scope.parent();
+    }
+    headers
+}
+
+fn declared_sites(path: &str, source: &str) -> Result<Vec<DeclaredSite>> {
+    fn collect(
+        node: Node<'_>,
+        source: &str,
+        aliases: &BTreeMap<String, String>,
+        sites: &mut Vec<DeclaredSite>,
+    ) -> Result<()> {
+        if node.kind() == "call_expression"
+            && declaration(node, source, aliases)
+                .is_some_and(|(suite, supported)| !suite && supported)
+            && let Some((_, names)) = declared_identities(node, source)?
+        {
+            sites.push(DeclaredSite {
+                line: node.start_position().row + 1,
+                column: node.start_position().column + 1,
+                names,
+            });
+            return Ok(());
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, source, aliases, sites)?;
+        }
+        Ok(())
+    }
+    let tree = source_tree(path, source)?;
+    let mut aliases = BTreeMap::new();
+    imported_aliases(tree.root_node(), source, &mut aliases);
+    let mut sites = Vec::new();
+    collect(tree.root_node(), source, &aliases, &mut sites)?;
+    Ok(sites)
 }
 
 fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String, String>) {
@@ -359,6 +572,48 @@ fn walk(
         let callback = args
             .named_children(&mut cursor)
             .find(|arg| matches!(arg.kind(), "arrow_function" | "function_expression"));
+        if !suite && let Some((comment, names)) = declared_identities(node, source)? {
+            if !supported || callback.is_some() {
+                bail!("explicit stability identities require a supported local shared callback");
+            }
+            let mut cursor = args.walk();
+            let argument = args
+                .named_children(&mut cursor)
+                .last()
+                .context("declared stability callback missing")?;
+            let binding = callback_binding(node, argument, source)?;
+            let headers = control_headers(node, source, aliases);
+            let changed = force
+                || overlaps(node, lines)
+                || overlaps(comment, lines)
+                || overlaps(binding, lines)
+                || headers.iter().any(|(first, last, _)| {
+                    lines
+                        .iter()
+                        .any(|(start, end)| start <= last && end >= first)
+                });
+            if changed {
+                if strict {
+                    reject_retry_configuration(node, source, path, aliases, true)?;
+                }
+                let fingerprint = serde_json::to_string(&(
+                    text(comment, source),
+                    text(node, source),
+                    text(binding, source),
+                    headers.iter().map(|(_, _, text)| text).collect::<Vec<_>>(),
+                ))?;
+                for name in names {
+                    tests.push((
+                        Identity {
+                            path: path.to_string(),
+                            name,
+                        },
+                        fingerprint.clone(),
+                    ));
+                }
+            }
+            return Ok(());
+        }
         let mut cursor = args.walk();
         let external_callback = callback.is_none()
             && args
@@ -451,7 +706,10 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
     let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
     let tests = changed_tests(&repo, &base, &head, &args[1..])?;
     if tests.is_empty() {
-        bail!(crate::gates::tag("G-61", "no changed JavaScript tests matched the supplied files"));
+        bail!(crate::gates::tag(
+            "G-61",
+            "no changed JavaScript tests matched the supplied files"
+        ));
     }
     let _lane =
         super::try_lock_lane_with_command(cas_root, &repo, &super::worker_check_command(args))?
@@ -533,6 +791,28 @@ fn execute_tests(
     for (path, names) in by_file {
         let package = package_root(repo, path)?;
         let executable = runner_path(repo, &package, runner)?;
+        let source = std::fs::read_to_string(repo.join(path))?;
+        let sites = declared_sites(path, &source)?;
+        if !sites.is_empty() {
+            if runner != "playwright" {
+                bail!("declared stability identities require native Playwright discovery");
+            }
+            let report = reports.path().join("discovery.json");
+            let mut command = Command::new(&executable);
+            command
+                .current_dir(&package)
+                .env("CI", "1")
+                .args(["test", "--list", "--reporter=json"])
+                .arg(regex::escape(&repo.join(path).to_string_lossy()))
+                .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
+            if !run_scoped_javascript(command, high, &reports.path().join("discovery-scope"))? {
+                bail!("Playwright native discovery failed for {path}");
+            }
+            let report = serde_json::from_slice(
+                &std::fs::read(report).context("Playwright discovery report missing")?,
+            )?;
+            validate_declared_discovery(repo, &report, path, &sites)?;
+        }
         let pattern = names
             .iter()
             .map(|name| format!("(?:{})", regex::escape(name)))
@@ -616,33 +896,12 @@ fn execute_tests(
                 _ => bail!("unsupported stability runner: {runner}"),
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
-            // A stale marker could mistake admission failure for test execution.
-            let _ = std::fs::remove_file(&marker);
-            let mut command = crate::factory_build_memory::scope_command(
-                command,
-                cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
-                high,
-                &marker,
-            );
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                command.process_group(0);
-            }
-            #[cfg(unix)]
-            let _signals = super::WorkerWaitSignals::install()?;
-            let mut child = command
-                .spawn()
-                .with_context(|| format!("start {runner} stability run"))?;
-            #[cfg(unix)]
-            let status = super::wait_for_worker_command(&mut child)?;
-            #[cfg(not(unix))]
-            let status = child.wait()?;
+            let success = run_scoped_javascript(command, high, &marker)?;
             let value: Value =
                 serde_json::from_slice(&std::fs::read(&report).with_context(|| {
                     format!("{runner} did not produce a stability report for {path}")
                 })?)?;
-            Ok((status.success(), value))
+            Ok((success, value))
         })?;
     }
     if super::clean_head(repo)? != head {
@@ -656,6 +915,178 @@ fn execute_tests(
     };
     super::stability::record(cas_root, repo, head, proof.clone())?;
     Ok(proof)
+}
+
+fn validate_declared_discovery(
+    repo: &Path,
+    report: &Value,
+    path: &str,
+    sites: &[DeclaredSite],
+) -> Result<()> {
+    type Location = (String, usize, usize);
+    type Discovered = BTreeMap<Location, BTreeMap<String, BTreeSet<String>>>;
+    fn collect(
+        repo: &Path,
+        root: &Path,
+        suites: &Value,
+        ancestry: &[String],
+        discovered: &mut Discovered,
+    ) -> Result<()> {
+        for suite in suites.as_array().context("Playwright discovery suites")? {
+            let mut names = ancestry.to_vec();
+            if !ancestry.is_empty() || suite.get("column").and_then(Value::as_u64).unwrap_or(0) != 0
+            {
+                names.push(
+                    suite
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .context("discovery suite title")?
+                        .to_string(),
+                );
+            }
+            for spec in suite
+                .get("specs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let mut full = names.clone();
+                full.push(
+                    spec.get("title")
+                        .and_then(Value::as_str)
+                        .context("discovery spec title")?
+                        .to_string(),
+                );
+                let file = root.join(
+                    spec.get("file")
+                        .and_then(Value::as_str)
+                        .context("discovery spec file")?,
+                );
+                let location = (
+                    report_path(repo, file.to_str().context("discovery path encoding")?)?,
+                    spec.get("line")
+                        .and_then(Value::as_u64)
+                        .context("discovery spec line")? as usize,
+                    spec.get("column")
+                        .and_then(Value::as_u64)
+                        .context("discovery spec column")? as usize,
+                );
+                let tests = spec
+                    .get("tests")
+                    .and_then(Value::as_array)
+                    .context("discovery spec tests")?;
+                if tests.is_empty() {
+                    bail!("discovery spec has no projects");
+                }
+                for test in tests {
+                    let project = test
+                        .get("projectId")
+                        .or_else(|| test.get("projectName"))
+                        .and_then(Value::as_str)
+                        .context("discovery project missing")?;
+                    if !discovered
+                        .entry(location.clone())
+                        .or_default()
+                        .entry(project.to_string())
+                        .or_default()
+                        .insert(full.join(" "))
+                    {
+                        bail!(
+                            "ambiguous duplicate discovered identity at {}:{}:{}",
+                            location.0,
+                            location.1,
+                            location.2
+                        );
+                    }
+                }
+            }
+            if let Some(nested) = suite.get("suites") {
+                collect(repo, root, nested, &names, discovered)?;
+            }
+        }
+        Ok(())
+    }
+    if report
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_none_or(|errors| !errors.is_empty())
+    {
+        bail!("Playwright discovery did not produce an error-free report");
+    }
+    let root = Path::new(
+        report
+            .get("config")
+            .and_then(|config| config.get("rootDir"))
+            .and_then(Value::as_str)
+            .context("discovery rootDir missing")?,
+    );
+    let mut discovered = BTreeMap::new();
+    collect(
+        repo,
+        root,
+        report.get("suites").context("discovery suites missing")?,
+        &[],
+        &mut discovered,
+    )?;
+    let mut declared = BTreeMap::new();
+    for site in sites {
+        let location = (path.to_string(), site.line, site.column);
+        let expected: BTreeSet<_> = site.names.iter().cloned().collect();
+        for name in &site.names {
+            if declared.insert(name.clone(), location.clone()).is_some() {
+                bail!("ambiguous declared runtime identity: {name}");
+            }
+        }
+        let projects = discovered
+            .get(&location)
+            .context("declared registration missing from native discovery")?;
+        if projects.is_empty() || projects.values().any(|actual| actual != &expected) {
+            bail!(
+                "declared identities do not match native expansion at {path}:{}:{}",
+                site.line,
+                site.column
+            );
+        }
+    }
+    for (location, projects) in &discovered {
+        if location.0 != path {
+            continue;
+        }
+        for name in projects.values().flatten() {
+            if declared
+                .get(name)
+                .is_some_and(|expected| expected != location)
+            {
+                bail!("declared identity has an ambiguous native registration: {name}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_scoped_javascript(command: Command, high: u64, marker: &Path) -> Result<bool> {
+    let _ = std::fs::remove_file(marker);
+    let mut command = crate::factory_build_memory::scope_command(
+        command,
+        cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
+        high,
+        marker,
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(unix)]
+    let _signals = super::WorkerWaitSignals::install()?;
+    let mut child = command
+        .spawn()
+        .context("start JavaScript stability command")?;
+    #[cfg(unix)]
+    let status = super::wait_for_worker_command(&mut child)?;
+    #[cfg(not(unix))]
+    let status = child.wait()?;
+    Ok(status.success())
 }
 
 fn verify_repeats(
@@ -1008,6 +1439,193 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.is::<IsolatedCheckoutRequired>());
+    }
+
+    #[test]
+    fn shared_paste_callback_selects_declared_expanded_cases_cas_13c9() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let path = "paste-content.journey.ts";
+        let source = r#"import { test, expect } from '@playwright/test';
+for (const [width, height, colorScheme] of [[1440, 800, 'light'], [1440, 800, 'dark'], [390, 844, 'light'], [390, 844, 'dark']] as const) {
+  test.describe(`composer paste ${width} ${colorScheme}`, () => {
+    const run: Parameters<typeof test>[2] = async () => {
+      expect(1 + 1).toBe(2);
+    };
+    if (width === 1440 && colorScheme === 'light') {
+      // cas-stability-identities: ["composer paste 1440 light HUB-J24 paste content into the composer"]
+      test('HUB-J24 paste content into the composer', run);
+    } else {
+      // cas-stability-identities: ["composer paste 1440 dark HUB-J24 paste content 1440 dark", "composer paste 390 light HUB-J24 paste content 390 light", "composer paste 390 dark HUB-J24 paste content 390 dark"]
+      test(`HUB-J24 paste content ${width} ${colorScheme}`, { tag: '@part' }, run);
+    }
+  });
+}
+test('unrelated', () => { throw new Error('must remain unselected'); });
+"#;
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join(path), source).unwrap();
+        git(&["add", path]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(
+            repo.path().join(path),
+            source.replace("expect(1 + 1).toBe(2)", "expect(1 + 2).toBe(3)"),
+        )
+        .unwrap();
+        git(&["add", path]);
+        git(&["commit", "--quiet", "-m", "shared body changed"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let expected = [
+            id(
+                path,
+                "composer paste 1440 dark HUB-J24 paste content 1440 dark",
+            ),
+            id(
+                path,
+                "composer paste 1440 light HUB-J24 paste content into the composer",
+            ),
+            id(
+                path,
+                "composer paste 390 dark HUB-J24 paste content 390 dark",
+            ),
+            id(
+                path,
+                "composer paste 390 light HUB-J24 paste content 390 light",
+            ),
+        ];
+        assert_eq!(
+            changed_tests(repo.path(), &base, &head, &[path.into()]).unwrap(),
+            expected
+        );
+        for invalid in [
+            source.replace("const run:", "let run:"),
+            source.replace("}, run);", "}, missing);"),
+            source.replace(
+                "async () => {\n      expect(1 + 1).toBe(2);\n    }",
+                "importedCallback",
+            ),
+            source.replace(
+                "[\"composer paste 1440 light HUB-J24 paste content into the composer\"]",
+                "[\"duplicate_id\", \"duplicate_id\"]",
+            ),
+            source.replace(
+                "[\"composer paste 1440 light HUB-J24 paste content into the composer\"]",
+                "[]",
+            ),
+        ] {
+            assert!(source_tests(path, &invalid, &[(1, usize::MAX)]).is_err());
+        }
+        let shadowed = "const run = async () => {};\ntest.describe('suite', (run) => {\n// cas-stability-identities: [\"suite case_1\"]\ntest('case_1', run);\n});";
+        assert!(source_tests(path, shadowed, &[(1, usize::MAX)]).is_err());
+        let duplicate_sites = "const run = async () => {};\n// cas-stability-identities: [\"case_1\"]\ntest('case_1', run);\n// cas-stability-identities: [\"case_1\"]\ntest('case_2', run);";
+        assert!(source_tests(path, duplicate_sites, &[(1, usize::MAX)]).is_err());
+        for changed in [
+            source.replace("1440, 800", "1280, 800"),
+            source.replace("width === 1440", "width === 1280"),
+        ] {
+            std::fs::write(repo.path().join(path), changed).unwrap();
+            git(&["add", path]);
+            git(&["commit", "--quiet", "-m", "control header changed"]);
+            assert_eq!(
+                changed_tests(
+                    repo.path(),
+                    &base,
+                    &git(&["rev-parse", "HEAD"]),
+                    &[path.into()]
+                )
+                .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn declared_playwright_discovery_requires_exact_registration_expansions_cas_13c9() {
+        let path = "hub-web/e2e/paste.journey.ts";
+        let sites = [DeclaredSite {
+            line: 8,
+            column: 5,
+            names: vec!["suite case_1".into(), "suite case_2".into()],
+        }];
+        let spec = |name: &str| {
+            json!({"title":name,"file":"paste.journey.ts","line":8,"column":5,
+            "tests":[{"projectId":"journeys","results":[]}]})
+        };
+        let report = json!({"config":{"rootDir":"/project/hub-web/e2e"},"errors":[],"suites":[
+            {"title":"paste.journey.ts","column":0,"specs":[],"suites":[
+                {"title":"suite","column":1,"specs":[spec("case_1"),spec("case_2")],"suites":[]}]}]});
+        validate_declared_discovery(Path::new("/project"), &report, path, &sites).unwrap();
+        for variant in 0..6 {
+            let mut invalid = report.clone();
+            let specs = invalid["suites"][0]["suites"][0]["specs"]
+                .as_array_mut()
+                .unwrap();
+            match variant {
+                0 => {
+                    specs.pop();
+                }
+                1 => {
+                    specs.push(spec("case_extra"));
+                }
+                2 => {
+                    specs[0]["line"] = json!(9);
+                }
+                3 => {
+                    specs[0]["column"] = json!(6);
+                }
+                4 => {
+                    specs.push(specs[0].clone());
+                }
+                5 => {
+                    let mut misplaced = specs[0].clone();
+                    misplaced["line"] = json!(9);
+                    specs.push(misplaced);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_declared_discovery(Path::new("/project"), &invalid, path, &sites).is_err(),
+                "variant {variant}"
+            );
+        }
+        let mut second_project = report.clone();
+        for spec in second_project["suites"][0]["suites"][0]["specs"]
+            .as_array_mut()
+            .unwrap()
+        {
+            spec["tests"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"projectId":"second","results":[]}));
+        }
+        validate_declared_discovery(Path::new("/project"), &second_project, path, &sites).unwrap();
+        second_project["suites"][0]["suites"][0]["specs"][0]["tests"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(
+            validate_declared_discovery(Path::new("/project"), &second_project, path, &sites)
+                .is_err()
+        );
     }
 
     #[test]

@@ -109,6 +109,10 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     await sheet.getByRole("searchbox", { name: "Filter projects" }).fill("ledger");
     await expect(sheet.locator("#launch-panel-known .launch-row-name")).toHaveText(["ledger-api"]);
     await sheet.getByRole("radio", { name: /ledger-api/ }).check();
+    // Selecting a project starts an asynchronous, project-specific profile
+    // load. Wait for its rows before measuring the scroller's final bottom;
+    // otherwise the accounts can arrive after scrollTo(bottom) and extend it.
+    await expect(sheet.locator(".launch-accounts")).toBeVisible();
     // cas-6c0d: the action bar frosts only while fields scroll beneath it; at the end it is the sheet, not a slab.
     const frost = () => sheet.locator(".launch-actions").evaluate(node => getComputedStyle(node).backdropFilter);
     await expect.poll(frost).not.toBe("none");
@@ -120,7 +124,6 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     // the failing base build where main remains selected.
     const captures = join(testInfo.outputDir, "project-policy");
     mkdirSync(captures, { recursive: true });
-    await expect(sheet.locator(".launch-accounts")).toBeVisible();
     for (const width of [390, 1440]) {
       await page.setViewportSize({ width, height: 844 });
       await page.screenshot({ path: join(captures, `recommendation-${width}.png`) });

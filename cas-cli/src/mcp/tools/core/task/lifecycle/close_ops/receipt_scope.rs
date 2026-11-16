@@ -1381,6 +1381,60 @@ mod tests {
     }
 
     #[test]
+    fn adopted_delivery_retains_original_fragment_after_restart_cas_2a80() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        let repo = changelog_fixture();
+        let task = Task::new("cas-a1b2".into(), "adopted delivery".into());
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        // The original worker parked its source and fragment on a side branch.
+        git(&["checkout", "-qb", "factory/old-cas-a1b2", "main"]);
+        std::fs::create_dir(repo.path().join("changelog.d")).unwrap();
+        let fragment = "changelog.d/cas-a1b2.md";
+        std::fs::write(repo.path().join(fragment), "### Fixed — Factory\n\n- **Replacement assignment** — Retire the previous assignment.\n").unwrap();
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let original = commit_changelog_fixture(repo.path(), "fix(cas-a1b2): release old assignment");
+        git(&["checkout", "main"]);
+        std::fs::write(repo.path().join("upstream.txt"), "new train\n").unwrap();
+        let start = commit_changelog_fixture(repo.path(), "train advance");
+        git(&["checkout", "-qb", "factory/new-cas-a1b2"]);
+        // Branch names embed the task id but are not whole-token task claims.
+        git(&["merge", "-q", "--no-ff", "--no-edit", "factory/old-cas-a1b2"]);
+        std::fs::write(repo.path().join("README.md"), "assignment ownership\n").unwrap();
+        commit_changelog_fixture(repo.path(), "document ownership");
+        std::fs::write(repo.path().join("diagnostic.txt"), "temporary probe\n").unwrap();
+        let diagnostic = commit_changelog_fixture(repo.path(), "diagnose(a1b2): inspect assignment");
+        git(&["revert", "--no-edit", &diagnostic]);
+        git(&["checkout", "main"]);
+        std::fs::write(repo.path().join("target-only.txt"), "unrelated target change\n").unwrap();
+        commit_changelog_fixture(repo.path(), "target refresh");
+        git(&["checkout", "factory/new-cas-a1b2"]);
+        git(&["merge", "-q", "--no-ff", "--no-edit", "main"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "replacement worker restarted after adoption",
+            identity: TaskCommitIdentity {
+                task_id: Some(task.id.clone()),
+                start_base: Some(start),
+                known_commits: vec![original, diagnostic, head.clone()],
+                ..Default::default()
+            },
+        };
+        let changed = task_attribution::paths(repo.path(), "main", &window, Some(&head)).unwrap();
+        assert!(changed.iter().any(|path| path == fragment), "{changed:?}");
+        assert!(changed.iter().any(|path| path == "hub-web/src/app.ts"), "{changed:?}");
+        assert!(!changed.iter().any(|path| path == "target-only.txt"), "{changed:?}");
+        let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(&head)).unwrap();
+        assert!(changelog_refusal(repo.path(), &task, &changed, &head, "main", Some(&ranges)).is_none());
+    }
+
+    #[test]
     fn reasoned_no_changelog_decision_exempts_source_delivery() {
         let repo = changelog_fixture();
         let cas_root = tempfile::tempdir().unwrap();

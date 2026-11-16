@@ -928,6 +928,9 @@ mod tests {
         let fixture = Fixture::build(false);
         fixture.start().await;
         git(fixture._repo.path(), &["branch", "epic/deleted", "main"]);
+        let config = fixture.root.join("config.toml");
+        let pinned = std::fs::read_to_string(&config).unwrap() + "[project]\ncanonical_id = 'gh-2017-fixture'\n";
+        std::fs::write(&config, pinned).unwrap();
         let tasks = fixture.core.open_task_store().unwrap();
         let mut stale_train = Task::new("cas-stale-train".into(), "cancelled train".into());
         stale_train.task_type = TaskType::Epic;

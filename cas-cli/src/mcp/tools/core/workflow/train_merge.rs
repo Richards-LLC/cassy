@@ -940,9 +940,10 @@ mod tests {
         stale.status = TaskStatus::AwaitingMerge;
         stale.deliverables.factory_branch_anchor = Some(fixture.shas[2].clone());
         stale.deliverables.parked_branch = Some("factory/worker-3".into());
-        stale.deliverables.work_target = crate::mcp::tools::core::task::repo_context::declare_work_target(
-            &fixture.root, fixture._repo.path().to_str(), Some("epic/deleted"),
-        ).unwrap();
+        stale.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:gh-2017-fixture".into(),
+            target_branch: "epic/deleted".into(),
+        });
         tasks.create_atomic(&stale, &[], Some(&stale_train.id), None).unwrap();
 
         resume_pending(&fixture.root, "queue-session").await.unwrap();

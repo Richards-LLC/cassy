@@ -193,6 +193,8 @@ mod tests {
             ("unfrozen", false, None, "pending"),
             ("frozen", true, None, "green"),
             ("fast red", true, Some((1, "failure")), "red"),
+            ("impact own red", true, Some((3, "failure")), "red"),
+            ("impact ring red", true, Some((4, "failure")), "red"),
             ("factory pending", true, Some((2, "pending")), "pending"),
             ("factory skipped", true, Some((2, "skipped")), "pending"),
             ("factory missing", true, Some((2, "missing")), "pending"),
@@ -233,6 +235,7 @@ mod tests {
                     rows[index]["conclusion"] = serde_json::Value::Null;
                 }
                 Some((index, conclusion)) => {
+                    rows[index]["status"] = "completed".into();
                     rows[index]["conclusion"] = conclusion.into();
                 }
                 None => {}

@@ -159,9 +159,9 @@ impl BranchCiState {
 
 /// Reuse admission's exact commit/check classifier, never infer green from a
 /// workflow completing, an empty response or an unavailable forge.
-pub(crate) fn retry_ci_status(sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
+pub(crate) fn retry_ci_status(root: Option<&Path>, sha: &str, target: &str, cwd: &Path, ci_sha: &str) -> crate::factory_ci_retry::CiStatus {
     use crate::factory_ci_retry::CiStatus;
-    let lookup = lookup_branch_ci(sha, target, cwd);
+    let lookup = frozen_train_ci::lookup(root, sha, target, cwd);
     // GH #1899: a timed-out or failed gh api call is no CI answer. Stay armed
     // for the next watch pass; the two-hour cap still bounds the wait.
     if lookup.gh_failed {
@@ -415,9 +415,9 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
 
 /// cas-207e: whether a parked delivery's lane CI is still running, so the
 /// supervisor-stall relay does not call it a ready merge (cas-6c13).
-pub(crate) fn delivery_ci_pending(branch: &str, target: &str, cwd: &Path) -> bool {
+pub(crate) fn delivery_ci_pending(root: Option<&Path>, branch: &str, target: &str, cwd: &Path) -> bool {
     matches!(
-        lookup_branch_ci(branch, target, cwd).state,
+        frozen_train_ci::lookup(root, branch, target, cwd).state,
         BranchCiState::Pending { .. } | BranchCiState::CodePending { .. }
     )
 }
@@ -5425,7 +5425,7 @@ impl CasCore {
             .map(|(_, _, _, note)| format!("{note}\n\n"))
             .unwrap_or_default();
         let branch_ci_lookup = fast_lane_lookup
-            .unwrap_or_else(|| frozen_train_ci::lookup(&cas_root, ci_source, &worktree.parent_branch, &cwd));
+            .unwrap_or_else(|| frozen_train_ci::lookup(Some(&cas_root), ci_source, &worktree.parent_branch, &cwd));
         let unparked_notice = scoped_task.as_deref()
             .filter(|task| task.status == cas_types::TaskStatus::InProgress
                 && task.task_type != cas_types::TaskType::Epic)
@@ -7127,7 +7127,7 @@ mod tests {
                 "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{code_sha}/check-runs) printf '%s\\n' '{cancelled}' ;;\n*/{tip}/check-runs) printf '%s\\n' '{tip_response}' ;;\n*) exit 97 ;;\nesac\n"
             ));
             env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
-            assert_eq!(super::retry_ci_status(&tip, "main", repo.path(), &code_sha), expected, "tip CI: {tip_response}");
+            assert_eq!(super::retry_ci_status(None, &tip, "main", repo.path(), &code_sha), expected, "tip CI: {tip_response}");
         }
     }
 

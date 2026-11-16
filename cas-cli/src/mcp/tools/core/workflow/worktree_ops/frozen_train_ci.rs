@@ -45,8 +45,14 @@ fn rows(output: &GhApiOutput, sha: &str) -> Option<Vec<serde_json::Value>> {
 }
 
 // cas-rule: rule-176 scope: "(2) Each check runs once per change, at the cheapest point that catches its defect. Running the same check in more places is a defect."
-pub(super) fn lookup(root: &Path, branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
+pub(super) fn lookup(
+    root: Option<&Path>,
+    branch: &str,
+    target: &str,
+    cwd: &Path,
+) -> BranchCiLookup {
     let frozen = || {
+        let root = root?;
         if !active_target(root, target, cwd) {
             return None;
         }
@@ -238,7 +244,16 @@ mod tests {
                     "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncat <<'JSON'\n{response}\nJSON\n"
                 ),
             );
-            let state = lookup(&root, &tip, target, repo.path()).state;
+            let state = lookup(Some(&root), &tip, target, repo.path()).state;
+            let pending = super::super::delivery_ci_pending(Some(&root), &tip, target, repo.path());
+            assert_eq!(pending, expected == "pending", "{case}");
+            let retry = super::super::retry_ci_status(Some(&root), &tip, target, repo.path(), &tip);
+            let expected_retry = match expected {
+                "green" => crate::factory_ci_retry::CiStatus::Green,
+                "red" => crate::factory_ci_retry::CiStatus::Red,
+                _ => crate::factory_ci_retry::CiStatus::Pending,
+            };
+            assert_eq!(retry, expected_retry, "{case}");
             match expected {
                 "green" => {
                     assert!(

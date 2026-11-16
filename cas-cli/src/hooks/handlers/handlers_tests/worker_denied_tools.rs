@@ -491,6 +491,19 @@ fn worker_piped_or_background_cd_keeps_credential_cwd_cas_707a2() {
 }
 
 #[test]
+fn worker_argument_substitution_keeps_credential_reader_cas_707a2() {
+    assert_credential_cwd_cases(
+        &[
+            "cat $(echo x) ~/.config/neonctl/credentials.json",
+            "cd ~ && cat $(echo x) .config/neonctl/credentials.json",
+            "cat $(echo x) $(echo y) ~/.config/neonctl/credentials.json",
+            "head -n $(echo 5) ~/.local/share/com.vercel.cli/auth.json",
+        ],
+        &["cat $(echo x) README.md"],
+    );
+}
+
+#[test]
 fn worker_function_body_cd_is_not_executed_cas_707a2() {
     assert_credential_cwd_cases(
         &[

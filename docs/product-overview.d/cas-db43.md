@@ -1,3 +1,5 @@
+## Core Concepts
+
 ### Frozen train repair admission
 
 For an active release freeze, merge admission requires the repair's exact SHA

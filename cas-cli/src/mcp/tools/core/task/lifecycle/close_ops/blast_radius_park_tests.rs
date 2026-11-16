@@ -332,9 +332,7 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     // Crate coverage and the mounted test's exact-tip stability are separate.
     stability::record(&f.cas_dir(), &f.worker_path, &head, stability::Proof {
         runner: "nextest".into(),
-        tests: vec![stability::Identity {
-            path: "crates/widget/src/gear_tests.rs".into(), name: "gear::tests::turns".into(),
-        }],
+        tests: vec![stability::Identity::exact("crates/widget/src/gear_tests.rs", "gear::tests::turns")],
         consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 0,
     }).unwrap();
     let parked = call(&f.worker, serde_json::json!({
@@ -766,9 +764,7 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     // The crate receipt still rebounds across docs; the new test needs exact-tip proof.
     stability::record(&f.cas_dir(), &f.worker_path, &delivered_tip, stability::Proof {
         runner: "nextest".into(),
-        tests: vec![stability::Identity {
-            path: "crates/widget/tests/gear.rs".into(), name: "gear_turns".into(),
-        }],
+        tests: vec![stability::Identity::exact("crates/widget/tests/gear.rs", "gear_turns")],
         consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 0,
     }).unwrap();
     let parked = call(&f.worker, close.clone()).await;

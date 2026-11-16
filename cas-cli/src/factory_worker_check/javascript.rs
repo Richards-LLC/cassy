@@ -29,21 +29,77 @@ fn javascript(path: &str) -> bool {
     )
 }
 
+/// A scoped JavaScript stability command, however the shell names its runner.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Invocation {
+    pub(super) runner: &'static str,
+    /// The runner's `--config` file, relative to the invocation directory.
+    pub(super) config: Option<String>,
+    /// Test files relative to the invocation directory.
+    pub(super) files: Vec<String>,
+}
+
+pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>`";
+
+/// Package-manager prefixes and runner subcommands are spelling; the only
+/// runner option is a config file. Retries, filters and other flags stay
+/// refused: the stability run owns them.
+pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let args = match args.as_slice() {
+        ["pnpm" | "yarn" | "npm", "exec", rest @ ..] => rest,
+        ["npx" | "bunx" | "pnpx" | "pnpm" | "yarn", rest @ ..] => rest,
+        rest => rest,
+    };
+    let (runner, rest) = match args {
+        ["vitest", "run", rest @ ..] | ["vitest", rest @ ..] => ("vitest", rest),
+        ["jest", rest @ ..] => ("jest", rest),
+        ["playwright", "test", rest @ ..] | ["playwright", rest @ ..] => ("playwright", rest),
+        _ => return None,
+    };
+    let mut config = None;
+    let mut files = Vec::new();
+    let mut rest = rest.iter();
+    while let Some(arg) = rest.next() {
+        let value = match *arg {
+            "--config" | "-c" => Some(*rest.next()?),
+            "--runInBand" | "-i" if runner == "jest" => continue,
+            other => other.strip_prefix("--config="),
+        };
+        if let Some(value) = value {
+            if config.is_some() || !safe_path(value) {
+                return None;
+            }
+            config = Some(value.to_string());
+        } else if safe_path(arg) && javascript(arg) {
+            files.push(arg.to_string());
+        } else {
+            return None;
+        }
+    }
+    (!files.is_empty()).then_some(Invocation { runner, config, files })
+}
+
 pub(super) fn allowed_args(args: &[String]) -> bool {
-    args.len() > 1
-        && matches!(args[0].as_str(), "vitest" | "jest" | "playwright")
-        && args[1..]
-            .iter()
-            .all(|path| safe_path(path) && javascript(path))
+    invocation(args).is_some()
+}
+
+/// Whether a refused command was meant as a JavaScript stability run.
+pub(super) fn names_runner(args: &[String]) -> bool {
+    args.iter().take(3).any(|arg| matches!(arg.as_str(), "vitest" | "jest" | "playwright"))
 }
 
 /// Only hunks intersecting a test function (or its suite title) select it.
-/// Dynamic titles cannot safely become a runtime selector and fail closed.
+/// `base` is the scoped proof base and only the delivered `head` is parsed:
+/// intermediate commits never count. `owned`, when known, keeps only head
+/// lines blamed on the task's own commits. A base revision that does not
+/// parse has no prior tests to compare. Dynamic titles fail closed.
 pub(crate) fn changed_tests(
     repo: &Path,
     base: &str,
     head: &str,
     paths: &[String],
+    owned: Option<&BTreeSet<String>>,
 ) -> Result<Vec<Identity>> {
     let mut selected = BTreeSet::new();
     for path in paths.iter().filter(|path| javascript(path)) {
@@ -53,15 +109,6 @@ pub(crate) fn changed_tests(
         if super::git(repo, &["ls-tree", "--name-only", head, "--", path])?.is_empty() {
             continue;
         }
-        let output = Command::new("git")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .current_dir(repo)
-            .args(["show", &format!("{head}:{path}")])
-            .output()?;
-        if !output.status.success() {
-            bail!("cannot read {head}:{path}");
-        }
-        let source = String::from_utf8(output.stdout)?;
         let diff = super::git(
             repo,
             &[
@@ -75,16 +122,31 @@ pub(crate) fn changed_tests(
                 path,
             ],
         )?;
-        let old = Command::new("git")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .current_dir(repo)
-            .args(["show", &format!("{base}:{path}")])
-            .output()?;
-        let old = if old.status.success() {
-            String::from_utf8(old.stdout)?
-        } else {
-            String::new()
-        };
+        let mut lines = changed_lines(&diff)?;
+        if let Some(owned) = owned {
+            let authored = authored_lines(repo, base, head, path, owned)?;
+            lines = lines
+                .into_iter()
+                .flat_map(|(start, end)| {
+                    if start == end && diff_deletes_at(&diff, start) {
+                        // A pure deletion has no surviving line to blame.
+                        return vec![(start, end)];
+                    }
+                    (start..=end)
+                        .filter(|line| authored.contains(line))
+                        .map(|line| (line, line))
+                        .collect()
+                })
+                .collect();
+        }
+        if lines.is_empty() {
+            continue;
+        }
+        let source = String::from_utf8(show(repo, head, path)?.context(format!("cannot read {head}:{path}"))?)?;
+        let old = show(repo, base, path)?
+            .map(String::from_utf8)
+            .transpose()?
+            .unwrap_or_default();
         let all = parsed_tests(path, &source, &[(1, usize::MAX)], false)?;
         let stem = Path::new(path)
             .file_stem()
@@ -93,15 +155,16 @@ pub(crate) fn changed_tests(
         let test_file = stem.ends_with(".test")
             || stem.ends_with(".spec")
             || path.split('/').any(|part| part == "__tests__");
-        if test_file && all.is_empty() && !source.trim().is_empty() && !diff.is_empty() {
+        if test_file && all.is_empty() && !source.trim().is_empty() {
             bail!(
                 "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
             );
         }
-        let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)?
+        let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)
+            .unwrap_or_default()
             .into_iter()
             .collect();
-        for (identity, body) in parsed_tests(path, &source, &changed_lines(&diff)?, true)? {
+        for (identity, body) in parsed_tests(path, &source, &lines, true)? {
             // Hunk lines may contain several calls. Repeating an unchanged
             // neighbour would violate the delivery-only selection contract.
             if previous.get(&identity) != Some(&body) {
@@ -110,6 +173,52 @@ pub(crate) fn changed_tests(
         }
     }
     Ok(selected.into_iter().collect())
+}
+
+fn show(repo: &Path, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .current_dir(repo)
+        .args(["show", &format!("{revision}:{path}")])
+        .output()?;
+    Ok(output.status.success().then_some(output.stdout))
+}
+
+/// Head lines whose blame, bounded at the proof base, is a task commit.
+fn authored_lines(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    path: &str,
+    owned: &BTreeSet<String>,
+) -> Result<BTreeSet<usize>> {
+    let blame = super::git(
+        repo,
+        &["blame", "--porcelain", &format!("{base}..{head}"), "--", path],
+    )?;
+    let mut lines = BTreeSet::new();
+    for header in blame.lines().filter(|line| !line.starts_with('\t')) {
+        let mut fields = header.split(' ');
+        if let (Some(commit), Some(_), Some(line)) = (fields.next(), fields.next(), fields.next())
+            && commit.len() >= 40
+            && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && owned.contains(commit)
+        {
+            lines.insert(line.parse()?);
+        }
+    }
+    Ok(lines)
+}
+
+/// Whether the net diff deletes lines just above head line `line`.
+fn diff_deletes_at(diff: &str, line: usize) -> bool {
+    diff.lines().filter(|hunk| hunk.starts_with("@@ ")).any(|hunk| {
+        let mut ranges = hunk.split_whitespace().skip(1);
+        let (Some(old), Some(new)) = (ranges.next(), ranges.next()) else { return false };
+        let count = |range: &str| range.split_once(',').map_or(Some(1), |(_, n)| n.parse::<usize>().ok());
+        let start = new.trim_start_matches('+').split(',').next().and_then(|n| n.parse::<usize>().ok());
+        count(old).is_some_and(|n| n > 0) && count(new) == Some(0) && start == Some(line)
+    })
 }
 
 fn changed_lines(diff: &str) -> Result<Vec<(usize, usize)>> {
@@ -157,13 +266,26 @@ fn title(node: Node<'_>, source: &str) -> Option<String> {
     Some(contents.to_string())
 }
 
+/// `(suite, supported, parameterized)` for a test registration call.
+/// `it.each(table)(title, fn)` and its tagged-template form register one
+/// runtime test per row; their title is a placeholder template.
 fn declaration(
     node: Node<'_>,
     source: &str,
     aliases: &BTreeMap<String, String>,
-) -> Option<(bool, bool)> {
-    let function = node.child_by_field_name("function")?;
+) -> Option<(bool, bool, bool)> {
+    let mut function = node.child_by_field_name("function")?;
+    let mut parameterized = false;
+    if function.kind() == "call_expression"
+        && let Some(inner) = function.child_by_field_name("function")
+        && inner.kind() == "member_expression"
+        && text(inner, source).ends_with(".each")
+    {
+        function = inner;
+        parameterized = true;
+    }
     let name = text(function, source);
+    let name = if parameterized { name.strip_suffix(".each")? } else { name };
     let parts: Vec<_> = name.split('.').collect();
     let raw_root = name
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
@@ -194,7 +316,7 @@ fn declaration(
             )
         })
     {
-        Some((suite, true))
+        Some((suite, true, parameterized))
     } else if parts.last().is_some_and(|part| {
         matches!(
             *part,
@@ -213,7 +335,7 @@ fn declaration(
     }) {
         None
     } else {
-        Some((suite, false))
+        Some((suite, false, parameterized))
     }
 }
 
@@ -246,6 +368,7 @@ fn parsed_tests(
         &[],
         false,
         false,
+        false,
         strict,
         &aliases,
         &mut tests,
@@ -275,10 +398,33 @@ fn source_tree(path: &str, source: &str) -> Result<tree_sitter::Tree> {
     let tree = parser
         .parse(source, None)
         .context("JavaScript test parse")?;
-    if tree.root_node().has_error() {
-        bail!("cannot resolve changed tests in {path}: JavaScript parse error");
+    // Valid TypeScript the grammar cannot parse (GH #1973) must not block
+    // discovery. Recovery keeps the rest of the tree, so only an unparsed
+    // region that could hide a test registration fails closed.
+    let mut unparsed = Vec::new();
+    unparsed_regions(tree.root_node(), &mut unparsed);
+    let registration = regex::Regex::new(r"\b(?:it|test|describe)\b|\.each\b")?;
+    if let Some(region) = unparsed
+        .iter()
+        .find(|region| region.is_missing() || registration.is_match(text(**region, source)))
+    {
+        bail!(
+            "cannot resolve changed tests in {path}: JavaScript parse error at line {}",
+            region.start_position().row + 1
+        );
     }
     Ok(tree)
+}
+
+fn unparsed_regions<'a>(node: Node<'a>, regions: &mut Vec<Node<'a>>) {
+    if node.is_error() || node.is_missing() {
+        regions.push(node);
+    } else if node.has_error() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            unparsed_regions(child, regions);
+        }
+    }
 }
 
 fn declared_identities<'a>(
@@ -423,7 +569,7 @@ fn control_headers<'a>(
             }
             "if_statement" => scope.child_by_field_name("consequence"),
             "call_expression"
-                if declaration(scope, source, aliases).is_some_and(|(suite, _)| suite) =>
+                if declaration(scope, source, aliases).is_some_and(|(suite, _, _)| suite) =>
             {
                 scope.child_by_field_name("arguments").and_then(|args| {
                     let mut cursor = args.walk();
@@ -454,7 +600,7 @@ fn declared_sites(path: &str, source: &str) -> Result<Vec<DeclaredSite>> {
     ) -> Result<()> {
         if node.kind() == "call_expression"
             && declaration(node, source, aliases)
-                .is_some_and(|(suite, supported)| !suite && supported)
+                .is_some_and(|(suite, supported, _)| !suite && supported)
             && let Some((_, names)) = declared_identities(node, source)?
         {
             sites.push(DeclaredSite {
@@ -555,14 +701,16 @@ fn walk(
     lines: &[(usize, usize)],
     suites: &[String],
     unresolved: bool,
+    templated: bool,
     force: bool,
     strict: bool,
     aliases: &BTreeMap<String, String>,
     tests: &mut Vec<(Identity, String)>,
 ) -> Result<()> {
     if node.kind() == "call_expression"
-        && let Some((suite, supported)) = declaration(node, source, aliases)
+        && let Some((suite, supported, each)) = declaration(node, source, aliases)
     {
+        let templated = templated || each;
         let args = node
             .child_by_field_name("arguments")
             .context("test arguments")?;
@@ -603,13 +751,7 @@ fn walk(
                     headers.iter().map(|(_, _, text)| text).collect::<Vec<_>>(),
                 ))?;
                 for name in names {
-                    tests.push((
-                        Identity {
-                            path: path.to_string(),
-                            name,
-                        },
-                        fingerprint.clone(),
-                    ));
+                    tests.push((Identity::exact(path, name), fingerprint.clone()));
                 }
             }
             return Ok(());
@@ -646,6 +788,7 @@ fn walk(
                     lines,
                     &nested,
                     unresolved,
+                    templated,
                     force || header_changed,
                     strict,
                     aliases,
@@ -672,6 +815,7 @@ fn walk(
                     Identity {
                         path: path.to_string(),
                         name: names.join(" "),
+                        parameterized: templated,
                     },
                     text(node, source).to_string(),
                 ));
@@ -683,17 +827,39 @@ fn walk(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         walk(
-            child, source, path, lines, suites, unresolved, force, strict, aliases, tests,
+            child, source, path, lines, suites, unresolved, templated, force, strict, aliases,
+            tests,
         )?;
     }
     Ok(())
 }
 
 pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()> {
-    if !allowed_args(args) {
-        bail!("expected vitest|jest|playwright followed by repository-relative test files");
-    }
+    let invocation = invocation(args).context(SHAPE)?;
     let repo = PathBuf::from(super::git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
+    // Paths are as the shell sees them: relative to the invocation directory.
+    let cwd = cwd.canonicalize()?;
+    let relative = |path: &str| -> Result<String> {
+        cwd.join(path)
+            .strip_prefix(&repo)
+            .ok()
+            .and_then(Path::to_str)
+            .filter(|path| safe_path(path))
+            .map(str::to_owned)
+            .with_context(|| format!("{path} is outside the repository"))
+    };
+    let files = invocation.files.iter().map(|file| relative(file)).collect::<Result<Vec<_>>>()?;
+    let runner_config = invocation
+        .config
+        .as_deref()
+        .map(|config| {
+            let config = repo.join(relative(config)?);
+            if !config.is_file() {
+                bail!("{} config not found: {}", invocation.runner, config.display());
+            }
+            Ok(config)
+        })
+        .transpose()?;
     let cas_root = cas_root.canonicalize()?;
     if !repo.starts_with(cas_root.join("worktrees"))
         && !crate::factory_review_scratch::is_managed_checkout(&cas_root, &repo)
@@ -704,7 +870,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
     let head = super::clean_head(&repo)?;
     let config = crate::config::Config::load(cas_root)?.factory();
     let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
-    let tests = changed_tests(&repo, &base, &head, &args[1..])?;
+    let tests = changed_tests(&repo, &base, &head, &files, None)?;
     if tests.is_empty() {
         bail!(crate::gates::tag(
             "G-61",
@@ -727,7 +893,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         )
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
-    let proof = execute_tests(cas_root, &repo, &head, &args[0], &tests)?;
+    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests)?;
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -774,6 +940,7 @@ fn execute_tests(
     repo: &Path,
     head: &str,
     runner: &str,
+    runner_config: Option<&Path>,
     tests: &[Identity],
 ) -> Result<Proof> {
     let start = Instant::now();
@@ -783,12 +950,12 @@ fn execute_tests(
         config.max_concurrent_builders,
         &std::fs::read_to_string("/proc/meminfo").unwrap_or_default(),
     );
-    let mut by_file: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut by_file: BTreeMap<&str, Vec<&Identity>> = BTreeMap::new();
     for test in tests {
-        by_file.entry(&test.path).or_default().push(&test.name);
+        by_file.entry(&test.path).or_default().push(test);
     }
     let reports = tempfile::tempdir()?;
-    for (path, names) in by_file {
+    for (path, selected) in by_file {
         let package = package_root(repo, path)?;
         let executable = runner_path(repo, &package, runner)?;
         let source = std::fs::read_to_string(repo.join(path))?;
@@ -805,6 +972,9 @@ fn execute_tests(
                 .args(["test", "--list", "--reporter=json"])
                 .arg(regex::escape(&repo.join(path).to_string_lossy()))
                 .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
+            if let Some(config) = runner_config {
+                command.arg("--config").arg(config);
+            }
             if !run_scoped_javascript(command, high, &reports.path().join("discovery-scope"))? {
                 bail!("Playwright native discovery failed for {path}");
             }
@@ -813,9 +983,9 @@ fn execute_tests(
             )?;
             validate_declared_discovery(repo, &report, path, &sites)?;
         }
-        let pattern = names
+        let pattern = selected
             .iter()
-            .map(|name| format!("(?:{})", regex::escape(name)))
+            .map(|test| format!("(?:{})", test.name_pattern()))
             .collect::<Vec<_>>()
             .join("|");
         let pattern = if runner == "playwright" {
@@ -823,13 +993,7 @@ fn execute_tests(
         } else {
             format!("^(?:{pattern})$")
         };
-        let selected: Vec<_> = names
-            .iter()
-            .map(|name| Identity {
-                path: path.to_string(),
-                name: (*name).to_string(),
-            })
-            .collect();
+        let selected: Vec<_> = selected.into_iter().cloned().collect();
         verify_repeats(runner, repo, &selected, |iteration| {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
@@ -894,6 +1058,9 @@ fn execute_tests(
                         .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
                 }
                 _ => bail!("unsupported stability runner: {runner}"),
+            }
+            if let Some(config) = runner_config {
+                command.arg("--config").arg(config);
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
             let success = run_scoped_javascript(command, high, &marker)?;
@@ -1175,10 +1342,7 @@ fn validate_report(
                     .get("fullName")
                     .and_then(Value::as_str)
                     .context("test fullName missing")?;
-                let id = Identity {
-                    path: path.clone(),
-                    name: name.to_string(),
-                };
+                let id = Identity::exact(path.clone(), name);
                 match test.get("status").and_then(Value::as_str) {
                     Some("passed") => {
                         if test
@@ -1198,7 +1362,8 @@ fn validate_report(
                         }
                         *results.entry(id).or_default() += 1;
                     }
-                    Some("pending" | "skipped" | "todo" | "disabled") if !tests.contains(&id) => {}
+                    Some("pending" | "skipped" | "todo" | "disabled")
+                        if !tests.iter().any(|test| test.selects(&id)) => {}
                     _ => bail!("{runner} stability failed: {} :: {}", id.path, id.name),
                 }
             }
@@ -1210,8 +1375,10 @@ fn validate_report(
             bail!("{runner} stability report was unsuccessful");
         }
     }
+    // A template identity is proved when every row it selected passed.
     for test in tests {
-        if results.get(test) != Some(&repeats) {
+        let mut rows = results.iter().filter(|(ran, _)| test.selects(ran)).peekable();
+        if rows.peek().is_none() || rows.any(|(_, count)| *count != repeats) {
             bail!(
                 "{runner} stability requires {repeats} passing results: {} :: {}",
                 test.path,
@@ -1219,7 +1386,7 @@ fn validate_report(
             );
         }
     }
-    if results.keys().any(|test| !tests.contains(test)) {
+    if results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
     Ok(())
@@ -1277,10 +1444,10 @@ fn playwright_results(
                     .and_then(Value::as_str)
                     .context("spec file")?,
             );
-            let id = Identity {
-                path: report_path(repo, file.to_str().context("spec path encoding")?)?,
-                name: full.join(" "),
-            };
+            let id = Identity::exact(
+                report_path(repo, file.to_str().context("spec path encoding")?)?,
+                full.join(" "),
+            );
             for test in spec
                 .get("tests")
                 .and_then(Value::as_array)
@@ -1324,10 +1491,7 @@ mod tests {
     use serde_json::json;
 
     fn id(path: &str, name: &str) -> Identity {
-        Identity {
-            path: path.into(),
-            name: name.into(),
-        }
+        Identity::exact(path, name)
     }
 
     #[test]
@@ -1347,7 +1511,6 @@ mod tests {
         for source in [
             "test(title, () => {});",
             "describe(title, () => { test('child', () => {}); });",
-            "test.each([1, 2])('row %i', () => {});",
             "test('case_id', callback);",
             "describe('suite_id', declareTests);",
         ] {
@@ -1356,12 +1519,43 @@ mod tests {
                 "{source}"
             );
         }
+        // GH #1977/#1978: an `.each` table registers one runtime test per row.
+        let rows = "describe.each(['x'])('suite %s', () => {\n  it.each([1, 2])('row %i', () => {});\n});";
+        let template = Identity { parameterized: true, ..id("a.test.ts", "suite %s row %i") };
+        assert_eq!(source_tests("a.test.ts", rows, &[(2, 2)]).unwrap(), [template.clone()]);
+        assert!(template.selects(&id("a.test.ts", "suite x row 2")));
+        assert!(!template.selects(&id("a.test.ts", "suite x other 2")));
+        // GH #1973: a TypeScript generic over an import type parses.
+        let generic = "vi.mock('vue-i18n', async importOriginal => ({\n  ...(await importOriginal<typeof import('vue-i18n')>()),\n}));\nit('a', () => { expect(1).toBe(1); });";
+        assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);
         assert_eq!(
             changed_lines("@@ -7 +7,0 @@\n-x\n@@ -10 +9,2 @@\n+y\n+z").unwrap(),
             [(7, 7), (9, 10)]
         );
         assert!(!allowed_args(&["vitest".into(), "--retry=3".into()]));
         assert!(!allowed_args(&["jest".into(), "../a.test.js".into()]));
+        // GH #1985, #1992, #1973, #1978, #1998: the shapes worker discipline and
+        // package scripts use, plus a package-local jest config.
+        let parse = |command: &str| {
+            invocation(&command.split(' ').map(String::from).collect::<Vec<_>>())
+        };
+        let file = || vec!["src/a.spec.ts".to_string()];
+        for (command, runner, config) in [
+            ("npx vitest run src/a.spec.ts", "vitest", None),
+            ("pnpm exec vitest run src/a.spec.ts", "vitest", None),
+            ("npx jest src/a.spec.ts --runInBand", "jest", None),
+            ("pnpm exec jest --config jest.conversations.config.js --runInBand src/a.spec.ts", "jest", Some("jest.conversations.config.js")),
+            ("yarn playwright test -c e2e/playwright.config.ts src/a.spec.ts", "playwright", Some("e2e/playwright.config.ts")),
+        ] {
+            assert_eq!(
+                parse(command),
+                Some(Invocation { runner, config: config.map(String::from), files: file() }),
+                "{command}"
+            );
+        }
+        for command in ["npx jest -t name src/a.spec.ts", "vitest run --retry 2 src/a.spec.ts", "jest --config ../x.js src/a.spec.ts"] {
+            assert_eq!(parse(command), None, "{command}");
+        }
         let aliased = "import { test as check } from 'vitest'; check('case_id', () => {});";
         assert_eq!(
             source_tests("a.test.ts", aliased, &[(1, 1)]).unwrap(),
@@ -1416,7 +1610,7 @@ mod tests {
         git(&["commit", "--quiet", "-m", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
         assert_eq!(
-            changed_tests(repo.path(), &base, &head, &["a.test.ts".into()]).unwrap(),
+            changed_tests(repo.path(), &base, &head, &["a.test.ts".into()], None).unwrap(),
             [id("a.test.ts", "case_2")]
         );
         std::fs::write(repo.path().join("a.test.ts"), "declareTests();").unwrap();
@@ -1427,7 +1621,8 @@ mod tests {
                 repo.path(),
                 &head,
                 &git(&["rev-parse", "HEAD"]),
-                &["a.test.ts".into()]
+                &["a.test.ts".into()],
+                None
             )
             .is_err()
         );
@@ -1513,7 +1708,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ),
         ];
         assert_eq!(
-            changed_tests(repo.path(), &base, &head, &[path.into()]).unwrap(),
+            changed_tests(repo.path(), &base, &head, &[path.into()], None).unwrap(),
             expected
         );
         for invalid in [
@@ -1550,7 +1745,8 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
                     repo.path(),
                     &base,
                     &git(&["rev-parse", "HEAD"]),
-                    &[path.into()]
+                    &[path.into()],
+                    None
                 )
                 .unwrap(),
                 expected
@@ -1628,6 +1824,64 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         );
     }
 
+    /// GH #1977, #2000, #1971: park asks only for tests the task's own
+    /// commits changed in the delivered tree.
+    #[test]
+    fn park_requires_only_tests_the_delivery_changed_at_its_tip() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let spec = "a.spec.ts";
+        let commit = |source: &str, message: &str| {
+            std::fs::write(repo.path().join(spec), source).unwrap();
+            git(&["add", spec]);
+            git(&["commit", "--quiet", "-m", message]);
+            git(&["rev-parse", "HEAD"])
+        };
+        let file = |table: &str, own: &str, foreign: &str| format!(
+            "it.each([{table}])('row %s', () => {{}});\nit('own', () => {{ {own} }});\nit('foreign', () => {{ {foreign} }});\n"
+        );
+        git(&["init", "--quiet", "-b", "main"]);
+        let base = commit(&file("1", "", ""), "base");
+        git(&["checkout", "--quiet", "-b", "lane"]);
+        // #1977: an edited table row, then restored, is not in the net delivery.
+        let edited = commit(&file("1, 2", "", ""), "cas-1 edit row");
+        // #1971: another author's commit on the lane changes its own test.
+        let foreign = commit(&file("1, 2", "", "foreign();"), "foreign PR work");
+        // #2000: the target edits its table; the lane merges the target.
+        git(&["checkout", "--quiet", "main"]);
+        commit(&file("3", "", ""), "target edits its table");
+        git(&["checkout", "--quiet", "lane"]);
+        // The table conflicts; the merge resolves to the target's row.
+        let _ = Command::new("git")
+            .current_dir(repo.path())
+            .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+            .args(["merge", "--quiet", "--no-ff", "--no-commit", "main"])
+            .output()
+            .unwrap();
+        std::fs::write(repo.path().join(spec), file("3", "", "foreign();")).unwrap();
+        git(&["add", spec]);
+        git(&["commit", "--quiet", "-m", "merge main"]);
+        let merge = git(&["rev-parse", "HEAD"]);
+        let head = commit(&file("3", "own();", "foreign();"), "cas-1 own test");
+        let ranges = [(base, edited), (merge, head.clone())];
+        let required = crate::factory_worker_check::stability::required(
+            repo.path(), &head, "main", &[spec.into()], Some(&ranges),
+        )
+        .unwrap();
+        assert_eq!(required, [id(spec, "own")], "foreign commit {foreign}");
+    }
+
     #[test]
     fn javascript_reports_require_every_selected_test_and_reject_failure_or_extra_execution() {
         let repo = Path::new("/project");
@@ -1648,6 +1902,14 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             let mut retried = passing.clone();
             retried["testResults"][0]["assertionResults"][0]["invocations"] = json!(2);
             assert!(validate_report(runner, repo, &retried, &selected, 1).is_err());
+            // GH #1978: a template is proved when every row it selects passes.
+            let template = [Identity { parameterized: true, ..id("a.test.js", "row %s") }];
+            let rows = json!({"success":true,"testResults":[{"name":"/project/a.test.js","status":"passed", "assertionResults":[
+                {"fullName":"row a","status":"passed"}, {"fullName":"row b","status":"passed"}]}]});
+            validate_report(runner, repo, &rows, &template, 1).unwrap();
+            let mut failed_row = rows.clone();
+            failed_row["testResults"][0]["assertionResults"][1]["status"] = json!("failed");
+            assert!(validate_report(runner, repo, &failed_row, &template, 1).is_err());
         }
     }
 

@@ -818,7 +818,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
             .with_context(|| format!("{path} is outside the repository"))
     };
     let files = invocation.files.iter().map(|file| relative(file)).collect::<Result<Vec<_>>>()?;
-    let config = invocation
+    let runner_config = invocation
         .config
         .as_deref()
         .map(|config| {
@@ -862,7 +862,7 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         )
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
-    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, config.as_deref(), &tests)?;
+    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests)?;
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -909,7 +909,7 @@ fn execute_tests(
     repo: &Path,
     head: &str,
     runner: &str,
-    config: Option<&Path>,
+    runner_config: Option<&Path>,
     tests: &[Identity],
 ) -> Result<Proof> {
     let start = Instant::now();
@@ -941,7 +941,7 @@ fn execute_tests(
                 .args(["test", "--list", "--reporter=json"])
                 .arg(regex::escape(&repo.join(path).to_string_lossy()))
                 .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
-            if let Some(config) = config {
+            if let Some(config) = runner_config {
                 command.arg("--config").arg(config);
             }
             if !run_scoped_javascript(command, high, &reports.path().join("discovery-scope"))? {
@@ -1028,7 +1028,7 @@ fn execute_tests(
                 }
                 _ => bail!("unsupported stability runner: {runner}"),
             }
-            if let Some(config) = config {
+            if let Some(config) = runner_config {
                 command.arg("--config").arg(config);
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
@@ -1579,7 +1579,7 @@ mod tests {
         git(&["commit", "--quiet", "-m", "head"]);
         let head = git(&["rev-parse", "HEAD"]);
         assert_eq!(
-            changed_tests(repo.path(), &base, &head, &["a.test.ts".into()]).unwrap(),
+            changed_tests(repo.path(), &base, &head, &["a.test.ts".into()], None).unwrap(),
             [id("a.test.ts", "case_2")]
         );
         std::fs::write(repo.path().join("a.test.ts"), "declareTests();").unwrap();
@@ -1590,7 +1590,8 @@ mod tests {
                 repo.path(),
                 &head,
                 &git(&["rev-parse", "HEAD"]),
-                &["a.test.ts".into()]
+                &["a.test.ts".into()],
+                None
             )
             .is_err()
         );
@@ -1676,7 +1677,7 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             ),
         ];
         assert_eq!(
-            changed_tests(repo.path(), &base, &head, &[path.into()]).unwrap(),
+            changed_tests(repo.path(), &base, &head, &[path.into()], None).unwrap(),
             expected
         );
         for invalid in [
@@ -1713,7 +1714,8 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
                     repo.path(),
                     &base,
                     &git(&["rev-parse", "HEAD"]),
-                    &[path.into()]
+                    &[path.into()],
+                    None
                 )
                 .unwrap(),
                 expected

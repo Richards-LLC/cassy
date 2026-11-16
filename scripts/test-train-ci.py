@@ -8,7 +8,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import zipfile
 import yaml
 
@@ -75,39 +77,44 @@ class TrainReceipts(unittest.TestCase):
 
     def evidence(self, name, failed=False):
         out = self.root/name
-        for slot in (1, 2, 3):
+        for slot in range(1, 7):
             log, junit = self.root/'native.log', self.root/'junit.xml'
             log.write_bytes(b'first line\n'+b'untruncated output\n'*20000+b'last line\n')
             bad = failed and slot == 2
             junit.write_text('<testsuites><testsuite name="fixture::lib"><testcase name="regression">'+
                              ('<failure>deterministic red</failure>' if bad else '')+'</testcase></testsuite></testsuites>')
-            self.run_cli('shard', '--log', log, '--junit', junit, '--status', int(bad), '--shard', f'{slot}/3', '--out', out/str(slot))
+            self.run_cli('shard', '--log', log, '--junit', junit, '--status', int(bad), '--shard', f'{slot}/6', '--out', out/str(slot))
             self.assertEqual((out/str(slot)/'native.log').read_bytes(), log.read_bytes())
         self.run_cli('collect', '--repo', self.repo, '--evidence', out,
-                     '--build-status', 'success', '--shards-status', 'failure' if failed else 'success')
+                     '--build-status', 'success', '--shards-status', 'failure' if failed else 'success', expected=int(failed))
         jobs = {name: {'result': 'success'} for name in (
             'fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-validation-web',
-            'fast-validation-suite', 'fast-validation-docs', 'queue-flake-publication')}
+            'fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-docs')}
         jobs['ci-diff'] = {'outputs': {'journeys-check-needed': 'false', 'bridge-check-needed': 'false'}}
-        if failed: jobs['fast-validation-suite']['result'] = 'failure'
+        if failed: jobs['fast-validation-suite-shards']['result'] = 'failure'
         full = subprocess.run([sys.executable, str(SCRIPT), 'full-collect', '--repo', str(self.repo),
                                '--evidence', str(out), '--jobs-json', json.dumps(jobs),
                                '--main-baseline', self.git('rev-parse', 'origin/main'),
-                               '--started-at', '2026-01-01T00:00:00Z'], env=self.env, capture_output=True, text=True)
+                               '--started-at', '2026-01-01T00:00:00Z', '--gate-status', 'success',
+                               '--publication-status', 'success'], env=self.env, capture_output=True, text=True)
         self.assertEqual(full.returncode, int(failed), full.stdout+full.stderr)
         return json.loads(full.stdout)
 
 
-    def test_same_tree_requeue_reuses_only_successful_job_receipts(self):
+    def test_cross_tree_requeue_reuses_only_successful_job_receipts(self):
         # Execute the actual composite's shell, not a parallel CLI wiring.
         action=yaml.safe_load((SCRIPT.parent.parent/'.github/actions/full-gate-job/action.yml').read_text())
         body=action['runs']['steps'][0]['run']
         (self.repo/'scripts').mkdir()
         shutil.copyfile(SCRIPT,self.repo/'scripts/train-ci.py')
-        self.git('add','scripts')
+        shutil.copyfile(SCRIPT.with_name('classify-web-inputs.py'),self.repo/'scripts/classify-web-inputs.py')
+        (self.repo/'cas-cli').mkdir()
+        (self.repo/'cas-cli/Cargo.toml').write_text('[package]\nversion = \"1.0.0\"\n')
+        self.git('add','cas-cli','scripts')
         self.git('commit','-qm','receipt command')
         self.env['GITHUB_SHA']=self.git('rev-parse','HEAD')
-        inputs='{"selection":"all","matrix":1}'
+        inputs='{"full_set":"true","selection":null,"matrix":1}'
+        self.env['GITHUB_EVENT_NAME']='workflow_dispatch'
         downloads={}; artifacts=[]; jobs=[]
         producer=self.env['GITHUB_SHA']
         def composite(phase,slot,status='success',selection=inputs,requires=''):
@@ -119,7 +126,8 @@ class TrainReceipts(unittest.TestCase):
                     'GITHUB_WORKSPACE':str(self.repo),'GH_BIN':str(self.gh)},capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             return dict(line.split('=',1) for line in output.read_text().splitlines())
-        for slot,status in [('scripts','success'),('rust','failure')]:
+        for slot,status in [('fast-validation-web','success'),('fast-validation-journeys-1','success'),
+                ('fast-validation-docs','success'),('fast-validation-suite-build','failure')]:
             reports=self.repo/'target/train-suite/1'
             reports.mkdir(parents=True,exist_ok=True)
             (reports/'shard.json').write_text(json.dumps({'schema':1,'run_id':'101','run_attempt':1,
@@ -134,45 +142,145 @@ class TrainReceipts(unittest.TestCase):
                 'workflow_run':{'id':101,'head_sha':producer}})
             jobs.append({'name':slot,'conclusion':status})
         (self.root/'forge.json').write_text(json.dumps({'job_artifacts':artifacts,'job_downloads':downloads,
-            'job_jobs':jobs,'job_run':{'id':101,'head_sha':producer,'event':'merge_group',
+            'job_jobs':jobs,'job_run':{'id':101,'head_sha':producer,'event':'workflow_dispatch',
                 'path':'.github/workflows/full-validation.yml','status':'completed','conclusion':'failure'}}))
         self.git('commit','--allow-empty','-qm','same tree requeue')
         self.env.update(GITHUB_SHA=self.git('rev-parse','HEAD'),GITHUB_RUN_ID='102')
         shutil.rmtree(self.repo/'target')
         def check(slot, selection=inputs,requires=''):
             return composite('restore',slot,selection=selection,requires=requires)['reused']=='true'
-        legacy=self.root/'scripts/receipt.json'
+        legacy=self.root/'fast-validation-web/receipt.json'
         record=json.loads(legacy.read_text())
         legacy.write_text(json.dumps({**record,'recovery':[{'outcome':'FLAKY'}]}))
-        self.assertFalse(check('scripts'))
+        self.assertFalse(check('fast-validation-web'))
         legacy.write_text(json.dumps(record))
-        self.assertTrue(check('scripts'))
-        self.assertFalse(check('rust'))
+        self.assertTrue(check('fast-validation-web'))
+        self.assertTrue(check('fast-validation-journeys-1'))
+        self.assertTrue(check('fast-validation-docs'))
+        self.assertFalse(check('fast-validation-suite-build'))
         self.assertEqual(json.loads((reports/'shard.json').read_text())['head'],self.env['GITHUB_SHA'])
         self.assertEqual((reports/'native.log').read_bytes(),original_log)
-        self.assertFalse(check('scripts','{"selection":"changed"}'))
-        self.assertFalse(check('scripts',requires='expired-suite-archive'))
+        self.assertFalse(check('fast-validation-web','{"selection":"changed"}'))
+        self.assertFalse(check('fast-validation-web',requires='expired-suite-archive'))
         forge=self.root/'forge.json'
         provider=json.loads(forge.read_text())
         provider['job_outputs']=[{'name':'suite-archive','expired':False}]
         forge.write_text(json.dumps(provider))
-        self.assertTrue(check('scripts',requires='suite-archive'))
+        self.assertTrue(check('fast-validation-web',requires='suite-archive'))
         provider['job_outputs'][0]['expired']=True
         forge.write_text(json.dumps(provider))
-        self.assertFalse(check('scripts',requires='suite-archive'))
+        self.assertFalse(check('fast-validation-web',requires='suite-archive'))
         provider['job_jobs'][0]['conclusion']='failure'
         forge.write_text(json.dumps(provider))
-        self.assertFalse(check('scripts'))
+        self.assertFalse(check('fast-validation-web'))
         provider['job_jobs'][0]['conclusion']='success'
         provider['job_run']['path']='.github/workflows/untrusted.yml'
         forge.write_text(json.dumps(provider))
-        self.assertFalse(check('scripts'))
+        self.assertFalse(check('fast-validation-web'))
         provider['job_run']['path']='.github/workflows/full-validation.yml'
         forge.write_text(json.dumps(provider))
+        # Replay the release repair: new Rust bytes, identical Commander inputs.
+        (self.repo/'cas-cli/repair.rs').write_text('fn repaired() {}')
+        self.git('add','cas-cli')
+        self.git('commit','-qm','Rust-only repair')
+        self.env['GITHUB_SHA']=self.git('rev-parse','HEAD')
+        self.assertTrue(check('fast-validation-web'))
+        self.assertTrue(check('fast-validation-journeys-1'))
+        self.assertFalse(check('fast-validation-docs'))
+        composite('save','fast-validation-web')
+        adopted=json.loads((self.repo/'target/full-gate-job-fast-validation-web/receipt.json').read_text())
+        self.assertEqual(adopted['tree'],self.git('rev-parse','HEAD^{tree}'))
+        self.assertEqual((adopted['producer_run'],adopted['reused_from']),('101','101'))
+        self.assertEqual(adopted['source_tree'],self.git('rev-parse',producer+'^{tree}'))
+        destination=self.root/'adopted/jobs/web'
+        destination.mkdir(parents=True)
+        (destination/'receipt.json').write_text(json.dumps(adopted))
+        self.assertEqual(self.evidence('adopted')['outcome'],'PASS')
         self.commit('different tree')
         self.env['GITHUB_SHA']=self.git('rev-parse','HEAD')
-        self.assertFalse(check('scripts'))
-        self.assertFalse(check('rust'))
+        self.assertFalse(check('fast-validation-web'))
+        self.assertFalse(check('fast-validation-suite-build'))
+
+    def test_job_keys_cover_shared_inputs_and_unknown_paths(self):
+        self.enterContext(patch.dict(os.environ, {'GITHUB_EVENT_NAME':'workflow_dispatch',
+            'GITHUB_REF_NAME':'epic/release-train-fixture'}))
+        identity=runpy.run_path(str(SCRIPT))['job_identity']
+        manifest=self.repo/'cas-cli/Cargo.toml'
+        manifest.parent.mkdir()
+        manifest.write_text('[package]\nversion = "1.0.0"\n')
+        self.git('add','cas-cli')
+        self.git('commit','-qm','version input')
+        baseline=self.git('rev-parse','HEAD')
+        web={'fast-validation-web','fast-validation-journeys-1'}
+        rust={'fast-validation-suite-build','fast-validation-suite-shards-1','fast-validation-docs'}
+        broad={'fast-validation-preflight','fast-validation-ci-tiers','future-job'}
+        bridge={'fast-validation-slack-bridge'}
+        jobs=web|rust|broad|bridge
+        def keys():
+            return {job:identity(SimpleNamespace(repo=self.repo,job=job,job_name=job,
+                inputs='{"full_set":"true","selection":null}'))['key'] for job in jobs}
+        before=keys()
+        # Each row is an independent repair of the same frozen tree.
+        for path,body,changed in (
+            ('cas-cli/src/repair.rs','fn repair() {}',rust|broad),
+            ('crates/cas-core/src/repair.rs','fn repair() {}',rust|broad),
+            ('cas-cli/src/hub/server.rs','changed embedded asset list',web|rust|broad),
+            ('cas-cli/src/hub/visual_page_csp.txt','changed preview CSP',web|rust|broad),
+            ('crates/cas-operator-crypto/tests/fixtures/envelope.json','{}',web|rust|broad),
+            ('Cargo.lock','changed lock',rust|broad),
+            ('hub-web/src/view.ts','export const view = 1;',web|broad),
+            ('hub-web/src/fixtures/pairing.json','{}',web|rust|broad),
+            ('hub-web/e2e/journeys/receipt-directory.mjs','export {};',web|rust|broad),
+            ('hub-web/dist/app.js','changed embedded dist',web|rust|broad),
+            ('slack-bridge/src/router.ts','export {};',bridge|broad),
+            ('scripts/visual-qa.mjs','changed shared web input',jobs),
+            ('scripts/unknown-tool.py','new script',jobs),
+            ('docs/unknown.md','new document',jobs),
+            ('.github/workflows/ci.yml','changed workflow',jobs),
+            ('new-subsystem/input','unknown dependency',jobs),
+            ('cas-cli/Cargo.toml','[package]\nversion = "1.0.1"\n',web|rust|broad),
+        ):
+            with self.subTest(path=path):
+                self.git('checkout','-q','--detach',baseline)
+                target=self.repo/path
+                target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_text(body)
+                self.git('add',path)
+                self.git('commit','-qm','candidate repair')
+                after=keys()
+                self.assertEqual({job for job in jobs if before[job]!=after[job]},changed)
+        # Missing version metadata cannot authorize web reuse either.
+        self.git('rm','cas-cli/Cargo.toml')
+        self.git('commit','-qm','missing version')
+        self.assertTrue(all(before[job]!=keys()[job] for job in web))
+
+    def test_content_keys_require_full_set_train_dispatch(self):
+        identity=runpy.run_path(str(SCRIPT))['job_identity']
+        manifest=self.repo/'cas-cli/Cargo.toml'
+        manifest.parent.mkdir()
+        manifest.write_text('[package]\nversion = "1.0.0"\n')
+        self.git('add','cas-cli')
+        self.git('commit','-qm','version input')
+        before=self.git('rev-parse','HEAD')
+        manifest.with_name('repair.rs').write_text('fn repair() {}')
+        self.git('add','cas-cli')
+        self.git('commit','-qm','unrelated Rust repair')
+        after=self.git('rev-parse','HEAD')
+        for event,branch,full,reuses in (
+            ('workflow_dispatch','epic/release-train-fixture','true',True),
+            ('merge_group','gh-readonly-queue/main/pr-1','true',False),
+            ('workflow_dispatch','main','true',False),
+            ('workflow_dispatch','epic/release-train-fixture','false',False),
+            ('push','epic/release-train-fixture','true',False),
+        ):
+            with self.subTest(event=event,branch=branch,full=full), patch.dict(os.environ,
+                    {'GITHUB_EVENT_NAME':event,'GITHUB_REF_NAME':branch}):
+                args=SimpleNamespace(repo=self.repo,job='fast-validation-web',job_name='web',
+                    inputs=json.dumps({'full_set':full,'selection':None}))
+                self.git('checkout','-q','--detach',before)
+                original=identity(args)['key']
+                self.git('checkout','-q','--detach',after)
+                self.assertEqual(original==identity(args)['key'],reuses)
 
     def forge(self, artifact, status='completed', conclusion='success', fanin='success', later=()):
         run = lambda id, conclusion: {'id': id, 'run_attempt': int(self.env['GITHUB_RUN_ATTEMPT']), 'head_sha': self.env['GITHUB_SHA'],
@@ -194,7 +302,7 @@ class TrainReceipts(unittest.TestCase):
         self.git('checkout', '-q', self.env['GITHUB_REF_NAME'])
         self.git('merge', '--no-ff', '-qm', 'Merge reviewed delivery\n\nTask: cas-b222', 'factory/cas-b222')
         self.env.update(GITHUB_SHA=self.git('rev-parse', 'HEAD'), GITHUB_RUN_ID='102')
-        self.assertEqual(self.evidence('red', failed=True)['failures'], ['fast-validation-suite'])
+        self.assertEqual(self.evidence('red', failed=True)['failures'], ['fast-validation-suite-shards'])
         self.forge('red', conclusion='failure', fanin='failure')
         red = self.observe()
         self.assertEqual(red['introducing_merge'], self.env['GITHUB_SHA'])
@@ -259,7 +367,7 @@ class TrainReceipts(unittest.TestCase):
         out = self.root/'evidence'
         shutil.rmtree(out/'3')
         result = self.run_cli('collect', '--repo', self.repo, '--evidence', out,
-                              '--build-status', 'success', '--shards-status', 'success')
+                              '--build-status', 'success', '--shards-status', 'success', expected=1)
         self.assertEqual(result['outcome'], 'FAIL')
         row = out/'1/shard.json'
         data = json.loads(row.read_text())
@@ -273,10 +381,10 @@ class TrainReceipts(unittest.TestCase):
         out = self.root/'mixed'
         self.env['GITHUB_RUN_ATTEMPT'] = '2'
         self.run_cli('shard', '--log', self.root/'native.log', '--junit', self.root/'junit.xml',
-                     '--status', 0, '--shard', '2/3', '--out', out/'2')
+                     '--status', 0, '--shard', '2/6', '--out', out/'2')
         result = self.run_cli('collect', '--repo', self.repo, '--evidence', out,
                               '--build-status', 'success', '--shards-status', 'success')
-        self.assertEqual((result['outcome'], result['run_attempt'], result['tests']), ('PASS', 2, 3))
+        self.assertEqual((result['outcome'], result['run_attempt'], result['tests']), ('PASS', 2, 6))
         row = out/'1/shard.json'
         original = json.loads(row.read_text())
         for mutation in ({'status': 1}, {'run_attempt': 3}, {'run_id': 'foreign'}):
@@ -317,13 +425,25 @@ class TrainReceipts(unittest.TestCase):
         self.forge('full')
         receipt = self.root/'full/receipt.json'
         original = json.loads(receipt.read_text())
-        for mutation in ('legacy', 'tree', 'partial', 'omitted'):
+        for gate,publication,queue in (('failure','success','skipped'),('success','failure','skipped'),
+                ('success','cancelled','skipped'),('success','success','failure')):
+            jobs={name:{'result':status} for name,status in original['jobs'].items()}
+            jobs['fast-validation-queue-check']={'result':queue}
+            result=self.run_cli('full-collect','--repo',self.repo,'--evidence',self.root/'step-status',
+                '--jobs-json',json.dumps(jobs),'--main-baseline',original['main_baseline'],
+                '--started-at','2026-01-01T00:00:00Z','--gate-status',gate,
+                '--publication-status',publication,expected=1)
+            self.assertEqual(result['outcome'],'FAIL')
+        for mutation in ('legacy', 'tree', 'partial', 'omitted', 'publication', 'gate', 'queue-check'):
             with self.subTest(mutation=mutation):
                 row = json.loads(json.dumps(original))
                 if mutation == 'legacy': row['schema'] = 1
                 if mutation == 'tree': row['tree'] = '0'*40
                 if mutation == 'partial': row['jobs']['fast-validation-ci-tiers'] = 'skipped'
                 if mutation == 'omitted': row['required_jobs'].remove('fast-validation-web')
+                if mutation == 'publication': row['checks']['repair-publication']='failure'
+                if mutation == 'gate': row['checks']['gate']='failure'
+                if mutation == 'queue-check': row['jobs']['fast-validation-queue-check']='failure'
                 receipt.write_text(json.dumps(row))
                 shutil.rmtree(self.root/'cache', ignore_errors=True)
                 self.observe(check=True, expected=1)
@@ -410,7 +530,7 @@ class TrainReceipts(unittest.TestCase):
                         GITHUB_SHA=docs_head, GITHUB_RUN_ID='102')
         self.assertTrue(attempt())
         jobs = yaml.safe_load((SCRIPT.parent.parent/'.github/workflows/ci.yml').read_text())['jobs']
-        publication = next(step for step in jobs['fast-validation-main-push-dedupe']['steps']
+        publication = next(step for step in jobs['ci-diff']['steps']
                            if step.get('with', {}).get('name') == 'train-full-gate')
         adoption = self.repo/publication['with']['path']/'receipt.json'
         record = json.loads(adoption.read_text())

@@ -128,7 +128,10 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
         required.extend(rust::changed(repo, from, to, paths)?.into_iter()
             .map(|test| test.identity).filter(|identity| live.contains(identity)));
     }
-    required.extend(super::javascript::changed_tests(repo, &base, head, paths, owned.as_ref())?);
+    // After integration, keep the attributed base rather than collapsing proof
+    // onto the already-landed tip. Otherwise compare with the current target.
+    let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
+    required.extend(super::javascript::changed_tests(repo, net_base, head, paths, owned.as_ref())?);
     Ok(required.into_iter().collect())
 }
 

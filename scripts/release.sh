@@ -524,7 +524,19 @@ preview_cut() {
     ' <<<"$release_close_preview")"
     [[ -z "$unvalidated" ]] \
         || die "release cut refused: LANE_CI_MISSING for $unvalidated; deliberately exempt deliveries need green lane CI alongside the green frozen-train run; nothing pushed or enqueued"
-    jq -e '.members == 0 or .would_close > 0 or (.would_hold == 0 and .not_eligible == 0)' <<<"$release_close_preview" >/dev/null \
+    # Legacy holds outside this release's included tasks are reported, never refused.
+    local gate
+    gate="$(jq -c --slurpfile inputs "$release_input_report" '
+        ($inputs[0].included_task_ids // []) as $included |
+        [.members_by_id // {} | to_entries[]
+            | . + {own: (($included | length) == 0 or (.key as $id | $included | index($id)) != null)}] as $members |
+        [$members[] | select(.own) | .value] as $own |
+        {pass: (any($own[]; type == "object" and has("closed")) or all($own[]; . == "already_closed")),
+         legacy_held: [$members[] | select((.own | not) and (.value | type == "object" and has("held"))) | .key]}
+    ' <<<"$release_close_preview")"
+    [[ "$(jq '.legacy_held | length' <<<"$gate")" == 0 ]] \
+        || say "legacy holds outside this release (nonblocking): $(jq -r '.legacy_held | join(", ")' <<<"$gate")"
+    jq -e .pass <<<"$gate" >/dev/null \
         || die "release cut refused: zero would-close; inspect the close preview above; nothing pushed or enqueued"
 }
 

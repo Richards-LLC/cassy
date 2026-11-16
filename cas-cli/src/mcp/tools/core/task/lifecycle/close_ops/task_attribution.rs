@@ -1379,30 +1379,119 @@ pub(super) fn first_parent_delivery_content_presence(
     let mut identity = TaskCommitIdentity {
         task_id: Some(task_id.into()), start_base: Some(base.into()), ..Default::default()
     };
-    let mut commits = Vec::new();
+    let (mut commits, mut foreign) = (Vec::new(), Vec::new());
     for commit in history.lines().filter(|commit| !commit.is_empty()) {
         let message = git_text(repo, &["show", "-s", "--format=%B", commit])?;
         let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
         let paths = git_text(repo, &["diff", "--name-only", &parent, commit, "--", ".", ":(exclude).cas", ":(exclude).cas/**"])?;
-        if !paths.is_empty() && !subject_claims_another_task(&message, &identity) { commits.push(commit.to_string()); }
+        if paths.is_empty() { continue; }
+        if subject_claims_another_task(&message, &identity) { foreign.push(commit.to_string()); }
+        else { commits.push(commit.to_string()); }
     }
     if commits.is_empty() { return None; }
     identity.known_commits = commits.clone();
     identity.known_commits.push(anchor.into());
+    let mut paths = Vec::new();
+    for commit in &commits {
+        append_unique(&mut paths, changed_paths(repo, &format!("{commit}^1"), commit)?);
+    }
     if anchor != shipped {
         // The squash has the exact source snapshot. Limit its comparison to
         // the task's own first-parent paths, excluding target-sync imports.
-        let mut paths = Vec::new();
-        for commit in &commits {
-            let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
-            let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", &parent, commit, "--"])?;
-            append_unique(&mut paths, changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect());
-        }
         return Some(super::delivery_content_presence_on_target_for_paths(
             repo, shipped, target, Some(&paths), false, &[task_id], Some(base),
         ));
     }
-    merge_tip_content_presence_selected(repo, target, anchor, None, &identity, None, Some(&commits))
+    // cas-2430: a path only the task's own commits touched is judged by its
+    // net base..anchor effect, so a change the task itself reverted or
+    // rewrote is not a loss. A path a target-sync merge also touched keeps
+    // the per-commit proof: the sync's content is never the task's own
+    // restoration (a delivery reverted on the target and re-merged by a
+    // sync stays reverted).
+    let mut synced = Vec::new();
+    // A first-parent commit naming another task is not the task's own work
+    // either, so the paths it touches keep the per-commit proof too.
+    let merges = git_text(repo, &["rev-list", "--first-parent", "--merges", &format!("{base}..{anchor}")])?;
+    for merge in merges.lines().filter(|merge| !merge.is_empty()).chain(foreign.iter().map(String::as_str)) {
+        append_unique(&mut synced, changed_paths(repo, &format!("{merge}^1"), merge)?
+            .into_iter().filter(|path| paths.contains(path)).collect());
+    }
+    let net = changed_paths(repo, base, anchor)?;
+    let clean: Vec<String> = paths.iter()
+        .filter(|path| !synced.contains(path) && net.contains(path)).cloned().collect();
+    let synced_commits: Vec<String> = commits.iter().filter(|commit| {
+        changed_paths(repo, &format!("{commit}^1"), commit)
+            .is_some_and(|changed| changed.iter().any(|path| synced.contains(path)))
+    }).cloned().collect();
+    let clean_proof = (!clean.is_empty()).then(|| super::delivery_content_presence_on_target_for_paths(
+        repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
+    ));
+    let synced_proof = if synced_commits.is_empty() { None } else {
+        Some(merge_tip_content_presence_selected(
+            repo, target, anchor, None, &identity, None, Some((synced_commits.as_slice(), synced.as_slice())),
+        )?)
+    };
+    judge_presence(clean_proof, synced_proof, |paths| {
+        paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
+            && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
+    })
+}
+
+/// Join the net proof of the task's own-only paths with the per-commit proof
+/// of synced paths. An unfinished proof leaves the delivery unknown. cas-baf7,
+/// shared by close and release: rebuilt bundle output among the own-only
+/// paths is not a revert when every other delivered path, and some source,
+/// is proven (`rebuilt_bundles_only`).
+fn judge_presence(
+    clean: Option<DeliveryContentPresence>,
+    synced: Option<DeliveryContentPresence>,
+    rebuilt_bundles_only: impl Fn(&[String]) -> bool,
+) -> Option<DeliveryContentPresence> {
+    if clean.is_none() && synced.is_none() { return None; }
+    if let Some(DeliveryContentPresence::Unknown { reason }) = [&clean, &synced].into_iter().flatten()
+        .find(|proof| matches!(proof, DeliveryContentPresence::Unknown { .. }))
+    {
+        return Some(DeliveryContentPresence::Unknown { reason: reason.clone() });
+    }
+    // Per-commit drops of synced paths always stand.
+    let clean = match clean {
+        Some(DeliveryContentPresence::Dropped { paths }) if rebuilt_bundles_only(&paths) => {
+            Some(DeliveryContentPresence::Present { paths: Vec::new() })
+        }
+        other => other,
+    };
+    Some(combine_presence(clean.into_iter().chain(synced).collect()))
+}
+
+fn changed_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
+    let changed = git_text(repo, &["diff", "--name-only", "--no-renames", "-z", from, to, "--"])?;
+    Some(changed.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect())
+}
+
+/// Any drop wins, then any unknown, then any supersession.
+fn combine_presence(proofs: Vec<DeliveryContentPresence>) -> DeliveryContentPresence {
+    let (mut present, mut superseded, mut commits, mut dropped, mut unknown) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None);
+    for proof in proofs {
+        match proof {
+            DeliveryContentPresence::Present { paths } => append_unique(&mut present, paths),
+            DeliveryContentPresence::Superseded { paths, commits: by } => {
+                append_unique(&mut superseded, paths);
+                append_unique(&mut commits, by);
+            }
+            DeliveryContentPresence::Dropped { paths } => append_unique(&mut dropped, paths),
+            DeliveryContentPresence::Unknown { reason } => { unknown.get_or_insert(reason); }
+        }
+    }
+    if !dropped.is_empty() {
+        DeliveryContentPresence::Dropped { paths: dropped }
+    } else if let Some(reason) = unknown {
+        DeliveryContentPresence::Unknown { reason }
+    } else if !superseded.is_empty() {
+        DeliveryContentPresence::Superseded { paths: superseded, commits }
+    } else {
+        DeliveryContentPresence::Present { paths: present }
+    }
 }
 
 /// Prove a merge or empty checkpoint delivery from the task's attributed
@@ -1438,8 +1527,10 @@ fn merge_tip_content_presence_selected(
     window: Option<&TaskCommitReceiptWindow>,
     identity: &TaskCommitIdentity,
     validated_receipt: Option<&str>,
-    explicit_commits: Option<&[String]>,
+    explicit: Option<(&[String], &[String])>,
 ) -> Option<DeliveryContentPresence> {
+    let explicit_commits = explicit.map(|(commits, _)| commits);
+    let explicit_paths = explicit.map(|(_, paths)| paths);
     let full_tip = git_text(repo, &["rev-parse", &format!("{merge_tip}^{{commit}}")])?;
     let merge_tip = full_tip.as_str();
     let has_work_window = window.is_some();
@@ -1734,7 +1825,7 @@ fn merge_tip_content_presence_selected(
                 // Measure this selected commit directly; the public task seam
                 // may expand the release anchor into this same delivery range.
                 return super::delivery_content_presence_on_target_for_paths(
-                    repo, commit, target, None, false,
+                    repo, commit, target, explicit_paths, false,
                     &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(), None,
                 );
             }
@@ -2357,6 +2448,17 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::process::Command;
+
+
+    #[test]
+    fn rebuilt_bundle_drop_never_hides_an_unfinished_proof_cas_2430() {
+        let bundle = DeliveryContentPresence::Dropped { paths: vec!["hub-web/dist/app.js".into()] };
+        let unknown = DeliveryContentPresence::Unknown { reason: "ancestry not proven".into() };
+        assert!(matches!(
+            judge_presence(Some(bundle), Some(unknown), |_| true),
+            Some(DeliveryContentPresence::Unknown { .. })
+        ));
+    }
 
     fn git(repo: &Path, args: &[&str]) -> String {
         let out = Command::new("git")

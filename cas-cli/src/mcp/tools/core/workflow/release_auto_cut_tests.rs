@@ -1,6 +1,7 @@
 use super::*;
 use crate::store::{open_agent_store, open_supervisor_queue_store, open_task_store};
 use crate::test_support::TestEnvGuard;
+use crate::train_guardrails::notify_train_cuts;
 use cas_types::{Agent, AgentRole, TaskStatus, TaskType};
 use std::collections::BTreeSet;
 

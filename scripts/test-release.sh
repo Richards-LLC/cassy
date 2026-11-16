@@ -29,7 +29,7 @@ case "$1 $2" in
   "release view") exit 1 ;;
   "release create") ;;
   "api repos/"*)
-    echo '{}' ;;
+    case "$2" in */logs) cat "${FAKE_TRAIN_LOG_ZIP:?}" ;; *) echo '{}' ;; esac ;;
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit") ;;
@@ -610,7 +610,7 @@ one_item_hotfix_train() {
         [[ "$(grep -c '^pr merge ' "$tmp/one-hotfix-gh.log")" == 1 ]] &&
         grep -q "^release track --commit $cut --version $version " "$tmp/one-hotfix-cas.log" || return 1
     grep -q "^ledger estimate release v$version$" "$tmp/one-hotfix-cas.log" || return 1
-    [[ "$(grep -c '^ledger estimate pipeline ' "$tmp/one-hotfix-cas.log")" == 2 ]] || return 1
+    [[ "$(grep -c '^ledger estimate pipeline ' "$tmp/one-hotfix-cas.log")" == 3 ]] || return 1
     # Stand in only for the external merge queue's landing, then invoke the
     # same publisher as the release workflow against its exact landed SHA.
     git -C "$fixture" switch --quiet main

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use cas_types::{TaskStatus, TaskType};
+use cas_types::TaskStatus;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,

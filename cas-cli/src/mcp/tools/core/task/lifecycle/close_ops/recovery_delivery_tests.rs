@@ -2095,3 +2095,106 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
     assert!(ledger.iter().any(|event| matches!(&event.payload,
         cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::OverrideClose, .. })), "{ledger:?}");
 }
+
+/// Point the fixture task's recorded start at `base` on the worker lane,
+/// with no parked or anchored delivery yet.
+fn start_on_lane(tasks: &dyn cas_store::TaskStore, base: &str) -> Task {
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.parked_branch = None;
+    task.deliverables.factory_branch_anchor = None;
+    task.deliverables.historical_factory_branch_anchors.clear();
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: BRANCH.into(), base_sha: base.into(),
+    });
+    tasks.update(&task).unwrap();
+    task
+}
+
+fn commit_file(path: &Path, file: &str, subject: &str) -> String {
+    std::fs::write(path.join(file), format!("{subject}\n")).unwrap();
+    git(path, &["add", file]);
+    git(path, &["commit", "-qm", subject]);
+    git(path, &["rev-parse", "HEAD"])
+}
+
+/// GH #1944 (cas-f45f): the worker's own commit, recorded in this task's
+/// delivery cycle when it was made, names the regression it fixes. Start and
+/// close read it as this task's work; an unrecorded commit naming another
+/// task still refuses.
+#[tokio::test]
+async fn recorded_own_commit_naming_another_task_stays_this_delivery_gh1944() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    git(&f.worker_path, &["reset", "-q", "--hard", "main"]);
+    let base = git(repo, &["rev-parse", "main"]);
+    let mut task = start_on_lane(tasks.as_ref(), &base);
+    // Each commit-hook anchor write appends to the open delivery cycle.
+    for (file, subject) in [
+        ("a.rs", "fix(post-chat): answer the hook question (cas-c6e1-fixture)"),
+        ("b.rs", "fix(post-chat): a vague answer still answers the hook question (cas-7ecf)"),
+        ("c.rs", "test(post-chat): cover the vague answer (cas-c6e1-fixture)"),
+    ] {
+        task.deliverables.factory_branch_anchor = Some(commit_file(&f.worker_path, file, subject));
+        tasks.update(&task).unwrap();
+    }
+    let task = tasks.get(TASK).unwrap();
+    let delivery = task_attribution::started_delivery(repo, &task).unwrap().unwrap();
+    assert_eq!(delivery.commits.len(), 3, "{:?}", delivery.commits);
+    task_commit_identity_in_repo(repo, &task, None).unwrap();
+
+    commit_file(&f.worker_path, "d.rs", "fix(cas-dddd): unrecorded other task");
+    assert!(task_attribution::started_delivery(repo, &task).is_err());
+}
+
+/// GH #1988 (cas-f45f): a replacement lane imports the task's reviewed
+/// hotfix with `--no-ff`. One imported commit is another task's reused red
+/// test, which the supervisor granted. The rebind's delivery read must find
+/// the merge, not drop it for that granted commit.
+#[tokio::test]
+async fn granted_commit_inside_no_ff_import_keeps_the_merge_gh1988() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    let cas_dir = repo.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let base = git(repo, &["rev-parse", "main"]);
+    git(repo, &["switch", "-qc", "hotfix", "main"]);
+    let reused = commit_file(repo, "red.rs", "test(cas-f4a2): replay the folded member");
+    commit_file(repo, "fix.rs", "fix(cas-c6e1-fixture): judge own paths by net range");
+    git(repo, &["switch", "-q", "main"]);
+    git(&f.worker_path, &["reset", "-q", "--hard", "main"]);
+    git(&f.worker_path, &["merge", "-q", "--no-ff", "hotfix", "-m", "Merge cas-c6e1-fixture repair"]);
+    let merge = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let task = start_on_lane(tasks.as_ref(), &base);
+    assert!(task_attribution::started_delivery(repo, &task).is_err(), "ungranted import refuses");
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+        id: TASK.into(),
+        reason: format!("Reuse the red test merge_source={reused}"),
+    })).await.unwrap();
+    let granted = tasks.get(TASK).unwrap();
+    let delivery = task_attribution::started_delivery(repo, &granted).unwrap().unwrap();
+    assert_eq!(delivery.commits, vec![merge]);
+}
+
+/// GH #1888 (cas-f45f): the returned task's start records the worker lane,
+/// while task start cut an empty `factory/<worker>-<task>` ref at the target
+/// tip and checked it out. A ref merely named for the task is not its
+/// delivery: close checks measure the recorded lane.
+#[tokio::test]
+async fn empty_per_task_ref_does_not_replace_the_recorded_lane_gh1888() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let repo = f.dir.path();
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    let task = start_on_lane(tasks.as_ref(), &git(repo, &["rev-parse", "main"]));
+    let per_task = crate::factory_isolation::worker_task_branch(WORKER, TASK);
+    git(&f.worker_path, &["switch", "-qc", &per_task, "main"]);
+    assert_eq!(close_measured_factory_branch(repo, &task, WORKER), BRANCH);
+}

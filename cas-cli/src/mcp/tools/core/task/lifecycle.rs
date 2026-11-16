@@ -657,6 +657,40 @@ mod reused_factory_branch_tests {
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), worker_tip);
     }
 
+    /// GH #1976, #1988 (cas-f45f): a lane that lands someone else's PR, one
+    /// commit naming another task, resumes once the supervisor grants that
+    /// PR's head. Without the grant the same lane still occupies.
+    #[test]
+    fn granted_import_is_task_work_at_resume_and_ungranted_still_occupies() {
+        let repo = repo();
+        git(repo.path(), &["checkout", "-b", "teammate/pr"]);
+        for (file, subject) in [("widget", "Add teammate widget"), ("red", "test(cas-f4a2): reuse the red test")] {
+            std::fs::write(repo.path().join(file), "teammate\n").expect("teammate file");
+            git(repo.path(), &["add", file]);
+            git(repo.path(), &["commit", "-m", subject]);
+        }
+        let pr_head = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "-b", "factory/test-worker", "main"]);
+        git(repo.path(), &["merge", "--no-ff", "teammate/pr", "-m", "Land the teammate PR for cas-1976a"]);
+        let tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        let identity = |grants: Vec<String>| super::close_ops::TaskCommitIdentity {
+            approved_merge_parents: grants,
+            task_id: Some("cas-1976a".into()),
+            ..Default::default()
+        };
+
+        let ungranted = identity(Vec::new());
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&ungranted), None, |_| None)
+            .expect("ungranted import is reported");
+        assert!(matches!(result, ReusedFactoryBranchStart::Occupied { .. }), "{result:?}");
+
+        let granted = identity(vec![pr_head]);
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&granted), None, |_| None)
+            .expect("granted import resumes");
+        assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), tip);
+    }
+
     #[test]
     fn matching_target_base_is_left_untouched() {
         let repo = repo();

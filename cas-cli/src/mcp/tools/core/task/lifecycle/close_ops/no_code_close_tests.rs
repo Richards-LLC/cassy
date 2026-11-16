@@ -787,9 +787,13 @@ async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
     }
 }
 
+/// GH #1939 (cas-aac3, cas-f45f): both retarget paths, `task update epic=`
+/// and a `dep_add` parent link (cas-361e's case), carry an unchanged empty
+/// source to the new target, so its no-delivery close is not refused G-47.
 #[tokio::test]
 async fn epic_retarget_rebinds_unchanged_started_source_before_no_delivery_close() {
     let mut env = TestEnvGuard::temp_home();
+    for via_dep_add in [false, true] {
     let f = fixture(&mut env, "main");
     let repo = f.dir.path();
     git(repo, &["checkout", "-q", "-b", "epic/next"]);
@@ -812,9 +816,16 @@ async fn epic_retarget_rebinds_unchanged_started_source_before_no_delivery_close
     let mut helper = assigned(id, TaskType::Task, "main");
     helper.status = TaskStatus::Open;
     f.put(&helper);
-    tasks.add_dependency(&Dependency::new(
-        id.into(), "cas-aac3-old".into(), DependencyType::ParentChild,
-    )).unwrap();
+    if !via_dep_add {
+        tasks.add_dependency(&Dependency::new(
+            id.into(), "cas-aac3-old".into(), DependencyType::ParentChild,
+        )).unwrap();
+    }
+    let retarget = if via_dep_add {
+        serde_json::json!({"action":"dep_add", "id":id, "to_id":"cas-aac3-new", "dep_type":"parent"})
+    } else {
+        serde_json::json!({"action":"update", "id":id, "epic":"cas-aac3-new"})
+    };
     let agents = open_agent_store(&f.cas_dir()).unwrap();
     let mut worker = agents.get("nocode-worker-session").unwrap();
     worker.metadata.insert(
@@ -829,23 +840,20 @@ async fn epic_retarget_rebinds_unchanged_started_source_before_no_delivery_close
     let mut reassigned = f.task(id);
     reassigned.assignee = Some("another-worker".into());
     f.put(&reassigned);
-    let refused = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
-        "action":"update", "id":id, "epic":"cas-aac3-new",
-    })).unwrap())).await;
+    let refused = f.supervisor.task(Parameters(serde_json::from_value(retarget.clone()).unwrap())).await;
     assert!(refused.is_err(), "mismatched assignee must refuse the retarget");
     assert!(
         refused.as_ref().unwrap_err().message.contains("rebind_branch"),
         "mismatched source guidance names the supervisor recovery action: {refused:?}"
     );
-    assert_eq!(tasks.get_parent_epic(id).unwrap().unwrap().id, "cas-aac3-old", "{refused:?}");
+    assert_ne!(tasks.get_parent_epic(id).unwrap().map(|epic| epic.id).as_deref(), Some("cas-aac3-new"), "{refused:?}");
     assert_eq!(f.task(id).deliverables.work_target, Some(target("main")), "{refused:?}");
     let mut restored = f.task(id);
     restored.assignee = Some(WORKER.into());
     f.put(&restored);
 
-    let moved = call(&f.supervisor, serde_json::json!({"action":"update", "id":id, "epic":"cas-aac3-new"})).await;
+    let moved = call(&f.supervisor, retarget).await;
     let rebound = f.task(id);
-    assert_eq!(tasks.get_parent_epic(id).unwrap().unwrap().id, "cas-aac3-new", "{moved}");
     assert_eq!(rebound.deliverables.work_target, Some(target("epic/next")), "{moved}");
     assert_eq!(rebound.deliverables.factory_branch_start.as_ref().unwrap().work_target, target("epic/next"), "{moved}");
     assert!(rebound.notes.contains("DELIVERY BRANCH REBOUND"), "{moved}");
@@ -856,6 +864,7 @@ async fn epic_retarget_rebinds_unchanged_started_source_before_no_delivery_close
         "action":"close", "id":id, "reason":"No code was needed", "no_delivery":true,
     })).await;
     assert_closed_without_lane(&f, id, &closed);
+    }
 }
 
 /// A derived empty ref cannot erase work on B's publicly recorded source.

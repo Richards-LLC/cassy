@@ -1859,28 +1859,17 @@ pub(super) mod tests {
             assert_eq!(sibling.status, train.status, "{id}");
         }
         assert_eq!(store.get("cas-b007").unwrap().status, unfinished.status);
-        // After checking retirement, finish the fixture's other admissions
-        // so the existing rollover assertion exercises opening a fresh train.
-        for (id, _, _, _, retired) in rows {
-            if !retired {
-                let mut sibling = store.get(id).unwrap();
-                sibling.labels.push("release-train-cut".into());
-                store.update(&sibling).unwrap();
-            }
-        }
+        // cas-4845: a successor opens only after the cut train publishes, so
+        // new work is refused rather than joining the queued release.
         let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-        core.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
+        let refused = core.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
             "title": "Next train followup", "task_type": "task", "risk": "none", "epic": train.id,
-        })).unwrap())).await.unwrap();
+        })).unwrap())).await.unwrap_err();
+        assert!(refused.message.starts_with("RELEASE_PUBLICATION_PENDING:"), "{}", refused.message);
         let store = open_task_store(&root).unwrap();
-        let child = store.list(None).unwrap().into_iter().find(|t| t.title == "Next train followup").unwrap();
-        let next = store.get_parent_epic(&child.id).unwrap().unwrap();
-        assert_ne!(next.id, train.id, "new work must not join the queued release");
-        assert_eq!(git(temp.path(), &["rev-parse", next.effective_epic_branch().unwrap()]).unwrap(),
-            git(temp.path(), &["rev-parse", "main"]).unwrap(), "fresh train starts from integration");
+        assert!(!store.list(None).unwrap().iter().any(|t| t.title == "Next train followup"));
         assert!(store.get(&train.id).unwrap().labels.iter().any(|label| label == "release-train-cut"));
-        // A restarted cut still resolves its original train, even after new
-        // work has opened a different train. Its reminders stay idempotent.
+        // A restarted cut still resolves its original train; its reminders stay idempotent.
         track(&args, &root).unwrap();
         assert_eq!(open_reminder_store(&root).unwrap().list_all_pending().unwrap().len(), 2);
         let recorded: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();

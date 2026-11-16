@@ -505,10 +505,17 @@ pub(crate) fn record_supervisor_test(
         if owned.is_empty() {
             bail!("this selection owns no changed tests; no stability evidence is needed");
         }
-        let names_passed = |log: &str| owned.iter().all(|test| log.lines().any(|line| {
-            let line = line.trim_end();
-            line.trim_start().starts_with("PASS [") && line.ends_with(&format!(" {}", test.identity.name))
-        }));
+        // nextest names a test by binary id (package, or package::harness)
+        // and full path; a same-named test elsewhere is not this test.
+        let names_passed = |log: &str| owned.iter().all(|test| {
+            let binary = test.harness.as_ref()
+                .map_or_else(|| test.package.clone(), |harness| format!("{}::{harness}", test.package));
+            let suffix = format!(" {binary} {}", test.identity.name);
+            log.lines().any(|line| {
+                let line = line.trim_end();
+                line.trim_start().starts_with("PASS [") && line.ends_with(&suffix)
+            })
+        });
         if !names_passed(&log) {
             bail!("selected log does not show every changed test passing");
         }

@@ -737,20 +737,110 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
     Ok(())
 }
 
-fn package_root(repo: &Path, path: &str) -> Result<PathBuf> {
+const JEST_CONFIGS: &[&str] = &[
+    "jest.config.js",
+    "jest.config.ts",
+    "jest.config.mjs",
+    "jest.config.cjs",
+    "jest.config.mts",
+    "jest.config.cts",
+    "jest.config.json",
+];
+// Vitest prefers its own config over the Vite config in the same directory.
+const VITEST_CONFIGS: &[&str] = &[
+    "vitest.config.ts",
+    "vitest.config.mts",
+    "vitest.config.cts",
+    "vitest.config.js",
+    "vitest.config.mjs",
+    "vitest.config.cjs",
+    "vite.config.ts",
+    "vite.config.mts",
+    "vite.config.cts",
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.cjs",
+];
+const PLAYWRIGHT_CONFIGS: &[&str] = &[
+    "playwright.config.ts",
+    "playwright.config.mts",
+    "playwright.config.cts",
+    "playwright.config.js",
+    "playwright.config.mjs",
+    "playwright.config.cjs",
+];
+
+/// The runner's config in `dir`; a `"jest"` key in package.json counts for Jest.
+fn runner_config(dir: &Path, runner: &str) -> Option<PathBuf> {
+    let names = match runner {
+        "jest" => JEST_CONFIGS,
+        "vitest" => VITEST_CONFIGS,
+        "playwright" => PLAYWRIGHT_CONFIGS,
+        _ => &[],
+    };
+    names
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|config| config.is_file())
+        .or_else(|| {
+            let manifest = dir.join("package.json");
+            (runner == "jest"
+                && std::fs::read(&manifest)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .is_some_and(|manifest| manifest.get("jest").is_some()))
+            .then_some(manifest)
+        })
+}
+
+/// The runner's working directory and explicit config for a test file: the
+/// nearest ancestor holding that runner's config, else the nearest
+/// package.json. A nested package.json must not hide the config and its
+/// transforms (cas-1468).
+fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
     let mut current = repo
         .join(path)
         .parent()
         .context("test parent")?
         .to_path_buf();
+    let mut package = None;
     loop {
-        if current.join("package.json").is_file() {
-            return Ok(current);
+        if let Some(config) = runner_config(&current, runner) {
+            return Ok((current, Some(config)));
+        }
+        if package.is_none() && current.join("package.json").is_file() {
+            package = Some(current.clone());
         }
         if current == repo || !current.pop() {
-            bail!("no package.json found for {path}");
+            return package
+                .map(|package| (package, None))
+                .with_context(|| format!("no package.json found for {path}"));
         }
     }
+}
+
+/// The runner a G-61 refusal names for a changed test file: its runner
+/// import, else the nearest Jest or Vitest config.
+pub(crate) fn runner_hint(repo: &Path, path: &str) -> &'static str {
+    let source = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
+    if source.contains("@playwright/test") {
+        return "playwright";
+    }
+    if source.contains("'vitest'") || source.contains("\"vitest\"") {
+        return "vitest";
+    }
+    if source.contains("@jest/globals") {
+        return "jest";
+    }
+    let mut current = repo.join(path);
+    while current.pop() && current.starts_with(repo) {
+        for runner in ["jest", "vitest"] {
+            if runner_config(&current, runner).is_some() {
+                return runner;
+            }
+        }
+    }
+    "<vitest|jest|playwright>"
 }
 
 fn runner_path(repo: &Path, package: &Path, runner: &str) -> Result<PathBuf> {
@@ -789,7 +879,11 @@ fn execute_tests(
     }
     let reports = tempfile::tempdir()?;
     for (path, names) in by_file {
-        let package = package_root(repo, path)?;
+        let (package, config) = runner_root(repo, path, runner)?;
+        let config: Vec<std::ffi::OsString> = config
+            .into_iter()
+            .flat_map(|config| ["--config".into(), config.into_os_string()])
+            .collect();
         let executable = runner_path(repo, &package, runner)?;
         let source = std::fs::read_to_string(repo.join(path))?;
         let sites = declared_sites(path, &source)?;
@@ -802,7 +896,9 @@ fn execute_tests(
             command
                 .current_dir(&package)
                 .env("CI", "1")
-                .args(["test", "--list", "--reporter=json"])
+                .arg("test")
+                .args(&config)
+                .args(["--list", "--reporter=json"])
                 .arg(regex::escape(&repo.join(path).to_string_lossy()))
                 .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
             if !run_scoped_javascript(command, high, &reports.path().join("discovery-scope"))? {
@@ -838,8 +934,9 @@ fn execute_tests(
             match runner {
                 "vitest" => {
                     command
+                        .arg("run")
+                        .args(&config)
                         .args([
-                            "run",
                             "--retry",
                             "0",
                             "--bail",
@@ -859,6 +956,7 @@ fn execute_tests(
                 }
                 "jest" => {
                     command
+                        .args(&config)
                         .args([
                             "--runInBand",
                             "--maxConcurrency=1",
@@ -874,8 +972,9 @@ fn execute_tests(
                 }
                 "playwright" => {
                     command
+                        .arg("test")
+                        .args(&config)
                         .args([
-                            "test",
                             "--repeat-each",
                             "5",
                             "--retries",
@@ -1328,6 +1427,32 @@ mod tests {
             path: path.into(),
             name: name.into(),
         }
+    }
+
+    /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
+    /// apps/backend/jest.config.js and its ts-jest transform.
+    #[test]
+    fn nested_package_json_runs_from_the_jest_config_root_cas_1468() {
+        let repo = tempfile::tempdir().unwrap();
+        let backend = repo.path().join("apps/backend");
+        std::fs::create_dir_all(backend.join("scripts")).unwrap();
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        std::fs::write(backend.join("package.json"), "{}").unwrap();
+        std::fs::write(backend.join("jest.config.js"), "module.exports = {};").unwrap();
+        std::fs::write(backend.join("scripts/package.json"), "{}").unwrap();
+        let spec = "apps/backend/scripts/merge-creator-workspaces.spec.ts";
+        std::fs::write(repo.path().join(spec), "it('merges', () => {});").unwrap();
+
+        assert_eq!(
+            runner_root(repo.path(), spec, "jest").unwrap(),
+            (backend.clone(), Some(backend.join("jest.config.js")))
+        );
+        assert_eq!(runner_hint(repo.path(), spec), "jest");
+        // Without a runner config, the nearest package.json stays the root.
+        assert_eq!(
+            runner_root(repo.path(), spec, "vitest").unwrap(),
+            (backend.join("scripts"), None)
+        );
     }
 
     #[test]

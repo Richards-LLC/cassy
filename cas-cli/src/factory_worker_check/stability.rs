@@ -80,6 +80,28 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     Ok(required.into_iter().collect())
 }
 
+/// The command that proves these changed tests, one per runner (cas-1468).
+pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -> Vec<String> {
+    let mut javascript: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut rust = false;
+    for test in tests {
+        if test.path.ends_with(".rs") {
+            rust = true;
+        } else {
+            javascript.entry(super::javascript::runner_hint(repo, &test.path))
+                .or_default().insert(&test.path);
+        }
+    }
+    let mut commands: Vec<String> = javascript.into_iter().map(|(runner, files)| format!(
+        "cas factory worker-check --cas-root {} -- {runner} {}",
+        cas_root.display(), files.into_iter().collect::<Vec<_>>().join(" "),
+    )).collect();
+    if rust {
+        commands.push("cargo nextest run -p <crate> --lib -E 'test(<name>)'".into());
+    }
+    commands
+}
+
 /// A failed rerun may not leave an earlier overlapping five-pass proof usable.
 pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, tests: &[Identity]) -> Result<()> {
     if tests.is_empty() { return Ok(()); }

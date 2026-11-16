@@ -800,7 +800,8 @@ esac
         self.assertFalse((self.repo / "cargo-called").exists())
         # The comparison built a disposable checkout of the pushed tip, so
         # this checkout keeps its committed bytes and stays clean.
-        self.assertEqual((self.repo / "hub-web/dist/app.js").read_text(), "hand-edited bundle\n")
+        committed = command(self.repo, "git", "show", "HEAD:hub-web/dist/app.js").stdout
+        self.assertEqual((self.repo / "hub-web/dist/app.js").read_text(), committed)
         self.assertEqual(command(self.repo, "git", "status", "--porcelain").stdout, "")
         # Prepare matching output explicitly, then replay the same pre-push
         # payload twice, as after a transport failure.

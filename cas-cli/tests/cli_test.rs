@@ -264,11 +264,21 @@ esac
     artifacts.mark_committed(&artifact.id, None).unwrap();
     // The park-recorded report reference is the member's proof (cas-0226).
     report.external_ref = Some(format!("artifact:{}", artifact.id));
-    report.status = TaskStatus::Closed;
-    report.closed_at = Some(chrono::Utc::now());
     tasks.update(&report).unwrap();
     git(&held, &["add", "notes.md"]);
     git(&held, &["commit", "-qm", "release input notes"]);
+    // The release review verdict binds the report at the reviewed train tip.
+    let reviewed = git(&held, &["rev-parse", "HEAD"]);
+    cas_store::import_qa_batch_receipt(&root, &cas_store::QaBatchReceipt {
+        schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-report-review".into(),
+        project_id: "cut-entry".into(), ledger_artifact_id: artifact.id.clone(),
+        ledger_path: artifact_path.display().to_string(), ledger_sha256: artifact.sha256.clone(),
+        ledger_size_bytes: artifact.size_bytes, staging_sha: reviewed.clone(),
+        task_heads: std::collections::BTreeMap::from([("cas-bbbb".into(), reviewed)]),
+        recorder_agent_id: "supervisor".into(), recorded_at: chrono::Utc::now().to_rfc3339(),
+        release_tag: None, ledger_author_id: Some("reviewer".into()),
+        ledger_author_role: Some("sub_agent".into()), author_overrides: Default::default(), imported: true,
+    }).unwrap();
     let (ok, fixed) = plan();
     assert!(ok, "{fixed}");
     assert!(!marker.exists());

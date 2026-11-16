@@ -551,8 +551,8 @@ path="tests/builtin_archive_portability_test.rs"
         state = self.root / "output/lane.json"
         ref = "refs/cas/delivery-base/lane"
         self.git("update-ref", ref, self.base)
-        def plan_with(target):
-            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", "plan", "--base-sha", target, "--history", str(self.history), "--out", str(state), "--recorded-base-ref", ref]
+        def plan_with(target, record=ref, zero=""):
+            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", "plan", "--base-sha", target, "--history", str(self.history), "--out", str(state), "--recorded-base-ref", record, "--zero-base-ref", zero]
             self.assertEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
             return json.loads(state.read_text())
         before = plan_with(self.base)
@@ -574,6 +574,18 @@ path="tests/builtin_archive_portability_test.rs"
         with patch.object(impact, "lane_attribute", return_value=0) as attribute:
             self.assertEqual(impact.lane(self.root, Namespace(out=str(state), phase="attribute", receipt="own")), 0)
         self.assertEqual(attribute.call_args.args[1], self.base)
+        # cas-0e97 (lane run 43919298591): first push, so BASE_SHA is empty and
+        # no start base is recorded. Attribute at the resolved target merge-base.
+        first_push = plan_with("", record="refs/cas/delivery-base/missing", zero=target)
+        self.assertEqual(first_push["plan"]["attribution_base"], target)
+        # Nothing resolves: own failures stay red without handing git an empty ref.
+        failure = self.NEXTEST_FAILURE
+        destination = state.with_name("own-attribution.json")
+        with patch.object(impact.subprocess, "check_call", side_effect=AssertionError("git ran with an empty ref")), \
+                patch.object(impact.subprocess, "run", side_effect=AssertionError("git ran with an empty ref")):
+            self.assertEqual(impact.lane_attribute(self.root, "", [failure], destination, {}, "fixture"), 1)
+        unresolved = json.loads(destination.read_text())
+        self.assertEqual((unresolved["status"], unresolved["unresolved"]), ("unresolved", [failure]))
 
 
 if __name__ == "__main__":

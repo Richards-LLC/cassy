@@ -62,4 +62,4 @@ Dispatch: one worker per file-group lane via `spawn_workers count=1 lane=<lane> 
 | Release or publish | [reporting and routing](references/reporting-and-routing.md) |
 | A recurring lesson | [ladder and tags](references/workflow.md#lessons-must-remove-causes) |
 | Schedule follow-up | [reminders](references/reminders.md) |
-| Bug filing | [issue registry](references/filing-cas-bugs.md) (`issues.repo`, `issues.components.violet`, `issues.components.cloud`): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately. |
+| Bug filing | [issue registry](references/filing-cas-bugs.md) (`issues.repo`, `issues.components.violet`, `issues.components.cloud`): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. Find or file in issues.components.cassy: `system action=report_cas_bug`, refusal first in `actual`, then continue; in Cassy's source repo, find or staff a fix task. |

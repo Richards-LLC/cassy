@@ -1312,10 +1312,9 @@ sys.exit(17 if name == 'test-release-report-post.py' else 0)
                     self.assertLessEqual(active, 4)
                     self.assertLessEqual(browsers, 1)
                 self.assertEqual((active, peak), (0, 4))
-                logs = self.root / 'target/ci-script-suite-logs'
+                self.assertFalse((self.root / 'target').exists(), 'suite logs stay outside the checkout')
                 for name in names:
                     expected = [f'{name}:{i}' for i in range(80)]
-                    self.assertEqual((logs / f'{name}.log').read_text().splitlines(), expected)
                     self.assertIn('\n'.join(expected), output)
                 excerpt = output.split('failed: scripts/test-release-report-post.py\n', 1)[1]
                 self.assertIn('test-release-report-post.py:79', excerpt)

@@ -1766,6 +1766,15 @@ bug_families:
     tasks: [cas-9d2c]
     journeys: [HUB-J4, HUB-J22, HUB-J9]
     invariants: [HUB-J4-IMAGE-INSPECTION, HUB-J22-GOAL, HUB-J9-GOAL]
+  commander-accounts-cleanup-confirm-width:
+    title: The Accounts Clean up confirmation sits under its banner at full sheet width, never squeezed inside the banner's flex row
+    tasks: [cas-9543]
+    journeys: [HUB-J13]
+    invariants: [HUB-J13-ACCOUNT-MANAGEMENT]
+  resumed-delivery-attribution:
+    title: Resumed delivery scope retains implementation and ignores restored journeys
+    tasks: [cas-ded9]
+    journeys: [FACTORY-CLOSE, FACTORY-SPAWN]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1804,10 +1813,6 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
-  REPORT-JOURNAL-GRID:
-    statement: Accounting report entries use saved ledger identities, numeric debit and credit rows, balanced totals, source-or-hypothetical amounts and visible revision changes; internal QBO IDs are never chart account numbers.
-    check: Run scripts/test-accounting-journals.py through the shipped CLI with saved chart/source fixtures, including disabled or blank AcctNum, imbalance, invalid accounts, missing or mismatched sources and revised amounts. Open the generated simple and compound before-after page in light/dark desktop/phone, print and JS-disabled modes; inspect indentation, totals and memo placement.
-    bug: {task: cas-b1f3}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -2612,6 +2617,10 @@ invariants:
     statement: The Quality journey focuses the visible desktop search or phone composer, sends one palette shortcut and waits for the palette; the selected project's trend factor and chart remain visible in both schemes.
     check: Run the original HUB-J13 quality trend identity headlessly on locked Playwright with retries zero; keep a red focus-loss control, the passing control, and the final four viewport/scheme captures. The journey must show the trend, not merely issue a quality request.
     bug: {task: cas-c008}
+  REPORT-JOURNAL-GRID:
+    statement: Accounting report entries use saved ledger identities, numeric debit and credit rows, balanced totals, source-or-hypothetical amounts and visible revision changes; internal QBO IDs are never chart account numbers.
+    check: Run scripts/test-accounting-journals.py through the shipped CLI with saved chart/source fixtures, including disabled or blank AcctNum, imbalance, invalid accounts, missing or mismatched sources and revised amounts. Open the generated simple and compound before-after page in light/dark desktop/phone, print and JS-disabled modes; inspect indentation, totals and memo placement.
+    bug: {task: cas-b1f3}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS

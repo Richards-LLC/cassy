@@ -126,6 +126,8 @@ A `focus_epic` pin is a display filter, never merge authority.
 
 Before landing a lane, check that the worker's capped `check: PASS <sha>` and targeted `test: PASS <sha> <package> <filter> <count>` receipts name the delivered commit and affected scope. The full build and suite run once, at the Phase 4 final gate. For public surfaces, score distinctiveness, fit and hierarchy 1–5 with cas-codebase-design; the floor is 4/5. A script used on several platforms needs more than Linux proof unless a fixture covers the difference.
 
+G-61 changed-test stability covers Jest, Vitest and Playwright as well as Rust: the worker runs `cas factory worker-check --cas-root "$CAS_ROOT" -- jest|vitest|playwright <files>`, and the refusal names the exact command. Never waive it as cargo-only.
+
 1. **Contract changes first.** If the diff changes a public contract (API shape, persisted field, CLI/MCP response, or behavior callers rely on), search for tests that still pin the old contract, for example `git grep -n '<old contract token>' -- '*test*'`. Update or reject the lane when they prove an unreviewed caller contract.
 2. **Read the lane CI signal.** `gh run list --branch factory/<worker>` at review time; the merge receipt names the code-check SHA it used. Red CI, or docs-only success on a code delivery, refuses the merge. Override it with `supervisor_override=true` and a reason only for a CI defect, never to skip a real failure. Pending, unavailable and no-checks results are advisory: the merge proceeds and the receipt marks code validation unconfirmed.
 

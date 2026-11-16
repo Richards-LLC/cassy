@@ -239,9 +239,18 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
                 String::from_utf8_lossy(&output.stderr)
             );
             let mut state: Value = serde_json::from_slice(&output.stdout)?;
-            if let Err(error) = dispatch_frozen(root, &epic, &repo, branch, &head, &state) {
+            // The script owns verdicts; retain the dispatch history even when
+            // a completed run replaces its entire receipt.
+            state["dispatches"] = previous.as_ref()
+                .map(|state| state["dispatches"].clone())
+                .filter(Value::is_object)
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Err(error) = dispatch_frozen(root, &epic, &repo, branch, &head, &mut state) {
                 tracing::warn!(train=%epic.id, %error, "train suite dispatch deferred");
             }
+            crate::cli::integrate::fs::atomic_write(
+                &out.join("state.json"), &serde_json::to_string_pretty(&state)?,
+            )?;
             scan_result(root, &epic, branch, previous.as_ref(), &mut state)
         })();
         if let Err(error) = result {
@@ -255,18 +264,44 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
 /// CI proved each delivery; a frozen train accepts no merge that could
 /// supersede the run. A repair or plumbing commit on a frozen train is a new
 /// tip and gets its own single run.
-fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &str, head: &str, state: &Value) -> Result<()> {
-    // cas-bac4: PENDING also covers a run already under way at this head.
-    // The marker below knows only this daemon's own dispatch, so on Nov 13 a
-    // supervisor's run at the frozen tip got a duplicate one scan later.
+fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &str, head: &str, state: &mut Value) -> Result<()> {
+    let history = state["dispatches"][head].clone();
+    // A replacement may take a scan to appear in GitHub's list. Never count
+    // the abandoned run as pending again, including after a daemon restart.
+    if history["dead_run_id"].is_string()
+        && state["pending_run_id"] == history["dead_run_id"]
+    {
+        state["pending_run_id"] = Value::Null;
+    }
     if state["outcome"] != "PENDING"
-        || state["pending_run_id"].is_string()
         || crate::mcp::tools::core::workflow::release_freeze::active(root, epic).is_none()
     {
         return Ok(());
     }
     let marker = directory(root, &epic.id)?.join("dispatched-head");
-    if std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == head) {
+    let pending = state["pending_run_id"].as_str().map(str::to_owned);
+    if let Some(run_id) = pending.as_deref() {
+        state["dispatches"][head]["run_id"] = run_id.into();
+        // cas-7d684: one replacement per frozen head, never a retry chain.
+        if history["dead_run_id"].is_string() {
+            return Ok(());
+        }
+        let endpoint = format!("repos/{{owner}}/{{repo}}/actions/runs/{run_id}");
+        let run = gh_json(repo, &endpoint)?;
+        let old = run["created_at"].as_str()
+            .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+            .is_some_and(|created| chrono::Utc::now().signed_duration_since(created)
+                >= chrono::Duration::seconds(90));
+        if run["status"] != "queued" || run["head_sha"] != head || !old {
+            return Ok(());
+        }
+        let jobs = gh_json(repo, &format!("{endpoint}/jobs?per_page=1"))?;
+        if jobs["total_count"].as_u64() != Some(0) {
+            return Ok(());
+        }
+    } else if history["dead_run_id"].is_string()
+        || std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == head)
+    {
         return Ok(());
     }
     let mut command = Command::new(crate::github_repo::gh_binary());
@@ -285,9 +320,28 @@ fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &st
         "train suite dispatch failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    if let Some(run_id) = pending {
+        state["dispatches"][head]["dead_run_id"] = run_id.into();
+        state["dispatches"][head]["run_id"] = Value::Null;
+        state["pending_run_id"] = Value::Null;
+    }
     std::fs::write(&marker, head)?;
     tracing::info!(train=%epic.id, %head, "train suite dispatched at frozen tip");
     Ok(())
+}
+
+/// Read run metadata without ever cancelling a GitHub run.
+fn gh_json(repo: &Path, endpoint: &str) -> Result<Value> {
+    let mut command = Command::new(crate::github_repo::gh_binary());
+    command.args(["api", "-X", "GET", endpoint]).current_dir(repo);
+    let timeout = Duration::from_secs(30);
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(timeout),
+        timeout,
+    ).map_err(|error| anyhow::anyhow!("train run lookup failed: {error:?}"))?;
+    ensure!(output.status.success(), "train run lookup failed ({})", output.status);
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 /// Everything after the CI script: tie merges to tasks, record timings, notify.
@@ -569,7 +623,7 @@ else: sys.exit(1)
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         env.set("GH_BIN", &gh);
         let dispatches = || std::fs::read_to_string(&calls).unwrap_or_default().lines()
-            .filter(|call| call.starts_with("workflow run " )).count();
+            .filter(|call| call.starts_with("workflow run ")).count();
 
         for merge in ["merge one", "merge two", "merge three"] {
             git(&["commit", "-q", "--allow-empty", "-m", merge]);

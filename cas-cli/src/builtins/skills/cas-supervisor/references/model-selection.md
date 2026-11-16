@@ -2,14 +2,7 @@
 
 Pay for reasoning only where reasoning is the bottleneck. You own each worker's `cli`, `model` and `effort`: tier each task at breakdown, spawn the mix the backlog needs, and escalate deliberately. This file is the one copy of the lane matrix.
 
-- **Light** is Codex GPT-6 Luna at xhigh: bounded chores and mechanical non-public docs.
-- **Standard** is Codex GPT-6.1 Sol at high: the floor for normal feature and bug work.
-- **Taste** is Claude Opus 5.5 at high: public surfaces, prompts, docs, naming, release notes and general judgment.
-- **Heavy** is Claude Opus 5.5 at high: cross-cutting refactors, concurrency/lifecycle code, migrations and critical-path work.
-- **Supervisor** is Claude Opus 5.5 at high.
-- **OpenCode is route-specific**: each Qwen route needs its own live receipt; see [OpenCode lane](#opencode-lane-route-specific-conformance).
-
-Pass `lane=<light|standard|taste|heavy>` (preferred) or a complete explicit `cli=`/`model=`/`effort=` recipe, never both. Fallbacks fire only in lane mode, and the receipt names them; an explicit recipe runs as written or fails.
+Pass `lane=<light|standard|taste|heavy>` (preferred) or a complete explicit `cli=`/`model=`/`effort=` recipe. Fallbacks fire only in lane mode; an explicit recipe runs as written or fails.
 
 ## Registry route table
 
@@ -39,26 +32,22 @@ Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not
 
 Score each task while breaking down the EPIC:
 
-- `task_type=chore` or mechanical, non-public docs → **light**
-- Priority 0–1 on the critical path, or work touching 3+ modules or shared traits → **heavy**
-- Public docs, skills, prompts and other taste or general-judgment work → **taste**, even when the diff is small
+- `task_type=chore`, bounded chores or mechanical, non-public docs → **light**
+- Priority 0–1 on the critical path, or work touching 3+ modules or shared traits: cross-cutting refactors, concurrency/lifecycle code, migrations → **heavy**
+- Public docs, skills, prompts, naming, release notes and other taste or general-judgment work → **taste**, even when the diff is small
 - Architecture, safety, rescue or independent challenge → **taste** for the decision, **heavy** for the implementation
-- Everything else → **standard**
+- Everything else → **standard**, the floor for normal feature and bug work
 
 `effort=high` is the ceiling except for the light lane's Luna/xhigh and an explicit operator request for `max` on a recipe that lists it, after a task already failed at `high`/`xhigh`. Claude Sonnet is not a worker lane. If a route is unavailable, report it and choose another active registry lane deliberately; never invent a fallback.
 
 ## Workflow
 
 1. **Tag at breakdown:** tasks default to standard; tag deviations with `labels="tier:light"`, `"tier:taste"` or `"tier:heavy"` and note non-obvious rationale in `design`.
-2. **Spawn the mix:** one `lane=<lane>` spawn, or complete explicit recipe, per lane the ready backlog needs.
+2. **Spawn the mix:** one `lane=<lane>` spawn, or complete explicit recipe, per lane the ready backlog needs ([recipes](workflow.md#phase-2-coordinate)).
 3. **Escalate on failure or judgment:** after repeated rejection, move deliberately to a lane with the needed capability. Judge the output, not the price: use cheap lanes for drafts and pay for what ships.
 4. **De-escalate the tail:** shut down only workers on a heavier lane than the remaining work needs; let the light lane sweep the tail.
 
-Explicit spawn parameters beat `.cas/config.toml` `[factory.defaults]` and `[[factory.workers]]` for that spawn only.
-
-### Stock fallback routes
-
-Omitted controls resolve through factory configuration, then `[llm.worker]` (or `[llm]`), then the harness stock fallback; the receipt names each field's source.
+Explicit spawn parameters beat `.cas/config.toml` `[factory.defaults]` and `[[factory.workers]]` for that spawn only. Omitted controls resolve through factory configuration, then `[llm.worker]` (or `[llm]`), then the harness stock fallback; the receipt names each field's source.
 
 ```text
 # Codex stock fallback
@@ -75,11 +64,7 @@ Read this only when spawning with `cli=opencode`. Each route needs its own passi
 - `cli=opencode model=alibaba/qwen3.8-max effort=low|medium|xhigh`: DashScope pay-as-you-go (`alibaba-cn/...` for the mainland endpoint); needs `DASHSCOPE_API_KEY`.
 - `cli=opencode model=local/<model>`: the operator's local server.
 
-Keep Token Plan fan-out within the operator's declared tier (Lite 1–2, Standard 3–4, Pro 6–8 agents). Never persist keys in generated files or receipts.
-
-## Spawn recipes
-
-Copy lane recipes from the generated block in [workflow.md](workflow.md#phase-2-coordinate). The receipted OpenCode route:
+Keep Token Plan fan-out within the operator's declared tier (Lite 1–2, Standard 3–4, Pro 6–8 agents). Never persist keys in generated files or receipts. The receipted route:
 
 ```text
 factory action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"

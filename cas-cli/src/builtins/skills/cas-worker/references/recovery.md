@@ -4,16 +4,21 @@ Read for a rejection, blocked work, interruption or branch transition.
 
 ## MERGE REQUIRED
 
-A successful park is not this refusal. The park relay is the completion signal; send merge_request=true only for local_merge.
+A successful park is not this refusal; MERGE REQUIRED means unpushed or
+unattributable work.
 
-Drain `coordination action=inbox_poll` to `No unread messages`, follow
-unread supervisor messages and re-read task state: the tip may have landed.
-Capture `git rev-parse factory/<name>` (or the active per-task branch). For
-`local_merge`, keep the local commit and send
-`coordination action=message target=supervisor merge_request=true summary="Merge requested" message="<branch, SHA, target and evidence>"`.
-Otherwise push that branch and retry close once. Never open or merge a PR
-yourself (`gh pr create`). If rejected, fix what the exact error names; never
-bypass close with `status=closed` or an invented verification record.
+1. Drain `coordination action=inbox_poll` to `No unread messages`, act on
+   unread supervisor messages and re-read task state.
+2. Capture `git rev-parse factory/<name>` (or the active per-task branch) and
+   check `git merge-base --is-ancestor <delivered-tip> <target-tip>`; if it
+   already landed, await the verdict rather than amend stale state.
+3. For `local_merge`, keep the local commit and send
+   `coordination action=message target=supervisor merge_request=true summary="Merge requested" message="<branch, SHA, target and evidence>"`;
+   push only with explicit supervisor authorization. Otherwise push that branch
+   and retry close once.
+4. The supervisor owns the merge venue, so never open or merge a PR yourself.
+   Fix what the exact error names; never bypass close with `status=closed` or
+   an invented verification record.
 
 ### While the merge is pending
 
@@ -67,16 +72,13 @@ When required supervisor review, approval or another decision blocks work:
 
 ## Verification-required close
 
-When close returns VERIFICATION REQUIRED naming a dispatch:
-Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
-On older runtimes that queue a worker retry, the supervisor reads the exact
-dispatch and retries ordinary close through the existing gates.
-Send only the blocker the refusal
-names, if any, set `status=blocked` and record exactly this one-line blocker note:
+The refusal says whether Cassy already delivered the dispatch; send only the
+blocker it names, if any. To wait, set `status=blocked` with exactly this
+blocker note, which stays quiet (any other text wakes the supervisor as a real
+blocker):
 `Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
-Any other text wakes the supervisor as a real blocker. Start no other task
-meanwhile; after five minutes without a needed response, read task state and
-send one follow-up.
+Start no other task meanwhile; after five minutes without a needed response,
+read task state and send one follow-up.
 
 ## Universal denial or connectivity failure
 
@@ -87,23 +89,21 @@ workspace-path denial means using the worktree, task artifacts directory or
 harness scratchpad. A recurring "fixed" CAS bug is a runtime/source mismatch to
 report before filing a duplicate.
 
-## ToolSearch resolved the tool but you still can't call it
-
-Do not re-run ToolSearch for a tool it already resolved. Make a *separate* call to that tool by its full prefixed name and actual arguments. If that call
-fails, report the error.
-
 ## Interrupted assignment or checkout
 
 - Reassignment or stand-down: checkpoint authorized work, push unless
   local_merge, note done and remaining work with the SHA, and stop editing.
-- Low context: At 80% or at the harness compaction warning: commit, push, write `HANDOFF.md` under the task artifacts directory printed in the assignment brief (never the repo root), send one `coordination action=message target=supervisor kind=respawn summary=Checkpoint message="<return contract>" task_id=<task>`. Cassy queues the existing recycle path with the same recipe and task bindings; the supervisor receives a quiet receipt. Repeated requests within ten minutes are held, including after replacement or daemon restart. A recycle safety refusal still requires a checkpoint; never force it.
-  Read 80% from Cassy's `context used: N%` notice (`context used: unknown` is
-  not exhaustion). `HANDOFF.md` goes in the task artifact directory (SHAs,
-  remaining steps, next command, open questions); the respawned worker resumes from it.
+- Low context: at 80% (Cassy's `context used: N%` notice; `unknown` is not
+  exhaustion) or the harness compaction warning, commit, push, write
+  `HANDOFF.md` (SHAs, remaining steps, next command, open questions) under the
+  task artifacts directory printed in the assignment brief, never the repo
+  root, then send one `coordination action=message target=supervisor kind=respawn summary=Checkpoint message="<return contract>" task_id=<task>`.
+  Cassy recycles you with the same recipe and task bindings, and the
+  replacement resumes from `HANDOFF.md`. A second request within ten minutes
+  is held; a recycle safety refusal still requires a checkpoint.
 - Conflict: checkpoint before rebasing onto the supervisor's named branch;
   resolve owned conflicts and escalate unowned ones with files and hashes.
 - Failure outside your diff: run the same check on the base when permitted and
   report which side failed. Rust checks/tests follow [discipline.md](discipline.md).
-  Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
 - Missing submodule: inspect the main checkout's copy first; never silently
   change dependencies.

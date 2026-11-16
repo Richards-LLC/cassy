@@ -684,7 +684,7 @@ fn render_status(
 
     if view.agents.is_empty() {
         fmt.newline()?;
-        return fmt.remedy(0, "cas factory spawn");
+        return fmt.remedy(0, "factory action=spawn_workers count=<n>");
     }
 
     // Agents ledger: one row per agent, columns sized from the data, the

@@ -9,50 +9,36 @@ metadata:
 
 Tests assert behavior or stable machine identifiers such as error codes and rule IDs. Never require human-readable wording, word lists, canonical sentences or phrase presence; changing prose alone must not fail a test. Exact caller payloads and machine protocol bytes remain data-integrity checks. Fixed safety text needs a named consumer that requires those bytes; a writing preference is insufficient.
 
-Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
-
-SILENT EXECUTION: results, errors and return contract only.
-
 Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
+
+The launch contract carries start, one task at a time, push, close and the 80% checkpoint; this skill adds what it does not.
 
 ## Lifecycle
 
-1. `task action=start` before editing; success accepts the assignment. With
-   nothing from `task action=mine`, tell the supervisor once you are ready.
+1. `task action=start` before editing; success accepts the assignment.
    QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.
 2. Only when task start's close checks list a Ledger or `Adversarial probe` line,
    scaffold proof with `cas qa ledger init --task <id>` and validate with
    `cas qa ledger check <path> --task <id>`. Follow [close-gate.md](references/close-gate.md) and
    [verify-before-claim](../verify-before-claim/SKILL.md), then close with
    `task action=close reason="PASS <sha>: <proof>"`.
-3. If close returns VERIFICATION REQUIRED naming a dispatch:
-   Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
-   Follow [Verification-required close](references/recovery.md#verification-required-close).
-4. A park reads `PARKED … awaiting merge verdict; nothing more to do`.
-   The park relay is the completion signal; send merge_request=true only for local_merge.
-   The verdict wakes you once. Don't re-close or block on it. For a MERGE REQUIRED
-   refusal, drain `inbox_poll`, act on unread supervisor messages, capture
-   the current factory-branch tip SHA, then follow [recovery.md](references/recovery.md).
+3. A park reads `PARKED … awaiting merge verdict; nothing more to do`; the
+   verdict wakes you once. VERIFICATION REQUIRED and MERGE REQUIRED refusals
+   follow [recovery.md](references/recovery.md).
 
-One event gets one message. A close is the lifecycle report; never send a post-close
-summary or echo the close relay. After a merge request, wait for the supervisor's
-response; send no follow-up update.
+One event gets one message. A close is the lifecycle report, so send no
+post-close summary; after a merge request, wait for the supervisor's response.
 
-Stay available after handoff. Never self-dispatch: use assigned work when idle;
-`ready` and `available` are backlog
-  visibility, not authorization.
-
-- One integration per release: fixes merge to the train, the train goes through the gate once.
+- Never self-dispatch: `ready` and `available` are backlog visibility, not authorization.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close when the brief links one.
 - Worker peer lane: local collision warnings within the same factory session; remote same-epic contracts
   ([rules](references/details.md#worker-peer-lane)); Cassy sends a copy to the supervisor.
-- The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
-- `kind=status` (actionable, work continues) requests a typed action wake; FYIs
-  use `kind=receipt` or `wake=false`.
+- The supervisor writes release notes; workers never draft them.
+- `kind=status` requests an action wake; FYIs use `kind=receipt` or `wake=false`.
 - Never block the pane: run long commands in the background with a log.
   Signal only PIDs you started; never `pkill`, `killall` or name matching.
-- Never compact. At 80% or a compaction warning: commit, push, save HANDOFF.md in your brief's task artifacts dir; send `coordination action=message target=supervisor kind=respawn summary=Respawn message=<contract>`.
-  See [Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout).
+- Checkpoint: `kind=respawn` queues your recycle with the same recipe and task bindings
+  ([Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout)).
 
 ## Phase references
 
@@ -68,10 +54,7 @@ Stay available after handoff. Never self-dispatch: use assigned work when idle;
 | Detach or checkpoint | [reminders.md](../cas-supervisor/references/reminders.md) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
 | Evidence, sync or resume | [details.md](references/details.md) |
-| Bug filing | [Routing](references/details.md#credentials-and-routing) (`issues.repo`, `issues.components.violet`, `issues.components.cloud`): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately. |
-
-Tool loading is two steps, not one: lookup does **not** execute the tool;
-call the resolved tool next, not another ToolSearch.
+| Bug filing | [Routing](references/details.md#credentials-and-routing) |
 
 ## Return contract
 

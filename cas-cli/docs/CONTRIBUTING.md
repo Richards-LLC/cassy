@@ -2737,6 +2737,11 @@ A pending `.claude/CODEMAP.md` edit can ride the release commit without a
 separate train commit. The release verdict uses existing member approvals and
 the green frozen-train receipt, with no separate batch release review. Missing
 required member approvals or exempt-lane CI still refuse the cut by task ID.
+The zero-would-close check counts only the release's `included_task_ids` (every
+member when that list is empty): it refuses when none of them would close and
+one is held or ineligible. Held members outside that list print as `legacy
+holds outside this release (nonblocking)` and never refuse the cut
+(`scripts/release.sh` `preview_cut`, `release_automation.rs` `allow_cut`).
 
 Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
 Name cached or recorded state as such; a successful mutation does not establish
@@ -3239,8 +3244,12 @@ leaves explicit unresolved identities and keeps the lane red. Lane receipts are
 published as `lane-impact-*`, outside the selector's failure history.
 Merges into a release train start no train suite; lane CI already proved each
 delivery. The daemon's train CI scan
-dispatches `full-validation.yml` once per frozen train tip (cas-0fc56), and a
-frozen train accepts no merge that could supersede it. That dispatched run and
+dispatches `full-validation.yml` once per frozen train tip; a frozen train
+accepts no merge that could supersede that run, and a repair merged onto it is
+a new tip with its own run. If the dispatched run is still queued with zero
+jobs ninety seconds after creation, the scan dispatches one replacement at the
+same head and records the abandoned run without cancelling it
+(`train_ci.rs` `dispatch_frozen`). That dispatched run and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.
@@ -3248,7 +3257,8 @@ The archive feeds six disjoint `count:N/6` shards. Classification, runner routin
 and tree reuse share one classifier job. The hosted Full-set gate collects Rust
 reports, publishes repairs and checks every direct producer, including the
 default-feature queue check. Its receipt records gate and repair-publication
-step outcomes. The separate required `Fast Validation` wrapper stays a job check.
+step outcomes. The required `Fast Validation` context is the outer job in
+`full-validation.yml`, which passes only when that graph succeeds.
 Both preserve the first failure, publish P0 repair issues and run without retries
 or test exclusions. The schema-2 `train-full-gate` artifact
 binds every required job to the source tree and main baseline; train cuts refuse
@@ -3730,7 +3740,12 @@ Factory worker spawns use `sccache` automatically when it is installed, while
 keeping a separate target directory per worktree so concurrent Cargo builds do
 not serialize. An existing `RUSTC_WRAPPER` wins; set
 `CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
-cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
+cache-v2 backend and keeps the cold Build Benchmark explicitly uncached. Only
+`refs/heads/main` writes that cache; every other ref, including lanes, queue
+and train runs, reads it with `SCCACHE_GHA_RW_MODE=READ_ONLY`, so branch objects
+cannot evict main's dependencies from the shared 10 GB cache (`ci.yml`,
+`lane.yml`, `release-prebuild.yml`). A read-only branch run is expected, not a
+cache fault.
 
 Capped worker checks and named tests override both `RUSTC_WRAPPER` and
 `RUSTC_WORKSPACE_WRAPPER` with empty strings, including Cargo-config and
@@ -4072,7 +4087,8 @@ original deadline. Normal issue intake creates and staffs the repair task ahead
 of feature work. If its owner deletes the test, the task must record the behaviour
 it covered. CI never deletes source or changes the evaluated tree.
 
-Only the hosted publisher has issues-write and contents-write. Its atomic
+Only the hosted Full-set gate job has issues-write and contents-write; shard
+and test jobs never receive writable credentials. Its atomic
 `heads/cas-queue-flake-publication-lock` ref serializes issue updates across runs.
 After a lost create response it reads the acknowledged issue instead of creating
 a duplicate. A cancelled publisher can leave this lock; confirm the owning run
@@ -4311,13 +4327,18 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
 
 5. The merge-queue run also runs `release-prebuild.yml` for a PR that changes
    the version: Linux `release-fast` and macOS ARM64 (LTO off) start at
-   enqueue, in parallel with the tests, on hosted runners. They are not
-   required checks, and the queue lands its tested merge commit as `main`.
+   enqueue, in parallel with the tests. Linux is always hosted; macOS uses the
+   self-hosted Mac release runner when its probe starts within 90 seconds,
+   otherwise hosted `macos-26`. They are not required checks, and the queue
+   lands its tested merge commit as `main`.
 6. `release.yml` runs when the version change reaches `main`. It adopts the
    queue run's archives by commit or tree id (`find-release-prebuild.sh`) and
-   builds them only when none exist. It runs the ISA audit and the operator
-   launch smoke on the packaged Linux archive, and the signature check and
-   launch smoke on the packaged macOS archive. It then creates the annotated
+   builds them only when none exist. The Linux build always runs on a hosted
+   runner. Its prebuild ISA-audits the packaged Linux executable once and
+   uploads that executable's SHA-256 beside the archive; `release.yml` checks
+   the shipped executable against that digest and runs only the operator launch
+   smoke. The packaged macOS archive gets the signature check and launch smoke.
+   It then creates the annotated
    tag `vx.y.z` and the GitHub release (`release-publish.sh`), whose notes end
    with the release timer, and dispatches the install-path proof.
    After publication, a separate `deploy-hub` job uploads that tag's
@@ -5050,7 +5071,15 @@ lane (through `check_cut_merge`, before and under the target lock), CI retry
 arming (`factory_ci_retry::arm`) and staffing (`ensure_staffing_allowed`,
 covering spawn, assignment and start of tasks that are still open). A
 `release-repair` task is admitted only while the train is red, and each
-admission is noted on the train. Task create retargets new work aimed at a
+admission is noted on the train. A repair's merge admission into the frozen
+train needs `Scoped Validation (fast)` and `Scoped Validation (factory/PR)`
+green at its exact SHA; unfinished `Scoped Validation — impact` jobs do not
+hold it, because the new frozen tip's full-set run supplies Rust proof. A
+completed impact failure still refuses, and missing freeze or check evidence
+falls back to ordinary lane admission. After publishing the merge, Cassy
+cancels that lane run only when its remaining unfinished jobs are all impact
+jobs; a failed cancel does not undo the merge
+(`worktree_ops/frozen_train_ci.rs`). Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), or through the operator-only Commander

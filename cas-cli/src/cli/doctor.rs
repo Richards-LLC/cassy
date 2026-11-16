@@ -2591,7 +2591,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             checks.push(Check {
                 name: "database".to_string(),
                 status: CheckStatus::Warning,
-                message: "Using legacy markdown storage. Consider migrating with 'cas migrate'."
+                message: "Using legacy markdown storage."
                     .to_string(),
             });
         }
@@ -3232,7 +3232,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     } else if args.foreign_rows {
         anyhow::bail!(
             "`cas doctor --foreign-rows` needs a SQLite database at {}; this project uses legacy \
-             markdown storage. Migrate with `cas migrate` first.",
+             markdown storage.",
             cas_root.join("cas.db").display()
         );
     }

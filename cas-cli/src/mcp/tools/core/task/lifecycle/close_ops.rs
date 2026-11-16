@@ -13857,11 +13857,11 @@ impl TaskCommitIdentity {
     /// Both sides are git object ids, so a prefix match in either direction is
     /// the same commit (Cassy records full ids; git may hand back an
     /// abbreviation).
-    fn matches_known_commit(&self, commit: &str) -> bool {
+    pub(crate) fn matches_known_commit(&self, commit: &str) -> bool {
         Self::matches_commit_in(&self.known_commits, commit) || self.matches_superseded_commit(commit)
     }
 
-    fn matches_superseded_commit(&self, commit: &str) -> bool {
+    pub(crate) fn matches_superseded_commit(&self, commit: &str) -> bool {
         Self::matches_commit_in(&self.superseded_commits, commit)
     }
 
@@ -13932,6 +13932,7 @@ pub(crate) fn task_commit_identity_in_repo(
         fetch_parent_branch_best_effort(repo, &target.target_branch);
     }
     task_attribution::include_superseded_commits(repo, task, &mut identity)?;
+    task_attribution::include_cycle_anchors(repo, task, &mut identity);
     if let Some(delivery) = task_attribution::validated_started_delivery(repo, task)? {
         identity.start_base = task.deliverables.factory_branch_start.as_ref()
             .map(|start| start.base_sha.clone());
@@ -16900,9 +16901,12 @@ pub(crate) fn resolve_close_delivery_branch(
         let mut measured = task.clone();
         measured.deliverables.factory_branch_start.as_mut().expect("start checked above")
             .branch = branch.strip_prefix("origin/").unwrap_or(&branch).to_string();
-        return Ok(task_attribution::started_delivery(repo_path, &measured)?
-            .map(|delivery| delivery.branch)
-            .unwrap_or(branch));
+        // cas-f45f (GH #1888): a ref merely named for this task is not its
+        // delivery. Redirect only when it carries this start's delivered work;
+        // otherwise the recorded start lane is measured below.
+        if let Some(delivery) = task_attribution::started_delivery(repo_path, &measured)? {
+            return Ok(delivery.branch);
+        }
     }
     if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
         return Ok(delivery.branch);

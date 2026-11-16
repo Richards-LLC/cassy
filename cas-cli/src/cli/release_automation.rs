@@ -1865,7 +1865,7 @@ pub(super) mod tests {
         let refused = core.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
             "title": "Next train followup", "task_type": "task", "risk": "none", "epic": train.id,
         })).unwrap())).await.unwrap_err();
-        assert!(refused.message.starts_with("RELEASE_PUBLICATION_PENDING:"), "{}", refused.message);
+        assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         let store = open_task_store(&root).unwrap();
         assert!(!store.list(None).unwrap().iter().any(|t| t.title == "Next train followup"));
         assert!(store.get(&train.id).unwrap().labels.iter().any(|label| label == "release-train-cut"));

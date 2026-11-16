@@ -6424,6 +6424,11 @@ impl CasCore {
             &worktree.branch, &push_branch, &push_outcome, task_id,
         );
         record_published_merge(manager.git(), merge_commit.as_deref(), &push_branch, &push_outcome);
+        frozen_train_ci::cancel_after_merge(
+            &cas_root, &push_branch, &cwd, branch_ci_lookup.repo.as_deref(), branch_ci_state.sha(),
+            matches!(push_outcome, crate::worktree::git::TargetPushOutcome::Pushed { .. }
+                | crate::worktree::git::TargetPushOutcome::AlreadyCurrent { .. }),
+        );
         if let (Some(approval), Some(attempted)) = (premerge_approval.as_ref(), reviewed_attempt.as_deref()) {
             if let Some(held) = approval.finish_publication(manager.git(), &push_outcome, attempted)
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?

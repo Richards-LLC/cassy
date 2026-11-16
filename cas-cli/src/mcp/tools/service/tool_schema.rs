@@ -333,6 +333,10 @@ mod tests {
         for param in &coordination_params {
             assert!(COORDINATION_FIELDS.contains(&param.as_str()), "{param}");
         }
+        // cas-b1e7: role contracts tell workers to send FYIs with wake=false;
+        // a strict-schema client rejects any parameter the tool does not publish.
+        assert!(coordination["properties"].as_object().unwrap().contains_key("wake"));
+        assert!(!factory["properties"].as_object().unwrap().contains_key("wake"));
         for supervisor_only in ["count", "worker_names", "config_dir", "workers", "allow_trunk", "command", "port"] {
             assert!(
                 !coordination["properties"].as_object().unwrap().contains_key(supervisor_only),

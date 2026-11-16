@@ -286,7 +286,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                 case = {**context,
                         'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
                         'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
-                        'needs.ci-diff.outputs.rust-unaffected': unaffected,
+                        # The check follows preflight's own classifier, not ci-diff's.
+                        'needs.ci-diff.outputs.rust-unaffected': 'true',
                         'steps.proven.outputs.identical': 'false',
                         'steps.classify-diff.outputs.rust-unaffected': unaffected}
                 # These functions are GitHub job status, not routing inputs.
@@ -453,7 +454,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                         step.get('with',{}).get('phase')=='save' or
                         step.get('with',{}).get('name','').startswith('train-suite-shard-'))
                     self.assertEqual(runs,evidence,(name,shard,step))
-        self.assertEqual(len(cached),8)
+        self.assertEqual(len(cached),9)
         # Cross-run archive reuse must point consumers at its original run.
         download=next(s for s in jobs['fast-validation-suite-shards']['steps']
             if s.get('with',{}).get('name')=='fast-validation-suite-archive')

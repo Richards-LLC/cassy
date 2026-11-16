@@ -1038,7 +1038,6 @@ jobs:
     name: Fast Validation — default-feature check
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && needs.ci-diff.outputs.rust-unaffected != 'true'
       && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true'
       && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -1052,10 +1051,32 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          ref: ${{ github.sha }}
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-queue-check
+          job-name: Fast Validation — default-feature check
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
+      # The same classifier preflight's compile steps use.
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          full-set: ${{ inputs.full-set }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Skip a tree the full gate proved byte for byte
         id: proven
+        if: steps.job-receipt.outputs.reused != 'true'
         env:
           PROVEN_TREE: ${{ needs.fast-validation-main-push-dedupe.outputs.receipt-tree }}
         run: |
@@ -1064,17 +1085,34 @@ jobs:
           fi
 
       # A queue ref's cache is readable by no later run; do not write one.
-      - if: steps.proven.outputs.identical != 'true'
+      - if: >-
+          ${{ steps.job-receipt.outputs.reused != 'true' && steps.proven.outputs.identical != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation
           cache-save-if: "false"
 
       - name: Check
-        if: steps.proven.outputs.identical != 'true'
+        if: >-
+          ${{ steps.job-receipt.outputs.reused != 'true' && steps.proven.outputs.identical != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-queue-check
+          job-name: Fast Validation — default-feature check
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
 
   # The release, CI and factory machinery's own tests. They compile no Rust.
   # Visual-QA tool fixtures follow their registered inputs; full assembly

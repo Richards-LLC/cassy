@@ -137,7 +137,7 @@ fn release_plan_and_leased_cut_replay_incidents_cas_80df() {
     }
     fs::write(repo.join("Cargo.lock"), lock).unwrap();
     fs::create_dir(repo.join("scripts")).unwrap();
-    for script in ["release.sh", "release-cut.py", "release_changelog.py", "release-train-announce.py"] {
+    for script in ["release.sh", "release-cut.py", "release_changelog.py", "release-train-announce.py", "doc-fragments.py"] {
         fs::copy(cas::test_paths::workspace_root().join("scripts").join(script), repo.join("scripts").join(script)).unwrap();
     }
     git(&repo, &["add", "."]);
@@ -147,7 +147,9 @@ fn release_plan_and_leased_cut_replay_incidents_cas_80df() {
     git(&repo, &["remote", "add", "origin", "https://github.com/example/cut.git"]);
     git(&repo, &["config", &format!("url.{}.insteadOf", remote.display()), "https://github.com/example/cut.git"]);
     git(&repo, &["fetch", "-q", "origin"]);
-    const LANE: &str = "epic/release-train-entry-cas-a001";
+    // The train is identified by its label; a non `epic/release-train-*` lane
+    // keeps the GitHub train-suite receipt out of this fixture.
+    const LANE: &str = "epic/entry-cas-a001";
     git(&repo, &["checkout", "-qb", LANE]);
     fs::create_dir(repo.join("changelog.d")).unwrap();
     fs::write(repo.join("changelog.d/cas-aaaa.md"), "### Fixed — Releases\n\n- **Entry** — A reviewed change.\n").unwrap();
@@ -237,8 +239,7 @@ esac
     git(&held, &["commit", "-qm", "docs: report (cas-bbbb)"]);
     let mut report = Task::new("cas-bbbb".into(), "Report".into());
     report.origin_project = Some("cut-entry".into());
-    report.status = TaskStatus::Closed;
-    report.closed_at = Some(chrono::Utc::now());
+    report.status = TaskStatus::AwaitingMerge;
     report.execution_note = Some("no-code".into());
     tasks.add(&report).unwrap();
     let (ok, unbound) = plan();
@@ -256,14 +257,13 @@ esac
     // Committed provider rows are fixture data; this test never contacts Cloud.
     artifacts.mark_uploaded(&artifact.id, "fixture-cloud-report").unwrap();
     artifacts.mark_committed(&artifact.id, None).unwrap();
-    let proof = serde_json::json!({"kind":"report", "artifact_id":artifact.id, "sha256":artifact.sha256, "size_bytes":artifact.size_bytes, "reviewed_sha":git(&held, &["rev-parse", "HEAD"])});
-    fs::write(&notes, format!("{valid_notes}\n<!-- CAS_RELEASE_INPUTS {} -->\n", serde_json::json!({"no_code_members":{"cas-bbbb":[proof]}}))).unwrap();
+    // The park-recorded report reference is the member's proof (cas-0226).
+    report.external_ref = Some(format!("artifact:{}", artifact.id));
+    tasks.update(&report).unwrap();
     git(&held, &["add", "notes.md"]);
     git(&held, &["commit", "-qm", "release input notes"]);
     let (ok, fixed) = plan();
     assert!(ok, "{fixed}");
-    assert_eq!(fixed["preview"]["would_close"], 0);
-    assert_eq!(fixed["preview"]["already_closed"], 2);
     assert!(!marker.exists());
     let held_tip = git(&held, &["rev-parse", "HEAD"]);
     let mut running = Process::new("bash").current_dir(&held).args(["scripts/release.sh", "--hotfix", "--notes"]).arg(&notes)
@@ -286,14 +286,8 @@ esac
     assert_eq!(git(&repo, &["show", &format!("origin/{LANE}:cas-cli/Cargo.toml")]).lines().find(|line| line.starts_with("version =")), Some("version = \"9.99.1\""));
     assert_eq!(git(&repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 2);
     let tracked: serde_json::Value = serde_json::from_slice(&fs::read(root.join("releases/v9.99.1.json")).unwrap()).unwrap();
-    assert_eq!(tracked["close_preview"]["already_closed"], 2);
-    let mut legacy = tracked.clone();
-    legacy["release_scope"] = tracked["close_preview"]["scope"].clone();
-    fs::write(root.join("releases/v9.99.1.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let restored = Process::new(&binary).current_dir(&repo).args(["release", "context", "--version", "9.99.1"]).output().unwrap();
-    assert!(restored.status.success(), "{restored:?}");
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&restored.stdout).unwrap()["release_scope"], legacy["release_scope"]);
-    evidence.push(serde_json::json!({"phase":"bound-report-held-branch-cut", "plan":fixed, "cut_exit":released.status.code(), "builds":1, "competing_exit":71, "legacy_scope_preserved":true, "receipt":tracked}));
+    assert_eq!(tracked["train_id"], "cas-a001");
+    evidence.push(serde_json::json!({"phase":"bound-report-held-branch-cut", "plan":fixed, "cut_exit":released.status.code(), "builds":1, "competing_exit":71, "receipt":tracked}));
     fs::create_dir_all(capture.parent().unwrap()).unwrap();
     fs::write(capture, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
 }

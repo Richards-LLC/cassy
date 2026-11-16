@@ -921,6 +921,33 @@ mod tests {
         );
     }
 
+    /// GH #2017: a delivery still parked on a train whose branch is gone from
+    /// origin must not stop another train's merge from advancing.
+    #[tokio::test]
+    async fn parked_task_on_deleted_train_does_not_stall_other_train_gh_2017() {
+        let fixture = Fixture::build(false);
+        fixture.start().await;
+        git(fixture._repo.path(), &["branch", "epic/deleted", "main"]);
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut stale_train = Task::new("cas-stale-train".into(), "cancelled train".into());
+        stale_train.task_type = TaskType::Epic;
+        stale_train.branch = Some("epic/deleted".into());
+        tasks.add(&stale_train).unwrap();
+        let mut stale = Task::new("cas-stale-delivery".into(), "parked on a deleted train".into());
+        stale.status = TaskStatus::AwaitingMerge;
+        stale.deliverables.factory_branch_anchor = Some(fixture.shas[2].clone());
+        stale.deliverables.parked_branch = Some("factory/worker-3".into());
+        tasks.create_atomic(&stale, &[], Some(&stale_train.id), None).unwrap();
+
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+
+        let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!queue.active(), "{}", queue.render());
+        assert_eq!(tasks.get(&stale.id).unwrap().status, TaskStatus::AwaitingMerge);
+    }
+
     /// A train asks origin about its target once per entry: under the merge
     /// lock, shared by containment, the target sync, publication and the
     /// close's integration proof.

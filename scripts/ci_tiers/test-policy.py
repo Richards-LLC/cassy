@@ -263,7 +263,11 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         jobs = self.ci()['jobs']
         preflight = jobs['fast-validation-preflight']
         archive = jobs['fast-validation-suite-build']
-        check = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
+        # cas-f0e7: the check runs in its own job, beside preflight's build.
+        checker = jobs['fast-validation-queue-check']
+        self.assertNotIn('fast-validation-preflight', checker['needs'])
+        self.assertIn('fast-validation-queue-check', jobs['fast-validation']['needs'])
+        check = next(s for s in checker['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
         build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
         self.assertNotIn('--no-default-features', shlex.split(build['run']))
         portable = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-5:] == ['cargo','build','-p','cas','--no-default-features'])
@@ -282,11 +286,13 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                 case = {**context,
                         'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false' if reuse else 'true',
                         'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse,
+                        'needs.ci-diff.outputs.rust-unaffected': unaffected,
+                        'steps.proven.outputs.identical': 'false',
                         'steps.classify-diff.outputs.rust-unaffected': unaffected}
                 # These functions are GitHub job status, not routing inputs.
                 selected = lambda job, step: self.gh_expr(job['if'], case) and self.gh_expr(
                     step.get('if', 'true').replace('cancelled()', 'False').replace('success()', 'True'), case)
-                self.assertEqual(selected(preflight, check), expected_check)
+                self.assertEqual(selected(checker, check), expected_check)
                 self.assertEqual(selected(archive, build), expected_archive)
                 self.assertEqual(selected(preflight, portable), expected_portable)
                 self.assertEqual(selected(preflight, consumer), expected_portable and not reuse)
@@ -316,7 +322,6 @@ out = pathlib.Path(args[args.index('--dir')+1]); out.mkdir(parents=True, exist_o
 shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
 ''')
         gh.chmod(0o755)
-        check = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-4:] == ['cargo', 'check', '-p', 'cas'])
         build = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-5:] == ['cargo', 'build', '-p', 'cas', '--no-default-features'])
         smoke = next(s for s in job['steps'] if 'npm run --prefix hub-web build' in s.get('run', ''))
         context = {'steps.job-receipt.outputs.reused': 'false',
@@ -358,7 +363,6 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 route = {**case, 'steps.cli-restore.outputs.restored': outputs['restored'],
                          'steps.classify-diff.outputs.rust-unaffected': 'false',
                          'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false'}
-                self.assertEqual(self.gh_expr(check['if'], route), not restored)
                 self.assertEqual(self.gh_expr(build['if'], route), not restored)
                 if proof == 'full-gate':
                     self.assertTrue(self.gh_expr(smoke['if'], route))

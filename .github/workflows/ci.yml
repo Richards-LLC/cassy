@@ -918,17 +918,6 @@ jobs:
           sccache rustc -vV
           sccache --show-stats
 
-      # The default-feature archive covers a full run. For full-gate reuse,
-      # compile only if its exact-tree executable could not be restored.
-      - name: Check
-        if: >-
-          ${{ steps.cli-restore.outputs.restored != 'true' && (!cancelled()
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true') }}
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo check -p cas
-
       - name: Test portable x86_64 ISA audit
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' && !cancelled()
@@ -1024,6 +1013,52 @@ jobs:
             "runner_mode": "${{ runner.environment }}"}
           status: ${{ job.status }}
 
+
+  # cas-f0e7: on a queue tree the train's full gate already proved, the
+  # default-feature compile check runs here, beside preflight's
+  # no-default-features build instead of before it. The default-feature
+  # archive covers a full run; an identical proven tree needs neither.
+  fast-validation-queue-check:
+    name: Fast Validation — default-feature check
+    if: >-
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.ci-diff.outputs.rust-unaffected != 'true'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true'
+      && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: [ci-diff, fast-validation-main-push-dedupe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ github.sha }}
+
+      - name: Skip a tree the full gate proved byte for byte
+        id: proven
+        env:
+          PROVEN_TREE: ${{ needs.fast-validation-main-push-dedupe.outputs.receipt-tree }}
+        run: |
+          if [[ "$PROVEN_TREE" == "$(git rev-parse 'HEAD^{tree}')" ]]; then
+            echo 'identical=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A queue ref's cache is readable by no later run; do not write one.
+      - if: steps.proven.outputs.identical != 'true'
+        uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: fast-validation
+          cache-save-if: "false"
+
+      - name: Check
+        if: steps.proven.outputs.identical != 'true'
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo check -p cas
 
   # The release, CI and factory machinery's own tests. They compile no Rust.
   # Visual-QA tool fixtures follow their registered inputs; full assembly
@@ -2013,6 +2048,7 @@ jobs:
       - scoped-validation-fast
       - fast-validation-main-push-dedupe
       - fast-validation-preflight
+      - fast-validation-queue-check
       - fast-validation-ci-tiers
       - fast-validation-slack-bridge
       - fast-validation-web
@@ -2115,6 +2151,7 @@ jobs:
           && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
         env:
           PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
+          QUEUE_CHECK: ${{ needs.fast-validation-queue-check.result }}
           SLACK_BRIDGE: ${{ needs.fast-validation-slack-bridge.result }}
           JOURNEYS: ${{ needs.fast-validation-journeys.result }}
           VALIDATING_RUN_ID: ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}
@@ -2125,6 +2162,7 @@ jobs:
           # Preflight restored an identical-tree CLI or compiled the release
           # tree, then ran smoke. Journeys are covered separately (cas-9f70).
           test "$PREFLIGHT" = success
+          [[ "$QUEUE_CHECK" == success || "$QUEUE_CHECK" == skipped ]]
           [[ "$SLACK_BRIDGE" == success || "$SLACK_BRIDGE" == skipped ]]
           [[ "$JOURNEYS" == success || "$JOURNEYS" == skipped ]]
           if [[ "$JOURNEYS_REUSE" == true ]]; then

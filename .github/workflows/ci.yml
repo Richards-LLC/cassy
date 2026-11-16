@@ -255,6 +255,9 @@ jobs:
   # This job never checks out the merge-queue tree and only selects a label.
   # Therefore fork/pull-request code cannot use the persistent runner. The
   # actual archive job repeats the merge_group-only guard before it compiles.
+  # cas-f0e7: the train's full-set run (a dispatch on epic/release-train-*)
+  # may also build the suite archive there, behind its own opt-in
+  # CASSY_TRAIN_ARCHIVE_SELF_HOSTED; only the archive job reads archive-*.
   fast-validation-runner-route:
     name: Fast Validation — merge-queue runner route
     if: >-
@@ -269,18 +272,31 @@ jobs:
     outputs:
       runner: ${{ steps.route.outputs.runner }}
       mode: ${{ steps.route.outputs.mode }}
+      archive-runner: ${{ steps.route.outputs.archive-runner }}
+      archive-mode: ${{ steps.route.outputs.archive-mode }}
     steps:
       - id: route
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
           SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
+          TRAIN_ARCHIVE_ENABLED: ${{ vars.CASSY_TRAIN_ARCHIVE_SELF_HOSTED }}
         run: |
+          self_hosted='["self-hosted","Linux","X64","cas-ci-32core"]'
           if [[ "$EVENT_NAME" == merge_group && "$SELF_HOSTED_ENABLED" == enabled ]]; then
-            echo 'runner=["self-hosted","Linux","X64","cas-ci-32core"]' >> "$GITHUB_OUTPUT"
-            echo 'mode=self-hosted' >> "$GITHUB_OUTPUT"
+            printf 'runner=%s\nmode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
+            printf 'archive-runner=%s\narchive-mode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          echo 'mode=hosted' >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == workflow_dispatch && "$REF" == refs/heads/epic/release-train-*
+                && "$REPOSITORY" == Richards-LLC/cassy && "$TRAIN_ARCHIVE_ENABLED" == enabled ]]; then
+            printf 'archive-runner=%s\narchive-mode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
           else
-            echo 'runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
-            echo 'mode=hosted' >> "$GITHUB_OUTPUT"
+            echo 'archive-runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'archive-mode=hosted' >> "$GITHUB_OUTPUT"
           fi
 
   # A merge queue validates a synthetic tree, then GitHub pushes that exact
@@ -918,17 +934,6 @@ jobs:
           sccache rustc -vV
           sccache --show-stats
 
-      # The default-feature archive covers a full run. For full-gate reuse,
-      # compile only if its exact-tree executable could not be restored.
-      - name: Check
-        if: >-
-          ${{ steps.cli-restore.outputs.restored != 'true' && (!cancelled()
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true') }}
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo check -p cas
-
       - name: Test portable x86_64 ISA audit
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' && !cancelled()
@@ -1024,6 +1029,90 @@ jobs:
             "runner_mode": "${{ runner.environment }}"}
           status: ${{ job.status }}
 
+
+  # cas-f0e7: on a queue tree the train's full gate already proved, the
+  # default-feature compile check runs here, beside preflight's
+  # no-default-features build instead of before it. The default-feature
+  # archive covers a full run; an identical proven tree needs neither.
+  fast-validation-queue-check:
+    name: Fast Validation — default-feature check
+    if: >-
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true'
+      && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: [ci-diff, fast-validation-main-push-dedupe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Restore exact-tree job receipt
+        id: job-receipt
+        if: (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: restore
+          job: fast-validation-queue-check
+          job-name: Fast Validation — default-feature check
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+
+      # The same classifier preflight's compile steps use.
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          full-set: ${{ inputs.full-set }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+
+      - name: Skip a tree the full gate proved byte for byte
+        id: proven
+        if: steps.job-receipt.outputs.reused != 'true'
+        env:
+          PROVEN_TREE: ${{ needs.fast-validation-main-push-dedupe.outputs.receipt-tree }}
+        run: |
+          if [[ "$PROVEN_TREE" == "$(git rev-parse 'HEAD^{tree}')" ]]; then
+            echo 'identical=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A queue ref's cache is readable by no later run; do not write one.
+      - if: >-
+          ${{ steps.job-receipt.outputs.reused != 'true' && steps.proven.outputs.identical != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
+        uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: fast-validation
+          cache-save-if: "false"
+
+      - name: Check
+        if: >-
+          ${{ steps.job-receipt.outputs.reused != 'true' && steps.proven.outputs.identical != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo check -p cas
+
+      - name: Publish exact-tree job receipt
+        if: always() && !cancelled() && (inputs.full-set || github.event_name == 'merge_group')
+        uses: ./.github/actions/full-gate-job
+        with:
+          phase: save
+          job: fast-validation-queue-check
+          job-name: Fast Validation — default-feature check
+          binding: >-
+            {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
+            "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
+            "runner_mode": "${{ runner.environment }}"}
+          status: ${{ job.status }}
 
   # The release, CI and factory machinery's own tests. They compile no Rust.
   # Visual-QA tool fixtures follow their registered inputs; full assembly
@@ -1362,13 +1451,15 @@ jobs:
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-      && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
-      || (github.event_name == 'merge_group'
-      && github.repository == 'Richards-LLC/cassy'
+      && (needs.fast-validation-runner-route.outputs.archive-mode != 'self-hosted'
+      || (github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
-      && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
+      && ((github.event_name == 'merge_group' && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled')
+      || (github.event_name == 'workflow_dispatch'
+      && startsWith(github.ref, 'refs/heads/epic/release-train-')
+      && vars.CASSY_TRAIN_ARCHIVE_SELF_HOSTED == 'enabled'))))
     needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]
-    runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
+    runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.archive-runner) }}
     # Profile inputs must be visible when rust-cache computes its key, not
     # only at compile time. The advisory main producer reuses this mapping.
     env: &suite-archive-profile
@@ -1406,18 +1497,18 @@ jobs:
           full-set: ${{ inputs.full-set }}
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
-      - name: Verify merge-queue self-hosted trust boundary
-        if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+      - name: Verify self-hosted archive trust boundary
+        if: needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted'
         env:
           SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
+          TRAIN_ARCHIVE_ENABLED: ${{ vars.CASSY_TRAIN_ARCHIVE_SELF_HOSTED }}
         run: |
           set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = merge_group
           test "$GITHUB_REPOSITORY" = Richards-LLC/cassy
-          test "$SELF_HOSTED_ENABLED" = enabled
-          case "$GITHUB_REF" in
-            refs/heads/gh-readonly-queue/*) ;;
-            *) echo "self-hosted route received a non-queue ref: $GITHUB_REF" >&2; exit 1 ;;
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            merge_group:refs/heads/gh-readonly-queue/*) test "$SELF_HOSTED_ENABLED" = enabled ;;
+            workflow_dispatch:refs/heads/epic/release-train-*) test "$TRAIN_ARCHIVE_ENABLED" = enabled ;;
+            *) echo "self-hosted route received an untrusted run: $GITHUB_EVENT_NAME $GITHUB_REF" >&2; exit 1 ;;
           esac
           ./scripts/check-cassy-actions-runner-isolation.sh
 
@@ -1429,7 +1520,7 @@ jobs:
 
       - if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'hosted') }}
+          && needs.fast-validation-runner-route.outputs.archive-mode == 'hosted') }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-suite-archive
@@ -1439,13 +1530,13 @@ jobs:
       - name: Set up shared self-hosted Rust toolchain
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted') }}
         run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted') }}
         run: ./scripts/bootstrap-zig.sh
 
       - name: Install nextest
@@ -1455,7 +1546,7 @@ jobs:
       - name: Verify private self-hosted sccache
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted') }}
         # cas-065a: cache isolation stays observable, but its TCP failure must
         # not block the merge queue while the server defect is investigated.
         continue-on-error: true
@@ -1467,7 +1558,7 @@ jobs:
       - name: Disable sccache for the self-hosted suite archive
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted') }}
         # cas-065a: the cache is an optimization, not a merge-queue prerequisite.
         run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
@@ -2013,6 +2104,7 @@ jobs:
       - scoped-validation-fast
       - fast-validation-main-push-dedupe
       - fast-validation-preflight
+      - fast-validation-queue-check
       - fast-validation-ci-tiers
       - fast-validation-slack-bridge
       - fast-validation-web
@@ -2115,6 +2207,7 @@ jobs:
           && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
         env:
           PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
+          QUEUE_CHECK: ${{ needs.fast-validation-queue-check.result }}
           SLACK_BRIDGE: ${{ needs.fast-validation-slack-bridge.result }}
           JOURNEYS: ${{ needs.fast-validation-journeys.result }}
           VALIDATING_RUN_ID: ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}
@@ -2125,6 +2218,7 @@ jobs:
           # Preflight restored an identical-tree CLI or compiled the release
           # tree, then ran smoke. Journeys are covered separately (cas-9f70).
           test "$PREFLIGHT" = success
+          [[ "$QUEUE_CHECK" == success || "$QUEUE_CHECK" == skipped ]]
           [[ "$SLACK_BRIDGE" == success || "$SLACK_BRIDGE" == skipped ]]
           [[ "$JOURNEYS" == success || "$JOURNEYS" == skipped ]]
           if [[ "$JOURNEYS_REUSE" == true ]]; then

@@ -318,6 +318,17 @@ Enable required merge-queue archive routing only after that online check:
 gh variable set CASSY_MERGE_QUEUE_SELF_HOSTED --repo Richards-LLC/cassy --body enabled
 ```
 
+The release train's full-set run can build its suite archive on the same
+two slots (cas-f0e7), behind its own variable; the test shards stay hosted:
+
+```bash
+gh variable set CASSY_TRAIN_ARCHIVE_SELF_HOSTED --repo Richards-LLC/cassy --body enabled
+```
+
+The published Linux release binary never builds on these slots: merge-queue
+jobs share their toolchain, registry, target and compiler caches, so the
+release build stays hosted.
+
 Before planned maintenance or an offline-fallback drill, disable required
 merge-queue routing and advisory assignment first, then stop the listener:
 

@@ -239,9 +239,18 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
                 String::from_utf8_lossy(&output.stderr)
             );
             let mut state: Value = serde_json::from_slice(&output.stdout)?;
-            if let Err(error) = dispatch_frozen(root, &epic, &repo, branch, &head, &state) {
+            // The script owns verdicts; retain the dispatch history even when
+            // a completed run replaces its entire receipt.
+            state["dispatches"] = previous.as_ref()
+                .map(|state| state["dispatches"].clone())
+                .filter(Value::is_object)
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Err(error) = dispatch_frozen(root, &epic, &repo, branch, &head, &mut state) {
                 tracing::warn!(train=%epic.id, %error, "train suite dispatch deferred");
             }
+            crate::cli::integrate::fs::atomic_write(
+                &out.join("state.json"), &serde_json::to_string_pretty(&state)?,
+            )?;
             scan_result(root, &epic, branch, previous.as_ref(), &mut state)
         })();
         if let Err(error) = result {
@@ -255,18 +264,44 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
 /// CI proved each delivery; a frozen train accepts no merge that could
 /// supersede the run. A repair or plumbing commit on a frozen train is a new
 /// tip and gets its own single run.
-fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &str, head: &str, state: &Value) -> Result<()> {
-    // cas-bac4: PENDING also covers a run already under way at this head.
-    // The marker below knows only this daemon's own dispatch, so on Nov 13 a
-    // supervisor's run at the frozen tip got a duplicate one scan later.
+fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &str, head: &str, state: &mut Value) -> Result<()> {
+    let history = state["dispatches"][head].clone();
+    // A replacement may take a scan to appear in GitHub's list. Never count
+    // the abandoned run as pending again, including after a daemon restart.
+    if history["dead_run_id"].is_string()
+        && state["pending_run_id"] == history["dead_run_id"]
+    {
+        state["pending_run_id"] = Value::Null;
+    }
     if state["outcome"] != "PENDING"
-        || state["pending_run_id"].is_string()
         || crate::mcp::tools::core::workflow::release_freeze::active(root, epic).is_none()
     {
         return Ok(());
     }
     let marker = directory(root, &epic.id)?.join("dispatched-head");
-    if std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == head) {
+    let pending = state["pending_run_id"].as_str().map(str::to_owned);
+    if let Some(run_id) = pending.as_deref() {
+        state["dispatches"][head]["run_id"] = run_id.into();
+        // cas-7d684: one replacement per frozen head, never a retry chain.
+        if history["dead_run_id"].is_string() {
+            return Ok(());
+        }
+        let endpoint = format!("repos/{{owner}}/{{repo}}/actions/runs/{run_id}");
+        let run = gh_json(repo, &endpoint)?;
+        let old = run["created_at"].as_str()
+            .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+            .is_some_and(|created| chrono::Utc::now().signed_duration_since(created)
+                >= chrono::Duration::seconds(90));
+        if run["status"] != "queued" || run["head_sha"] != head || !old {
+            return Ok(());
+        }
+        let jobs = gh_json(repo, &format!("{endpoint}/jobs?per_page=1"))?;
+        if jobs["total_count"].as_u64() != Some(0) {
+            return Ok(());
+        }
+    } else if history["dead_run_id"].is_string()
+        || std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == head)
+    {
         return Ok(());
     }
     let mut command = Command::new(crate::github_repo::gh_binary());
@@ -285,9 +320,28 @@ fn dispatch_frozen(root: &Path, epic: &cas_types::Task, repo: &Path, branch: &st
         "train suite dispatch failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    if let Some(run_id) = pending {
+        state["dispatches"][head]["dead_run_id"] = run_id.into();
+        state["dispatches"][head]["run_id"] = Value::Null;
+        state["pending_run_id"] = Value::Null;
+    }
     std::fs::write(&marker, head)?;
     tracing::info!(train=%epic.id, %head, "train suite dispatched at frozen tip");
     Ok(())
+}
+
+/// Read run metadata without ever cancelling a GitHub run.
+fn gh_json(repo: &Path, endpoint: &str) -> Result<Value> {
+    let mut command = Command::new(crate::github_repo::gh_binary());
+    command.args(["api", "-X", "GET", endpoint]).current_dir(repo);
+    let timeout = Duration::from_secs(30);
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(timeout),
+        timeout,
+    ).map_err(|error| anyhow::anyhow!("train run lookup failed: {error:?}"))?;
+    ensure!(output.status.success(), "train run lookup failed ({})", output.status);
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 /// Everything after the CI script: tie merges to tasks, record timings, notify.
@@ -546,15 +600,21 @@ print(json.dumps(state))\n");
         let forge_script = r#"import json, pathlib, subprocess, sys
 args, runs = sys.argv[1:], pathlib.Path('RUNS')
 listed = json.loads(runs.read_text()) if runs.exists() else []
+open('CALLS', 'a').write(' '.join(args) + '\n')
 if args[:2] == ['repo', 'view']: print('fixture/repo')
 elif args[:2] == ['workflow', 'run']:
-    open('CALLS', 'a').write(' '.join(args) + '\n')
     ref = args[args.index('--ref') + 1]
     tip = subprocess.check_output(['git', 'rev-parse', ref], text=True).strip()
-    listed.append(dict(id=100 + len(listed), run_attempt=1, head_sha=tip, head_branch=ref,
+    listed.append(dict(id=max((run['id'] for run in listed), default=99) + 1, run_attempt=1, head_sha=tip, head_branch=ref,
                        event='workflow_dispatch', status='queued', conclusion=None))
     runs.write_text(json.dumps(listed))
-elif args[0] == 'api': print(json.dumps({'workflow_runs': listed}))
+elif args[0] == 'api':
+    endpoint = next(arg for arg in args if arg.startswith('repos/'))
+    if '/actions/runs/' in endpoint:
+        run = next(run for run in listed if str(run['id']) == endpoint.split('/actions/runs/')[1].split('/')[0])
+        print(json.dumps({'total_count': run.get('job_count', 0), 'jobs': []}
+                         if '/jobs' in endpoint else run))
+    else: print(json.dumps({'workflow_runs': listed}))
 else: sys.exit(1)
 "#;
         std::fs::write(&forge, forge_script.replace("RUNS", &runs.display().to_string())
@@ -562,7 +622,8 @@ else: sys.exit(1)
         crate::test_paths::warm_stub(&gh, &format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", forge.display()));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         env.set("GH_BIN", &gh);
-        let dispatches = || std::fs::read_to_string(&calls).unwrap_or_default().lines().count();
+        let dispatches = || std::fs::read_to_string(&calls).unwrap_or_default().lines()
+            .filter(|call| call.starts_with("workflow run ")).count();
 
         for merge in ["merge one", "merge two", "merge three"] {
             git(&["commit", "-q", "--allow-empty", "-m", merge]);
@@ -595,6 +656,55 @@ else: sys.exit(1)
             .into_iter().filter(|row| row.prompt.contains("train_ci_red")).count();
         assert_eq!(red, 1, "red at the frozen tip raises train_ci_red");
         assert_eq!(dispatches(), 2);
+
+        // Nov 16: run 43884793330 stayed queued with no jobs. Cancelling it
+        // was refused; a replacement at the same head started normally.
+        git(&["commit", "-q", "--allow-empty", "-m", "next frozen tip"]);
+        observe(&root, "session").unwrap();
+        assert_eq!(dispatches(), 3);
+        let mut listed: Value = serde_json::from_slice(&std::fs::read(&runs).unwrap()).unwrap();
+        let stalled = listed.as_array_mut().unwrap().last_mut().unwrap();
+        stalled["id"] = 43884793330_u64.into();
+        let head = stalled["head_sha"].as_str().unwrap().to_owned();
+        let state_path = directory(&root, "cas-train").unwrap().join("state.json");
+        let read_state = || serde_json::from_slice::<Value>(&std::fs::read(&state_path).unwrap()).unwrap();
+        // Age alone, queued alone, and zero jobs alone are insufficient.
+        for (age, status, jobs, expected) in [
+            (10, "queued", 0, 3),
+            (120, "queued", 1, 3),
+            (120, "in_progress", 0, 3),
+            (120, "queued", 0, 4),
+        ] {
+            listed[2]["created_at"] = (chrono::Utc::now() - chrono::Duration::seconds(age)).to_rfc3339().into();
+            listed[2]["status"] = status.into();
+            listed[2]["job_count"] = jobs.into();
+            std::fs::write(&runs, listed.to_string()).unwrap();
+            observe(&root, "session").unwrap();
+            assert_eq!(dispatches(), expected, "age={age}, status={status}, jobs={jobs}");
+        }
+        let state = read_state();
+        assert_eq!(state["dispatches"][&head]["dead_run_id"], "43884793330");
+        assert!(state["pending_run_id"].is_null());
+        // GitHub may still list only the dead run after accepting dispatch.
+        let with_replacement = std::fs::read(&runs).unwrap();
+        std::fs::write(&runs, listed.to_string()).unwrap();
+        observe(&root, "session").unwrap();
+        assert_eq!(dispatches(), 4);
+        assert!(read_state()["pending_run_id"].is_null());
+
+        std::fs::write(&runs, with_replacement).unwrap();
+        let mut listed: Value = serde_json::from_slice(&std::fs::read(&runs).unwrap()).unwrap();
+        let replacement = listed.as_array_mut().unwrap().last_mut().unwrap();
+        assert_eq!(replacement["head_sha"], head);
+        assert_eq!(replacement["head_branch"], lane);
+        replacement["created_at"] = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339().into();
+        std::fs::write(&runs, listed.to_string()).unwrap();
+        observe(&root, "session").unwrap();
+        observe(&root, "session").unwrap();
+        assert_eq!(dispatches(), 4, "a stalled replacement cannot start a retry chain");
+        assert_eq!(read_state()["dispatches"][&head]["run_id"], "43884793331");
+        assert!(!std::fs::read_to_string(&calls).unwrap().lines().any(|call|
+            call.starts_with("run cancel ") || call.contains("/cancel")));
     }
 
     #[test]

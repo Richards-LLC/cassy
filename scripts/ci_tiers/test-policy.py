@@ -1163,6 +1163,91 @@ else:
                 git('reset', '--hard', 'HEAD^')
                 output.unlink()
 
+    def test_script_suite_concurrency_keeps_logs_failures_and_browser_isolation(self):
+        from contextlib import closing
+        import sqlite3
+        import time
+
+        action = policy.load(self.root / '.github/actions/run-script-suite-tests/action.yml')
+        run = action['runs']['steps'][-1]['run']
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        shutil.copyfile(policy.ROOT / 'scripts/ci-script-tests-for-diff.py',
+                        scripts / 'ci-script-tests-for-diff.py')
+        # Registered provisioned names exercise the action's real selection.
+        names = ['test-journey-bundles.py', 'test-release-budget-breach.py',
+                 'test-release-report-post.py', 'visual-qa.test.mjs',
+                 'visual-qa-secrets.test.mjs', 'test_factory_model_history.py']
+        (self.root / 'cas-cli').mkdir()
+        (self.root / 'cas-cli/Makefile').write_text('test-ci-tiers:\n' + ''.join(
+            f'\tcd .. && {shlex.quote(sys.executable)} scripts/{name}\n' for name in names))
+        probe = r'''import os, pathlib, sqlite3, sys, time
+from contextlib import closing
+name = pathlib.Path(__file__).name
+with closing(sqlite3.connect(os.environ['STATE'], timeout=10, isolation_level=None)) as db:
+    db.execute('insert into events values (?, ?, ?, ?)', (name, 'start', time.monotonic_ns(), os.environ.get('TMPDIR')))
+# A fixed temp filename must be isolated per suite.
+marker = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / 'suite-marker'
+marker.write_text(name)
+deadline = time.monotonic() + 15
+while not pathlib.Path(os.environ['RELEASE']).exists():
+    if time.monotonic() > deadline: raise RuntimeError('release barrier timed out')
+    time.sleep(.01)
+assert marker.read_text() == name
+for i in range(80): print(f'{name}:{i}')
+with closing(sqlite3.connect(os.environ['STATE'], timeout=10, isolation_level=None)) as db:
+    db.execute('insert into events values (?, ?, ?, ?)', (name, 'end', time.monotonic_ns(), os.environ.get('TMPDIR')))
+sys.exit(17 if name == 'test-release-report-post.py' else 0)
+'''
+        for name in names:
+            (scripts / name).write_text(probe)
+        for mode, body in [('action', run), ('full-tier',
+                'python3 scripts/ci-script-tests-for-diff.py --all')]:
+            with self.subTest(mode=mode):
+                state = self.root / f'{mode}.sqlite'
+                release = self.root / f'{mode}.release'
+                with closing(sqlite3.connect(state, isolation_level=None)) as db:
+                    db.execute('create table events (name, event, stamp, tmp)')
+                env = dict(os.environ, STATE=str(state), RELEASE=str(release), FULL_SET='true', BASE_SHA='')
+                child = subprocess.Popen(['bash', '-euo', 'pipefail', '-c', body], cwd=self.root,
+                    env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                started = []
+                try:
+                    deadline = time.monotonic() + 10
+                    while child.poll() is None and time.monotonic() < deadline:
+                        with closing(sqlite3.connect(state, isolation_level=None)) as db:
+                            started = db.execute("select name from events where event='start'").fetchall()
+                        if len(started) >= 4: break
+                        time.sleep(.01)
+                    self.assertEqual(len(started), 4, 'four suites must reach the completion barrier')
+                finally:
+                    release.touch()
+                    output, _ = child.communicate(timeout=20)
+                self.assertEqual(child.returncode, 1, output)
+                with closing(sqlite3.connect(state, isolation_level=None)) as db:
+                    events = db.execute('select name, event, tmp from events order by stamp').fetchall()
+                starts = [(name, tmp) for name, event, tmp in events if event == 'start']
+                self.assertCountEqual([name for name, _ in starts], names)
+                self.assertEqual(len({tmp for _, tmp in starts}), len(names))
+                active = browsers = peak = 0
+                for name, event, _ in events:
+                    delta = 1 if event == 'start' else -1
+                    active += delta
+                    browsers += delta if name.startswith('visual-qa') else 0
+                    peak = max(peak, active)
+                    self.assertLessEqual(active, 4)
+                    self.assertLessEqual(browsers, 1)
+                self.assertEqual((active, peak), (0, 4))
+                logs = self.root / 'target/ci-script-suite-logs'
+                for name in names:
+                    expected = [f'{name}:{i}' for i in range(80)]
+                    self.assertEqual((logs / f'{name}.log').read_text().splitlines(), expected)
+                    self.assertIn('\n'.join(expected), output)
+                excerpt = output.split('failed: scripts/test-release-report-post.py\n', 1)[1]
+                self.assertIn('test-release-report-post.py:79', excerpt)
+                self.assertNotIn('test-release-report-post.py:19\n', excerpt)
+                self.assertNotIn('test-journey-bundles.py:79', excerpt)
+
     def test_real_markdown_step_filters_assets_and_skips_an_asset_only_diff(self):
         source = {'file': '.github/workflows/ci.yml', 'job': 'docs-lint'}
         _, step = policy.role(self.ci()['jobs']['docs-lint'], 'Markdown lint', source)

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -182,13 +183,16 @@ def job_inputs(repo, job, tree):
     bridge = job == 'fast-validation-slack-bridge'
     if not (web or rust or bridge):
         return tree
+    covered = runpy.run_path(str(Path(__file__).with_name('classify-web-inputs.py')))['covered'] if web else None
     rows = git(repo, 'ls-tree', '-rz', 'HEAD').split('\0')
     selected = []
     for row in rows:
         if not row:
             continue
         path = row.split('\t', 1)[1]
-        if path.startswith(('cas-cli/', 'crates/', 'vendor/', '.cargo/')) or path in (
+        if web and covered(path):
+            selected.append(row)
+        elif path.startswith(('cas-cli/', 'crates/', 'vendor/', '.cargo/')) or path in (
                 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'):
             if rust:
                 selected.append(row)
@@ -202,7 +206,6 @@ def job_inputs(repo, job, tree):
                 selected.append(row)
         else:
             # Includes workflow/actions, scripts, docs and unknown/new families.
-            # This covers every external WEB_INPUTS entry from the web classifier.
             selected.append(row)
     if web:
         # The web build embeds this value, not the rest of the Rust manifest.

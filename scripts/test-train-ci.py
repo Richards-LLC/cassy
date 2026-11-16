@@ -105,6 +105,7 @@ class TrainReceipts(unittest.TestCase):
         body=action['runs']['steps'][0]['run']
         (self.repo/'scripts').mkdir()
         shutil.copyfile(SCRIPT,self.repo/'scripts/train-ci.py')
+        shutil.copyfile(SCRIPT.with_name('classify-web-inputs.py'),self.repo/'scripts/classify-web-inputs.py')
         (self.repo/'cas-cli').mkdir()
         (self.repo/'cas-cli/Cargo.toml').write_text('[package]\nversion = \"1.0.0\"\n')
         self.git('add','cas-cli','scripts')

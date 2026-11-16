@@ -13192,7 +13192,8 @@ async fn test_parked_advisory_names_predecessor_branch_after_successor_rebase_gh
     }))
     .unwrap();
     let text = get_text(&env.service.task(Parameters(start)).await.expect("successor starts"));
-    assert!(text.contains(&format!("cas-pk03 stays on {predecessor}")), "{text}");
+    let advisory = text.lines().find(|line| line.contains("PARKED BRANCH PRESERVED")).unwrap_or_default();
+    assert!(advisory.contains(&predecessor), "{text}");
 }
 
 /// GH #1006 item 3: a worker whose branch is frozen at a delivery parked for

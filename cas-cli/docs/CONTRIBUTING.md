@@ -3259,12 +3259,15 @@ Each full-set test/build job also publishes a schema-2 job receipt through
 `.github/actions/full-gate-job`. Its key binds the job's input content, stable
 job/matrix identity, workflow/actions, effective selection, main baseline and
 runner inputs. Commander web/journeys can reuse successful proof across Rust-only
-repairs; the Rust archive, shards and doctests can reuse across unrelated web
+repairs that do not touch web dependencies; web inputs include the hub asset list,
+preview CSP and Rust crypto fixtures. The Rust archive, shards and doctests can reuse across unrelated web
 source repairs. Rust inputs retain scripts, docs, embedded dist, public assets,
 web fixtures and journey instrumentation. Script tiers and preflight retain
 whole-tree keys because their tests read source across subsystems. Unknown paths
 invalidate every scope, and unknown jobs retain whole-tree keys. Web keys also
 bind the CLI version embedded in their build. Full-set coverage stays exhaustive.
+Content-based keys apply only to full-set dispatches on release-train branches;
+merge-group and other job receipts retain exact-tree keys.
 A requeue can reuse a successful producer job from a failed overall run; it
 validates the completed producer workflow and that particular job through GitHub.
 Failed jobs, changed inputs, missing proof and lookup errors execute normally.

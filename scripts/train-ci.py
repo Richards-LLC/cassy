@@ -226,7 +226,10 @@ def job_identity(args):
     digest=hashlib.sha256(json.dumps({'workflow':workflow,'inputs':inputs,
         'os':os.environ.get('RUNNER_OS'),'arch':os.environ.get('RUNNER_ARCH')},sort_keys=True).encode()).hexdigest()
     tree=git(args.repo,'rev-parse','HEAD^{tree}')
-    content=job_inputs(args.repo,args.job,tree)
+    train_full_set=(inputs.get('full_set') in (True,'true')
+        and os.environ.get('GITHUB_EVENT_NAME')==TRAIN_EVENT
+        and os.environ.get('GITHUB_REF_NAME','').startswith(PREFIX))
+    content=job_inputs(args.repo,args.job,tree) if train_full_set else tree
     key=hashlib.sha256(json.dumps([content,args.job,digest]).encode()).hexdigest()
     return {'schema':2,'scope':'job','tree':tree,'content_hash':content,'job':args.job,'job_name':args.job_name,
         'inputs_hash':digest,'key':key,'artifact':'full-gate-job-'+key}

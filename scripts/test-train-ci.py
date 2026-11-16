@@ -10,6 +10,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import zipfile
 import yaml
 
@@ -111,7 +112,8 @@ class TrainReceipts(unittest.TestCase):
         self.git('add','cas-cli','scripts')
         self.git('commit','-qm','receipt command')
         self.env['GITHUB_SHA']=self.git('rev-parse','HEAD')
-        inputs='{"selection":"all","matrix":1}'
+        inputs='{"full_set":"true","selection":null,"matrix":1}'
+        self.env['GITHUB_EVENT_NAME']='workflow_dispatch'
         downloads={}; artifacts=[]; jobs=[]
         producer=self.env['GITHUB_SHA']
         def composite(phase,slot,status='success',selection=inputs,requires=''):
@@ -139,7 +141,7 @@ class TrainReceipts(unittest.TestCase):
                 'workflow_run':{'id':101,'head_sha':producer}})
             jobs.append({'name':slot,'conclusion':status})
         (self.root/'forge.json').write_text(json.dumps({'job_artifacts':artifacts,'job_downloads':downloads,
-            'job_jobs':jobs,'job_run':{'id':101,'head_sha':producer,'event':'merge_group',
+            'job_jobs':jobs,'job_run':{'id':101,'head_sha':producer,'event':'workflow_dispatch',
                 'path':'.github/workflows/full-validation.yml','status':'completed','conclusion':'failure'}}))
         self.git('commit','--allow-empty','-qm','same tree requeue')
         self.env.update(GITHUB_SHA=self.git('rev-parse','HEAD'),GITHUB_RUN_ID='102')
@@ -199,6 +201,8 @@ class TrainReceipts(unittest.TestCase):
         self.assertFalse(check('fast-validation-suite-build'))
 
     def test_job_keys_cover_shared_inputs_and_unknown_paths(self):
+        self.enterContext(patch.dict(os.environ, {'GITHUB_EVENT_NAME':'workflow_dispatch',
+            'GITHUB_REF_NAME':'epic/release-train-fixture'}))
         identity=runpy.run_path(str(SCRIPT))['job_identity']
         manifest=self.repo/'cas-cli/Cargo.toml'
         manifest.parent.mkdir()
@@ -219,6 +223,9 @@ class TrainReceipts(unittest.TestCase):
         for path,body,changed in (
             ('cas-cli/src/repair.rs','fn repair() {}',rust|broad),
             ('crates/cas-core/src/repair.rs','fn repair() {}',rust|broad),
+            ('cas-cli/src/hub/server.rs','changed embedded asset list',web|rust|broad),
+            ('cas-cli/src/hub/visual_page_csp.txt','changed preview CSP',web|rust|broad),
+            ('crates/cas-operator-crypto/tests/fixtures/envelope.json','{}',web|rust|broad),
             ('Cargo.lock','changed lock',rust|broad),
             ('hub-web/src/view.ts','export const view = 1;',web|broad),
             ('hub-web/src/fixtures/pairing.json','{}',web|rust|broad),
@@ -245,6 +252,34 @@ class TrainReceipts(unittest.TestCase):
         self.git('rm','cas-cli/Cargo.toml')
         self.git('commit','-qm','missing version')
         self.assertTrue(all(before[job]!=keys()[job] for job in web))
+
+    def test_content_keys_require_full_set_train_dispatch(self):
+        identity=runpy.run_path(str(SCRIPT))['job_identity']
+        manifest=self.repo/'cas-cli/Cargo.toml'
+        manifest.parent.mkdir()
+        manifest.write_text('[package]\nversion = "1.0.0"\n')
+        self.git('add','cas-cli')
+        self.git('commit','-qm','version input')
+        before=self.git('rev-parse','HEAD')
+        manifest.with_name('repair.rs').write_text('fn repair() {}')
+        self.git('add','cas-cli')
+        self.git('commit','-qm','unrelated Rust repair')
+        after=self.git('rev-parse','HEAD')
+        for event,branch,full,reuses in (
+            ('workflow_dispatch','epic/release-train-fixture','true',True),
+            ('merge_group','gh-readonly-queue/main/pr-1','true',False),
+            ('workflow_dispatch','main','true',False),
+            ('workflow_dispatch','epic/release-train-fixture','false',False),
+            ('push','epic/release-train-fixture','true',False),
+        ):
+            with self.subTest(event=event,branch=branch,full=full), patch.dict(os.environ,
+                    {'GITHUB_EVENT_NAME':event,'GITHUB_REF_NAME':branch}):
+                args=SimpleNamespace(repo=self.repo,job='fast-validation-web',job_name='web',
+                    inputs=json.dumps({'full_set':full,'selection':None}))
+                self.git('checkout','-q','--detach',before)
+                original=identity(args)['key']
+                self.git('checkout','-q','--detach',after)
+                self.assertEqual(original==identity(args)['key'],reuses)
 
     def forge(self, artifact, status='completed', conclusion='success', fanin='success', later=()):
         run = lambda id, conclusion: {'id': id, 'run_attempt': int(self.env['GITHUB_RUN_ATTEMPT']), 'head_sha': self.env['GITHUB_SHA'],

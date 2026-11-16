@@ -80,7 +80,8 @@ permissions:
   actions: read
 
 jobs:
-  # One fail-closed classifier feeds every event-specific job gate. Keeping
+  # One fail-closed classifier also selects the runner and checks tree reuse.
+  # It feeds every event-specific job gate. Keeping
   # this as a job (rather than a step) lets docs-only merge-group trees skip
   # runner allocation for the full validation family while still producing a
   # cheap docs check.
@@ -100,6 +101,18 @@ jobs:
       script-tests-needed: ${{ steps.script-tests.outputs.needed }}
       fast-admission: ${{ steps.classify-diff.outputs.fast-admission }}
       fast-admission-reason: ${{ steps.classify-diff.outputs.fast-admission-reason }}
+      runner: ${{ steps.route.outputs.runner }}
+      mode: ${{ steps.route.outputs.mode }}
+      archive-runner: ${{ steps.route.outputs.archive-runner }}
+      archive-mode: ${{ steps.route.outputs.archive-mode }}
+      run-fast-validation: ${{ steps.tree-dedupe.outputs.run-fast-validation }}
+      validating-run-id: ${{ steps.tree-dedupe.outputs.validating-run-id }}
+      prior-run-url: ${{ steps.tree-dedupe.outputs.prior-run-url }}
+      reuse-source: ${{ steps.tree-dedupe.outputs.reuse-source }}
+      journeys-reuse: ${{ steps.tree-dedupe.outputs.journeys-reuse }}
+      journeys-prior-url: ${{ steps.tree-dedupe.outputs.journeys-prior-url }}
+      receipt-head: ${{ steps.tree-dedupe.outputs.receipt-head }}
+      receipt-tree: ${{ steps.tree-dedupe.outputs.receipt-tree }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,6 +135,68 @@ jobs:
           if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
           python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" \
             --provisioned --github-output "$GITHUB_OUTPUT"
+
+      - id: route
+        if: >-
+          steps.classify-diff.outputs.class != 'docs-only'
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+          || github.event_name == 'merge_group'
+          || (github.event_name == 'push'
+          && (github.ref == 'refs/heads/main'
+          || startsWith(github.ref, 'refs/tags/'))))
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
+          TRAIN_ARCHIVE_ENABLED: ${{ vars.CASSY_TRAIN_ARCHIVE_SELF_HOSTED }}
+        run: |
+          self_hosted='["self-hosted","Linux","X64","cas-ci-32core"]'
+          if [[ "$EVENT_NAME" == merge_group && "$SELF_HOSTED_ENABLED" == enabled ]]; then
+            printf 'runner=%s\nmode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
+            printf 'archive-runner=%s\narchive-mode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          echo 'mode=hosted' >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == workflow_dispatch && "$REF" == refs/heads/epic/release-train-*
+                && "$REPOSITORY" == Richards-LLC/cassy && "$TRAIN_ARCHIVE_ENABLED" == enabled ]]; then
+            printf 'archive-runner=%s\narchive-mode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
+          else
+            echo 'archive-runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'archive-mode=hosted' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A merge queue validates a synthetic tree, then GitHub pushes that exact
+      # tree to main. Re-running the Fast Validation family on that push wastes
+      # hosted capacity without adding coverage. This gate is fail-closed: direct
+      # pushes, bypass merges, lookup failures, and any different tree run the
+      # complete suite normally.
+      - id: tree-dedupe
+        if: >-
+          steps.classify-diff.outputs.class != 'docs-only'
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+          || github.event_name == 'merge_group'
+          || (github.event_name == 'push'
+          && (github.ref == 'refs/heads/main'
+          || startsWith(github.ref, 'refs/tags/'))))
+        name: Check for successful merge-queue validation of this tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MAIN_BASELINE: ${{ steps.classify-diff.outputs.main-baseline }}
+        run: scripts/check-ci-merge-queue-validation.sh
+      - name: Publish adopted train full-set identity
+        if: >-
+          github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+          && steps.tree-dedupe.outputs.reuse-source == 'full-gate'
+        uses: actions/upload-artifact@v4
+        with:
+          name: train-full-gate
+          path: target/full-gate-adoption/
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 90
 
   # Docs-only changes keep the existing branch-protection contexts satisfiable without
   # paying for Rust, web, or Darwin work. The full validation jobs remain the
@@ -246,113 +321,6 @@ jobs:
           tar -xzf "$RUNNER_TEMP/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$bin_dir"
           HOME="$RUNNER_TEMP/cas-home" "$bin_dir/cas" sync agents-md --check
 
-  # GitHub Actions cannot fall back after it has assigned an offline
-  # self-hosted runner: the job would simply remain queued. Select the runner
-  # before assignment instead. The repository variable is deliberately
-  # opt-in; its absent/disabled state is the fail-safe hosted path used before
-  # maintenance or whenever the runner's health is not established.
-  #
-  # This job never checks out the merge-queue tree and only selects a label.
-  # Therefore fork/pull-request code cannot use the persistent runner. The
-  # actual archive job repeats the merge_group-only guard before it compiles.
-  # cas-f0e7: the train's full-set run (a dispatch on epic/release-train-*)
-  # may also build the suite archive there, behind its own opt-in
-  # CASSY_TRAIN_ARCHIVE_SELF_HOSTED; only the archive job reads archive-*.
-  fast-validation-runner-route:
-    name: Fast Validation — merge-queue runner route
-    if: >-
-      needs.ci-diff.outputs.class != 'docs-only'
-      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.event_name == 'merge_group'
-      || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
-    needs: ci-diff
-    runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.route.outputs.runner }}
-      mode: ${{ steps.route.outputs.mode }}
-      archive-runner: ${{ steps.route.outputs.archive-runner }}
-      archive-mode: ${{ steps.route.outputs.archive-mode }}
-    steps:
-      - id: route
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-          REPOSITORY: ${{ github.repository }}
-          SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
-          TRAIN_ARCHIVE_ENABLED: ${{ vars.CASSY_TRAIN_ARCHIVE_SELF_HOSTED }}
-        run: |
-          self_hosted='["self-hosted","Linux","X64","cas-ci-32core"]'
-          if [[ "$EVENT_NAME" == merge_group && "$SELF_HOSTED_ENABLED" == enabled ]]; then
-            printf 'runner=%s\nmode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
-            printf 'archive-runner=%s\narchive-mode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo 'runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
-          echo 'mode=hosted' >> "$GITHUB_OUTPUT"
-          if [[ "$EVENT_NAME" == workflow_dispatch && "$REF" == refs/heads/epic/release-train-*
-                && "$REPOSITORY" == Richards-LLC/cassy && "$TRAIN_ARCHIVE_ENABLED" == enabled ]]; then
-            printf 'archive-runner=%s\narchive-mode=self-hosted\n' "$self_hosted" >> "$GITHUB_OUTPUT"
-          else
-            echo 'archive-runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
-            echo 'archive-mode=hosted' >> "$GITHUB_OUTPUT"
-          fi
-
-  # A merge queue validates a synthetic tree, then GitHub pushes that exact
-  # tree to main. Re-running the Fast Validation family on that push wastes
-  # hosted capacity without adding coverage. This gate is fail-closed: direct
-  # pushes, bypass merges, lookup failures, and any different tree run the
-  # complete suite normally.
-  fast-validation-main-push-dedupe:
-    name: Fast Validation — main-push tree dedupe
-    if: >-
-      needs.ci-diff.outputs.class != 'docs-only'
-      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.event_name == 'merge_group'
-      || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
-    needs: ci-diff
-    runs-on: ubuntu-latest
-    outputs:
-      run-fast-validation: ${{ steps.tree-dedupe.outputs.run-fast-validation }}
-      validating-run-id: ${{ steps.tree-dedupe.outputs.validating-run-id }}
-      prior-run-url: ${{ steps.tree-dedupe.outputs.prior-run-url }}
-      reuse-source: ${{ steps.tree-dedupe.outputs.reuse-source }}
-      journeys-reuse: ${{ steps.tree-dedupe.outputs.journeys-reuse }}
-      journeys-prior-url: ${{ steps.tree-dedupe.outputs.journeys-prior-url }}
-      receipt-head: ${{ steps.tree-dedupe.outputs.receipt-head }}
-      receipt-tree: ${{ steps.tree-dedupe.outputs.receipt-tree }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.sha }}
-
-      # cas-4cb8: on merge_group this also accepts the release train's
-      # full-gate receipt for the exact queue tree, and (cas-9f70) its
-      # full-journeys receipt for the same tree (see
-      # docs/branch-protection/README.md, "Merge-queue full-gate reuse").
-      - id: tree-dedupe
-        name: Check for successful merge-queue validation of this tree
-        env:
-          GH_TOKEN: ${{ github.token }}
-          QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          MAIN_BASELINE: ${{ needs.ci-diff.outputs.main-baseline }}
-        run: scripts/check-ci-merge-queue-validation.sh
-      - name: Publish adopted train full-set identity
-        if: >-
-          github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
-          && steps.tree-dedupe.outputs.reuse-source == 'full-gate'
-        uses: actions/upload-artifact@v4
-        with:
-          name: train-full-gate
-          path: target/full-gate-adoption/
-          overwrite: true
-          if-no-files-found: error
-          retention-days: 90
-
   # Factory pushes and PRs that do not target the protected default branch get
   # one cheap target-scoped lane. Main PRs use the full required lanes below;
   # do not spend an additional runner on this redundant subset there.
@@ -380,6 +348,7 @@ jobs:
   # Factory pushes under the small-delta policy use the mapped proof surface
   # only. The release train can accept this exact job, or a supervisor's
   # equivalent --proof receipt, without waiting for the full scoped lane.
+
   scoped-validation-fast:
     name: Scoped Validation (fast)
     if: >-
@@ -805,20 +774,20 @@ jobs:
     name: Fast Validation — preflight (no test suite)
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
-      || needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate')
+      && (needs.ci-diff.outputs.run-fast-validation == 'true'
+      || needs.ci-diff.outputs.reuse-source == 'full-gate')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-      && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
+      && (needs.ci-diff.outputs.mode != 'self-hosted'
       || (github.event_name == 'merge_group'
       && github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
-    needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]
-    runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
+    needs: [ci-diff]
+    runs-on: ${{ fromJSON(needs.ci-diff.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -847,7 +816,7 @@ jobs:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify merge-queue self-hosted trust boundary
-        if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        if: needs.ci-diff.outputs.mode == 'self-hosted'
         env:
           SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
         run: |
@@ -869,9 +838,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CACHED_RUN: ${{ steps.job-receipt.outputs.reused == 'true' && steps.job-receipt.outputs.producer_run || '' }}
-          REUSE_SOURCE: ${{ needs.fast-validation-main-push-dedupe.outputs.reuse-source }}
-          PROVEN_RUN: ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}
-          PROVEN_TREE: ${{ needs.fast-validation-main-push-dedupe.outputs.receipt-tree }}
+          REUSE_SOURCE: ${{ needs.ci-diff.outputs.reuse-source }}
+          PROVEN_RUN: ${{ needs.ci-diff.outputs.validating-run-id }}
+          PROVEN_TREE: ${{ needs.ci-diff.outputs.receipt-tree }}
         run: |
           echo 'restored=false' >> "$GITHUB_OUTPUT"
           rm -rf "$RUNNER_TEMP/preflight-cli"
@@ -904,7 +873,7 @@ jobs:
       - if: >-
           ${{ steps.cli-restore.outputs.restored != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'hosted') }}
+          && needs.ci-diff.outputs.mode == 'hosted') }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation
@@ -913,21 +882,21 @@ jobs:
         if: >-
           ${{ steps.cli-restore.outputs.restored != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.mode == 'self-hosted') }}
         run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
           ${{ steps.cli-restore.outputs.restored != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.mode == 'self-hosted') }}
         run: ./scripts/bootstrap-zig.sh
 
       - name: Verify private self-hosted sccache
         if: >-
           ${{ steps.cli-restore.outputs.restored != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.mode == 'self-hosted') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -936,7 +905,7 @@ jobs:
 
       - name: Test portable x86_64 ISA audit
         if: >-
-          ${{ steps.job-receipt.outputs.reused != 'true' && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true' && !cancelled()
+          ${{ steps.job-receipt.outputs.reused != 'true' && (needs.ci-diff.outputs.run-fast-validation == 'true' && !cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true') }}
         run: ./scripts/test-check-portable-x86_64-isa.sh
 
@@ -981,7 +950,7 @@ jobs:
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled()
           && steps.classify-diff.outputs.rust-unaffected != 'true'
-          && success() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true') }}
+          && success() && needs.ci-diff.outputs.run-fast-validation == 'true') }}
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base }}
           FULL_SET: ${{ inputs.full-set }}
@@ -994,7 +963,7 @@ jobs:
             --only scripts/test-factory-client-terminal.py
 
       - name: Smoke the source-built CLI and compile release assets
-        if: needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate' && success()
+        if: needs.ci-diff.outputs.reuse-source == 'full-gate' && success()
         env:
           RESTORED: ${{ steps.cli-restore.outputs.restored }}
         run: |
@@ -1038,14 +1007,14 @@ jobs:
     name: Fast Validation — default-feature check
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation != 'true'
-      && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
+      && needs.ci-diff.outputs.run-fast-validation != 'true'
+      && needs.ci-diff.outputs.reuse-source == 'full-gate'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-main-push-dedupe]
+    needs: [ci-diff]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1078,7 +1047,7 @@ jobs:
         id: proven
         if: steps.job-receipt.outputs.reused != 'true'
         env:
-          PROVEN_TREE: ${{ needs.fast-validation-main-push-dedupe.outputs.receipt-tree }}
+          PROVEN_TREE: ${{ needs.ci-diff.outputs.receipt-tree }}
         run: |
           if [[ "$PROVEN_TREE" == "$(git rev-parse 'HEAD^{tree}')" ]]; then
             echo 'identical=true' >> "$GITHUB_OUTPUT"
@@ -1122,13 +1091,13 @@ jobs:
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
       && needs.ci-diff.outputs.rust-unaffected != 'true'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && needs.ci-diff.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-main-push-dedupe]
+    needs: [ci-diff]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1193,13 +1162,13 @@ jobs:
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
       && needs.ci-diff.outputs.bridge-check-needed == 'true'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && needs.ci-diff.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-main-push-dedupe]
+    needs: [ci-diff]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1249,13 +1218,13 @@ jobs:
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
       && needs.ci-diff.outputs.web-check-needed == 'true'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && needs.ci-diff.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-main-push-dedupe]
+    needs: [ci-diff]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1352,15 +1321,15 @@ jobs:
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
       && needs.ci-diff.outputs.journeys-check-needed == 'true'
-      && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
-      || (needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
-      && needs.fast-validation-main-push-dedupe.outputs.journeys-reuse != 'true'))
+      && (needs.ci-diff.outputs.run-fast-validation == 'true'
+      || (needs.ci-diff.outputs.reuse-source == 'full-gate'
+      && needs.ci-diff.outputs.journeys-reuse != 'true'))
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-main-push-dedupe]
+    needs: [ci-diff]
     permissions:
       contents: read
       issues: read
@@ -1445,21 +1414,21 @@ jobs:
     name: Fast Validation — suite archive build
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && needs.ci-diff.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-      && (needs.fast-validation-runner-route.outputs.archive-mode != 'self-hosted'
+      && (needs.ci-diff.outputs.archive-mode != 'self-hosted'
       || (github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
       && ((github.event_name == 'merge_group' && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled')
       || (github.event_name == 'workflow_dispatch'
       && startsWith(github.ref, 'refs/heads/epic/release-train-')
       && vars.CASSY_TRAIN_ARCHIVE_SELF_HOSTED == 'enabled'))))
-    needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]
-    runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.archive-runner) }}
+    needs: [ci-diff]
+    runs-on: ${{ fromJSON(needs.ci-diff.outputs.archive-runner) }}
     # Profile inputs must be visible when rust-cache computes its key, not
     # only at compile time. The advisory main producer reuses this mapping.
     env: &suite-archive-profile
@@ -1498,7 +1467,7 @@ jobs:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify self-hosted archive trust boundary
-        if: needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted'
+        if: needs.ci-diff.outputs.archive-mode == 'self-hosted'
         env:
           SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
           TRAIN_ARCHIVE_ENABLED: ${{ vars.CASSY_TRAIN_ARCHIVE_SELF_HOSTED }}
@@ -1520,7 +1489,7 @@ jobs:
 
       - if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.archive-mode == 'hosted') }}
+          && needs.ci-diff.outputs.archive-mode == 'hosted') }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-suite-archive
@@ -1530,13 +1499,13 @@ jobs:
       - name: Set up shared self-hosted Rust toolchain
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.archive-mode == 'self-hosted') }}
         run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.archive-mode == 'self-hosted') }}
         run: ./scripts/bootstrap-zig.sh
 
       - name: Install nextest
@@ -1546,7 +1515,7 @@ jobs:
       - name: Verify private self-hosted sccache
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.archive-mode == 'self-hosted') }}
         # cas-065a: cache isolation stays observable, but its TCP failure must
         # not block the merge queue while the server defect is investigated.
         continue-on-error: true
@@ -1558,7 +1527,7 @@ jobs:
       - name: Disable sccache for the self-hosted suite archive
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.archive-mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.archive-mode == 'self-hosted') }}
         # cas-065a: the cache is an optimization, not a merge-queue prerequisite.
         run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
@@ -1652,10 +1621,10 @@ jobs:
       github.event_name == 'push' && github.ref == 'refs/heads/main'
       && needs.ci-diff.outputs.class != 'docs-only'
       && needs.ci-diff.outputs.rust-unaffected != 'true'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
-      && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'merge-queue'
+      && needs.ci-diff.outputs.run-fast-validation == 'false'
+      && needs.ci-diff.outputs.reuse-source == 'merge-queue'
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED != 'enabled'
-    needs: [ci-diff, fast-validation-main-push-dedupe]
+    needs: [ci-diff]
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 20
@@ -1698,20 +1667,20 @@ jobs:
           fi
 
   fast-validation-suite-shards:
-    name: Fast Validation — suite shard ${{ matrix.shard }}/3
+    name: Fast Validation — suite shard ${{ matrix.shard }}/6
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && needs.ci-diff.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-suite-build, fast-validation-main-push-dedupe]
+    needs: [ci-diff, fast-validation-suite-build]
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     permissions:
       contents: read
       issues: read
@@ -1730,7 +1699,7 @@ jobs:
         with:
           phase: restore
           job: fast-validation-suite-shards-${{ matrix.shard }}
-          job-name: Fast Validation — suite shard ${{ matrix.shard }}/3
+          job-name: Fast Validation — suite shard ${{ matrix.shard }}/6
           binding: >-
             {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
             "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
@@ -1770,13 +1739,13 @@ jobs:
           tar -xzf fast-validation-suite-runner.tar.gz
           test -x target/debug/cas
 
-      # count:1/3 through count:3/3 are disjoint and exhaustive. Keep
+      # count:1/6 through count:6/6 are disjoint and exhaustive. Keep
       # --no-fail-fast so failures never mask later binaries; doctests stay in
       # their own required lane because nextest cannot run them. Remap the
       # self-hosted producer workspace to this hosted checkout (cas-c4a5).
       # Insta also resolves snapshots at runtime from its producer path, so
       # pin its workspace root to this hosted checkout.
-      - name: Test full suite shard ${{ matrix.shard }}/3
+      - name: Test full suite shard ${{ matrix.shard }}/6
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true') }}"
         env:
           INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
@@ -1788,12 +1757,12 @@ jobs:
           start_seconds=$SECONDS
           export VERIFIED_TEST_LOG="target/ci-impact/full-shard-$SHARD.log"
           set +e
-          python3 scripts/ci-queue-flakes.py run rust --shard "$SHARD/3" \
+          python3 scripts/ci-queue-flakes.py run rust --shard "$SHARD/6" \
             --out "target/queue-flakes/rust-$SHARD"
           suite_status=$?
           set -e
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/epic/release-train-* ]]; then
-            python3 scripts/train-ci.py shard --status "$suite_status" --shard "$SHARD/3" \
+            python3 scripts/train-ci.py shard --status "$suite_status" --shard "$SHARD/6" \
               --log "$VERIFIED_TEST_LOG" --junit target/nextest/queue/junit.xml \
               --out "target/train-suite/$SHARD"
           fi
@@ -1857,7 +1826,7 @@ jobs:
         with:
           phase: save
           job: fast-validation-suite-shards-${{ matrix.shard }}
-          job-name: Fast Validation — suite shard ${{ matrix.shard }}/3
+          job-name: Fast Validation — suite shard ${{ matrix.shard }}/6
           binding: >-
             {"full_set": "${{ inputs.full-set }}", "selection": ${{ inputs.full-set && 'null' || toJSON(needs.ci-diff.outputs) }},
             "main_baseline": "${{ needs.ci-diff.outputs.main-baseline }}",
@@ -1866,113 +1835,23 @@ jobs:
 
 
   # Writable credentials live only in the hosted fan-in, never in test processes.
-  queue-flake-publication:
-    name: Test repair publication
-    if: >-
-      always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
-      && needs.ci-diff.outputs.class != 'docs-only'
-    needs: [ci-diff, fast-validation-main-push-dedupe, fast-validation-preflight, fast-validation-ci-tiers, fast-validation-slack-bridge, fast-validation-web, fast-validation-suite-build, fast-validation-suite-shards, fast-validation-docs, fast-validation-journeys]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # Atomic publication lock ref; no evaluated-tree edits.
-      issues: write
-      actions: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: queue-flakes-*
-          path: target/queue-flake-receipts
-      - name: Persist every first native failure as a P0 repair
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Reused successful jobs have no new failure observations. Each native
-          # shard still independently gates Fast Validation on its first exit.
-          if [[ ! -d target/queue-flake-receipts ]]; then exit 0; fi
-          python3 scripts/ci-queue-flakes.py reconcile --issues-repo Richards-LLC/cassy \
-            --receipts target/queue-flake-receipts
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: queue-flake-publication
-          path: target/queue-flake-receipts/publication.json
-          if-no-files-found: ignore
-
-  # Keep the protected ruleset's exact full-suite context while the actual
-  # test execution fans out after the shared archive. This job runs even when a shard fails and
-  # makes a failed or cancelled shard fail the required check.
-  fast-validation-suite:
-    name: Fast Validation — full suite
-    if: >-
-      always() && needs.ci-diff.outputs.class != 'docs-only'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
-      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.event_name == 'merge_group'
-      || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-suite-build, fast-validation-suite-shards, fast-validation-main-push-dedupe]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
-        with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
-        with:
-          pattern: train-suite-*
-          path: target/train-suite-evidence
-      - name: Record train full-suite result
-        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
-        env:
-          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
-          BUILD_RESULT: ${{ needs.fast-validation-suite-build.result }}
-          SHARDS_RESULT: ${{ needs.fast-validation-suite-shards.result }}
-        run: |
-          python3 scripts/train-ci.py collect --evidence target/train-suite-evidence \
-            --build-status "$BUILD_RESULT" --shards-status "$SHARDS_RESULT"
-      - name: Publish train receipt and complete logs
-        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')
-        uses: actions/upload-artifact@v4
-        with:
-          name: train-rust-suite
-          path: target/train-suite-evidence/
-          overwrite: true
-          if-no-files-found: error
-          retention-days: 90
-      - name: Report Rust short-circuit
-        if: needs.ci-diff.outputs.rust-unaffected == 'true'
-        env:
-          DIFF_CLASS: ${{ needs.ci-diff.outputs.class }}
-        run: echo "Full-suite fan-in short-circuited for $DIFF_CLASS diff."
-
-      - name: Require every suite shard to pass
-        env:
-          SHARDS: ${{ needs.fast-validation-suite-shards.result }}
-        run: test "$SHARDS" = success
-
   fast-validation-docs:
     name: Fast Validation — doctests
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && needs.ci-diff.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-      && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
+      && (needs.ci-diff.outputs.mode != 'self-hosted'
       || (github.event_name == 'merge_group'
       && github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
-    needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]
-    runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
+    needs: [ci-diff]
+    runs-on: ${{ fromJSON(needs.ci-diff.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -2000,7 +1879,7 @@ jobs:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify merge-queue self-hosted trust boundary
-        if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        if: needs.ci-diff.outputs.mode == 'self-hosted'
         env:
           SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
         run: |
@@ -2022,7 +1901,7 @@ jobs:
 
       - if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'hosted') }}
+          && needs.ci-diff.outputs.mode == 'hosted') }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-docs
@@ -2030,19 +1909,19 @@ jobs:
       - name: Set up shared self-hosted Rust toolchain
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.mode == 'self-hosted') }}
         run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.mode == 'self-hosted') }}
         run: ./scripts/bootstrap-zig.sh
 
       - name: Verify private self-hosted sccache
         if: >-
           ${{ steps.job-receipt.outputs.reused != 'true' && (steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted') }}
+          && needs.ci-diff.outputs.mode == 'self-hosted') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -2102,15 +1981,14 @@ jobs:
     needs:
       - ci-diff
       - scoped-validation-fast
-      - fast-validation-main-push-dedupe
       - fast-validation-preflight
       - fast-validation-queue-check
       - fast-validation-ci-tiers
       - fast-validation-slack-bridge
       - fast-validation-web
       - fast-validation-journeys
-      - queue-flake-publication
-      - fast-validation-suite
+      - fast-validation-suite-build
+      - fast-validation-suite-shards
       - fast-validation-docs
     # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
     # push events) and cancel superseded runs. Keying on the head SHA put every
@@ -2127,11 +2005,67 @@ jobs:
       group: fast-validation-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     permissions:
-      contents: read
+      contents: write # Repair-publication lock ref; no evaluated-tree edits.
+      issues: write
       actions: read
       statuses: write
     runs-on: ubuntu-latest
     steps:
+      # Collection and repair publication share this hosted rollup. Writable
+      # credentials never enter the shard/test jobs or checkout's Git config.
+      - uses: actions/checkout@v4
+        if: inputs.full-set || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.run-fast-validation == 'true'
+        with:
+          pattern: train-suite-*
+          path: target/train-suite-evidence
+      - name: Record train full-suite result
+        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.run-fast-validation == 'true'
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          BUILD_RESULT: ${{ needs.fast-validation-suite-build.result }}
+          SHARDS_RESULT: ${{ needs.fast-validation-suite-shards.result }}
+        run: |
+          python3 scripts/train-ci.py collect --evidence target/train-suite-evidence \
+            --build-status "$BUILD_RESULT" --shards-status "$SHARDS_RESULT"
+      - name: Publish train receipt and complete logs
+        if: always() && github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-') && needs.ci-diff.outputs.run-fast-validation == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: train-rust-suite
+          path: target/train-suite-evidence/
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/download-artifact@v4
+        if: always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && needs.ci-diff.outputs.class != 'docs-only'
+        with:
+          pattern: queue-flakes-*
+          path: target/queue-flake-receipts
+      - name: Persist every first native failure as a P0 repair
+        id: queue-publication
+        if: always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && needs.ci-diff.outputs.class != 'docs-only'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Reused successful jobs have no new failure observations. Each native
+          # shard still independently gates Fast Validation on its first exit.
+          if [[ ! -d target/queue-flake-receipts ]]; then exit 0; fi
+          python3 scripts/ci-queue-flakes.py reconcile --issues-repo Richards-LLC/cassy \
+            --receipts target/queue-flake-receipts
+      - uses: actions/upload-artifact@v4
+        if: always() && (github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && needs.ci-diff.outputs.class != 'docs-only'
+        with:
+          name: queue-flake-publication
+          path: target/queue-flake-receipts/publication.json
+          if-no-files-found: ignore
+
       - name: Require selected script suites
         if: always()
         env:
@@ -2153,7 +2087,7 @@ jobs:
       - name: Require durable test repair publication
         if: github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-'))
         env:
-          PUBLICATION: ${{ needs.queue-flake-publication.result }}
+          PUBLICATION: ${{ steps.queue-publication.outcome }}
         run: |
           case "$PUBLICATION" in
             success|skipped) ;;
@@ -2163,10 +2097,12 @@ jobs:
       - name: Require every Fast Validation lane to pass
         if: >-
           github.event_name != 'pull_request'
-          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+          && needs.ci-diff.outputs.run-fast-validation == 'true'
         env:
           PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
-          SUITE: ${{ needs.fast-validation-suite.result }}
+          SUITE_BUILD: ${{ needs.fast-validation-suite-build.result }}
+          SHARDS: ${{ needs.fast-validation-suite-shards.result }}
+          QUEUE_CHECK: ${{ needs.fast-validation-queue-check.result }}
           DOCS: ${{ needs.fast-validation-docs.result }}
           CI_TIERS: ${{ needs.fast-validation-ci-tiers.result }}
           SLACK_BRIDGE: ${{ needs.fast-validation-slack-bridge.result }}
@@ -2174,12 +2110,13 @@ jobs:
           JOURNEYS: ${{ needs.fast-validation-journeys.result }}
         run: |
           test "$PREFLIGHT" = success
-          test "$SUITE" = success
+          test "$SUITE_BUILD" = success
+          test "$SHARDS" = success
           test "$DOCS" = success
           # Input-gated lanes: skipped when their inputs did not change, never
           # failed or cancelled. Report every red lane, not just the first.
           failed=0
-          for lane in CI_TIERS SLACK_BRIDGE WEB JOURNEYS; do
+          for lane in CI_TIERS SLACK_BRIDGE WEB JOURNEYS QUEUE_CHECK; do
             case "${!lane}" in
               success|skipped) ;;
               *) echo "::error title=Fast Validation::$lane lane is ${!lane}"; failed=1 ;;
@@ -2191,10 +2128,10 @@ jobs:
         if: >-
           github.event_name == 'push'
           && github.ref == 'refs/heads/main'
-          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
+          && needs.ci-diff.outputs.run-fast-validation == 'false'
         env:
-          VALIDATING_RUN_ID: ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}
-          PRIOR_RUN_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}
+          VALIDATING_RUN_ID: ${{ needs.ci-diff.outputs.validating-run-id }}
+          PRIOR_RUN_URL: ${{ needs.ci-diff.outputs.prior-run-url }}
         run: |
           echo "::notice title=Fast Validation deduplicated::Skipped the main-push suite because merge-queue run $VALIDATING_RUN_ID already validated this exact tree: $PRIOR_RUN_URL"
           echo "Fast Validation reused successful merge-queue run [$VALIDATING_RUN_ID]($PRIOR_RUN_URL)." >> "$GITHUB_STEP_SUMMARY"
@@ -2203,17 +2140,17 @@ jobs:
         if: >-
           (github.event_name == 'merge_group'
           || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/epic/release-train-')))
-          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
-          && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
+          && needs.ci-diff.outputs.run-fast-validation == 'false'
+          && needs.ci-diff.outputs.reuse-source == 'full-gate'
         env:
           PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
           QUEUE_CHECK: ${{ needs.fast-validation-queue-check.result }}
           SLACK_BRIDGE: ${{ needs.fast-validation-slack-bridge.result }}
           JOURNEYS: ${{ needs.fast-validation-journeys.result }}
-          VALIDATING_RUN_ID: ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}
-          PRIOR_RUN_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}
-          JOURNEYS_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-reuse }}
-          JOURNEYS_PRIOR_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-prior-url }}
+          VALIDATING_RUN_ID: ${{ needs.ci-diff.outputs.validating-run-id }}
+          PRIOR_RUN_URL: ${{ needs.ci-diff.outputs.prior-run-url }}
+          JOURNEYS_REUSE: ${{ needs.ci-diff.outputs.journeys-reuse }}
+          JOURNEYS_PRIOR_URL: ${{ needs.ci-diff.outputs.journeys-prior-url }}
         run: |
           # Preflight restored an identical-tree CLI or compiled the release
           # tree, then ran smoke. Journeys are covered separately (cas-9f70).
@@ -2233,12 +2170,6 @@ jobs:
       # fan-in passes. A later main push may reuse it only after the workflow
       # itself concludes successfully, so it cannot turn a partial queue run
       # into a false green shortcut.
-      - uses: actions/checkout@v4
-        if: github.event_name == 'merge_group'
-        with:
-          fetch-depth: 0
-          ref: ${{ github.sha }}
-
       - id: merge-queue-tree
         name: Compute successful merge-queue tree receipt
         if: github.event_name == 'merge_group'
@@ -2259,29 +2190,26 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - uses: actions/checkout@v4
-        # A red lane still records its FAIL full-set receipt below.
-        if: inputs.full-set && !cancelled()
-        with:
-          fetch-depth: 0
-          ref: ${{ github.sha }}
       - uses: actions/download-artifact@v4
-        if: inputs.full-set && !cancelled() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+        if: inputs.full-set && !cancelled() && needs.ci-diff.outputs.run-fast-validation == 'true'
         with:
           pattern: full-gate-job-*
           path: target/full-gate/jobs
       - name: Record full-set receipt and wall clock
-        if: inputs.full-set && !cancelled() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+        if: inputs.full-set && !cancelled() && needs.ci-diff.outputs.run-fast-validation == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           NEEDS_JSON: ${{ toJSON(needs) }}
           MAIN_BASELINE: ${{ needs.ci-diff.outputs.main-baseline }}
+          PUBLICATION_RESULT: ${{ steps.queue-publication.outcome }}
+          GATE_RESULT: ${{ job.status }}
         run: |
           python3 scripts/train-ci.py full-collect --evidence target/full-gate \
             --jobs-json "$NEEDS_JSON" --main-baseline "$MAIN_BASELINE" \
+            --publication-status "$PUBLICATION_RESULT" --gate-status "$GATE_RESULT" \
             --started-at "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)"
       - name: Publish complete full-set receipt
-        if: inputs.full-set && !cancelled() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+        if: inputs.full-set && !cancelled() && needs.ci-diff.outputs.run-fast-validation == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: train-full-gate
@@ -2364,14 +2292,14 @@ jobs:
       always() && !inputs.full-set && needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'pull_request'
       || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-      || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true')
+      || needs.ci-diff.outputs.run-fast-validation == 'true')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-main-push-dedupe]
+    needs: [ci-diff]
     # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
     # push events) and cancel superseded runs. Keying on the head SHA put every
     # push in its own group, so a rapid second push left the first run's full
@@ -2428,10 +2356,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          lookup-only: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'merge-queue' }}
+          lookup-only: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-diff.outputs.reuse-source == 'merge-queue' }}
           # Lookup-only must not save an unrestored target. On an exact-key
           # miss, the seed-cache step restores any partial key and saves it.
-          save-if: ${{ github.ref == 'refs/heads/main' && needs.fast-validation-main-push-dedupe.outputs.reuse-source != 'merge-queue' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && needs.ci-diff.outputs.reuse-source != 'merge-queue' }}
 
       - name: Decide whether Darwin compilation is needed
         id: cache-work
@@ -2439,8 +2367,8 @@ jobs:
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
-          REUSE_SOURCE: ${{ needs.fast-validation-main-push-dedupe.outputs.reuse-source }}
-          PRIOR_RUN_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}
+          REUSE_SOURCE: ${{ needs.ci-diff.outputs.reuse-source }}
+          PRIOR_RUN_URL: ${{ needs.ci-diff.outputs.prior-run-url }}
           CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$REUSE_SOURCE" == merge-queue && "$CACHE_HIT" == true ]]; then
@@ -2455,7 +2383,7 @@ jobs:
         id: seed-cache
         if: >-
           github.event_name == 'push' && github.ref == 'refs/heads/main'
-          && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'merge-queue'
+          && needs.ci-diff.outputs.reuse-source == 'merge-queue'
           && steps.cache-work.outputs.run-check == 'true'
         uses: Swatinem/rust-cache@v2
         with:

@@ -24,7 +24,7 @@ import zipfile
 ARTIFACT = 'train-full-gate'
 WORKFLOW = 'full-validation.yml'
 REQUIRED_JOBS = ('fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-validation-web',
-                 'fast-validation-suite', 'fast-validation-docs', 'queue-flake-publication')
+                 'fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-docs')
 PREFIX = 'epic/release-train-'
 # cas-0fc56: Cassy dispatches the one train run at a release freeze; merges start none.
 TRAIN_EVENT = 'workflow_dispatch'
@@ -150,7 +150,7 @@ def collect(args):
         receipt['failures'].extend(row['failures'])
         if row['status'] != 0 or not (path.parent/'native.log').is_file():
             receipt['outcome'] = 'FAIL'
-    if slots != {'1/3', '2/3', '3/3'} or args.build_status != 'success' or args.shards_status != 'success':
+    if slots != {f'{slot}/6' for slot in range(1, 7)} or args.build_status != 'success' or args.shards_status != 'success':
         receipt['outcome'] = 'FAIL'
     if not receipt['tests']:
         receipt['outcome'] = 'FAIL'
@@ -159,6 +159,8 @@ def collect(args):
     write(args.evidence/'receipt.json', receipt)
     write(args.evidence/'failures.json', receipt['failures'])
     print(json.dumps(receipt))
+    if receipt['outcome'] == 'FAIL':
+        raise ValueError('suite evidence is incomplete or contains failures')
 
 
 def elapsed(started, ended=None):
@@ -326,6 +328,11 @@ def full_collect(args):
     if outputs.get('bridge-check-needed') == 'true':
         required.append('fast-validation-slack-bridge')
     failures = [name for name in required if jobs.get(name, {}).get('result') != 'success']
+    checks = {'gate': args.gate_status, 'repair-publication': args.publication_status}
+    failures.extend(name for name, status in checks.items() if status != 'success')
+    queue_check = jobs.get('fast-validation-queue-check', {}).get('result', 'skipped')
+    if queue_check not in ('success', 'skipped'):
+        failures.append('fast-validation-queue-check')
     main = git(args.repo, 'rev-parse', args.main_baseline + '^{commit}')
     head = git(args.repo, 'rev-parse', 'HEAD')
     if subprocess.run(['git', 'merge-base', '--is-ancestor', main, head], cwd=args.repo).returncode:
@@ -345,6 +352,7 @@ def full_collect(args):
                'journeys_required': outputs.get('journeys-check-needed') == 'true',
                'bridge_required': outputs.get('bridge-check-needed') == 'true',
                'required_jobs': required, 'jobs': {name: job.get('result') for name, job in jobs.items()},
+               'checks': checks,
                'elapsed_seconds': elapsed(args.started_at)}
     write(args.evidence/'receipt.json', receipt)
     print(json.dumps(receipt))
@@ -361,6 +369,8 @@ def validate_full(receipt, tree):
             or receipt.get('tree') != tree or set(required) != complete
             or not isinstance(receipt.get('journeys_required'), bool)
             or not isinstance(receipt.get('bridge_required'), bool)
+            or (receipt.get('outcome') == 'PASS' and receipt.get('checks') != {'gate':'success', 'repair-publication':'success'})
+            or (receipt.get('outcome') == 'PASS' and receipt.get('jobs', {}).get('fast-validation-queue-check', 'skipped') not in ('success', 'skipped'))
             or (receipt.get('outcome') == 'PASS' and any(receipt.get('jobs', {}).get(name) != 'success' for name in required))
             or not isinstance(receipt.get('elapsed_seconds'), (int, float))
             or receipt['elapsed_seconds'] < 0
@@ -676,6 +686,8 @@ def main():
     full.add_argument('--jobs-json', required=True)
     full.add_argument('--main-baseline', required=True)
     full.add_argument('--started-at', required=True)
+    full.add_argument('--publication-status', required=True)
+    full.add_argument('--gate-status', required=True)
     reuse_parser = sub.add_parser('reuse')
     reuse_parser.add_argument('--repo', type=Path, default=Path.cwd())
     reuse_parser.add_argument('--gh', default=os.environ.get('GH_BIN', 'gh'))

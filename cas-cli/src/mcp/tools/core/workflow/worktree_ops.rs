@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod frozen_train_ci;
+
 /// A bounded response from the `gh api` invocation used by the merge receipt.
 /// Keeping status, stdout, and stderr together lets classification distinguish
 /// an empty/no-PR response from an authentication or transport failure.
@@ -5423,7 +5425,7 @@ impl CasCore {
             .map(|(_, _, _, note)| format!("{note}\n\n"))
             .unwrap_or_default();
         let branch_ci_lookup = fast_lane_lookup
-            .unwrap_or_else(|| lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd));
+            .unwrap_or_else(|| frozen_train_ci::lookup(&cas_root, ci_source, &worktree.parent_branch, &cwd));
         let unparked_notice = scoped_task.as_deref()
             .filter(|task| task.status == cas_types::TaskStatus::InProgress
                 && task.task_type != cas_types::TaskType::Epic)
@@ -6964,7 +6966,7 @@ mod tests {
 
     /// `extra_cases` adds shell `case` arms to the fake gh, before its refusal.
     #[cfg(unix)]
-    fn delivery_ci_fixture_with(
+    pub(super) fn delivery_ci_fixture_with(
         code: bool,
         code_response: &str,
         extra_cases: &str,

@@ -285,8 +285,14 @@ def run_logged(command, repo, env, log):
 def run_suites(selected, repo, env, jobs):
     if not selected:
         return []
-    logs = repo / "target/ci-script-suite-logs"
-    logs.mkdir(parents=True, exist_ok=True)
+    # cas-a2a8: logs live outside the checkout; a log under the repo dirties
+    # fixture checkouts that suites push from (the fast-rows pre-push refusal).
+    with tempfile.TemporaryDirectory(prefix="ci-script-suite-logs-",
+                                     dir=os.environ.get("RUNNER_TEMP") or None) as logs:
+        return _run_suites(selected, repo, env, jobs, Path(logs))
+
+
+def _run_suites(selected, repo, env, jobs, logs):
     pending, running, failed = list(selected), {}, {}
     # Browser launchers use their own profiles and ephemeral ports, but serializing
     # this cohort also avoids competing browser processes and shared web tooling.

@@ -429,7 +429,7 @@ impl CiStatusRequest {
         let target = facts.target.clone().unwrap_or_else(|| "main".to_string());
         // The lock is not held across git and gh.
         let pending =
-            crate::mcp::tools::core::workflow::delivery_ci_pending(branch, &target, &self.repo_root);
+            crate::mcp::tools::core::workflow::delivery_ci_pending(Some(&facts.cas_dir), branch, &target, &self.repo_root);
         if let Ok(mut cache) = self.lane_ci_pending.lock() {
             cache.insert(key, (std::time::Instant::now(), pending));
         }

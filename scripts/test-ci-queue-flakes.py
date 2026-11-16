@@ -162,8 +162,8 @@ class QueueRecovery(unittest.TestCase):
 
     def workflow_reconcile(self):
         policy = runpy.run_path(str(SCRIPT.parent/'ci_tiers/policy.py'))
-        job = policy['load'](SCRIPT.parent.parent/'.github/workflows/ci.yml')['jobs']['queue-flake-publication']
-        download = next(step for step in job['steps'] if step.get('uses')=='actions/download-artifact@v4')
+        job = policy['load'](SCRIPT.parent.parent/'.github/workflows/ci.yml')['jobs']['fast-validation']
+        download = next(step for step in job['steps'] if step.get('with',{}).get('pattern')=='queue-flakes-*')
         self.assertEqual(download['with']['pattern'],'queue-flakes-*')
         destination = self.repo/download['with']['path']
         shutil.rmtree(destination,ignore_errors=True)

@@ -31,6 +31,11 @@ import tomllib
 # references, so a new `../scripts/...` read in hub-web fails CI until listed.
 WEB_INPUTS = (
     'hub-web/',
+    # Web tests inspect the embedded asset list, preview imports the real hub
+    # CSP, and browser crypto tests load the Rust interoperability fixtures.
+    'cas-cli/src/hub/server.rs',
+    'cas-cli/src/hub/visual_page_csp.txt',
+    'crates/cas-operator-crypto/tests/fixtures/',
     # The user-journey catalog the Commander journeys implement.
     'docs/qa/journeys.md',
     # The journey registry hub-web/src/usage.test.ts reads for the usage map.

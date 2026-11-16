@@ -541,6 +541,15 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
         self.assertTrue(result[0])
         self.assertNotIn('started', result)
         self.assertTrue(any(e['reason'] == 'proof running' for e in self.events))
+        # cas-40d4: a budget refusal is typed as not started and carries the
+        # sampled budget, estimate and reserve for the caller to report.
+        low = dict(HIGH, budget_bytes=3*GIB)
+        with self.assertRaises(host.NotStarted) as refused:
+            with host.admission('worker', self.env, lambda _: low, directory=self.pool,
+                                wait_secs=.05, poll_secs=.01, report=self.events.append):
+                self.fail('started')
+        self.assertEqual({key: refused.exception.memory[key] for key in ('budget_bytes', 'estimate_bytes', 'reserve_bytes')},
+                         {'budget_bytes': 3*GIB, 'estimate_bytes': host.DEFAULT_ESTIMATE_BYTES, 'reserve_bytes': 16*GIB})
 
     def test_low_budget_waits_then_admits_after_fresh_sample(self):
         snapshots = iter([dict(HIGH, budget_bytes=3*GIB), HIGH])

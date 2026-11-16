@@ -401,7 +401,7 @@ impl DirectorData {
         // Atomically load tasks + parent-child deps in a single lock hold to prevent
         // read skew where a task exists but its epic link is invisible (causes panel flicker)
         let (mut tasks, parent_child_deps, start_gated_task_ids) =
-            task_store.list_with_parent_deps_and_start_gates()?;
+            task_store.list_heads_with_parent_deps_and_start_gates()?;
         if let Some(project_id) = project_id {
             tasks.retain(|task| task_in_project(task, project_id));
         }

@@ -7,6 +7,41 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.30.0] - 2026-11-16
+
+### Fixed — Factory checks
+
+- **Shared journey stability identities** — Existing Playwright journeys can declare the expanded runtime identities of a local shared callback. The capped worker check validates those declarations against native discovery before collecting five passes with retries disabled; unknown or ambiguous bindings remain refused.
+
+### Fixed — Release
+
+- **Shipped members are no longer held as reverted** — Release closeout and task close now judge a delivery's own paths by their net effect. A change the task itself reverted, a fragment draft it rewrote, or a bundle the release rebuilt no longer reads as `RELEASE_MEMBER_REVERTED`. A delivery reverted on the target and brought back only by a sync merge is still held.
+
+### Fixed — Factory
+
+- **Adopted deliveries retain their original proof scope** — Closing a replacement worker's delivery includes a recorded predecessor imported by merge, preserving its source changes and release note after a restart.
+- **CI reminder workflow names shared by several workflows** — A `ci_completed` reminder whose workflow name matches several workflows, such as the suggested `"CI"`, binds to the workflow that ran for the commit. When the commit's runs do not single one out, the refusal lists each candidate's file path and ID.
+- **Epic retarget keeps source identity aligned** — Unchanged no-delivery lanes now rebind their recorded start to the new train with an audit; changed or mismatched sources require explicit supervisor recovery.
+
+### Changed — CI
+
+- **Bubblewrap installs only where sandbox tests run** — Build-only Linux jobs no longer install bubblewrap through the shared Rust setup, and jobs that run verifier sandbox tests install it exactly once.
+
+### Fixed — Developer tooling
+
+- **Cancelled journey runs free their server port** — The journey snapshot server exits when the Playwright runner that launched it dies. A cancelled or killed journey run no longer leaves the server listening, so the next run in the same checkout starts instead of failing EADDRINUSE.
+
+### Fixed — CI
+
+- **Lane impact no longer blames a delivery for a one-off failure** — A test that fails at the delivery but passes at its base is rerun once at the delivery: only a repeat failure is reported as caused by the delivery; otherwise it is unattributed. Both still fail the lane.
+
+### Fixed — Merge reconciliation
+
+- **Queue landings over newer target work reconcile** — when the merge queue
+  lands an approved delivery on top of other work, reconciliation keeps the
+  approval instead of holding the merge for a second review. A target change
+  to the delivered files is still refused.
+
 ## [4.29.0] - 2026-11-14
 
 ### Fixed — Factory

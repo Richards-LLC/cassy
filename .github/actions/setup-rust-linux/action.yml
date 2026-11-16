@@ -39,8 +39,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/setup-native-test-deps
-
     - name: Install dependencies
       uses: ./.github/actions/setup-linux-linker
 

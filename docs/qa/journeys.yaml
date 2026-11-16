@@ -1745,6 +1745,27 @@ bug_families:
     tasks: [cas-6c1a]
     journeys: []
     invariants: []
+  ci-reminder-shared-workflow-names:
+    title: A CI reminder's suggested workflow name is shared by several workflows and must bind to the one that ran
+    tasks: [cas-a746]
+    journeys: [FACTORY-SUPERVISE]
+  commander-machine-socket-readiness:
+    title: Commander header Live precedes the journey's machine socket observation
+    tasks: [cas-d76e]
+    journeys: [HUB-J12]
+    invariants: [HUB-J12-GOAL]
+  launch-sheet-scroll-frost:
+    # docs/qa/bug-families/launch-sheet-scroll-frost.yaml
+    title: Launch sheet footer frost follows scroll after project accounts load
+    found: cas-d76e
+    fixed_by: [cas-1a92]
+    tasks: [cas-1a92]
+    journeys: [HUB-J13]
+  send-before-session-socket:
+    title: A journey sends a supervisor message before the hub double holds the conversation's session socket
+    tasks: [cas-9d2c]
+    journeys: [HUB-J4, HUB-J22, HUB-J9]
+    invariants: [HUB-J4-IMAGE-INSPECTION, HUB-J22-GOAL, HUB-J9-GOAL]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

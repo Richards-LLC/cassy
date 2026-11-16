@@ -567,17 +567,33 @@ impl CasService {
             {
                 let project = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root).to_path_buf();
                 let lookup = selector.clone();
-                let workflow = tokio::task::spawn_blocking(move || {
+                let sha = filter["sha"].as_str().unwrap_or_default().to_string();
+                let selection = tokio::task::spawn_blocking(move || {
                     let transport = crate::ui::factory::daemon::runtime::ci_watch::GhCiTransport::from_project(&project)?;
-                    transport.resolve_workflow(&lookup)
+                    transport.resolve_workflow(&lookup, &sha)
                 }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                         format!("Cannot resolve CI workflow: {error}")))?;
-                let workflow = workflow.ok_or_else(|| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: format!("Unknown or ambiguous workflow selector {selector:?}; use an exact workflow name, file path or numeric ID").into(),
-                    data: Some(serde_json::json!({"error_code": "workflow_selector_invalid", "workflow": selector})),
-                })?;
+                use crate::ui::factory::daemon::runtime::ci_watch::WorkflowSelection;
+                let workflow = match selection {
+                    WorkflowSelection::Resolved(id) => id,
+                    WorkflowSelection::Unknown => return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: format!("Unknown workflow selector {selector:?}; use an exact workflow name, file path or numeric ID").into(),
+                        data: Some(serde_json::json!({"error_code": "workflow_selector_invalid", "workflow": selector})),
+                    }),
+                    WorkflowSelection::Ambiguous(candidates) => {
+                        let listed: Vec<String> = candidates.iter().map(|(id, path)| format!("{path} ({id})")).collect();
+                        return Err(McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: format!("Workflow selector {selector:?} matches {} workflows and this commit's runs do not single one out: {}; use one file path or numeric ID", candidates.len(), listed.join(", ")).into(),
+                            data: Some(serde_json::json!({
+                                "error_code": "workflow_selector_ambiguous", "workflow": selector,
+                                "candidates": candidates.iter().map(|(id, path)| serde_json::json!({"id": id, "path": path})).collect::<Vec<_>>(),
+                            })),
+                        });
+                    }
+                };
                 filter["workflow"] = workflow.to_string().into();
             }
 
@@ -969,10 +985,10 @@ mod tests {
             "remind_filter": serde_json::json!({"sha": sha, "workflow": selector}).to_string(),
         })).unwrap();
         let reminders = crate::store::open_reminder_store(&cas_root).unwrap();
-        for selector in ["CI", "missing.yml"] {
+        for (selector, code) in [("CI", "workflow_selector_ambiguous"), ("missing.yml", "workflow_selector_invalid")] {
             let error = service.factory_remind(request(selector)).await.unwrap_err();
             assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-            assert_eq!(error.data.unwrap()["error_code"], "workflow_selector_invalid");
+            assert_eq!(error.data.unwrap()["error_code"], code);
             assert!(reminders.list_pending_for_target(&agent.id).unwrap().is_empty());
         }
         for selector in ["Pull request CI", "ci.yml", "17"] {
@@ -993,6 +1009,20 @@ mod tests {
             let completed = ci_completed_runs(&transport, &condition).unwrap().unwrap();
             assert_eq!(completed.iter().map(|run| run.id).collect::<Vec<_>>(), vec![101]);
         }
+        // cas-a746: the refusal's own example selector resolves once the
+        // commit has a run under that name, binding the workflow that ran.
+        let example: serde_json::Value = serde_json::from_str(
+            super::external_filter_spec("ci_completed").unwrap().example).unwrap();
+        let mut with_lane = runs("completed");
+        with_lane["workflow_runs"].as_array_mut().unwrap().push(serde_json::json!(
+            {"id": 103, "workflow_id": 19, "name": "CI", "head_branch": "main", "head_sha": sha,
+             "html_url": "https://github.test/runs/103", "status": "completed",
+             "conclusion": "success", "event": "push"}));
+        std::fs::write(temp.path().join("runs.json"), with_lane.to_string()).unwrap();
+        service.factory_remind(request(example["workflow"].as_str().unwrap())).await.unwrap();
+        let bound: Vec<_> = reminders.list_pending_for_target(&agent.id).unwrap().into_iter()
+            .map(|reminder| reminder.trigger_filter.unwrap()["workflow"].clone()).collect();
+        assert!(bound.contains(&serde_json::json!("19")), "{bound:?}");
     }
 
     #[tokio::test(flavor = "current_thread")]

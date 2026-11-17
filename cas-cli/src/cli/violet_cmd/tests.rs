@@ -1570,12 +1570,17 @@ fn explicit_managed_reply_fields_reach_violet_cas_e3beb() {
     assert_eq!(calls[0], ("violet_post".into(), json!({"kind":"message","channel":"dev",
         "reply_to":root,"text":"update","coordination_operation_id":operation,
         "expected_generation":7,"request_id":request})));
-    // An explicit stale intent cannot override the journal's current authority.
+    // Explicit caller fields reach Violet unchanged; its existing generation check decides.
     let stale = json!({"coordination_operation_id":operation,"expected_generation":8});
-    let denied = ScriptedHub::default();
+    let denied = ScriptedHub::with(vec![json!({"ok":false,"error":{
+        "code":"stale_generation","message":"claim changed","retryable":false}})]);
     assert_eq!(run_cli_claimed(&argv, &denied, true, &no_gate, Some(stale)).1.unwrap_err().code,
-        "reply_intent_mismatch");
-    assert_eq!(denied.connects(), 0);
+        "stale_generation");
+    assert_eq!(denied.calls(), calls);
+    // A directly supplied intent can also be forwarded when no local thread is known.
+    let hub = ScriptedHub::with(vec![json!({"ok":true})]);
+    run_cli(&argv, &hub, true, &no_gate).1.unwrap();
+    assert_eq!(hub.calls(), calls);
 }
 
 #[test]

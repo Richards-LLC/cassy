@@ -377,29 +377,25 @@ function fakeScript(t, body) {
   t.after(() => { process.env.PATH = original; });
 }
 
-for (const [name, body] of [
-  ["unsupported script", 'printf "script: unsupported option\\n" >&2; exit 1'],
-  ["silent successful script", "exit 0"],
-  ["script that only prints its own error", 'printf "script runner failed\\n"; exit 1'],
-]) {
-  const unavailable = async (t) => {
-    fakeScript(t, body);
-    const out = tmpOut(t);
-    fs.writeFileSync(path.join(out, "report.md"), "terminal-qa: PASS stale\n");
-    fs.writeFileSync(path.join(out, "report.json"), '{"verdict":"PASS"}');
-    await assert.rejects(
-      runTerminalQa({ command: [process.execPath, "-e", 'console.log("healthy")'], out }),
-      (err) => err instanceof UsageError,
-    );
-    assert.ok(!fs.existsSync(path.join(out, "report.md")));
-    assert.ok(!fs.existsSync(path.join(out, "report.json")));
-    const cli = spawnSync(process.execPath, [script, "--out", out, "--", process.execPath, "-e", 'console.log("healthy")'], { encoding: "utf8" });
-    assert.equal(cli.status, 2, cli.stderr + cli.stdout);
-    assert.doesNotMatch(cli.stdout, /terminal-qa: PASS/);
-  };
-  // cas-stability-identities: ["unsupported script is unavailable and cannot retain a stale PASS", "silent successful script is unavailable and cannot retain a stale PASS", "script that only prints its own error is unavailable and cannot retain a stale PASS"]
-  test(`${name} is unavailable and cannot retain a stale PASS`, unavailable);
-}
+// A runner that cannot produce a fresh verdict must not leave a stale PASS behind.
+const unavailable = (body) => async (t) => {
+  fakeScript(t, body);
+  const out = tmpOut(t);
+  fs.writeFileSync(path.join(out, "report.md"), "terminal-qa: PASS stale\n");
+  fs.writeFileSync(path.join(out, "report.json"), '{"verdict":"PASS"}');
+  await assert.rejects(
+    runTerminalQa({ command: [process.execPath, "-e", 'console.log("healthy")'], out }),
+    (err) => err instanceof UsageError,
+  );
+  assert.ok(!fs.existsSync(path.join(out, "report.md")));
+  assert.ok(!fs.existsSync(path.join(out, "report.json")));
+  const cli = spawnSync(process.execPath, [script, "--out", out, "--", process.execPath, "-e", 'console.log("healthy")'], { encoding: "utf8" });
+  assert.equal(cli.status, 2, cli.stderr + cli.stdout);
+  assert.doesNotMatch(cli.stdout, /terminal-qa: PASS/);
+};
+test("unsupported script is unavailable and cannot retain a stale PASS", unavailable('printf "script: unsupported option\\n" >&2; exit 1'));
+test("silent successful script is unavailable and cannot retain a stale PASS", unavailable("exit 0"));
+test("script that only prints its own error is unavailable and cannot retain a stale PASS", unavailable('printf "script runner failed\\n"; exit 1'));
 
 test("an unavailable runner through a symlink exits nonzero and removes stale PASS", (t) => {
   fakeScript(t, 'printf "script runner failed\\n" >&2; exit 1');

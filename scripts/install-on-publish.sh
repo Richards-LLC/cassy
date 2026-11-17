@@ -30,6 +30,7 @@
 # GH_BIN (gh), XDG_STATE_HOME, RELEASE_INSTALL_NOW (epoch, tests),
 # RELEASE_INSTALL_HOST (host label in the notes; default hostname -s),
 # RELEASE_NOTICE_TIMEOUT_SECONDS (notice deadline; default 45),
+# RELEASE_PUBLISH_TIMEOUT_SECONDS (publish reconciliation deadline; default 900),
 # RELEASE_NOTICE_MAX_ATTEMPTS (installed notice attempt cap; default 10).
 set -euo pipefail
 
@@ -50,6 +51,9 @@ state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/cassy"
 state_file="$state_dir/install-on-publish.last-failure"
 retry_seconds="${RELEASE_INSTALL_RETRY_SECONDS:-600}"
 notice_timeout="${RELEASE_NOTICE_TIMEOUT_SECONDS:-45}"
+# The first closeout of a release measured 3 min on soundwave (GH #2030); a
+# later trigger reuses it, so only this one-time pass needs the longer bound.
+publish_timeout="${RELEASE_PUBLISH_TIMEOUT_SECONDS:-900}"
 notice_max_attempts="${RELEASE_NOTICE_MAX_ATTEMPTS:-10}"
 pending_dir="$state_dir/install-on-publish.pending.d"
 notified_dir="$state_dir/install-on-publish.notified.d"
@@ -240,9 +244,10 @@ preserve_pending() {
 # Bound the entire adapter, including startup, SQLite and close gates. Kill
 # descendants too: bounded Git probes can own separate process groups.
 deliver_notice() {
-    local phase="$1" receipt="$2"
+    local phase="$1" receipt="$2" deadline="$notice_timeout"
     shift 2
-    [[ "$notice_timeout" =~ ^[1-9][0-9]*$ ]] || { log "invalid notice timeout: $notice_timeout"; return 1; }
+    [[ "$phase" != published ]] || deadline="$publish_timeout"
+    [[ "$deadline" =~ ^[1-9][0-9]*$ ]] || { log "invalid $phase timeout: $deadline"; return 1; }
     perl -MPOSIX=setpgid -e '
         my $seconds = shift @ARGV;
         my $pid = fork(); defined $pid or die "fork: $!\n";
@@ -279,7 +284,7 @@ deliver_notice() {
         my $status = $?;
         alarm 0;
         exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
-    ' "$notice_timeout" "$cas_bin" release "$phase" --receipt "$receipt" --repo "$repo" "$@"
+    ' "$deadline" "$cas_bin" release "$phase" --receipt "$receipt" --repo "$repo" "$@"
 }
 
 # Reconcile only after version verification, using the same adapter deadline.
@@ -450,6 +455,6 @@ case "${1:---once}" in
         fi
         run_once
         ;;
-    -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//' ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) printf 'usage: %s [--install | --uninstall | --once]\n' "$0" >&2; exit 2 ;;
 esac

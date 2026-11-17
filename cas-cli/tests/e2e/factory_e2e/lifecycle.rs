@@ -8,11 +8,11 @@
 //! These tests require tmux (to avoid CLAUDECODE env var conflict):
 //! ```bash
 //! cargo test --test e2e_test factory_e2e::lifecycle \
-//!     --features claude_rs_e2e -- --ignored --nocapture
+//!     --features claude_e2e -- --ignored --nocapture
 //! ```
 
 use crate::fixtures::HookTestEnv;
-use claude_rs::{Message, QueryOptions, session};
+use cas_claude::{Message, QueryOptions, session};
 
 // =============================================================================
 // Helpers

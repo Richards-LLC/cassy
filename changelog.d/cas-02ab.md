@@ -1,0 +1,3 @@
+### Fixed — CI
+
+- **A wedged lane compile fails fast with its phase named and reruns once** — Was: when a hosted runner's compile wedged in the lane's own-tests step, the job printed only compiler warnings for 55 minutes, past its 45-minute limit, and ended "cancelled" (exit 143) with no log kept and no hint of where it stopped; a person had to rerun it. Now: the step has its own 25-minute deadline (green runs took at most 19.1 minutes). Every 3 minutes it prints the live cargo/rustc/linker phase and free memory, and keeps those lines in the uploaded evidence. At the deadline it fails with a named error giving the last phase, then reruns the step once. Only the deadline triggers the rerun; an ordinary test or build failure is reported as before.

@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 
 use super::{CasService, mutation_receipt::Receipt};
@@ -59,7 +59,7 @@ impl MergeReceipt {
         let committed = receipt.commit.get();
         let outcome = if committed.is_some() { "COMMITTED" } else { "IN_PROGRESS" };
         let state = if committed.is_some() { "merged" } else { "preparing" };
-        let mut answer = CallToolResult::success(vec![Content::text(format!(
+        let mut answer = CallToolResult::success(vec![ContentBlock::text(format!(
             "{outcome}: merge {state}. {}Receipt: {}. Work continues in the background; a supervisor notice reports the outcome. Do not retry.",
             committed.map(|commit| format!("{}; ", commit.description)).unwrap_or_default(), self.path.display()))]);
         answer.structured_content = Some(json!({"mutation_outcome":outcome, "state":state,

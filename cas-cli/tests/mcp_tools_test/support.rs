@@ -163,8 +163,8 @@ pub(crate) fn extract_text(result: rmcp::model::CallToolResult) -> String {
     result
         .content
         .into_iter()
-        .filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text),
+        .filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text),
             _ => None,
         })
         .collect::<Vec<_>>()

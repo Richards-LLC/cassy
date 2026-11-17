@@ -15,6 +15,38 @@ pub(crate) fn directory(root: &Path, train: &str) -> Result<PathBuf> {
     )
 }
 
+/// Cut refusals `release.sh` records as a release red (GH #2027).
+pub(crate) const RELEASE_RED_GATES: &[&str] = &["ZERO_WOULD_CLOSE", "REVIEW_MISSING", "LANE_CI_MISSING"];
+const RELEASE_RED: &str = "release-red.json";
+
+/// A Cassy gate refused the cut of `head`, a green tip of `train`'s `branch`:
+/// the train is red for release, so G-100 admits a `release-repair` merge.
+/// It never holds train_merge (G-114 reads only the suite receipt).
+pub(crate) fn record_release_red(root: &Path, train: &str, branch: &str, head: &str, gate: &str) -> Result<PathBuf> {
+    ensure!(RELEASE_RED_GATES.contains(&gate), "unknown cut refusal {gate}; expected one of {}", RELEASE_RED_GATES.join(", "));
+    ensure!(head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit()), "commit must be a full SHA");
+    let task = crate::store::open_task_store(root)?.get(train)?;
+    ensure!(
+        crate::mcp::tools::core::task::release_train::is_release_train(&task)
+            && task.effective_epic_branch() == Some(branch),
+        "{train} is not the release train of {branch}"
+    );
+    let dir = directory(root, train)?;
+    std::fs::create_dir_all(&dir)?;
+    let receipt = serde_json::json!({
+        "branch": branch, "head": head, "gate": gate, "recorded_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let path = dir.join(RELEASE_RED);
+    crate::cli::integrate::fs::atomic_write(&path, &serde_json::to_string_pretty(&receipt)?)?;
+    Ok(path)
+}
+
+/// The latest recorded cut refusal of `train`, if any.
+pub(crate) fn release_red(root: &Path, train: &str) -> Option<Value> {
+    let bytes = std::fs::read(directory(root, train).ok()?.join(RELEASE_RED)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// A known red holds an existing queue even while its repair's tip is pending.
 /// An override belongs to one observed red run, never to a future failure.
 // gate[G-114 train-merge as-of]: Train suite red hold

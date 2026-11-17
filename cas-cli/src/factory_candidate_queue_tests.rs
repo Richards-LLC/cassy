@@ -7,7 +7,7 @@ use std::process::Command;
 
 use cas_mcp::types::CoordinationRequest;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::RawContent;
+use rmcp::model::ContentBlock;
 use tempfile::TempDir;
 
 use super::*;
@@ -156,8 +156,8 @@ impl Fixture {
             Ok(result) => result
                 .content
                 .iter()
-                .filter_map(|content| match &content.raw {
-                    RawContent::Text(text) => Some(text.text.clone()),
+                .filter_map(|content| match content {
+                    ContentBlock::Text(text) => Some(text.text.clone()),
                     _ => None,
                 })
                 .collect(),

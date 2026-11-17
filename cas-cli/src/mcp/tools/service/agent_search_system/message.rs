@@ -1270,6 +1270,9 @@ impl CasService {
                 )
                 .await?
         {
+            if req.merge_request.unwrap_or(false) && let Some(task) = req.task_id.as_deref() {
+                crate::factory_delivery_wake::arm_task_id(&self.inner.cas_root, task, &source);
+            }
             return Ok(sent);
         }
 
@@ -2450,7 +2453,7 @@ impl CasService {
                         task.delivery_mode,
                     ) {
                         Ok(fresh) => fresh,
-                        Err(message) => return Ok(CallToolResult::error(vec![Content::text(message)])),
+                        Err(message) => return Ok(CallToolResult::error(vec![ContentBlock::text(message)])),
                     }
                 } else { true };
                 let branch = if !source_is_fresh {
@@ -3263,6 +3266,9 @@ impl CasService {
             };
 
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
+        if req.merge_request.unwrap_or(false) && let Some(task) = req.task_id.as_deref() {
+            crate::factory_delivery_wake::arm_task_id(&self.inner.cas_root, task, &source);
+        }
         // cas-fc42: a worker's typed ready message is its completion claim;
         // record it on its own task, where the director reads readiness.
         if let (false, Some(contract), Some(task_id), Some(sender)) = (
@@ -3738,7 +3744,7 @@ impl CasService {
             result.structured_content = Some(serde_json::json!({
                 "respawn_queued": queued, "cooldown_seconds": 600, "notification_id": message_id,
             }));
-            result.content.push(rmcp::model::Content::text(if queued {
+            result.content.push(rmcp::model::ContentBlock::text(if queued {
                 "Context respawn queued with the recorded recipe and task bindings."
             } else {
                 "No additional recycle queued: the ten-minute cooldown or another request is active."
@@ -5783,7 +5789,7 @@ mod cas_89e1_post_merge_message_type_tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
     use cas_types::{Agent, AgentRole, Task, TaskStatus, WorkTarget};
-    use rmcp::model::RawContent;
+    use rmcp::model::ContentBlock;
     use std::path::Path;
     use std::process::Command;
 
@@ -5952,8 +5958,8 @@ mod cas_89e1_post_merge_message_type_tests {
         result
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()

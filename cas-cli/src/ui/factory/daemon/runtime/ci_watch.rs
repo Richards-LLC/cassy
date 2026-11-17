@@ -276,6 +276,7 @@ impl CiWake {
             "workflow": self.condition.workflow,
             "outcome": ci_outcome(&self.runs),
             "runs": self.runs.iter().map(|run| serde_json::json!({
+                "id": run.id, "attempt": run.run_attempt,
                 "name": run.name, "conclusion": run.conclusion, "url": run.html_url,
             })).collect::<Vec<_>>(),
         })
@@ -294,6 +295,8 @@ impl CiWake {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CiRun {
     pub id: u64,
+    #[serde(default = "first_attempt")]
+    pub run_attempt: u64,
     #[serde(default)]
     pub workflow_id: Option<u64>,
     #[serde(default)]
@@ -310,6 +313,53 @@ pub(crate) struct CiRun {
     /// The run's check suite; its jobs are the check-runs that carry this id.
     #[serde(default)]
     pub check_suite_id: Option<u64>,
+}
+
+fn first_attempt() -> u64 { 1 }
+
+/// Re-arm on a new GitHub run/attempt, including a rerun that completed
+/// between polls. Fired rows are durable observation receipts, not a SHA ban.
+pub(crate) fn delivery_ci_rearms(
+    root: &Path, session: &str, transport: &impl CiTransport,
+) -> Result<Vec<(cas_types::Agent, String, serde_json::Value)>, CiWatchError> {
+    let probe = || -> anyhow::Result<Vec<(cas_types::Agent, String, serde_json::Value)>> {
+        let mut rearms = Vec::new();
+        let tasks = crate::store::open_task_store_local(root)?;
+        let reminders = crate::store::open_reminder_store(root)?;
+        for task in tasks.list(Some(cas_types::TaskStatus::AwaitingMerge))? {
+            let Some(sha) = task.deliverables.factory_branch_anchor.as_deref() else { continue };
+            let Some(owner) = crate::factory_delivery_wake::owner(root, &task, "")? else { continue };
+            if owner.factory_session.as_deref() != Some(session) { continue; }
+            let rows = reminders.list_for_task(&task.id)?;
+            let ours = |row: &&cas_store::Reminder| row.owner_id == owner.id
+                && row.trigger_event.as_deref() == Some("ci_completed")
+                && row.trigger_filter.as_ref().is_some_and(|filter| filter["delivery_wake"] == true)
+                && row.trigger_filter.as_ref().and_then(|filter| filter.get("sha")).and_then(serde_json::Value::as_str) == Some(sha);
+            if rows.iter().filter(ours).any(|row| row.status == cas_store::ReminderStatus::Pending) { continue; }
+            let Some(fired) = rows.iter().filter(ours).rev()
+                .find(|row| row.status == cas_store::ReminderStatus::Fired) else { continue };
+            let filter = fired.trigger_filter.as_ref().expect("filtered CI condition");
+            let condition = parse_ci_completed(filter).map_err(anyhow::Error::msg)?;
+            let runs: Vec<_> = transport.runs_for_sha(sha).map_err(|error| anyhow::anyhow!("{error}"))?.into_iter().filter(|run| {
+                condition.workflow.as_ref().is_none_or(|workflow| match workflow.parse::<u64>() {
+                    Ok(id) => run.workflow_id == Some(id), Err(_) => run.name == *workflow,
+                })
+            }).collect();
+            let known: BTreeSet<_> = fired.fired_event.as_ref()
+                .and_then(|event| event.pointer("/data/runs")).and_then(serde_json::Value::as_array)
+                .into_iter().flatten().filter_map(|run| Some((run["id"].as_u64()?, run["attempt"].as_u64()?))).collect();
+            let changed = if known.is_empty() {
+                runs.iter().any(|run| run.status != "completed")
+            } else {
+                runs.iter().any(|run| !known.contains(&(run.id, run.run_attempt)))
+            };
+            if changed {
+                rearms.push((owner, task.id, filter.clone()));
+            }
+        }
+        Ok(rearms)
+    };
+    probe().map_err(|error| CiWatchError::Unavailable(error.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,6 +538,7 @@ pub(crate) enum ExternalWakeCondition {
 pub(crate) struct ExternalWakeObservation {
     pub(crate) compared_ref: String,
     pub(crate) compared_sha: String,
+    pub(crate) landed_sha: Option<String>,
 }
 
 impl ExternalWakeCondition {
@@ -820,13 +871,29 @@ where
                 Ok(contained.then(|| ExternalWakeObservation {
                     compared_ref: format!("refs/remotes/origin/{target_branch}"),
                     compared_sha,
+                    landed_sha: None,
                 }))
             }
             ExternalWakeCondition::TagExists { tag } => Ok(Some(ExternalWakeObservation {
                 compared_ref: format!("refs/tags/{tag}"),
                 compared_sha,
+                landed_sha: None,
             })),
         }
+    }
+
+    /// First appearance of a delivery on the target's first-parent history,
+    /// rather than a later target tip observed by the completion scan.
+    pub(crate) fn delivery_landing(&mut self, commit: &str, target: &str) -> Result<String, CiWatchError> {
+        let source = self.resolve_commit(commit)?.ok_or_else(|| CiWatchError::Unavailable("delivery commit unavailable".into()))?;
+        if source == target { return Ok(source); }
+        let output = self.git(&["rev-list", "--first-parent", "--reverse",
+            "--ancestry-path", &format!("{source}..{target}")])?;
+        let candidate = output.stdout.lines().next().filter(|_| output.success)
+            .ok_or_else(|| CiWatchError::Unavailable("delivery landing unavailable".into()))?.trim().to_string();
+        if self.resolve_commit(&format!("{candidate}^1"))?.as_deref() == Some(source.as_str()) {
+            Ok(source)
+        } else { Ok(candidate) }
     }
 
     /// Each remote read this probe made, and whether it failed (a fetch or
@@ -1334,6 +1401,7 @@ pub(crate) struct GithubPoll {
     pub ejections: Vec<(MergeQueueEjection, Option<String>, bool)>,
     pub delivery_pr_observations: Vec<DeliveryPrObservation>,
     pub ci_wakes: (Vec<CiWake>, bool),
+    pub ci_rearms: Vec<(cas_types::Agent, String, serde_json::Value)>,
 }
 
 /// cas-c24e: the daemon's poll and `cas factory ci-watch-dry-run` share this
@@ -1351,8 +1419,9 @@ pub(crate) fn read_github(
     let deliveries = super::merge_queue_ejection::awaiting_merge_deliveries(cas_dir);
     let supervisor_prs = super::merge_queue_ejection::supervisor_prs(cas_dir);
     let transport = GhCiTransport::from_project(project)?;
+    let ci_rearms = delivery_ci_rearms(cas_dir, session_name, &transport)?;
     let candidates = super::queue_and_events::ci_completed_candidates(cas_dir, session_name);
-    let ci_wakes = (collect_ci_wakes(&transport, &candidates), !candidates.is_empty());
+    let ci_wakes = (collect_ci_wakes(&transport, &candidates), !candidates.is_empty() || !ci_rearms.is_empty());
     let failures = mark_merged_failures(project, collect_failures(&transport, watched_branches)?);
     let mut queue_poll = collect_tracked_merge_queue_ejections(
         &transport,
@@ -1398,7 +1467,7 @@ pub(crate) fn read_github(
             }
         }
     }
-    Ok(GithubPoll { failures, queue_poll, ejections, delivery_pr_observations, ci_wakes })
+    Ok(GithubPoll { failures, queue_poll, ejections, delivery_pr_observations, ci_wakes, ci_rearms })
 }
 
 /// cas-e369: as above, also tracking supervisor-owned epic PRs. An epic PR
@@ -1887,6 +1956,78 @@ mod tests {
         assert!(runs.iter().any(|run| run.event == "merge_group"));
     }
 
+    #[test]
+    fn same_sha_rerun_arms_a_new_completion_once_cas_f16b() {
+        use super::super::queue_and_events::{self, ReminderTriggerContext};
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let mut owner = cas_types::Agent::new_with_role("rerun-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("rerun-session".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let mut task = cas_types::Task::new("cas-f16b-rerun".into(), "CI retry".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some(owner.id.clone());
+        task.deliverables.factory_branch_anchor = Some(FIXTURE_SHA.into());
+        task.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() });
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        crate::factory_delivery_wake::arm_task(&root, &task, &owner.id).unwrap();
+        let reminders = crate::store::open_reminder_store(&root).unwrap();
+        let prompts = crate::store::open_prompt_queue_store(&root).unwrap();
+        let records = crate::store::open_supervisor_queue_store(&root).unwrap();
+        let names = std::collections::HashMap::from([(owner.id.clone(), owner.name.clone())]);
+        let fire = |transport: &FakeTransport| {
+            let candidates = queue_and_events::ci_completed_candidates(&root, "rerun-session");
+            let wakes = collect_ci_wakes(transport, &candidates);
+            assert_eq!(wakes.len(), 1);
+            for _ in 0..2 {
+                let wake = &wakes[0];
+                queue_and_events::fire_reminder(&wake.reminder, &reminders, &Some(records.clone()), &Some(prompts.clone()),
+                    "rerun-session", "supervisor", &names, Some(&ReminderTriggerContext::ci(wake)), &root);
+            }
+        };
+        let mut transport = recorded_runs("completed", Some("success"));
+        // The fixture also has a default-branch push at the same SHA.
+        transport.runs.retain(|run| run.id == 38603274883);
+        assert_eq!(transport.runs.len(), 1);
+        fire(&transport);
+        reminders.create_with_scope(&owner.id, None, "unrelated workflow", cas_store::ReminderTriggerType::Event,
+            None, Some("ci_completed"), Some(&serde_json::json!({"sha": FIXTURE_SHA, "workflow": "Release"})),
+            0, Some("rerun-session"), None, true, Some(&task.id)).unwrap();
+        for (attempt, status) in [(2, "in_progress"), (3, "completed")] {
+            assert!(delivery_ci_rearms(&root, "rerun-session", &transport).unwrap().is_empty());
+            transport.runs[0].run_attempt = attempt;
+            transport.runs[0].status = status.into();
+            let rearms = delivery_ci_rearms(&root, "rerun-session", &transport).unwrap();
+            assert_eq!(rearms.len(), 1);
+            if attempt == 2 {
+                crate::factory_ci_retry::arm(&root, &crate::factory_ci_retry::Retry {
+                    task: task.id.clone(), worktree: "worker".into(), branch: "factory/worker".into(),
+                    sha: FIXTURE_SHA.into(), ci_sha: FIXTURE_SHA.into(), target: "main".into(),
+                    repo: project.clone(), supervisor: owner.id.clone(), session: "rerun-session".into(),
+                    force: false, allow_trunk: false, cleanup: None, armed_at: Some(chrono::Utc::now()),
+                }).unwrap();
+            }
+            for _ in 0..2 {
+                let (supervisor, id, filter) = &rearms[0];
+                crate::factory_delivery_wake::arm_event(&root, supervisor, id, "ci_completed", filter, true).unwrap();
+            }
+            assert!(delivery_ci_rearms(&root, "rerun-session", &transport).unwrap().is_empty());
+            if status == "in_progress" {
+                let candidates = queue_and_events::ci_completed_candidates(&root, "rerun-session");
+                assert!(collect_ci_wakes(&transport, &candidates).is_empty());
+            }
+            transport.runs[0].status = "completed".into();
+            fire(&transport);
+        }
+        let history = reminders.list_for_task(&task.id).unwrap();
+        let fired: Vec<_> = history.iter().filter(|row| row.status == cas_store::ReminderStatus::Fired).collect();
+        assert_eq!(fired.len(), 3);
+        assert_eq!(fired.iter().map(|row| row.fired_event.as_ref().unwrap()["data"]["runs"][0]["attempt"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(prompts.peek_all(20).unwrap().len(), 3);
+    }
+
     /// cas-e845 / cas-ae6a: `ci_completed` waits only while a check-run of the
     /// selected runs is still running. A check cancelled with no rerun at the
     /// SHA, or any failed check, settles the wake. Driven through the real
@@ -1998,6 +2139,7 @@ mod tests {
     fn run_with(branch: &str, head_sha: &str, id: u64, conclusion: Option<&str>) -> CiRun {
         CiRun {
             id,
+            run_attempt: 1,
             workflow_id: None,
             created_at: None,
             name: "CI".to_string(),

@@ -13216,7 +13216,7 @@ pub(super) fn ci_completed_candidates(
 /// reminder to fire. Its context is included in the durable payload and
 /// delivered prompt so the recipient knows what happened.
 #[derive(Clone)]
-pub(super) struct ReminderTriggerContext {
+pub(crate) struct ReminderTriggerContext {
     event_type: String,
     data: serde_json::Value,
     description: String,
@@ -13252,7 +13252,7 @@ impl ReminderTriggerContext {
         })
     }
 
-    fn ci(wake: &super::ci_watch::CiWake) -> Self {
+    pub(crate) fn ci(wake: &super::ci_watch::CiWake) -> Self {
         Self {
             event_type: super::ci_watch::EXTERNAL_CI_COMPLETED_EVENT.to_string(),
             data: wake.to_json(),
@@ -13260,14 +13260,20 @@ impl ReminderTriggerContext {
         }
     }
 
-    fn external(
+    pub(crate) fn external(
         condition: &super::ci_watch::ExternalWakeCondition,
         observation: &super::ci_watch::ExternalWakeObservation,
     ) -> Self {
+        let mut data = condition.to_json();
+        let mut description = condition.description_with_observation(observation);
+        if let Some(sha) = &observation.landed_sha {
+            data["landed_sha"] = sha.clone().into();
+            description.push_str(&format!("; delivery landed at {sha}"));
+        }
         Self {
             event_type: condition.event_type().to_string(),
-            data: condition.to_json(),
-            description: condition.description_with_observation(observation),
+            data,
+            description,
         }
     }
 }
@@ -13646,7 +13652,7 @@ fn run_reminder_scan(scan: ReminderScanInput) {
     }
 }
 
-pub(super) fn fire_reminder(
+pub(crate) fn fire_reminder(
     reminder: &cas_store::Reminder,
     reminder_store: &std::sync::Arc<dyn cas_store::ReminderStore>,
     supervisor_queue: &Option<std::sync::Arc<dyn cas_store::SupervisorQueueStore>>,
@@ -14903,6 +14909,7 @@ mod tests {
             &super::super::ci_watch::ExternalWakeObservation {
                 compared_ref: "refs/tags/v9.99.0".to_string(),
                 compared_sha: "0123456789012345678901234567890123456789".to_string(),
+                landed_sha: None,
             },
         );
         let supervisor = Some(Arc::clone(&supervisor_store));

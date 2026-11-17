@@ -1970,7 +1970,7 @@ async fn generate_session_summary_async(
     observations: &[&Entry],
 ) -> Result<SessionSummary, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
-    use claude_rs::QueryOptions;
+    use cas_claude::QueryOptions;
 
     // Build prompt from observations
     let obs_text: String = observations
@@ -2054,7 +2054,7 @@ pub fn generate_session_title_sync(observations: &[&Entry]) -> Result<String, Me
 /// Generate a concise session title using AI
 async fn generate_session_title_async(observations: &[&Entry]) -> Result<String, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
-    use claude_rs::QueryOptions;
+    use cas_claude::QueryOptions;
 
     if observations.is_empty() {
         return Ok("Empty session".to_string());
@@ -2146,7 +2146,7 @@ async fn extract_learnings_async(
     file_paths: &[String],
 ) -> Result<Vec<ExtractedLearning>, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
-    use claude_rs::QueryOptions;
+    use cas_claude::QueryOptions;
 
     // Read the transcript file
     let transcript = std::fs::read_to_string(transcript_path)
@@ -2570,7 +2570,7 @@ async fn session_learn_async(
     existing: &[(String, String)],
 ) -> Result<Vec<SessionLearnDraft>, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
-    use claude_rs::QueryOptions;
+    use cas_claude::QueryOptions;
 
     // Skip trivial transcripts.
     if transcript.len() < 500 {

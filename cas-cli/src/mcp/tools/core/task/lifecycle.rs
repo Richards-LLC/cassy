@@ -74,6 +74,7 @@ fn publish_delivery_base(repo: &std::path::Path, branch: &str, base_sha: &str) {
 
 #[cfg(test)]
 mod gate_error_tests;
+#[cfg(test)] mod source_claim_tests;
 pub(crate) mod proof_scope;
 mod qa_dispatch;
 pub(crate) mod qa_impact;
@@ -4326,8 +4327,8 @@ mod related_recall_response_tests {
         result
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()

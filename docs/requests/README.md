@@ -41,7 +41,7 @@ exists; it is not authorization to create a new outbound request file.
 
 2. Read `issues.repo`. If it is unset, do not guess a destination; preserve and commit the staging file as described below.
 
-3. If `gh` is installed and `gh auth status` succeeds, file the staged report:
+3. If `gh` is installed and `gh auth status` succeeds, find or file the staged report: search open issues and tasks first (`gh issue list --repo "$issues_repo" --state open --search "<wrong output>"`), and on a match comment the report there with +1 instead of filing. Only when nothing matches:
 
    ```sh
    issues_repo="$(cas config get issues.repo)"

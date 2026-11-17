@@ -199,7 +199,7 @@ pub(crate) fn live(repo: &Path, head: &str, paths: &[String]) -> Result<BTreeSet
     Ok(inventory(repo, head, paths)?.into_iter().map(|test| test.identity).collect())
 }
 
-fn filter_matches(filter: &str, name: &str) -> bool {
+pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
     filter.split('|').any(|union| union.split('&').all(|intersection| {
         let value = intersection.trim().trim_start_matches("test(").trim_end_matches(')');
         value.strip_prefix('=').map_or_else(|| name.contains(value), |exact| name == exact)

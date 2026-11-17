@@ -10,8 +10,8 @@ pub(super) fn register_accounts(registry: &mut ConfigRegistry) {
     });
     registry.register(ConfigMeta {
         key: "accounts.selection", section: "accounts", name: "Account selection",
-        description: "Recommend the soonest weekly reset (within 24h prefer headroom), or the most weekly then 5h headroom. Manual choices and explicit directories always win.",
-        value_type: ConfigType::String, default: "soonest-reset",
+        description: "Recommend the most headroom on the binding (fuller) weekly or 5h window, ties by earliest reset; or the soonest weekly reset (within 24h prefer headroom). Manual choices and explicit directories always win.",
+        value_type: ConfigType::String, default: "most-headroom",
         constraint: Constraint::OneOf(vec!["soonest-reset".into(), "most-headroom".into()]),
         advanced: false, requires_feature: None, keywords: &["account", "recommend", "reset", "headroom", "claude", "codex"],
         use_cases: &["Choose a subscription for interactive launches and workers"],

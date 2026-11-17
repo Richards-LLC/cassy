@@ -162,6 +162,6 @@ fn tagged_codes(text: &str, prefix: &str) -> Vec<&'static str> {
 pub(crate) fn append_override_tags(result: &mut rmcp::model::CallToolResult, codes: &[&'static str]) {
     if result.is_error != Some(true) && !codes.is_empty() {
         let text = codes.iter().fold(String::new(), |text, code| override_tag(code, text));
-        result.content.push(rmcp::model::Content::text(text));
+        result.content.push(rmcp::model::ContentBlock::text(text));
     }
 }

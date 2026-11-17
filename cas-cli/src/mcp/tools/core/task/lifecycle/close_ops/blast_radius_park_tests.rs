@@ -38,8 +38,8 @@ async fn call(service: &CasService, request: serde_json::Value) -> String {
         Ok(result) => result
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -1016,6 +1016,9 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
     // The same approval does not waive fresh receipt-scope checks at close.
     std::fs::remove_dir_all(f.cas_dir().join("worker-checks")).unwrap();
+    let mut unproven = f.task();
+    unproven.deliverables.test_receipts.clear();
+    tasks.update(&unproven).unwrap();
     // Publication continues the same verdict close, including its hold restoration.
     let first = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await.receipt(ID);
     // pin: preserve the worker receipt-scope refusal after the review moved before publication.
@@ -1040,6 +1043,81 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     let closed = f.task();
     assert_eq!(closed.status, TaskStatus::Closed);
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+/// cas-289b (GH #2025): a worker's receipt files stay on its machine. The
+/// close on the machine that merges counts the receipts carried on the task
+/// row, and refuses one bound to another head or filter, a digest that is not
+/// its run's, or a run that did not pass.
+#[tokio::test]
+async fn cassy_merge_close_counts_receipts_carried_from_the_worker_machine_cas_289b() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    std::fs::write(f.cas_dir().join("config.toml"), format!("[project]\ncanonical_id=\"{PROJECT}\"\n")).unwrap();
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_with_log_for_tests(
+        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+    );
+    let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
+    // The merging machine has none of the worker's receipt files.
+    std::fs::remove_dir_all(f.cas_dir().join("worker-checks")).unwrap();
+    let carried = f.task().deliverables.test_receipts;
+    assert!(!carried.is_empty(), "park carries the worker's receipts on the task row");
+
+    let repo = f.dir.path();
+    git(repo, &["config", "user.name", "CAS Test"]);
+    git(repo, &["config", "user.email", "cas@example.test"]);
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let cassy = CasCore::with_daemon(f.cas_dir(), None, None);
+    cassy.set_agent_id_for_testing("br-supervisor-session".into());
+    let _ = cassy.prepare_premerge_verification(&f.task(), repo, LANE, "main");
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().expect("candidate dispatch");
+    f.supervisor.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "add", "task_id": ID, "dispatch_id": dispatch.id,
+        "status": "approved", "summary": "gear turns", "confidence": 1.0,
+    })).unwrap())).await.expect("approve the candidate before merge");
+    git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "merge lane"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let merge = git(repo, &["rev-parse", "HEAD"]);
+    assert!(tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap());
+    let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
+    let set_carried = |receipts: Vec<cas_types::PortableTestReceipt>| {
+        let mut task = f.task();
+        task.deliverables.test_receipts = receipts;
+        tasks.update(&task).unwrap();
+    };
+    let tampered: [fn(&mut cas_types::PortableTestReceipt); 6] = [
+        |receipt| receipt.head = "f".repeat(40),
+        |receipt| receipt.filter = "all()".into(),
+        // A broadened filter that still selects the carried run.
+        |receipt| receipt.filter = format!("{} | test(other)", receipt.filter),
+        // A well-formed digest that is not the carried run's.
+        |receipt| receipt.log_sha256 = "0".repeat(64),
+        // A different valid filter than the run recorded.
+        |receipt| receipt.filter = "test(other)".into(),
+        // A failing run, with its own matching digest.
+        |receipt| {
+            receipt.passing_run = receipt.passing_run.replace("1 passed", "0 passed, 1 failed");
+            receipt.log_sha256 = sha256_hex(format!("{}\n{}", receipt.filter, receipt.passing_run).as_bytes());
+        },
+    ];
+    for tamper in tampered {
+        let mut receipts = carried.clone();
+        receipts.iter_mut().for_each(tamper);
+        set_carried(receipts);
+        let refused = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await;
+        assert_ne!(f.task().status, TaskStatus::Closed, "{}", refused.receipt(ID));
+    }
+    set_carried(carried);
+    let closed = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await;
+    assert_eq!(f.task().status, TaskStatus::Closed, "{}", closed.receipt(ID));
 }
 
 /// cas-8f19d: a verdict belongs to the delivery, even when its verifier and

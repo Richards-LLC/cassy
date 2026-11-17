@@ -12,7 +12,7 @@ use cas::types::Agent;
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
 use cas_types::AgentRole;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::RawContent;
+use rmcp::model::ContentBlock;
 use tempfile::TempDir;
 
 struct TestEnv {
@@ -61,8 +61,8 @@ fn result_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
         .iter()
-        .filter_map(|content| match &content.raw {
-            RawContent::Text(text) => Some(text.text.clone()),
+        .filter_map(|content| match content {
+            ContentBlock::Text(text) => Some(text.text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

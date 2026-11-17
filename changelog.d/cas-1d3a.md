@@ -1,0 +1,3 @@
+### Fixed — Release
+
+- **A refused cut no longer needs an operator freeze lift to repair** — Was: when `release.sh` refused to cut a green frozen train (zero would-close, REVIEW_MISSING or LANE_CI_MISSING), the merge gate still saw no red at the frozen tip, so the `release-repair` task that fixed the refusal could not merge until the operator lifted the freeze. Now: each of those refusals records a release red for the green tip it started from (`cas release refused`), and the merge gate admits a `release-repair` task against it. Other merges into the frozen train are still refused, and the train merge queue is not held by it.

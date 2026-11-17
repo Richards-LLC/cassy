@@ -47,7 +47,7 @@ with `cas config get issues.repo`, `cas config get issues.components.cassy`,
 `cas config get issues.components.cloud`. Use `issues.repo` for the current
 project, the Cassy component key for runtime/hooks/MCP/factory/skill defects,
 the Violet key for Slack hub defects, and the Cloud key for sync,
-relay, or pairing defects. If you hit a bug during operation, file a ticket in the matching repo before moving on; do not infer a destination from git remotes.
+relay, or pairing defects. If you hit a bug during operation, find or file a ticket in the matching repo before moving on; do not infer a destination from git remotes.
 
 The code-history document index has a separate source setting. Configure
 `history.github_repo` for an override, or leave it empty to use the checkout's
@@ -174,8 +174,11 @@ removing that edge sends a worker at a base that does not contain the fix.
 ## 6. File issues for defects you observed
 
 Anything you hit since the last sweep that is a real defect belongs in the
-tracker, even if you already worked around it. Search first — the duplicate you
-create is the duplicate you have to dedupe next hour:
+tracker, even if you already worked around it. Find or file: search open issues
+and open tasks first — the duplicate you create is the duplicate you have to
+dedupe next hour. On a match, comment the new evidence and +1 there instead of
+filing. Cassy-system defects go through `system action=report_cas_bug` with the
+verbatim refusal leading `actual`, which does this match for you:
 
 ```bash
 gh issue list --state all --search "<distinctive symptom>" --limit 20

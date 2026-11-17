@@ -328,6 +328,10 @@ pub trait ReminderStore: Send + Sync {
     /// List all pending reminders (across all agents)
     fn list_all_pending(&self) -> Result<Vec<Reminder>>;
 
+    /// All phases of a task's reminders, including completed wakes needed to
+    /// distinguish a later CI attempt from an already delivered completion.
+    fn list_for_task(&self, task_id: &str) -> Result<Vec<Reminder>>;
+
     /// List reminders fired within the last N seconds (across all agents)
     fn list_recently_fired(&self, within_secs: i64) -> Result<Vec<Reminder>>;
 
@@ -383,6 +387,7 @@ pub trait ReminderStore: Send + Sync {
     /// Cancel pending reminders issued under a task that has just closed.
     /// Explicit cross-session opt-in keeps a reminder alive across this
     /// boundary, but its delivery is stamped with task status and age.
+    /// Automatic delivery-phase watches retire with their task.
     fn cancel_pending_for_task(&self, task_id: &str) -> Result<usize>;
 
     /// Expire reminders past their TTL, returns count expired
@@ -792,6 +797,14 @@ impl ReminderStore for SqliteReminderStore {
         Ok(reminders)
     }
 
+    fn list_for_task(&self, task_id: &str) -> Result<Vec<Reminder>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let sql = format!("SELECT {} FROM reminders WHERE task_id = ? ORDER BY id", Self::SELECT_COLUMNS);
+        let mut stmt = conn.prepare_cached(&sql)?;
+        Ok(stmt.query_map(params![task_id], Self::reminder_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     fn list_recently_fired(&self, within_secs: i64) -> Result<Vec<Reminder>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::seconds(within_secs)).to_rfc3339();
@@ -992,7 +1005,8 @@ impl ReminderStore for SqliteReminderStore {
         let rows = conn.execute(
             "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
              WHERE status IN ('pending', 'suspended') AND task_id = ?2 \
-             AND COALESCE(cross_session, 0) = 0",
+             AND (COALESCE(cross_session, 0) = 0 OR CASE WHEN json_valid(trigger_filter) \
+             THEN json_type(trigger_filter, '$.delivery_wake') = 'true' ELSE 0 END)",
             params![now, task_id],
         )?;
         Ok(rows)
@@ -1209,11 +1223,22 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(store.cancel_pending_for_task("cas-issue-276").unwrap(), 1);
+        store.create_with_scope("supervisor-1", None, "automatic delivery phase", ReminderTriggerType::Event,
+            None, Some("ci_completed"), Some(&serde_json::json!({"delivery_wake": true})),
+            0, Some("factory-a"), None, true, Some("cas-issue-276")).unwrap();
+        assert_eq!(store.cancel_pending_for_task("cas-issue-276").unwrap(), 2);
         let pending = store.list_pending("worker-1").unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].cross_session);
         assert_eq!(pending[0].task_id.as_deref(), Some("cas-issue-276"));
+        let history = store.list_for_task("cas-issue-276").unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.iter().filter(|row| row.status == ReminderStatus::Cancelled).count(), 2);
+        store.mark_fired(pending[0].id, None).unwrap();
+        let reopened = SqliteReminderStore::open(_temp.path()).unwrap();
+        assert_eq!(reopened.list_for_task("cas-issue-276").unwrap().iter()
+            .filter(|row| row.status == ReminderStatus::Fired).count(), 1);
+        assert!(reopened.list_for_task("cas-other").unwrap().is_empty());
 
         let delivery = format_reminder_delivery_with_provenance(&pending[0], None, Some("closed"));
         assert!(

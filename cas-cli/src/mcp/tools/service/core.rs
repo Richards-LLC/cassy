@@ -283,6 +283,30 @@ impl CasService {
             },
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        // Find or file (cas-7823, cas-5edc): a finding whose wrong output an
+        // open issue or task already records adds its evidence and a +1 there
+        // and returns that identity instead of opening a twin.
+        if let Some(origin) = finding_origin.as_deref()
+            && let Some(fingerprint) = req
+                .repro
+                .as_deref()
+                .and_then(crate::issue_intake::RefusalFingerprint::of_last)
+        {
+            let title = req.title.as_deref().unwrap_or_default();
+            let evidence = format!(
+                "Finding origin: {origin}\nRepro: {}\nAffected: {}",
+                req.repro.as_deref().unwrap_or_default(),
+                req.affected.as_deref().unwrap_or_default()
+            );
+            if let Some(existing) = self
+                .add_evidence_to_open_match(&fingerprint, title, &evidence, None)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?
+            {
+                return Ok(Self::success(format!(
+                    "No new task filed: added evidence and +1 to open {existing}, which already records this wrong output."
+                )));
+            }
+        }
         let mut req = req;
         if req.repro.as_deref().is_some_and(|s| !s.trim().is_empty()) {
             req.labels = Some(format!("{},runtime-repro", req.labels.as_deref().unwrap_or_default()));
@@ -993,10 +1017,10 @@ impl CasService {
         })).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         match self.pattern_list(patterns).await {
             Ok(personal) => {
-                result.content.push(Content::text("Source: personal pattern (Cassy Cloud)"));
+                result.content.push(ContentBlock::text("Source: personal pattern (Cassy Cloud)"));
                 result.content.extend(personal.content);
             }
-            Err(error) => result.content.push(Content::text(format!(
+            Err(error) => result.content.push(ContentBlock::text(format!(
                 "Personal pattern source unavailable: {}", error.message
             ))),
         }

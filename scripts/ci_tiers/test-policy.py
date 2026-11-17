@@ -604,11 +604,12 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
              'Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}',
              'Scoped Validation — Commander journeys ${{ matrix.shard }}/${{ needs.ci-diff.outputs.journey-shard-total }}'},
             'merge admission and the CI watchers read these exact check names')
-        # cas-2e1b: the train's impact selection runs on hosted runners for a
-        # Rust diff, own tests first; ring shards wait for them (fail fast).
+        # Own builds use the trusted local lane slots; ring shards, overrun
+        # reporting and browser jobs retain their hosted placement.
         impact = {name: slim_jobs.pop(name) for name in ('lane-impact', 'lane-impact-overrun', 'lane-impact-ring', 'lane-journeys')}
         self.assertEqual(impact['lane-impact-ring']['needs'], 'lane-impact')
-        self.assertEqual({job['runs-on'] for job in impact.values()}, {'ubuntu-latest'})
+        self.assertEqual(impact['lane-impact']['runs-on'], local)
+        self.assertEqual({job['runs-on'] for name, job in impact.items() if name != 'lane-impact'}, {'ubuntu-latest'})
         for slim, unaffected in itertools.product(('true', ''), ('true', 'false')):
             ctx = {'vars.CAS_LANE_SLIM': slim, 'needs.ci-diff.outputs.rust-unaffected': unaffected}
             self.assertEqual(self.gh_expr(impact['lane-impact']['if'], ctx), slim == 'true' and unaffected == 'false')
@@ -626,6 +627,25 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                     self.assertEqual(runner(off), 'ubuntu-latest')
         for name, job in ci['jobs'].items():
             self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
+
+    def test_lane_own_step_retains_both_streams_without_masking_failure(self):
+        job = policy.load(self.root / '.github/workflows/lane.yml')['jobs']['lane-impact']
+        body = next(step['run'] for step in job['steps'] if step.get('id') == 'own')
+        commands = self.root / 'bin'
+        commands.mkdir()
+        producer = commands / 'python3'
+        producer.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"phase":"compile","seconds":7}\'\nprintf \'%s\\n\' \'{"phase":"tests","count":3}\' >&2\nexit "$FIXTURE_EXIT"\n')
+        producer.chmod(0o755)
+        for status in (0, 17):
+            result = self.run_body(body, dict(PATH=str(commands) + os.pathsep + os.environ['PATH'],
+                GITHUB_OUTPUT=str(self.root / 'outputs'), FIXTURE_EXIT=str(status)))
+            self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+            log = self.root / 'target/ci-impact/own-build.log'
+            self.assertEqual(log.read_text().splitlines(),
+                ['{"phase":"compile","seconds":7}', '{"phase":"tests","count":3}'])
+            uploads = [step['with']['path'] for step in job['steps']
+                if step.get('uses') == 'actions/upload-artifact@v4' and step.get('if') == 'always()']
+            self.assertTrue(any(log.is_relative_to(self.root / path) for path in uploads))
 
     # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
     def test_lane_runs_only_selected_commander_journeys_and_names_failures_cas_6a42(self):

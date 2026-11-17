@@ -18,6 +18,55 @@ pub struct MetadataUnavailable {
     pub reason: &'static str,
 }
 
+/// Local records and synced references cannot establish an exhaustive Cloud
+/// inventory. Keep that boundary explicit even when this receiver knows none.
+#[derive(serde::Serialize)]
+pub struct ArtifactListing {
+    pub task_id: String,
+    pub state: &'static str,
+    pub artifacts: Vec<PublishedArtifact>,
+    pub warnings: Vec<&'static str>,
+}
+
+pub fn list_task_metadata(cas_root: &Path, task_id: &str) -> anyhow::Result<ArtifactListing> {
+    let store = SqliteArtifactStore::open(cas_root)?;
+    let mut records = store.list_for_task(task_id)?.into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut warnings = std::collections::BTreeSet::new();
+    let task = crate::store::open_task_store_local(cas_root)
+        .and_then(|tasks| tasks.get(task_id).map_err(Into::into));
+    match task {
+        Ok(task) => {
+            for json in task.notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
+                let Ok(record) = serde_json::from_str::<PublishedArtifact>(json) else {
+                    warnings.insert("invalid_publication_reference");
+                    continue;
+                };
+                // A local revocation remains authoritative over an older note.
+                if records.get(&record.id).is_some_and(|local| local.revocation.is_some()) {
+                    continue;
+                }
+                if validate(&record, task_id).is_err() {
+                    warnings.insert("invalid_publication_reference");
+                } else if let Some(local) = records.get(&record.id) {
+                    if !same_artifact(local, &record) {
+                        warnings.insert("conflicting_publication_reference");
+                    }
+                } else {
+                    records.insert(record.id.clone(), record);
+                }
+            }
+        }
+        Err(crate::error::CasError::StoreErr(cas_store::StoreError::TaskNotFound(_))) => {}
+        Err(_) => { warnings.insert("task_references_unavailable"); }
+    }
+    Ok(ArtifactListing {
+        task_id: task_id.into(), state: "partial",
+        artifacts: records.into_values().collect(), warnings: warnings.into_iter().collect(),
+    })
+}
+
 /// Share every successful publication through the existing trusted task-note
 /// transport, including publications that did not request a prose proof note.
 pub(crate) fn record_published(

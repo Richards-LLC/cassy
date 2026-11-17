@@ -48,7 +48,7 @@ with a journey, opaque subject and nonempty invariant list. Any alarm, nonzero
 exit, invalid JSON, timeout or failed read-back makes the verdict **failed**.
 Otherwise it stays **pending** until the window ends and all observations exist,
 then becomes **clean**. A completed window missing a read-back or observation
-fails. Treat failure as an incident: file the bug and start a new check on the
+fails. Treat failure as an incident: find or file the bug and start a new check on the
 fix-forward release SHA.
 
 Each run appends `POST-RELEASE k/n <sha>: ok | ALARM … | ERROR …` to the epic.

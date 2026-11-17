@@ -919,6 +919,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         )
         .unwrap();
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // cas-40040: the read-only sandbox preflight probes `bwrap` on PATH.
+        // This test proves dispatch recording, not the host's namespace
+        // policy, so the isolated PATH answers the probe as a capable host.
+        let bwrap = bin.join("bwrap");
+        std::fs::write(&bwrap, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bwrap, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         // Registry login probes use the CLI on PATH. Isolate that PATH in a
         // child test process, never mutate the library test process's PATH.

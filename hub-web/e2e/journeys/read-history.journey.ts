@@ -949,7 +949,7 @@ async function paintedPixel(tab: import("@playwright/test").Page, x: number, y: 
 }
 
 for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["phone", { width: 390, height: 844 }]] as const) {
-  test(`HUB-J4 cas-3aff ${name}: a supervisor's page shows inline, and a hostile page stays in its sandbox`, journeyPart, async ({ page: tab, journey }) => {
+  const run = async ({ page: tab, journey }: { page: import("@playwright/test").Page; journey: import("./journey").Journey }) => {
     await tab.setViewportSize(viewport);
     const hub = await journey.hub({
       machines: [ATLAS],
@@ -1111,5 +1111,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       expect(leaked, "nothing was sent to another host from the tab either").toEqual([]);
       await hostileTab.close();
     });
-  });
+  };
+  // cas-stability-identities: ["HUB-J4 cas-3aff desktop: a supervisor's page shows inline, and a hostile page stays in its sandbox", "HUB-J4 cas-3aff phone: a supervisor's page shows inline, and a hostile page stays in its sandbox"]
+  test(`HUB-J4 cas-3aff ${name}: a supervisor's page shows inline, and a hostile page stays in its sandbox`, journeyPart, run);
 }

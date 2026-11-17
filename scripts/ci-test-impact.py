@@ -5,6 +5,7 @@ No builds are performed by plan/history/record. Unknown inputs select the worksp
 module uncertainty selects the affected crate, never an empty successful run.
 """
 import argparse
+import datetime
 import io
 import json
 import os
@@ -689,11 +690,31 @@ def lane_base(root, recorded_ref, inferred):
 
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+def lane_overrun(root, args):
+    """Name the plan and elapsed time of an own-tests job that ended without a
+    verdict (cas-3a12). A hosted runner that stops responding uploads no log
+    and runs no always() step, so its timeout reads only as "cancelled"."""
+    selection = plan(root, args.base_sha, args.zero_base_ref, args.history, delivery=True)
+    split = lane_split(root, selection)
+    _, fetch = github_fetcher()
+    run, attempt = os.environ["GITHUB_RUN_ID"], os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+    jobs = json.loads(fetch(f"/actions/runs/{int(run)}/attempts/{int(attempt)}/jobs?per_page=100"))["jobs"]
+    job = next(job for job in jobs if job["name"].endswith(args.job))
+    stamp = lambda value: datetime.datetime.fromisoformat(value.replace("Z", "+00:00")) if value else datetime.datetime.now(datetime.timezone.utc)
+    minutes = (stamp(job["completed_at"]) - stamp(job["started_at"])).total_seconds() / 60
+    print(f"::error title=Lane impact overrun::{args.job} ended {job['conclusion'] or 'unfinished'} after {minutes:.1f} min "
+          f"(budget {args.budget_minutes} min) with a {selection['mode']} plan "
+          f"({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}")
+    return 1
+
+
 def lane(root, args):
-    """Lane CI phases: plan, own (builds and runs own tests), ring shards and
-    attribute (rerun a phase's failures at the base)."""
+    """Lane CI phases: plan, own (builds and runs own tests), ring shards,
+    attribute (rerun a phase's failures at the base) and overrun."""
     out = Path(args.out)
     outputs = {}
+    if args.phase == "overrun":
+        return lane_overrun(root, args)
     if args.phase == "plan":
         selection = plan(root, args.base_sha, args.zero_base_ref, args.history, delivery=True)
         # cas-0e97: infer from the resolved merge-base, never the raw BASE_SHA,
@@ -730,7 +751,12 @@ def lane(root, args):
         else:
             print("Lane impact: no own tests; the ring follows")
         outputs = {"failed": str(failed).lower()}
-        if args.phase == "own" and (status == 0 or failed):
+        if args.phase == "own" and (status == 0 or failed) and selection["mode"] != "scoped":
+            # A whole-workspace ring would rerun the full suite in a slim lane;
+            # the train's full set owns it (cas-3a12).
+            print(f"Lane impact: whole-workspace plan ({'; '.join(selection['reasons'])}); the ring is left to the train full set")
+            outputs.update({"ring-shards": "[]", "ring-total": "0", "ring-tests": "0"})
+        elif args.phase == "own" and (status == 0 or failed):
             ring = lane_count(root, source, split["ring"])
             shards = min(3, -(-ring // 1500))
             outputs.update({"ring-shards": json.dumps(list(range(1, shards + 1))), "ring-total": str(shards), "ring-tests": str(ring)})
@@ -830,7 +856,9 @@ def record(plan, logs, status, elapsed, destination, role):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize", "lane"])
-    parser.add_argument("--phase", choices=["plan", "own", "ring", "attribute"], default="plan")
+    parser.add_argument("--phase", choices=["plan", "own", "ring", "attribute", "overrun"], default="plan")
+    parser.add_argument("--job", default="Scoped Validation — impact own tests")
+    parser.add_argument("--budget-minutes", type=int, default=45)
     parser.add_argument("--receipt", choices=["own", "ring"], default="own")
     parser.add_argument("--archive", default="lane-impact.tar.zst")
     parser.add_argument("--shard", default="1/1")

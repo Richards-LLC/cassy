@@ -475,8 +475,12 @@ path="tests/builtin_archive_portability_test.rs"
         self.put("Cargo.lock", "# shared build input\n")
         self.select("Cargo.lock")
         self.assertEqual(phase("plan").returncode, 0)
-        split = json.loads(state.read_text())["split"]
-        self.assertEqual((split["build"], split["ring"]), (["--workspace"], f"(all()) and not ({own})"), "a workspace plan runs whole, own first")
+        # cas-3a12: a whole-workspace ring would rerun the full suite in a slim
+        # lane; it is left to the train's full set.
+        outputs.write_text("")
+        self.assertEqual(phase("own").returncode, 0)
+        values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+        self.assertEqual((json.loads(state.read_text())["plan"]["mode"], values["ring-shards"]), ("workspace", "[]"))
 
     # cas-rule: rule-176 scope: "(2) Each check runs once per change, at the cheapest point that catches its defect. Running the same check in more places is a defect."
     def test_lane_attribution_reuses_only_exact_base_configuration_and_test_proof(self):

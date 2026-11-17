@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { copyFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,6 +13,36 @@ import { runVisualQa as runBuiltinVisualQa } from '../cas-cli/src/builtins/skill
 const here = fileURLToPath(new URL('.', import.meta.url));
 const fixture = (name) => join(here, 'visual-qa-fixtures', name);
 const repoRoot = join(here, '..');
+
+test('explicit Playwright selection wins over a locally installed package', async () => {
+  for (const script of ['scripts/visual-qa.mjs', 'cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs']) {
+    const dir = await mkdtemp(join(tmpdir(), 'visual-qa-module-'));
+    await copyFile(join(repoRoot, script), join(dir, 'visual-qa.mjs'));
+    for (const [name, marker] of [['node_modules/playwright', 'local'], ['selected', 'explicit']]) {
+      const pkg = join(dir, name);
+      await mkdir(pkg, { recursive: true });
+      await writeFile(join(pkg, 'package.json'), JSON.stringify({ type: 'module', main: 'index.js', version: '1.65.0' }));
+      await writeFile(join(pkg, 'index.js'), `export const marker = ${JSON.stringify(marker)};`);
+    }
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `import { resolvePlaywright } from ${JSON.stringify(pathToFileURL(join(dir, 'visual-qa.mjs')).href)}; console.log((await resolvePlaywright()).playwright.marker);`], {
+      encoding: 'utf8', env: { ...process.env, PLAYWRIGHT_MODULE: join(dir, 'selected') },
+    });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout.trim(), 'explicit');
+  }
+});
+
+test('strict phone QA reports page overflow from unbroken inline text', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'visual-qa-page-overflow-'));
+  const page = join(dir, 'page.html');
+  await writeFile(page, `<html><body><p><strong>${'unbroken'.repeat(100)}</strong></p></body></html>`);
+  for (const run of [runVisualQa, runBuiltinVisualQa]) {
+    const result = await run({ urls: [page], artifactDir: await mkdtemp(join(dir, 'capture-')), strict: true,
+      schemes: ['light'], viewports: [{ name: 'phone', width: 390, height: 800 }] });
+    assert.equal(result.status, 'FAIL');
+    assert.ok(result.findings.some(finding => finding.type === 'page-overflow' && finding.scrollWidth > finding.clientWidth));
+  }
+});
 
 /**
  * cas-9ebd: where the historical acceptance runs keep their renders. It was a

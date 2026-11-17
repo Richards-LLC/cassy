@@ -9776,11 +9776,12 @@ impl CasCore {
                     drop(_phase);
                     // cas-289b: carry this machine's passing receipts at the
                     // parked tip, so a close on another machine can count them.
-                    let portable = receipt_tip.map(|tip| crate::factory_worker_check::PassingTests::new(
+                    let portable = exported_test_receipts(
                         &self.cas_root,
                         worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
-                        tip,
-                    ).with_target(&resolved_parent_branch).portable()).unwrap_or_default();
+                        receipt_tip,
+                        &resolved_parent_branch,
+                    );
                     if !portable.is_empty() {
                         parking.deliverables.test_receipts = portable.clone();
                     }
@@ -9828,14 +9829,7 @@ impl CasCore {
                             return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
                         }
                         // The advanced anchor keeps this machine's fresh receipts.
-                        if !portable.is_empty()
-                            && let Ok(latest) = task_store.get(&task.id)
-                            && latest.deliverables.test_receipts != portable
-                        {
-                            let mut fresh = latest.clone();
-                            fresh.deliverables.test_receipts = portable;
-                            let _ = task_store.update_if_current(&fresh, &latest);
-                        }
+                        keep_fresh_test_receipts(task_store.as_ref(), &task.id, portable);
                     }
 
                     // cas-619f: a user-facing delivery needs an independent
@@ -21109,6 +21103,42 @@ fn preserves_close_note_history(before: &str, after: &str) -> bool {
 /// Refresh only retained note history or clock changes, then CAS against that row.
 /// Other fields, rewritten history and request_changes still invalidate the
 /// snapshot. Keep the generic store and replication CAS strict.
+/// cas-289b: this machine's passing receipts at the parked tip. Kept out of
+/// the close future, whose debug-build poll frame is already near the worker
+/// stack limit.
+#[inline(never)]
+fn exported_test_receipts(
+    cas_root: &std::path::Path,
+    repo: &std::path::Path,
+    tip: Option<&str>,
+    target: &str,
+) -> Vec<cas_types::PortableTestReceipt> {
+    tip.map(|tip| {
+        crate::factory_worker_check::PassingTests::new(cas_root, repo, tip).with_target(target).portable()
+    })
+    .unwrap_or_default()
+}
+
+/// cas-289b: an already-parked task whose anchor advanced keeps this
+/// machine's fresh receipts. Best-effort; a concurrent write wins.
+#[inline(never)]
+fn keep_fresh_test_receipts(
+    task_store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    receipts: Vec<cas_types::PortableTestReceipt>,
+) {
+    if receipts.is_empty() {
+        return;
+    }
+    let Ok(latest) = task_store.get(task_id) else { return };
+    if latest.deliverables.test_receipts == receipts {
+        return;
+    }
+    let mut fresh = latest.clone();
+    fresh.deliverables.test_receipts = receipts;
+    let _ = task_store.update_if_current(&fresh, &latest);
+}
+
 fn update_close_snapshot_preserving_notes(
     task_store: &dyn cas_store::TaskStore,
     task: &mut Task,

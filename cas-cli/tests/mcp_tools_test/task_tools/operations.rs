@@ -556,7 +556,9 @@ Keep reading.".into(),
                 "{case}: start-only instruction unreachable: {instruction}\n{started}"
             );
             assert!(
-                started.contains(&instruction) || case == "qa-overflow",
+                // Either inline, or the reply carries the paged recovery command.
+                started.contains(&instruction)
+                    || started.contains("task notes id=cas-start-read offset="),
                 "{case}: silently clipped instruction: {instruction}\n{started}"
             );
         }

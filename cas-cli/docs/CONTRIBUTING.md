@@ -820,6 +820,20 @@ keep their existing MCP behavior under either value; hooks, account selection,
 Teams and worker credential protections still apply. Invalid values are refused
 by both config commands and TOML loading.
 
+`factory.claude.worker_sandbox` (default `shadow`) controls macOS Claude workers'
+OS sandbox (cas-3751a):
+
+- **`shadow`:** the worker settings carry a generated `sandbox` block, which
+  `cas-mux` completes at launch with the checkout's exact git paths. While the
+  sandbox enforces, the stage-A text guards record would-deny facts for Bash
+  instead of refusing it (`cas gates report`, column `shadowed`).
+- **`off`:** workers launch without the sandbox, and those guards enforce.
+
+Linux workers and supervisors are not sandboxed. The corpus test
+`worker_sandbox::tests::bypass_corpus_is_blocked_through_the_generated_profile`
+runs only when a named capped run passes `CAS_SRT_BIN=<sandbox-runtime srt>`;
+otherwise it skips with a reason.
+
 Use `cas config set factory.claude.remote_control true` to opt in, and
 `cas config set factory.claude.fallback_model sonnet` to choose a fallback.
 An empty fallback value clears it. Explicitly requested unsupported flags

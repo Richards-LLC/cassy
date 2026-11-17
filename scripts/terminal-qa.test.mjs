@@ -382,7 +382,7 @@ for (const [name, body] of [
   ["silent successful script", "exit 0"],
   ["script that only prints its own error", 'printf "script runner failed\\n"; exit 1'],
 ]) {
-  test(`${name} is unavailable and cannot retain a stale PASS`, async (t) => {
+  const unavailable = async (t) => {
     fakeScript(t, body);
     const out = tmpOut(t);
     fs.writeFileSync(path.join(out, "report.md"), "terminal-qa: PASS stale\n");
@@ -396,7 +396,9 @@ for (const [name, body] of [
     const cli = spawnSync(process.execPath, [script, "--out", out, "--", process.execPath, "-e", 'console.log("healthy")'], { encoding: "utf8" });
     assert.equal(cli.status, 2, cli.stderr + cli.stdout);
     assert.doesNotMatch(cli.stdout, /terminal-qa: PASS/);
-  });
+  };
+  // cas-stability-identities: ["unsupported script is unavailable and cannot retain a stale PASS", "silent successful script is unavailable and cannot retain a stale PASS", "script that only prints its own error is unavailable and cannot retain a stale PASS"]
+  test(`${name} is unavailable and cannot retain a stale PASS`, unavailable);
 }
 
 test("an unavailable runner through a symlink exits nonzero and removes stale PASS", (t) => {

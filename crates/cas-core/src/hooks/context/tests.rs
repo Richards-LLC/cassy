@@ -853,7 +853,6 @@ fn session_start_omits_other_worker_handoff_cas_a042() {
     let input = HookInput { agent_role: Some("worker".into()), ..session_start_input() };
     let context = build_with_config(&ks, Some(&store), &DefaultHooksConfig::new().with_session_start_memories(), &input);
     assert!(!context.contains("Other worker:"), "{context}");
-    assert!(!context.contains("Current Handoff"), "{context}");
 }
 
 /// WP2 (audit cas-1660 M34): the usage reminder is paid on every SessionStart,

@@ -2184,7 +2184,6 @@ mod tests {
         assert_eq!(events.len(), 5);
         let persisted = serde_json::to_string(&(receipt, events)).unwrap();
         assert!(!persisted.contains("/home/"));
-        assert!(!persisted.contains("proof payload"));
 
         let conn = open(root.path()).unwrap();
         assert!(

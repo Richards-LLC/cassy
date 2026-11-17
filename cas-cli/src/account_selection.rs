@@ -65,7 +65,7 @@ pub fn recommend<'a>(
         let (observed, assumed): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| !c.5);
         candidates = observed;
         for (account, ..) in assumed {
-            result.excluded.push((account, "usage assumed after an expired window; observed accounts first".into()));
+            result.excluded.push((account, "usage assumed from stale or expired windows; observed accounts first".into()));
         }
     }
     let earliest = candidates
@@ -194,8 +194,11 @@ fn capacity(
         return Err("usage unknown".into());
     }
     let assumed = std::cell::Cell::new(false);
+    let stale_observation = account.usage_observed_at.is_some_and(|at|
+        at > now || now.signed_duration_since(at).num_seconds() > crate::cli::limits::CLAUDE_SNAPSHOT_MAX_AGE);
     let window = |name: &str| -> Result<(Option<DateTime<Utc>>, f64), String> {
         let Some(w) = account.windows.iter().find(|w| w.name == name) else {
+            assumed.set(assumed.get() || stale_observation);
             return Ok((None, 0.0));
         };
         // A past timestamp proves rollover even if the registry cleared its
@@ -205,7 +208,12 @@ fn capacity(
             return Ok((None, 0.0));
         }
         let used = match (w.used_percent, w.resets_at) {
-            (None, None) => 0.0, // Unopened window in an otherwise known account.
+            (None, None) => {
+                // Limits clears age-invalidated observations with unknown
+                // resets. Only a fresh unopened window is observed empty.
+                assumed.set(assumed.get() || stale_observation);
+                0.0
+            },
             (Some(used), _) if used.is_finite() && (0.0..=100.0).contains(&used) => used,
             _ => return Err(format!("{name} usage unknown")),
         };

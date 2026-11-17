@@ -1756,8 +1756,31 @@ fn resolve_spawn_lane_accounts(
     now: chrono::DateTime<chrono::Utc>,
     collect: impl FnOnce() -> std::io::Result<Vec<crate::account_registry::Account>>,
 ) -> Result<(String, Vec<String>), String> {
-    let _ = (automatic, policy, now, collect);
-    resolve_lane_account_models(lane, specs, snapshot)
+    let original = match resolve_lane_account_models(lane, specs, snapshot) {
+        Ok(decision) => return Ok(decision),
+        Err(error) => error,
+    };
+    if !specs.iter().zip(automatic).any(|(spec, automatic)| *automatic && spec.cli == cas_mux::SupervisorCli::Codex) {
+        return Err(original);
+    }
+    let accounts = collect().map_err(|_| original.clone())?;
+    let mut account_notices = Vec::new();
+    for (spec, automatic) in specs.iter_mut().zip(automatic) {
+        if !automatic || spec.cli != cas_mux::SupervisorCli::Codex { continue; }
+        let supported = accounts.iter().filter(|account| {
+            let mut candidate = spec.clone();
+            candidate.config_dir = Some(account.folder.to_string_lossy().into_owned());
+            account.provider == crate::accounts::Provider::Codex
+                && resolve_lane_account_models(lane, std::slice::from_mut(&mut candidate), snapshot).is_ok()
+        }).cloned().collect::<Vec<_>>();
+        if let Some(choice) = crate::account_selection::launch_choice(&supported, crate::accounts::Provider::Codex, now, policy).recommended {
+            account_notices.push(format!("Automatic Codex account {} verifies lane {lane}", choice.account.folder.display()));
+            spec.config_dir = Some(choice.account.folder.to_string_lossy().into_owned());
+        }
+    }
+    let (recipe, mut warnings) = resolve_lane_account_models(lane, specs, snapshot)?;
+    warnings.extend(account_notices);
+    Ok((recipe, warnings))
 }
 
 /// cas-05cee: link each worker account's empty shared slots before its

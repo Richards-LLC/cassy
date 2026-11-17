@@ -613,16 +613,18 @@ pub fn normalize_git_remote_url(url: &str) -> Option<String> {
         return None;
     }
 
-    // SSH form: `git@host:owner/repo[.git]`. Replace the `:` with `/` after
-    // stripping the user prefix so the parse falls through to the generic
-    // `host/owner/repo` extractor below.
-    let without_ssh_user = if let Some(rest) = trimmed.strip_prefix("git@") {
-        // Find the first `:` — that's the separator between host and path.
+    // SSH usernames are transport credentials, not repository identity.
+    // Normalize both home-relative and absolute scp paths to host/path.
+    let without_ssh_user = if let Some(rest) = trimmed.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+        if host.is_empty() || path.trim_matches('/').is_empty() { return None; }
+        format!("{host}/{}", path.trim_start_matches('/'))
+    } else if let Some((user, rest)) = trimmed.split_once('@').filter(|(user, _)| !user.contains(['/', ':']) && !user.is_empty()) {
+        let _ = user;
         let (host, path) = rest.split_once(':')?;
-        format!("{host}/{path}")
-    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@") {
-        // ssh://git@host/path → strip prefix; rest already uses `/`.
-        rest.to_string()
+        if host.is_empty() || host.contains('/') || path.trim_matches('/').is_empty() { return None; }
+        format!("{host}/{}", path.trim_start_matches('/'))
     } else if let Some(rest) = trimmed.strip_prefix("https://") {
         rest.to_string()
     } else if let Some(rest) = trimmed.strip_prefix("http://") {

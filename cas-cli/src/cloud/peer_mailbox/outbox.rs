@@ -42,10 +42,26 @@ fn route_ownership(conn: &Connection, key: &str) -> anyhow::Result<Option<(Strin
     Ok(conn.query_row(
         "SELECT recipient,COALESCE(cloud_id,'peer-outbox:' || id) FROM peer_message_outbox
          WHERE json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?1
-         AND (cloud_id IS NOT NULL OR state='sent' OR
+         AND state!='abandoned' AND (cloud_id IS NOT NULL OR state='sent' OR
               (state='retrying' AND last_error IS NULL AND next_attempt_at>?2)) LIMIT 1",
         params![key, chrono::Utc::now().timestamp()], |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()?)
+}
+
+/// Retire a routed ask after authoritative peer discovery proves departure
+/// or stale capacity. Keep the accepted Cloud ID as audit history. A live
+/// transport lease cannot be recalled while the send is still in flight.
+pub(crate) fn retire_build_route(root: &Path, key: &str, recipient: &str) -> Result<bool, String> {
+    let retire = || -> anyhow::Result<bool> {
+        let conn = connection(root)?;
+        Ok(conn.execute("UPDATE peer_message_outbox SET state='abandoned',last_error='build route peer unavailable; local admission restored'
+            WHERE json_valid(payload) AND json_extract(payload,'$.dedupe_key')=?1
+            AND json_extract(payload,'$.recipient_agent_id')=?2
+            AND state!='abandoned'
+            AND NOT (state='retrying' AND last_error IS NULL AND next_attempt_at>?3)",
+            params![key, recipient, chrono::Utc::now().timestamp()])? > 0)
+    };
+    retire().map_err(|error| error.to_string())
 }
 
 /// False means a transport lease or accepted ask won the race with cancellation.

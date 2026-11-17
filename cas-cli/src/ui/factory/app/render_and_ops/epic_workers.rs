@@ -2531,6 +2531,18 @@ impl WorkerSpawnContext {
                 .map_err(anyhow::Error::msg)?;
         }
         if self.isolate {
+            if self.worktree_repo_root.is_none() {
+                let config = Config::load(&self.cas_dir)?.worktrees();
+                let manager = WorktreeManager::new(&self.project_path, WorktreeConfig {
+                    enabled: true,
+                    base_path: config.resolve_base_path(&self.project_path).to_string_lossy().into_owned(),
+                    branch_prefix: "factory/".into(), auto_merge: false,
+                    cleanup_on_close: false, promote_entries_on_merge: false,
+                })?;
+                self.worktree_repo_root = Some(manager.repo_root().to_path_buf());
+                self.worktree_root = Some(manager.worktree_root());
+            }
+
             match DirectorData::load_fast(&self.cas_dir) {
                 Ok(data) => {
                     let focus = self.factory_session.as_deref()
@@ -3256,6 +3268,16 @@ impl FactoryApp {
             }
         }
 
+        // The first isolated spawn can follow git init in a session that
+        // originally had no worktree manager. Retain it for recycle/cleanup.
+        if self.worktree_manager.is_none() && let Some(wt) = result.worktree.as_ref() {
+            self.worktree_manager = Some(WorktreeManager::new(self.project_path(), WorktreeConfig {
+                enabled: true,
+                base_path: wt.path.parent().unwrap().to_string_lossy().into_owned(),
+                branch_prefix: "factory/".into(), auto_merge: false,
+                cleanup_on_close: false, promote_entries_on_merge: false,
+            })?);
+        }
         // Register the worktree with the manager if applicable
         if let (Some(manager), Some(wt)) = (&mut self.worktree_manager, result.worktree) {
             manager.register_worktree(&worker_name, wt);

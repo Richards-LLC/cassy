@@ -271,7 +271,7 @@ struct RepositoryFacts {
 
 #[derive(Debug, Clone, Copy)]
 enum RepositoryFailure {
-    Missing,
+    Missing(&'static str),
     Wrong,
     Ambiguous,
     StaleBinding,
@@ -648,9 +648,9 @@ fn classify_repository(
         },
         Err(reason) => {
             let (code, message, remediation) = match reason {
-                RepositoryFailure::Missing => (
+                RepositoryFailure::Missing(input) => (
                     "repository.unresolved",
-                    "Canonical repository identity or active branch cannot be resolved.",
+                    input,
                     "Run from the intended initialized Git checkout and ensure it has a canonical project ID or origin remote.",
                 ),
                 RepositoryFailure::Wrong => (
@@ -1433,32 +1433,32 @@ fn collect_repository_facts(
     use crate::mcp::tools::core::task::repo_context::BoundedRepoError;
     use cas_types::WorkTarget;
 
-    let map_error = |error| match error {
+    let map_error = |error, input| match error {
         BoundedRepoError::TimedOut => RepositoryFailure::TimedOut,
         BoundedRepoError::CandidateLimit => RepositoryFailure::CandidateLimit,
-        BoundedRepoError::Unavailable => RepositoryFailure::Missing,
+        BoundedRepoError::Unavailable => RepositoryFailure::Missing(input),
         BoundedRepoError::Ambiguous => RepositoryFailure::Ambiguous,
         BoundedRepoError::StaleBinding => RepositoryFailure::StaleBinding,
     };
     let branch = probe
         .output(project_root, &["symbolic-ref", "--short", "HEAD"])
-        .map_err(map_error)?;
+        .map_err(|error| map_error(error, "Active Git branch could not be resolved; detached HEAD needs a named branch."))?;
     if branch.is_empty() {
-        return Err(RepositoryFailure::Missing);
+        return Err(RepositoryFailure::Missing("Active Git branch is empty; select the intended branch."));
     }
     let active = crate::mcp::tools::core::task::repo_context::resolve_path_context_bounded(
         project_root,
         &branch,
         probe,
     )
-    .map_err(map_error)?;
+    .map_err(|error| map_error(error, "Active checkout identity could not be resolved from its canonical project ID or origin remote."))?;
     let cas_project = cas_root.parent().unwrap_or(cas_root);
     let configured = crate::mcp::tools::core::task::repo_context::resolve_path_context_bounded(
         cas_project,
         &branch,
         probe,
     )
-    .map_err(map_error)?;
+    .map_err(|error| map_error(error, "Cassy project identity could not be resolved from its canonical project ID or origin remote."))?;
     if active.repo_selector != configured.repo_selector || active.repo_root != configured.repo_root
     {
         return Err(RepositoryFailure::Wrong);

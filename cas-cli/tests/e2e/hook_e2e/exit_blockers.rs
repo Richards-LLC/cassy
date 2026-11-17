@@ -59,24 +59,7 @@ fn test_stop_hook_blocks_on_incomplete_epic_subtasks() {
     let (_, stop_stdout) = env.run_stop_hook();
     println!("Stop hook stdout: {}", stop_stdout);
 
-    // 8. Verify the Stop hook output indicates blocking due to incomplete epic subtasks
-    let combined_output = stop_stdout.to_lowercase();
-
-    // Should mention blocking or tasks or epic
-    let is_blocked = combined_output.contains("block")
-        || combined_output.contains("subtask")
-        || combined_output.contains("epic")
-        || combined_output.contains("task")
-        || combined_output.contains("complete")
-        || combined_output.contains("finish")
-        || combined_output.contains("remain");
-
-    // The hook output should indicate there are tasks to complete
-    assert!(
-        is_blocked || stop_stdout.contains(&subtask2_id),
-        "Stop hook should indicate incomplete epic subtasks. Got stdout: '{}'",
-        stop_stdout,
-    );
+    assert!(stop_hook_blocks(&stop_stdout), "{stop_stdout}");
 
     // 9. Now close subtask 1 and subtask 2
     env.cas.close_task(&subtask1_id);
@@ -87,16 +70,7 @@ fn test_stop_hook_blocks_on_incomplete_epic_subtasks() {
     let (_, stop_stdout2) = env.run_stop_hook();
     println!("Stop hook after closing subtasks: {}", stop_stdout2);
 
-    // Should succeed or at least not mention incomplete tasks
-    let combined_output2 = stop_stdout2.to_lowercase();
-    let still_blocked = combined_output2.contains("subtask 2")
-        || (combined_output2.contains("block") && combined_output2.contains("task"));
-
-    assert!(
-        !still_blocked,
-        "Stop hook should not block after all subtasks are closed. Got: '{}'",
-        stop_stdout2
-    );
+    assert!(!stop_hook_blocks(&stop_stdout2), "{stop_stdout2}");
 }
 
 /// Test that agent is blocked even after closing their subtask if epic has other incomplete subtasks
@@ -146,37 +120,7 @@ fn test_stop_hook_blocks_when_epic_has_other_incomplete_subtasks() {
     let (_, stop_stdout) = env.run_stop_hook();
     println!("Stop hook after closing subtask 1: {}", stop_stdout);
 
-    // Parse the JSON output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_stdout) {
-        // Should have a "block" decision because epic has incomplete subtasks
-        let decision = json.get("decision").and_then(|d| d.as_str());
-        let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("");
-
-        println!("Decision: {:?}", decision);
-        println!("Reason: {}", reason);
-
-        // The agent should be blocked because the epic has incomplete subtask 2
-        let mentions_subtask2 = reason.contains(&subtask2_id) || reason.contains("Second Subtask");
-        let mentions_epic = reason.to_lowercase().contains("epic");
-        let is_blocked = decision == Some("block");
-
-        assert!(
-            is_blocked && (mentions_subtask2 || mentions_epic),
-            "Agent should be blocked due to incomplete epic subtask 2. \
-            Decision: {:?}, Reason mentions subtask2: {}, Reason mentions epic: {}. \
-            Full reason: {}",
-            decision,
-            mentions_subtask2,
-            mentions_epic,
-            reason
-        );
-    } else {
-        // Empty response means no blockers - this is the BUG we're testing for!
-        panic!(
-            "Stop hook should block when epic has incomplete subtasks, but got: '{}'",
-            stop_stdout
-        );
-    }
+    assert!(stop_hook_blocks(&stop_stdout), "{stop_stdout}");
 }
 
 /// Test that Stop hook does NOT block when working on standalone task (no epic)
@@ -212,16 +156,7 @@ fn test_stop_hook_allows_standalone_task() {
     let (_, stop_stdout) = env.run_stop_hook();
     println!("Stop hook for standalone task: {}", stop_stdout);
 
-    // Should NOT block - task is closed and no epic involvement
-    let combined_output = stop_stdout.to_lowercase();
-    let is_blocked = combined_output.contains("block")
-        && (combined_output.contains("task") || combined_output.contains("epic"));
-
-    assert!(
-        !is_blocked,
-        "Stop hook should not block for closed standalone task. Got: '{}'",
-        stop_stdout
-    );
+    assert!(!stop_hook_blocks(&stop_stdout), "{stop_stdout}");
 }
 
 /// Test that session-based agent ID is used for working_epics

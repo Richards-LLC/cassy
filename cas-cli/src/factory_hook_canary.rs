@@ -166,12 +166,11 @@ mod tests {
     #[test]
     fn cas_2a49_marker_written_during_spawn_bookkeeping_counts() {
         let dir = tempfile::tempdir().unwrap();
-        let floor = launch_floor();
-        std::thread::sleep(Duration::from_millis(5));
-        // PTY started; the hook fires while the daemon is still busy.
         record_session_start(dir.path(), "steady-leopard-44", "s-2459").unwrap();
-        std::thread::sleep(Duration::from_millis(5));
-        let after_bookkeeping = SystemTime::now();
+        let written = marker_written_at_ms(dir.path(), "steady-leopard-44").unwrap();
+        // Model the launch and bookkeeping boundaries around the actual marker.
+        let floor = UNIX_EPOCH + Duration::from_millis(written - 1);
+        let after_bookkeeping = UNIX_EPOCH + Duration::from_millis(written + 1);
 
         assert!(fired_since(dir.path(), "steady-leopard-44", floor));
         assert!(
@@ -184,9 +183,9 @@ mod tests {
             HOOK_CANARY_TIMEOUT,
             after_bookkeeping,
         );
-        assert!(detail.contains("A marker exists but was written at"), "{detail}");
+        assert!(detail.contains(&marker_written_at_ms(dir.path(), "steady-leopard-44").unwrap().to_string()), "{detail}");
         let none = failure_detail_since(dir.path(), "never-ran", HOOK_CANARY_TIMEOUT, floor);
-        assert!(!none.contains("A marker exists"), "{none}");
+        assert_eq!(none, failure_detail("never-ran", HOOK_CANARY_TIMEOUT, &marker_path(dir.path(), "never-ran")));
     }
 
     #[test]

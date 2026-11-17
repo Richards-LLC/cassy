@@ -408,7 +408,6 @@ mod tests {
         let mut lease = TaskLease::new("task-1".to_string(), "agent-1".to_string(), 60);
         let old_expires = lease.expires_at;
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
         lease.renew(120);
 
         assert!(lease.expires_at > old_expires);

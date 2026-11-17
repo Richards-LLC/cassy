@@ -194,7 +194,6 @@ pub fn observe_rule_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn observe_waits_for_a_foreign_sqlite_writer() {
@@ -202,26 +201,17 @@ mod tests {
         let root = temp.path();
         list_rule_candidates(root).unwrap();
 
-        let db_path = root.join("cas.db");
-        let (locked, ready) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let conn = rusqlite::Connection::open(db_path).unwrap();
-            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-            locked.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(300));
-            conn.execute_batch("COMMIT").unwrap();
-        });
-        ready.recv().unwrap();
-
-        let candidate = observe_rule_candidate(
-            root,
-            None,
-            "A concurrent observation must wait for the SQLite writer",
-            "concurrency",
-            &[("cas-lock", "ver-lock"), ("cas-other", "ver-other")],
-        )
-        .expect("observation should wait for the foreign writer and be recorded");
-        holder.join().unwrap();
+        let blocker = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let candidate = crate::shared_db::tests::retry_after_release(blocker, || {
+            observe_rule_candidate(
+                root,
+                None,
+                "A concurrent observation must wait for the SQLite writer",
+                "concurrency",
+                &[("cas-lock", "ver-lock"), ("cas-other", "ver-other")],
+            )
+        }).expect("observation retries the contended write");
 
         assert_eq!(candidate.distinct_tasks(), 2);
         assert_eq!(candidate.occurrences.len(), 2);

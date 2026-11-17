@@ -748,12 +748,13 @@ mod cases {
         rt.block_on(pane.inject_prompt(payload))
             .expect("inject into an idle pane");
 
-        // Past the Codex 500ms submit settle, draining like the daemon poll.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        // Observe the actual echoed bytes; this deliberately unread child never takes a turn.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut echoed = Vec::new();
-        while std::time::Instant::now() < deadline {
+        while pane.bytes_received() - before < payload.len() as u64 && std::time::Instant::now() < deadline {
             let (bytes, _) = pane.drain_output();
             echoed.extend_from_slice(&bytes);
+            if pane.bytes_received() - before >= payload.len() as u64 { break; }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let after = pane.bytes_received();

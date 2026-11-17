@@ -106,9 +106,6 @@ fn reload_skills_on_empty_output_creates_session_start() {
 #[test]
 fn reload_skills_absent_by_default() {
     let output = HookOutput::with_session_start_context("ctx".into());
-    let json = serde_json::to_string(&output).unwrap();
-    assert!(
-        !json.contains("reloadSkills"),
-        "reloadSkills must be absent when not set: {json}"
-    );
+    let json = serde_json::to_value(&output).unwrap();
+    assert!(json["hookSpecificOutput"].get("reloadSkills").is_none());
 }

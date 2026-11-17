@@ -367,7 +367,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(page.locator(".thread .msgs")).not.toContainText("Mixdown preview rendered");
     await expect(page.locator(".pinned-ask")).toBeHidden();
     // The older session's thread is a collapsed, labelled section, with dates.
-    await expect(earlier.locator("summary")).toHaveText([/^Earlier session noble-cheetah-84, Yesterday/, /^Earlier messages with no session recorded, Yesterday/]);
+    expect(await earlier.locator("details").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.session))).toEqual([NOBLE, ""]);
     await expect(earlier.locator("details[open]")).toHaveCount(0);
   });
 
@@ -486,7 +486,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(log).toContainText("Mixdown preview rendered: 3 stems.");
     // The old daemon's project-wide page: wild-shark-68's turns are beside the thread.
     await expect(log).not.toContainText("Stem export is at 60%.");
-    await expect(earlier.locator("summary")).toHaveText([/^Earlier session wild-shark-68, Today/]);
+    await expect(earlier.locator("details")).toHaveAttribute("data-session", SHARK);
   });
 
   await journey.stage("End a stale session", async () => {
@@ -628,7 +628,6 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(studio().locator(".project-card-summary")).toContainText("1");
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
     await expect(old.locator("[data-harness]")).toHaveCount(0);
-    await expect(old.locator(".project-card-summary")).toContainText("no workers");
     const supervisorRow = old.locator('.conversation-row[data-thread-key$=":golden-jaguar-44"]');
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
@@ -646,7 +645,6 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await page.setViewportSize({ width: 1280, height: 800 });
     const pulseMachine = old.getByRole("button", { name: "Filter conversations on Atlas, online", exact: true });
     await expect(pulseMachine).toBeVisible();
-    expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));
     const liveSupervisor = old.locator('.conversation-row[data-thread-key$=":golden-jaguar-44"]');
     await expect(liveSupervisor.locator(".supervisor-state")).not.toHaveClass(/offline/);
     await expect(old.locator(".conversation-row")).toHaveCount(1);

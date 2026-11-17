@@ -8,6 +8,7 @@ pass, and the scratch-directory guard.
 """
 
 import importlib.util
+from datetime import timedelta
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -228,8 +230,9 @@ class StandinCloudTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in claimed], ["pm_1"])
         self.assertEqual(claimed[0]["sender_name"], "alpha")
         self.assertEqual(self.call("POST", "/api/peer-messages/claim", claim, token="tok-b")[1]["messages"], [])
-        time.sleep(1.2)  # the lease runs out: the message is claimable again
-        again = self.call("POST", "/api/peer-messages/claim", claim, token="tok-b")[1]["messages"]
+        after_expiry = standin_cloud.now_dt() + timedelta(seconds=claim['lease_secs'])
+        with mock.patch.object(standin_cloud, 'now_dt', return_value=after_expiry):
+            again = self.call("POST", "/api/peer-messages/claim", claim, token="tok-b")[1]["messages"]
         self.assertEqual([(m["id"], m["attempts"]) for m in again], [("pm_1", 2)])
         self.call("POST", "/api/peer-messages/ack",
                   {"consumer_id": "beta:s", "acks": [{"id": "pm_1", "outcome": "delivered"}]}, token="tok-b")

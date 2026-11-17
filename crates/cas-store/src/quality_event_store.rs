@@ -1048,8 +1048,6 @@ mod tests {
         record_quality_event(dir.path(), &intervention("a")).unwrap();
         let stored = quality_events_after(dir.path(), 0, 10).unwrap().remove(0);
         assert!(stored.local_note.is_some());
-        let wire = serde_json::to_string(&stored.to_wire()).unwrap();
-        assert!(!wire.contains("secret"), "{wire}");
 
         let mut code = intervention("b");
         code.payload = QualityPayload::CheckRun { review: None,

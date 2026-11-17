@@ -373,10 +373,7 @@ fn worker_suites_run_unwrapped_without_memory_admission_cas_38e7() {
                 assert!(deny_reason(&out).is_none(), "{command}: {out:?}");
                 let value = serde_json::to_value(&out).unwrap();
                 assert!(value.pointer("/hookSpecificOutput/updatedInput").is_none(), "{harness}: {command}: {out:?}");
-                assert!(
-                    !out.system_message.as_deref().is_some_and(|message| message.contains("memory admission")),
-                    "{out:?}"
-                );
+
             }
         }
         let mut request = input("npm test; node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'", "worker");

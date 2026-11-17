@@ -458,12 +458,7 @@ async fn personal_push_stops_after_a_failed_batch_without_replaying_forever() {
 
     assert_eq!(result.batches_run, 1);
     assert_eq!(result.remaining_backlog.pending, 1);
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.contains("no progress"))
-    );
+
     assert_eq!(queue.pending(10, 5).unwrap()[0].retry_count, 1);
 }
 

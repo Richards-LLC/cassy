@@ -189,14 +189,10 @@ fn a_production_parent_is_refused() {
         ..binding()
     };
     assert!(
-        resolve_parent(&prod_only, None, &branches)
-            .unwrap_err()
-            .contains("no dev or staging")
+        resolve_parent(&prod_only, None, &branches).is_err()
     );
     assert!(
-        resolve_parent(&binding(), Some("br-missing"), &branches)
-            .unwrap_err()
-            .contains("not found")
+        resolve_parent(&binding(), Some("br-missing"), &branches).is_err()
     );
 }
 

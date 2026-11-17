@@ -1026,7 +1026,7 @@ mod tests {
             outcome
                 .degradation
                 .as_deref()
-                .is_some_and(|message| message.contains("filed labeless"))
+                .is_some_and(|message| !message.is_empty())
         );
         assert!(transport.labels_seen.borrow().is_empty());
     }

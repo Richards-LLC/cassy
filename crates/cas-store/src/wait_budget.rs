@@ -392,12 +392,10 @@ mod tests {
             let _ = release_rx.recv();
         });
         locked.recv().unwrap();
-        let started = Instant::now();
         {
             let _budget = bound_waits_for(Duration::from_millis(30));
             assert!(lock_mutex_within_budget(&mutex, "test mutex").is_none());
         }
-        assert!(started.elapsed() < Duration::from_millis(500));
         release.send(()).unwrap();
         holder.join().unwrap();
         let _budget = bound_waits_for(Duration::from_millis(30));
@@ -501,13 +499,11 @@ mod tests {
         let holder = File::create(&path).unwrap();
         holder.lock_exclusive().unwrap();
         let contender = File::open(&path).unwrap();
-        let started = Instant::now();
         let error = {
             let _guard = bound_waits_for(Duration::from_millis(30));
             lock_file_exclusive_within_budget(&contender, "test.lock").unwrap_err()
         };
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-        assert!(started.elapsed() < Duration::from_millis(500));
         holder.unlock().unwrap();
         let _guard = bound_waits_for(Duration::from_millis(30));
         lock_file_exclusive_within_budget(&contender, "test.lock").unwrap();

@@ -73,7 +73,23 @@ fi
 EOF
 chmod +x "$fixture_root/systemctl" "$fixture_root/mount-guard"
 
+# Observe a real rejected shared-lock attempt before asserting that the hook
+# cannot cross the pruner. Keep util-linux flock as the actual lock owner.
+real_flock="$(command -v flock)"
+mkdir -p "$fixture_root/bin"
+cat >"$fixture_root/bin/flock" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "-s -w "*" 9" ]]; then
+    if "$TEST_REAL_FLOCK" -n -s 9; then exit 0; fi
+    : >"$TEST_SHARED_LOCK_WAITING"
+fi
+exec "$TEST_REAL_FLOCK" "$@"
+EOF
+chmod +x "$fixture_root/bin/flock"
 common_env=(
+    PATH="$fixture_root/bin:$PATH"
+    TEST_REAL_FLOCK="$real_flock"
+    TEST_SHARED_LOCK_WAITING="$fixture_root/shared-lock-waiting"
     CASSY_ACTIONS_ALLOW_TEST_ROOT=1
     CASSY_ACTIONS_CACHE_ROOT="$cache_root"
     CASSY_ACTIONS_STATE_ROOT="$state_root"
@@ -312,13 +328,14 @@ for _ in $(seq 1 100); do
     sleep 0.02
 done
 test -e "$guard_entered"
+rm -f "$fixture_root/shared-lock-waiting"
 run_started >/dev/null &
 hook_pid=$!
-sleep 0.1
-if ! kill -0 "$hook_pid" 2>/dev/null; then
-    printf 'FAIL job-started crossed an active exclusive prune lock\n' >&2
-    exit 1
-fi
+for _ in $(seq 1 500); do
+    [[ -e "$fixture_root/shared-lock-waiting" ]] && break
+    sleep 0.02
+done
+test -e "$fixture_root/shared-lock-waiting"
 test ! -e "$state_root/slot-1.pid"
 touch "$guard_release"
 wait "$pruner_pid"

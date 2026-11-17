@@ -608,14 +608,14 @@ while not pathlib.Path(sys.argv[5]).exists(): time.sleep(.01)
         program = r'''import importlib.util,sys
 s=importlib.util.spec_from_file_location('s',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory:
-    child="import signal,time,sys;from pathlib import Path;\ndef stop(s,f):\n signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(5.1);Path("+repr(sys.argv[4])+").touch();sys.exit(0)\nsignal.signal(signal.SIGTERM,stop);Path("+repr(sys.argv[3])+").write_text("+repr(str(directory))+");time.sleep(60)"
+    child="import signal,time,sys;from pathlib import Path;\ndef stop(s,f):\n signal.signal(signal.SIGTERM,signal.SIG_IGN);Path("+repr(sys.argv[4]+".entered")+").touch();time.sleep(5.1);Path("+repr(sys.argv[4])+").touch();sys.exit(0)\nsignal.signal(signal.SIGTERM,stop);Path("+repr(sys.argv[3])+").write_text("+repr(str(directory))+");time.sleep(60)"
     scope.run([sys.executable,'-c',child])
 '''
         parent = self.spawn([sys.executable, '-c', program, str(Path(scratch.__file__).resolve()), str(self.parent), str(ready), str(finished)])
         self.wait_until(ready.exists)
         directory = Path(ready.read_text())
         parent.send_signal(signal.SIGTERM)
-        time.sleep(.1)
+        self.wait_until(lambda: Path(str(finished) + '.entered').exists())
         parent.send_signal(signal.SIGTERM)  # Cannot interrupt a finally/reap a second time.
         self.assertTrue(directory.exists(), 'scratch removed before child teardown')
         parent.communicate(timeout=10)

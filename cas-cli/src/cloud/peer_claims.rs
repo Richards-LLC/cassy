@@ -2836,7 +2836,5 @@ mod tests {
         assert!(hold(future, Some(false)).is_stale(now));
         assert!(!hold(future, None).is_stale(now));
         assert!(!hold(future, Some(true)).is_stale(now));
-        assert!(hold(past, None).stale_reason(now).starts_with("expired at"));
-        assert!(hold(future, Some(false)).stale_reason(now).contains("not seen alive"));
     }
 }

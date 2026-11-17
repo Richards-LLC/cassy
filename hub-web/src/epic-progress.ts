@@ -63,10 +63,12 @@ function taskList(document: Document, rows: readonly ProjectEpic["rows"][number]
   return list;
 }
 
-function taskGroup(document: Document, epic: ProjectEpic, label: "In progress" | "Open", multiMachine: boolean): HTMLElement | undefined {
+function taskGroup(document: Document, epic: ProjectEpic, label: "In progress" | "Open", multiMachine: boolean, groupId: "in_progress" | "open"): HTMLElement | undefined {
   const rows = epic.rows.filter(row => row.group === label);
   if (!rows.length) return undefined;
   const group = element(document, "section", "live-epic-group");
+  group.dataset.group = groupId;
+  group.dataset.count = String(rows.length);
   group.append(element(document, "h4", "live-epic-group-label", `${label} · ${rows.length}`), taskList(document, rows, multiMachine));
   return group;
 }
@@ -106,8 +108,8 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
   }
   toggle.append(line);
   const panel = element(document, "div", "live-epic-tasks"); panel.id = panelId; panel.hidden = !open;
-  for (const label of ["In progress", "Open"] as const) {
-    const group = taskGroup(document, epic, label, options.multiMachine);
+  for (const [groupId, label] of [["in_progress", "In progress"], ["open", "Open"]] as const) {
+    const group = taskGroup(document, epic, label, options.multiMachine, groupId);
     if (group) panel.append(group);
   }
   const mergedRows = epic.rows.filter(row => row.group === "Merged");
@@ -116,6 +118,8 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
     // Closed tasks are not part of the status snapshot: Merged lists the
     // merged deliveries it has and points at the full board for the rest.
     const merged = element(document, "details", "live-epic-group live-epic-merged");
+    merged.dataset.group = "merged";
+    merged.dataset.count = String(mergedCount);
     merged.append(element(document, "summary", "live-epic-group-label", `Merged · ${mergedCount}`));
     if (mergedRows.length) merged.append(taskList(document, mergedRows, options.multiMachine));
     const note = element(document, "p", "live-epic-merged-note");

@@ -1383,14 +1383,14 @@ mod tests {
         let sender = service.clone();
         let request = serde_json::from_value(arguments.clone()).unwrap();
         let done = finished.clone();
+        let (resume, held) = tokio::sync::oneshot::channel::<()>();
         let call = async move {
             let result = sender.task(Parameters(request)).await;
             // Post-commit work that outlives the grace (a blocked lock, the network).
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            held.await.unwrap();
             done.store(true, Ordering::SeqCst);
             result
         };
-        let started = std::time::Instant::now();
         let answered = service
             .call_with_deadline_and_grace(
                 "task",
@@ -1401,12 +1401,12 @@ mod tests {
             )
             .await
             .expect("a committed note is a success, not a tool error");
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "answered within the grace, not the 10s budget");
         let text = result_text(&answered);
         assert_eq!(answered.is_error, Some(false));
         assert!(text.contains("cas-note"), "{text}");
 
         assert!(!finished.load(Ordering::SeqCst), "answered while post-commit work was still running");
+        resume.send(()).unwrap();
         for _ in 0..50 {
             if finished.load(Ordering::SeqCst) {
                 break;
@@ -1448,9 +1448,10 @@ mod tests {
         let arguments = serde_json::json!({"action":"close", "id":"cas-done", "reason":"runbook updated"});
         let sender = service.clone();
         let request = serde_json::from_value(arguments.clone()).unwrap();
+        let (resume, held) = tokio::sync::oneshot::channel::<()>();
         let close = async move {
             let result = sender.task(Parameters(request)).await;
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            held.await.unwrap();
             result
         };
         let answered = service
@@ -1462,6 +1463,8 @@ mod tests {
                 close,
             )
             .await;
+        resume.send(()).unwrap();
+        service.tool_work.wait_idle().await;
         let closed = tasks.get("cas-done").unwrap();
         if closed.status == crate::types::TaskStatus::Closed {
             let text = result_text(&answered.expect("a committed close is a success"));
@@ -1518,7 +1521,6 @@ mod tests {
             // Simulate post-commit work that outlives the response budget.
             std::future::pending::<Result<rmcp::model::CallToolResult, rmcp::ErrorData>>().await
         };
-        let started = std::time::Instant::now();
         let error = service
             .call_with_deadline(
                 "coordination",
@@ -1528,10 +1530,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "post-commit work blocked response"
-        );
+
         let rows = crate::store::open_prompt_queue_store(&service.inner.cas_root)
             .unwrap()
             .peek_all(10)
@@ -1938,14 +1937,15 @@ mod tests {
             None,
         );
         let arguments = serde_json::json!({"action": "worktree_merge", "id": "wt", "task_id": "cas-merged"});
-        let merge = async {
+        let (resume, held) = tokio::sync::oneshot::channel::<()>();
+        let merge = async move {
             super::super::mutation_receipt::merge_committed("abc123", "epic/x", "pushed to origin");
             // Cassy's close found the task not eligible: its receipt is empty.
             super::super::mutation_receipt::merge_followup(
                 &crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::NotEligible
                     .followup("cas-merged"),
             );
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            held.await.unwrap();
             Err(rmcp::ErrorData {
                 code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                 message: "Failed to mark worker delivery complete: disk full".into(),
@@ -1963,6 +1963,7 @@ mod tests {
             .await
             .expect("the committed merge answers early");
         assert_eq!(answered.is_error, Some(false));
+        resume.send(()).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let notes = loop {
             let notes = tasks.get("cas-merged").unwrap().notes;
@@ -2016,8 +2017,9 @@ mod tests {
         });
         let refusals = vec![format!("{first}\n\n{second}"), third];
         let refusal_payload = park_reply(refusals.clone());
+        let (resume, held) = tokio::sync::oneshot::channel::<()>();
         let close = async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            held.await.unwrap();
             Ok(CasCore::tool_error(park_reply(refusals)))
         };
         let error = service
@@ -2031,6 +2033,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+        resume.send(()).unwrap();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let notes = loop {

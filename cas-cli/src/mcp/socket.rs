@@ -748,16 +748,22 @@ mod tests {
         let config = test_config(dir.path());
         let owns = Arc::clone(&config.owns_socket);
         let shutdown = Arc::clone(&config.shutdown);
-        let interval = config.election_interval;
-        tokio::spawn(run_socket_election(config, pong_handler()));
-
-        // The survivor must defer while the owner is alive.
-        tokio::time::sleep(interval * 4).await;
+        let mut election = Box::pin(run_socket_election(config, pong_handler()));
+        // Drive the real bind attempt through its first Pending boundary while
+        // the fixture still owns the socket, then let the task keep running.
+        std::future::poll_fn(|cx| {
+            assert!(matches!(
+                std::future::Future::poll(election.as_mut(), cx),
+                std::task::Poll::Pending
+            ));
+            std::task::Poll::Ready(())
+        }).await;
         assert!(
             !owns.load(Ordering::SeqCst),
             "survivor must not steal a live socket"
         );
 
+        tokio::spawn(election);
         // Owner dies, leaving its socket file behind.
         drop(owner);
 

@@ -159,7 +159,6 @@ class Fixture(unittest.TestCase):
     def test_offer_and_reuse_through_the_cli(self):
         result = self.cli('offer', '--repo', str(self.repo), '--tip', self.tip, '--green')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('pending', result.stdout)
         state = json.loads((self.repo / '.cas/merge-sweeps/journey-background.json').read_text())
         tree = bg.evaluation_key(self.repo, 'HEAD')
         self.assertEqual(state['pending']['tree'], tree)

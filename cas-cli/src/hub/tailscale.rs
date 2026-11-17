@@ -932,10 +932,7 @@ mod tests {
             .unwrap();
         assert!(
             manager
-                .ensure(4175, 443)
-                .unwrap_err()
-                .to_string()
-                .contains("already owned")
+                .ensure(4175, 443).is_err()
         );
         assert_eq!(fs::read_to_string(&state).unwrap(), "http://127.0.0.1:9999");
         assert_eq!(

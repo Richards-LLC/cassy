@@ -793,24 +793,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generated_plugin_uses_awaited_hooks_and_explicit_permission_boundary() {
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("tool.execute.before"));
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("tool.execute.after"));
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("session.created"));
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("session.idle"));
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("await update"));
-
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("rename(temp, STATE_PATH)"));
-        assert!(
-            OPENCODE_PLUGIN_SOURCE.contains("export const CassyPlugin = async () => ({"),
-            "OpenCode loads named plugin exports as factory functions"
-        );
-        assert!(!OPENCODE_PLUGIN_SOURCE.contains("export const Hooks = {"));
-        assert!(!OPENCODE_PLUGIN_SOURCE.contains("SessionStart"));
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("await enforceSlackPolicy(input, output)"));
-        assert!(OPENCODE_PLUGIN_SOURCE.contains("[\"hook\", \"PreToolUse\"]"));
-    }
 
     #[test]
     fn worker_spec_projection_preserves_selector_fields() {

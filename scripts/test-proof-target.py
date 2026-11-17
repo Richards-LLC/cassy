@@ -150,9 +150,10 @@ sys.exit(0 if value else 1)
         self.assertTrue(targets.workspace_unit('liblibcustom-123.rlib', {'libcustom'}))
 
     def test_explicit_target_override_refuses_before_command(self):
-        r = self.run_helper(self.a, [sys.executable, '-c', 'raise Exception("ran")', '--target-dir=/shared'])
+        marker = self.base / 'ran'
+        r = self.run_helper(self.a, [sys.executable, '-c', f'from pathlib import Path; Path({str(marker)!r}).touch()', '--target-dir=/shared'])
         self.assertNotEqual(r.returncode, 0)
-        self.assertNotIn('ran', r.stderr)
+        self.assertFalse(marker.exists())
 
     def test_scoped_runner_uses_same_guard_and_records_failed_source(self):
         b = self.b_worktree()

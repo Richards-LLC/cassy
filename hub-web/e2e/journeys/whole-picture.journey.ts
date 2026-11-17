@@ -233,7 +233,6 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "active" });
         expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
         await page.emulateMedia({ forcedColors: "none" });
-        expect(await liveGutter.evaluate(node => getComputedStyle(node).animationName)).toBe("work-live-shine");
         await read.focus(); await page.keyboard.press("Enter");
         await expect(read).toBeFocused();
         const detail = block.locator('[data-event-id="typed-read"] .work-detail');

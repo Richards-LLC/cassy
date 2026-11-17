@@ -95,8 +95,15 @@ fn claude_home() -> tempfile::TempDir {
     write(&main.join("plugins/marketplaces/m/README.md"), "old cache");
     write(&main.join("plugins/installed_plugins.json"), "{\"plugins\":{\"x@m\":[1]}}");
     write(&a.join("plugins/installed_plugins.json"), "{\"plugins\":{\"y@m\":[2]}}");
-    std::thread::sleep(std::time::Duration::from_millis(20));
     write(&a.join("plugins/marketplaces/m/README.md"), "new cache");
+    for (path, modified) in [
+        (main.join("plugins/marketplaces/m/README.md"), std::time::SystemTime::UNIX_EPOCH),
+        (a.join("plugins/marketplaces/m/README.md"), std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3600)),
+    ] {
+        std::fs::File::open(path).unwrap().set_times(
+            std::fs::FileTimes::new().set_modified(modified),
+        ).unwrap();
+    }
     // A second named account with nothing shared yet.
     login(&h.join(".claude-c@x.com"), "c@x.com");
     // A typo directory with no login.
@@ -120,10 +127,9 @@ fn cas_e1f4_dry_run_lists_planned_links_merges_and_conflicts() {
         labels,
         [".claude", ".claude-alt", ".claude-a@x.cmo", ".claude-a@x.com", ".claude-c@x.com"]
     );
-    assert!(plan.dir_changes.contains(&DirChange::Retire {
-        label: ".claude".into(),
-        reason: "login a@x.com duplicates .claude-a@x.com".into(),
-    }));
+    assert!(plan.dir_changes.iter().any(|change| matches!(
+        change, DirChange::Retire { label, .. } if label == ".claude"
+    )));
     assert!(plan.dir_changes.contains(&DirChange::Rename {
         label: ".claude-alt".into(),
         to: ".claude-b@x.com".into(),

@@ -160,6 +160,7 @@ const server = createServer(async (req, res) => {
         case "/start": return startHub();
         case "/stop": await stop(state.hub); return { stopped: true, stopped_at: new Date().toISOString() };
         case "/evidence": return evidence();
+        case "/drain": return jsonCas(["hub", "operator", "drain"]);
         case "/revoke": {
           const { devices } = await inventory(); assert(devices.some((x) => x.device_id === data.id), "only run-created device can be revoked");
           return jsonCas(["hub", "operator", "revoke-device", data.id]);

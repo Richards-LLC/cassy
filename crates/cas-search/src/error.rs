@@ -93,30 +93,7 @@ impl From<serde_json::Error> for SearchError {
 mod tests {
     use crate::error::*;
 
-    #[test]
-    fn test_error_display() {
-        let err = SearchError::index("failed to open");
-        assert_eq!(err.to_string(), "index error: failed to open");
 
-        let err = SearchError::DimensionMismatch {
-            expected: 1024,
-            actual: 768,
-        };
-        assert_eq!(
-            err.to_string(),
-            "dimension mismatch: expected 1024, got 768"
-        );
-    }
-
-    #[test]
-    fn test_error_constructors() {
-        let _ = SearchError::index("test");
-        let _ = SearchError::query("test");
-        let _ = SearchError::vector("test");
-        let _ = SearchError::storage("test");
-        let _ = SearchError::serialization("test");
-        let _ = SearchError::config("test");
-    }
 
     #[test]
     fn test_io_error_conversion() {

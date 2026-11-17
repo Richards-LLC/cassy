@@ -81,6 +81,7 @@ describe("secret request (cas-1996)", () => {
     // Password managers are told to leave it alone, and there is no form for a browser to offer to save.
     expect(input.hasAttribute("data-1p-ignore") && input.dataset.lpignore === "true").toBe(true);
     expect(node.querySelector("form")).toBeNull();
+    const transcriptBeforeAnswer = structuredClone(history.visibleEvents());
     input.value = "cio_secret_value";
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await vi.waitFor(() => expect(node.dataset.answered).toBe("true"));
@@ -88,7 +89,7 @@ describe("secret request (cas-1996)", () => {
     expect(respond).not.toHaveBeenCalled();
     expect(input.value).toBe("");
     expect(node.querySelector(".chip.sent")?.textContent).toContain("/home/op/.cas/private/creds/cassy/CRATES_TOKEN");
-    expect(JSON.stringify(history.visibleEvents())).not.toContain("cio_secret_value");
+    expect(history.visibleEvents()).toEqual(transcriptBeforeAnswer);
 
     const other = reply(71, "secret", "For the npm publish.", { summary: "NPM_TOKEN" });
     const declined = renderSecretObject(other, { ...context(other, history), answerSecret });

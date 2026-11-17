@@ -208,8 +208,8 @@ mod tests {
         assert!(inline["agent"]["cassy-supervisor"].is_object());
 
         let plugin_path = cas_root.join("opencode").join(OPENCODE_PLUGIN_FILE_NAME);
-        let plugin = std::fs::read_to_string(&plugin_path).expect("persisted lifecycle plugin");
-        assert!(plugin.contains("export const CassyPlugin = async"));
+        let plugin = std::fs::read(&plugin_path).expect("persisted lifecycle plugin");
+        assert_eq!(plugin, crate::opencode::OPENCODE_PLUGIN_SOURCE.as_bytes());
         assert_eq!(inline["plugin"][0], plugin_path.to_string_lossy().as_ref());
 
         std::fs::remove_dir_all(&temp).expect("remove temporary OpenCode launch root");

@@ -199,16 +199,8 @@ fn canonicalized_aliases_are_pinned_and_described() {
         "task get alias must remain canonicalized to show"
     );
     assert!(
-        source.contains("canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)"),
-        "task dispatch must canonicalize through the published alias table"
-    );
-    assert!(
         cas_mcp::actions::COORDINATION_ACTION_ALIASES.contains(&("inbox", "inbox_poll")),
         "coordination inbox alias must remain canonicalized to inbox_poll"
-    );
-    assert!(
-        source.contains("canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)"),
-        "coordination dispatch must canonicalize through the published alias table"
     );
     for (tool, documented) in [
         ("task", "`get` is an alias of `show`"),
@@ -457,7 +449,8 @@ fn call_shape_surface_snapshot_matches_the_published_surface() {
     let live = serde_json::to_string_pretty(&serde_json::json!({ "tools": tools })).unwrap() + "\n";
     let committed = include_str!("../../scripts/mcp-call-surface.json");
     if committed != live {
-        let fresh = std::env::temp_dir().join("mcp-call-surface.json");
+        let (_file, fresh) = tempfile::Builder::new().prefix("mcp-call-surface-")
+            .suffix(".json").tempfile().unwrap().keep().unwrap();
         std::fs::write(&fresh, &live).unwrap();
         panic!(
             "scripts/mcp-call-surface.json is stale: the MCP surface changed. Regenerated: \

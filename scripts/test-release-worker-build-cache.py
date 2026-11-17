@@ -2,7 +2,11 @@
 """Exercise the real atomic cache publisher with fake Cargo; no Rust builds."""
 import hashlib
 import importlib.util
+import json
 import os
+import select
+import shlex
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -59,6 +63,9 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         # A hermetic `cas` answers `config get factory.scratch_root` (cas-3f93).
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        zig = self.bin / "zig"
+        zig.write_text("#!/bin/sh\nprintf '0.0.0-fixture\\n'\n")
+        zig.chmod(0o755)
         fake_cas = self.bin / "cas"
         fake_cas.write_text(
             "#!/usr/bin/env bash\n"
@@ -68,6 +75,7 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         self.receipt = self.root / "host-update.json"
         self.env = patch.dict(os.environ, {
             "CARGO": str(self.cargo), "FIXTURE_RELEASED": self.released,
+            "ZIG": str(zig),
             "FIXTURE_CARGO_EXIT": "0", "CAS_ROOT": str(self.root / "wrong-root"),
             "CAS_RELEASE_TRAIN_WORKER_CACHE_CMD": str(SCRIPTS / "refresh-worker-build-cache.sh"),
             "CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS": "60",
@@ -213,11 +221,40 @@ echo 'Published worker target baseline: ours'
 
     def test_timeout_stops_descendant_writer_and_keeps_old_pointer(self):
         marker = self.root / "late-publication"
-        with self.stub(f"(sleep 2; touch '{marker}') &\nwait\n"), patch.dict(
+        stopped = self.root / "descendant-stopped"
+        writer = self.root / "writer.py"
+        writer.write_text("import pathlib, signal, sys\n"
+                          "def stop(signum, frame):\n"
+                          f"    pathlib.Path({str(stopped)!r}).touch()\n"
+                          "    raise SystemExit(0)\n"
+                          "signal.signal(signal.SIGTERM, stop)\n"
+                          "print('{\"event\":\"ready\"}', flush=True)\n"
+                          "signal.pause()\n"
+                          f"pathlib.Path({str(marker)!r}).touch()\n")
+        popen = host_update.subprocess.Popen
+        def launch(command, *args, **kwargs):
+            child = popen(command, *args, **kwargs)
+            if str(self.root / 'refresh-stub') not in command:
+                return child
+            communicate = child.communicate
+            first = True
+            def communicate_after_ready(timeout=None):
+                nonlocal first
+                if first:
+                    first = False
+                    self.assertTrue(select.select([child.stdout], [], [], 5)[0])
+                    event = json.loads(child.stdout.readline())
+                    self.assertEqual(event['event'], 'ready')
+                    raise subprocess.TimeoutExpired(command, timeout)
+                return communicate(timeout=timeout)
+            child.communicate = communicate_after_ready
+            return child
+        body = f"{shlex.quote(sys.executable)} {shlex.quote(str(writer))} &\nwait\n"
+        with self.stub(body), patch.object(host_update.subprocess, 'Popen', side_effect=launch), patch.dict(
                 os.environ, CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS="1"):
             result = self.refresh()
         self.assertEqual(result["status"], "WARN")
-        time.sleep(1.2)
+        self.assertTrue(stopped.exists())
         self.assertFalse(marker.exists(), "descendant writer survived refresh timeout")
         self.assertEqual((self.cache / "current").read_text(), "old\n")
         self.assert_no_checkouts()

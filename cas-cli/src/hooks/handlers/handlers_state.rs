@@ -920,16 +920,16 @@ mod cas_85d9_lease_renewal_tests {
         agent_store
             .try_claim("cas-85d9-t1", "agent-85d9", 1, None)
             .expect("try_claim");
+        rusqlite::Connection::open(cas.root.join("cas.db")).unwrap().execute(
+            "UPDATE task_leases SET expires_at = ?1 WHERE task_id = ?2",
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(), "cas-85d9-t1"],
+        ).unwrap();
 
         // The worker heartbeats normally while still working — this is
         // what production does every ~5-30s via the daemon tick.
         agent_store.heartbeat("agent-85d9").expect("heartbeat");
 
-        // Wait past the ORIGINAL 1s claim duration. Before cas-85d9, the
-        // lease would now be expired and `cleanup_orphaned_tasks` would
-        // reopen the task on the next SessionStart despite the worker
-        // being alive and having just heartbeated.
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // The original fixture deadline was in the past; heartbeat must renew it.
 
         // Model the same production reclaim-sweep timing as the sibling
         // no-heartbeat test below — must be a no-op here since the
@@ -978,9 +978,11 @@ mod cas_85d9_lease_renewal_tests {
             .try_claim("cas-85d9-t2", "agent-85d9-dead", 1, None)
             .expect("try_claim");
 
-        // No heartbeat call — the agent is presumed crashed/hung before
-        // ever heartbeating on this lease.
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // No heartbeat call; set the fixture deadline in the past.
+        rusqlite::Connection::open(cas.root.join("cas.db")).unwrap().execute(
+            "UPDATE task_leases SET expires_at = ?1 WHERE task_id = ?2",
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(), "cas-85d9-t2"],
+        ).unwrap();
 
         // `list_active_leases` (which `cleanup_orphaned_tasks` consults)
         // returns any row still `status='active'` regardless of whether

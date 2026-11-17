@@ -409,10 +409,16 @@ mod tests {
         }
 
         store.upsert(&a).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
         store.upsert(&b).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
         store.upsert(&c).unwrap();
+
+        for (path, days) in [(&a, 3), (&b, 2), (&c, 1)] {
+            let changed = store.conn.lock().unwrap().execute(
+                "UPDATE known_repos SET last_touched_at = ?1 WHERE path = ?2",
+                rusqlite::params![(Utc::now() - chrono::Duration::days(days)).to_rfc3339(), path.canonicalize().unwrap().to_str().unwrap()],
+            ).unwrap();
+            assert_eq!(changed, 1);
+        }
 
         let list = store.list().unwrap();
         let names: Vec<_> = list

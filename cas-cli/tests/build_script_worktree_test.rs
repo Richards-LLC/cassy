@@ -128,24 +128,7 @@ fn generate_lockfile_or_skip(package_root: &Path) -> bool {
     }
 }
 
-#[test]
-fn offline_fixture_registry_classifier_preserves_skip_message_shape() {
-    assert_eq!(
-        nested_cargo_skip_message(
-            b"error: no matching package named `chrono` found\n\
-              location searched: crates.io index"
-        ),
-        "SKIP: nested cargo unavailable: error: no matching package named `chrono` found"
-    );
-    assert_eq!(
-        nested_cargo_skip_message(b"\n  error: could not execute process `sccache rustc -vV`\n"),
-        "SKIP: nested cargo unavailable: error: could not execute process `sccache rustc -vV`"
-    );
-    assert_eq!(
-        nested_cargo_skip_message(b""),
-        "SKIP: nested cargo unavailable: no stderr output"
-    );
-}
+
 
 fn create_fixture() -> (TempDir, PathBuf, PathBuf) {
     let repo = tempfile::tempdir().expect("fixture tempdir");

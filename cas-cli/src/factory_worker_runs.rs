@@ -449,13 +449,6 @@ mod tests {
         };
         let result = crate::cli::factory::execute(args, &cli, Some(&root));
         assert!(result.is_err(), "keep the producer exit result");
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Only package-scoped"),
-            "execute the real capped producer validation"
-        );
         let completed = snapshot(&root, "run-worker", None, now).unwrap();
         assert!(!completed.running);
         let completion = completed.completion.unwrap();

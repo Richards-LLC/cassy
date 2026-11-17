@@ -78,7 +78,7 @@ describe("delivery notice copy", () => {
     const raw = watchdog({ source: "relay-watchdog", subject: 3196290 });
     const plan = planNotice("atlas", "Accounting-rapid-gazelle-52", raw, () => false);
     if (plan.action !== "raise") throw new Error("expected raise");
-    expect(JSON.stringify(plan.content.payload)).toContain("9 minutes ago");
+    expect(plan.content.payload).toEqual({ summary: raw.summary, message: raw.message });
     const legacy = createAttentionItem({ id: "old", machineId: "atlas", machineLabel: "Atlas", session: "s", kind: NOTICE_KIND, createdAt: "2026-09-30T17:49:00Z" }, { headline: raw.summary!, detail: raw.message, severity: "warning", action: "view_pane" });
   });
 });

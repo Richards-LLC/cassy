@@ -565,6 +565,39 @@ mod tests {
         (pid, std::thread::spawn(move || child.wait()))
     }
 
+    fn spawn_ready_shell(script: &str) -> (u32, JoinHandle<std::io::Result<ExitStatus>>) {
+        use std::io::BufRead;
+        let mut child = Command::new("sh").args(["-c", script]).process_group(0)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let pid = child.id();
+        let output = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            std::io::BufReader::new(output).read_line(&mut line).unwrap();
+            let _ = tx.send(line);
+        });
+        let ready = rx.recv_timeout(std::time::Duration::from_secs(20));
+        if ready.as_deref() != Ok("ready\n") {
+            kill_group(pid);
+            let _ = child.wait();
+            panic!("shell readiness failed: {ready:?}");
+        }
+        (pid, std::thread::spawn(move || child.wait()))
+    }
+
+    fn join_reaped(pgid: u32, child: JoinHandle<std::io::Result<ExitStatus>>) -> ExitStatus {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(child.join().unwrap()); });
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(status) => status.unwrap(),
+            Err(error) => {
+                kill_group(pgid);
+                panic!("owned child was not reaped: {error}");
+            }
+        }
+    }
+
     fn kill_group(pgid: u32) {
         let _ = nix::sys::signal::killpg(
             nix::unistd::Pid::from_raw(pgid as i32),
@@ -605,8 +638,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
         let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
-        let (pid, daemon) = spawn_group("sh", &["-c", "trap '' TERM; exec sleep 30"]);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (pid, daemon) = spawn_ready_shell("trap '' TERM; printf 'ready\\n'; exec sleep 30");
         crate::ui::factory::process_groups::track(store.path(), "w1", "wedged", worker_pgid)
             .unwrap();
         let mut metadata = save_session("wedged", pid, project.path());
@@ -616,13 +648,7 @@ mod tests {
         let outcome = end_session_with_grace("wedged", std::time::Duration::from_millis(300));
         kill_group(pid);
         let status = daemon.join().unwrap().unwrap();
-        // A worker that survived would hold this join for 30 s.
-        let started = std::time::Instant::now();
-        let worker_status = worker.join().unwrap().unwrap();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "the SIGKILLed daemon's worker group was left running"
-        );
+        let worker_status = join_reaped(worker_pgid, worker);
         assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
         assert_eq!(outcome.unwrap(), EndSessionOutcome::Ended);
         assert_eq!(status.signal(), Some(libc::SIGKILL));
@@ -642,7 +668,6 @@ mod tests {
         let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
         let (dead_pid, daemon) = spawn_group("true", &[]);
         daemon.join().unwrap().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
         crate::ui::factory::process_groups::track(store.path(), "w1", "killed9", worker_pgid)
             .unwrap();
         let mut metadata = save_session("killed9", dead_pid, project.path());
@@ -650,20 +675,9 @@ mod tests {
         SessionManager::new().save_metadata(&metadata).unwrap();
 
         let outcome = end_session_by_name("killed9");
-        let started = std::time::Instant::now();
-        let reaped = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            kill_group(worker_pgid);
-        });
-        let worker_status = worker.join().unwrap().unwrap();
-        let elapsed = started.elapsed();
-        reaped.join().unwrap();
+        let worker_status = join_reaped(worker_pgid, worker);
         assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
         assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
-        assert!(
-            elapsed < std::time::Duration::from_secs(4),
-            "the dead daemon's worker group was left running"
-        );
         assert!(daemon_log("killed9").contains("\"worker_reaped\""));
     }
 
@@ -677,7 +691,6 @@ mod tests {
         let store = tempfile::tempdir().unwrap();
         let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
         let (pid, daemon) = spawn_group("sleep", &["30"]);
-        std::thread::sleep(std::time::Duration::from_millis(200));
         crate::ui::factory::process_groups::track(store.path(), "w1", "opaque", worker_pgid)
             .unwrap();
         let mut metadata = save_session("opaque", pid, project.path());
@@ -711,7 +724,6 @@ mod tests {
         let store = tempfile::tempdir().unwrap();
         let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
         let (other_pid, other) = spawn_group("sleep", &["30"]);
-        std::thread::sleep(std::time::Duration::from_millis(200));
         crate::ui::factory::process_groups::track(store.path(), "w1", "reused", worker_pgid)
             .unwrap();
         let mut metadata = save_session("reused", other_pid, project.path());
@@ -721,19 +733,11 @@ mod tests {
         let outcome = force_clear_stale_session("reused", other_pid, None, &|_| None);
         let other_alive =
             nix::sys::signal::kill(nix::unistd::Pid::from_raw(other_pid as i32), None).is_ok();
-        let started = std::time::Instant::now();
-        let stop_worker = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            kill_group(worker_pgid);
-        });
-        let worker_status = worker.join().unwrap().unwrap();
-        let elapsed = started.elapsed();
+        let worker_status = join_reaped(worker_pgid, worker);
         kill_group(other_pid);
         other.join().unwrap().unwrap();
-        stop_worker.join().unwrap();
         assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
         assert!(other_alive, "--force-stale signalled the recorded PID");
-        assert!(elapsed < std::time::Duration::from_secs(4), "the recorded worker was left running");
         assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
         assert!(SessionManager::new().find_session(Some("reused")).unwrap().is_none());
         assert!(daemon_log("reused").contains("\"force_stale\""));
@@ -749,7 +753,6 @@ mod tests {
         let store = tempfile::tempdir().unwrap();
         let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
         let (other_pid, other) = spawn_group("sleep", &["30"]);
-        std::thread::sleep(std::time::Duration::from_millis(200));
         crate::ui::factory::process_groups::track(store.path(), "w1", "unstamped", worker_pgid)
             .unwrap();
         let mut metadata = save_session("unstamped", other_pid, project.path());
@@ -765,19 +768,11 @@ mod tests {
         );
         let other_alive =
             nix::sys::signal::kill(nix::unistd::Pid::from_raw(other_pid as i32), None).is_ok();
-        let started = std::time::Instant::now();
-        let stop_worker = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            kill_group(worker_pgid);
-        });
-        let worker_status = worker.join().unwrap().unwrap();
-        let elapsed = started.elapsed();
+        let worker_status = join_reaped(worker_pgid, worker);
         kill_group(other_pid);
         other.join().unwrap().unwrap();
-        stop_worker.join().unwrap();
         assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
         assert!(other_alive, "--force-stale signalled the recorded PID");
-        assert!(elapsed < std::time::Duration::from_secs(4), "the recorded worker was left running");
         assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
         assert!(SessionManager::new().find_session(Some("unstamped")).unwrap().is_none());
     }
@@ -875,8 +870,7 @@ mod tests {
     fn withheld_sigkill_is_reported_and_logged() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();
-        let (pid, daemon) = spawn_group("sh", &["-c", "trap '' TERM; exec sleep 30"]);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (pid, daemon) = spawn_ready_shell("trap '' TERM; printf 'ready\\n'; exec sleep 30");
         let mut metadata = save_session("unverified", pid, project.path());
         metadata.daemon_pid_starttime = None;
         SessionManager::new().save_metadata(&metadata).unwrap();
@@ -900,7 +894,6 @@ mod tests {
         let cas_root = project.path().join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
         let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
-        std::thread::sleep(std::time::Duration::from_millis(100));
         crate::ui::factory::process_groups::track(&cas_root, "w1", "renamed", worker_pgid)
             .unwrap();
         // The replacement (this test process) takes the name when the old
@@ -917,12 +910,11 @@ mod tests {
         let staged = project.path().join("replacement.json");
         std::fs::write(&staged, serde_json::to_string(&replacement).unwrap()).unwrap();
         let script = format!(
-            "trap 'cp \"{}\" \"{}\"' TERM; while :; do sleep 0.05; done",
+            "trap 'cp \"{}\" \"{}\"' TERM; printf 'ready\\n'; while :; do sleep 0.05; done",
             staged.display(),
             crate::ui::factory::metadata_path("renamed").display()
         );
-        let (pid, daemon) = spawn_group("sh", &["-c", &script]);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (pid, daemon) = spawn_ready_shell(&script);
         save_session("renamed", pid, project.path());
 
         let outcome = end_session_with_grace("renamed", std::time::Duration::from_millis(500));

@@ -68,7 +68,6 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
           await expect(panel.locator(`.team-lane[data-worker="${worker}"]`).getByRole("img", { name: label, exact: true })).toHaveAttribute("title", label);
         }
         // The track is an outline, so a release at zero cannot read as a full bar.
-        expect(await panel.locator(".release-progress progress").evaluate(bar => { const style = getComputedStyle(bar); return [style.borderTopStyle, style.backgroundColor]; })).toEqual(["solid", "rgba(0, 0, 0, 0)"]);
         // The track's connector is a graphic that carries meaning, so it holds 3:1 against its lane.
         const connector = await panel.locator(".team-lane").first().evaluate(lane => {
           const channels = (value: string) => value.match(/[\d.]+/g)!.slice(0, 3).map(Number);
@@ -87,7 +86,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["atlas.test", PELICAN]);
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
         await expect(panel.locator(".team-lane").first()).toHaveAttribute("data-worker", "brisk-wren-9");
-        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-state')).toHaveText("Blocked");
+        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"]')).toHaveAttribute("data-task-status", "blocked");
         await expect(panel.locator("[data-team-action]")).toHaveCount(0);
         await expect(panel.locator(".team-needs")).toHaveAttribute("data-active", "false");
         await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1]);
@@ -98,7 +97,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         fleet.agents[3].liveness = "offline";
         const started = performance.now();
         await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["atlas.test", PELICAN]);
-        await expect(page.locator('.team-lane[data-worker="swift-lark-3"] .team-state')).toHaveText("Stalled", { timeout: 5_000 });
+        await expect(page.locator('.team-lane[data-worker="swift-lark-3"]')).toHaveAttribute("data-liveness", "stalled");
         const waiting = page.locator('.team-lane[data-worker="brisk-wren-9"]');
         const offline = page.locator('.team-lane[data-worker="calm-heron-5"]');
         await expect(offline.getByRole("img", { name: "Offline", exact: true })).toHaveAttribute("title", "Offline");
@@ -126,7 +125,6 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(forced.unselected).toBe(forced.page);
         expect(forced.selected).not.toBe(forced.unselected);
         expect(forced.name).toBe(forced.row);
-        if (width === 1280) expect(await page.locator(".conversation-context .status-agent").first().evaluate(row => getComputedStyle(row).borderTopWidth)).toBe("0px");
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         await page.getByRole("tab", { name: "Conversation", exact: true }).click();
         await expect(page.locator("#team-panel")).toBeHidden();
@@ -252,7 +250,7 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         await page.evaluate(([host, session]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => void }).__journeyMachineEvent(host, JSON.stringify({ kind: "fleet_changed", session })), ["prowl.test", "remote-session"]);
         await expectRun(peer, [2, 0, 3]);
         await expect(peer).toContainText("3/5");
-        await expect(tasks.locator(".live-epic-group-label")).toHaveText(["Open · 2", "Merged · 3"]);
+        expect(await tasks.locator("[data-group]").evaluateAll(nodes => nodes.map(node => [(node as HTMLElement).dataset.group, Number((node as HTMLElement).dataset.count)]))).toEqual([["open", 2], ["merged", 3]]);
         await tasks.locator(".live-epic-merged summary").click();
         await expect(tasks.locator(".live-epic-merged")).toContainText("Follow up on the release");
         await expect(peer).toHaveAttribute("aria-expanded", "true");

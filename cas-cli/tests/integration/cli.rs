@@ -24,8 +24,6 @@ mod coordination_cli_test;
 mod deliverable_test;
 #[path = "../gh701_origin_filter_measurement_test.rs"]
 mod gh701_origin_filter_measurement_test;
-#[path = "../host_registry_isolation_test.rs"]
-mod host_registry_isolation_test;
 #[path = "../hub_clean_home_test.rs"]
 mod hub_clean_home_test;
 #[path = "../hub_detached_lifecycle_test.rs"]

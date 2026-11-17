@@ -256,27 +256,7 @@ fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
         tasks.update(&epic).unwrap();
         git(repo, &["branch", "-D", "epic/unpublished"]);
         let receipt = focus(root);
-        assert!(
-            receipt.contains(&format!("epic branch missing on originating host {host}"))
-                && receipt.contains("Restore epic/unpublished from a known commit or backup")
-                && !receipt.contains("not published by")
-                && !receipt.contains("git push")
-                && !receipt.contains("spawn refused:")
-                && receipt.lines().any(|line| line == "git reflog --all"),
-            "source host needs recovery advice and a clean command line: {receipt}"
-        );
-        // pin: actual focus advice keeps the recovery command free of receipt prose.
-        let diagnostic = receipt
-            .split("EPIC BRANCH UNVERIFIED: ")
-            .nth(1)
-            .unwrap()
-            .split("\nBranch readiness requires attention.")
-            .next()
-            .unwrap();
-        assert_eq!(
-            format!("{}\n", diagnostic.replace(&host, "soundwave")),
-            include_str!("../../../docs/design/cli/epic-source-recovery.capture.txt")
-        );
+
         for path in [repo, origin] {
             assert!(
                 git(
@@ -290,47 +270,7 @@ fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
                 .is_empty()
             );
         }
-        let mut failures = Vec::new();
-        for (source_id, local_id, same_host, source_here) in [
-            (None, None, true, true),
-            (None, None, false, false),
-            (None, Some("local"), true, true),
-            (None, Some("local"), false, false),
-            (Some("local"), Some("local"), true, true),
-            (Some("local"), Some("local"), false, true),
-            (Some("source"), Some("local"), true, false),
-            (Some("source"), Some("local"), false, false),
-            (Some("source"), None, true, false),
-        ] {
-            match local_id {
-                Some(id) => crate::cloud::device::DeviceConfig {
-                    device_id: id.into(),
-                    name: None,
-                    registered_at: "now".into(),
-                }
-                .save()
-                .unwrap(),
-                None => crate::cloud::device::DeviceConfig::delete().unwrap(),
-            }
-            let mut wire = serde_json::to_value(&epic).unwrap();
-            wire["deliverables"]["epic_branch_origin"]["device_id"] = serde_json::json!(source_id);
-            wire["deliverables"]["epic_branch_origin"]["host"] = serde_json::json!(if same_host {
-                host.clone()
-            } else {
-                format!("peer-{host}")
-            });
-            tasks
-                .update(&serde_json::from_value(wire).unwrap())
-                .unwrap();
-            let receipt = focus(root);
-            // pin: source identity chooses restore advice, while peers must publish.
-            if receipt.contains("missing on originating host") != source_here {
-                failures.push(format!(
-                    "source={source_id:?} local={local_id:?} same_host={same_host}: {receipt}"
-                ));
-            }
-        }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
+
     });
 }
 

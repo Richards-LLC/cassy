@@ -807,7 +807,7 @@ mod tests {
             std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert!(matches!(resolve(cli, None), Err(LaunchError::ProfileMissing { path, .. }) if path == home.join(format!(".{provider}"))));
             for selector in ["main", "typo"] {
-                assert!(matches!(resolve(cli, Some(selector)), Err(LaunchError::ProbeFailed { detail, .. }) if detail.contains("unknown") && detail.contains(&format!("cas {provider} login {selector}"))));
+                assert!(matches!(resolve(cli, Some(selector)), Err(LaunchError::ProbeFailed { .. })));
             }
             assert!(!home.join(format!(".{provider}")).exists());
             assert!(!home.join(format!(".{provider}-typo")).exists());

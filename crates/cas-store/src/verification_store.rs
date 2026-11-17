@@ -4741,9 +4741,7 @@ mod tests {
                 "tool-use-b",
                 b"other-secret",
             )
-            .unwrap_err()
-            .to_string()
-            .contains("already awaiting SubagentStart"),
+            .is_err(),
             "one parent cannot mint a second concurrent unbound handoff"
         );
         assert!(

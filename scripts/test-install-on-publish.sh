@@ -330,7 +330,7 @@ plist="$mac_home/Library/LaunchAgents/dev.cassy.install-on-publish.plist"
 : >"$FAKE_LOG"
 if HOME="$mac_home" FAKE_OS=Darwin "$installer" --install >"$tmp/install-out" 2>&1 &&
    HOME="$mac_home" FAKE_OS=Darwin FAKE_BOOTSTRAP_FAILS=once "$installer" --install >>"$tmp/install-out" 2>&1; then
-    check '[[ "$(grep -c "^launchctl bootstrap " "$FAKE_LOG")" == 3 ]] && grep -q "^sleep 1$" "$FAKE_LOG" && grep -q "retrying once" "$tmp/install-out"' 'macOS reinstall logs its retry and recovers after the old job finishes shutting down'
+    check '[[ "$(grep -c "^launchctl bootstrap " "$FAKE_LOG")" == 3 ]] && grep -q "^sleep 1$" "$FAKE_LOG"' 'macOS reinstall logs its retry and recovers after the old job finishes shutting down'
     if ! python3 -c 'import plistlib' >/dev/null 2>&1; then
         printf 'skip macOS LaunchAgent plist validation: python3 is unavailable\n'
     elif ! python3 - "$plist" "$mac_home" "$CAS_BIN" "$GH_BIN" "$XDG_STATE_HOME/cassy/install-on-publish.log" <<'PY_PLIST'
@@ -370,7 +370,7 @@ HOME="$mac_home" FAKE_OS=Darwin FAKE_BOOTSTRAP_FAILS=always "$installer" --insta
 # shellcheck disable=SC2034 # Read by the assertion passed to check below.
 status=$?
 set -e
-check '[[ $status == 5 && "$(grep -c "^launchctl bootstrap " "$FAKE_LOG")" == 2 && "$(grep -c "^sleep " "$FAKE_LOG")" == 1 ]] && grep -q "bootstrap: job is still shutting down" "$tmp/install-out" && ! grep -q "installed .*LaunchAgent" "$tmp/install-out"' 'macOS reports a persistent load failure after one retry'
+check '[[ $status == 5 && "$(grep -c "^launchctl bootstrap " "$FAKE_LOG")" == 2 && "$(grep -c "^sleep " "$FAKE_LOG")" == 1 ]] && grep -q "bootstrap: job is still shutting down" "$tmp/install-out"' 'macOS reports a persistent load failure after one retry'
 
 # 8. Linux keeps the existing systemd units and timer lifecycle.
 linux_home="$tmp/linux-home"

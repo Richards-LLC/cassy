@@ -772,7 +772,7 @@ mod tests {
                     let response = daemon.dispatch_supervisor_command(Request::Status, "reload".into(), owner.clone()).await.unwrap();
                     if let DaemonMessage::SupervisorCommandReceipt { receipt } = response {
                         if receipt.phase == Phase::Observed {
-                            assert!(receipt.detail.contains(&format!("PID {}, version 9.99.2", replacement.0.id())), "{}", receipt.detail);
+                            assert!(receipt.detail.contains(&replacement.0.id().to_string()) && receipt.detail.contains("9.99.2"), "{}", receipt.detail);
                             break;
                         }
                     }

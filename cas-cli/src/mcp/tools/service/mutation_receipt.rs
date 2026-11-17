@@ -297,7 +297,7 @@ impl Receipt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     /// cas-3b81 (GH #1142): with one runtime worker, two synchronous
     /// close-shaped handlers ran one after the other and a timer queued behind
@@ -337,13 +337,21 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn blocking_pool_handlers_overlap_and_keep_their_receipt_cas_3b81() {
-        let started = Instant::now();
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (entered, entries) = std::sync::mpsc::channel();
         let slow = |id: &'static str| {
+            let gate = std::sync::Arc::clone(&gate);
+            let entered = entered.clone();
             let receipt = Receipt::new("task", "close", Some(id));
             let observed = receipt.clone();
             let handle = tokio::spawn(scope(receipt, async move {
                 run_on_blocking_pool(async move {
-                    std::thread::sleep(Duration::from_millis(400));
+                    entered.send(id).unwrap();
+                    let (open, changed) = &*gate;
+                    let open = changed.wait_timeout_while(
+                        open.lock().unwrap(), Duration::from_secs(5), |open| !*open,
+                    ).unwrap().0;
+                    assert!(*open, "both handlers must enter before release");
                     task_terminal_committed(id);
                 })
                 .await
@@ -353,22 +361,18 @@ mod tests {
         };
         let (first, first_receipt) = slow("cas-a");
         let (second, second_receipt) = slow("cas-b");
-        let tick = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            started.elapsed()
-        });
-        let tick = tick.await.unwrap();
+        let first_entry = entries.recv_timeout(Duration::from_secs(5));
+        let second_entry = entries.recv_timeout(Duration::from_secs(5));
+        let tick = tokio::time::timeout(Duration::from_secs(5), tokio::spawn(async {})).await;
+        // Release even when overlap or runtime responsiveness failed, before asserting.
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
         first.await.unwrap();
         second.await.unwrap();
-        let total = started.elapsed();
-        assert!(
-            tick < Duration::from_millis(300),
-            "runtime pinned: timer fired after {tick:?}"
-        );
-        assert!(
-            total < Duration::from_millis(750),
-            "handlers serialized: {total:?}"
-        );
+        let mut entered = vec![first_entry.unwrap(), second_entry.unwrap()];
+        entered.sort_unstable();
+        assert_eq!(entered, ["cas-a", "cas-b"]);
+        tick.expect("runtime must remain responsive while both handlers are blocked").unwrap();
         assert!(first_receipt.terminal.get().is_some());
         assert!(second_receipt.terminal.get().is_some());
         assert!(

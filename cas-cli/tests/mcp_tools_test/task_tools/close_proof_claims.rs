@@ -129,7 +129,7 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         let task = store.get(&id).unwrap();
         if let Some(rejection) = rejection {
             assert!(
-                is_error && text.contains("PROOF CLAIM RECEIPT REQUIRED"),
+                is_error && cas::gates::codes_in(&text).contains(&"G-31"),
                 "{reason}: {text}"
             );
             assert!(text.contains(rejection), "{text}");
@@ -146,7 +146,7 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
             );
         } else {
             assert!(
-                !is_error && text.contains("Closed task:"),
+                !is_error,
                 "{reason}: {text}"
             );
             assert_eq!(task.status, TaskStatus::Closed, "{reason}");

@@ -42,24 +42,7 @@ fn cas_a576_rust_module_filter_target_is_refused() {
     }
 }
 
-#[test]
-fn cas_a576_refusal_reports_parsed_missing_fields_and_example() {
-    let task =
-        concurrency_task("non-Rust target: vitest src/example.test.ts --jobs 16; result=PASS");
-    let error = validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).unwrap_err();
-    for expected in [
-        "parsed=[target, parallelism, result]",
-        "missing=[loops]",
-        "LOADED_PROOF: target=",
-        "loops=3",
-        "result=PASS",
-    ] {
-        assert!(
-            error.contains(expected),
-            "missing diagnostic {expected}: {error}"
-        );
-    }
-}
+
 
 #[test]
 fn cas_a576_split_notes_report_each_incomplete_receipt() {
@@ -67,19 +50,9 @@ fn cas_a576_split_notes_report_each_incomplete_receipt() {
     task.notes
         .push_str("\n[2026-10-15 22:26] 🧪 LOADED_PROOF 3 loops; result=PASS");
     let error = validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).unwrap_err();
-    for expected in [
-        "note 1",
-        "parsed=[target, parallelism]",
-        "missing=[loops, result]",
-        "note 2",
-        "parsed=[loops, result]",
-        "missing=[target, parallelism]",
-    ] {
-        assert!(
-            error.contains(expected),
-            "missing per-note diagnostic {expected}: {error}"
-        );
-    }
+    assert!(crate::gates::codes_in(&error).contains(&"G-76"), "{error}");
+    let fields = loaded_proof::assess_notes(&task.notes).map(|fields| fields.0).collect::<Vec<_>>();
+    assert_eq!(fields, vec![[true, true, false, false], [false, false, true, true]]);
 }
 
 #[test]
@@ -204,19 +177,9 @@ async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], missing: Op
                 "{name}: accepted {receipt}: {text}"
             );
             assert_eq!(persisted.status, TaskStatus::InProgress, "{name}: {text}");
-            let missing = format!("missing=[{}]", missing.unwrap());
-            assert!(
-                text.contains("loaded_proof") && text.contains(&missing),
-                "{name}: {text}"
-            );
-            assert!(text.contains("parsed=[target,"), "{name}: {text}");
-            assert!(text.contains("Accepted example:"), "{name}: {text}");
-            assert!(
-                declared_risk_close_gaps(&persisted, &[], dir.path())
-                    .join(";")
-                    .contains(&missing),
-                "{name}: audit differs"
-            );
+            assert!(crate::gates::codes_in(&text).contains(&"G-76"), "{name}: {text}");
+            assert!(loaded_proof::assess_notes(&persisted.notes).all(|fields| !fields.complete()));
+            assert!(!declared_risk_close_gaps(&persisted, &[], dir.path()).is_empty(), "{name}");
         }
     }
 }
@@ -271,55 +234,51 @@ async fn cas_69b4_close_handler_accepts_issue_receipt_forms() {
 #[test]
 fn missing_or_contradictory_fields_remain_refused_with_precise_diagnostics() {
     for (receipt, expected) in [
-        ("-j16 loops=3 result=PASS", "missing=[target]"),
-        ("target= -j16 loops=3 result=PASS", "missing=[target]"),
-        ("target=loops=3 -j16 result=PASS", "missing=[target]"),
+        ("-j16 loops=3 result=PASS", [false, true, true, true]),
+        ("target= -j16 loops=3 result=PASS", [false, true, true, true]),
+        ("target=loops=3 -j16 result=PASS", [false, true, true, true]),
         (
             "log=target=vitest -j16 loops=3 result=PASS",
-            "missing=[target]",
+            [false, true, true, true],
         ),
-        ("target=vitest loops=3 result=PASS", "missing=[parallelism]"),
+        ("target=vitest loops=3 result=PASS", [true, false, true, true]),
         (
             "target=vitest -j160 loops=3 result=PASS",
-            "missing=[parallelism]",
+            [true, false, true, true],
         ),
         (
             "target=vitest concurrency=160 loops=3 result=PASS",
-            "missing=[parallelism]",
+            [true, false, true, true],
         ),
         (
             "target=vitest parallelism=16; loops=2 result=PASS",
-            "missing=[loops]",
+            [true, true, false, true],
         ),
         (
             "target=vitest parallelism=16 receipt=1234 result=PASS",
-            "missing=[loops]",
+            [true, true, false, true],
         ),
-        ("target=vitest parallelism=16 loops=3", "missing=[result]"),
+        ("target=vitest parallelism=16 loops=3", [true, true, true, false]),
         (
             "target=vitest parallelism=16 loops=3 result=FAIL",
-            "missing=[result]",
+            [true, true, true, false],
         ),
         (
             "target=vitest parallelism=16 loops=3 result=PASS exit=1",
-            "missing=[result]",
+            [true, true, true, false],
         ),
         (
             "target=vitest parallelism=16 loops=3 result=PASS status=2",
-            "missing=[result]",
+            [true, true, true, false],
         ),
     ] {
         let task = concurrency_task(receipt);
         let error =
             validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).expect_err(receipt);
-        assert!(error.contains(expected), "{receipt}: {error}");
-
-        let gaps = declared_risk_close_gaps(&task, &[], std::path::Path::new(".")).join("; ");
-        assert!(gaps.contains(expected), "audit differs: {gaps}");
-        assert!(
-            gaps.contains("Accepted example: LOADED_PROOF: target="),
-            "{gaps}"
-        );
+        assert!(crate::gates::codes_in(&error).contains(&"G-76"), "{receipt}: {error}");
+        let fields = loaded_proof::assess_notes(&task.notes).map(|fields| fields.0).collect::<Vec<_>>();
+        assert_eq!(fields, vec![expected], "{receipt}");
+        assert!(!declared_risk_close_gaps(&task, &[], std::path::Path::new(".")).is_empty());
     }
 }
 
@@ -330,14 +289,9 @@ fn no_typed_note_reports_all_missing_fields_and_executable_example() {
     let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
         .expect_err("untyped progress cannot satisfy concurrency risk");
 
-    let example = error
-        .split("Accepted example: ")
-        .nth(1)
-        .unwrap()
-        .split(". Add one with")
-        .next()
-        .unwrap();
-    validate_risk_close_proofs(&concurrency_task(example), &[], std::path::Path::new("."))
+    assert!(crate::gates::codes_in(&error).contains(&"G-76"), "{error}");
+    assert!(loaded_proof::assess_notes(&task.notes).next().is_none());
+    validate_risk_close_proofs(&concurrency_task(loaded_proof::EXAMPLE), &[], std::path::Path::new("."))
         .expect("the refusal's accepted example must pass without adding SHA/log");
 }
 

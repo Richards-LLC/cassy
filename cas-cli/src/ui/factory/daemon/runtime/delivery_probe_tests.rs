@@ -312,8 +312,7 @@ async fn cas_cc89_whole_poison_sweep_runs_under_enforced_daemon_step() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    // Replay the actual complete step; durable claims/episode markers must
-    // leave exactly one body and one bounce after outstanding work settles.
+    // Replay the actual complete step and observe its real asynchronous work settle.
     for _ in 0..5 {
         {
             let (_attachment, _enforce) = loop_watchdog::enforced_daemon_step(
@@ -324,7 +323,15 @@ async fn cas_cc89_whole_poison_sweep_runs_under_enforced_daemon_step() {
                 .run_prompt_poison_sweep(queue.as_ref(), &targets)
                 .await;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            daemon.drain_relay_jobs();
+            if daemon.relay_jobs.idle() && daemon.queue_jobs.poison_jobs.pointers.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "poison sweep work never settled");
+            tokio::task::yield_now().await;
+        }
     }
     assert_eq!(
         queue
@@ -753,8 +760,14 @@ async fn cas_cc89_shutdown_releases_a_pointer_claim_waiting_on_the_writer() {
         assert!(Instant::now() < deadline, "claim never reached held writer");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    let stopping = daemon.queue_jobs.poison_jobs.epoch("worker-a");
+    assert!(stopping.load(std::sync::atomic::Ordering::Acquire));
     let releasing = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(20));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while stopping.load(std::sync::atomic::Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(!stopping.load(std::sync::atomic::Ordering::Acquire), "shutdown must cancel the real pointer epoch before release");
         let _ = release.send(());
     });
     let worker = super::super::store_worker::StoreWorker::start();

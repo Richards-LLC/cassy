@@ -398,8 +398,12 @@ sys.exit(m.link([sys.executable,'-c',child]))
         available.write_text(str(16 * guard.proof.GIB + guard.proof.GUARD_HEADROOM_BYTES + guard.proof.LINK_BYTES))
         third = self.launch_link("third", available, maximum=8)
         self.wait_until(lambda: self.events.exists() and 'live link capacity occupied' in self.events.read_text())
+        seen = len(self.events.read_text().splitlines())
         self.finish_link(first, "first")
-        time.sleep(.1)
+        self.wait_until(lambda: any(
+            event.get('reason') == 'live link capacity occupied'
+            and event.get('active_links') == 1 and event.get('link_slots') == 1
+            for event in map(json.loads, self.events.read_text().splitlines()[seen:])))
         self.assertFalse((self.root / "third.started").exists())
         self.finish_link(second, "second")
         self.wait_until(lambda: (self.root / "third.started").exists())

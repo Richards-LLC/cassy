@@ -189,16 +189,8 @@ fn serve_exits_after_its_parent_harness_is_killed() {
     let sandbox = CasSandbox::new();
     let mut rig = OrphanRig::launch(&sandbox);
 
-    // Control: with the parent alive, the server keeps running across many
-    // watchdog polls. This is the "an idle client is not a dead one" property —
-    // if the watchdog were trigger-happy, it would already have fired.
-    std::thread::sleep(Duration::from_secs(3));
-    assert!(
-        rig.server_is_alive(),
-        "watchdog killed a server whose parent was still alive; log:\n{}",
-        rig.serve_log()
-    );
-
+    // The separate bystander case checks a live owner through an observed
+    // orphan exit; no guessed number of watchdog polls is needed here.
     rig.kill_parent();
 
     let deadline = Instant::now() + EXIT_DEADLINE;

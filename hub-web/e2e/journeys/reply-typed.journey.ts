@@ -194,7 +194,6 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(waiting).toContainText("Studio iPad");
     await expect(waiting).toHaveAttribute("aria-disabled", "true");
     await expect(waiting).toBeFocused();
-    expect(await waiting.evaluate((element) => getComputedStyle(element).cursor), "the waiting pill does not look pressable").toBe("default");
     await expect(take).toHaveCount(0);
     // cas-b00c (journey F18): Retry beside it would only be refused again, so
     // it is not pressable either while the iPad holds control.

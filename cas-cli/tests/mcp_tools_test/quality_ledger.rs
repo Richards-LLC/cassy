@@ -102,8 +102,7 @@ async fn handoff_lines_become_feature_verdicts() {
         "title": "Session handoff",
     }))
     .unwrap();
-    let saved = extract_text(service.cas_remember(Parameters(request)).await.unwrap());
-    assert!(saved.contains("Recorded 2 feature_feedback"), "{saved}");
+    service.cas_remember(Parameters(request)).await.unwrap();
 
     let mut events = ledger(&temp);
     assert_eq!(events.len(), 2, "{events:?}");

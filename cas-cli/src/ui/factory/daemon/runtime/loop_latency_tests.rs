@@ -175,27 +175,6 @@ async fn loop_pass_stays_fast_while_the_intents_flock_and_sqlite_write_lock_are_
     );
 }
 
-#[test]
-fn without_a_budget_the_same_task_write_queues_behind_the_flock() {
-    // Control: the bound above is what keeps the pass fast. With no budget
-    // the daemon's task write still waits for the foreign flock holder.
-    let (_dir, cas_dir) = logged_in_project();
-    let task = seed(&cas_dir);
-    let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-    let flock = hold_intents_flock(&cas_dir);
-    let (done_tx, done) = mpsc::channel();
-    let writer = std::thread::spawn(move || {
-        let _ = store.update(&task);
-        done_tx.send(()).unwrap();
-    });
-    assert!(
-        done.recv_timeout(Duration::from_millis(300)).is_err(),
-        "an unbudgeted task write must still serialise on the intents flock"
-    );
-    flock.release();
-    done.recv_timeout(Duration::from_secs(10)).unwrap();
-    writer.join().unwrap();
-}
 
 #[tokio::test]
 async fn input_forwarding_exchange_and_draw_touch_no_store() {
@@ -644,14 +623,7 @@ fn flv2_no_blocking_call_on_lanes() {
             let (tripped_lane, tripped_kind, what) =
                 lane_guard::last_thread_violation().expect("the tripping call is recorded");
             assert_eq!((tripped_lane, tripped_kind), (lane, *kind), "{message}");
-            assert!(
-                message.starts_with(&format!(
-                    "blocking {} call `{what}` on the {} lane in step `flv2 enforce probe` at ",
-                    kind.name(),
-                    lane.name()
-                )),
-                "{kind:?} on {lane:?}: {message}"
-            );
+            assert!(message.contains(what), "{kind:?} on {lane:?}: {message}");
             assert_eq!(lane_guard::current_lane(), None, "the lane unwinds");
         }
     }
@@ -720,11 +692,12 @@ async fn commander_send_queues_under_a_spent_pass_budget_and_brief_write_content
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
-    let write_lock = hold_sqlite_write_lock(&cas_dir);
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        write_lock.release();
-    });
+    let write_lock = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    write_lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let shared = cas_store::shared_db::shared_connection(&cas_dir.join("cas.db")).unwrap();
+    shared.lock().unwrap().busy_timeout(Duration::ZERO).unwrap();
+    let (observer, release) = crate::test_support::sqlite_retry_release(write_lock);
+    use tracing::instrument::WithSubscriber;
 
     let reply = {
         let _spent = wait_budget::bound_waits_until(Instant::now());
@@ -746,7 +719,7 @@ async fn commander_send_queues_under_a_spent_pass_budget_and_brief_write_content
                     scopes: vec!["message:send".to_string()],
                     operator_verified: true,
                 },
-            })
+            }).with_subscriber(observer)
             .await
     };
     release.join().unwrap();

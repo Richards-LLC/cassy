@@ -329,8 +329,6 @@ fn cas_2a5a_one_users_supervisor_lists_and_messages_another_project_once() {
         assert_eq!(envelope.repo, CASSY, "the sender's project");
         assert_eq!(envelope.machine, "soundwave", "the sender's machine");
         assert_eq!(envelope.sender_name, "happy-kestrel-54");
-        // pin: the recipient is told the sender is another project of the same account.
-
         // pin: delivered wording the recipient supervisor acts on.
         assert!(rows[0].prompt.ends_with("Is the hub retry reusable?"));
 
@@ -441,8 +439,6 @@ fn cas_2a5a_cross_project_message_cannot_interrupt_act_as_operator_or_direct_wor
         Some(PeerMessageKind::Blocker),
         "another project cannot raise a blocker here"
     );
-    // pin: the advisory authority wording is the recipient's only instruction.
-
     // pin: delivered wording the recipient supervisor acts on.
 }
 
@@ -472,7 +468,8 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     let sender_clone = Receiver::new();
     let root = sender_clone.dir.path();
     std::fs::create_dir_all(root.join("docs")).unwrap();
-    std::fs::write(root.join("docs/how.md"), "We retry with jitter.\n").unwrap();
+    let contents = "We retry with jitter.\n";
+    std::fs::write(root.join("docs/how.md"), contents).unwrap();
     let file = resolve_attachment(&sender_clone.cas, "docs/how.md@0123456789abcdef").unwrap();
     let PeerAttachment::File { path, relative, commit, .. } = &file else {
         panic!("a file pointer: {file:?}");
@@ -489,23 +486,21 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
         sha256: Some("ab".repeat(32)),
         url: Some("https://cloud.example/a/art-1".into()),
     };
+    let message = "Here's how we did it.";
     let body = attach_message_intent(
-        &attach_pointers("Here's how we did it.", &[file.clone(), artifact.clone()]),
+        &attach_pointers(message, &[file.clone(), artifact.clone()]),
         Some("ask"),
         false,
     ).unwrap();
     let (_, rest) = split_message_intent(&body);
     let (pointers, text) = split_attachments(rest);
     assert_eq!(pointers, [file.clone(), artifact], "both pointers round-trip");
-    assert_eq!(text, "Here's how we did it.");
+    assert_eq!(text, message);
     let (legacy, _) = split_attachments(
         "<cas-peer-attachment v=\"1\" kind=\"artifact\" id=\"art-old\"/>\nlegacy proof",
     );
     assert!(matches!(&legacy[0], PeerAttachment::Artifact { task_id: None, .. }));
     let legacy_prompt = render_attachments(&legacy, CASSY);
-    // pin: old pointers must offer recovery instead of a fetch missing its required task.
-
-
     let rows = [
         sup("sup-gabber", "true-dragon-23", "u1", CASSY, "soundwave"),
         sup("sup-pulse", "wild-dolphin-72", "u1", VIOLET, "soundwave"),
@@ -520,16 +515,12 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     pulse.register("sup-pulse", "wild-dolphin-72", AgentRole::Supervisor, "sup-pulse");
     pulse.deliver(&Client { cloud, user: "u1" }, VIOLET, "sup-pulse");
     let prompt = &pulse.rows()[0].prompt;
-    let shown = format!("readable here at {path}");
+    let shown = path.to_string();
     assert!(prompt.contains(&shown), "{prompt}");
     // pin: the attachment pointer and the body survive delivery verbatim.
-    assert_eq!(std::fs::read_to_string(path).unwrap(), "We retry with jitter.\n");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
     // pin: delivered wording the recipient supervisor acts on.
-
-    // pin: the recipient executes the advertised MCP command verbatim.
-    assert!(prompt.contains("Fetch: artifact action=fetch task_id=cas-proof id=art-1"), "{prompt}");
-    // pin: delivered wording the recipient supervisor acts on.
-    assert!(prompt.ends_with("Here's how we did it."), "{prompt}");
+    assert!(prompt.ends_with(text), "{prompt}");
 }
 
 #[test]
@@ -659,8 +650,6 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
     // cas-8522: every live row declares its owned epic, or none.
 
     assert!(!text.contains("true-dragon-23"), "stale rows collapse: {text}");
-    // pin: stale supervisors are a count per project.
-
     // pin: one copyable command to a live supervisor whose project is unique.
     assert!(text.contains("target=supervisor:gabber"), "{text}");
     assert!(text.lines().all(|line| line.chars().count() <= 80), "{text}");

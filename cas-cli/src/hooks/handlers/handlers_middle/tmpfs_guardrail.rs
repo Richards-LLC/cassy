@@ -518,7 +518,9 @@ mod tests {
         std::fs::write(&stale, "{}").unwrap();
         std::fs::write(&lock, "").unwrap();
 
-        std::thread::sleep(Duration::from_millis(2));
+        std::fs::File::open(&stale).unwrap().set_times(
+            std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH),
+        ).unwrap();
         prune_old_state_files(tmp.path(), Duration::ZERO);
 
         assert!(!stale.exists(), "expired state json should be pruned");

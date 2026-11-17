@@ -356,11 +356,11 @@ fn test_heartbeat() {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_temp, store) = create_test_store(&mut env);
 
-    let agent = Agent::new("agent-hb".to_string(), "Heartbeat Test".to_string());
+    let mut agent = Agent::new("agent-hb".to_string(), "Heartbeat Test".to_string());
+    agent.last_heartbeat = Utc::now() - Duration::days(1);
     store.register(&agent).unwrap();
 
     let before = store.get("agent-hb").unwrap().last_heartbeat;
-    std::thread::sleep(std::time::Duration::from_millis(10));
     store.heartbeat("agent-hb").unwrap();
     let after = store.get("agent-hb").unwrap().last_heartbeat;
 
@@ -431,7 +431,7 @@ fn test_lease_renewal() {
         .unwrap();
 
     let before = store.get_lease("task-renew").unwrap().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(10));
+
     store.renew_lease("task-renew", "agent-renew", 120).unwrap();
     let after = store.get_lease("task-renew").unwrap().unwrap();
 
@@ -578,11 +578,16 @@ fn test_heartbeat_renews_task_lease_past_original_duration() {
         .try_claim("task-hb-renew", "agent-hb-renew", 1, None)
         .unwrap();
 
+    store.conn.lock().unwrap().execute(
+        "UPDATE task_leases SET expires_at = ?1 WHERE task_id = ?2",
+        params![(Utc::now() - Duration::days(1)).to_rfc3339(), "task-hb-renew"],
+    ).unwrap();
+
     let before = store.get_lease("task-hb-renew").unwrap().unwrap();
 
     // Heartbeat renews the lease to `now + TASK_LEASE_HEARTBEAT_RENEWAL_SECS`
     // (600s in production) — well past the original 1s claim duration.
-    std::thread::sleep(std::time::Duration::from_millis(10));
+
     store.heartbeat("agent-hb-renew").unwrap();
 
     let after = store.get_lease("task-hb-renew").unwrap().unwrap();
@@ -595,10 +600,7 @@ fn test_heartbeat_renews_task_lease_past_original_duration() {
         "heartbeat-driven renewal must be recorded the same way explicit renew_lease is"
     );
 
-    // Wait past the ORIGINAL 1s claim duration — before cas-85d9, the
-    // lease would now be expired and `reclaim_expired_leases` would sweep
-    // it, even though the agent just heartbeated.
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // The original fixture expiry was in the past. Renewal must make it reclaim-safe.
 
     let reclaimed = store.reclaim_expired_leases().unwrap();
     assert_eq!(
@@ -628,7 +630,10 @@ fn test_lease_still_expires_without_heartbeat() {
         .unwrap();
     // No heartbeat call.
 
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    store.conn.lock().unwrap().execute(
+        "UPDATE task_leases SET expires_at = ?1 WHERE task_id = ?2",
+        params![(Utc::now() - Duration::days(1)).to_rfc3339(), "task-no-hb"],
+    ).unwrap();
 
     let reclaimed = store.reclaim_expired_leases().unwrap();
     assert_eq!(
@@ -659,9 +664,13 @@ fn test_heartbeat_renews_worktree_lease_past_original_duration() {
         .try_claim_worktree("wt-hb-renew", "agent-hb-wt-renew", 1)
         .unwrap();
 
+    store.conn.lock().unwrap().execute(
+        "UPDATE worktree_leases SET expires_at = ?1 WHERE worktree_id = ?2",
+        params![(Utc::now() - Duration::days(1)).to_rfc3339(), "wt-hb-renew"],
+    ).unwrap();
+
     let before = store.get_worktree_lease("wt-hb-renew").unwrap().unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
     store.heartbeat("agent-hb-wt-renew").unwrap();
 
     let after = store.get_worktree_lease("wt-hb-renew").unwrap().unwrap();
@@ -670,9 +679,7 @@ fn test_heartbeat_renews_worktree_lease_past_original_duration() {
         "heartbeat must extend the worktree lease's expires_at"
     );
 
-    // Wait past the ORIGINAL 1s claim duration and reclaim — the renewed
-    // lease must survive.
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // The original fixture expiry was in the past; its renewal survives reclamation.
     let reclaimed = store.reclaim_expired_worktree_leases().unwrap();
     assert_eq!(
         reclaimed, 0,
@@ -706,7 +713,6 @@ fn test_heartbeat_renewal_does_not_affect_other_agents_leases() {
 
     let b_before = store.get_lease("task-b").unwrap().unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
     store.heartbeat("agent-hb-a").unwrap();
 
     assert_eq!(store.get_lease("task-a").unwrap().unwrap().renewal_count, 1);
@@ -731,8 +737,11 @@ fn test_expired_lease_reclaim() {
         .try_claim("task-expire", "agent-expire", 1, None)
         .unwrap();
 
-    // Wait for expiration
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Set an expired fixture deadline
+    store.conn.lock().unwrap().execute(
+        "UPDATE task_leases SET expires_at = ?1 WHERE task_id = ?2",
+        params![(Utc::now() - Duration::days(1)).to_rfc3339(), "task-expire"],
+    ).unwrap();
 
     // Reclaim expired
     let count = store.reclaim_expired_leases().unwrap();
@@ -977,8 +986,11 @@ fn test_lease_history_expired() {
         .try_claim("task-expire-hist", "agent-expire-hist", 1, None)
         .unwrap();
 
-    // Wait for expiration
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Set an expired fixture deadline
+    store.conn.lock().unwrap().execute(
+        "UPDATE task_leases SET expires_at = ?1 WHERE task_id = ?2",
+        params![(Utc::now() - Duration::days(1)).to_rfc3339(), "task-expire-hist"],
+    ).unwrap();
 
     // Reclaim expired
     store.reclaim_expired_leases().unwrap();
@@ -1103,15 +1115,21 @@ fn test_get_agent_worked_tasks_with_since_filter() {
         .try_claim("old-task", "agent-filter", 600, None)
         .unwrap();
 
-    // Sleep briefly and record timestamp
-    std::thread::sleep(std::time::Duration::from_millis(50));
     let cutoff = Utc::now();
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    store.conn.lock().unwrap().execute(
+        "UPDATE task_lease_history SET timestamp = ?1 WHERE task_id = 'old-task'",
+        params![(cutoff - Duration::days(1)).to_rfc3339()],
+    ).unwrap();
 
     // Claim another task after the cutoff
     store
         .try_claim("new-task", "agent-filter", 600, None)
         .unwrap();
+
+    store.conn.lock().unwrap().execute(
+        "UPDATE task_lease_history SET timestamp = ?1 WHERE task_id = 'new-task'",
+        params![(cutoff + Duration::days(1)).to_rfc3339()],
+    ).unwrap();
 
     // Without filter: both tasks
     let all_tasks = store.get_agent_worked_tasks("agent-filter", None).unwrap();
@@ -1762,7 +1780,8 @@ fn cas_4ac8_round4_explicit_update_advances_incarnation_but_stale_update_cannot_
 fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (temp, store) = create_test_store(&mut env);
-    let agent = Agent::new("agent-1bc7".to_string(), "Heartbeat".to_string());
+    let mut agent = Agent::new("agent-1bc7".to_string(), "Heartbeat".to_string());
+    agent.last_heartbeat = Utc::now() - Duration::days(1);
     store.register(&agent).unwrap();
     let before = store.get("agent-1bc7").unwrap().last_heartbeat;
 
@@ -1779,7 +1798,6 @@ fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
     )
     .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(5));
     let error = store.heartbeat("agent-1bc7").expect_err("the renewal fails");
     assert!(error.to_string().contains("cas-1bc7 renewal probe"), "{error}");
     assert_eq!(

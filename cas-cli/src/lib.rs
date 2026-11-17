@@ -168,6 +168,89 @@ pub(crate) mod test_support {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
+    /// Release a held foreign writer only after SQLITE_BUSY reaches the real retry path.
+    pub(crate) fn sqlite_retry_release(
+        blocker: rusqlite::Connection,
+    ) -> (tracing::Dispatch, std::thread::JoinHandle<()>) {
+        struct RetryObserver {
+            first: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        }
+        impl tracing::Subscriber for RetryObserver {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.target() == "cas_store::shared_db"
+                    && metadata.fields().field("delay_ms").is_some()
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+            fn event(&self, _: &tracing::Event<'_>) {
+                if let Some((ready, resume)) = self.first.lock().unwrap().take() {
+                    ready.send(()).unwrap();
+                    resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                }
+            }
+        }
+        let (ready, retrying) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let observer = tracing::Dispatch::new(RetryObserver {
+            first: Mutex::new(Some((ready, resumed))),
+        });
+        let holder = std::thread::spawn(move || {
+            retrying.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            blocker.execute_batch("COMMIT").unwrap();
+            resume.send(()).unwrap();
+        });
+        (observer, holder)
+    }
+
+    thread_local! {
+        static BUSY_BLOCKER: std::cell::RefCell<Option<rusqlite::Connection>> = const { std::cell::RefCell::new(None) };
+        static BUSY_RELEASE: std::cell::RefCell<Option<Result<(), String>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Release an owned foreign writer at the actual SQLite busy callback.
+    /// This exercises contention, independently of the production wait policy.
+    pub(crate) struct SqliteBusyRelease(std::marker::PhantomData<std::rc::Rc<()>>);
+
+    impl SqliteBusyRelease {
+        pub(crate) fn install(conn: &rusqlite::Connection, blocker: rusqlite::Connection) -> Self {
+            let guard = Self(std::marker::PhantomData);
+            BUSY_BLOCKER.with(|slot| assert!(slot.borrow_mut().replace(blocker).is_none()));
+            BUSY_RELEASE.with(|slot| *slot.borrow_mut() = None);
+            conn.busy_handler(Some(Self::release)).unwrap();
+            guard
+        }
+
+        fn release(_: i32) -> bool {
+            // Never panic across SQLite's C callback boundary.
+            let blocker = BUSY_BLOCKER.try_with(|slot| {
+                slot.try_borrow_mut().ok().and_then(|mut slot| slot.take())
+            }).ok().flatten();
+            let Some(blocker) = blocker else { return false; };
+            let result = blocker.execute_batch("COMMIT").map_err(|error| error.to_string());
+            let released = result.is_ok();
+            let _ = BUSY_RELEASE.try_with(|slot| {
+                if let Ok(mut slot) = slot.try_borrow_mut() { *slot = Some(result); }
+            });
+            released
+        }
+
+        pub(crate) fn assert_released(&self) {
+            BUSY_RELEASE.with(|slot| assert_eq!(*slot.borrow(), Some(Ok(()))));
+        }
+    }
+
+    impl Drop for SqliteBusyRelease {
+        fn drop(&mut self) {
+            BUSY_BLOCKER.with(|slot| { slot.borrow_mut().take(); });
+            BUSY_RELEASE.with(|slot| { slot.borrow_mut().take(); });
+        }
+    }
+
     /// Pin real styled bytes independently of crossterm's memoized NO_COLOR.
     /// Declare after `TestEnvGuard` and keep both alive through rendering, so
     /// color-policy changes are serialized and restored before the env lock.

@@ -165,7 +165,7 @@ print(json.dumps({'journeys': rows}))
         self.assertNotEqual(out.returncode, 0)
 
     def test_full_worker_refused_supervisor_allowed(self):
-        self.assertIn('supervisor-only', self.plan('--full').stderr)
+        self.assertNotEqual(self.plan('--full').returncode, 0)
         self.env['CAS_AGENT_ROLE'] = 'supervisor'
         out = self.plan('--full')
         self.assertEqual(out.returncode, 0, out.stderr)

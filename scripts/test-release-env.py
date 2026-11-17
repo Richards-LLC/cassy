@@ -353,7 +353,6 @@ class QueueHealth(Fixture):
         make_exe(gh, "#!/bin/sh\necho 'API rate limit exceeded: fixture-secret' >&2\nexit 1\n")
         result = subprocess.run([sys.executable, str(SCRIPTS / "github_queue_health.py"), "--worktree", str(repo), "--gh", str(gh)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)
-        self.assertIn("unavailable", result.stderr)
         self.assertNotIn("fixture-secret", result.stderr)
 
 

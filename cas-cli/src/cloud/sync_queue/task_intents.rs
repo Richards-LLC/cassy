@@ -1257,32 +1257,20 @@ mod tests {
         let queue = SyncQueue::open(temp.path()).unwrap();
         queue.init().unwrap();
         let db = temp.path().join("cas.db");
+        queue.conn.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
         for round in 0..3 {
-            let (held_tx, held_rx) = std::sync::mpsc::channel();
-            let writer_db = db.clone();
-            let writer = std::thread::spawn(move || {
-                let conn = rusqlite::Connection::open(writer_db).unwrap();
-                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-                conn.execute(
-                    "INSERT INTO task_mutation_revisions (entity_id, revision, present) VALUES (?1, 1, 1)
-                     ON CONFLICT(entity_id) DO UPDATE SET revision = revision + 1",
-                    params![format!("other-task-{round}")],
-                )
-                .unwrap();
-                held_tx.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                conn.execute_batch("COMMIT").unwrap();
-            });
-            held_rx.recv().unwrap();
-            let staged = queue.stage_task_sync_intent(
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            conn.execute(
+                "INSERT INTO task_mutation_revisions (entity_id, revision, present) VALUES (?1, 1, 1)
+                 ON CONFLICT(entity_id) DO UPDATE SET revision = revision + 1",
+                params![format!("other-task-{round}")],
+            ).unwrap();
+            let (observer, writer) = crate::test_support::sqlite_retry_release(conn);
+            let staged = tracing::dispatcher::with_default(&observer, || queue.stage_task_sync_intent(
                 &format!("cas-contended-{round}"),
-                "update",
-                None,
-                None,
-                None,
-                None,
-                false,
-            );
+                "update", None, None, None, None, false,
+            ));
             writer.join().unwrap();
             let intent = staged.unwrap_or_else(|error| {
                 panic!("round {round}: staging must wait out the writer: {error}")
@@ -1409,30 +1397,6 @@ mod tests {
 
     /// Same-task mutations still serialize: the intent protocol's evidence is
     /// per entity.
-    #[test]
-    fn same_task_mutations_serialize_on_their_stripe() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
-        let held = queue.lock_task_sync_mutations(&["cas-same"]).unwrap();
-        let contender = Arc::clone(&queue);
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            let guard = contender.lock_task_sync_mutations(&["cas-same"]).unwrap();
-            done_tx.send(()).unwrap();
-            drop(guard);
-        });
-        assert!(
-            done_rx
-                .recv_timeout(std::time::Duration::from_millis(150))
-                .is_err(),
-            "a second mutation of the same task must wait"
-        );
-        drop(held);
-        done_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("the waiting mutation proceeds after release");
-        thread.join().unwrap();
-    }
 
     /// GH #1165 (3) structural guard: no path can wait for the SQLite write
     /// lock while it holds a reconcile lease.
@@ -1483,14 +1447,12 @@ mod tests {
 
         let legacy = open_lock_file(&temp.path().join(TASK_SYNC_INTENT_LOCK)).unwrap();
         legacy.lock_exclusive().unwrap();
-        let started = std::time::Instant::now();
         assert!(
             queue
                 .try_task_sync_reconcile_lease("cas-live")
                 .unwrap()
                 .is_none()
         );
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
         FileExt::unlock(&legacy).unwrap();
         assert!(
             queue

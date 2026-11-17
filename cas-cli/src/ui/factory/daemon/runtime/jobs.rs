@@ -1157,9 +1157,14 @@ mod tests {
             r.wait();
         });
         started.wait();
-        std::thread::sleep(Duration::from_millis(5));
-        let stats = runtime.lane_stats(Lane::Blocking);
-        let running = stats.running.expect("the wedged job is visible");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let running = loop {
+            if let Some(running) = runtime.lane_stats(Lane::Blocking).running.filter(|job| job.over_budget()) {
+                break running;
+            }
+            assert!(Instant::now() < deadline, "held job never became over budget");
+            std::thread::yield_now();
+        };
         assert_eq!((running.kind, running.key.as_str()), ("TestJob", "fetch"));
         assert!(running.over_budget());
         assert_eq!(runtime.over_budget_running().len(), 1);
@@ -1355,7 +1360,7 @@ mod tests {
     /// busy key; queued refresh work is skipped.
     #[test]
     fn flv2_job_drop_runs_queued_critical_work() {
-        let runtime: JobRuntime<()> = JobRuntime::start(4);
+        let mut runtime: JobRuntime<()> = JobRuntime::start(4);
         let started = Arc::new(Barrier::new(2));
         let release = Arc::new(Barrier::new(2));
         let ran = Arc::new(Mutex::new(Vec::new()));
@@ -1379,14 +1384,18 @@ mod tests {
                 log.lock().unwrap().push(key);
             });
         }
+        // Preserve only the join handles; Drop still closes and releases the runtime.
+        let threads = std::mem::take(&mut runtime.threads);
         drop(runtime);
         release.wait();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while ran.lock().unwrap().len() < 3 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(2));
+        for thread in threads {
+            while !thread.is_finished() && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(thread.is_finished(), "dropped runtime lane never exited");
+            thread.join().unwrap();
         }
-        // Give a wrongly-run refresh job time to show up before asserting.
-        std::thread::sleep(Duration::from_millis(20));
         let ran = ran.lock().unwrap().clone();
         assert_eq!(
             ran.iter().filter(|k| **k == "blocker").count(),

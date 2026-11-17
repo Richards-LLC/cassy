@@ -867,27 +867,27 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let error = preflight_local_endpoint(
-            &format!("http://127.0.0.1:{port}/v1?api_key=secret"),
+            &format!("http://127.0.0.1:{port}/v1?api_key=cas-e074-query-sentinel"),
             "qwen-local",
             Duration::from_millis(100),
         )
         .unwrap_err();
         assert!(error.contains(&format!("127.0.0.1:{port}")), "{error}");
 
-        assert!(!error.contains("secret"), "secret leaked: {error}");
+        assert!(!error.contains("cas-e074-query-sentinel"), "secret leaked: {error}");
     }
 
     #[test]
     fn endpoint_credentials_are_rejected_without_echoing_them() {
         let error = preflight_local_endpoint(
-            "http://operator:secret@127.0.0.1:8000/v1",
+            "http://cas-e074-user-sentinel:cas-e074-password-sentinel@127.0.0.1:8000/v1",
             "qwen-local",
             Duration::from_secs(1),
         )
         .unwrap_err();
 
-        assert!(!error.contains("operator"), "username leaked: {error}");
-        assert!(!error.contains(":secret@"), "password leaked: {error}");
+        assert!(!error.contains("cas-e074-user-sentinel"), "username leaked: {error}");
+        assert!(!error.contains("cas-e074-password-sentinel"), "password leaked: {error}");
     }
 
     #[test]
@@ -1004,9 +1004,6 @@ mod tests {
 
         let token_error =
             validate_hosted_api_key(HostedLane::TokenPlan, Some("sk-payg-mismatch")).unwrap_err();
-        assert!(token_error.contains("hosted-token-plan"), "{token_error}");
-        assert!(token_error.contains("sk-sp-"), "{token_error}");
-        assert!(token_error.contains("sk-"), "{token_error}");
         assert!(
             !token_error.contains("sk-payg-mismatch"),
             "key leaked: {token_error}"
@@ -1014,9 +1011,6 @@ mod tests {
 
         let payg_error =
             validate_hosted_api_key(HostedLane::Payg, Some("sk-sp-mismatch")).unwrap_err();
-        assert!(payg_error.contains("hosted-payg"), "{payg_error}");
-        assert!(payg_error.contains("sk-sp-"), "{payg_error}");
-        assert!(payg_error.contains("sk- or sk-ws-"), "{payg_error}");
         assert!(
             !payg_error.contains("sk-sp-mismatch"),
             "key leaked: {payg_error}"

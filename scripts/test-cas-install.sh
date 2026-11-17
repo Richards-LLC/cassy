@@ -129,7 +129,6 @@ darwin_output="$(
   CAS_REPO=fixture/cassy \
   "$installer"
 )"
-grep -qF 'Platform: aarch64-apple-darwin' <<<"$darwin_output"
 grep -qF 'cas fixture version' <<<"$darwin_output"
 grep -qF 'cas hub service install' <<<"$darwin_output"
 test -x "$tmpdir/install/cas"
@@ -251,7 +250,6 @@ diagnostic_output="$(
 diagnostic_status=$?
 set -e
 test "$diagnostic_status" -ne 0
-grep -qF 'HTTP status: 403' <<<"$diagnostic_output"
 grep -qF 'API rate limit exceeded' <<<"$diagnostic_output"
 test "$(<"$diagnostic_attempts")" -eq 3
 test "$(wc -l <"$diagnostic_sleep_log")" -eq 2

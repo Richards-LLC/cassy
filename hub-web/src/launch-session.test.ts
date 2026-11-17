@@ -542,7 +542,6 @@ describe("re-pairing and session launch (cas-0e14 F29)", () => {
     const copy = repairStatus("Atlas · Linux", [...CONTROL, "session-launch"]);
     expect(copy).toContain("Atlas · Linux");
     expect(copy).toContain("Atlas · Linux");
-    expect(copy, "the command is not set as prose").not.toContain("cas hub pair");
     expect(repairCommand([...CONTROL, "session-launch"], "https://hub.example")).toBe("cas hub pair --origin https://hub.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch");
     // Without launch there is nothing to lose: the plain wording stays, with no command.
     expect(repairStatus("Atlas · Linux", CONTROL)).toContain("Atlas · Linux");

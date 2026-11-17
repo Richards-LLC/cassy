@@ -404,7 +404,7 @@ fn deliverable_brand_resolves_pulse_card_shaped_fixture() {
             .unwrap()
             .iter()
             .any(|w| w.as_str().unwrap().contains(
-                "no local .woff2 for Satoshi; body text falls back to: Satoshi, ui-sans-serif"
+                "Satoshi"
             )),
         "{receipt}"
     );
@@ -489,7 +489,7 @@ fn deliverable_finalize_customer_hygiene_refuses_a_planted_ticket_label() {
     let receipt: Value = serde_json::from_slice(&customer.get_output().stdout).unwrap();
     assert_eq!(receipt["findings"][0]["code"], "hygiene", "{receipt}");
     let message = receipt["findings"][0]["message"].as_str().unwrap();
-    assert!(message.contains("ticket label 'cas-1a2b'"), "{message}");
+    assert!(message.contains("cas-1a2b"), "{message}");
     // A refused customer file never sits at the deliverable path.
     assert_eq!(receipt["html"], Value::Null, "{receipt}");
     assert!(!project.path().join("report/customer.html").exists());

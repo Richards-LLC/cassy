@@ -1126,11 +1126,10 @@ mod tests {
     #[test]
     fn test_hook_output_serialization() {
         let output = HookOutput::with_session_start_context("Test context".to_string());
-        let json = serde_json::to_string(&output).unwrap();
+        let json = serde_json::to_value(&output).unwrap();
 
-        assert!(json.contains("hookSpecificOutput"));
-        assert!(json.contains("SessionStart"));
-        assert!(json.contains("additionalContext"));
+        assert_eq!(json["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        assert_eq!(json["hookSpecificOutput"]["additionalContext"], "Test context");
     }
 
     #[test]

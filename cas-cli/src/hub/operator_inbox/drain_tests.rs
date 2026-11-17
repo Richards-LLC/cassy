@@ -377,8 +377,10 @@ async fn a_lost_append_response_retries_the_same_bytes_without_duplicating() {
         .unwrap()
         .0
         .clone();
-    // The retry waits out its backoff (1 s plus at most 1 s of jitter).
-    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    // Expire only this disposable outbox's durable retry boundary.
+    let changed = rusqlite::Connection::open(rig._dir.path().join("cas.db")).unwrap()
+        .execute("UPDATE operator_cloud_outbox SET retry_at_ms = 0 WHERE receipt_kind IS NULL", []).unwrap();
+    assert_eq!(changed, 1);
     let report = rig.drain().await.unwrap();
     assert_eq!(
         (report.sealed, report.stored),

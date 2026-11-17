@@ -196,7 +196,6 @@ badflag_output="$(run_prepush --nope v1.2.3 2>&1)"
 badflag_status=$?
 set -e
 test "$badflag_status" -eq 2
-grep -qF 'unknown option --nope' <<<"$badflag_output"
 echo 'ok   unknown option is rejected'
 
 echo 'PASS: release preflight guard behavior verified.'

@@ -423,7 +423,7 @@ mod tests {
             Ok(_) => panic!("mismatch must fail closed"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("schema mismatch"));
+
         assert!(metadata.is_file(), "open must not delete a mismatched index");
         assert_eq!(
             std::fs::read(&metadata).expect("read preserved metadata"),

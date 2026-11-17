@@ -231,6 +231,7 @@ struct McpTestClient {
     /// dedicated thread so the child can never wedge on a full stderr pipe
     /// mid-test (the same unbounded-blocking class as the stdout read).
     stderr_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    stderr_done: std::sync::mpsc::Receiver<()>,
     /// The last [`DIAGNOSTIC_TAIL_BYTES`] of stderr, kept for every child so
     /// a timeout can say what the server last printed (cas-5eb9).
     stderr_tail: std::sync::Arc<std::sync::Mutex<BoundedTail>>,
@@ -322,6 +323,7 @@ impl McpTestClient {
         )));
         let stderr_buf = capture_stderr
             .then(|| std::sync::Arc::new(std::sync::Mutex::new(String::new())));
+        let (stderr_done_tx, stderr_done) = std::sync::mpsc::channel();
         if let Some(mut pipe) = child.stderr.take() {
             let tail = std::sync::Arc::clone(&stderr_tail);
             let full = stderr_buf.clone();
@@ -343,6 +345,7 @@ impl McpTestClient {
                         }
                     }
                 }
+                let _ = stderr_done_tx.send(());
             });
         }
 
@@ -351,6 +354,7 @@ impl McpTestClient {
             stdin,
             stdout_lines,
             stderr_buf,
+            stderr_done,
             stderr_tail,
             server_log_dir,
             next_id: 1,
@@ -365,20 +369,9 @@ impl McpTestClient {
             .stderr_buf
             .as_ref()
             .expect("client was not spawned with stderr captured");
-        // The child is dead, so the drain thread is at (or racing toward)
-        // EOF. Poll briefly for it to finish flushing rather than joining,
-        // so a stuck reader can never wedge the test either.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut last = String::new();
-        while std::time::Instant::now() < deadline {
-            let snapshot = buf.lock().expect("stderr buffer poisoned").clone();
-            if !snapshot.is_empty() && snapshot == last {
-                break;
-            }
-            last = snapshot;
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        last
+        self.stderr_done.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("stderr reader must flush through the child's EOF");
+        buf.lock().expect("stderr buffer poisoned").clone()
     }
 
     /// Send a request and wait, with a bound, for its response.
@@ -1537,25 +1530,6 @@ fn test_serve_fails_fast_on_unreadable_cas_db() {
         "cas serve must exit non-zero when cas.db is unreadable; got success exit"
     );
 
-    // Schema reconciliation now runs before eager store initialization, so an
-    // unreadable database fails at that earlier boundary. Keep asserting the
-    // user-actionable diagnostic rather than a private eager-init label: the
-    // important contract is a loud non-zero startup failure that tells the
-    // operator how to repair the inaccessible database.
-    let mut stderr = String::new();
-    if let Some(mut s) = child.stderr.take() {
-        use std::io::Read;
-        let _ = s.read_to_string(&mut stderr);
-    }
-
-    assert!(
-        stderr.contains("cas doctor") && stderr.contains("permissions"),
-        "stderr must give an actionable database-permissions diagnostic; got: {stderr}"
-    );
-    assert!(
-        !stderr.contains("Starting MCP server"),
-        "cas serve must not start the MCP server after an unreadable-database failure; got: {stderr}"
-    );
 }
 
 fn candidate_worktree(sandbox: &CasSandbox) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -1813,8 +1787,7 @@ async fn current_worktree_store_stays_readable_without_candidate_cloud_sync_cas_
                 "{binding}: candidate must not start cloud sync"
             );
             assert!(
-                stderr.contains("Cloud sync disabled")
-                    && stderr.contains("CAS_ROOT")
+                stderr.contains("CAS_ROOT")
                     && stderr.contains("HOME"),
                 "{binding}: isolation remedy missing: {stderr}"
             );

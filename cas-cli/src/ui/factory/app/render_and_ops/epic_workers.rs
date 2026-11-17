@@ -5872,6 +5872,22 @@ mod spawn_base_tests {
         init_repo(&project);
         let error = validate_live_spawn_repo_root(manager.repo_root(), &project)
             .expect_err("changed repository context must fail this spawn loudly");
+        drop(error);
+        // A session started without worktrees can provision isolation after
+        // git init, without switching the shared checkout for each worker.
+        let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+        let context = WorkerSpawnContext {
+            worker_name: "late-isolation".into(), spawn_type: "named".into(),
+            isolate: true, task_id: None, project_path: project.clone(), cas_dir,
+            worktree_repo_root: None, worktree_root: None, epic_branch: None,
+            current_epic_id: None, factory_session: None,
+        };
+        let prep = context.resolve().unwrap();
+        assert_eq!(prep.worktree_info.as_ref().unwrap().repo_root, project);
+        without_spawn_disk_floor(&project);
+        let result = prep.run().unwrap();
+        assert_ne!(result.cwd, project);
+        crate::factory_isolation::verify_worker_worktree_binding("late-isolation", &result.cwd, None).unwrap();
     }
 
     #[test]

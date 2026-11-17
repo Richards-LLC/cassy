@@ -683,13 +683,10 @@ def text_literals(source, path):
 SEARCH_CALLS = frozenset((
     'contains', 'includes', 'indexOf', 'find', 'rfind', 'assertIn', 'assertRegex', 'toContain',
     'toMatch', 'starts_with', 'ends_with', 'startsWith', 'endsWith', 'match', 'matches', 'search', 'test'))
-TEXT_CALLS = frozenset((
-    'from', 'format', 'String', 'to_string', 'to_owned', 'into', 'concat', 'join', 'str', 'raw', 'dedent',
-    'expect', 'toBe', 'toEqual', 'toStrictEqual', 'eq', 'ne'))
 
 
 def enclosing_calls(context, offset):
-    """Callee names of the calls open at `offset`, innermost first."""
+    """(callee, open paren index) of the calls open at `offset`, innermost first."""
     calls, depth = [], 0
     for index in range(offset - 1, -1, -1):
         char = context[index]
@@ -701,18 +698,36 @@ def enclosing_calls(context, offset):
                 continue
             if char == '(':
                 callee = re.search(r'([A-Za-z_]\w*)\s*!?\s*(?:::\s*<[^<>]*>\s*)?$', context[:index])
-                calls.append(callee[1] if callee else '')
+                calls.append((callee[1] if callee else '', index))
     return calls
 
 
-def constructor_argument(context, offset):
-    """A literal passed to a data constructor (`id("a.ts", "group changed")`)
-    is structured data. Searches, assertions and text conversions are not
-    constructors, and a constructor nested in a search is still a needle."""
+def runtime_identity_argument(context, offset, line_literals):
+    """A literal in a runtime test identity (`id("a.test.ts", "group changed")`)
+    is structured data. The signal is structural, never the callee's name: the
+    innermost call's arguments are only literals, at least two, and another of
+    them is a test file path. A one-argument wrapper (`Some("...")`), a call
+    that also takes the source, and an identity nested in a search stay needles.
+    `context` has every literal on the line blanked; `line_literals` holds
+    their (start, end, body) relative to the line."""
     calls = enclosing_calls(context, offset)
-    return (bool(calls) and calls[0] != '' and calls[0] not in SEARCH_CALLS | TEXT_CALLS
-            and not calls[0].startswith('assert')
-            and not any(call in SEARCH_CALLS for call in calls))
+    if not calls or any(callee in SEARCH_CALLS for callee, _ in calls):
+        return False
+    open_index = calls[0][1]
+    depth, close = 0, None
+    for index in range(open_index + 1, len(context)):
+        if context[index] in '([{':
+            depth += 1
+        elif context[index] in ')]}':
+            if not depth:
+                close = index
+                break
+            depth -= 1
+    if close is None or context[open_index + 1:close].strip(' \t,'):
+        return False  # Unclosed on this line, or a non-literal argument.
+    arguments = [(left, body) for left, right, body in line_literals if open_index < left and right <= close]
+    return len(arguments) >= 2 and any(
+        left != offset and not re.search(r'\s', body) and is_test_file(body) for left, body in arguments)
 
 
 def is_exact_text_pin(body, context, structured=False):
@@ -736,8 +751,9 @@ def is_exact_text_pin(body, context, structured=False):
         r'\b(?:contains|includes|indexOf|find|assertIn|assertRegex|toContain|'
         r'toMatch|toEqual|toBe|assert\w*)\b|(?:===|==)', context, re.I,
     ) is not None
-    return (prose and assertion) or (not structured and len(body.strip()) >= 12 and len(words) >= 2
-                                     and source_input and search)
+    if structured:
+        return False  # A runtime identity's title is data at any length.
+    return (prose and assertion) or (len(body.strip()) >= 12 and len(words) >= 2 and source_input and search)
 
 
 def rust_assertion_diagnostics(source):
@@ -962,7 +978,10 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
             right = min(literal_end, line_end) - line_start
             context_chars[left:right] = ' ' * (right - left)
         context = ''.join(context_chars)
-        if is_exact_text_pin(body, context, constructor_argument(context, max(start, line_start) - line_start)):
+        line_literals = [(max(left, line_start) - line_start, min(right, line_end) - line_start, text)
+                         for left, right, text in literals if left < line_end and right > line_start]
+        offset = max(start, line_start) - line_start
+        if is_exact_text_pin(body, context, runtime_identity_argument(context, offset, line_literals)):
             hits.append((changed_literal_lines[0] if changed_literal_lines else start_line, 'exact-text pin'))
     return sorted(set(hits))
 

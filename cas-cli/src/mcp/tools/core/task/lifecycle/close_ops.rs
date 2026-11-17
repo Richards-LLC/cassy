@@ -7926,6 +7926,8 @@ impl CasCore {
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
+        #[cfg(test)]
+        crate::async_runtime::stack_probe::mark("close_body");
         let _phase = crate::mcp::tools::service::mutation_receipt::phase("close_gates");
         let caller_task = format!("{}task", self.guidance_prefix());
         if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]

@@ -70,6 +70,35 @@ pub fn heap_future<F: Future>(build: impl FnOnce() -> F) -> std::pin::Pin<Box<F>
     Box::pin(build())
 }
 
+/// Test-only stack depth probes (cas-5dc9e). `mark(label)` records the
+/// deepest stack address reached at `label`; a test subtracts two labels
+/// marked on the same thread to measure the frames between them.
+#[cfg(test)]
+pub(crate) mod stack_probe {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    static DEEPEST: Mutex<BTreeMap<&'static str, usize>> = Mutex::new(BTreeMap::new());
+
+    /// The address of a local in a frame below the caller's whole frame.
+    #[inline(never)]
+    pub(crate) fn address() -> usize {
+        let marker = 0u8;
+        std::hint::black_box(&marker) as *const u8 as usize
+    }
+
+    pub(crate) fn mark(label: &'static str) {
+        let address = address();
+        let mut deepest = DEEPEST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = deepest.entry(label).or_insert(address);
+        *entry = (*entry).min(address);
+    }
+
+    pub(crate) fn take(label: &'static str) -> Option<usize> {
+        DEEPEST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(label)
+    }
+}
+
 /// Progress tracking for long-running operations
 #[derive(Debug, Clone)]
 pub struct Progress {

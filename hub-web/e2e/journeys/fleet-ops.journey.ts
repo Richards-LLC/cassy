@@ -52,8 +52,7 @@ async function openFailureFleet(page: Page, journey: Journey, width: number) {
 for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`fleet failure copy ${width} ${colorScheme} cas_a348`, () => {
     test.use({ viewport: { width, height: 844 }, colorScheme });
-    // cas-stability-identities: ["fleet failure copy 390 light cas_a348 HUB-J17 fleet failure copy 390 light cas_a348: worker failure and recovery", "fleet failure copy 390 dark cas_a348 HUB-J17 fleet failure copy 390 dark cas_a348: worker failure and recovery", "fleet failure copy 1280 light cas_a348 HUB-J17 fleet failure copy 1280 light cas_a348: worker failure and recovery", "fleet failure copy 1280 dark cas_a348 HUB-J17 fleet failure copy 1280 dark cas_a348: worker failure and recovery"]
-    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: worker failure and recovery`, journeyPart, async ({ page, journey }) => {
+    const workerFailure = async ({ page, journey }: { page: import("@playwright/test").Page; journey: Journey }) => {
       const { row, panel, result } = await openFailureFleet(page, journey, width);
       await journey.stage("A server failure names the worker and offers a next step", async () => {
         await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, contentType: "text/html", body: "Internal Server Error" }));
@@ -84,9 +83,10 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
 
         await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
       });
-    });
-    // cas-stability-identities: ["fleet failure copy 390 light cas_a348 HUB-J17 fleet failure copy 390 light cas_a348: assignment failure", "fleet failure copy 390 dark cas_a348 HUB-J17 fleet failure copy 390 dark cas_a348: assignment failure", "fleet failure copy 1280 light cas_a348 HUB-J17 fleet failure copy 1280 light cas_a348: assignment failure", "fleet failure copy 1280 dark cas_a348 HUB-J17 fleet failure copy 1280 dark cas_a348: assignment failure"]
-    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: assignment failure`, journeyPart, async ({ page, journey }) => {
+    };
+    // cas-stability-identities: ["fleet failure copy 390 light cas_a348 HUB-J17 fleet failure copy 390 light cas_a348: worker failure and recovery", "fleet failure copy 390 dark cas_a348 HUB-J17 fleet failure copy 390 dark cas_a348: worker failure and recovery", "fleet failure copy 1280 light cas_a348 HUB-J17 fleet failure copy 1280 light cas_a348: worker failure and recovery", "fleet failure copy 1280 dark cas_a348 HUB-J17 fleet failure copy 1280 dark cas_a348: worker failure and recovery"]
+    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: worker failure and recovery`, journeyPart, workerFailure);
+    const assignmentFailure = async ({ page, journey }: { page: import("@playwright/test").Page; journey: Journey }) => {
       const { result } = await openFailureFleet(page, journey, width);
       await journey.stage("A failed assignment names the task before its assignee", async () => {
         await page.unroute("**/v1/sessions/*/operations");
@@ -103,7 +103,9 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await expect(task.locator(".fleet-ops-note")).toHaveText(text);
         if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
       });
-    });
+    };
+    // cas-stability-identities: ["fleet failure copy 390 light cas_a348 HUB-J17 fleet failure copy 390 light cas_a348: assignment failure", "fleet failure copy 390 dark cas_a348 HUB-J17 fleet failure copy 390 dark cas_a348: assignment failure", "fleet failure copy 1280 light cas_a348 HUB-J17 fleet failure copy 1280 light cas_a348: assignment failure", "fleet failure copy 1280 dark cas_a348 HUB-J17 fleet failure copy 1280 dark cas_a348: assignment failure"]
+    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: assignment failure`, journeyPart, assignmentFailure);
   });
 }
 

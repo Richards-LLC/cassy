@@ -169,8 +169,13 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(rail.locator(".write-grant-result")).toContainText("cas-1234");
       });
     };
-    if (part) test(`HUB-J20 write access ${width} ${colorScheme} cas_ab04`, journeyPart, body);
-    else test(`HUB-J20 write access ${width} ${colorScheme} cas_ab04`, body);
+    if (part) {
+      // cas-stability-identities: ["write access 390 dark cas_ab04 HUB-J20 write access 390 dark cas_ab04"]
+      test(`HUB-J20 write access ${width} ${colorScheme} cas_ab04`, journeyPart, body);
+    } else {
+      // cas-stability-identities: ["write access 1280 light cas_ab04 HUB-J20 write access 1280 light cas_ab04"]
+      test(`HUB-J20 write access ${width} ${colorScheme} cas_ab04`, body);
+    }
   });
 }
 

@@ -1,5 +1,5 @@
 import type { Locator } from "@playwright/test";
-import { clickConversationHeaderAction, test, expect, journeyPart } from "./journey";
+import { clickConversationHeaderAction, test, expect, journeyPart, type Journey } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { journeyNow } from "./clock";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -13,7 +13,7 @@ const expectRun = (where: Locator, run: number[]) => expect.poll(async () => { c
 for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
   test.describe(`Team staffing ${width}`, () => {
     test.use({ viewport: { width, height: width === 1280 ? 800 : 844 }, colorScheme });
-    test(`HUB-J26 see live staffing without opening output ${width}`, journeyPart, async ({ page, journey }) => {
+    const liveStaffing = async ({ page, journey }: { page: import("@playwright/test").Page; journey: Journey }) => {
       const names = ["swift-lark-3", "quiet-owl-7", "brisk-wren-9", "calm-heron-5"];
       const fleet: FleetWorld = {
         agents: names.map((name, i) => ({ name, generation: 1, status: "active", current_task: `task-${i}`, liveness: i === 0 ? "executing" : "waiting_for_input",
@@ -132,7 +132,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(page.locator("#conversation-composer-slot")).toBeVisible();
         await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("Keep my draft while checking the team");
       });
-    });
+    };
+    // cas-stability-identities: ["Team staffing 1280 HUB-J26 see live staffing without opening output 1280", "Team staffing 390 HUB-J26 see live staffing without opening output 390"]
+    test(`HUB-J26 see live staffing without opening output ${width}`, journeyPart, liveStaffing);
   });
 }
 

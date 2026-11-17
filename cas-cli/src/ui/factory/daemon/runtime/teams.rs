@@ -2025,7 +2025,11 @@ while read local_ref local_sha remote_ref remote_sha; do
       :
     else
       record_push_rejection \"$remote_ref\"
-      echo \"Cassy PUSH GUARD: rewrite refused; only a verified InProgress checkpoint may be rebased. Merge the target into parked or reviewed deliveries. [H-40]\" >&2
+      if [ \"$local_sha\" = \"$zero_sha\" ]; then
+        echo \"Cassy PUSH GUARD: deletion refused; only an unbound owned diagnostic ref may be removed. [H-40]\" >&2
+      else
+        echo \"Cassy PUSH GUARD: rewrite refused; only a verified InProgress checkpoint may be rebased. Merge the target into parked or reviewed deliveries. [H-40]\" >&2
+      fi
       exit 1
     fi
   fi

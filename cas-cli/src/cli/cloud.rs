@@ -6292,7 +6292,7 @@ impl PurgeRetainedTask {
     fn operator_command_with_endpoint(&self, endpoint: &str) -> Option<String> {
         if self.reason.starts_with("id collision") {
             return Some(format!(
-                "cas task show id={}; then mcp__cs__task action=update id={} origin_project=<confirmed canonical id>",
+                "task action=show id={}; then task action=update id={} origin_project=<confirmed canonical id>",
                 self.id, self.id
             ));
         }

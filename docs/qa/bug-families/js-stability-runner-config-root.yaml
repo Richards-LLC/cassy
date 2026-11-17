@@ -1,7 +1,0 @@
-title: JavaScript stability runs start from the test's runner config, and the stability refusal names the exact command
-statement: A Jest spec under a nested package.json (apps/backend/scripts/package.json beside apps/backend/jest.config.js) ran without the project's ts-jest transform and failed with a Babel SyntaxError, and the park refusal named no runner command. The runner must start at the nearest runner config and pass it explicitly; the refusal names each changed test's runner, or each valid form as its own command when no evidence identifies one.
-found: {date: '2026-11-16', source: pulse-card worker-check on v4.31.0}
-fixed_by: [cas-1468]
-tasks: [cas-1468]
-journeys: [FACTORY-CLOSE]
-invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]

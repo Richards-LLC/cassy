@@ -109,6 +109,10 @@ Every number in the report must be traceable without asking you.
 - Rounding is stated when it matters; do not present a rounded number and a precise one in the same
   column.
 
+For reports containing journal entries, run the [accounting-entry validator](accounting-entries.md)
+before writing HTML. Its exact-cent balance and saved-account/source checks are part of rendering,
+not client-side JavaScript. Reconcile revised amounts against the saved prior edition.
+
 ## 7. Copyability
 
 - Tables are real tables so a reader can select and paste into a spreadsheet.

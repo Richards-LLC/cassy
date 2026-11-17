@@ -1,4 +1,0 @@
-title: An upward reading gesture at the history edge survives a tail scroll queued for the same frame
-tasks: [cas-c389]
-journeys: [HUB-J23]
-invariants: [HUB-J23-GOAL]

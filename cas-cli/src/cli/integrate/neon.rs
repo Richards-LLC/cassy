@@ -404,7 +404,7 @@ pub fn parse_describe_project(value: &serde_json::Value) -> Result<NeonProjectDe
                  \n\
                  If this is a freshly-created project, the default database may \
                  not have provisioned yet — wait a few seconds and re-run \
-                 `cas integrate neon refresh --update-ids`. Otherwise pass \
+                 `cas integrate neon init`. Otherwise pass \
                  `InitChoices.database_name = Some(...)` (or open a bug). \
                  \n\
                  Response: {inner}"
@@ -954,7 +954,7 @@ pub fn refresh<C: NeonClient>(
         if let Some(existing) = existing_claude.as_deref() {
             for orphan in keep_block::orphaned_existing(&claude, existing)? {
                 outcome.summary.push(format!(
-                    "warning: --update-ids dropping orphan keep block in {}: name={:?}",
+                    "warning: dropping orphan keep block while updating IDs in {}: name={:?}",
                     CLAUDE_SKILL, orphan.name
                 ));
             }
@@ -962,7 +962,7 @@ pub fn refresh<C: NeonClient>(
         if let Some(existing) = existing_cursor.as_deref() {
             for orphan in keep_block::orphaned_existing(&cursor, existing)? {
                 outcome.summary.push(format!(
-                    "warning: --update-ids dropping orphan keep block in {}: name={:?}",
+                    "warning: dropping orphan keep block while updating IDs in {}: name={:?}",
                     CURSOR_SKILL, orphan.name
                 ));
             }

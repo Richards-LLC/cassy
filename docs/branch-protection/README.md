@@ -84,13 +84,13 @@ These CI jobs illustrate the required-set boundary. Their triggers decide eligib
 | --- | --- | --- |
 | `Fast Validation` | Cheap hosted admission on `pull_request`; exhaustive rollup on `merge_group`, push to `main`, schedule, dispatch | **Yes — the full-set wrapper reports the folded gate's result** |
 | `macOS Check` | Informational notice on protected `pull_request`; advisory Darwin/cache lane on push to `main`, tags, schedule, dispatch; never `merge_group` | **No** |
-| `Release-Profile & Build Guard (compile-only, no test suite)` | `if:` limits it to `schedule` or `refs/heads/main` | **No — must not be required** |
+| `Test Compile Guard (compile-only, executes nothing)` | Push to `main` or `staging`, schedule, dispatch; never `pull_request`, `merge_group` or the full set | **No — must not be required** |
+| `Panic Isolation — …` and `Build Benchmark & Timings …` | Schedule and dispatch only | **No — must not be required** |
 
-**Release-Profile & Build Guard is excluded, and this is the load-bearing exclusion.** Its
-`if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'` means it does not run
-on pull requests. Requiring it would leave every PR waiting on a check that can never arrive —
-permanently unmergeable. Its own renamed title already says it is compile-only with no test
-suite, so it is not the suite-executing gate anyway.
+**The heavy-tier guards are excluded, and this is the load-bearing exclusion.** Their `if:`
+conditions skip pull requests and merge-group trees. Requiring one would leave every PR waiting
+on a check that can never arrive, so the PR would never become mergeable. Their titles already
+say they compile or run a named subset, not the suite.
 
 **macOS Check is excluded** (cas-04c3). PR #1475's queue runs
 41851954166, 41855101135 and 41860322468 never acquired their macos-26 runner:
@@ -186,8 +186,10 @@ ref becomes unmergeable until it is fixed. GH #138 already renamed these jobs on
 run: Cassy dispatches the workflow once per frozen train tip, so no run is
 cancelled by a later merge. Both events select Commander journeys against the last release,
 run every registered script/CI-tier test, Commander vitest/typecheck/build,
-preflight, doctests and the complete Rust archive/shards. Quarantine and one
-rerun, including durable flake publication, apply equally to train and queue.
+preflight, doctests and the complete Rust archive across six shards. Both run
+every test once with retries disabled and no label-based exclusions; the
+Full-set gate publishes each first native failure as a P0 repair issue for
+train and queue alike.
 
 The full-set fan-in emits `train-full-gate/receipt.json` with schema 2, exact
 source tree, main baseline, required/actual job outcomes and elapsed seconds.
@@ -214,7 +216,7 @@ Any product change, moved main, partial/legacy proof or uncertainty runs the ful
 graph. A release-plumbing continuation can reuse the source's earlier receipt.
 
 A dispatched train run at a plumbing-only frozen tip uses the same consumer before scheduling tests.
-The existing dedupe job publishes a `train-full-gate` artifact with scope
+The `Classify CI diff` job's `tree-dedupe` step publishes a `train-full-gate` artifact with scope
 `full-set-adoption`: the adopting head/tree, main baseline, and original native
 source head, run and attempt. It becomes usable only after that workflow and its
 full-set fan-in succeed. Cut retries and later queue entries revalidate the

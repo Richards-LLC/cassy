@@ -255,11 +255,7 @@ fn dispatch(
                     preseed_project.as_deref(),
                 )
             }
-            StepMode::Refresh => {
-                let client = vercel::default_client();
-                // Default refresh: preserve keep block (do not re-fetch IDs).
-                vercel::refresh(repo_root, client.as_ref(), false)
-            }
+            StepMode::Refresh => vercel::refresh(repo_root),
         },
         Step::Neon { mode, preseed_project } => {
             let client = LiveNeonClient::new();

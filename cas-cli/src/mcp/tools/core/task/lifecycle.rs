@@ -2920,7 +2920,7 @@ impl CasCore {
                                 && crate::factory_isolation::branch_at(worker_checkout).as_deref()
                                     == Some(worker_branch.as_str()))
                             .map(|parked| {
-                                let preserved = worker_branch.clone();
+                                let preserved = parked.branch.clone().unwrap_or_else(|| worker_branch.clone());
                                 worker_branch = checkout_task_beside_parked_delivery(
                                     worker_checkout, &worker.name, &task.id, target_branch, false,
                                 ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;

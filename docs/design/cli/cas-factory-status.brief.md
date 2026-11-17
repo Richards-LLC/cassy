@@ -11,8 +11,8 @@
 ## Rendering decisions
 
 - Verdicts: `✓ active`, `⚠ idle N min` (actionable-idle minutes), `⚠ no agents` with the
-  remedy `cas factory spawn`.
-- The old right-aligned `        Pending prompts: 0` key/value dump became left-aligned rows
+  remedy `factory action=spawn_workers count=<n>`.
+- The old right-aligned `Pending prompts: 0` key/value dump became left-aligned rows
   whose values start at one column.
 - The agents ledger truncates only the name column, with `…`; `--full` is honoured and named.
 - The `═══ Status for session ═══` banner in accent colour is gone; the verdict carries the

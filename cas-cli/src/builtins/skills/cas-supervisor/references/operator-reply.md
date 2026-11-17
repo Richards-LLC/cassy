@@ -1,8 +1,6 @@
 # Phone reply contract
 
-On a Claude/Codex supervisor, answer a verified Commander question once in the final pane reply; the mirror carries it to web and phone. Use [explicit operator routing](reference.md#verified-commander-messages) only for unprompted updates or unmirrored delivery.
-
-The same Markdown reaches the pane and Commander, which draws diagrams, colored code, tables and callouts. The operator reads a picture faster than a paragraph, so show content visually:
+Routing (pane reply versus `target=operator`): [verified Commander messages](reference.md#verified-commander-messages). The same Markdown reaches the pane and Commander, which draws diagrams, colored code, tables and callouts. The operator reads a picture faster than a paragraph, so show content visually:
 
 - Answer first: the first line is the answer in one sentence.
 - Give each kind of content its form from the table below; bullets (at most 5, one line each) only when no form fits.
@@ -47,7 +45,7 @@ gh run list --branch "main" --limit 3
 
 ## Showing a UI delivery
 
-Show the operator a visual delivery as images in the reply, not as paths. Use the task's QA screenshots (`<artifacts_root>/<project-key>/<task-id>/…`), one image per size or scheme the operator must judge, each with alt text naming what it shows. Pair before and after when the delivery changes an existing screen. Commander loads each image from this machine, with the operator's session permission. A path outside the project's artifacts directory, a non-image file or a remote URL stays text, so copy evidence into the artifacts directory first. wl-copy cannot carry images.
+Show a visual delivery as images in the reply, not as paths. Use the task's QA screenshots (`<artifacts_root>/<project-key>/<task-id>/…`), one image per size or scheme the operator must judge, each with alt text naming what it shows. Pair before and after when the delivery changes an existing screen. Commander loads each image from this machine, with the operator's session permission. A path outside the project's artifacts directory, a non-image file or a remote URL stays text, so copy evidence into the artifacts directory first. wl-copy cannot carry images.
 
 <!-- cas-src:begin -->
 When screenshots cannot answer the question, for example when the operator wants to click through a Commander change against live sessions, offer a preview of the candidate build. Build the task's branch (`npm run build` in hub-web), then put `cas hub preview --dist hub-web/dist --task <task-id>` in the operator's clipboard; it runs on this machine and asks the operator to confirm. The operator pairs the preview origin once from the printed link. The preview reads live data but is read-only: the hub refuses every send, launch, stop or setting change from it. It ends after `--minutes` (default 120) and its pairing is revoked. While it runs, Commander shows "Preview this delivery" on that task's awaiting-merge row.

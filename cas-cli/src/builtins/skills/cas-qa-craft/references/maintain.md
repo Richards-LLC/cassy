@@ -2,12 +2,10 @@
 
 Run once per release, in the background, for projects that have
 `docs/qa/features/`. The sweep keeps `docs/qa/verify.md` and the feature map
-true for features nobody touched this release; touched features are kept
-current by QA use. Task park no longer checks feature files or the journey
-registry. Nothing waits on the sweep.
-
-**Hard cap: about 15 minutes.** When the cap expires, record what was not
-reached and stop.
+true for features nobody touched this release; QA use keeps touched features
+current, and park does not check feature files. Nothing waits on the sweep.
+Cap it at about 15 minutes; when the cap expires, record what was not reached
+and stop.
 
 ## Procedure
 
@@ -33,8 +31,6 @@ reached and stop.
    - `Sweep: <date> <commit> blocked: <reason>`: the cap expired or a
      harness gap stopped the sweep; name the features not reached.
 
-## Boundaries
-
-The sweep edits only `docs/qa/`. It never edits product code, even for a
-one-line regression fix: product regressions become tasks. It does not
-re-drive features touched this release unless the static check fails for them.
+The sweep edits only `docs/qa/`; product regressions become tasks, even
+one-line fixes. It re-drives features touched this release only when the static
+check fails for them.

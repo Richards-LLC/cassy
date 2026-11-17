@@ -42,7 +42,7 @@ disk; escalate unexplained writes instead of closing over them.
 For `depth=light`, deliver the minimal working outcome with honest evidence.
 Otherwise map every criterion to executed proof or a named proof owner using
 `verify-before-claim`, trace affected consumers and registrations, and consume
-the receipts from [discipline.md](discipline.md). Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
+the receipts from [discipline.md](discipline.md).
 
 ## Ledger preflight
 
@@ -63,28 +63,16 @@ see [cas-html-reports](../../cas-html-reports/SKILL.md).
 ## Merge and freshness
 
 A successful park reads `PARKED <sha> on <branch>; awaiting merge verdict; nothing more to do`.
-Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.
-The park relay is the completion signal; send merge_request=true only for local_merge.
 A dispatched verifier reviews the candidate before publication; PASS publishes
-and closes, FAIL reopens it to you with findings. In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.
-MERGE REQUIRED is a genuine refusal, such as unpushed or unattributable work:
-
-1. Drain `coordination action=inbox_poll` to `No unread messages`; act on
-   unread supervisor messages and re-read the task before corrective edits.
-2. Capture `git rev-parse factory/<name>` (or your per-task branch) and check
-   `git merge-base --is-ancestor <delivered-tip> <target-tip>`; if it already
-   landed, await the verdict rather than amend stale state.
-3. For `delivery_mode=local_merge`, keep the local commit and send
-   `merge_request=true` with branch and SHA; push only with explicit supervisor
-   authorization. Otherwise push and retry close once. While a merge is pending,
-   follow [recovery.md](recovery.md#while-the-merge-is-pending).
-4. Never open or merge a PR yourself (`gh pr create`); the supervisor owns the merge venue.
+and closes, FAIL reopens it to you with findings. A MERGE REQUIRED refusal
+follows [recovery.md](recovery.md#merge-required); while a merge is pending,
+follow [recovery.md](recovery.md#while-the-merge-is-pending).
 
 `commit_receipt=<sha>` names this task's delivered commit when squash or
 cherry-pick changed its identity; `completion_receipt=<json>` delivers an
 unpublished tip for candidate verification. A following task starts its own
 branch from the epic tip (`factory/<name>-<task-id>`), preserving the parked
-one. Never set `status=closed` or invent a verification record to bypass close.
+one.
 
 ## Shared docs
 
@@ -109,9 +97,9 @@ alone. Test-only, docs-only or internal QA deliveries record a decision note
 
 ## Conditional evidence
 
-- In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.
-- In qa.mode=per_task only: demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
-  before parking and cite its commit-bound bundle or real-build ledger, run on an
+- [Batch QA](details.md#batch-qa) (the default) owns the walk; per-task QA
+  evidence applies only in qa.mode=per_task. There, for a demo, configured
+  user-facing path or a journey the impact names, use `cas-qa-craft` before parking and cite its commit-bound bundle or real-build ledger, run on an
   exact-tip candidate from `factory action=candidate_request`. Terminal paths
   also need `cas-cli-craft`'s `terminal-qa: PASS`. Docs/test/CI-only deliveries
   need no visual QA.
@@ -158,7 +146,4 @@ Record evidence for each changed surface:
 Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
 criterion evidence, the plan section and its metric receipt when the brief links one,
 and safety facts. A missed plan metric is never non-blocking.
-
-When close returns VERIFICATION REQUIRED naming a dispatch:
-Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.
-Follow [Verification-required close](recovery.md#verification-required-close).
+VERIFICATION REQUIRED follows [Verification-required close](recovery.md#verification-required-close).

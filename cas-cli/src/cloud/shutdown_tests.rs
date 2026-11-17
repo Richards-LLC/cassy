@@ -267,7 +267,8 @@ fn cas_4ac8_unreadable_intent_reports_io_error() {
     agent.cc_session_id = Some("session".into());
     let file = super::path(root, "ended", "session");
     std::fs::create_dir_all(&file).unwrap();
-    let io_error = read(&file).unwrap_err().to_string();
+    let Err(io_error) = read(&file) else { panic!("a directory is not a readable intent") };
+    let io_error = io_error.to_string();
     let outcome =
         crate::cloud::presence::tick(&client("http://example.invalid"), root, &agent, Utc::now());
     assert!(

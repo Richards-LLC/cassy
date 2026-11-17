@@ -683,6 +683,13 @@ def text_literals(source, path):
 SEARCH_CALLS = frozenset((
     'contains', 'includes', 'indexOf', 'find', 'rfind', 'assertIn', 'assertRegex', 'toContain',
     'toMatch', 'starts_with', 'ends_with', 'startsWith', 'endsWith', 'match', 'matches', 'search', 'test'))
+# Free functions that build text from several values. Macros, method calls
+# and bare groupings are refused by syntax; these are the plain-call forms.
+TEXT_BUILDERS = frozenset(('format', 'str', 'String', 'concat', 'join', 'sprintf', 'Sprintf'))
+# A keyword before `(` opens a grouping or tuple, not a call.
+GROUPING_KEYWORDS = frozenset((
+    'in', 'not', 'and', 'or', 'is', 'return', 'yield', 'await', 'assert', 'if', 'elif', 'while',
+    'for', 'match', 'case', 'typeof', 'void', 'delete', 'throw', 'else', 'lambda'))
 
 
 def enclosing_calls(context, offset):
@@ -704,16 +711,29 @@ def enclosing_calls(context, offset):
 
 def runtime_identity_argument(context, offset, line_literals):
     """A literal in a runtime test identity (`id("a.test.ts", "group changed")`)
-    is structured data. The signal is structural, never the callee's name: the
-    innermost call's arguments are only literals, at least two, and another of
-    them is a test file path. A one-argument wrapper (`Some("...")`), a call
-    that also takes the source, and an identity nested in a search stay needles.
+    is structured data. The signal is structural, not an unknown callee: a
+    plain constructor call whose arguments are only literals, at least two,
+    and another of them is a test file path. A one-argument wrapper
+    (`Some("...")`), a call that also takes the source, a string-joining call
+    and an identity nested in a search stay needles.
     `context` has every literal on the line blanked; `line_literals` holds
     their (start, end, body) relative to the line."""
     calls = enclosing_calls(context, offset)
     if not calls or any(callee in SEARCH_CALLS for callee, _ in calls):
         return False
     open_index = calls[0][1]
+    # Identity construction is a plain function, path or `new` call
+    # (`id(`, `Identity::exact(`, `new Identity(`). A macro (`concat!(`,
+    # `format!(`), a method on a value (`.join(`, `.call(`), a bare
+    # grouping or tuple (`("a.test.ts", ...)`, `% (...)`) and the free text
+    # builders all join their literals into text, so a test path there
+    # launders adjacent wording (vdispatch-7f22ae6f).
+    callee = re.search(r'(?:(?P<dot>\.)\s*)?(?P<path>[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*)\s*'
+                       r'(?P<bang>!)?\s*(?:::\s*<[^<>]*>\s*)?$', context[:open_index])
+    if (not callee or callee['dot'] or callee['bang']
+            or callee['path'] in GROUPING_KEYWORDS
+            or re.split(r'\s*::\s*', callee['path'])[-1] in TEXT_BUILDERS):
+        return False
     depth, close = 0, None
     for index in range(open_index + 1, len(context)):
         if context[index] in '([{':

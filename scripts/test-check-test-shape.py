@@ -285,6 +285,8 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         # wrapper around a wording pin over the source is still a pin.
         self.assertFalse(shape.lint_text_pins('assert_eq!(found, [id("a.test.ts", "cas-ae48: returns the original conversation when the retry budget is exhausted.")]);', 'src/a_tests.rs'))
         self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow.lines().next(), Some("Always merge staging first"));', 'src/a_tests.rs'))
+        # vdispatch-7f22ae6f: a test path inside a string-joining macro does not launder wording.
+        self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow, concat!("a.test.ts", "Always merge staging first"));', 'src/a_tests.rs'))
         self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
         self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
         self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner"), "the outage is announced once").toHaveLength(1);', 'reconnect.journey.ts'))

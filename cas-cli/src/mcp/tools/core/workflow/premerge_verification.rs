@@ -2254,6 +2254,7 @@ mod tests {
         task.origin_project = Some("fixture".into());
         task.worktree_id = Some(worktree.id);
         task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() });
+        task.deliverables.delivery_cycle = 1;
         task.deliverables.premerge_repair = Some(cas_types::PremergeRepair {
             dispatch_id: "declined-dispatch".into(), rejected_anchor: source.clone(),
             repair_cycle: task.deliverables.delivery_cycle,
@@ -2276,7 +2277,7 @@ mod tests {
         let assert_no_intent = || {
             let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
             for table in ["worker_completion_receipts", "worker_delivery_transactions", "worker_delivery_events", "verification_dispatches"] {
-                let count: u64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+                let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
                 assert_eq!(count, 0, "{table}");
             }
             assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);

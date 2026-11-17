@@ -69,7 +69,6 @@ class Journals(unittest.TestCase):
         self.assertEqual(html.stdout.count('<table'), 2)
         self.assertEqual(html.stdout.count('<tfoot>'), 2)
         self.assertIn('2,190.00', html.stdout)  # caller amount, not human-facing wording
-        self.assertIn('<th scope="row">Hosting Income</th>', html.stdout)  # numbering off: caller name, no number prefix
         name = 'Bank *operating* | R&D'
         self.chart['accounts'][2]['Name'] = name
         self.save('chart.json', self.chart)

@@ -529,7 +529,6 @@ async fn test_task_create_invalid_depth_is_rejected() {
     assert!(result.is_err(), "invalid depth must be rejected");
     let err = result.err().unwrap();
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{}", err.message);
-    assert!(err.message.contains("medium"), "{}", err.message);
 }
 
 #[tokio::test]

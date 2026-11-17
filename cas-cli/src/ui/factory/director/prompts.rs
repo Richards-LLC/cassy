@@ -5499,7 +5499,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            !prompt.text.contains("action=update id=<task-id>"),
+            gated.iter().all(|id| !prompt.text.contains(id.as_str())),
             "the only ready task is gated — must fall through to the \
              no-dispatchable-work message, not 'ready tasks exist': {}",
             prompt.text
@@ -5530,7 +5530,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            !prompt.text.contains("action=update id=<task-id>"),
+            gated.iter().all(|id| !prompt.text.contains(id.as_str())),
             "a gated-only snapshot must not advertise ready tasks on \
              registration either: {}",
             prompt.text

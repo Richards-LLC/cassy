@@ -5087,8 +5087,8 @@ handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 `factory action=train_freeze id=<train> reason="release-freeze: <reason>"`
 needs a live registered supervisor and a nonempty reason after that explicit
 confirmation prefix. Without it the call refuses before freezing. This is a
-release freeze, not a temporary CI hold: only the operator can lift it in
-Commander, or a published release covering its tip ends it.
+release freeze, not a temporary CI hold: a published release covering its tip,
+the operator's Commander lift or the train supervisor's audited lift ends it.
 Commander's `freeze_train` operation does the same for the operator. Both
 `freeze_train` and `lift_train_freeze` require only a verified pairing's baseline
 `machine:read` scope, without worker-management permissions. Preview pairings
@@ -5110,8 +5110,24 @@ jobs; a failed cancel does not undo the merge
 (`worktree_ops/frozen_train_ci.rs`). Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
-contains the frozen tip), or through the operator-only Commander
-`lift_train_freeze` operation. There is no supervisor lift.
+contains the frozen tip), through the operator's Commander
+`lift_train_freeze` operation, or through the supervisor lift (cas-444b):
+`factory action=train_freeze id=<train> decision=lift reason="<why>"`. The
+caller must be a live registered supervisor, the reason is required
+(`TRAIN_LIFT_REASON_REQUIRED`), and a live supervisor of another factory session
+than the train owner's is refused (`TRAIN_LIFT_NOT_TRAIN_SUPERVISOR`). Freezes
+from auto-cut or a supervisor carry a `release-train-freeze-supervisor-liftable`
+label. A freeze without it is the operator's: a Commander freeze, a freeze from
+before the label existed, or a Cassy freeze the operator froze again (the repeat
+removes the label). A supervisor lift of one is refused
+(`TRAIN_LIFT_OPERATOR_FREEZE`) unless the operator set the operator-only
+`release.supervisor_lifts_operator_freeze`. Both lifts append a
+`RELEASE FREEZE LIFTED: <json>` decision to the train (actor, time, reason, lane
+tip, frozen tip); the supervisor lift also queues a `release_freeze_lifted`
+operator notice. Auto-cut reads that decision and never re-freezes the lifted
+tip (cas-b523); the next merge moves the tip and re-arms it. Lift when a Cassy
+gate blocks the cut on a green frozen tip, or when the operator asked for new
+work in the release; never as a temporary CI hold.
 
 ### Temporary CI merge hold follow-up
 

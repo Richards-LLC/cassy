@@ -35,6 +35,10 @@ Release prep checklist: compare the locked Playwright version with the latest st
    the draft at the `release-notes.md` path its wake names. Write that draft
    and commit a regenerated CODEMAP;
    Cassy never writes or posts notes. The operator pauses auto-cut in Commander.
+   Lift a freeze yourself with `factory action=train_freeze id=<train> decision=lift reason="<why>"`
+   only when a Cassy gate refuses the cut on a green frozen tip or the operator asked for new work
+   in the release. The lift is audited and sent to the operator, and auto-cut leaves that tip alone.
+   A freeze the operator applied in Commander is theirs to lift unless they granted it.
 2. Read the train CI receipt and complete log artifact; fix every red first.
    The existing CI suite at the newest train tip replaces a local pre-cut full
    run. A known red holds `train_merge`; any override is a visible decision for

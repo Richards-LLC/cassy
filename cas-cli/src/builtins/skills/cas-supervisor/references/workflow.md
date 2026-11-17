@@ -178,6 +178,8 @@ with `scripts/release.sh --hotfix`.
 as a hotfix release.
 <!-- cas-src:end -->
 
+Lift a release freeze on your own train with `factory action=train_freeze id=<train> decision=lift reason="<why>"` only when a Cassy gate blocks the cut on a green frozen tip or the operator asked for new work in the release, never as a CI hold. The lift is recorded on the train and sent to the operator; a freeze the operator applied in Commander (or one from before supervisor lifts existed) stays theirs unless they set `release.supervisor_lifts_operator_freeze`.
+
 ## Queue precheck
 
 <!-- cas-src:begin -->

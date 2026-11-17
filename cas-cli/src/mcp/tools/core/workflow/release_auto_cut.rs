@@ -165,6 +165,15 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, green: b
         return Ok(Outcome::Declined(format!("must-land deliveries are still pending: {}", pending.join(", "))));
     }
     if release_freeze::active(root, train).is_none() {
+        // cas-b523: a lift reopened this exact tip; re-freezing it would undo
+        // the lift a minute later. The next merge moves the tip and re-arms.
+        if let Some(lift) = release_freeze::lifted_at(train, tip) {
+            return Ok(Outcome::Declined(format!(
+                "{} lifted the freeze at this tip ({}); auto-cut waits for a new tip",
+                lift["actor"].as_str().unwrap_or("someone"),
+                lift["reason"].as_str().unwrap_or("no reason recorded")
+            )));
+        }
         if let Some(reason) = cadence(root, train, now)? {
             return Ok(Outcome::Declined(reason));
         }

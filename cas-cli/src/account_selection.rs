@@ -59,6 +59,15 @@ pub fn recommend<'a>(
             Err(reason) => result.excluded.push((account, reason)),
         }
     }
+    // cas-c58f: an expired window's 0% is only assumed. Under either policy,
+    // observed accounts are chosen first; assumed ones are a fallback.
+    if candidates.iter().any(|c: &Candidate<'_>| !c.5) {
+        let (observed, assumed): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| !c.5);
+        candidates = observed;
+        for (account, ..) in assumed {
+            result.excluded.push((account, "usage assumed after an expired window; observed accounts first".into()));
+        }
+    }
     let earliest = candidates
         .iter()
         .filter_map(|(_, reset, ..)| *reset)
@@ -84,12 +93,10 @@ pub fn recommend<'a>(
     // Ties break on that window's own reset (cas-c58f).
     let binding_reset = |c: &Candidate<'_>| if c.3 > c.2 { c.4 } else { c.1 };
     candidates.sort_by(|a, b| match config.selection {
-        // Accounts whose usage was observed come before any whose expired
-        // window is only assumed empty (cas-c58f); then most headroom on the
-        // binding window; ties by its earliest reset, unknown resets last.
-        AccountSelection::MostHeadroom => a.5
-            .cmp(&b.5)
-            .then(binding(a).total_cmp(&binding(b)))
+        // Most headroom on the binding window; ties by its earliest reset,
+        // unknown resets last.
+        AccountSelection::MostHeadroom => binding(a)
+            .total_cmp(&binding(b))
             .then(binding_reset(a).is_none().cmp(&binding_reset(b).is_none()))
             .then(binding_reset(a).cmp(&binding_reset(b)))
             .then(a.0.folder.cmp(&b.0.folder)),
@@ -502,19 +509,35 @@ pub(crate) mod tests {
                     90,
                     Some("idle"),
                 ),
+                // cas-c58f: an expired window's 0% is assumed; the observed
+                // account wins under either policy.
                 (
                     "expired Codex 5h snapshot",
-                    vec![busy.clone(), expired_five],
+                    vec![busy.clone(), expired_five.clone()],
                     AccountSelection::SoonestReset,
                     90,
-                    Some("idle"),
+                    Some("busy"),
+                ),
+                (
+                    "expired Codex 5h snapshot, most headroom",
+                    vec![busy.clone(), expired_five],
+                    AccountSelection::MostHeadroom,
+                    90,
+                    Some("busy"),
                 ),
                 (
                     "expired Codex cleared percentage",
-                    vec![busy, cleared_expired],
+                    vec![busy.clone(), cleared_expired.clone()],
                     AccountSelection::SoonestReset,
                     90,
-                    Some("idle"),
+                    Some("busy"),
+                ),
+                (
+                    "expired Codex cleared percentage, most headroom",
+                    vec![busy, cleared_expired],
+                    AccountSelection::MostHeadroom,
+                    90,
+                    Some("busy"),
                 ),
                 (
                     "unknown weekly reset eligible",

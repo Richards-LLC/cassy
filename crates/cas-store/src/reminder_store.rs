@@ -387,6 +387,7 @@ pub trait ReminderStore: Send + Sync {
     /// Cancel pending reminders issued under a task that has just closed.
     /// Explicit cross-session opt-in keeps a reminder alive across this
     /// boundary, but its delivery is stamped with task status and age.
+    /// Automatic delivery-phase watches retire with their task.
     fn cancel_pending_for_task(&self, task_id: &str) -> Result<usize>;
 
     /// Expire reminders past their TTL, returns count expired
@@ -1004,7 +1005,8 @@ impl ReminderStore for SqliteReminderStore {
         let rows = conn.execute(
             "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
              WHERE status IN ('pending', 'suspended') AND task_id = ?2 \
-             AND COALESCE(cross_session, 0) = 0",
+             AND (COALESCE(cross_session, 0) = 0 OR CASE WHEN json_valid(trigger_filter) \
+             THEN json_type(trigger_filter, '$.delivery_wake') = 'true' ELSE 0 END)",
             params![now, task_id],
         )?;
         Ok(rows)

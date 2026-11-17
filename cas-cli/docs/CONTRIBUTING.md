@@ -561,6 +561,8 @@ can re-arm a rerun on the same SHA, including one completed between polls.
 The dry-run poll only observes re-arming candidates. A missing delivery wake
 raises `DELIVERY_WAKE_MISSING` during the next progress-watchdog cycle and is
 excluded from worker-stall/operator-page timing until its watch is repaired.
+Automatic delivery watches retire when the task closes; manually requested
+cross-session reminders retain their existing explicit opt-in behavior.
 
 Supervisor stall notices use the full `epic_status` delivery containment
 computation. A parked delivery already contained in its target, including a

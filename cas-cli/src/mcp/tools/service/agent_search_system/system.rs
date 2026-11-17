@@ -42,7 +42,7 @@ struct GhBugFilingTransport;
 
 impl BugFilingTransport for GhBugFilingTransport {
     fn ensure_agent_reported_label(&self, repo: &str) -> Result<(), String> {
-        let output = crate::gh_budget::output(Command::new("gh")
+        let output = crate::gh_budget::output(Command::new(crate::github_repo::gh_binary())
             .args([
                 "label",
                 "create",
@@ -71,7 +71,7 @@ impl BugFilingTransport for GhBugFilingTransport {
         body: &str,
         labels: &[&str],
     ) -> Result<String, String> {
-        let mut command = Command::new("gh");
+        let mut command = Command::new(crate::github_repo::gh_binary());
         command.args([
             "issue", "create", "--repo", repo, "--title", title, "--body", body,
         ]);
@@ -92,7 +92,7 @@ impl BugFilingTransport for GhBugFilingTransport {
 
     fn open_issues(&self, repo: &str) -> Result<Vec<(String, String)>, String> {
         let output = crate::gh_budget::output(
-            Command::new("gh").args([
+            Command::new(crate::github_repo::gh_binary()).args([
                 "issue", "list", "--repo", repo, "--state", "open", "--limit", "1000", "--json",
                 "url,title,body",
             ]),
@@ -115,7 +115,7 @@ impl BugFilingTransport for GhBugFilingTransport {
 
     fn comment_issue(&self, url: &str, body: &str) -> Result<(), String> {
         let output = crate::gh_budget::output(
-            Command::new("gh").args(["issue", "comment", url, "--body", body]),
+            Command::new(crate::github_repo::gh_binary()).args(["issue", "comment", url, "--body", body]),
             std::time::Duration::from_secs(30),
         )
         .map_err(|error| format!("Failed to run gh CLI while commenting: {error}"))?;
@@ -588,6 +588,61 @@ impl CasService {
                 Ok(Filing::Evidence(format!("added evidence and +1 to open task {id}")))
             }
         }
+    }
+
+    /// Find or file on the task side (cas-5edc): finding creation and QA
+    /// follow-ups use the same matcher as report_cas_bug, against the
+    /// project's tracker and its open tasks. A match gets the evidence
+    /// and a +1, and its identity is returned so nothing new is filed. With no
+    /// project tracker, or GitHub unreachable, open tasks are still matched.
+    pub(in crate::mcp::tools::service) fn add_evidence_to_open_match(
+        &self,
+        fingerprint: &RefusalFingerprint,
+        title: &str,
+        body: &str,
+        skip_task: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let transport = GhBugFilingTransport;
+        // The configured project tracker; in Cassy's own source, Cassy's
+        // tracker. A destination is never inferred from git remotes.
+        let tracker = match self.inner.load_config().issue_repo_registry().project {
+            Some(repo) => Ok(repo),
+            None if crate::quality_ledger::is_cassy_source(&self.inner.cas_root) => {
+                resolve_issue_repo(&self.inner.cas_root)
+            }
+            None => Err("no project issue tracker configured".to_string()),
+        };
+        let found = match tracker.and_then(|repo| self.find_open_match(&transport, &repo, fingerprint)) {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(%error, "cas-5edc: open issues not consulted; matching open tasks only");
+                let store = self
+                    .inner
+                    .open_task_store()
+                    .map_err(|error| format!("task store unavailable: {}", error.message))?;
+                crate::issue_intake::open_task_match(store.as_ref(), fingerprint)
+                    .map_err(|error| format!("could not list open tasks: {error}"))?
+                    .map(|task| OpenMatch::Task(task.id))
+            }
+        };
+        let Some(found) = found else { return Ok(None) };
+        let identity = match &found {
+            OpenMatch::Task(id) if Some(id.as_str()) == skip_task => return Ok(None),
+            OpenMatch::Issue(identity) | OpenMatch::Task(identity) => identity.clone(),
+        };
+        // An issue comment is public: redact it as report_cas_bug does.
+        let (title, body) = match &found {
+            OpenMatch::Issue(_) => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let public = |text: &str| {
+                    redact_known_credentials(&if home.is_empty() { text.to_string() } else { text.replace(&home, "~") })
+                };
+                (public(title), public(body))
+            }
+            OpenMatch::Task(_) => (title.to_string(), body.to_string()),
+        };
+        self.add_evidence(&transport, found, &title, &body)?;
+        Ok(Some(identity))
     }
 
     async fn report_cas_bug_with_transport<T: BugFilingTransport>(

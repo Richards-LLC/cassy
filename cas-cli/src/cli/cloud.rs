@@ -3872,7 +3872,9 @@ pub(crate) fn render_sync_summary(
                     if parts.is_empty() {
                         parts.push("queued rows remain".to_string());
                     }
-                    if reasons.is_empty()
+                    if reasons.iter().any(|(reason, _)| reason.eq_ignore_ascii_case("revision_conflict")) {
+                        parts.push(crate::cloud::push_reason_hint("revision_conflict").to_string());
+                    } else if reasons.is_empty()
                         || reasons
                             .iter()
                             .any(|(reason, _)| crate::cloud::push_rejection_is_retryable(reason))

@@ -1623,7 +1623,7 @@ impl CasCore {
                     .unwrap_or_else(|| "The stale code work target was cleared.".to_string())
             };
             return Ok(update_result(&task, format!(
-                "Corrected proof scope for task {}. The task is Open with assignee {} preserved; the stale proof cycle was invalidated without recording review failure. {}",
+                "Corrected proof scope for task {}. The task is Open with assignee {} preserved; no failed-review verdict was recorded. {}",
                 task.id,
                 task.assignee.as_deref().unwrap_or("unassigned"),
                 result_target,

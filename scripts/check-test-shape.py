@@ -683,133 +683,88 @@ def text_literals(source, path):
 SEARCH_CALLS = frozenset((
     'contains', 'includes', 'indexOf', 'find', 'rfind', 'assertIn', 'assertRegex', 'toContain',
     'toMatch', 'starts_with', 'ends_with', 'startsWith', 'endsWith', 'match', 'matches', 'search', 'test'))
-# Free functions that build text from several values. Macros, method calls
-# and bare groupings are refused by syntax; these are the plain-call forms.
+# Free functions that build text from several values; macros, methods and
+# groupings are refused by syntax.
 TEXT_BUILDERS = frozenset(('format', 'str', 'String', 'concat', 'join', 'sprintf', 'Sprintf'))
 # A keyword before `(` opens a grouping or tuple, not a call.
 GROUPING_KEYWORDS = frozenset((
     'in', 'not', 'and', 'or', 'is', 'return', 'yield', 'await', 'assert', 'if', 'elif', 'while',
     'for', 'match', 'case', 'typeof', 'void', 'delete', 'throw', 'else', 'lambda'))
+ASSERTION_CALLEE = re.compile(r'(?:debug_)?assert\w*|expect|to[A-Z]\w*|assert[A-Z]\w*')
+CALLEE = re.compile(r'(?:(?P<dot>\.)\s*)?(?P<path>[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*)\s*'
+                    r'(?P<bang>!)?\s*(?:::\s*<[^<>]*>\s*)?$')
 
 
-def enclosing_calls(context, offset):
-    """(callee, open paren index) of the calls open at `offset`, innermost first."""
-    calls, depth = [], 0
-    for index in range(offset - 1, -1, -1):
-        char = context[index]
-        if char in ')]}':
+def opener_of(context, index):
+    """Index of the bracket left open at `index`, or None."""
+    depth = 0
+    for position in range(index - 1, -1, -1):
+        if context[position] in ')]}':
             depth += 1
-        elif char in '([{':
-            if depth:
-                depth -= 1
-                continue
-            if char == '(':
-                callee = re.search(r'([A-Za-z_]\w*)\s*!?\s*(?:::\s*<[^<>]*>\s*)?$', context[:index])
-                calls.append((callee[1] if callee else '', index))
-    return calls
+        elif context[position] in '([{':
+            if not depth:
+                return position
+            depth -= 1
+    return None
+
+
+def closer_of(context, opener):
+    """Index of the bracket closing `opener` on this line, or None."""
+    depth = 0
+    for position in range(opener + 1, len(context)):
+        if context[position] in '([{':
+            depth += 1
+        elif context[position] in ')]}':
+            if not depth:
+                return position
+            depth -= 1
+    return None
 
 
 def runtime_identity_argument(context, offset, line_literals):
-    """A literal in a runtime test identity (`id("a.test.ts", "group changed")`)
-    is structured data. The signal is structural, not an unknown callee: a
-    plain constructor call whose arguments are only literals, at least two,
-    and another of them is a test file path. A one-argument wrapper
-    (`Some("...")`), a call that also takes the source, a string-joining call
-    and an identity nested in a search stay needles.
+    """A literal in a runtime test identity is structured data only when the
+    identity is the entire compared argument of an assertion:
+    `assert_eq!(found, [id("a.test.ts", "group changed")])` or
+    `expect(id("a.test.ts", "...")).toEqual(found)`. The identity is a plain
+    function, path or `new` call whose arguments are only literals, at least
+    two, another of them a test file path. Its closing delimiter resolves on
+    the line and the very next token closes the assertion; a single-element
+    array or `vec!` around it is the argument. Anything else fails closed:
+    indexing, a method, an operator, a wrapping call, a joining macro or a
+    continuation on the next line all keep the wording a pin.
     `context` has every literal on the line blanked; `line_literals` holds
     their (start, end, body) relative to the line."""
-    calls = enclosing_calls(context, offset)
-    if not calls or any(callee in SEARCH_CALLS for callee, _ in calls):
+    open_index = opener_of(context, offset)
+    if open_index is None or context[open_index] != '(':
         return False
-    open_index = calls[0][1]
-    # Identity construction is a plain function, path or `new` call
-    # (`id(`, `Identity::exact(`, `new Identity(`). A macro (`concat!(`,
-    # `format!(`), a method on a value (`.join(`, `.call(`), a bare
-    # grouping or tuple (`("a.test.ts", ...)`, `% (...)`) and the free text
-    # builders all join their literals into text, so a test path there
-    # launders adjacent wording (vdispatch-7f22ae6f).
-    callee = re.search(r'(?:(?P<dot>\.)\s*)?(?P<path>[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*)\s*'
-                       r'(?P<bang>!)?\s*(?:::\s*<[^<>]*>\s*)?$', context[:open_index])
-    if (not callee or callee['dot'] or callee['bang']
-            or callee['path'] in GROUPING_KEYWORDS
+    callee = CALLEE.search(context[:open_index])
+    if (not callee or callee['dot'] or callee['bang'] or callee['path'] in GROUPING_KEYWORDS
             or re.split(r'\s*::\s*', callee['path'])[-1] in TEXT_BUILDERS):
         return False
-    depth, close = 0, None
-    for index in range(open_index + 1, len(context)):
-        if context[index] in '([{':
-            depth += 1
-        elif context[index] in ')]}':
-            if not depth:
-                close = index
-                break
-            depth -= 1
+    close = closer_of(context, open_index)
     if close is None or context[open_index + 1:close].strip(' \t,'):
         return False  # Unclosed on this line, or a non-literal argument.
     arguments = [(left, body) for left, right, body in line_literals if open_index < left and right <= close]
-    return len(arguments) >= 2 and any(
-        left != offset and not re.search(r'\s', body) and is_test_file(body) for left, body in arguments
-    ) and consumed_as_identity(context, callee.start('path'), close)
-
-
-# The value's consumer decides: an assertion compares an identity; any other
-# call may render it to text. Matchers such as `toEqual` count; search
-# matchers are refused before this point.
-ASSERTION_CALLEE = re.compile(r'(?:debug_)?assert\w*|expect|to[A-Z]\w*|assert[A-Z]\w*')
-
-
-def consumed_as_identity(context, start, end):
-    """Walk outward from the identity span `context[start:end + 1]` to the
-    assertion that compares it. Only arrays, tuples, braces and `vec!` may sit
-    between them. A text consumer launders the wording: a method or field
-    after any level (`.join(`, `.toString(`, `Array.from(...).join`), an
-    operator around it (`+`, `%`, spread `...`), or any other enclosing call
-    (`String(`, `format!(`, `" ".join(`, an unknown helper).
-    A group left open at the end of the line continues out of sight."""
-    while True:
-        before = context[:start].rstrip()
-        after = context[end + 1:].lstrip()
-        if before.endswith(('+', '%', '...', '${')) or after.startswith(('.', '+', '%', '?.')):
-            return False
-        depth, opener = 0, None
-        for index in range(start - 1, -1, -1):
-            if context[index] in ')]}':
-                depth += 1
-            elif context[index] in '([{':
-                if depth:
-                    depth -= 1
-                    continue
-                opener = index
-                break
-        if opener is None:
-            return True  # The statement's top level on this line.
-        if not after:
-            return False  # Its consumer continues on the next line, unseen.
-        if context[opener] == '(':
-            callee = re.search(r'(?P<path>[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*)\s*(?P<bang>!)?\s*$',
-                               context[:opener])
-            name = re.split(r'\s*::\s*', callee['path'])[-1] if callee else ''
-            if callee and ASSERTION_CALLEE.fullmatch(name):
-                return True
-            if callee and name not in GROUPING_KEYWORDS:
-                return False  # Any other call may turn the identity into text.
-            start = opener
-        else:
-            macro = re.search(r'(?P<name>[A-Za-z_]\w*)\s*!\s*$', context[:opener])
-            if macro and macro['name'] != 'vec':
-                return False
-            start = macro.start() if macro else opener
-        depth, close = 0, None
-        for index in range(opener + 1, len(context)):
-            if context[index] in '([{':
-                depth += 1
-            elif context[index] in ')]}':
-                if not depth:
-                    close = index
-                    break
-                depth -= 1
-        if close is None:
-            return True  # Opened here and closed on a later line.
-        end = close
+    if len(arguments) < 2 or not any(
+            left != offset and not re.search(r'\s', body) and is_test_file(body) for left, body in arguments):
+        return False
+    start, end = callee.start('path'), close
+    before = context[:start].rstrip()
+    after = context[end + 1:].lstrip()
+    if before.endswith('[') and after.startswith(']'):
+        start = len(before) - 1
+        end = context.index(']', end + 1)
+        vec = re.search(r'\bvec\s*!\s*$', context[:start])
+        start = vec.start() if vec else start
+    argument_start = context[:start].rstrip()
+    if not argument_start.endswith(('(', ',')) or not context[end + 1:].lstrip().startswith(')'):
+        return False
+    assertion = opener_of(context, start)
+    if assertion is None or context[assertion] != '(' or closer_of(context, assertion) != context.index(')', end + 1):
+        return False
+    name = CALLEE.search(context[:assertion])
+    name = re.split(r'\s*::\s*', name['path'])[-1] if name else ''
+    return bool(ASSERTION_CALLEE.fullmatch(name)) and name not in SEARCH_CALLS
 
 
 def is_exact_text_pin(body, context, structured=False):

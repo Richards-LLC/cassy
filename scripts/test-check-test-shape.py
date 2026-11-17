@@ -287,8 +287,8 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow.lines().next(), Some("Always merge staging first"));', 'src/a_tests.rs'))
         # vdispatch-7f22ae6f: a test path inside a string-joining macro does not launder wording.
         self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow, concat!("a.test.ts", "Always merge staging first"));', 'src/a_tests.rs'))
-        # fbdbc2ac review: the identity's consumer decides. Every text-producing
-        # consumer stays a pin; only an assertion comparing the identity passes.
+        # fbdbc2ac and c114629b reviews: the identity is exempt only as the
+        # entire compared argument; every other consumer stays a pin.
         wording = 'Always merge staging first'
         reads = {'src/a_tests.rs': 'let workflow = include_str!("../workflow.md"); ',
                  'test_shape.py': 'workflow = Path("w.md").read_text()\n',
@@ -317,6 +317,11 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
             ('x.test.ts', 'expect(workflow).toEqual("" + id("a.test.ts", "W"));'),
             ('x.test.ts', 'expect(workflow).toEqual(id("a.test.ts", "W")?.join(""));'),
             ('x.test.ts', 'expect(workflow).toEqual(JSON.stringify(id("a.test.ts", "W")));'),
+            # c114629b review: indexing and an array continued onto the next line.
+            ('x.test.ts', 'expect(workflow).toEqual(Array("a.test.ts", "W")[1]);'),
+            ('x.test.ts', 'expect(workflow).toEqual([Array("a.test.ts", "W"),\n].join(""));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, [id("a.test.ts", "W"), id("b.test.ts", "x")][0].name);'),
+            ('x.test.ts', 'expect(workflow).toContain(id("a.test.ts", "W"));'),
         ]:
             with self.subTest(path=path, consumer=consumer):
                 self.assertTrue(shape.lint_text_pins(reads[path] + consumer.replace('W', wording), path))

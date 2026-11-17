@@ -33,7 +33,7 @@ type CloseHeld = BTreeMap<String, crate::mcp::tools::core::task::close_refusal::
 /// The session's open work, and a fingerprint of every task, lane and
 /// message change. `None` when a store is unreadable: uncertainty is
 /// neither progress nor a stall.
-fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>, unarmed: &HashSet<String>) -> Option<(String, Vec<String>, String, FreezeHeld, CloseHeld)> {
+fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld, CloseHeld)> {
     use cas_types::{AgentRole, TaskStatus};
     let agents: Vec<_> = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?
         .into_iter().filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
@@ -77,9 +77,10 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>, unarmed: &HashSet<
     let mut all_tasks = None;
     let mut freeze_held = FreezeHeld::new();
     let mut close_held = CloseHeld::new();
+    let parked: Vec<_> = tasks.iter().filter(|task| task.status == TaskStatus::AwaitingMerge
+        && task.deliverables.factory_branch_anchor.as_deref()
+            .is_some_and(crate::factory_delivery_wake::full_sha)).cloned().collect();
     tasks.retain(|task| {
-        // An absent completion edge is a plumbing defect, not idle work.
-        if unarmed.contains(&task.id) { return false; }
         // Like a frozen-train park, these intentional waits have no local
         // next step. Removing them also resets any previous stall episode.
         if dependency_held.contains(&task.id)
@@ -142,6 +143,19 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>, unarmed: &HashSet<
             .2.push(task.id.clone());
         false
     });
+    // Recorded holds already explain these deliveries. Preserve their own
+    // notices, and leave durable completion edges ready for the hold's lift.
+    for held in parked.iter().filter(|parked| !tasks.iter().any(|task| task.id == parked.id)) {
+        if let Err(error) = crate::factory_delivery_wake::arm_task(cas_dir, held, "") {
+            tracing::warn!(task_id=%held.id, %error, "held delivery completion wake unavailable");
+        }
+    }
+    let unarmed = match report_unwatched(cas_dir, &tasks) {
+        Ok(unarmed) => unarmed,
+        Err(error) => { tracing::warn!(%error, "delivery wake coverage unavailable"); return None; }
+    };
+    // An absent completion edge is a plumbing defect, not idle work.
+    tasks.retain(|task| !unarmed.contains(&task.id));
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
     let mut fingerprint: Vec<String> = tasks.iter()
         .map(|task| format!("{} {} {}", task.id, task.status, task.updated_at.to_rfc3339())).collect();
@@ -244,11 +258,7 @@ fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> b
 
 /// One watchdog sample for `session` at `now`.
 pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
-    let unarmed = match report_unwatched(cas_dir, session) {
-        Ok(unarmed) => unarmed,
-        Err(error) => { tracing::warn!(%error, "delivery wake coverage unavailable"); return; }
-    };
-    let Some((fingerprint, waiting, supervisor, freeze_held, close_held)) = observe(cas_dir, session, now, &unarmed) else { return };
+    let Some((fingerprint, waiting, supervisor, freeze_held, close_held)) = observe(cas_dir, session, now) else { return };
     report_freeze_held(cas_dir, freeze_held);
     report_close_held(cas_dir, close_held);
     let mut episodes = EPISODES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -289,15 +299,9 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
     }
 }
 
-fn report_unwatched(cas_dir: &Path, session: &str) -> anyhow::Result<HashSet<String>> {
-    let agents = crate::store::open_agent_store(cas_dir)?;
-    let registered = agents.list(None)?;
-    let members: HashSet<_> = registered.iter().filter(|agent| agent.factory_session.as_deref() == Some(session))
-        .flat_map(|agent| [agent.id.as_str(), agent.name.as_str()]).collect();
-    let tasks = crate::store::open_task_store_local(cas_dir)?;
+fn report_unwatched(cas_dir: &Path, actionable: &[cas_types::Task]) -> anyhow::Result<HashSet<String>> {
     let mut unarmed = HashSet::new();
-    for task in tasks.list(Some(cas_types::TaskStatus::AwaitingMerge))? {
-        if !task.assignee.as_deref().is_some_and(|who| members.contains(who)) { continue; }
+    for task in actionable.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge) {
         let Some(sha) = task.deliverables.factory_branch_anchor.as_deref()
             .filter(|sha| crate::factory_delivery_wake::full_sha(sha)) else { continue };
         let Some(supervisor) = crate::factory_delivery_wake::owner(cas_dir, &task, "")? else { continue };

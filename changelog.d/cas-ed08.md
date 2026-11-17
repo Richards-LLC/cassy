@@ -1,3 +1,3 @@
 ### Changed — Pre-merge review
 
-- **One extra round for non-behavioural findings** — A second rejected review with only documentation, evidence or simplicity blockers gets one automatic repair round when its structured findings show no behavioural or money/data-loss impact. Missing findings or triage still hold for the operator, as does a third rejection. The corrected candidate still requires approval before publication.
+- **Return one non-behavioural repair directly to its worker** — Cassy now reopens the first eligible documentation, evidence or simplicity rejection to the same live worker and sends its findings directly. A portable dispatch receipt limits this to one automatic repair per work cycle. An unchanged source cannot start another review; another rejection holds for the supervisor. Behavioural, security, correctness, missing-triage and money/data-loss findings remain held. Every correction still requires independent approval before publication.

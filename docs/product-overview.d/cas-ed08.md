@@ -1,9 +1,3 @@
 ## Core Concepts
 
-**Bounded review repairs.** Second pre-merge rejections receive one automatic extra repair round when every
-blocking finding concerns documentation, evidence, receipts or unnecessary
-complexity and all findings have awkward or cosmetic impact. Cassy uses the
-existing structured findings, without interpreting verdict prose. Missing
-findings or triage, behavioural or money/data-loss impact, and a third rejection
-hold the delivery and ask the supervisor to escalate to the operator. Every
-corrected candidate still requires independent approval before publication.
+**Bounded review repairs.** Previously a non-behavioural rejection needed a supervisor to return the delivery. Cassy now reopens the first eligible rejection to the same live worker and sends the findings as its next prompt. Eligibility uses existing structured categories and awkward/cosmetic triage, including evidence-only missing validation and simplicity-only duplication. Summary prose grants no authority. A dispatch-bound portable receipt consumes the single repair round across the correction cycle and restart. A new source commit is required before another independent review. Another rejection, unsafe or incomplete findings, and an unavailable worker hold for the supervisor; automatic repair never approves or publishes a delivery.

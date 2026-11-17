@@ -1079,15 +1079,9 @@ impl CasCore {
         dispatch: &VerificationDispatch,
         status: VerificationStatus,
     ) -> Result<String, McpError> {
-        if self
-            .open_task_store()?
-            .get(&dispatch.task_id)
-            .map_err(fail)?
-            .is_terminal()
-        {
-            return Ok(
-                "\nThe delivery is already complete; its original approval is retained.".into(),
-            );
+        let task = self.open_task_store()?.get(&dispatch.task_id).map_err(fail)?;
+        if task.is_terminal() {
+            return Ok("\nThe delivery is already complete; its original approval is retained.".into());
         }
         if status == VerificationStatus::Approved && automatic::owns(&self.cas_root, dispatch) {
             return automatic::approved(self, dispatch).await;
@@ -1100,32 +1094,20 @@ impl CasCore {
         let findings = verdict.as_ref().map(|verdict| format!("\n{}\nFindings: {}", verdict.summary,
             serde_json::to_string(&verdict.issues).unwrap_or_default())).unwrap_or_default();
         let rejection = if status == VerificationStatus::Rejected {
-            use cas_types::{FindingSeverity, IssueSeverity};
-            let rounds = self.open_verification_store()?.get_for_task(&dispatch.task_id).map_err(fail)?
-                .iter()
-                .filter(|row| row.status == VerificationStatus::Rejected)
-                .filter_map(|row| row.dispatch_id.clone())
-                .collect::<std::collections::HashSet<_>>().len();
-            let eligible = verdict.as_ref().is_some_and(|row| {
-                row.issues.iter().any(|issue| issue.severity == IssueSeverity::Blocking)
-                    && row.issues.iter().all(|issue| {
-                        matches!(issue.triage.severity, FindingSeverity::Awkward | FindingSeverity::Cosmetic)
-                            && (issue.severity != IssueSeverity::Blocking
-                                || matches!(issue.category.as_str(), "documentation" | "evidence" | "receipt"
-                                    | "incomplete_close_reason" | "unnecessary_complexity"))
-                    })
-            });
-            Some((match rounds {
-                1 => "repair",
-                2 if eligible => "extra_round",
-                _ => "hold_escalate",
-            }, rounds))
+            // Old verdict callbacks cannot reopen a newer review or manual cycle.
+            if cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).map_err(fail)?
+                .is_none_or(|latest| latest.id != dispatch.id)
+            {
+                return Ok("\nThis verdict was superseded; the current delivery is retained.".into());
+            }
+            if let Some(note) = self.auto_return_premerge_repair(&task, dispatch, verdict.as_ref(), &findings)? {
+                return Ok(note);
+            }
+            Some("hold_escalate")
         } else { None };
-        let action = match rejection.map(|(action, _)| action) {
-            Some("repair") => "This delivery remains unpublished. Return only this delivery to its implementer for repair; unrelated deliveries may continue.",
-            Some("extra_round") => "This second rejection has only non-behavioural blockers. Return this delivery to the same implementer for one automatic extra repair round without an operator hold. The corrected candidate still requires independent approval. A third rejection holds and escalates; unrelated deliveries may continue.",
-            Some("hold_escalate") => "Hold this unpublished delivery and escalate to the operator before another repair round. The automatic extra round is unavailable: findings are behavioural or incomplete, or the repair budget is exhausted. Unrelated deliveries may continue.",
-            _ if status == VerificationStatus::Approved => "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed.",
+        let action = match rejection {
+            Some(_) => "Hold this unpublished delivery for the supervisor. Automatic repair is unavailable: findings are behavioural or incomplete, the worker is unavailable, or the repair round is exhausted. Unrelated deliveries may continue.",
+            None if status == VerificationStatus::Approved => "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed.",
             _ => "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue.",
         };
         crate::supervisor_notices::enqueue_with_context(
@@ -1137,13 +1119,59 @@ impl CasCore {
                 dispatch.task_id, dispatch.id
             ),
             &format!("{}:{status}", dispatch.id),
-            rejection.map(|(action, rounds)| serde_json::json!({
+            rejection.map(|action| serde_json::json!({
                 "task_id": dispatch.task_id, "dispatch_id": dispatch.id,
-                "rejection_action": action, "rejected_rounds": rounds,
+                "rejection_action": action,
             })),
         )
         .map_err(fail)?;
         Ok(format!("\n{action}"))
+    }
+
+    fn auto_return_premerge_repair(
+        &self, task: &Task, dispatch: &VerificationDispatch,
+        verdict: Option<&Verification>, findings: &str,
+    ) -> Result<Option<String>, McpError> {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push;
+        use cas_types::{FindingSeverity, IssueSeverity, TaskStatus};
+        if let Some(receipt) = &task.deliverables.premerge_repair {
+            if receipt.dispatch_id == dispatch.id {
+                // A lost response/wake retries the same queue key, not the decline.
+                if task.status == TaskStatus::Open && task.deliverables.delivery_cycle == receipt.repair_cycle {
+                    crate::store::publish_direct_task_write(&self.cas_root, &task.id).map_err(fail)?;
+                    if supervisor_push::queue_premerge_repair_notice(&self.cas_root, task, &dispatch.id, findings)
+                        .map_err(fail)?.is_none()
+                    { return Ok(None); }
+                }
+                return Ok(Some("\nThe automatic repair was already returned to the assigned worker.".into()));
+            }
+            if receipt.repair_cycle == task.deliverables.delivery_cycle { return Ok(None); }
+        }
+        let eligible = verdict.is_some_and(|row| row.status == VerificationStatus::Rejected
+            && row.issues.iter().any(|issue| issue.severity == IssueSeverity::Blocking)
+            && row.issues.iter().all(|issue|
+                matches!(issue.triage.severity, FindingSeverity::Awkward | FindingSeverity::Cosmetic)
+                && matches!(issue.category.as_str(), "documentation" | "evidence" | "receipt"
+                    | "incomplete_close_reason" | "unnecessary_complexity" | "missing_validation" | "code_duplication")));
+        if !eligible || task.status != TaskStatus::AwaitingMerge
+            || !supervisor_push::premerge_repair_worker_available(&self.cas_root, task).map_err(fail)?
+        { return Ok(None); }
+        let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)? else { return Ok(None); };
+        let outcome = cas_store::auto_return_premerge_rejection(&self.cas_root, &task.id,
+            &dispatch.owner_agent_id, &format!("Automatic non-behavioural repair for dispatch {}.{findings}", dispatch.id), &dispatch.id, &candidate.source_sha).map_err(fail)?;
+        if outcome.is_none() {
+            let current = self.open_task_store()?.get(&task.id).map_err(fail)?;
+            if current.deliverables.premerge_repair.as_ref().is_some_and(|receipt| receipt.dispatch_id == dispatch.id) {
+                return self.auto_return_premerge_repair(&current, dispatch, verdict, findings);
+            }
+            return Ok(None);
+        }
+        crate::store::publish_direct_task_write(&self.cas_root, &task.id).map_err(fail)?;
+        let returned = self.open_task_store()?.get(&task.id).map_err(fail)?;
+        if supervisor_push::queue_premerge_repair_notice(&self.cas_root, &returned, &dispatch.id, findings)
+            .map_err(fail)?.is_none()
+        { return Ok(None); }
+        Ok(Some("\nCassy returned the delivery to its assigned worker with the findings for one automatic repair. A new source commit and independent approval are required; another rejection holds for the supervisor.".into()))
     }
 
     fn inherited_supervisor_call_for_target(
@@ -1197,6 +1225,17 @@ impl CasCore {
         use crate::harness_policy::{
             supervisor_harness_from_env, verification_policy, worker_harness_from_env,
         };
+        // A target/context change must not buy another review of an unchanged
+        // rejected delivery. The replicated receipt survives dispatch invalidation.
+        let current = self.open_task_store()?.get(&task.id).map_err(fail)?;
+        if let Some(receipt) = &current.deliverables.premerge_repair
+            && receipt.repair_cycle == current.deliverables.delivery_cycle
+            && git(repo, &["rev-parse", source]).map_err(fail)? == receipt.rejected_anchor
+        {
+            let mut error = fail("the automatic repair needs a new source commit before another review");
+            error.data = Some(serde_json::json!({"reason": "premerge_repair_requires_new_commit", "dispatch_id": receipt.dispatch_id}));
+            return Err(error);
+        }
         let config = self.load_config();
         let fast_lane =
             crate::fast_lane::owns_review(&self.cas_root, task, repo, Some((source, target)));
@@ -1996,6 +2035,7 @@ mod tests {
         let core = CasCore::with_daemon(root.clone(), None, None);
         let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
         core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.set_agent_id_for_testing(owner.id.clone());
         // Replay the structured findings from ver-ca026909ea7b (cas-2f46)
         // and ver-22c4d2451b27 (cas-d740), independent of their summary prose.
         let simplicity: VerificationIssue = serde_json::from_value(serde_json::json!({
@@ -2025,6 +2065,8 @@ mod tests {
             ("cas-2f46", vec![simplicity.clone()], true),
             ("cas-d740", vec![data_loss], false),
             ("empty", vec![], false),
+            ("unavailable", vec![simplicity.clone()], false),
+            ("blocked", vec![simplicity.clone()], false),
         ];
         // Today's 0553/02ab evidence and 1d3a simplicity findings use these
         // existing categories and safe triage, not a summary-text classifier.
@@ -2051,11 +2093,14 @@ mod tests {
         })).unwrap();
         cases.push(("missing_triage", vec![missing_triage], false));
 
+        let mut expected_worker_prompts = 0;
         for (name, issues, eligible) in cases {
+            run(repo, &["checkout", "-q", "--detach", &source]);
+            run(repo, &["update-ref", "refs/heads/factory/w", &source]);
             let mut task = Task::new(name.into(), "Review".into());
-            task.assignee = Some(worker.name.clone());
+            task.assignee = Some(if name == "unavailable" { "absent".into() } else { worker.name.clone() });
             task.origin_project = Some("fixture".into());
-            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.status = if name == "blocked" { cas_types::TaskStatus::Blocked } else { cas_types::TaskStatus::AwaitingMerge };
             task.deliverables.factory_branch_anchor = Some(source.clone());
             task.deliverables.parked_branch = Some("factory/w".into());
             task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
@@ -2085,6 +2130,8 @@ mod tests {
             let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(200).unwrap();
             let worker_prompts: Vec<_> = prompts.iter().filter(|p| p.target == worker.name).collect();
             // Each eligible dispatch adds exactly one worker prompt, even on replay.
+            expected_worker_prompts += usize::from(eligible);
+            assert_eq!(worker_prompts.len(), expected_worker_prompts, "{name}");
             if eligible {
                 assert!(worker_prompts.iter().any(|p| p.prompt.contains(&serde_json::to_string(&issues).unwrap())), "{name}");
                 let receipt = serde_json::to_value(&current.deliverables).unwrap();
@@ -2099,16 +2146,32 @@ mod tests {
                 let restarted = CasCore::with_daemon(root.clone(), None, None);
                 let refused = restarted.prepare_premerge_verification(&current, repo, "factory/w", "main").unwrap_err();
                 assert_eq!(refused.data.as_ref().unwrap()["reason"], "premerge_repair_requires_new_commit");
+                // Even an old merge caller snapshot cannot discard the persisted guard.
+                let stale = restarted.prepare_premerge_verification(&task, repo, "factory/w", "main").unwrap_err();
+                assert_eq!(stale.data.as_ref().unwrap()["reason"], "premerge_repair_requires_new_commit");
                 assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);
                 // A corrected delivery in this repair cycle gets review, but
                 // another rejection consumes no new automatic repair budget.
-                let next = cas_store::create_verification_dispatch(&root, &task.id, &worker.id, &owner.id,
-                    chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
+                let next = if name == "cas-2f46" {
+                    let corrected = commit_file(repo, "work.txt", "corrected\n", "apply findings");
+                    run(repo, &["update-ref", "refs/heads/factory/w", &corrected]);
+                    current.deliverables.factory_branch_anchor = Some(corrected);
+                    core.open_task_store().unwrap().update(&current).unwrap();
+                    let held = core.prepare_premerge_verification(&current, repo, "factory/w", "main").unwrap_err();
+                    assert_ne!(held.data.as_ref().map(|data| &data["reason"]), Some(&serde_json::json!("premerge_repair_requires_new_commit")));
+                    let next = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+                    assert_ne!(next.id, dispatch.id);
+                    next
+                } else {
+                    cas_store::create_verification_dispatch(&root, &task.id, &worker.id, &owner.id,
+                        chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap()
+                };
                 verdict.id.push_str("-next");
                 verdict.dispatch_id = Some(next.id.clone());
                 cas_store::add_system_verification(&root, &verdict).unwrap();
                 cas_store::resolve_verification_dispatch_with_conn(&conn, &next.id, &owner.id, None, true).unwrap();
                 restarted.continue_premerge_after_verdict(&next, verdict.status).await.unwrap();
+                restarted.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
                 assert_eq!(core.open_task_store().unwrap().get(&task.id).unwrap().status, task.status);
                 let after = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(200).unwrap();
                 assert_eq!(after.iter().filter(|p| p.target == worker.name).count(), worker_prompts.len());

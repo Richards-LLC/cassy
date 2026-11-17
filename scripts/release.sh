@@ -470,6 +470,19 @@ publish_branch() {
     git push --quiet "$remote" "HEAD:refs/heads/$branch"
 }
 
+# GH #2027: a Cassy gate refusing the cut of a green train tip is a release
+# red, so a release-repair task may merge into the frozen train (G-100). The
+# cut's candidate records it: the installed CLI may predate `release refused`.
+# Best effort: a failed record never changes the refusal.
+refuse_cut() {
+    if "$train_tracking"; then
+        CAS_ROOT="$release_store_root" "$release_candidate" release refused --train "$(jq -r .train_id <<<"$context")" \
+            --branch "$branch" --commit "$cut_start" --gate "$1" >&2 \
+            || say "warning: release red not recorded; a repair merge into a frozen train needs an operator freeze lift"
+    fi
+    die "$2"
+}
+
 # Evaluate with the release commit's code before any push, enqueue or freeze.
 # Do not wait for a queue prebuild that this cut has not admitted yet.
 preview_cut() {
@@ -516,14 +529,14 @@ preview_cut() {
         [(.review_missing // [])[] | select(. as $id | $included | index($id))] | join(", ")
     ' <<<"$release_close_preview")"
     [[ -z "$unreviewed" ]] \
-        || die "release cut refused: REVIEW_MISSING for $unreviewed; complete the named deliveries' pre-merge verification and retry; release review is computed from existing approvals and the green train receipt; nothing pushed or enqueued"
+        || refuse_cut REVIEW_MISSING "release cut refused: REVIEW_MISSING for $unreviewed; complete the named deliveries' pre-merge verification and retry; release review is computed from existing approvals and the green train receipt; nothing pushed or enqueued"
     local unvalidated
     unvalidated="$(jq -r --slurpfile inputs "$release_input_report" '
         ($inputs[0].included_task_ids // []) as $included |
         [(.lane_ci_missing // [])[] | select(. as $id | $included | index($id))] | join(", ")
     ' <<<"$release_close_preview")"
     [[ -z "$unvalidated" ]] \
-        || die "release cut refused: LANE_CI_MISSING for $unvalidated; deliberately exempt deliveries need green lane CI alongside the green frozen-train run; nothing pushed or enqueued"
+        || refuse_cut LANE_CI_MISSING "release cut refused: LANE_CI_MISSING for $unvalidated; deliberately exempt deliveries need green lane CI alongside the green frozen-train run; nothing pushed or enqueued"
     # Legacy holds outside this release's included tasks are reported, never refused.
     local gate
     gate="$(jq -c --slurpfile inputs "$release_input_report" '
@@ -537,7 +550,7 @@ preview_cut() {
     [[ "$(jq '.legacy_held | length' <<<"$gate")" == 0 ]] \
         || say "legacy holds outside this release (nonblocking): $(jq -r '.legacy_held | join(", ")' <<<"$gate")"
     jq -e .pass <<<"$gate" >/dev/null \
-        || die "release cut refused: zero would-close; inspect the close preview above; nothing pushed or enqueued"
+        || refuse_cut ZERO_WOULD_CLOSE "release cut refused: zero would-close; inspect the close preview above; nothing pushed or enqueued"
 }
 
 # Advisory once per invocation, including dry-run and version preview. Never
@@ -588,6 +601,8 @@ if [[ "$branch" == epic/release-train-* ]]; then
 else
     say "no train receipt: the merge queue will run the full check set"
 fi
+# The green tip this cut starts from, before version preparation.
+cut_start="${train_ci_start:-$(git rev-parse HEAD)}"
 version="$(prepare)"
 if "$dry_run"; then
     say "dry run: v$version committed locally on $branch; nothing pushed"

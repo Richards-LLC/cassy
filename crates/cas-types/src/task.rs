@@ -773,6 +773,28 @@ pub struct TaskDeliverables {
     pub green_merge_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_ci_admission: Option<MergeCiAdmission>,
+    /// cas-289b: the worker's passing capped test receipts at the parked tip.
+    /// Receipt files stay on the machine that ran them; these travel with the
+    /// task row, so a close on another machine can count them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_receipts: Vec<PortableTestReceipt>,
+}
+
+/// A passing capped targeted-test receipt carried on its task (cas-289b).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortableTestReceipt {
+    /// The delivered tip the receipt proves.
+    pub head: String,
+    /// The commit the run tested: `head`, or an ancestor whose later commits
+    /// changed no proof inputs (checked on the minting machine).
+    pub tested_head: String,
+    pub package: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    pub filter: String,
+    pub count: u64,
+    /// SHA-256 of the run's selected-test log on the minting machine.
+    pub log_sha256: String,
 }
 
 /// A no-delivery or portable no-code close waiting on one exact verdict.
@@ -862,6 +884,8 @@ struct TaskDeliverablesObject {
     green_merge_commit: Option<String>,
     #[serde(default)]
     merge_ci_admission: Option<MergeCiAdmission>,
+    #[serde(default)]
+    test_receipts: Vec<PortableTestReceipt>,
 }
 
 impl From<TaskDeliverablesObject> for TaskDeliverables {
@@ -899,6 +923,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             no_delivery_close_intent: value.no_delivery_close_intent,
             green_merge_commit: value.green_merge_commit,
             merge_ci_admission: value.merge_ci_admission,
+            test_receipts: value.test_receipts,
         }
     }
 }

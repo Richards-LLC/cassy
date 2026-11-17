@@ -1545,6 +1545,28 @@ fn normalize_repo_path(base: &str, path: &str) -> Option<String> {
 /// Write the receipt a passing targeted run leaves, for tests of the gates
 /// that read it (cas-b38a).
 #[cfg(test)]
+/// [`record_passing_test_for_tests`] with the selected-test log a capped
+/// run leaves beside its receipt.
+#[cfg(test)]
+pub(crate) fn record_passing_test_with_log_for_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    package: &str,
+    filter: &str,
+) {
+    record_passing_test_for_tests(cas_root, repo, head, package, filter);
+    let repo = repo.canonicalize().expect("canonical repo");
+    let path = test_receipt_path(cas_root, &repo, head, &TargetedTest {
+        package: package.to_string(), harness: None, filter: filter.to_string(),
+    });
+    let mut record: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let log = path.with_extension("log");
+    std::fs::write(&log, "Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+    record.test.as_mut().unwrap().selected_log = Some(log);
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+}
+
 pub(crate) fn record_passing_test_for_tests(
     cas_root: &Path,
     repo: &Path,

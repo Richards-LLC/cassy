@@ -1573,11 +1573,12 @@ mod tests {
             };
             for _ in 0..2 {
                 let error = resolve_repo_context(&cas_root, &missing).unwrap_err();
-
-                assert!(
-                    !error.contains("MISMATCH"),
-                    "an incomplete scan cannot prove a mismatch"
-                );
+                // Caller payloads and the failed host root are diagnostic data,
+                // independent of the surrounding explanation's wording.
+                assert!(error.contains(&missing.repo_selector), "{error}");
+                assert!(error.contains(&missing.target_branch), "{error}");
+                assert!(error.contains(fixtures.join("blocked").to_str().unwrap()), "{error}");
+                assert!(error.contains(&renamed.repo_selector), "{error}");
             }
             assert_eq!(
                 std::fs::read_to_string(&calls).unwrap().lines().count(),

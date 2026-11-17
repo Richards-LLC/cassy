@@ -2294,6 +2294,54 @@ async fn no_code_close_survives_the_next_task_on_its_lane_cas_aa98() {
     assert_closed_without_lane(&f, id, &response);
 }
 
+/// GH #1983: syncing released trunk for report tooling is not an artifact-only
+/// task's delivery. A subsequent unpublished commit still belongs to its lane.
+#[tokio::test]
+async fn artifact_only_close_after_released_trunk_sync_gh1983() {
+    for own_commit in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "epic/artifact");
+        let repo = f.dir.path();
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        git(&checkout, &["reset", "-q", "--hard", "epic/artifact"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&worker).unwrap();
+        let id = "cas-a1983";
+        let mut task = assigned(id, TaskType::Task, "epic/artifact");
+        task.status = TaskStatus::Open;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("artifact:art-1983".into());
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        git(repo, &["merge", "-q", "--ff-only", &f.foreign_tip]);
+        std::fs::write(repo.join("parser.rs"), "pub fn parser() {}\n").unwrap();
+        git(repo, &["add", "parser.rs"]);
+        git(repo, &["commit", "-qm", "Repair report parser"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(&checkout, &["merge", "-q", "--ff-only", "origin/main"]);
+        if own_commit {
+            std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+            git(&checkout, &["add", "own.rs"]);
+            git(&checkout, &["commit", "-qm", "Report tooling changes"]);
+        }
+        let branch = git(&checkout, &["branch", "--show-current"]);
+        let tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", &branch]);
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":id, "reason":"Report published with portable artifact proof",
+        })).await;
+        if own_commit {
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "{response}");
+        } else {
+            assert_closed_without_lane(&f, id, &response);
+        }
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), tip);
+    }
+}
+
 /// A legacy start recorded the preceding parked task's lane before the worker
 /// switched to its own lane. Only a proven integrated delivery can recover it;
 /// neither an arbitrary receipt nor supervisor review erases delivery checks.

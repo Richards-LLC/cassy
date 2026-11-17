@@ -5,7 +5,8 @@
 //! too. While a train is frozen, Cassy refuses worktree_merge into it, new
 //! staffing on it and CI retries armed against it. A `release-repair` task is
 //! the one exception, and only while the train is red: a recorded
-//! train-suite red, or a failed GitHub train run at the frozen tip. The freeze
+//! train-suite red, a cut refusal recorded by `release.sh` (GH #2027), or a
+//! failed GitHub train run at the frozen tip. The freeze
 //! ends when a published release covers its tip, or when the operator
 //! lifts it in Commander. A supervisor cannot lift it.
 
@@ -91,8 +92,9 @@ fn is_repair(task: &Task) -> bool {
 }
 
 /// Evidence that the frozen train is red: the train-suite receipt names a red
-/// at or after the frozen tip, or GitHub's latest train run at that tip
-/// failed. Either one admits a repair; a missing receipt never locks it out.
+/// at or after the frozen tip, a Cassy gate refused the cut of such a tip, or
+/// GitHub's latest train run at that tip failed. Any one admits a repair; a
+/// missing receipt never locks it out.
 fn red_evidence(root: &Path, train: &Task, freeze: &Freeze) -> Option<String> {
     let lane = train.effective_epic_branch()?;
     let repo = repo_of(root, train)?;
@@ -111,6 +113,14 @@ fn red_evidence(root: &Path, train: &Task, freeze: &Freeze) -> Option<String> {
             state["run_id"].as_str().unwrap_or("unknown"),
             short(head)
         ));
+    }
+    if let Some(refusal) = crate::train_ci::release_red(root, &train.id)
+        && refusal["branch"].as_str() == Some(lane)
+        && let Some(gate) = refusal["gate"].as_str().filter(|gate| crate::train_ci::RELEASE_RED_GATES.contains(gate))
+        && let Some(head) = refusal["head"].as_str()
+        && is_ancestor(&repo, &freeze.tip, head)
+    {
+        return Some(format!("release cut refused {gate} at {}", short(head)));
     }
     let mut command = Command::new(crate::github_repo::gh_binary());
     command
@@ -437,7 +447,7 @@ mod tests {
 
     /// The 4.2.1 incident: merges kept landing after the release ask. Frozen,
     /// a feature is refused and a repair is refused until the train is red,
-    /// by receipt or by GitHub. A peer reads only the synced task row, and
+    /// by receipt, by a recorded cut refusal or by GitHub. A peer reads only the synced task row, and
     /// the freeze ends when a published release covers its tip.
     #[cfg(unix)]
     #[test]
@@ -461,6 +471,11 @@ mod tests {
         assert!(check_merge(&root, lane, Some("cas-fix")).is_err(), "repair without a red");
 
         let tip = git(repo, &["rev-parse", lane]);
+        // GH #2027: release.sh refused the cut of the green frozen tip.
+        let refusal = crate::train_ci::record_release_red(&root, "cas-tr", lane, &tip, "ZERO_WOULD_CLOSE").unwrap();
+        check_merge(&root, lane, Some("cas-fix")).unwrap();
+        assert!(check_merge(&root, lane, Some("cas-feat")).is_err(), "a cut refusal admits repairs only");
+        std::fs::remove_file(refusal).unwrap();
         crate::test_paths::warm_stub(&gh, "#!/bin/sh\nprintf '[{\"databaseId\":77,\"conclusion\":\"failure\"}]\\n'\n");
         check_merge(&root, lane, Some("cas-fix")).unwrap();
         crate::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 1\n");

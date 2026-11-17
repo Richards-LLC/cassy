@@ -494,7 +494,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             body = body[3:-2]
         elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
             return body  # a literal such as runs-on: ubuntu-latest
-        body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
+        body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env|runner)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('cancelled()', 'False').replace('success()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
         return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads,
@@ -1162,7 +1162,8 @@ import os,shutil,sys
 shutil.copyfile(os.environ['FIXTURE_INSTALLER'],sys.argv[sys.argv.index('-o')+1])
 ''')
         for executable in [rustup, cargo, *commands.iterdir()]:
-            executable.chmod(0o755)
+            if not executable.is_symlink():
+                executable.chmod(0o755)
         temporary = self.root / 'tmp'; temporary.mkdir()
         env = dict(PATH=str(commands) + ':/usr/bin:/bin', RUNNER_TEMP=str(temporary),
             CARGO_HOME=str(self.root / 'cargo'), RUSTUP_HOME=str(self.root / 'rustup'),

@@ -67,11 +67,12 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
         fallback = vec![(base.clone(), head.to_owned())];
         &fallback
     };
-    let live = rust::live(repo, head, paths)?;
     // Historical ranges establish ownership, not whether a test edit survived.
     // After integration, keep the attributed base rather than collapsing proof
     // onto the already-landed tip. Otherwise compare with the current target.
     let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
+    let live = rust::net_changed(repo, net_base, head)?.into_iter()
+        .map(|test| test.identity).collect::<BTreeSet<_>>();
     let live_javascript = super::javascript::changed_tests(repo, net_base, head, paths)?
         .into_iter().collect::<BTreeSet<_>>();
     let javascript_paths = paths.iter().filter(|path|
@@ -114,7 +115,9 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
         ["jest", "vitest", "playwright"].map(|runner| command(runner, file)).join(" or "),
     )));
     if rust {
-        commands.push("`cargo nextest run -p <crate> --lib -E 'test(<name>)'`".into());
+        // cas-e751: outside the worker hook the capped runner needs --cas-root.
+        commands.push(format!("`cargo nextest run -p <crate> --lib -E 'test(<name>)'` (the worker hook caps it; elsewhere {})",
+            command("nextest run -p <crate> --lib -E", "'test(<name>)'")));
     }
     commands
 }

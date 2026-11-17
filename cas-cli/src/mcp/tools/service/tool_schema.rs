@@ -54,6 +54,7 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "urgent",
     "in_reply_to",
     "kind",
+    "wake",
     "options",
     "attachment",
     "supersede_key",
@@ -85,13 +86,13 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("action", "`inbox` is an alias of `inbox_poll`."),
     ("id", "Agent id (self); message_status: id."),
     ("target", "To: agent|supervisor|all_workers|operator|commander:<label>; remind=self."),
-    ("message", "Caps: message 1200, blocker/merge 2500, notes 1500 (configurable). Over-cap operator/Commander refused; supervisor spills to artifact."),
+    ("message", "Caps: message 1200, blocker/merge 2500, notes 1500. Over-cap operator/Commander refused; supervisor spills to artifact."),
     ("urgent", "Discard in-flight work; inject next."),
     ("blocker", "Escalate blocker; wake idle supervisor."),
     ("merge_request", "Parked task merge request."),
-    ("in_reply_to", "notification_id of direct message answered."),
-    ("kind", "answer|status|receipt|ask|blocker|secret; worker respawn=recycle with quiet receipt (10m limit)."),
-    ("wake", "message: false=inbox only; broadcasts never wake."),
+    ("in_reply_to", "Answered notification_id."),
+    ("kind", "answer|status|receipt|ask|blocker|secret|respawn (worker recycle; 10m limit)."),
+    ("wake", "message: false=inbox only."),
     ("options", "Operator choices; selection returns label with in_reply_to."),
     ("attachment", "Commander artifact id."),
     // Keep explicit caller contracts within the 3,600 B coordination budget.
@@ -126,6 +127,7 @@ pub(crate) const FACTORY_HIDDEN_FIELDS: &[&str] = &[
     "urgent",
     "in_reply_to",
     "kind",
+    "wake",
     "options",
     "attachment",
     "supersede_key",
@@ -333,6 +335,10 @@ mod tests {
         for param in &coordination_params {
             assert!(COORDINATION_FIELDS.contains(&param.as_str()), "{param}");
         }
+        // cas-b1e7: role contracts tell workers to send FYIs with wake=false;
+        // a strict-schema client rejects any parameter the tool does not publish.
+        assert!(coordination["properties"].as_object().unwrap().contains_key("wake"));
+        assert!(!factory["properties"].as_object().unwrap().contains_key("wake"));
         for supervisor_only in ["count", "worker_names", "config_dir", "workers", "allow_trunk", "command", "port"] {
             assert!(
                 !coordination["properties"].as_object().unwrap().contains_key(supervisor_only),

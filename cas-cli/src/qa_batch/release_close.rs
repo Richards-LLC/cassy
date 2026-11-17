@@ -734,7 +734,15 @@ pub(crate) fn reconcile_members(
                 }) {
                     return Err("LANE_CI_MISSING".into());
                 }
-                approved &= exempt || dispatch_approval.is_some() || (delivery.membership == ReleaseMembership::ExplicitNoCode && receipts.iter().any(|receipt| {
+                // cas-c8ae: verdict rows are machine-local. With none here, an
+                // approval of this exact delivery carried on the task row from
+                // the machine that reviewed it admits the member.
+                let carried = dispatch_approval.is_none() && no_review
+                    && task.deliverables.premerge_approval.as_ref().is_some_and(|approval| {
+                        approval.approved_anchor == anchor
+                            && approval.delivery_cycle == task.deliverables.delivery_cycle
+                    });
+                approved &= exempt || dispatch_approval.is_some() || carried || (delivery.membership == ReleaseMembership::ExplicitNoCode && receipts.iter().any(|receipt| {
                     matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
                         && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)
                 }));

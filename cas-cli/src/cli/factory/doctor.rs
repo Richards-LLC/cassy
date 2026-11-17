@@ -509,7 +509,7 @@ fn cas_mcp_row(project_root: &Path, required: bool, registered: bool) -> DoctorR
                 "{} is missing [mcp_servers.cs] command = \"cas\" with args including \"serve\"",
                 path.display()
             ),
-            remediation: Some("Run `cas sync codex` (or register the project-local `cs` MCP server) and rerun `cas factory doctor`.".to_string()),
+            remediation: Some("Run `cas update --sync` in a project with a `.codex/` directory (or register the project-local `cs` MCP server) and rerun `cas factory doctor`.".to_string()),
         }
     }
 }

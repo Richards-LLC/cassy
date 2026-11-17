@@ -29,11 +29,9 @@ to that reporter without echoing the value. A script failure or malformed line
 is recorded in the ledger honesty section and does not become a fabricated
 finding.
 
-## Documentation-only PostHog/HogQL example
+## PostHog/HogQL shape (illustrative, not drop-in)
 
-This is a reference shape, adapted from the project sweep contract rather than
-a drop-in Cassy implementation. It illustrates the query boundary only; keep
-the API host, project id, and token in the environment and never echo them.
+Keep the API host, project id and token in the environment and never echo them.
 
 ```bash
 #!/usr/bin/env bash
@@ -72,5 +70,5 @@ Keep explained subjects in the QA ledger instead of re-filing them:
 | checkout | expected migration traffic | cas-1234 | task note or issue URL |
 ```
 
-The task id must identify the existing explanation. A finding with no matching
-row remains a finding and should be evaluated by the normal defect-task rule.
+The task id must identify the existing explanation; a finding with no matching
+row stays a finding.

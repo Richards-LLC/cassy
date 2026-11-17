@@ -404,7 +404,11 @@ pub fn build_context_with_stores(
         .map(handoff::HandoffLineage::for_agent)
         .unwrap_or_else(handoff::HandoffLineage::for_local_machine);
     // gate[N-42 notice]: Current Handoff (role)
-    if let Some(store) = stores.primary_store()
+    // Worker task briefs carry their assigned work; a role-wide worker handoff
+    // can belong to another worker's task and must not become startup
+    // instructions (cas-a042).
+    if session_role != "worker"
+        && let Some(store) = stores.primary_store()
         && let Ok(project_entries) = store.list()
         && let Some(current) = handoff::current_handoff(&project_entries, &session_role, Some(&lineage))
     {

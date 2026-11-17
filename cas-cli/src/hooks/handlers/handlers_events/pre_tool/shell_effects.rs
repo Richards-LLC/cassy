@@ -11,6 +11,9 @@ pub(super) struct ShellEffects {
     pub edits: Vec<String>,
     pub deletes: Vec<(String, bool)>,
     pub links: Vec<(ShellLink, PathBuf)>,
+    read_contexts: Option<Vec<ShellReadContext>>,
+    /// The read projection saw a function or coprocess body.
+    deferred_bodies: bool,
 }
 
 type Directories = Vec<Option<PathBuf>>;
@@ -26,6 +29,43 @@ pub(super) fn collect(command: &str, cwd: &Path) -> Result<ShellEffects, &'stati
         &mut effects,
     )?;
     Ok(effects)
+}
+
+/// Opt-in read projection; `None` when the command cannot be projected.
+/// Collecting workspace write effects keeps its current behavior.
+pub(super) fn read_contexts(command: &str, cwd: &Path) -> Option<Vec<ShellReadContext>> {
+    let mut effects = ShellEffects { read_contexts: Some(Vec::new()), ..Default::default() };
+    collect_script(command, vec![Some(cwd.to_path_buf())], cwd, &HashMap::new(), 0, &mut effects).ok()?;
+    let mut contexts = effects.read_contexts?;
+    // A function body runs wherever it is later called, so every statement
+    // is judged from every directory the command can reach.
+    if effects.deferred_bodies {
+        let mut reachable = Vec::new();
+        for directory in contexts.iter().flat_map(|context| &context.directories) {
+            if !reachable.contains(directory) {
+                reachable.push(directory.clone());
+            }
+        }
+        for context in &mut contexts {
+            context.directories = reachable.clone();
+        }
+    }
+    Some(contexts)
+}
+
+/// A pipe or background `&` at `at`: not `||`, `&&`, the `&` of `|&`, or
+/// part of a redirection such as `>|`, `>&` or `&>`.
+fn lone_operator(tokens: &[ShellToken], source: &str, ends: &[usize], at: usize) -> Option<char> {
+    let ShellToken::Operator(operator @ ('|' | '&')) = tokens.get(at)? else {
+        return None;
+    };
+    let before = at.checked_sub(1).and_then(|index| tokens.get(index));
+    let joins = |token: Option<&ShellToken>| matches!(token, Some(ShellToken::Operator(other)) if other == operator);
+    let redirect = matches!(before, Some(ShellToken::Operator('<' | '>')))
+        || (*operator == '&'
+            && (matches!(before, Some(ShellToken::Operator('|')))
+                || source.get(*ends.get(at)?..).is_some_and(|rest| rest.starts_with('>'))));
+    (!joins(before) && !joins(tokens.get(at + 1)) && !redirect).then_some(*operator)
 }
 
 fn quote(word: &str) -> String {
@@ -899,7 +939,7 @@ fn collect_script(
     }
     arithmetic_commands(&projected, &mut lexed)?;
     let case_tokens = case_syntax(&projected, &lexed)?;
-    let (tokens, literal_words) = (lexed.tokens, lexed.literals);
+    let (tokens, literal_words, source_ends) = (lexed.tokens, lexed.literals, lexed.ends);
     let captured_status: HashSet<String> = tokens
         .iter()
         .filter_map(|token| match token {
@@ -935,10 +975,33 @@ fn collect_script(
     }
     let mut heredocs = delimiters.into_iter().zip(bodies);
     let mut scopes = Vec::new();
+    let mut directory_stack = Vec::new();
+    // Credential reads only. A function or coprocess body runs later or never,
+    // and a piped or background compound command runs in a subshell. Their
+    // extents are not modelled, so each directory change is only possible.
+    let read_mode = effects.read_contexts.is_some();
+    let deferred_bodies = read_mode
+        && (tokens.windows(2).any(|pair| pair == [ShellToken::Operator('('), ShellToken::Operator(')')])
+            || tokens.iter().any(|token| matches!(token,
+                ShellToken::Word(word) if matches!(word.as_str(), "function" | "coproc"))));
+    effects.deferred_bodies |= deferred_bodies;
+    let unordered_cwd = deferred_bodies
+        || (read_mode
+            && tokens.iter().any(|token| matches!(token, ShellToken::Word(word)
+                if matches!(word.as_str(), "{" | "if" | "while" | "until" | "for" | "select" | "case")))
+            && (0..tokens.len()).any(|at| lone_operator(&tokens, &projected, &source_ends, at).is_some()));
+    // Directories and stack on entry to the current and-or list, which a
+    // trailing background `&` runs in a subshell.
+    // `cd -` returns to the previous directory; unknown before the first change.
+    let mut previous_dirs: Directories = vec![None];
+    let mut list_entry = (dirs.clone(), directory_stack.clone(), previous_dirs.clone());
     // The directories on entry to each open `case`. Only one arm runs, so no arm
     // sees a `cd` from an earlier one and any of them may be the one that ran.
     let mut case_entries: Vec<Directories> = Vec::new();
     let mut continuation = false;
+    // Credential reads: the reader and operands before an unquoted argument
+    // substitution, which the words after it continue.
+    let mut continuation_head = String::new();
     let mut start: usize = 0;
     for end in 0..=tokens.len() {
         let syntax = case_tokens.get(end).copied().unwrap_or(CaseSyntax::Code);
@@ -961,7 +1024,32 @@ fn collect_script(
             (CaseSyntax::Code, None) => None,
             (CaseSyntax::Code, _) => continue,
         };
-        let assignment_may_skip = conditional_bindings
+        // Credential reads: only a conditional block still open before a
+        // statement can skip it, including a `{ }` group after `&&` or `||`.
+        // A closer counts only when spelled unquoted in command position.
+        let before = &tokens[..start.min(tokens.len())];
+        let mut open_blocks: Vec<bool> = Vec::new();
+        for (at, token) in before.iter().enumerate() {
+            if case_tokens[at] == CaseSyntax::Esac {
+                open_blocks.pop();
+                continue;
+            }
+            let ShellToken::Word(word) = token else { continue };
+            let closer = case_tokens[at] == CaseSyntax::Code
+                && at > 0
+                && matches!(before[at - 1], ShellToken::Operator(';' | '&'))
+                && projected.get(source_ends[at - 1]..source_ends[at]).is_some_and(|source| source.trim_start() == word);
+            match word.as_str() {
+                "if" | "while" | "until" | "for" | "select" | "case" => open_blocks.push(true),
+                "{" => open_blocks.push(at > 0 && matches!(before[at - 1], ShellToken::Operator('&' | '|'))),
+                "fi" | "done" | "}" if closer => {
+                    open_blocks.pop();
+                }
+                _ => {}
+            }
+        }
+        let conditional_before = open_blocks.contains(&true);
+        let assignment_may_skip = if read_mode { conditional_before } else { conditional_bindings }
             || matches!(
                 tokens.get(start.wrapping_sub(1)),
                 Some(ShellToken::Operator('&' | '|'))
@@ -970,8 +1058,25 @@ fn collect_script(
         let visible: Vec<usize> =
             (start..end).filter(|index| case_tokens[*index] == CaseSyntax::Code).collect();
         let visible_tokens: Vec<ShellToken> = visible.iter().map(|&index| tokens[index].clone()).collect();
+        // Preserve original argv spelling (notably numeric redirect fds).
+        // The context is paired here with its source span, never by argv match.
+        let source_start = start.checked_sub(1).map_or(0, |index| source_ends[index]);
+        let source_end = source_ends.get(end).map_or(projected.len(), |end| end - 1);
+        let mut read_command = projected[source_start..source_end].to_string();
         let mut statement = visible_tokens.as_slice();
         let mut skipped_keywords = 0;
+        // After a pipe or background `&` (past newlines), a directory change
+        // may not reach the next command; before a pipe it never does.
+        let keep_alternatives = unordered_cwd
+            || (read_mode
+                && (0..start).rev().find(|&at| tokens[at] != ShellToken::Operator(';')).is_some_and(
+                    |at| match &tokens[at] {
+                        ShellToken::Operator('|') => true,
+                        ShellToken::Operator('&') => at == 0 || tokens[at - 1] != ShellToken::Operator('&'),
+                        _ => false,
+                    },
+                ));
+        let pipe_element = read_mode && lone_operator(&tokens, &projected, &source_ends, end) == Some('|');
         start = end + 1;
         while matches!(statement.first(), Some(ShellToken::Word(word))
             if matches!(word.as_str(), "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!"))
@@ -981,7 +1086,13 @@ fn collect_script(
         }
         let substitution_scope = separator == Some('(')
             && matches!(statement.last(), Some(ShellToken::Word(word)) if word.ends_with('$'));
-        let incoming = dirs.clone();
+        // The substitution's output stands in as one opaque operand.
+        let substitution_head = substitution_scope.then(|| format!(
+            "{}{}SUBSTITUTION",
+            if continuation { continuation_head.as_str() } else { "" },
+            read_command.strip_suffix('$').unwrap_or(&read_command),
+        ));
+        let mut incoming = dirs.clone();
         let and_then =
             separator == Some('&') && tokens.get(end + 1) == Some(&ShellToken::Operator('&'));
         if !statement.is_empty() {
@@ -1006,6 +1117,10 @@ fn collect_script(
                 if expected.value != delimiter.value || expected.strip_leading_tabs != delimiter.strip_leading_tabs {
                     return Err("an unresolved shell payload");
                 }
+                read_command.push('\n');
+                read_command.push_str(&body);
+                read_command.push_str(&delimiter.value);
+                read_command.push('\n');
                 command.push('\n');
                 command.push_str(&body);
                 command.push_str(&delimiter.value);
@@ -1184,7 +1299,31 @@ fn collect_script(
                 }
             }
 
-            if name == Some("cd") {
+            // A leading command executes before any later conditional syntax.
+            let entry_directory = depth == 0 && skipped_keywords == 0
+                && effects.read_contexts.as_ref().is_some_and(Vec::is_empty);
+            if depth == 0 && let Some(contexts) = &mut effects.read_contexts {
+                if dirs.is_empty() { return Err("an unresolved credential working directory"); }
+                let command = if continuation { format!("{continuation_head}{read_command}") } else { read_command };
+                contexts.push(ShellReadContext { command, directories: dirs.clone() });
+            }
+            let read_stack = effects.read_contexts.is_some();
+            let read_unconditional =
+                read_stack && !keep_alternatives && (!assignment_may_skip || entry_directory);
+            let statement_entry = (dirs.clone(), directory_stack.clone());
+            if read_stack && name == Some("popd") {
+                if let Some(previous) = directory_stack.pop() {
+                    if keep_alternatives {
+                        for directory in previous {
+                            add_directory(&mut dirs, directory);
+                        }
+                    } else {
+                        dirs = previous;
+                    }
+                }
+            }
+            if name == Some("cd") || (read_stack && name == Some("pushd")) {
+                if name == Some("pushd") { directory_stack.push(dirs.clone()); }
                 let mut cdpath = directory_values.get("CDPATH").cloned().unwrap_or_default();
                 for word in &words[..index.unwrap_or(0)] {
                     if let Some(value) = word.strip_prefix("CDPATH=") {
@@ -1209,6 +1348,23 @@ fn collect_script(
                 let mut changed = Vec::new();
                 for directory in &dirs {
                     for target in &targets {
+                        // Credential reads only: a glob component names one
+                        // unknown entry, so the directory keeps its literal
+                        // ancestors. A dot-glob may match `..` and stays unresolved.
+                        let masked;
+                        let target = match read_mode && !target.contains(['$', '`']) {
+                            true => match target.split('/').map(|part| match part.contains(['*', '?', '[']) {
+                                false => Some(part),
+                                true => (!part.starts_with('.')).then_some(UNKNOWN_DIRECTORY),
+                            }).collect::<Option<Vec<_>>>() {
+                                Some(parts) => {
+                                    masked = parts.join("/");
+                                    masked.as_str()
+                                }
+                                None => target.as_str(),
+                            },
+                            false => target.as_str(),
+                        };
                         let path = if target.contains(['$', '`', '*', '?', '['])
                             || (searches_directory
                                 && !Path::new(target).is_absolute()
@@ -1244,9 +1400,12 @@ fn collect_script(
                         add_directory(&mut changed, path);
                     }
                 }
+                if read_stack && name == Some("cd") && operands.len() == 1 && operands[0] == "-" {
+                    changed = previous_dirs.clone();
+                }
                 // The next && statement requires cd to have succeeded.
                 // Keep failed/skipped alternatives for later ;/|| joins.
-                if and_then {
+                if (and_then && !keep_alternatives) || read_unconditional {
                     dirs = changed;
                 } else {
                     for directory in changed {
@@ -1255,7 +1414,29 @@ fn collect_script(
                 }
             }
 
-            if name == Some("cd") {
+            // Keep the credential guard's existing destination policy for an
+            // unconditional directory command, including a later ; join.
+            // Conditional/skipped commands retain the shared alternatives.
+            if read_unconditional && matches!(name, Some("cd" | "pushd")) {
+                incoming = dirs.clone();
+            }
+            // A piped change never reaches this shell; one that may be
+            // skipped or not persist only adds a possible previous directory.
+            if read_stack && !pipe_element && matches!(name, Some("cd" | "pushd" | "popd"))
+                && dirs != statement_entry.0
+            {
+                if !((and_then && !keep_alternatives) || read_unconditional) {
+                    for directory in statement_entry.0.clone() {
+                        add_directory(&mut previous_dirs, directory);
+                    }
+                } else {
+                    previous_dirs = statement_entry.0.clone();
+                }
+            }
+            if pipe_element {
+                (dirs, directory_stack) = statement_entry;
+            }
+            if name == Some("cd") || (read_stack && matches!(name, Some("pushd" | "popd"))) {
                 directory_values.insert("PWD".into(), pwd_values(&dirs));
             }
             let assignments = if continuation {
@@ -1373,6 +1554,10 @@ fn collect_script(
                     alternatives.clone(),
                     directory_values.clone(),
                     substitution_scope,
+                    directory_stack.clone(),
+                    list_entry.clone(),
+                    previous_dirs.clone(),
+                    (std::mem::take(&mut continuation_head), substitution_head.unwrap_or_default()),
                 ));
                 continuation = false;
             }
@@ -1382,6 +1567,12 @@ fn collect_script(
                 alternatives = parent.1;
                 directory_values = parent.2;
                 continuation = parent.3;
+                directory_stack = parent.4;
+                list_entry = parent.5;
+                previous_dirs = parent.6;
+                // A substitution's following words continue its command.
+                let (outer, after) = parent.7;
+                continuation_head = if continuation { after } else { outer };
             }
             Some('&') if and_then => {
                 continuation = false;
@@ -1397,11 +1588,20 @@ fn collect_script(
             }
             Some('&') if tokens.get(end.wrapping_sub(1)) != Some(&ShellToken::Operator('&')) => {
                 continuation = false;
+                if read_mode && !unordered_cwd && lone_operator(&tokens, &projected, &source_ends, end).is_some() {
+                    alternatives.clear();
+                    (dirs, directory_stack, previous_dirs) = list_entry.clone();
+                }
                 for directory in std::mem::take(&mut alternatives) {
                     add_directory(&mut dirs, directory);
                 }
             }
             _ => {}
+        }
+        if matches!(separator, None | Some(';' | '('))
+            || lone_operator(&tokens, &projected, &source_ends, end) == Some('&')
+        {
+            list_entry = (dirs.clone(), directory_stack.clone(), previous_dirs.clone());
         }
     }
     // Even a quoted body left unclaimed proves that projection/splitting

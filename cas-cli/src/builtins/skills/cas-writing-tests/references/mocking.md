@@ -15,6 +15,7 @@ illustrate dependency design; they do not introduce production APIs.
 - [Keep owned behavior real](#keep-owned-behavior-real)
 - [Inject time and randomness without replacing behavior](#inject-time-and-randomness-without-replacing-behavior)
 - [Inject typed per-operation ports](#inject-typed-per-operation-ports)
+- [Predicate fakes](#predicate-fakes)
 - [Framework testing seams](#framework-testing-seams)
 
 ## Choose the boundary
@@ -39,11 +40,11 @@ services in the normal deterministic loop.
 
 ## Keep owned behavior real
 
-Do not mock the function under test, private helpers, your own modules/classes or
-internal collaborators just to verify call order/count. Do not replace the store
-with a fake if persistence/retrieval is what the test promises. For Cassy examples,
-use `open_task_store` with temporary SQLite and `GitOperations` with a real
-repository; see [tests.md](tests.md).
+Keep the function under test, private helpers, your own modules and internal
+collaborators real; a mock that only verifies call order/count proves nothing the
+caller sees. Keep the store real when persistence/retrieval is the promise
+(Cassy: `open_task_store` with temporary SQLite and `GitOperations` with a real
+repository; see [tests.md](tests.md)).
 
 A separately owned dependency can sit inside the process and still be a boundary.
 Name its ownership and contract before substituting it. Passing every helper
@@ -113,20 +114,12 @@ HTTP adapter responsible for URL/method details and test those details there.
 Use a protocol server instead when exercising reconnects, stream ordering or
 request encoding: canned per-operation responses cannot establish those promises.
 
-## Framework testing seams
-
-A DI container's provider override or a test harness's module builder is suitable
-when it replaces an external or separately owned dependency and runs the real
-consuming module through its public interface. Label which boundary is replaced
-and which public contract is asserted. For example, override the external hub
-provider, invoke the module's send operation, and assert the returned message or
-refusal. Replacing its internal mapper and asserting `mapper.map` was called
-remains implementation-coupled, even if a framework makes that override easy.
-
 ## Predicate fakes
 
-A fake update/count/query must evaluate the supplied predicates against fixture state. Return zero when no fixture row matches; model claimed ownership and transitions when concurrency is the promise. Canned count:1 is banned because it can pass while the real predicate rejects every row. Use a real disposable database for uniqueness, transactions, locks and rollback; reject a non-disposable target before setup/cleanup.
+A fake update/count/query must evaluate the supplied predicates against fixture state. Return zero when no fixture row matches; model claimed ownership and transitions when concurrency is the promise. A canned `count: 1` can pass while the real predicate rejects every row. Use a real disposable database for uniqueness, transactions, locks and rollback; reject a non-disposable target before setup/cleanup.
 
-For NestJS, build the real consuming module with Test.createTestingModule, overrideProvider(ExternalProvider).useValue(predicateFake), then invoke its public operation. Use an actual disposable database instead of a provider fake when the contract is transactional/unique/locking behavior.
+## Framework testing seams
+
+A DI provider override or module builder is suitable when it replaces an external or separately owned dependency and runs the real consuming module through its public interface; replacing an internal mapper and asserting `mapper.map` was called stays implementation-coupled. For NestJS, build the real consuming module with Test.createTestingModule, overrideProvider(ExternalProvider).useValue(predicateFake), then invoke its public operation. Use an actual disposable database instead of a provider fake when the contract is transactional/unique/locking behavior.
 
 For Nuxt composables, use Vitest with the project's Nuxt test-utils environment; mockNuxtImport may replace an external transport seam while the consuming composable stays real. Reset fixture state between cases and keep dynamic imports when they establish deliberate module/mock isolation. DOM-only behavior belongs in a mounted component/browser case, not a fake Nuxt runtime test.

@@ -1454,6 +1454,7 @@ pub(crate) fn candidate_verification_dispatch_envelope(
     dispatch: &cas_types::VerificationDispatch,
     worker: &str,
     reason: &str,
+    retry: &str,
 ) -> String {
     let head = dispatch.repository.as_ref().map(|proof| proof.head_commit.as_str()).unwrap_or("");
     format!(
@@ -1461,7 +1462,7 @@ pub(crate) fn candidate_verification_dispatch_envelope(
          Task {task}, delivered by {worker}, awaits its required pre-merge candidate review.\n\
          {reason}\n\
          {VERIFIER_CALLER_GUIDANCE}\n\
-         Retry factory action=worktree_merge with task_id={task} to start Cassy's daemon-owned verifier on this exact dispatch. \
+         Retry {retry} to start Cassy's daemon-owned verifier on this exact dispatch. \
          For mechanical evidence only, record it directly with verification action=add task_id={task} dispatch_id={id}. \
          A PASS continues the merge; a FAIL or unresolved verdict holds this delivery.\n\
          {VERIFICATION_DISPATCH_ENVELOPE_CLOSE}",

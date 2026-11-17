@@ -42,13 +42,9 @@ Step 3. The final assembled-tree gate in cas-src is the merge queue (cas-2970):
    the full workspace suite, doctests and archive mode on the exact merged tree.
    `Fast Validation` is the sole required context; macOS Check is excluded from
    the queue, and Release Prebuild retains pre-publish macOS proof. The diagnostic before enqueue and after a failed queue run is
-   the [interim queue precheck](../../cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md#interim-queue-precheck):
-   a clean checkout at the SHA, root and hub-web `npm ci`, resolvable Playwright
-   and Chromium, then `cargo nextest run --workspace --no-fail-fast` and
-   `make -C cas-cli test-ci-tiers`. Follow that section's runnable commands;
-   cas-298f replaces them with the hosted precheck. Do not substitute
-   `assembly-proof.py`: its scrubbed environment cannot resolve Playwright or
-   browsers outside `/home` on soundwave. The queue remains the final proof.
+   the [queue precheck](../../cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md#queue-precheck):
+   `cas release precheck <full-sha>` dispatches the queue's required job set on
+   hosted runners, and `--status` reads the result. The queue remains the final proof.
 
 Step 5. After the fix lands, re-enqueue the PR. For a local diagnostic run,
    capture the real exit code and record a fresh `ASSEMBLY_PROOF` for it:

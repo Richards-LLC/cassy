@@ -178,7 +178,7 @@ pub fn pairs(request: &PairsRequest) -> anyhow::Result<PairsReceipt> {
             }
             if !receipt.unlinked.is_empty() {
                 receipt.warnings.push(format!(
-                    "{} commit(s) have no unambiguous task provenance; run cas history index",
+                    "{} commit(s) have no unambiguous task provenance; run `cas history backfill`",
                     receipt.unlinked.len()
                 ));
             }

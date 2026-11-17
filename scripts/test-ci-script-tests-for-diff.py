@@ -29,6 +29,12 @@ class Selection(unittest.TestCase):
             for changed in [[resource], [suite], [resource, suite], ["docs/unrelated.md"]]:
                 selected = [(test, cmd) for test, cmd in SELECTOR.select(commands, changed) if test == suite]
                 self.assertEqual(selected, [] if changed == ["docs/unrelated.md"] else [(suite, command)])
+        # cas-b1f3: helper, model, chart and test-file changes share one suite run.
+        accounting = "python3 scripts/test-accounting-journals.py"
+        triggers = [path for path, command in SELECTOR.NAMED.items() if command == accounting]
+        for changed in [*([path] for path in triggers), [*triggers, "scripts/test-accounting-journals.py"]]:
+            commands_run = [cmd for _, cmd in SELECTOR.select(commands, changed)]
+            self.assertEqual(commands_run.count(accounting), 1, changed)
 
     def test_provisioned_suites_follow_real_pr_inputs_and_ignore_unrelated_pr(self):
         # Independent consumer inputs, not a copy of the selector's registry.

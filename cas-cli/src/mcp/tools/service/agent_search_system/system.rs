@@ -849,7 +849,7 @@ impl CasService {
         if config.servers.is_empty() {
             return Ok(Self::success(
                 "No upstream MCP servers configured.\n\nAdd one with:\n  \
-                 mcp__cas__system action=proxy_add name=<name> command=<cmd>\n  \
+                 system action=proxy_add name=<name> command=<cmd>\n  \
                  cas mcp add <name> <command>",
             ));
         }

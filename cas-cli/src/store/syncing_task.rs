@@ -125,6 +125,39 @@ pub struct SyncingTaskStore {
     team_only: bool,
 }
 
+/// Canonical task wire body shared by ordinary mutations and pulled-base recovery.
+/// Pure policy/serialization: callers load the row under their queue transaction.
+pub(crate) fn load_canonical_sync_payload(
+    mut task: Task,
+    global_scope: bool,
+    team_id: Option<&str>,
+    team_only: bool,
+) -> Result<TaskSyncPayload> {
+    task.scope = if global_scope {
+        Scope::Global
+    } else {
+        Scope::Project
+    };
+    if task.scope == Scope::Global {
+        task.origin_project = None;
+    }
+    let current_project_id = task
+        .origin_project
+        .as_deref()
+        .filter(|project_id| !project_id.trim().is_empty())
+        .map(ToOwned::to_owned);
+    let current_team_id = team_id
+        .filter(|_| eligible_for_team_task(&task))
+        .map(ToOwned::to_owned);
+    let payload = serde_json::to_string(&task)?;
+    Ok(TaskSyncPayload {
+        payload,
+        current_project_id,
+        current_team_id,
+        personal: !team_only || task.scope == Scope::Global,
+    })
+}
+
 impl SyncingTaskStore {
     /// Create a new syncing task store (personal queue only).
     pub fn new(inner: Arc<dyn TaskStore>, queue: Arc<SyncQueue>) -> Self {
@@ -180,32 +213,8 @@ impl SyncingTaskStore {
         // and BEGIN IMMEDIATE transaction. It is intentionally read-only: one
         // inner.get plus in-memory policy/serialization. It cannot reopen a
         // syncing store, acquire the mutation flock, or call back into queue.
-        let mut task = self.inner.get(&intent.entity_id)?;
-        task.scope = if intent.global_scope {
-            Scope::Global
-        } else {
-            Scope::Project
-        };
-        if task.scope == Scope::Global {
-            task.origin_project = None;
-        }
-        let current_project_id = task
-            .origin_project
-            .as_deref()
-            .filter(|project_id| !project_id.trim().is_empty())
-            .map(ToOwned::to_owned);
-        let current_team_id = self
-            .team_id
-            .as_deref()
-            .filter(|_| eligible_for_team_task(&task))
-            .map(ToOwned::to_owned);
-        let payload = serde_json::to_string(&task)?;
-        Ok(TaskSyncPayload {
-            payload,
-            current_project_id,
-            current_team_id,
-            personal: !self.team_only || task.scope == Scope::Global,
-        })
+        load_canonical_sync_payload(self.inner.get(&intent.entity_id)?, intent.global_scope,
+            self.team_id.as_deref(), self.team_only)
     }
 
     fn fulfill_upsert(&self, intent: &TaskSyncIntent) -> Result<TaskSyncFulfillResult> {

@@ -1,7 +1,6 @@
 # Details — Evidence, Sync and Resume
 
 Read for a report/evidence task, a requested sync or a context-resume handoff.
-`ready` and `available` provide read-only backlog visibility — not self-dispatch.
 Use `cas-search` for exploratory retrieval and `rg` for exact code matches.
 
 ## Read-only evidence
@@ -25,19 +24,6 @@ A commit-captured anchor or a checkpoint push alone is not a park. Publish the
 rebase with an explicit `--force-with-lease=refs/heads/<branch>:<observed-tip>`;
 a changed remote tip refuses. Merge the target into parked/reviewed work instead.
 A frozen parked delivery stays on its original branch; a new assignment uses its own per-task branch from the target tip.
-
-## Task fields
-
-The task ID field is always `id`; the notes parameter is `notes`.
-
-```text
-task action=start id=cas-abc1
-task action=close id=cas-abc1 reason="Implemented X, tests pass"
-task action=notes id=cas-abc1 notes="Found root cause in Y" note_type=progress
-```
-
-`note_type` is one of progress, blocker, decision, discovery, question or
-`platform_proof`, which the close gate reads for `risk=platform`.
 
 ## Resume state
 
@@ -73,8 +59,9 @@ follow [cross-machine proof logs](close-gate.md#cross-machine-proof-logs).
 
 ## Batch QA
 
-In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.
-`per_task` is the explicit opt-in. A batch park opens no per-task round. Capture
+In qa.mode=batch (the default) the release's batch QA round at the frozen tip
+is the only walk; per-task QA evidence applies only in the opt-in
+qa.mode=per_task. A batch park opens no per-task round. Capture
 visual before/after evidence while building. The supervisor owns the release's one
 epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`.
 In qa.mode=batch, QA receipts retry ordinary close using existing merge approvals. A QA receipt cannot replace a missing code approval; the worker does nothing.

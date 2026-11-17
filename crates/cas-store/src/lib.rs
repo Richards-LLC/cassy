@@ -258,7 +258,7 @@ pub use verification_store::{
     VERIFICATION_SCHEMA, VERIFICATION_ISSUE_TRIAGE_STATEMENT,
     VERIFICATION_STATUS_DETAIL_STATEMENT, VERIFICATION_STATUS_NORMALIZE_STATEMENT,
     VerificationStore, add_system_verification, add_verification_with_conn,
-    adopt_orphaned_verification_dispatches, bind_server_verifier_handoff,
+    adopt_orphaned_verification_dispatches, adopt_retired_verification_dispatch, bind_server_verifier_handoff,
     bind_server_verifier_handoff_and_register_child, bind_verifier_capability,
     cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,

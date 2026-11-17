@@ -773,6 +773,23 @@ pub struct TaskDeliverables {
     pub green_merge_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_ci_admission: Option<MergeCiAdmission>,
+    /// cas-c8ae: the approved pre-merge verdict for this delivery. It travels
+    /// with the task row, so a release cut on another machine of the project
+    /// can admit a member reviewed elsewhere. Bound to its delivery cycle and
+    /// reviewed anchor; a reopen starts a new cycle and voids it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub premerge_approval: Option<PortablePremergeApproval>,
+}
+
+/// An approved pre-merge verdict carried on its task (cas-c8ae).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortablePremergeApproval {
+    pub verdict_id: String,
+    pub dispatch_id: String,
+    /// The exact delivery commit the approved review covered.
+    pub approved_anchor: String,
+    /// `TaskDeliverables::delivery_cycle` when the verdict was recorded.
+    pub delivery_cycle: u32,
 }
 
 /// A no-delivery or portable no-code close waiting on one exact verdict.
@@ -862,6 +879,8 @@ struct TaskDeliverablesObject {
     green_merge_commit: Option<String>,
     #[serde(default)]
     merge_ci_admission: Option<MergeCiAdmission>,
+    #[serde(default)]
+    premerge_approval: Option<PortablePremergeApproval>,
 }
 
 impl From<TaskDeliverablesObject> for TaskDeliverables {
@@ -899,6 +918,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             no_delivery_close_intent: value.no_delivery_close_intent,
             green_merge_commit: value.green_merge_commit,
             merge_ci_admission: value.merge_ci_admission,
+            premerge_approval: value.premerge_approval,
         }
     }
 }

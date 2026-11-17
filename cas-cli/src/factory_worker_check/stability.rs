@@ -21,7 +21,7 @@ pub(crate) struct Proof {
 }
 
 pub(super) fn valid(proof: &Proof) -> bool {
-    matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright")
+    matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
         && proof.consecutive_passes >= REQUIRED_PASSES
         && !proof.tests.is_empty()
         && proof.tests.iter().all(|test| !test.name.is_empty()
@@ -84,6 +84,35 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
             .filter(|identity| live_javascript.contains(identity)));
     }
     Ok(required.into_iter().collect())
+}
+
+/// The command that proves these changed tests, one per runner (cas-1468).
+/// A file whose runner is unknown gets each valid form as its own command.
+pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -> Vec<String> {
+    let command = |runner: &str, files: &str| format!(
+        "`cas factory worker-check --cas-root {} -- {runner} {files}`", cas_root.display());
+    let mut known: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut unknown = BTreeSet::new();
+    let mut rust = false;
+    for test in tests {
+        if test.path.ends_with(".rs") {
+            rust = true;
+        } else if let Some(runner) = super::javascript::runner_hint(repo, &test.path) {
+            known.entry(runner).or_default().insert(test.path.as_str());
+        } else {
+            unknown.insert(test.path.as_str());
+        }
+    }
+    let mut commands: Vec<String> = known.into_iter().map(|(runner, files)|
+        command(runner, &files.into_iter().collect::<Vec<_>>().join(" "))).collect();
+    commands.extend(unknown.into_iter().map(|file| format!(
+        "no runner config, dependency or local executable identifies {file}; run the one it uses: {}",
+        ["jest", "vitest", "playwright"].map(|runner| command(runner, file)).join(" or "),
+    )));
+    if rust {
+        commands.push("`cargo nextest run -p <crate> --lib -E 'test(<name>)'`".into());
+    }
+    commands
 }
 
 /// A failed rerun may not leave an earlier overlapping five-pass proof usable.

@@ -17,10 +17,6 @@ A project without YAML may keep the legacy `docs/qa/journeys.md` catalog; edit
 a journey's **Steps** together with its `test.step` titles, because
 `scripts/journeys-for-diff.py --check` fails when the two drift.
 
-Each delivery keeps the registry true for what it changed, and task park
-refuses one that does not: a new surface file needs an owner, a bug fix needs
-its case, a rename must not orphan a glob ([escapes](#escape-vocabulary)).
-
 ## Pick the journeys a change touches
 
 Read the journey table in the QA task description: park computed it from the
@@ -38,16 +34,16 @@ row starts at its entry and ends at its goal.
 Run `cas qa ledger init --task <id>` to prefill predicted live journey IDs,
 then compare them with the parked impact (`cas qa impact --task <id>`) for
 this review round. Add missing journey IDs and walk each from entry to goal.
-Prove dark routes stay unreachable and record dead routes honestly. Run
-`cas qa ledger check <path> --task <id>` before recording the verdict.
-G8 consumes the same typed rows and refuses a missing live journey once a
-registry exists. The scaffold and check own the row grammar.
+Prove dark routes stay unreachable and record dead routes honestly. Once a
+registry exists, `qa_record` refuses a ledger missing a live journey's row; the
+scaffold and `cas qa ledger check` own the row grammar.
 
 ## Escape vocabulary
 
-Park does not check the journey registry, CODEMAP or PRODUCT_OVERVIEW. Add a
-bug case as `docs/qa/bug-families/<slug>.yaml` naming the task, own new surface
-files that `cas qa impact` lists, and leave the shared docs for release prep.
+Park does not check the journey registry, CODEMAP or PRODUCT_OVERVIEW; each
+delivery still keeps the registry true for what it changed. Add a bug case as
+`docs/qa/bug-families/<slug>.yaml` naming the task, own new surface files that
+`cas qa impact` lists, and leave the shared docs for release prep.
 <!-- cas-src:begin -->
 The `journey-catalog` lane lint (`scripts/doc-fragments.py check`) refuses a
 broken registry or bug family.
@@ -55,8 +51,8 @@ broken registry or bug family.
 
 | Gate | Refusal heading | Escape |
 | --- | --- | --- |
-| G8 | `QA RECORD REJECTED` | a `NOT EXERCISED: <reason>` row |
-| G9 | `RELEASE NOTES BLOCKED`, `POST-RELEASE CHECK` | operator only: `POST-RELEASE OVERRIDE: <their words>` on the epic |
+| G-118 (`qa_record`) | `QA RECORD REJECTED` | a `NOT EXERCISED: <reason>` row |
+| G-120 (post-release) | `RELEASE NOTES BLOCKED`, `POST-RELEASE CHECK` | operator only: `POST-RELEASE OVERRIDE: <their words>` on the epic |
 
 ## Run them and keep the evidence
 
@@ -64,9 +60,8 @@ Release batch QA runs the affected journeys through the project's established ru
 <!-- cas-src:begin -->
 Use `scripts/journey-eval.sh <task-artifact-dir>`; its source selection and native ID filter remain authoritative.
 <!-- cas-src:end -->
-Consume matching receipts before missing checks. Workers may iterate a named failing spec while preserving the original failure, and run touched unit/type checks. Factory workers and QA cannot use --full or unfiltered Playwright.
-
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
+Consume matching receipts before running missing checks. Workers may iterate a
+named failing spec while preserving the original failure.
 
 Each journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
 `producer` field of its `bundle.json` set to `journey`.
@@ -74,7 +69,7 @@ Each journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
 <!-- cas-src:begin -->
 For hub-web, the Playwright config never reuses a running server. Each
 checkout gets its own default port pair in 20000–32767, and a port that is
-already held fails the run loudly. Set `HUB_E2E_PORT`/`HUB_JOURNEY_PORT` to a
+already held fails the run. Set `HUB_E2E_PORT`/`HUB_JOURNEY_PORT` to a
 distinct pair in that range for runs in parallel from one checkout, and name
 the ports in the evidence.
 <!-- cas-src:end -->
@@ -90,28 +85,22 @@ The files are:
 | `final.aria.yml`, `final.aria.json` | Aria snapshots of the final screen |
 | `result.json` | The stage titles and timings |
 
-`<task-id>/journeys/JOURNEYS.md` summarises the run. Cite these paths in the
-ledger. The run also writes `journey-receipt.json` (base/head SHAs, selection
-IDs, per-ID counts); close and QA no longer require it; full-suite ownership follows the rule above. Keep the original failed run when
-checking a single failing spec at one worker. Document-only rebinds follow
+`<task-id>/journeys/JOURNEYS.md` summarises the run; cite these paths in the
+ledger. Document-only rebinds follow
 [the affected-journeys rules](evidence-bundle.md#affected-journeys).
 
 ## Score the experience
 
-Pass/fail is not enough. Score each journey from 0 to 3 on five dimensions:
+Pass/fail is not enough. Score each journey from 0 to 3 on five dimensions: a
+dead end, confusing copy, extra steps, lost context, and waits. Route the
+scores by severity:
 
-- a dead end
-- confusing copy
-- extra steps
-- lost context
-- waits
+| Severity | When |
+| --- | --- |
+| Blocking | any dimension scores 3, or the journey cannot reach its goal |
+| High | any 2 on a core journey |
+| Normal | any other 2, or a 1 with a concrete fix |
+| Note | everything else |
 
-Route each score by the severity table in the contract. A journey that
-cannot reach its goal is a defect task, never a note.
+A journey that cannot reach its goal is a defect task, never a note.
 
-## Before a release
-
-When a release ships a changed bundle, the release evaluation walks every
-journey. An independent taste-lane evaluator scores the receipts, and the
-release train blocks without a passing report. That procedure lives in the
-contract and in `cas-cut-release`.

@@ -941,7 +941,7 @@ struct TeamPushResponse {
 }
 
 /// A row the cloud accepted at HTTP level but refused to write because the
-/// existing global-keyed row belongs to a different project or sync scope.
+/// existing row belongs to another owner or has a different revision.
 ///
 /// The client deliberately keeps this wire type strict.  An itemized response
 /// is useful only when it names a unique local queue row; malformed itemization
@@ -950,6 +950,7 @@ struct TeamPushResponse {
 pub(crate) struct PushRejection {
     pub id: String,
     pub reason: PushRejectionReason,
+    #[serde(default)]
     pub existing_canonical_id: String,
 }
 
@@ -958,6 +959,7 @@ pub(crate) struct PushRejection {
 pub(crate) enum PushRejectionReason {
     ProjectMismatch,
     ScopeMismatch,
+    RevisionConflict,
 }
 
 impl PushRejectionReason {
@@ -965,6 +967,7 @@ impl PushRejectionReason {
         match self {
             Self::ProjectMismatch => "project_mismatch",
             Self::ScopeMismatch => "scope_mismatch",
+            Self::RevisionConflict => "revision_conflict",
         }
     }
 
@@ -977,8 +980,8 @@ impl PushRejectionReason {
 
 /// A row the cloud excluded because its revision cannot be accepted.
 ///
-/// Unlike [`PushRejection`], this is a property of the submitted revision
-/// itself, rather than a project/scope ownership collision. The server returns
+/// Unlike ownership or stale-base rejections, this identifies malformed
+/// submitted revision bytes. The server returns
 /// these under the optional per-entity `invalid` sibling so clients can name
 /// the precise queue row instead of reducing it to an aggregate skip count.
 #[derive(Debug, Clone, Deserialize)]
@@ -1065,10 +1068,9 @@ impl PushRowResult {
 pub(crate) fn push_rejection_is_retryable(reason: &str) -> bool {
     matches!(
         reason.to_ascii_lowercase().as_str(),
-        // A stale base revision is a lost race, not a bad row: the next
-        // cycle pulls the winning state and retries from a valid base.
-        "revision_conflict"
-            | "retryable"
+        // A stale revision needs a pull and payload reconciliation, not a
+        // blind retry. Only transient failures are immediately retryable.
+        "retryable"
             | "temporary"
             | "transient"
             | "server_error"
@@ -1105,7 +1107,7 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
             "the cloud row belongs to a different sync scope (personal vs team); push it from the owning scope, then `cas cloud queue --retry-reason scope_mismatch`"
         }
         "revision_conflict" | "invalid_revision" => {
-            "the cloud holds a newer revision; run `cas cloud pull`, then `cas cloud queue --retry`"
+            "revision_reconciliation_required: the cloud holds a newer revision; pull to reconcile the row and rebuild its queued payload before retrying"
         }
         "invalid_json_nul" => {
             "U+0000 in task notes now round-trips losslessly; queued payload retained unchanged. Retry with `cas cloud queue --retry --retry-reason invalid_json_nul`"
@@ -1219,6 +1221,9 @@ pub(crate) fn itemized_rejections_for(
     let queued_ids = queued_ids.collect::<std::collections::HashSet<_>>();
     let mut by_id = HashMap::with_capacity(rejected.len());
     for rejection in rejected {
+        if rejection.reason.is_permanent() && rejection.existing_canonical_id.is_empty() {
+            return Err(format!("{location}.rejected ownership collision lacks existing_canonical_id"));
+        }
         if !queued_ids.contains(&rejection.id) {
             return Err(format!(
                 "{location}.rejected names row {} that was not in this sub-batch",
@@ -1456,36 +1461,6 @@ impl PushResponse {
             }
         }
         revisions
-    }
-
-    /// Rows the server refused because our base revision was stale, mapped to
-    /// the revision the server actually holds.
-    pub(crate) fn revision_conflicts_for(&self, entity_type: &str) -> HashMap<String, Option<i64>> {
-        let mut conflicts = HashMap::new();
-        let Some(rejected) = self
-            .entity_detail(entity_type)
-            .and_then(serde_json::Value::as_object)
-            .and_then(|entity| entity.get("rejected"))
-            .and_then(serde_json::Value::as_array)
-        else {
-            return conflicts;
-        };
-        for rejection in rejected {
-            let is_revision_conflict = rejection
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|reason| reason == "revision_conflict");
-            if !is_revision_conflict {
-                continue;
-            }
-            if let Some(id) = rejection.get("id").and_then(serde_json::Value::as_str) {
-                conflicts.insert(
-                    id.to_string(),
-                    crate::cloud::parse_wire_revision(rejection.get("current_revision")),
-                );
-            }
-        }
-        conflicts
     }
 
     pub(crate) fn row_results_for(

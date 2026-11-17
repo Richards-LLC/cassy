@@ -2366,9 +2366,10 @@ fn correct_parked_delivery_proof_scope_inner(
     let preserve_approval = if execution_note_only
         && let Some(active) = dispatch.as_ref()
         && active.state == VerificationDispatchState::Resolved
-        && active.repository.as_ref().is_some_and(|proof|
-            corrected_task.deliverables.factory_branch_anchor.as_ref()
-                .is_some_and(|anchor| proof.anchor_commits.contains(anchor)))
+        // Synthetic candidates carry source identity in their manifest, not
+        // anchor_commits. Retain the binding; close validates that manifest
+        // and its source/landing before consuming this existing approval.
+        && active.repository.is_some()
     {
         tx.query_row(
             "SELECT status, verification_type FROM verifications WHERE dispatch_id = ?1

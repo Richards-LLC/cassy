@@ -1342,6 +1342,12 @@ impl Config {
                     release.auto_cut_min_interval_hours = number;
                 }
             }
+            "release.supervisor_lifts_operator_freeze" => {
+                self.release.get_or_insert_with(ReleaseConfig::default).supervisor_lifts_operator_freeze = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
             // Notifications section
             "notifications.enabled" => {
                 let notifications = self

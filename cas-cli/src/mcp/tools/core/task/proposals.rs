@@ -823,7 +823,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        let rmcp::model::RawContent::Text(project_text) = &project.content[0].raw else {
+        let rmcp::model::ContentBlock::Text(project_text) = &project.content[0] else {
             panic!("task list must return text")
         };
         let project_text = project_text.text.as_str();
@@ -997,7 +997,7 @@ mod tests {
                 ("list", core.cas_task_list(Parameters(serde_json::from_value(empty()).unwrap())).await),
             ] {
                 let shown = shown.unwrap();
-                let rmcp::model::RawContent::Text(text) = &shown.content[0].raw else {
+                let rmcp::model::ContentBlock::Text(text) = &shown.content[0] else {
                     panic!("{view} returns text");
                 };
                 assert_eq!(text.text.contains(&task.id), starts, "{view} in {project}: {}", text.text);

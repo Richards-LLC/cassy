@@ -86,13 +86,17 @@ case "$1 $2" in
        already_closed:count("already_closed"),not_eligible:count("not_eligible"),by_reason:{},
        review_missing:held("REVIEW_MISSING"),lane_ci_missing:held("LANE_CI_MISSING"),members_by_id:$m}' ;;
   "qa candidate")
-    case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
+    case "$3" in build) ;; path) printf '%s\n' "$(dirname "$0")/cas-candidate" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
+  # The installed CLI predates `release refused`; the cut's candidate has it (GH #2027).
+  "release refused")
+    [[ "$(basename "$0")" == cas-candidate ]] || { echo "error: unrecognized subcommand 'refused'" >&2; exit 2; } ;;
   "ledger estimate") echo 'typical 16 min, bad day 31 min; 20 references'; exit "${FAKE_ESTIMATE_EXIT:-0}" ;;
   *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
 esac
 EOF
 chmod +x "$tmp/bin/cas"
+cp "$tmp/bin/cas" "$tmp/bin/cas-candidate"
 export CAS_BIN="$tmp/bin/cas" FAKE_CAS_LOG="$tmp/cas.log"
 # The cut derives the live store root itself (cas-8e1b); never inherit one.
 unset CAS_ROOT
@@ -718,9 +722,15 @@ cut_own_review_missing() {
     write_valid_draft "$tmp/own-review-notes.md"
     : >"$FAKE_CAS_LOG"
     : >"$FAKE_GH_LOG"
+    local start
+    start="$(git -C "$fixture" rev-parse HEAD)"
     FAKE_REVIEW_MISSING='[]' FAKE_CI_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review-ci.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] && grep -q 'LANE_CI_MISSING.*cas-000a, cas-000b' "$tmp/own-review-ci.log" || return 1
+    # GH #2027: the refused green tip is recorded as a release red for G-100.
+    [[ "$status" == 1 ]] && grep -q 'LANE_CI_MISSING.*cas-000a, cas-000b' "$tmp/own-review-ci.log" &&
+        grep -qx "release refused --train cas-0001 --branch epic/own-review --commit $start --gate LANE_CI_MISSING" "$FAKE_CAS_LOG" &&
+        grep -q '^CAS_ROOT=/[^ ]*/\.cas release refused$' "$FAKE_CAS_LOG" &&
+        ! grep -q 'release red not recorded' "$tmp/own-review-ci.log" || return 1
     status=0
     FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
@@ -732,6 +742,7 @@ cut_own_review_missing() {
         grep -q 'cas-000b' <<<"$refusal" &&
         ! grep -q 'cas-dead' <<<"$refusal" &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/own-review &&
+        grep -q '^release refused .* --gate REVIEW_MISSING$' "$FAKE_CAS_LOG" &&
         ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
         ! grep -Eq '^pr (create|merge) ' "$FAKE_GH_LOG"
 }
@@ -753,6 +764,7 @@ cut_preview_gate() {
         run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
     [[ "$status" != 0 ]] &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
+        grep -q '^release refused .* --gate ZERO_WOULD_CLOSE$' "$FAKE_CAS_LOG" &&
         ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
         ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
     : >"$FAKE_CAS_LOG"

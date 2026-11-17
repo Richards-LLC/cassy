@@ -6671,6 +6671,9 @@ impl CasCore {
                 // relay. A refused close stays a tool error for the worker.
                 // CloseRejected remains readable for legacy outbox records.
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
+                if let Err(error) = crate::factory_delivery_wake::arm_task(&self.cas_root, &parked, &actor) {
+                    tracing::error!(task_id = %task.id, %error, "park committed without completion wake");
+                }
                 let actor_name = self
                     .open_agent_store()
                     .ok()
@@ -7501,6 +7504,11 @@ impl CasCore {
             }
             Ok(persisted_at) => {
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
+                if let Err(error) = crate::factory_delivery_wake::advance_task(
+                    &self.cas_root, &advanced, &actor, task.deliverables.factory_branch_anchor.as_deref(),
+                ) {
+                    tracing::error!(task_id=%task.id, %error, "advanced delivery completion wakes not refreshed");
+                }
                 let actor_name = self
                     .open_agent_store()
                     .ok()
@@ -7889,7 +7897,7 @@ impl CasCore {
         let note = self.advance_queue_after_delivery(&id).await;
         match note {
             Ok(Some(note)) => if let Ok(result) = result.as_mut() {
-                result.content.push(rmcp::model::Content::text(note));
+                result.content.push(rmcp::model::ContentBlock::text(note));
             },
             Err(error) => tracing::warn!(task_id=%id, %error, "worker task queue advancement deferred"),
             Ok(None) => {},
@@ -7918,6 +7926,8 @@ impl CasCore {
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
+        #[cfg(test)]
+        crate::async_runtime::stack_probe::mark("close_body");
         let _phase = crate::mcp::tools::service::mutation_receipt::phase("close_gates");
         let caller_task = format!("{}task", self.guidance_prefix());
         if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
@@ -28956,7 +28966,7 @@ mod merge_state_gate_tests {
             "{response:?}"
         );
         assert_eq!(response.is_error, Some(true));
-        assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff))));
+        assert!(response.content.iter().any(|content| matches!(content, rmcp::model::ContentBlock::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff))));
         let message = format!("{response:?}");
         assert!(
             message.contains("epic/current-cas-new-parent")
@@ -29156,8 +29166,8 @@ mod merge_state_gate_tests {
         let text = response
             .content
             .iter()
-            .filter_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -29279,8 +29289,8 @@ mod merge_state_gate_tests {
             let response = fixture.service.task(Parameters(serde_json::from_value(serde_json::json!({
                 "action":"close", "id":fixture.task_id, "reason":reason,
             })).unwrap())).await.unwrap();
-            let text = response.content.iter().filter_map(|item| match &item.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+            let text = response.content.iter().filter_map(|item| match item {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None,
             }).collect::<Vec<_>>().join("\n");
             if marked < 3 {
                 assert!(crate::gates::codes_in(&text).contains(&"G-48"), "unmarked sites must refuse before park: {text}");
@@ -29718,17 +29728,131 @@ mod merge_state_gate_tests {
     }
 
     #[test]
-    fn ct2_p1_park_sends_one_relay_after_upkeep_notes() {
+    fn parked_anchor_advance_replaces_completion_wakes_cas_f16b() {
+        use cas_store::{PromptQueueStore, ReminderStatus, ReminderTriggerType, TaskStore};
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "relay-fixture-session");
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["commit", "--allow-empty", "-qm", "base"]);
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let (core, tasks, _, mut task) = close_relay_fixture_cas_3a82(&root);
+        let branch = crate::factory_isolation::worker_task_branch("relay-worker", &task.id);
+        git(repo, &["checkout", "-qb", &branch]);
+        let first = commit_local(repo, "delivery.rs", "first delivery");
+        let origin = dir.path().join("origin.git");
+        git(repo, &["init", "--bare", "-q", origin.to_str().unwrap()]);
+        git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", &branch]);
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "main".into(),
+        });
+        tasks.update(&task).unwrap();
+        task = tasks.get(&task.id).unwrap();
+        core.park_task_awaiting_merge(&tasks, &task, &task, "MERGE REQUIRED", "delivery ready",
+            Some(first.clone()), false, Some(branch.clone()), None).unwrap();
+        let parked = tasks.get(&task.id).unwrap();
+        let reminders = crate::store::open_reminder_store(&root).unwrap();
+        assert_eq!(reminders.list_all_pending().unwrap().len(), 2);
+        let manual = reminders.create_with_scope("relay-supervisor-id", None, "manual old-SHA watch",
+            ReminderTriggerType::Event, None, Some("ci_completed"),
+            Some(&serde_json::json!({"sha": first, "workflow":"Release"})), 0,
+            Some("relay-fixture-session"), None, true, Some(&task.id)).unwrap();
+        let next = commit_local(repo, "correction.rs", &format!("fix({}): review correction", task.id));
+        core.advance_awaiting_merge_anchor(&tasks, &parked, repo, "main", Some(&next)).unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(first.as_str()));
+        git(repo, &["push", "-q", "origin", &branch]);
+        core.advance_awaiting_merge_anchor(&tasks, &parked, repo, "main", Some(&next)).unwrap();
+        let advanced = tasks.get(&task.id).unwrap();
+        assert_eq!(advanced.deliverables.factory_branch_anchor.as_deref(), Some(next.as_str()));
+        let history = reminders.list_for_task(&task.id).unwrap();
+        let automatic: Vec<_> = history.iter().filter(|row| row.trigger_filter.as_ref()
+            .is_some_and(|filter| filter["delivery_wake"] == true)).collect();
+        assert_eq!(automatic.iter().filter(|row| row.status == ReminderStatus::Pending
+            && row.trigger_filter.as_ref().and_then(|filter| filter.get("sha").or_else(|| filter.get("commit")))
+                == Some(&serde_json::Value::String(next.clone()))).count(), 2);
+        assert_eq!(automatic.iter().filter(|row| row.status == ReminderStatus::Cancelled).count(), 2);
+        assert_eq!(history.iter().find(|row| row.id == manual).unwrap().status, ReminderStatus::Pending);
+        core.advance_awaiting_merge_anchor(&tasks, &advanced, repo, "main", Some(&next)).unwrap();
+        assert_eq!(reminders.list_for_task(&task.id).unwrap().len(), history.len());
+        crate::ui::factory::daemon::runtime::progress_watchdog::sweep(&root, "relay-fixture-session", chrono::Utc::now());
+        let prompts = cas_store::SqlitePromptQueueStore::open(&root).unwrap().peek_all(20).unwrap();
+        assert!(prompts.iter().all(|row| !row.source.starts_with(&format!("lifecycle-wake:{}:", crate::factory_delivery_wake::MISSING_WAKE))));
+    }
+
+    #[test]
+    fn park_with_epic_inherited_target_arms_completion_wakes_cas_f16b() {
+        use cas_store::TaskStore;
+        let _env = TestEnvGuard::temp_home();
+        for (branch, binding, expected) in [
+            (Some("epic/inherited"), Some("main"), "epic/inherited"),
+            (None, Some("staging"), "staging"),
+            (Some("epic/legacy"), None, "epic/legacy"),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let repo = dir.path();
+            git(repo, &["init", "-q", "-b", "main"]);
+            git(repo, &["commit", "--allow-empty", "-qm", "delivery"]);
+            let tip = rev_parse_local(repo, "HEAD");
+            let root = repo.join(".cas");
+            std::fs::create_dir_all(&root).unwrap();
+            let (core, tasks, _, task) = close_relay_fixture_cas_3a82(&root);
+            let mut epic = Task::new("cas-f16b-parent".into(), "Inherited delivery target".into());
+            epic.task_type = TaskType::Epic;
+            epic.branch = branch.map(str::to_string);
+            epic.deliverables.work_target = binding.map(|target| cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: target.into(),
+            });
+            tasks.add(&epic).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(task.id.clone(), epic.id,
+                cas_types::DependencyType::ParentChild)).unwrap();
+            assert!(task.deliverables.work_target.is_none() && task.branch.is_none());
+            core.park_task_awaiting_merge(&tasks, &task, &task, "MERGE REQUIRED", "delivery ready",
+                Some(tip.clone()), false, Some("factory/relay-worker".into()), None).unwrap();
+            let watches = crate::store::open_reminder_store(&root).unwrap().list_all_pending().unwrap();
+            assert_eq!(watches.len(), 2, "{expected}");
+            assert!(watches.iter().all(|row| row.owner_id == "relay-supervisor-id" && row.target_id == "relay-supervisor-id"));
+            assert!(watches.iter().any(|row| row.trigger_event.as_deref() == Some("branch_contained_in")
+                && row.trigger_filter.as_ref().unwrap()["target_branch"] == expected
+                && row.trigger_filter.as_ref().unwrap()["commit"] == tip));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ct2_p1_park_sends_one_relay_after_upkeep_notes() {
         use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};
 
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "relay-fixture-session");
         for final_append in [false, true] {
             let dir = TempDir::new().unwrap();
-            let (core, tasks, queue, mut task) = close_relay_fixture_cas_3a82(dir.path());
+            let repo = dir.path().join("project");
+            std::fs::create_dir_all(&repo).unwrap();
+            let root = repo.join(".cas");
+            std::fs::create_dir_all(&root).unwrap();
+            let (core, tasks, queue, mut task) = close_relay_fixture_cas_3a82(&root);
+            git(&repo, &["init", "-q", "-b", "main"]);
+            git(&repo, &["commit", "--allow-empty", "-qm", "base"]);
+            let origin = dir.path().join("origin.git");
+            git(dir.path(), &["init", "--bare", "-q", origin.to_str().unwrap()]);
+            git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+            git(&repo, &["push", "-q", "origin", "main"]);
+            git(&repo, &["checkout", "-qb", "factory/relay-worker-cas-3a82"]);
+            git(&repo, &["commit", "--allow-empty", "-qm", "delivery"]);
+            git(&repo, &["push", "-q", "origin", "factory/relay-worker-cas-3a82"]);
+            let tip = String::from_utf8(git_command(&repo, &["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_string();
+            env.set_current_dir(&repo);
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: "main".into(),
+            });
+            tasks.update(&task).unwrap();
+            task = tasks.get(&task.id).unwrap();
             // Deterministically interleave the writes a long close can encounter:
             // its upkeep audits, a receipt imported by another store connection,
             // and another append after the last upkeep audit but before parking.
-            let receipts = cas_store::SqliteTaskStore::open(dir.path()).unwrap();
+            let receipts = cas_store::SqliteTaskStore::open(&root).unwrap();
             let mut upkeep = CloseNoteTracker::new(&tasks, &task);
             upkeep.record(&mut task, "UPKEEP: registry checked");
             receipts.append_trusted_note(&task.id, "Receipt imported during close").unwrap();
@@ -29752,14 +29876,28 @@ mod merge_state_gate_tests {
             // be written against the original snapshot, not mistaken for a
             // conflicting change made by another actor.
             let mut parking = task.clone();
-            parking.deliverables.factory_branch_anchor = Some("delivery-tip".into());
+            parking.deliverables.factory_branch_anchor = Some(tip.clone());
             parking.notes.push_str("\n\nDelivery anchor advanced during close");
             core.park_task_awaiting_merge(
                 &tasks, &parking, &task, "MERGE REQUIRED", "delivery is ready for merge",
-                Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+                Some(tip.clone()), false, Some("factory/relay-worker-cas-3a82".into()),
                 Some("PASS delivery-tip: relay fixture"),
             ).unwrap();
             let parked = tasks.get(&task.id).unwrap();
+            let watches = crate::store::open_reminder_store(&root).unwrap().list_all_pending().unwrap();
+            assert_eq!(watches.len(), 2);
+            for watch in &watches {
+                assert_eq!(watch.owner_id, "relay-supervisor-id");
+                assert_eq!(watch.target_id, "relay-supervisor-id");
+                assert_eq!(watch.task_id.as_deref(), Some(task.id.as_str()));
+                assert!(watch.cross_session);
+            }
+            assert!(watches.iter().any(|watch| watch.trigger_event.as_deref() == Some("ci_completed")
+                && watch.trigger_filter.as_ref().unwrap()["sha"] == tip
+                && watch.trigger_filter.as_ref().unwrap()["workflow"] == "CI"));
+            assert!(watches.iter().any(|watch| watch.trigger_event.as_deref() == Some("branch_contained_in")
+                && watch.trigger_filter.as_ref().unwrap()["commit"] == tip
+                && watch.trigger_filter.as_ref().unwrap()["target_branch"] == "main"));
             assert_eq!(parked.status, TaskStatus::AwaitingMerge);
             for note in ["UPKEEP: registry checked", "Receipt imported during close",
                 "UPKEEP: documentation checked", "Final receipt imported before park",
@@ -29779,20 +29917,77 @@ mod merge_state_gate_tests {
             let payload: serde_json::Value = serde_json::from_str(&relays[0].payload).unwrap();
             assert_eq!(payload["transition"], "task_awaiting_merge");
             assert_eq!(payload["task_id"], task.id);
-            assert_eq!(payload["branch_tip"], "delivery-tip");
-            let prompts = cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap();
+            assert_eq!(payload["branch_tip"], tip);
+            let prompts = cas_store::SqlitePromptQueueStore::open(&root).unwrap().peek_all(10).unwrap();
             assert_eq!(prompts.len(), 1);
             assert!(prompts[0].prompt.contains("task_awaiting_merge"));
 
+            // A real peer request reuses the park's durable edges. The peer
+            // merges in a separate clone and publishes to the shared origin.
+            let agents = crate::store::open_agent_store(&root).unwrap();
+            let mut peer = cas_types::Agent::new_with_role("peer-id".into(), "relay-peer".into(), cas_types::AgentRole::Supervisor);
+            peer.factory_session = Some("peer-session".into());
+            agents.register(&peer).unwrap();
+            let sender = CasCore::with_daemon(root.clone(), None, None);
+            sender.set_agent_id_for_testing("relay-supervisor-id".into());
+            #[cfg(feature = "mcp-proxy")]
+            let service = crate::mcp::tools::CasService::new(sender, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let service = crate::mcp::tools::CasService::new(sender);
+            let request = serde_json::from_value(serde_json::json!({
+                "action":"message", "target":"relay-peer", "merge_request":true,
+                "task_id":task.id, "summary":"delivery ready", "message":"Merge the recorded delivery.",
+            })).unwrap();
+            let sent = service.coordination(Parameters(request)).await.unwrap();
+            assert_ne!(sent.is_error, Some(true));
+            let reminders = crate::store::open_reminder_store(&root).unwrap();
+            assert_eq!(reminders.list_for_task(&task.id).unwrap().len(), 2);
+            let peer_repo = dir.path().join("peer");
+            git(dir.path(), &["clone", "-q", "--branch", "main", origin.to_str().unwrap(), peer_repo.to_str().unwrap()]);
+            git(&peer_repo, &["commit", "--allow-empty", "-qm", "main advanced before merge"]);
+            git(&peer_repo, &["merge", "--no-ff", "-qm", "peer landing", "origin/factory/relay-worker-cas-3a82"]);
+            git(&peer_repo, &["push", "-q", "origin", "main"]);
+            let landed = String::from_utf8(git_command(&peer_repo, &["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_string();
+            git(&peer_repo, &["commit", "--allow-empty", "-qm", "later target activity"]);
+            git(&peer_repo, &["push", "-q", "origin", "main"]);
+            use crate::ui::factory::daemon::runtime::{ci_watch, external_wake, queue_and_events};
+            let watch = reminders.list_for_task(&task.id).unwrap().into_iter()
+                .find(|watch| watch.trigger_event.as_deref() == Some("branch_contained_in")).unwrap();
+            let condition = ci_watch::parse_external_wake_condition("branch_contained_in", watch.trigger_filter.as_ref().unwrap()).unwrap();
+            let mut probe = ci_watch::ExternalWakeProbe::new(|args: &[String]| ci_watch::run_external_git_command(&repo, args));
+            let mut ready = external_wake::probe_external_wakes(&mut probe, vec![(watch.clone(), condition.clone())],
+                &mut external_wake::ExternalWakeBackoff::default(), std::time::Instant::now());
+            assert_eq!(ready.len(), 1);
+            let observation = ready.remove(0).observation;
+            assert_ne!(observation.compared_sha, landed);
+            assert_eq!(observation.landed_sha.as_deref(), Some(landed.as_str()));
+            let context = queue_and_events::ReminderTriggerContext::external(&condition, &observation);
+            let prompts = crate::store::open_prompt_queue_store(&root).unwrap();
+            let records = crate::store::open_supervisor_queue_store(&root).unwrap();
+            let names = std::collections::HashMap::from([("relay-supervisor-id".into(), "relay-supervisor".into())]);
+            for _ in 0..2 {
+                queue_and_events::fire_reminder(&watch, &reminders, &Some(records.clone()), &Some(prompts.clone()),
+                    "relay-fixture-session", "relay-supervisor", &names, Some(&context), &root);
+            }
+            let fired = reminders.list_for_task(&task.id).unwrap().into_iter()
+                .filter(|row| row.status == cas_store::ReminderStatus::Fired).collect::<Vec<_>>();
+            assert_eq!(fired.len(), 1);
+            assert_eq!(fired[0].fired_event.as_ref().unwrap()["data"]["landed_sha"], landed);
+            let wakes = prompts.peek_all(20).unwrap().into_iter().filter(|row|
+                cas_store::parse_reminder_delivery_id(&row.prompt) == Some(watch.id)).collect::<Vec<_>>();
+            assert_eq!(wakes.len(), 1);
+            assert_eq!(wakes[0].target, "relay-supervisor");
+            assert!(wakes[0].prompt.contains(&landed));
+
             cas_store::request_changes_for_parked_delivery(
-                dir.path(), &task.id, "relay-supervisor-id", "Correct the delivery before parking again",
+                &root, &task.id, "relay-supervisor-id", "Correct the delivery before parking again",
             ).unwrap();
             let mut stale_close = task.clone();
             append_close_decision_note(&tasks, &mut stale_close, "stale pre-park audit");
             assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
             core.park_task_awaiting_merge(
                 &tasks, &stale_close, &stale_close, "MERGE REQUIRED", "stale close still running",
-                Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+                Some(tip.clone()), false, Some("factory/relay-worker-cas-3a82".into()),
                 Some("PASS delivery-tip: stale close"),
             ).expect_err("GH #1276: a stale close cannot erase the review rejection");
             let reopened = tasks.get(&task.id).unwrap();
@@ -29853,8 +30048,8 @@ mod merge_state_gate_tests {
         request.reason = Some("worker cannot grant its own override".into());
         let response = core.cas_task_close(Parameters(request)).await.unwrap();
         assert_eq!(response.is_error, Some(true));
-        assert!(response.content.iter().any(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => text.text.contains("supervisor"),
+        assert!(response.content.iter().any(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => text.text.contains("supervisor"),
             _ => false,
         }), "the worker must receive the actual refusal: {response:?}");
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
@@ -29875,7 +30070,7 @@ mod merge_state_gate_tests {
         std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = './check'\n").unwrap();
         let result = core.cas_task_close(Parameters(base_req(&epic.id))).await.unwrap();
         assert_eq!(result.is_error,Some(true));
-        assert!(result.content.iter().any(|c| matches!(&c.raw,rmcp::model::RawContent::Text(t) if t.text.contains("POST-RELEASE CHECK pending"))),"{result:?}");
+        assert!(result.content.iter().any(|c| matches!(c,rmcp::model::ContentBlock::Text(t) if t.text.contains("POST-RELEASE CHECK pending"))),"{result:?}");
         assert_eq!(tasks.get(&epic.id).unwrap().status,TaskStatus::InProgress);
     }
 
@@ -30841,14 +31036,14 @@ mod merge_state_gate_tests {
         sibling.deliverables.factory_branch_anchor = Some(b.clone());
         tasks.add(&sibling).unwrap();
         let held = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
-        let handoff = held.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
+        let handoff = held.content.iter().any(|content| matches!(content, rmcp::model::ContentBlock::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
         let held = format!("{held:?}");
         assert!(handoff && held.contains(&b), "{held}");
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(a.as_str()));
         sibling.status = TaskStatus::Closed;
         tasks.update(&sibling).unwrap();
         let response = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
-        let handoff = response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
+        let handoff = response.content.iter().any(|content| matches!(content, rmcp::model::ContentBlock::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
         let text = format!("{response:?}");
         let parked = tasks.get(&task.id).unwrap();
         assert_ne!(parked.status, TaskStatus::Closed, "{text}");
@@ -31757,8 +31952,8 @@ esac
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -31933,8 +32128,8 @@ esac
             let service = &service;
             async move {
                 let response = service.task(Parameters(request)).await.unwrap();
-                let text = response.content.into_iter().filter_map(|content| match content.raw {
-                    rmcp::model::RawContent::Text(text) => Some(text.text),
+                let text = response.content.into_iter().filter_map(|content| match content {
+                    rmcp::model::ContentBlock::Text(text) => Some(text.text),
                     _ => None,
                 }).collect::<Vec<_>>().join("\n");
                 (response.is_error == Some(true), text)
@@ -32030,8 +32225,8 @@ esac
         });
         let response = service.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
         assert_eq!(response.is_error, Some(true), "an unshipped epic cannot waive review");
-        let text = response.content.iter().filter_map(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+        let text = response.content.iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None,
         }).collect::<Vec<_>>().join("\n");
         // Backtick-delimited MCP payloads are the refusal's copyable interface.
         // Consume parameters, not prose; fill only the documented placeholders.
@@ -32172,8 +32367,8 @@ esac
             response
                 .content
                 .into_iter()
-                .filter_map(|content| match content.raw {
-                    rmcp::model::RawContent::Text(text) => Some(text.text),
+                .filter_map(|content| match content {
+                    rmcp::model::ContentBlock::Text(text) => Some(text.text),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -32372,8 +32567,8 @@ esac
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -32532,8 +32727,8 @@ esac
             })).unwrap();
             service.task(Parameters(request)).await.unwrap()
         };
-        let text = response.content.into_iter().filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        let text = response.content.into_iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         let after = store.get(&task.id).unwrap();
         let rounds = cas_store::list_qa_passes(&cas_dir, &task.id).unwrap();
@@ -32676,8 +32871,8 @@ esac
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -32908,8 +33103,8 @@ esac
         let text = response
             .content
             .iter()
-            .filter_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()

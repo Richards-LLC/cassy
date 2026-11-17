@@ -205,11 +205,11 @@ fn test_session_agent_id_and_working_epics() {
 }
 
 // =============================================================================
-// Real Claude Session E2E Tests (using claude_rs with CAS MCP)
+// Real Claude Session E2E Tests (using cas-claude with CAS MCP)
 // =============================================================================
 
 // Test that Stop hook blocks when epic has incomplete subtasks using a real Claude session.
-// This test uses claude_rs to run a real Claude Code session with CAS MCP server and verifies:
+// This test uses cas-claude to run a real Claude Code session with CAS MCP server and verifies:
 // 1. CAS MCP server responds to tool calls
 // 2. Session ID is correctly propagated
 // 3. working_epics is populated when starting epic subtasks

@@ -472,8 +472,8 @@ fn a_failed_put_is_local_only_on_cli_and_mcp() {
         "action": "publish", "task_id": TASK, "path": file,
     })).unwrap();
     let response = runtime.block_on(core.artifact_publish(rmcp::handler::server::wrapper::Parameters(request))).unwrap();
-    let mcp = response.content.iter().filter_map(|content| match &content.raw {
-        rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+    let mcp = response.content.iter().filter_map(|content| match content {
+        rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
         _ => None,
     }).collect::<Vec<_>>().join("\n");
 

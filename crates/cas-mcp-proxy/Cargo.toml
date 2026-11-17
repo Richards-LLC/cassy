@@ -17,7 +17,7 @@ anyhow.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # TLS uses CAS's process-wide ring provider; keep rmcp's HTTP transport without
 # enabling reqwest's second, AWS-LC-backed provider.
-rmcp = { version = "0.16", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+rmcp = { version = "3.10", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 futures = "0.3"
 http = "1"
 tracing = "0.1"

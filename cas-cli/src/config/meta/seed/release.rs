@@ -25,6 +25,19 @@ pub(super) fn register_release(registry: &mut ConfigRegistry) {
             "Leave empty to keep the Claude fallback closed for this project",
         ],
     });
+    registry.register(ConfigMeta {
+        key: "release.supervisor_lifts_operator_freeze",
+        section: "release",
+        name: "Supervisor Lifts Operator Freeze",
+        description: "Operator-only grant: the train's live supervisor may lift a release freeze the operator applied in Commander, with an audited reason. Off by default; freezes from auto-cut or a supervisor are always supervisor-liftable.",
+        value_type: ConfigType::Bool,
+        default: "false",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["release", "freeze", "lift", "supervisor", "operator", "train"],
+        use_cases: &["Let the supervisor reopen a train you froze when a Cassy gate blocks the cut"],
+    });
     for (key, name, description, default, constraint) in [
         ("release.auto_cut_max_per_day", "Auto-Cut Releases Per Day",
          "Automatic cuts of a green release train allowed in any 24 hours. Cassy cuts a train whose exact tip has a green full-suite receipt and changelog fragments once the supervisor's notes draft exists, with no queue run in flight and no Commander pause. 0 turns auto-cut off.",

@@ -156,7 +156,7 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::Content;
+    use rmcp::model::ContentBlock;
 
     #[tokio::test]
     async fn recovery_guidance_dispatch_retains_panic_isolation() {
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
 
         let result = dispatch_with_guidance("task", core, async {
-            Ok(CallToolResult::success(vec![Content::text(
+            Ok(CallToolResult::success(vec![ContentBlock::text(
                 "literal mcp__cas__task stays",
             )]))
         })
@@ -194,7 +194,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn successful_handler_passes_through() {
         let result = dispatch_with_catch("ok_tool", async {
-            Ok(CallToolResult::success(vec![Content::text("hi")]))
+            Ok(CallToolResult::success(vec![ContentBlock::text("hi")]))
         })
         .await;
         let ok = result.expect("expected Ok");
@@ -293,7 +293,7 @@ mod tests {
 
         // Runtime must still be usable after 10 panics.
         let ok = dispatch_with_catch("ok_after_panics", async {
-            Ok(CallToolResult::success(vec![Content::text("alive")]))
+            Ok(CallToolResult::success(vec![ContentBlock::text("alive")]))
         })
         .await;
         assert!(

@@ -272,7 +272,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let result = self.shadow_review_inner(payload);
         result
-            .map(|value| CallToolResult::success(vec![Content::text(value.to_string())]))
+            .map(|value| CallToolResult::success(vec![ContentBlock::text(value.to_string())]))
             .map_err(|message| McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::Owned(message),

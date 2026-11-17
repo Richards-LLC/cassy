@@ -5,7 +5,7 @@ use cas::store::{init_cas_dir, open_task_store};
 use cas::types::{Task, TaskStatus};
 use cas_mcp::types::TaskRequest;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::RawContent;
+use rmcp::model::ContentBlock;
 use rusqlite::Connection;
 
 fn task_request(value: serde_json::Value) -> TaskRequest {
@@ -16,8 +16,8 @@ fn result_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
         .iter()
-        .filter_map(|content| match &content.raw {
-            RawContent::Text(text) => Some(text.text.clone()),
+        .filter_map(|content| match content {
+            ContentBlock::Text(text) => Some(text.text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

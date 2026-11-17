@@ -20,7 +20,7 @@ impl CasService {
         })).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         // Reuse the single-write/uncertain-outcome contract; never retry a POST.
         let mut result = self.pattern_create(pattern_req).await?;
-        result.content.push(Content::text(format!(
+        result.content.push(ContentBlock::text(format!(
             "Source: personal pattern; operator's verbatim words; authorised by {author}."
         )));
         Ok(result)

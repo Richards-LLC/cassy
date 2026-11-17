@@ -80,7 +80,11 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     for (from, to) in ranges {
         required.extend(rust::changed(repo, from, to, paths)?.into_iter()
             .map(|test| test.identity).filter(|identity| live.contains(identity)));
-        required.extend(super::javascript::changed_tests(repo, from, to, &javascript_paths)?.into_iter()
+        // Ranges establish delivery ownership, but their intermediate trees
+        // may still contain dynamic titles that the delivered tree replaced
+        // with declared identities. Resolve every range against the final
+        // head, as worker-check does, then retain only tests live at that tip.
+        required.extend(super::javascript::changed_tests(repo, from, head, &javascript_paths)?.into_iter()
             .filter(|identity| live_javascript.contains(identity)));
     }
     Ok(required.into_iter().collect())

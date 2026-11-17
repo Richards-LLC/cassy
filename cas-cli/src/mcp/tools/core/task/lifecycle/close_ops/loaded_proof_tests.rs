@@ -156,8 +156,8 @@ async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], missing: Op
         let text = response
             .content
             .iter()
-            .filter_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()

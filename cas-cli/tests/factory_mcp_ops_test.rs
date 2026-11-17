@@ -30,7 +30,7 @@ use cas_mcp::types::{CoordinationRequest, FactoryRequest, TaskRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
 use cas_types::{AgentRole, DeliveryMode};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::RawContent;
+use rmcp::model::ContentBlock;
 use tempfile::TempDir;
 
 // The grouped integration harness owns the process-wide env/cwd lock.
@@ -1076,8 +1076,8 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
         .iter()
-        .filter_map(|c| match &c.raw {
-            RawContent::Text(t) => Some(t.text.clone()),
+        .filter_map(|c| match c {
+            ContentBlock::Text(t) => Some(t.text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

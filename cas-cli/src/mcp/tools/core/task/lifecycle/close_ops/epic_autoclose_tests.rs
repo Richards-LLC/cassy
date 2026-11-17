@@ -356,8 +356,8 @@ async fn close_finished_epic(child_on_main: bool, declared: Option<bool>) -> Han
             response
                 .content
                 .iter()
-                .filter_map(|content| match &content.raw {
-                    rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                .filter_map(|content| match content {
+                    rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

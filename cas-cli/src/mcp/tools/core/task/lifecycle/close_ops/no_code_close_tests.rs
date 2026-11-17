@@ -186,8 +186,8 @@ async fn call(service: &CasService, request: serde_json::Value) -> String {
         .unwrap()
         .content
         .into_iter()
-        .filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text),
+        .filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -2786,8 +2786,8 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         let received = f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
             "action":"inbox_poll",
         })).unwrap())).await.unwrap();
-        let received = received.content.iter().filter_map(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+        let received = received.content.iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None,
         }).collect::<Vec<_>>().join("\n");
         // pin: next.id is the dynamically selected queue successor, not fixed prose.
         assert!(received.contains(&next.id), "next-turn inbox omitted the started assignment: {received}");
@@ -2924,7 +2924,7 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
     if let Some(ids) = ids { request["task_ids"] = serde_json::json!(ids); }
     let request = serde_json::from_value(request).unwrap();
     let result = f.supervisor.factory(Parameters(request)).await.unwrap();
-    result.content.iter().filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None })
+    result.content.iter().filter_map(|content| match content { rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None })
         .collect::<Vec<_>>().join("\n")
 }
 
@@ -3469,4 +3469,36 @@ async fn refused_close_keeps_correction_tip_and_restart_cas_56f1() {
         }
         assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), before);
     }
+}
+
+/// cas-5dc9e: Lane CI SIGABRT'd a close test ("tokio-runtime-worker has
+/// overflowed its stack") after cas-289b added ~20 inline lines. Each wrapper
+/// on the blocking-pool path had kept its own copy of the close future,
+/// using 1.56 MB of the 2 MiB thread before the close body began. This test
+/// measures the stack from the blocking thread's start to the close body.
+#[tokio::test]
+async fn close_future_frame_stays_under_stack_budget_cas_5dc9e() {
+    use crate::async_runtime::stack_probe;
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-5dc9e";
+    let (checkout, lane) = issue_delivery(&f, id, "main");
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-5dc9e): own delivery"]);
+    git(&checkout, &["push", "-q", "origin", &lane]);
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Own delivery ready",
+    })).await;
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{response}");
+    let top = stack_probe::take("blocking_pool").expect("blocking pool probe");
+    let body = stack_probe::take("close_body").expect("close body probe");
+    // Debug builds measured 1,561,648 B before boxing at the pool entry and
+    // 386,944 B after it; the rest of 2 MiB is for the body's own calls.
+    const BUDGET: usize = 512 * 1024;
+    let used = top - body;
+    assert!(used <= BUDGET,
+        "close stack budget exceeded: {used} B from the blocking-pool thread start to the close body, budget {BUDGET} B. \
+         Box the growing future (crate::async_runtime::heap_future) or move new close-body code into a helper fn; \
+         do not raise the thread stack size.");
 }

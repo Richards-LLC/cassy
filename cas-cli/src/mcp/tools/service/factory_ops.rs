@@ -14567,8 +14567,8 @@ mod spawn_lifecycle_tests {
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -14644,8 +14644,8 @@ mod spawn_lifecycle_tests {
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -14654,8 +14654,8 @@ mod spawn_lifecycle_tests {
         let repeated = service.factory_spawn_workers(serde_json::from_value(serde_json::json!({
             "action": "spawn_workers", "count": 1, "cli": "claude"
         })).unwrap()).await.expect("repeat spawn");
-        let repeated = repeated.content.into_iter().filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        let repeated = repeated.content.into_iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         assert!(!repeated.contains("m-spawn-recall"), "repeated spawn memory: {repeated}");
         assert!(text.contains("Related prior context:"), "{text}");
@@ -14849,8 +14849,8 @@ mod tests {
                 response
                     .content
                     .into_iter()
-                    .filter_map(|content| match content.raw {
-                        rmcp::model::RawContent::Text(text) => Some(text.text),
+                    .filter_map(|content| match content {
+                        rmcp::model::ContentBlock::Text(text) => Some(text.text),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -15602,8 +15602,8 @@ mod tests {
         response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()

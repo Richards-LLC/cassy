@@ -701,6 +701,8 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     let mut launch = cas::types::Task::new("cas-2b44".to_string(), "Verifier launch refuses a live supervisor".to_string());
     launch.description = "Notice: verifier_factory_launch: verifier_factory_owner: live registered supervisor required".to_string();
     tasks.add(&launch).unwrap();
+    // cas-5edc: an open issue, and no task, records F14's wrong output.
+    let (issue, comments) = fake_tracker(&mut test_env, &repo, "merge_gate_lane: lane receipt missing for a clean lane");
     close_text(&core, &task_id).await;
     let round_task = qa_task_id(&cas_dir, &task_id);
     let reviewer = reviewer_core(&cas_dir, "ledger-reviewer");
@@ -708,7 +710,7 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     let service = CasService::new(reviewer, None);
     let head = git(&repo, &["rev-parse", "factory/test-agent"]);
     let ledger = round_evidence(&repo.join("round-1"), &task_id, &head);
-    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\nF12 NORMAL: A cosmetic nit nobody acts on.\nF13 NORMAL: The verifier never launches.\n").unwrap();
+    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\nF12 NORMAL: A cosmetic nit nobody acts on.\nF13 NORMAL: The verifier never launches.\nF14 NORMAL: Clean lanes cannot merge.\n").unwrap();
     let record = |issues: serde_json::Value| verification(serde_json::json!({
         "action": "qa_record", "task_id": task_id, "status": "approved",
         "summary": "delivery passes; older defects are tracked separately",
@@ -728,9 +730,12 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
         {"id":"F11", "scope":"pre-existing", "repro":"run the strict capture twice; the contrast differs", "affected":"reviewers reading the capture"},
         {"id":"F12", "scope":"pre-existing"},
         {"id":"F13", "scope":"pre-existing", "affected":"supervisors",
-         "repro":"close a task\nverifier_factory_launch: verifier_factory_owner: live registered supervisor required"}
+         "repro":"close a task\nverifier_factory_launch: verifier_factory_owner: live registered supervisor required"},
+        {"id":"F14", "scope":"pre-existing", "affected":"supervisors",
+         "repro":"merge a clean lane\nmerge_gate_lane: lane receipt missing for a clean lane"}
     ])))).await.unwrap());
-    assert!(result.contains("Already tracked, not filed again: F10 by cas-2a33; F13 by cas-2b44"), "{result}");
+    assert!(result.contains(&format!("Already tracked, not filed again: F10 by cas-2a33; F13 by cas-2b44; F14 by {issue}")), "{result}");
+    assert!(std::fs::read_to_string(&comments).unwrap().contains("+1"));
     assert!(tasks.get("cas-2b44").unwrap().notes.contains("+1"));
     assert!(result.contains("Theoretical backlog (P4): F12"), "{result}");
     let follow_ups: Vec<_> = tasks.list(None).unwrap().into_iter()
@@ -747,8 +752,33 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     assert_eq!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
 }
 
-/// cas-7823: a finding whose wrong output an open task records is refused
-/// (G-148) until the filer says it is a different defect.
+/// cas-5edc: a fake project tracker whose one open issue records `refusal`.
+/// It logs every evidence comment; returns the issue URL and the log path.
+fn fake_tracker(test_env: &mut TestEnvGuard, repo: &Path, refusal: &str) -> (String, std::path::PathBuf) {
+    let url = "https://github.com/org/fixture/issues/77".to_string();
+    let dir = repo.join("fake-gh");
+    std::fs::create_dir_all(&dir).unwrap();
+    let issues = dir.join("issues.json");
+    std::fs::write(&issues, serde_json::json!([{
+        "url": url, "title": "Merge gate rejects a clean lane", "body": format!("## Actual Behavior\n{refusal}"),
+    }]).to_string()).unwrap();
+    let log = dir.join("comments.log");
+    let gh = dir.join("gh");
+    cas::test_paths::warm_stub(&gh, &format!(
+        "#!/bin/sh\ncase \"$1 $2\" in\n'issue list') cat '{}' ;;\n'issue comment') printf '%s\\n' \"$*\" >> '{}' ;;\n*) exit 1 ;;\nesac\n",
+        issues.display(), log.display(),
+    ));
+    test_env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+    let config = repo.join(".cas/config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("\n[issues]\nrepo = \"org/fixture\"\n");
+    std::fs::write(&config, text).unwrap();
+    (url, log)
+}
+
+/// cas-5edc: a finding whose wrong output an open task or open issue
+/// already records adds the evidence and a +1 there and returns that
+/// identity; no task is created and nothing is refused.
 #[tokio::test]
 async fn finding_naming_an_open_tasks_wrong_output_adds_evidence_not_a_twin() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -757,15 +787,32 @@ async fn finding_naming_an_open_tasks_wrong_output_adds_evidence_not_a_twin() {
     let mut launch = cas::types::Task::new("cas-2b44".to_string(), "Verifier launch refuses a live supervisor".to_string());
     launch.description = "Notice: verifier_factory_launch: verifier_factory_owner: live registered supervisor required".to_string();
     tasks.add(&launch).unwrap();
+    let (issue, comments) = fake_tracker(&mut test_env, &repo, "merge_gate_lane: lane receipt missing for a clean lane");
     let service = CasService::new(core, None);
-    let finding = |confirm: bool| serde_json::from_value(serde_json::json!({
-        "action": "create", "title": "Daemon verifier never starts", "risk": "none", "task_type": "bug",
-        "finding_origin": "review:operator", "affected": "supervisors", "confirm_warning": confirm,
-        "repro": "task action=close id=cas-7823\nverifier_factory_launch: verifier_factory_owner: live registered supervisor required",
+    let finding = |title: &str, wrong_output: &str| serde_json::from_value(serde_json::json!({
+        "action": "create", "title": title, "risk": "none", "task_type": "bug",
+        "finding_origin": "review:operator", "affected": "supervisors",
+        "repro": format!("task action=close id=cas-7823\n{wrong_output}"),
     })).unwrap();
-    let error = service.task(Parameters(finding(false))).await.expect_err("an open task already records it");
-    assert!(error.message.contains("[G-148]") && error.message.contains("cas-2b44"), "{}", error.message);
-    service.task(Parameters(finding(true))).await.expect("confirm_warning admits a different defect");
+    let count = || tasks.list(None).unwrap().len();
+    let before = count();
+
+    let text = extract_text(service.task(Parameters(finding(
+        "Daemon verifier never starts",
+        "verifier_factory_launch: verifier_factory_owner: live registered supervisor required",
+    ))).await.unwrap());
+    assert!(text.contains("cas-2b44"), "{text}");
+    let notes = tasks.get("cas-2b44").unwrap().notes;
+    assert!(notes.contains("+1") && notes.contains("task action=close id=cas-7823"), "{notes}");
+    assert_eq!(count(), before);
+
+    let text = extract_text(service.task(Parameters(finding(
+        "Clean lanes cannot merge",
+        "merge_gate_lane: lane receipt missing for a clean lane",
+    ))).await.unwrap());
+    assert!(text.contains(&issue), "{text}");
+    assert_eq!(std::fs::read_to_string(&comments).unwrap().lines().filter(|line| line.contains("+1")).count(), 1);
+    assert_eq!(count(), before);
 }
 
 /// Replay the visible failures and code-read findings from the Nov 4–5

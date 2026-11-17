@@ -360,7 +360,7 @@ mod tests {
             "ledger_artifact_id": artifact, "ledger_path": ledger, "ledger_author": "external-qa",
         })).unwrap();
         let text = |response: rmcp::model::CallToolResult| response.content.iter()
-            .filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(t) => Some(t.text.as_str()), _ => None })
+            .filter_map(|content| match content { rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()), _ => None })
             .collect::<Vec<_>>().join("\n");
         let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
         let pending_holds = || crate::store::open_supervisor_queue_store(&cas).unwrap()
@@ -473,8 +473,8 @@ mod tests {
                     core.set_agent_id_for_testing(owner.id.clone());
                     let service = crate::mcp::CasService::new(core, None);
                     let result = service.coordination(rmcp::handler::server::wrapper::Parameters(serde_json::from_value(json!({"action":"inbox_poll", "notification_id":row.id})).unwrap())).await.unwrap();
-                    assert!(result.content.iter().all(|content| match &content.raw {
-                        rmcp::model::RawContent::Text(text) => !text.text.contains(&body),
+                    assert!(result.content.iter().all(|content| match content {
+                        rmcp::model::ContentBlock::Text(text) => !text.text.contains(&body),
                         _ => true,
                     }));
                 }

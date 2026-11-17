@@ -1,0 +1,20 @@
+[package]
+name = "cas-claude"
+version = "4.33.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Headless Claude Code CLI client for Cassy"
+license = "MIT"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror.workspace = true
+tokio = { version = "1", features = ["process", "io-util", "time"] }
+
+[dev-dependencies]
+tempfile = "3.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

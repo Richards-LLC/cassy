@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     fn list_text(result: CallToolResult) -> String {
-        let rmcp::model::RawContent::Text(text) = &result.content[0].raw else {
+        let rmcp::model::ContentBlock::Text(text) = &result.content[0] else {
             panic!("task list must return text")
         };
         text.text.clone()

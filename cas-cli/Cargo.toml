@@ -2,7 +2,7 @@
 name = "cas"
 # Tests are modules of the explicit harnesses below; do not auto-link each source.
 autotests = false
-version = "4.33.0"
+version = "4.34.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"
@@ -176,13 +176,13 @@ lru = "0.12"
 uuid = { version = "1.11", features = ["v4"] }
 
 # Analytics (opt-in telemetry) - use blocking client, not async
-posthog-rs = { version = "0.6", default-features = false }
+posthog-rs = { version = "0.3", default-features = false }
 
-# Claude SDK (for AI extraction)
-claude_rs = { git = "https://github.com/codingagentsystem/claude_rs", branch = "main" }
+# Headless Claude Code CLI client (AI extraction, consolidation, summaries)
+cas-claude = { path = "../crates/cas-claude" }
 
 # MCP Server (always available; the factory requires `cas serve`)
-rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+rmcp = { version = "3.10", features = ["server", "macros", "transport-io", "client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 schemars = { version = "1.0" }
 cas-mcp = { path = "../crates/cas-mcp" }
 
@@ -226,7 +226,7 @@ sentry = { version = "0.35", default-features = false, features = ["backtrace", 
 # bail with a clear "rebuild with --features mcp-proxy" message.
 default = ["mcp-proxy"]
 mcp-proxy = ["dep:cmcp_core", "cas-mcp/mcp-proxy"]
-claude_rs_e2e = []
+claude_e2e = []
 # factory-recording feature removed - recording is now always available
 
 [build-dependencies]

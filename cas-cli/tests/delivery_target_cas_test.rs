@@ -30,7 +30,7 @@ use cas::types::{
 };
 use cas_mcp::types::{CoordinationRequest, TaskRequest, VerificationRequest};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::RawContent;
+use rmcp::model::ContentBlock;
 use tempfile::TempDir;
 
 use crate::test_env_guard::TestEnvGuard;
@@ -154,8 +154,8 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
         .iter()
-        .filter_map(|c| match &c.raw {
-            RawContent::Text(t) => Some(t.text.clone()),
+        .filter_map(|c| match c {
+            ContentBlock::Text(t) => Some(t.text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

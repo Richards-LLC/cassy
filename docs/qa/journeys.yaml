@@ -1806,6 +1806,22 @@ bug_families:
     tasks: [cas-32c2]
     journeys: []
     invariants: []
+  refused-cut-release-red:
+    title: A cut refused by a Cassy gate on a green frozen tip records a release red through the cut's candidate, so a release-repair merges without an operator freeze lift
+    statement: release.sh records each REVIEW_MISSING, LANE_CI_MISSING or zero would-close refusal with the prepared candidate binary, whose CLI has `release refused`, even when the installed CLI predates it; G-100 admits only a release-repair against that receipt, and other merges stay refused.
+    fixed_by: [cas-1d3a]
+    tasks: [cas-1d3a]
+    journeys: [CLI-RELEASE]
+    invariants: [FACTORY-RELEASE-CLOSEOUT]
+  rejected-train-position:
+    title: Rejected train candidates release their queue position
+    tasks: [cas-1bd7]
+    journeys: [FACTORY-MERGE]
+  task-source-claim-binding:
+    title: Task source claims require an explicit issue binding
+    statement: Task creation claims a GitHub issue from external_ref, an issue-owning title boundary, or Fixes/Closes #N; incidental citations remain suggestions.
+    tasks: [cas-bfc8]
+    invariants: [FACTORY-SOURCE-WORK-DELEGATION]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

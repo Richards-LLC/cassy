@@ -4427,6 +4427,7 @@ impl FactoryDaemon {
                             ejections,
                             delivery_pr_observations,
                             ci_wakes,
+                            ci_rearms,
                         } = super::ci_watch::read_github(
                             &watch_cas_dir,
                             &project,
@@ -4437,6 +4438,13 @@ impl FactoryDaemon {
                             &previously_held,
                             &failed_run_lookups,
                         )?;
+                        for (supervisor, task, filter) in ci_rearms {
+                            if let Err(error) = crate::factory_delivery_wake::arm_event(
+                                &watch_cas_dir, &supervisor, &task, "ci_completed", &filter, true,
+                            ) {
+                                tracing::error!(%task, %error, "CI rerun completion wake not armed");
+                            }
+                        }
                         // cas-dcc9: one "train ready to cut" notice per train
                         // state, from this same queue read; never an auto-cut.
                         let queued_trains = queue_poll

@@ -76,10 +76,17 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
+    // cas-5dc9e: every wrapper below and Tokio's block_on move their future
+    // by value, and each debug frame keeps its own copy. Unboxed, those
+    // copies took 1.2 MB of the blocking thread's 2 MiB before a close
+    // body began. Boxed, each layer moves a pointer.
+    let future = Box::pin(future);
     let receipt = current();
     let caller = crate::mcp::tools::core::guidance::current_caller_context();
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        crate::async_runtime::stack_probe::mark("blocking_pool");
         runtime.block_on(async move {
             let future = async move {
                 match caller {

@@ -38,7 +38,7 @@ pub mod entities {
     /// Extension trait for async entity extraction
     #[allow(async_fn_in_trait)]
     pub trait EntityExtractorAsync {
-        /// Async extraction using claude_rs SDK
+        /// Async extraction through the headless Claude Code CLI
         async fn extract_async(
             &self,
             entry: &Entry,
@@ -51,7 +51,7 @@ pub mod entities {
             entry: &Entry,
         ) -> Result<cas_core::extraction::EntityExtractionResult, CasError> {
             use crate::tracing::claude_wrapper::traced_prompt;
-            use claude_rs::QueryOptions;
+            use cas_claude::QueryOptions;
 
             let prompt_text = self.build_prompt(entry);
 
@@ -98,7 +98,7 @@ async fn extraction_response(
         .map_err(|e| MemError::Other(format!("light lane extraction task failed: {e}")))?;
     }
     use crate::tracing::claude_wrapper::traced_prompt;
-    use claude_rs::QueryOptions;
+    use cas_claude::QueryOptions;
     let mut options = QueryOptions::new().model(model).max_turns(1);
     if model == "claude-opus-5-5" {
         options = options.extra_arg("--effort").extra_arg("low");

@@ -277,8 +277,8 @@ async fn cas_13c7_daemon_recovers_when_login_arrives_after_startup() {
         let text = result
             .content
             .iter()
-            .filter_map(|c| match &c.raw {
-                rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+            .filter_map(|c| match c {
+                rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -486,8 +486,8 @@ async fn coordinate(service: &cas::mcp::CasService, request: Value) -> Result<St
             result
                 .content
                 .iter()
-                .filter_map(|content| match &content.raw {
-                    rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                .filter_map(|content| match content {
+                    rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

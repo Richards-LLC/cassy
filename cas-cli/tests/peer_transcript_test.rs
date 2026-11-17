@@ -4,7 +4,7 @@ use cas::cloud::{CloudConfig, peer_mailbox::PeerMailboxRuntime};
 use cas::mcp::{CasCore, CasService};
 use cas::store::{init_cas_dir, open_agent_store, open_prompt_queue_store};
 use cas::types::{Agent, AgentRole};
-use rmcp::{handler::server::wrapper::Parameters, model::RawContent};
+use rmcp::{handler::server::wrapper::Parameters, model::ContentBlock};
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -15,8 +15,8 @@ fn text(result: rmcp::model::CallToolResult) -> String {
     result
         .content
         .into_iter()
-        .filter_map(|item| match item.raw {
-            RawContent::Text(t) => Some(t.text),
+        .filter_map(|item| match item {
+            ContentBlock::Text(t) => Some(t.text),
             _ => None,
         })
         .collect::<Vec<_>>()

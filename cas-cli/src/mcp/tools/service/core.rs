@@ -283,36 +283,29 @@ impl CasService {
             },
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-        // Find or file (cas-7823): a finding whose wrong output an open task
-        // already records adds evidence there instead of opening a twin.
-        // gate-audit[confirm_warning]: bypass G-148 Explicitly accepts a finding whose wrong output an open task already records.
-        let mut tracked_finding_accepted = false;
-        if finding_origin.is_some()
+        // Find or file (cas-7823, cas-5edc): a finding whose wrong output an
+        // open issue or task already records adds its evidence and a +1 there
+        // and returns that identity instead of opening a twin.
+        if let Some(origin) = finding_origin.as_deref()
             && let Some(fingerprint) = req
                 .repro
                 .as_deref()
                 .and_then(crate::issue_intake::RefusalFingerprint::of_last)
-            && let Some(open) = crate::issue_intake::open_task_match(
-                self.inner.open_task_store()?.as_ref(),
-                &fingerprint,
-            )
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
         {
-            if !req.confirm_warning.unwrap_or(false) {
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    crate::gates::tag(
-                        "G-148",
-                        format!(
-                            "FINDING ALREADY TRACKED: open task {} ({:?}) records this wrong output. \
-                             Add the new evidence with task action=notes id={}; if this is a different \
-                             defect, retry with confirm_warning=true.",
-                            open.id, open.title, open.id
-                        ),
-                    ),
-                ));
+            let title = req.title.as_deref().unwrap_or_default();
+            let evidence = format!(
+                "Finding origin: {origin}\nRepro: {}\nAffected: {}",
+                req.repro.as_deref().unwrap_or_default(),
+                req.affected.as_deref().unwrap_or_default()
+            );
+            if let Some(existing) = self
+                .add_evidence_to_open_match(&fingerprint, title, &evidence, None)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?
+            {
+                return Ok(Self::success(format!(
+                    "No new task filed: added evidence and +1 to open {existing}, which already records this wrong output."
+                )));
             }
-            tracked_finding_accepted = true;
         }
         let mut req = req;
         if req.repro.as_deref().is_some_and(|s| !s.trim().is_empty()) {
@@ -378,7 +371,7 @@ impl CasService {
                 )
                 .await;
         }
-        let mut created = self
+        let created = self
             .inner
             .cas_task_create_with_delivery_mode(
                 inner_req,
@@ -388,15 +381,6 @@ impl CasService {
                 req.delivery_mode.as_deref(),
             )
             .await;
-        if tracked_finding_accepted
-            && let Ok(result) = created.as_mut()
-            && result.is_error != Some(true)
-        {
-            result.content.push(rmcp::model::Content::text(crate::gates::override_tag(
-                "G-148",
-                "Accepted a finding an open task already records.",
-            )));
-        }
         if created.as_ref().is_ok_and(|result| result.is_error != Some(true))
             && let Some(epic) = finding_epic.as_deref()
         {
@@ -1033,10 +1017,10 @@ impl CasService {
         })).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         match self.pattern_list(patterns).await {
             Ok(personal) => {
-                result.content.push(Content::text("Source: personal pattern (Cassy Cloud)"));
+                result.content.push(ContentBlock::text("Source: personal pattern (Cassy Cloud)"));
                 result.content.extend(personal.content);
             }
-            Err(error) => result.content.push(Content::text(format!(
+            Err(error) => result.content.push(ContentBlock::text(format!(
                 "Personal pattern source unavailable: {}", error.message
             ))),
         }

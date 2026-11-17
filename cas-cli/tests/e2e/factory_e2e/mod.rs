@@ -7,10 +7,10 @@
 //! # Running
 //! These tests require tmux (to avoid CLAUDECODE env var conflict):
 //! ```bash
-//! cargo test --test e2e_test factory_e2e --features claude_rs_e2e -- --ignored --nocapture
+//! cargo test --test e2e_test factory_e2e --features claude_e2e -- --ignored --nocapture
 //! ```
 
-#![cfg(feature = "claude_rs_e2e")]
+#![cfg(feature = "claude_e2e")]
 
 mod conformance;
 mod lifecycle;

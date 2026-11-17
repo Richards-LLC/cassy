@@ -25,8 +25,6 @@ its own row, ordered by real traffic. Check the map with:
 node <skills-dir>/cas-qa-craft/scripts/check-feature-map.mjs --root .
 ```
 
-`<skills-dir>` is `.claude/skills`, `.codex/skills` or `.grok/skills`.
-
 ## Drive
 
 Import these functions from the project's pinned copy:
@@ -69,7 +67,7 @@ quoted words. An uncited expectation becomes a spec question, never FAIL.
 Call `record({id,channel,view,sent,verdict,observed,frame,claims,reply,draft,defect})`
 with the exact `sent.text` and `sent.url`. Graded rows require readable frames
 inside the ledger directory and claims that appear in their visible text.
-Database read-back corroborates the visible result. A failed step names its
+A failed step names its
 `cas-*` defect; the kit merges that cause across widths/channels, refuses reused
 frames and conflicting verdicts, and atomically rewrites the ledger after each
 row. Fixtures use `label: 'fixture'`; they never prove a live build.
@@ -77,9 +75,8 @@ row. Fixtures use `label: 'fixture'`; they never prove a live build.
 ## Cleanup
 
 In `finally`, call the project's existing cleanup adapter and stop only the
-servers or PIDs this walk started. Keep captures and read cleanup results back.
-Run `cas qa ledger check <path> --task <id>` before submission. Mark unrun cells
-`NOT EXERCISED: <reason>` and retain automation errors in Honesty.
+servers or PIDs this walk started. Keep captures, read cleanup results back and
+retain automation errors in Honesty.
 
 ## Isolated candidate serve
 

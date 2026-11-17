@@ -422,8 +422,8 @@ and re-pulls this project's own scope.",
                 self.collisions.len()
             ));
             text.push_str(
-                " For each retained collision, first run `cas task show id=<task-id>` to confirm \
-the local title, then an authorized supervisor can run `mcp__cs__task action=update \
+                " For each retained collision, first run `task action=show id=<task-id>` to confirm \
+the local title, then an authorized supervisor can run `task action=update \
 id=<task-id> origin_project=<confirmed canonical id>`; do not update or delete until the \
 (id, title) owner is confirmed.",
             );

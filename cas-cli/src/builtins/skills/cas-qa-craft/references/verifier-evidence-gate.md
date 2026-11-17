@@ -27,16 +27,16 @@ defect. Never rerun QA or substitute the children's ledgers for the batch round.
 
 ### Step 0A: Apply the QA evidence gate before any judgment
 
-1. Locate `~/.cas/artifacts/<project-key>/<task-id>/LEDGER.md`. The task notes and eventual
-   close reason should cite this same path; do not use a close reason as a
-   substitute for the ledger. In `qa.mode=batch`, a missing task ledger is owed to the release batch receipt; record NOT VERIFIED with that owner, never reject. Otherwise, if the file is absent, reject with this exact
+1. Locate the task's `LEDGER.md` (`~/.cas/artifacts/<project-key>/<task-id>/`, or the
+   evidence directory the dispatch names). A close reason never substitutes for
+   the ledger. In `qa.mode=batch`, a missing task ledger is owed to the release batch receipt; record NOT VERIFIED with that owner, never reject. Otherwise, if the file is absent, reject with this exact
    summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
    Record that rejection with `verification action=add` and stop.
-2. Run `cas qa ledger check <path> --task <id> --json`. The CLI, worker close
-   and verifier share this parser. A nonzero exit rejects the ledger before
-   capture judgment. List each returned line, row ID, field and message in the
-   verification summary, record rejection, and stop. Use the candidate
-   revision's command when reviewing a change to the parser itself.
+2. Run `cas qa ledger check <path> --task <id> --json` (the parser close also
+   uses). A nonzero exit rejects the ledger before capture judgment: list each
+   returned line, row ID, field and message in the verification summary, record
+   rejection, and stop. Use the candidate revision's command when reviewing a
+   change to the parser itself.
 3. Keep the JSON report. Schema 2 requires cited `path:line` expectations and
    `visible:`, `terminal:` or `http:` outcomes; DB-only PASSes fail. Legacy receipts remain valid.
 
@@ -53,22 +53,14 @@ defect. Never rerun QA or substitute the children's ledgers for the batch round.
 
 ### NOT EXERCISED rows: apply the configured QA owner
 
-Read `qa.mode` from the supplied review context, or the project's configuration
-for a manual review. In `qa.mode=batch`, a journey row marked `NOT EXERCISED`
-solely because release batch QA owns its walk is already assigned by policy.
-Record each such row ID, cell and release batch QA owner as deferred in the
-verdict; do not request another supervisor decision for that ownership. If
-these are the only open rows, every other criterion is VERIFIED and no rejection
-condition applies, record `status=approved`. This task approval does not claim
-the journey passed or satisfy the release batch receipt.
-
-In `qa.mode=per_task`, or for any other `NOT EXERCISED` reason (including
-missing captures, unavailable environments, unclear ownership or rows you
-downgraded), the supervisor still decides. When the gate otherwise passes,
-record `status=supervisor_call` with a summary starting
-`SUPERVISOR CALL: <n> NOT EXERCISED row(s)` that lists each row ID, cell and
-reason requiring that decision. The supervisor decides whether they block and answers with
-`verification action=add` on the same `dispatch_id`; no re-dispatch is needed.
+Apply Step 0's `qa.mode` policy: in `qa.mode=batch`, record each journey row
+deferred solely to release batch QA by row ID, cell and owner; that approval
+does not claim the journey passed or satisfy the batch receipt. Every other
+`NOT EXERCISED` row (per_task mode, missing captures, unavailable environments,
+unclear ownership, rows you downgraded) needs the supervisor: when the gate
+otherwise passes, record `status=supervisor_call` with a summary starting
+`SUPERVISOR CALL: <n> NOT EXERCISED row(s)` listing each row ID, cell and reason.
+The supervisor answers on the same `dispatch_id`; no re-dispatch is needed.
 
 ## Measurable claims: same-command baseline and treatment
 
@@ -84,19 +76,21 @@ count, rate), with or without a demo:
    pair shows the claimed delta), `NOT VERIFIED` (no pair; name what is
    missing), or `INCONCLUSIVE` (the pair exists but variance or a changed
    input hides the delta). `VERIFIED` meets the criterion, and so does
-   `NOT VERIFIED` when the close names an owner by design (a factory worker's
-   full-suite execution follows the ownership rule below). Reject the
-   rest, naming the claim and the missing or ambiguous run.
+   `NOT VERIFIED` when the close names an owner by design. Reject the rest,
+   naming the claim and the missing or ambiguous run.
 
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task. Read receipts; never rerun a passing check.
+Ownership rule: workers run only the tests covering the lines they touched, with
+capped receipts at the delivered tip. The full suite runs once on the landing
+tree: in the merge queue, else CI, else one supervisor run per epic. Read
+receipts; never rerun a passing check.
 
 ## Candidate fixture isolation
 
 Before running a candidate `serve` or any stateful command, isolate it in a
-disposable fixture exactly as [evidence-ledger.md](evidence-ledger.md) describes
-(fixture `.cas`, `CAS_ROOT`, `HOME`, `XDG_CONFIG_HOME`, recorded store path). Keep
-these overrides scoped to candidate subprocesses so your reviewer MCP session
-keeps its factory binding.
+disposable fixture as [evidence-ledger.md](evidence-ledger.md#candidate-fixture-isolation)
+describes (fixture `.cas`, `CAS_ROOT`, `HOME`, `XDG_CONFIG_HOME`, recorded store
+path). Scope these overrides to candidate subprocesses so your reviewer MCP
+session keeps its factory binding.
 
 ## Counted verifier lane
 
@@ -104,7 +98,7 @@ To run the task's tests yourself, use the counted verifier lane at the dispatch'
 
 ## Rule candidates
 
-Only propose a rule candidate after at least two independent incidents from different tasks support the lesson. One verdict is not enough: retain that finding in the verdict and do not call `rule action=observe`. For a repeated lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>,<other-task-id>:<other-verification-id>"`, adding `id=<candidate-id>` for the same lesson. Cite completed verdicts belonging to those tasks; Cassy validates the links and records the bundle atomically before raising it to the supervisor and operator. Never create or promote the rule yourself.
+For a lesson backed by at least two independent incidents from different tasks, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>,<other-task-id>:<other-verification-id>"`, adding `id=<candidate-id>` for the same lesson. Cite completed verdicts belonging to those tasks; Cassy validates the links and records the bundle atomically before raising it to the supervisor and operator. Never create or promote the rule yourself.
 
 ## Code review procedure
 
@@ -119,7 +113,7 @@ Run `rule action=list` for the project rules. Read each changed file completely.
 
 ### Step 5: Structural checks with receipts
 
-Run commands, do not just opine. Use `ast-grep` on changed files, for example `ast-grep --lang rust -p '$EXPR.unwrap()' <file>`, `ast-grep --lang typescript -p '$EXPR as any' <file>`, `ast-grep --lang typescript -p 'catch ($ERR) {}' <file>`. If `ast-grep` is unavailable or cannot parse the language, fall back to:
+Use `ast-grep` on changed files, for example `ast-grep --lang rust -p '$EXPR.unwrap()' <file>`, `ast-grep --lang typescript -p '$EXPR as any' <file>`, `ast-grep --lang typescript -p 'catch ($ERR) {}' <file>`. If `ast-grep` is unavailable or cannot parse the language, fall back to:
 
 ```bash
 rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|except:' <changed_file>
@@ -164,7 +158,7 @@ Run `task action=dep_list id=<task-id>` to discover ParentChild dependencies. Re
 
 Identify the fields, behaviours and measurable targets that the plan assigns to this delivery or phase. Map each obligation to implementation and proof in the delivery found in Step 3; finalize this check after reading the changed files. Name each missing field or behaviour individually, with its plan section and delivery evidence. Compare every applicable plan target with the actual result, including targets recorded in delivered evidence even when the card only asks to run or report a measurement. Apply Step 0's measurable-claims evidence gate to these targets too. Passing tests or completing the card does not prove the plan's outcome.
 
-Respect the planned division of work: a child implementing its assigned slice need not implement the entire epic. Cite the plan section or authoritative scope decision assigning other obligations elsewhere. A worker's narrower card, follow-up, renamed field, or lowered threshold is not an approved plan revision. If an authorized operator decision revised the plan, cite that decision and check against the revised obligations; never silently accept a scope reduction.
+Respect the planned division of work: a child implementing its assigned slice need not implement the entire epic; cite the plan section or scope decision assigning other obligations elsewhere. A worker's narrower card, follow-up, renamed field or lowered threshold is not a plan revision; an authorized operator revision is, so cite it and check against the revised obligations.
 
 Record one explicit `PLAN-FIT:` line in the verdict summary:
 
@@ -192,8 +186,7 @@ When `task_type=epic`, use `verification_type=epic` and check, in order:
 2. **Plan outcome:** apply Plan conformance to the assembled epic's full planned scope and measurable targets, with receipts. A missed target or omitted behaviour is `PLAN-FIT: NOT VERIFIED` even if every child's card passed; follow-ups cannot excuse it.
 3. **Close reason covers the whole epic**, not only the last child; future-epic follow-ups may not defer this epic's obligations.
 4. **Verify on the epic branch**, not a worker worktree.
-5. **Stranded-branch gate:** a clean review does not override it. Every child `factory/<assignee>` branch must have no commits outside the epic's integration target, unless the close authorizes `stranded_branch_override` for a live registered supervisor who records the inspection narrative.
-6. **Epic verification owner gate:** if `epic_verification_owner` is set, only that live registered supervisor may close the epic; an unassigned, stale or mismatched owner is a blocking authority failure.
+5. **Stranded branches and owner:** reject child `factory/<assignee>` commits outside the epic's integration target unless the close authorizes `stranded_branch_override` with an inspection narrative. When `epic_verification_owner` is set, reject absent, stale or mismatched caller authority; only that live registered supervisor can close. Close enforces both too; a clean review overrides neither.
 
 ## Verdict recording
 

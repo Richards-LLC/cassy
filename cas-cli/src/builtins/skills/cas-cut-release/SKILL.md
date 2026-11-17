@@ -9,8 +9,8 @@ metadata:
 
 The release rides in the canonical open release train PR (the oldest open Cassy epic labelled `release-train`). One command prepares it, the merge queue
 proves the exact tree that ships, and landing on `main` publishes it. There is
-no release PR, no tag push and no local build. Platforms: Linux runs the suite;
-macOS: compile-checked and launch-tested; suite runs on Linux.
+no release PR, no tag push and no local build. Linux runs the suite; macOS is
+compile-checked and launch-tested.
 
 Release prep checklist: compare the locked Playwright version with the latest stable and verify browser binaries plus the chosen Node runtime. Any gap needs an upgrade decision before authoring/cut; the Node 26 tracing incident is a compatibility warning, not a universal engine constraint. Generate `npx playwright init-agents --loop=<harness>` and `npx playwright init-skills --loop=<harness>` in scratch, then review the official diff against [cas-playwright-tests](../cas-playwright-tests/SKILL.md), including its healer guard.
 
@@ -21,7 +21,7 @@ Release prep checklist: compare the locked Playwright version with the latest st
    Write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
-   Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`. The cut checks each member's existing merge approval alongside the green frozen-train receipt; missing approvals are named before push. No separate release-review ledger or recorder is needed for code deliveries. Deliberate light, sampled and Tier 0 exemptions use green lane CI plus the green train run; a missing lane receipt is named separately.
+   Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`. The cut checks each member's existing merge approval alongside the green frozen-train receipt; missing approvals are named before push. Only the release's included tasks gate the zero-would-close check: held legacy members outside them are listed as nonblocking and never refuse the cut. No separate release-review ledger or recorder is needed for code deliveries. Deliberate light, sampled and Tier 0 exemptions use green lane CI plus the green train run; a missing lane receipt is named separately.
    Commit the regenerated `.claude/CODEMAP.md` (`/codemap`) and the previous
    release's report there too; no docs PR follows. The command refuses while a
    file added or removed since the map's last commit is unmapped. Deliveries never edit
@@ -38,7 +38,9 @@ Release prep checklist: compare the locked Playwright version with the latest st
 2. Read the train CI receipt and complete log artifact; fix every red first.
    The existing CI suite at the newest train tip replaces a local pre-cut full
    run. A known red holds `train_merge`; any override is a visible decision for
-   that observed run and does not authorize a red cut. The command checks a
+   that observed run and does not authorize a red cut. A queued train run with
+   zero jobs is replaced once at the same head after ninety seconds; do not
+   re-dispatch it by hand. The command checks a
    green receipt for the starting tip before version preparation, reusing it
    on an unchanged prepared retry. The queue proves the version commit.
    Check out the train lane, then run `scripts/release.sh` with an installed
@@ -46,19 +48,15 @@ Release prep checklist: compare the locked Playwright version with the latest st
    (`CAS_BIN` selects a candidate for the first cut). It validates the canonical
    train and integration branch, merges the base when behind, bumps versions,
    promotes the changelog, builds Commander, commits, marks the train cut and pushes. It reuses the
-   train PR, requests auto-merge only when needed and checks admission once.
-   An auto-merge request awaiting required checks is reported as not admitted;
-   a red required-check snapshot exits nonzero without a CI polling loop.
-   It returns after admission; `--no-watch` behaves the same way. No PR-CI watch
-   or PR polling stage runs: the queue proves the prepared tree once.
+   train PR, requests auto-merge only when needed and checks admission once,
+   then returns (`--no-watch` is an alias). Do not watch PR CI: the queue
+   proves the prepared tree once.
    A hotfix is a branch from `main` released with `scripts/release.sh --hotfix`
    (next patch), through the same queue. No train or a different train lane
    keeps the caller's `--base` flow (default `main`). A matched train must persist
    its cut marker before push/enqueue; failure stops with a retry command. New
    tasks join a fresh train, and unfinished deliveries need retargeting; merges
-   into the cut lane stay refused after landing too. Reminder tracking stays advisory.
-   Missing/unreachable owners use the shared resolver's
-   peer fallback, or print one clear tracking-skipped message.
+   into the cut lane stay refused after landing too.
 3. The command automatically arms cross-session `branch_contained_in` for the
    release SHA and integration branch, plus `tag_exists` for the version, even
    with `--no-watch`. A retry reuses these durable occurrences; a version
@@ -69,7 +67,11 @@ Release prep checklist: compare the locked Playwright version with the latest st
    resolve it on the train, push and rerun. When train children are the cause,
    `cas factory train drop <task>... --reason "<failing job>"` is the repair cycle:
    it reverts them all, returns each to its worker and re-enqueues the train once.
-   A second ejection is an operator P0.
+   A second ejection is an operator P0. A repair targeting the frozen train
+   merges once its lane's no-build rows are green, without waiting for its
+   duplicate Rust impact jobs: the frozen tip's full set supplies Rust proof,
+   and full-set jobs whose own inputs the repair did not change reuse their
+   receipts.
 4. The merge queue runs required checks and starts Release Prebuild for the
    exact release tree. Commander journey shards run only for web product inputs.
    Landing wakes the supervisor through the persisted SHA reminder; publication
@@ -77,8 +79,9 @@ Release prep checklist: compare the locked Playwright version with the latest st
    rolls it over when later work is created. For a distinct recovery CI run,
    use `remind_event=ci_completed`; workers never poll CI.
 5. Landing on `main` starts `release.yml` with no agent: it adopts the queue
-   run's archives by tree id, runs the ISA audit and the operator launch smoke
-   on the packaged Linux and macOS assets, creates the annotated tag and the
+   run's archives by tree id, checks the Linux executable against the digest
+   the prebuild's one ISA audit recorded, runs the launch smoke on the Linux and
+   macOS assets and the macOS signature check, creates the annotated tag and the
    GitHub release, and dispatches the install-path proof. The host installs
    through the `cassy-install-on-publish` systemd user timer on Linux or the
    `dev.cassy.install-on-publish` LaunchAgent on macOS (set it up once per host

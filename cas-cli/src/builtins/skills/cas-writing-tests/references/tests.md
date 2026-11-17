@@ -5,10 +5,9 @@ metadata:
 
 # Test examples and audit patterns
 
-Adapted from mattpocock/skills `tdd/tests.md`, MIT © 2026 Matt Pocock.
-See [LICENSE](../LICENSE) for the permission notice. These Cassy-owned examples
-use repository APIs; anti-examples and snippets labelled schematic are teaching
-material, not tests to install unchanged in another project.
+Adapted from mattpocock/skills `tdd/tests.md`, MIT © 2026 Matt Pocock; see
+[LICENSE](../LICENSE). The Rust examples use Cassy repository APIs; anti-examples
+and schematic snippets are teaching material, not tests to install elsewhere.
 
 ## Contents
 
@@ -200,9 +199,9 @@ assert!(send_message(&read_only_device, "hello").is_ok());
 assert_eq!(send_message(&read_only_device, "hello"), Err(SendError::Forbidden));
 ```
 
-Use the real request/handler and assert no delivery occurred through its supported
-observable seam. Do not bypass authorization or weaken the assertion to make green.
-Assert refusal through the error code and unchanged state; do not compare its human-readable message. The names above are illustrative, not existing Rust APIs.
+Use the real request/handler and assert, through its error code and unchanged
+state, that no delivery occurred; never bypass authorization or weaken the
+assertion to make it green. The names above are illustrative, not Rust APIs.
 
 ## Source and prose audits
 
@@ -214,4 +213,5 @@ Assert refusal through the error code and unchanged state; do not compare its hu
 
 In the Cassy source repository, `scripts/check-test-shape.py` detects mechanical
 source-as-text and constant/literal violations; `--changed-since <base>` scopes
-its audit. Other projects use their equivalent lint. Human-message assertions use error codes or rule IDs, never prose substrings. A `pin:` comment does not authorize wording checks.
+its audit. Other projects use their equivalent lint. A `pin:` comment does not
+authorize wording checks.

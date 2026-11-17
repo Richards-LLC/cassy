@@ -29,7 +29,7 @@ For browser/e2e/journey authoring, use [cas-playwright-tests](../cas-playwright-
 
 Work one vertical slice: public promise → real failing case → minimum fix → green. An edited case in an existing file satisfies test-first; a new file is optional. Refactor after green without changing its promise. Hand the scoped proof and diff to review.
 
-Factory workers follow [worker discipline](../cas-worker/references/discipline.md): commit the red case, run its named filter, then commit the fix and run it green. Full integration proof stays with the established landing owner; read passing receipts instead of repeating checks.
+Factory workers follow [worker discipline](../cas-worker/references/discipline.md): commit the red case, run its named filter, then commit the fix and run it green.
 
 ## Stack seams
 

@@ -108,11 +108,17 @@ where
             continue;
         }
         match probe.observe(&condition) {
-            Ok(Some(observation)) => ready.push(ExternalWake {
-                reminder,
-                condition,
-                observation,
-            }),
+            Ok(Some(mut observation)) => {
+                if reminder.trigger_filter.as_ref().is_some_and(|filter| filter["delivery_wake"] == true)
+                    && let ExternalWakeCondition::BranchContained { commit, .. } = &condition
+                {
+                    match probe.delivery_landing(commit, &observation.compared_sha) {
+                        Ok(sha) => observation.landed_sha = Some(sha),
+                        Err(error) => { tracing::warn!(reminder_id=reminder.id, %error, "delivery landing unavailable; keeping wake pending"); continue; }
+                    }
+                }
+                ready.push(ExternalWake { reminder, condition, observation });
+            },
             Ok(None) => {}
             Err(error) => tracing::warn!(
                 reminder_id = reminder.id,

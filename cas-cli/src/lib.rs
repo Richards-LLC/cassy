@@ -60,6 +60,7 @@ pub(crate) mod factory_build_memory;
 pub(crate) mod factory_candidate_queue;
 #[doc(hidden)]
 pub mod factory_ci_retry;
+pub(crate) mod factory_delivery_wake;
 pub(crate) mod factory_worker_check;
 pub(crate) mod factory_capacity_wait;
 pub(crate) mod factory_worker_runs;

@@ -33,7 +33,7 @@ type CloseHeld = BTreeMap<String, crate::mcp::tools::core::task::close_refusal::
 /// The session's open work, and a fingerprint of every task, lane and
 /// message change. `None` when a store is unreadable: uncertainty is
 /// neither progress nor a stall.
-fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld, CloseHeld)> {
+fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>, unarmed: &HashSet<String>) -> Option<(String, Vec<String>, String, FreezeHeld, CloseHeld)> {
     use cas_types::{AgentRole, TaskStatus};
     let agents: Vec<_> = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?
         .into_iter().filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
@@ -78,6 +78,8 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let mut freeze_held = FreezeHeld::new();
     let mut close_held = CloseHeld::new();
     tasks.retain(|task| {
+        // An absent completion edge is a plumbing defect, not idle work.
+        if unarmed.contains(&task.id) { return false; }
         // Like a frozen-train park, these intentional waits have no local
         // next step. Removing them also resets any previous stall episode.
         if dependency_held.contains(&task.id)
@@ -242,7 +244,11 @@ fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> b
 
 /// One watchdog sample for `session` at `now`.
 pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
-    let Some((fingerprint, waiting, supervisor, freeze_held, close_held)) = observe(cas_dir, session, now) else { return };
+    let unarmed = match report_unwatched(cas_dir, session) {
+        Ok(unarmed) => unarmed,
+        Err(error) => { tracing::warn!(%error, "delivery wake coverage unavailable"); return; }
+    };
+    let Some((fingerprint, waiting, supervisor, freeze_held, close_held)) = observe(cas_dir, session, now, &unarmed) else { return };
     report_freeze_held(cas_dir, freeze_held);
     report_close_held(cas_dir, close_held);
     let mut episodes = EPISODES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -283,9 +289,75 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
     }
 }
 
+fn report_unwatched(cas_dir: &Path, session: &str) -> anyhow::Result<HashSet<String>> {
+    let agents = crate::store::open_agent_store(cas_dir)?;
+    let registered = agents.list(None)?;
+    let members: HashSet<_> = registered.iter().filter(|agent| agent.factory_session.as_deref() == Some(session))
+        .flat_map(|agent| [agent.id.as_str(), agent.name.as_str()]).collect();
+    let tasks = crate::store::open_task_store_local(cas_dir)?;
+    let mut unarmed = HashSet::new();
+    for task in tasks.list(Some(cas_types::TaskStatus::AwaitingMerge))? {
+        if !task.assignee.as_deref().is_some_and(|who| members.contains(who)) { continue; }
+        let Some(sha) = task.deliverables.factory_branch_anchor.as_deref()
+            .filter(|sha| crate::factory_delivery_wake::full_sha(sha)) else { continue };
+        let Some(supervisor) = crate::factory_delivery_wake::owner(cas_dir, &task, "")? else { continue };
+        if crate::factory_delivery_wake::watched(cas_dir, &task, &supervisor)? { continue; }
+        unarmed.insert(task.id.clone());
+        let key = format!("{}:{}:{sha}", crate::factory_delivery_wake::MISSING_WAKE, task.id);
+        crate::store::open_prompt_queue_store(cas_dir)?.enqueue_idempotent(
+            &format!("lifecycle-wake:{key}"), &supervisor.name,
+            &format!("{}: open delivery {} at {sha} has no durable supervisor completion wake. Repair its CI/merge event watch; this is a Cassy defect, not a worker stall.", crate::factory_delivery_wake::MISSING_WAKE, task.id),
+            supervisor.factory_session.as_deref(), Some("Delivery completion wake missing"),
+            Some(cas_store::NotificationPriority::High), &key, Some(&cas_store::QueueOrigin::Daemon),
+        )?;
+    }
+    Ok(unarmed)
+}
+
 #[cfg(test)]
 mod tests {
     use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
+
+    #[test]
+    fn missing_delivery_wake_is_a_one_cycle_defect_cas_f16b() {
+        const SESSION: &str = "unarmed-delivery-f16b";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut owner = Agent::new_with_role("owner-f16b".into(), "supervisor".into(), AgentRole::Supervisor);
+        owner.factory_session = Some(SESSION.into());
+        agents.register(&owner).unwrap();
+        let mut other = Agent::new_with_role("other-f16b".into(), "other-supervisor".into(), AgentRole::Supervisor);
+        other.factory_session = Some("other-session".into());
+        agents.register(&other).unwrap();
+        let mut task = Task::new("cas-f16b-unarmed".into(), "Unwatched delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some(owner.id.clone());
+        let sha = "1234567890abcdef1234567890abcdef12345678";
+        task.deliverables.factory_branch_anchor = Some(sha.into());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.work_target = Some(cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() });
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        crate::factory_delivery_wake::arm_event(&root, &other, &task.id, "ci_completed", &serde_json::json!({"sha": sha, "workflow":"CI"}), false).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let now = chrono::Utc::now();
+        super::sweep(&root, SESSION, now);
+        let rows = queue.peek_all(20).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, owner.name);
+        assert!(rows[0].source.starts_with(&format!("lifecycle-wake:{}:", crate::factory_delivery_wake::MISSING_WAKE)));
+        for minutes in [45, 90] {
+            super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        assert_eq!(queue.peek_all(20).unwrap().len(), 1);
+        crate::factory_delivery_wake::arm_task(&root, &task, &owner.id).unwrap();
+        assert!(crate::factory_delivery_wake::watched(&root, &task, &owner).unwrap());
+        super::sweep(&root, SESSION, now + chrono::Duration::minutes(91));
+        assert_eq!(queue.peek_all(20).unwrap().len(), 1);
+    }
 
     #[test]
     fn dependency_wait_does_not_stall_cas_74d3() {
@@ -537,6 +609,9 @@ mod tests {
                 task.notes = "[2026-11-06 18:00] ✅ DECISION deliberately not merged yet; peer merges next train".into();
             }
             tasks.add(&task).unwrap();
+            if status == TaskStatus::AwaitingMerge {
+                crate::factory_delivery_wake::arm_task(&cas_dir, &task, &worker.id).unwrap();
+            }
             if case == "peer-epic" {
                 tasks.add_dependency(&cas_types::Dependency::new(
                     task.id.clone(), peer_epic.id.clone(), cas_types::DependencyType::ParentChild,

@@ -552,6 +552,16 @@ omit it to wait for all runs for that full SHA. Local events such as
 `remind_ttl_secs` defaults to 3,600 seconds for time and local-event reminders,
 and 604,800 seconds (7 days) for external events. Explicit `0` means no expiry.
 
+Parked deliveries automatically create task-bound, durable supervisor-owned
+`ci_completed` (full SHA and `CI` workflow) and `branch_contained_in` wakes.
+Merge requests reuse those watches; pending-CI merge retries also arm the CI
+SHA they actually await. No manual reminder is needed for these phases.
+CI completion receipts retain run ID and attempt, so the existing GitHub poll
+can re-arm a rerun on the same SHA, including one completed between polls.
+The dry-run poll only observes re-arming candidates. A missing delivery wake
+raises `DELIVERY_WAKE_MISSING` during the next progress-watchdog cycle and is
+excluded from worker-stall/operator-page timing until its watch is repaired.
+
 Supervisor stall notices use the full `epic_status` delivery containment
 computation. A parked delivery already contained in its target, including a
 rewritten or intentionally evolved delivery, gets an "awaiting worker close"

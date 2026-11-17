@@ -328,6 +328,10 @@ pub trait ReminderStore: Send + Sync {
     /// List all pending reminders (across all agents)
     fn list_all_pending(&self) -> Result<Vec<Reminder>>;
 
+    /// All phases of a task's reminders, including completed wakes needed to
+    /// distinguish a later CI attempt from an already delivered completion.
+    fn list_for_task(&self, task_id: &str) -> Result<Vec<Reminder>>;
+
     /// List reminders fired within the last N seconds (across all agents)
     fn list_recently_fired(&self, within_secs: i64) -> Result<Vec<Reminder>>;
 
@@ -792,6 +796,14 @@ impl ReminderStore for SqliteReminderStore {
         Ok(reminders)
     }
 
+    fn list_for_task(&self, task_id: &str) -> Result<Vec<Reminder>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let sql = format!("SELECT {} FROM reminders WHERE task_id = ? ORDER BY id", Self::SELECT_COLUMNS);
+        let mut stmt = conn.prepare_cached(&sql)?;
+        Ok(stmt.query_map(params![task_id], Self::reminder_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     fn list_recently_fired(&self, within_secs: i64) -> Result<Vec<Reminder>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::seconds(within_secs)).to_rfc3339();
@@ -1214,6 +1226,14 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(pending[0].cross_session);
         assert_eq!(pending[0].task_id.as_deref(), Some("cas-issue-276"));
+        let history = store.list_for_task("cas-issue-276").unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.iter().filter(|row| row.status == ReminderStatus::Cancelled).count(), 1);
+        store.mark_fired(pending[0].id, None).unwrap();
+        let reopened = SqliteReminderStore::open(_temp.path()).unwrap();
+        assert_eq!(reopened.list_for_task("cas-issue-276").unwrap().iter()
+            .filter(|row| row.status == ReminderStatus::Fired).count(), 1);
+        assert!(reopened.list_for_task("cas-other").unwrap().is_empty());
 
         let delivery = format_reminder_delivery_with_provenance(&pending[0], None, Some("closed"));
         assert!(

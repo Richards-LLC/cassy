@@ -128,7 +128,10 @@ def python_literal_value(node):
 
 def machine_id_receiver(expression):
     # Exact typed projections are machine data; do not guess commands from prose.
+    # DOM `data-*` attributes (`el.dataset.retrievalState`) carry machine
+    # state for scripts and selectors; they are never rendered copy.
     return (re.search(r'\.(?:code|error_code|rule_id)(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
+            or re.search(r'[\w)\]]\.dataset\.[A-Za-z_$][\w$]*(?=\s*\)\s*(?:\.not)?\.to\w+\(\s*$)', expression) is not None
             or re.fullmatch(r'\s*(?:assert_(?:eq|ne)!\(\s*)?'
                             r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\.(?:command|redirect_command)(?:\(\))?'
                             r'\s*,?\s*', expression) is not None)
@@ -677,7 +680,77 @@ def text_literals(source, path):
             continue
 
 
-def is_exact_text_pin(body, context):
+SEARCH_CALLS = frozenset((
+    'contains', 'includes', 'indexOf', 'find', 'rfind', 'assertIn', 'assertRegex', 'toContain',
+    'toMatch', 'starts_with', 'ends_with', 'startsWith', 'endsWith', 'match', 'matches', 'search', 'test'))
+# Free functions that build text from several values. Macros, method calls
+# and bare groupings are refused by syntax; these are the plain-call forms.
+TEXT_BUILDERS = frozenset(('format', 'str', 'String', 'concat', 'join', 'sprintf', 'Sprintf'))
+# A keyword before `(` opens a grouping or tuple, not a call.
+GROUPING_KEYWORDS = frozenset((
+    'in', 'not', 'and', 'or', 'is', 'return', 'yield', 'await', 'assert', 'if', 'elif', 'while',
+    'for', 'match', 'case', 'typeof', 'void', 'delete', 'throw', 'else', 'lambda'))
+
+
+def enclosing_calls(context, offset):
+    """(callee, open paren index) of the calls open at `offset`, innermost first."""
+    calls, depth = [], 0
+    for index in range(offset - 1, -1, -1):
+        char = context[index]
+        if char in ')]}':
+            depth += 1
+        elif char in '([{':
+            if depth:
+                depth -= 1
+                continue
+            if char == '(':
+                callee = re.search(r'([A-Za-z_]\w*)\s*!?\s*(?:::\s*<[^<>]*>\s*)?$', context[:index])
+                calls.append((callee[1] if callee else '', index))
+    return calls
+
+
+def runtime_identity_argument(context, offset, line_literals):
+    """A literal in a runtime test identity (`id("a.test.ts", "group changed")`)
+    is structured data. The signal is structural, not an unknown callee: a
+    plain constructor call whose arguments are only literals, at least two,
+    and another of them is a test file path. A one-argument wrapper
+    (`Some("...")`), a call that also takes the source, a string-joining call
+    and an identity nested in a search stay needles.
+    `context` has every literal on the line blanked; `line_literals` holds
+    their (start, end, body) relative to the line."""
+    calls = enclosing_calls(context, offset)
+    if not calls or any(callee in SEARCH_CALLS for callee, _ in calls):
+        return False
+    open_index = calls[0][1]
+    # Identity construction is a plain function, path or `new` call
+    # (`id(`, `Identity::exact(`, `new Identity(`). A macro (`concat!(`,
+    # `format!(`), a method on a value (`.join(`, `.call(`), a bare
+    # grouping or tuple (`("a.test.ts", ...)`, `% (...)`) and the free text
+    # builders all join their literals into text, so a test path there
+    # launders adjacent wording (vdispatch-7f22ae6f).
+    callee = re.search(r'(?:(?P<dot>\.)\s*)?(?P<path>[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*)\s*'
+                       r'(?P<bang>!)?\s*(?:::\s*<[^<>]*>\s*)?$', context[:open_index])
+    if (not callee or callee['dot'] or callee['bang']
+            or callee['path'] in GROUPING_KEYWORDS
+            or re.split(r'\s*::\s*', callee['path'])[-1] in TEXT_BUILDERS):
+        return False
+    depth, close = 0, None
+    for index in range(open_index + 1, len(context)):
+        if context[index] in '([{':
+            depth += 1
+        elif context[index] in ')]}':
+            if not depth:
+                close = index
+                break
+            depth -= 1
+    if close is None or context[open_index + 1:close].strip(' \t,'):
+        return False  # Unclosed on this line, or a non-literal argument.
+    arguments = [(left, body) for left, right, body in line_literals if open_index < left and right <= close]
+    return len(arguments) >= 2 and any(
+        left != offset and not re.search(r'\s', body) and is_test_file(body) for left, body in arguments)
+
+
+def is_exact_text_pin(body, context, structured=False):
     """Recognize long exact prose and short needles into source-like inputs."""
     if ('/' in body and not re.search(r'\s', body)
             or re.fullmatch(r'[A-Z][A-Z0-9_]*=[A-Za-z0-9_.-]+', body)):
@@ -698,6 +771,8 @@ def is_exact_text_pin(body, context):
         r'\b(?:contains|includes|indexOf|find|assertIn|assertRegex|toContain|'
         r'toMatch|toEqual|toBe|assert\w*)\b|(?:===|==)', context, re.I,
     ) is not None
+    if structured:
+        return False  # A runtime identity's title is data at any length.
     return (prose and assertion) or (len(body.strip()) >= 12 and len(words) >= 2 and source_input and search)
 
 
@@ -923,7 +998,10 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
             right = min(literal_end, line_end) - line_start
             context_chars[left:right] = ' ' * (right - left)
         context = ''.join(context_chars)
-        if is_exact_text_pin(body, context):
+        line_literals = [(max(left, line_start) - line_start, min(right, line_end) - line_start, text)
+                         for left, right, text in literals if left < line_end and right > line_start]
+        offset = max(start, line_start) - line_start
+        if is_exact_text_pin(body, context, runtime_identity_argument(context, offset, line_literals)):
             hits.append((changed_literal_lines[0] if changed_literal_lines else start_line, 'exact-text pin'))
     return sorted(set(hits))
 
@@ -1070,10 +1148,17 @@ def lint(source, path, check_text_pins=True, changed_text_lines=None):
                 args = ts[i+2:ps[i+1]]
                 # Resolve simple local path bindings, rather than flag every
                 # unrelated read in a function which happens to create a .rs.
-                names = {x.value for x in args if not x.string}
+                # Only the argument's root bindings carry a path: method and
+                # field names (`repo.path().join(..)`) are not bindings, and
+                # a binding resolves in the innermost enclosing test function.
+                names = {x.value for k, x in enumerate(args)
+                         if not x.string and re.fullmatch(r'[A-Za-z_]\w*', x.value)
+                         and (k == 0 or args[k - 1].value not in ('.', '::'))
+                         and (k + 1 == len(args) or args[k + 1].value not in ('(', '!', '::'))}
                 direct = any(x.string and '.rs' in x.value for x in args)
+                innermost = max(left for _, left, right in scopes if left < i < right)
                 for name in names:
-                    for j in range(begin, i):
+                    for j in range(innermost, i):
                         if ts[j].value == 'let' and j+1 < i and ts[j+1].value == name:
                             stop = next((k for k in range(j+2, i) if ts[k].value == ';' and not ts[k].string), i)
                             direct |= any(x.string and '.rs' in x.value for x in ts[j:stop])

@@ -115,6 +115,9 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
             ('example.test.mjs', 'assert.equal(error.message, "please try later");', True),
             ('example.test.mjs', 'assert.throws(run, /please try later/);', True),
             ('example.test.ts', 'expect(error.code).toBe("scope_denied");', False),
+            # GH #1679: a data-* attribute is machine state; rendered text is not.
+            ('work-picture.test.ts', 'expect(detail(1).dataset.retrievalState).toBe("offline");', False),
+            ('work-picture.test.ts', 'expect(detail(1).textContent).toBe("offline");', True),
             ('src/example.rs', '#[test] fn check() { for phrase in ["please try later", "run it again"] { assert!(error.contains(phrase)); } }', True),
             ('test_example.py', 'def test_x():\n    for phrase in ("please try later",):\n        self.assertIn(phrase, result.stderr)', True),
             ('example.test.ts', 'for (const phrase of ["please try later"]) { expect(error.message).toContain(phrase); }', True),
@@ -215,6 +218,11 @@ fn cli_round_trip() {
 
     def test_source_read_and_position_check(self):
         self.assertTrue(self.hits('#[test] fn t() { let p = root.join("lib.rs"); let s = fs::read_to_string(&p).unwrap(); assert!(s.find("a") < s.find("b")); }'))
+        # GH #1934: a method name is not a binding, and an earlier test's
+        # `.rs` binding does not taint a later test's explicit Markdown read.
+        module = '#[cfg(test)] mod tests {\n#[test] fn a() { let path = "src/lib.rs"; run(path); }\n#[test] fn b() { let s = std::fs::read_to_string(repo.path().join("CHANGELOG.md")).unwrap();\n assert_eq!(entries(&s).len(), 1); }\n}'
+        self.assertFalse(self.hits(module))
+        self.assertTrue(self.hits(module.replace('join("CHANGELOG.md")', 'join(path)').replace('fn b() {', 'fn b() { let path = "src/lib.rs";')))
 
     def test_fixture_source_mutation_cas_81b7(self):
         # cas-28c5 at 094294333a: editing compiled inputs of a disposable repo
@@ -270,6 +278,15 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         self.assertFalse(self.hits('#[tokio::test]\n// pin: compatibility\nasync fn t() { assert_eq!(LIMIT, 3); }'))
 
     def test_non_rust_text_is_clean(self):
+        # GH #1914: a constructor's literal is a structured identity, not a needle into the source.
+        self.assertFalse(shape.lint_text_pins('assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "group changed")]);', 'src/a_tests.rs'))
+        self.assertTrue(shape.lint_text_pins('assert!(source.contains(&String::from("group changed")));', 'src/a_tests.rs'))
+        # vdispatch-05ed86ae: an identity's title is data at any length, and a
+        # wrapper around a wording pin over the source is still a pin.
+        self.assertFalse(shape.lint_text_pins('assert_eq!(found, [id("a.test.ts", "cas-ae48: returns the original conversation when the retry budget is exhausted.")]);', 'src/a_tests.rs'))
+        self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow.lines().next(), Some("Always merge staging first"));', 'src/a_tests.rs'))
+        # vdispatch-7f22ae6f: a test path inside a string-joining macro does not launder wording.
+        self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow, concat!("a.test.ts", "Always merge staging first"));', 'src/a_tests.rs'))
         self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
         self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
         self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner"), "the outage is announced once").toHaveLength(1);', 'reconnect.journey.ts'))

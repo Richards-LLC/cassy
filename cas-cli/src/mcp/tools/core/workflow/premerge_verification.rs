@@ -1152,7 +1152,7 @@ impl CasCore {
             && row.issues.iter().all(|issue|
                 matches!(issue.triage.severity, FindingSeverity::Awkward | FindingSeverity::Cosmetic)
                 && matches!(issue.category.as_str(), "documentation" | "evidence" | "receipt"
-                    | "incomplete_close_reason" | "unnecessary_complexity" | "missing_validation" | "code_duplication")));
+                    | "incomplete_close_reason" | "unnecessary_complexity")));
         if !eligible || task.status != TaskStatus::AwaitingMerge
             || !supervisor_push::premerge_repair_worker_available(&self.cas_root, task).map_err(fail)?
         { return Ok(None); }
@@ -2026,6 +2026,15 @@ mod tests {
 
     #[tokio::test]
     async fn premerge_rejection_round_policy_replays_cas_ed08() {
+        replay_premerge_rejection(false).await;
+    }
+
+    #[tokio::test]
+    async fn premerge_rejection_receipt_returns_from_blocked_cas_ed08() {
+        replay_premerge_rejection(true).await;
+    }
+
+    async fn replay_premerge_rejection(transactional: bool) {
         use cas_types::{FindingSeverity, IssueSeverity, VerificationIssue};
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -2092,6 +2101,7 @@ mod tests {
         })).unwrap();
         cases.push(("missing_triage", vec![missing_triage], false));
 
+        if transactional { cases = vec![("transactional", vec![simplicity.clone()], true)]; }
         let mut expected_worker_prompts = 0;
         for (name, issues, eligible) in cases {
             run(repo, &["checkout", "-q", "--detach", &source]);
@@ -2106,12 +2116,33 @@ mod tests {
                 work_target: cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() },
                 branch: "factory/w".into(), assignee: worker.name.clone(), base_sha: base.clone(),
             });
+            if transactional {
+                task.status = cas_types::TaskStatus::InProgress;
+                task.pending_verification = true;
+                task.deliverables.factory_branch_anchor = None;
+                task.deliverables.work_target = task.deliverables.factory_branch_start.as_ref().map(|start| start.work_target.clone());
+            }
             core.open_task_store().unwrap().add(&task).unwrap();
             let candidate = core.build_verification_candidate_sync(&task, repo, "factory/w", "main",
                 context_digest(&root, &task).unwrap(), None).unwrap();
-            let dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, &worker.id, &owner.id,
-                &cas_types::VerificationProofBoundary::task_at(candidate.proof),
-                chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
+            let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
+            let dispatch = if transactional {
+                let cas_types::ClaimResult::Success(lease) = core.open_agent_store().unwrap()
+                    .try_claim(&task.id, &worker.id, 600, Some(&owner.id)).unwrap() else { panic!("fixture lease"); };
+                let input = cas_types::WorkerCompletionReceiptInput {
+                    task_id: task.id.clone(), worker_agent_id: worker.id.clone(), repo_selector: "project:fixture".into(),
+                    source_branch: "factory/w".into(), commit_sha: source.clone(), merge_base_sha: base.clone(),
+                    target_branch: "main".into(), target_sha: base.clone(), proof_reference: "fixture-proof".into(),
+                    scope_summary: "bounded repair".into(), artifact_path: None,
+                };
+                let receipt = cas_store::build_worker_completion_receipt(&input, &worker.name, chrono::Utc::now());
+                cas_store::create_worker_delivery_with_dispatch_for_lease_at_repository(&root, &receipt,
+                    cas_types::WorkerDeliveryState::AwaitingVerification, &worker.id, lease.epoch, &owner.id,
+                    deadline, &candidate.proof).unwrap().1
+            } else {
+                cas_store::create_verification_dispatch_bound(&root, &task.id, &worker.id, &owner.id,
+                    &cas_types::VerificationProofBoundary::task_at(candidate.proof), deadline, false).unwrap()
+            };
             let mut verdict = Verification::new(format!("ver-{name}"), task.id.clone());
             verdict.status = VerificationStatus::Rejected;
             verdict.provenance = VerificationProvenance::System;
@@ -2140,6 +2171,13 @@ mod tests {
                 let receipt = serde_json::to_value(&current.deliverables).unwrap();
                 assert_eq!(receipt["premerge_repair"]["dispatch_id"], dispatch.id);
                 assert_eq!(receipt["premerge_repair"]["rejected_anchor"], source);
+                if transactional {
+                    let (_, delivery) = cas_store::get_latest_worker_delivery(&root, &task.id).unwrap().unwrap();
+                    assert_eq!(delivery.state, cas_types::WorkerDeliveryState::ChangesRequested);
+                    assert!(!current.pending_verification);
+                    assert!(crate::store::open_supervisor_queue_store(&root).unwrap().poll(&owner.id, 20).unwrap().is_empty());
+                    continue;
+                }
                 // Restart reads the portable receipt. A re-park of identical
                 // source must not mint another review, even after invalidation.
                 current.status = task.status;

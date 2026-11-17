@@ -1390,12 +1390,12 @@ mod large_artifact_staging_tests {
                  budget; Claude Code would file it to disk and show a ~2 KB preview",
                 context.len()
             );
-            assert!(
-                context.contains("Current Handoff"),
+            assert_eq!(
+                context.contains("Current Handoff"), role != Some("worker"),
                 "{label} lost the handoff pointer entirely: {context}"
             );
-            assert!(
-                context.contains("### budget-handoff-"),
+            assert_eq!(
+                context.contains("### budget-handoff-"), role != Some("worker"),
                 "{label} must retain the saved handoff id: {context}"
             );
             match role {

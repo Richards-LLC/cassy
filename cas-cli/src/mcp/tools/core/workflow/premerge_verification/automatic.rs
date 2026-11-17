@@ -414,17 +414,7 @@ pub(super) fn recovery_retry(root: &Path, dispatch: &VerificationDispatch) -> Op
     let owner_available = cas_store::get_verification_dispatch(root, &dispatch.id).ok()
         .and_then(|live| crate::store::open_agent_store(root).ok()?.get(&live.owner_agent_id).ok())
         .is_some_and(|owner| owner.role == cas_types::AgentRole::Supervisor && owner.is_alive());
-    if !owner_available {
-        return None;
-    }
-    let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
-    Some(match candidate_for_dispatch(root, dispatch).ok().flatten() {
-        Some(candidate) => format!(
-            "{prefix}factory action=worktree_merge id={} task_id={}",
-            candidate.source_branch, dispatch.task_id
-        ),
-        None => format!("{prefix}task action=close id={}", dispatch.task_id),
-    })
+    owner_available.then(|| retry_call(root, dispatch))
 }
 
 /// The executable recovery after an automatic verifier could not finish.
@@ -436,6 +426,26 @@ pub(crate) fn recovery(root: &Path, dispatch: &VerificationDispatch) -> String {
         "Retry {retry}; one replacement will claim this exact dispatch. {}",
         direct_verdict(dispatch)
     )
+}
+
+/// The call that starts this dispatch's verifier: the train merge that owns
+/// the target holds single merges (G-101), so it is retried instead.
+pub(crate) fn retry_call(root: &Path, dispatch: &VerificationDispatch) -> String {
+    let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+    match candidate_for_dispatch(root, dispatch).ok().flatten() {
+        Some(candidate) => match crate::mcp::tools::core::workflow::train_merge::owner(
+            root,
+            &candidate.repository,
+            &candidate.target_branch,
+        ) {
+            Some(train) => format!("{prefix}factory action=train_merge id={train}"),
+            None => format!(
+                "{prefix}factory action=worktree_merge id={} task_id={}",
+                candidate.source_branch, dispatch.task_id
+            ),
+        },
+        None => format!("{prefix}task action=close id={}", dispatch.task_id),
+    }
 }
 
 /// The other supported route. A native Task/Agent child on the supervisor's

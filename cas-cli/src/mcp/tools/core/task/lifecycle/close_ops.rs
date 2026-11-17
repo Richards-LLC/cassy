@@ -26430,6 +26430,50 @@ pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
         })
 }
 
+/// GH #2026: for an anchor already on the release commit, the line walk also
+/// reads later edits as drops: a sibling's merge resolution rewriting the
+/// delivered lines, a rebuilt bundle, or the task's own sync merge resolving
+/// an earlier draft. A dropped path is a real revert only when the task's
+/// net range no longer changes it, a revert commit outside the task's own
+/// first-parent work touches it, the target deleted it, or the target holds
+/// the pre-delivery content again. Any other drop is evolution.
+pub(crate) fn release_dropped_path_reverted(
+    repo: &std::path::Path,
+    base: &str,
+    anchor: &str,
+    target: &str,
+    path: &str,
+) -> bool {
+    use std::process::Command;
+    let git = |args: &[&str]| {
+        Command::new("git").args(args).current_dir(repo).measurement_output().ok()
+    };
+    let text = |args: &[&str]| {
+        git(args).filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+    };
+    let exists = |rev: &str| git(&["cat-file", "-e", &format!("{rev}:{path}")])
+        .is_some_and(|output| output.status.success());
+    let net_changes = git(&["diff", "--quiet", "--no-renames", base, anchor, "--", path])
+        .is_some_and(|output| output.status.code() == Some(1));
+    if !net_changes || (exists(anchor) && !exists(target)) {
+        return true;
+    }
+    let (Some(own), Some(history)) = (
+        text(&["rev-list", "--first-parent", &format!("{base}..{anchor}")]),
+        text(&["log", "--full-history", "--no-renames", "--format=%H%x1f%B%x1e", &format!("{base}..{target}"), "--", path]),
+    ) else {
+        return true;
+    };
+    let imported_revert = history.split('\u{1e}').filter_map(|record| record.trim().split_once('\u{1f}'))
+        .any(|(sha, message)| !own.lines().any(|commit| commit == sha)
+            && delivery_evolution::is_revert_message(message));
+    // The inverse patch applied in reverse is the delivery applied forward:
+    // it applies only where the target again has the pre-delivery content.
+    imported_revert || reverse_delivery_path_applies_to_tree(repo, anchor, base, target, path)
+        .unwrap_or(true)
+}
+
 fn delivery_content_presence_on_target_for_paths(
     repo_path: &std::path::Path,
     delivery_commit: &str,

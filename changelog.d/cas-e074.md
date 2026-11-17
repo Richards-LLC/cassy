@@ -1,0 +1,4 @@
+### Fixed — Developer
+
+- **Test audit now counts wording pins in any text-match assertion** — Was: `cas-test-audit` flagged a wording pin only when the assertion named `stderr`, `stdout`, `message` or `reason`, so `contains`/`includes`/`toContain`/`assertIn` checks on prose in any other binding went uncounted. Now: any of those text matches on a human-text literal is a wording candidate, and a literal the same test also supplies as input stays excluded as caller payload.
+- **Test suite asserts behaviour, not prose** — Was: about thirteen hundred test assertions across the Rust crates, hub-web and scripts pinned refusal headings, sentences and labels. Now: those checks assert the gate code, error code, stored state or caller-supplied id instead, or are removed where another assertion already proves the behaviour.

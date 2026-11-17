@@ -312,7 +312,7 @@ pub struct SystemRequest {
     pub expected: Option<String>,
 
     /// Actual behavior (for report_cas_bug)
-    #[schemars(description = "What actually happened (anonymize any sensitive output)")]
+    #[schemars(description = "Verbatim refusal first, then what happened; anonymize")]
     #[serde(default)]
     pub actual: Option<String>,
 

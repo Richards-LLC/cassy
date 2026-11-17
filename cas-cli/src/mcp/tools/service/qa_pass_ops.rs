@@ -615,8 +615,25 @@ impl CasService {
         for issue in issues {
             // cas-2849: a finding that names its existing follow-up is linked,
             // not filed again.
+            // cas-7823: so is one whose wrong output an open task records.
+            let matched = || {
+                let fingerprint = crate::issue_intake::RefusalFingerprint::of_last(&issue.repro)?;
+                let open = crate::issue_intake::open_task_match(store.as_ref(), &fingerprint)
+                    .ok()?
+                    .filter(|open| open.id != delivery_id)?;
+                let note = format!(
+                    "[{}] +1: QA pass {} reported this again: {}\nRepro: {}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                    pass.id,
+                    issue.problem,
+                    issue.repro
+                );
+                store.append_note(&open.id, &note).ok()?;
+                Some(open.id)
+            };
             if let Some(existing) =
                 crate::qa_pass::tracked_follow_up(issue, delivery_id, |id| store.get(id).is_ok())
+                    .or_else(matched)
             {
                 let related =
                     Dependency::new(existing.clone(), delivery.id.clone(), DependencyType::Related);

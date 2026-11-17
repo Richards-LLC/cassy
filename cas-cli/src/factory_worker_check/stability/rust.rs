@@ -205,7 +205,7 @@ pub(crate) fn net_changed(repo: &Path, base: &str, head: &str) -> Result<Vec<Tes
     changed(repo, base, head, &paths)
 }
 
-fn filter_matches(filter: &str, name: &str) -> bool {
+pub(crate) fn filter_matches(filter: &str, name: &str) -> bool {
     filter.split('|').any(|union| union.split('&').all(|intersection| {
         let value = intersection.trim().trim_start_matches("test(").trim_end_matches(')');
         value.strip_prefix('=').map_or_else(|| name.contains(value), |exact| name == exact)

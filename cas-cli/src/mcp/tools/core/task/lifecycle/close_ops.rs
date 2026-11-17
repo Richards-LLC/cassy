@@ -21099,10 +21099,6 @@ fn preserves_close_note_history(before: &str, after: &str) -> bool {
     })
 }
 
-/// A long close can overlap receipt/upkeep appends or a cloud note union.
-/// Refresh only retained note history or clock changes, then CAS against that row.
-/// Other fields, rewritten history and request_changes still invalidate the
-/// snapshot. Keep the generic store and replication CAS strict.
 /// cas-289b: this machine's passing receipts at the parked tip. Kept out of
 /// the close future, whose debug-build poll frame is already near the worker
 /// stack limit.
@@ -21139,6 +21135,10 @@ fn keep_fresh_test_receipts(
     let _ = task_store.update_if_current(&fresh, &latest);
 }
 
+/// A long close can overlap receipt/upkeep appends or a cloud note union.
+/// Refresh only retained note history or clock changes, then CAS against that row.
+/// Other fields, rewritten history and request_changes still invalidate the
+/// snapshot. Keep the generic store and replication CAS strict.
 fn update_close_snapshot_preserving_notes(
     task_store: &dyn cas_store::TaskStore,
     task: &mut Task,

@@ -59,7 +59,7 @@ pub(crate) fn gate(code: &str, next_action: &str, message: impl Into<String>) ->
         structured_content: Some(serde_json::json!({
             "code": code, "next_action": next_action, "operator_action_required": false,
         })),
-        ..CallToolResult::error(vec![rmcp::model::Content::text(message.into())])
+        ..CallToolResult::error(vec![rmcp::model::ContentBlock::text(message.into())])
     }
 }
 
@@ -77,8 +77,8 @@ pub(crate) fn record(
         Ok(answer)
             if answer.is_error == Some(true)
                 && !answer.content.iter().any(|content| {
-                    matches!(&content.raw,
-                rmcp::model::RawContent::Text(text) if text.text.lines().any(is_merge_handoff))
+                    matches!(content,
+                rmcp::model::ContentBlock::Text(text) if text.text.lines().any(is_merge_handoff))
                 }) =>
         {
             Some(answer.structured_content.clone().unwrap_or(Value::Null))

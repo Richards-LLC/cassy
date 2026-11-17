@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use chrono::{DateTime, Utc};
-use rmcp::model::{CallToolResult, Content, ErrorCode};
+use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::server::CasCore;
@@ -200,7 +200,7 @@ impl CasCore {
         }
         output.push_str("Export structured_content.snapshot for a peer's rule action=drift peer_snapshot. Snapshots describe their capture time; no live peer check or policy change is implied.");
         Ok(CallToolResult {
-            content: vec![Content::text(output)],
+            content: vec![ContentBlock::text(output)],
             structured_content: Some(serde_json::json!({"snapshot": local, "findings": findings})),
             is_error: Some(false),
             meta: None,

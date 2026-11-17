@@ -4289,8 +4289,8 @@ mod tests {
             "action": "close", "id": task.id, "reason": "delivery already merged",
         })).unwrap();
         let result = service.task(Parameters(request)).await.unwrap();
-        let text = result.content.into_iter().filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        let text = result.content.into_iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("Closed task:"), "{text}");
         let detail_path = text

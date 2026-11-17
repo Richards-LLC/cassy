@@ -167,7 +167,7 @@ fn cas_ced2_server_rows_are_single_line_and_bounded() {
 #[tokio::test]
 async fn cas_ced2_server_list_caps_running_and_excludes_unverified() {
     use crate::mcp::{CasCore, CasService};
-    use rmcp::model::RawContent;
+    use rmcp::model::ContentBlock;
 
     let temp = tempfile::TempDir::new().unwrap();
     let root = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -190,8 +190,8 @@ async fn cas_ced2_server_list_caps_running_and_excludes_unverified() {
         result
             .content
             .into_iter()
-            .filter_map(|c| match c.raw {
-                RawContent::Text(text) => Some(text.text),
+            .filter_map(|c| match c {
+                ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()

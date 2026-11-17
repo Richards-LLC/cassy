@@ -6325,8 +6325,8 @@ impl CasCore {
                     &close_result
                         .content
                         .iter()
-                        .find_map(|content| match &content.raw {
-                            rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                        .find_map(|content| match content {
+                            rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
                             _ => None,
                         })
                         .unwrap_or_default(),

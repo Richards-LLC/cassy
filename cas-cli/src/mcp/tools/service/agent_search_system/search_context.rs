@@ -483,7 +483,7 @@ fn bounded_context_receipt(
     }
     let budget = max_tokens.unwrap_or(500).max(64).saturating_mul(4);
     for content in &mut result.content {
-        if let rmcp::model::RawContent::Text(text) = &mut content.raw {
+        if let rmcp::model::ContentBlock::Text(text) = &mut content {
             if text.text.len() <= budget {
                 continue;
             }

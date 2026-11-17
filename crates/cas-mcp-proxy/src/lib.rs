@@ -1493,11 +1493,10 @@ impl ProxyEngine {
         let result = self
             .call_upstream(
                 server_name,
-                CallToolRequestParams {
-                    name: tool_name.to_string().into(),
-                    arguments: arguments.clone(),
-                    meta: None,
-                    task: None,
+                {
+                    let mut params = CallToolRequestParams::new(tool_name.to_string());
+                    params.arguments = arguments.clone();
+                    params
                 },
             )
             .await;
@@ -1529,7 +1528,7 @@ impl ProxyEngine {
                 value["dispatch_warning"] = Value::String(warning.clone());
             }
             for content in &mut result.content {
-                if let rmcp::model::RawContent::Text(text) = &mut content.raw
+                if let rmcp::model::ContentBlock::Text(text) = content
                     && let Ok(mut value) = serde_json::from_str::<Value>(&text.text)
                     && value.is_object()
                 {
@@ -1542,9 +1541,9 @@ impl ProxyEngine {
             {
                 // execute's text projection must retain structured-only
                 // receipts when adding the warning creates the first content.
-                result.content.push(rmcp::model::Content::text(structured.to_string()));
+                result.content.push(rmcp::model::ContentBlock::text(structured.to_string()));
             } else {
-                result.content.push(rmcp::model::Content::text(warning));
+                result.content.push(rmcp::model::ContentBlock::text(warning));
             }
         }
 
@@ -2130,13 +2129,13 @@ fn violet_payload(result: &rmcp::model::CallToolResult) -> Option<Value> {
         return Some(body.clone());
     }
     result.content.iter().find_map(|content| {
-        let rmcp::model::RawContent::Text(text) = &content.raw else { return None };
+        let rmcp::model::ContentBlock::Text(text) = content else { return None };
         serde_json::from_str::<Value>(&text.text).ok().filter(Value::is_object)
     })
 }
 
 fn violet_result(body: Value) -> rmcp::model::CallToolResult {
-    let content = vec![rmcp::model::Content::text(body.to_string())];
+    let content = vec![rmcp::model::ContentBlock::text(body.to_string())];
     let mut result = if body["ok"] == true {
         rmcp::model::CallToolResult::success(content)
     } else {
@@ -2790,14 +2789,14 @@ fn collect_result(
     text_parts: &mut Vec<String>,
     images: &mut Vec<ImageResult>,
 ) {
-    use rmcp::model::RawContent;
+    use rmcp::model::ContentBlock;
 
     for content in &result.content {
-        match &content.raw {
-            RawContent::Text(t) => {
+        match content {
+            ContentBlock::Text(t) => {
                 text_parts.push(t.text.clone());
             }
-            RawContent::Image(img) => {
+            ContentBlock::Image(img) => {
                 images.push(ImageResult {
                     data: img.data.clone(),
                     mime_type: img.mime_type.clone(),
@@ -2879,17 +2878,13 @@ mod cas_346b_regression_tests {
 
     #[test]
     fn structured_upstream_error_is_visible_when_content_is_empty() {
-        let result = rmcp::model::CallToolResult {
-            content: Vec::new(),
-            structured_content: Some(serde_json::json!({
-                "code": "upstream_unavailable",
-                "message": "Slack is temporarily unavailable",
-                "retryable": true,
-                "slack_error": "ratelimited"
-            })),
-            is_error: Some(true),
-            meta: None,
-        };
+        let mut result = rmcp::model::CallToolResult::error(Vec::new());
+        result.structured_content = Some(serde_json::json!({
+            "code": "upstream_unavailable",
+            "message": "Slack is temporarily unavailable",
+            "retryable": true,
+            "slack_error": "ratelimited"
+        }));
         let mut text = Vec::new();
         let mut images = Vec::new();
 
@@ -2994,7 +2989,7 @@ mod test_env_guard;
 mod tests {
     use super::*;
     use rmcp::model::Tool;
-    use std::borrow::Cow;
+
     use std::sync::Arc;
 
     fn install_test_crypto_provider() {
@@ -3002,17 +2997,7 @@ mod tests {
     }
 
     fn make_tool(name: &str, description: &str) -> Tool {
-        Tool {
-            name: Cow::Owned(name.to_string()),
-            title: None,
-            description: Some(Cow::Owned(description.to_string())),
-            input_schema: Arc::new(serde_json::Map::new()),
-            output_schema: None,
-            annotations: None,
-            icons: None,
-            meta: None,
-            execution: None,
-        }
+        Tool::new(name.to_string(), description.to_string(), Arc::new(serde_json::Map::new()))
     }
 
     #[derive(Debug)]
@@ -3056,7 +3041,7 @@ mod tests {
                     assert_eq!(caller.agent_id, "registered-worker");
                     assert_eq!((server, tool), ("violet", "violet_post"));
                     Ok(PreparedProxyCall { arguments, warning:None, failure_context:None,
-                        response:Some(rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text("contact_too_recent")])) })
+                        response:Some(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("contact_too_recent")])) })
                 })
             }
         }
@@ -3256,10 +3241,11 @@ mod tests {
 
     #[test]
     fn read_only_annotation_requires_read_only_and_not_destructive() {
-        let annotations = |read_only_hint, destructive_hint| rmcp::model::ToolAnnotations {
-            read_only_hint,
-            destructive_hint,
-            ..Default::default()
+        let annotations = |read_only_hint, destructive_hint| {
+            let mut annotations = rmcp::model::ToolAnnotations::default();
+            annotations.read_only_hint = read_only_hint;
+            annotations.destructive_hint = destructive_hint;
+            annotations
         };
         assert!(tool_annotations_read_only(&annotations(Some(true), None)));
         assert!(tool_annotations_read_only(&annotations(

@@ -3738,7 +3738,7 @@ impl CasService {
             result.structured_content = Some(serde_json::json!({
                 "respawn_queued": queued, "cooldown_seconds": 600, "notification_id": message_id,
             }));
-            result.content.push(rmcp::model::Content::text(if queued {
+            result.content.push(rmcp::model::ContentBlock::text(if queued {
                 "Context respawn queued with the recorded recipe and task bindings."
             } else {
                 "No additional recycle queued: the ten-minute cooldown or another request is active."
@@ -5783,7 +5783,7 @@ mod cas_89e1_post_merge_message_type_tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
     use cas_types::{Agent, AgentRole, Task, TaskStatus, WorkTarget};
-    use rmcp::model::RawContent;
+    use rmcp::model::ContentBlock;
     use std::path::Path;
     use std::process::Command;
 
@@ -5952,8 +5952,8 @@ mod cas_89e1_post_merge_message_type_tests {
         result
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()

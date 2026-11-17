@@ -374,8 +374,8 @@ const LATE_CLOSE_NOTE_MARKER: &str = "CLOSE_OUTCOME";
 const POST_COMMIT_NOTE_MARKER: &str = "POST_COMMIT_OUTCOME";
 
 fn first_tool_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
-    result.content.iter().find_map(|content| match &content.raw {
-        rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+    result.content.iter().find_map(|content| match content {
+        rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
         _ => None,
     })
 }
@@ -600,7 +600,7 @@ impl CasService {
                         if !timings.is_empty() && matches!(action, "worktree_merge" | "close")
                             && let Ok(answer) = &mut result
                         {
-                            answer.content.push(rmcp::model::Content::text(format!("Timing (inclusive): {timings}")));
+                            answer.content.push(rmcp::model::ContentBlock::text(format!("Timing (inclusive): {timings}")));
                         }
                         result
                     },
@@ -626,7 +626,7 @@ impl CasService {
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
                 if let Some(id) = &continuation_id {
                     self.record_registration_outcome(handle, receipt.clone(), arguments, id.clone());
-                    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
                         "COMMITTED: {description}. Registration follow-up continues; its final outcome will appear in your inbox. Continuation: {id}. Do not retry."
                     ))]);
                     answer.structured_content = Some(serde_json::json!({
@@ -654,13 +654,13 @@ impl CasService {
                 // cas-3937: a factory merge is not a task mutation; name the
                 // call itself, and its committed merge, instead.
                 if tool_name != "task" {
-                    return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                    return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
                         "COMMITTED: `{tool_name} action={action}` write committed ({description}). \
                          Remaining work continues in the background; its outcome is in task notes. Do not retry.",
                         action = receipt.action(),
                     ) + &format!("\nTiming (inclusive, + running): {}", receipt.timings()))]));
                 }
-                Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
                     "COMMITTED: {description}. Remaining close follow-up continues in the background; \
                      read task notes for its outcome. Do not retry.\nTiming (inclusive, + running): {}",
                     receipt.timings(),
@@ -875,7 +875,7 @@ impl CasService {
             }
         };
         if let Some(context) = context {
-            output.content.push(rmcp::model::Content::text(context));
+            output.content.push(rmcp::model::ContentBlock::text(context));
         }
         Ok(output)
     }
@@ -2089,7 +2089,7 @@ mod tests {
                     store.update(&task).unwrap();
                     mutation_receipt::task_disposition_committed(id, &supplied_outcome);
                 }
-                Ok(rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(supplied_refusal)]))
+                Ok(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(supplied_refusal)]))
             }));
             service.record_late_close_outcome(
                 handle, receipt, std::time::Instant::now() - std::time::Duration::from_millis(142_500),
@@ -2107,7 +2107,7 @@ mod tests {
     fn late_close_summary_keeps_one_bounded_line_cas_3b81() {
         let long = format!("Closed task: cas-x - {}\nsecond line", "y".repeat(400));
         let joined = Ok(Ok(rmcp::model::CallToolResult::success(vec![
-            rmcp::model::Content::text(long),
+            rmcp::model::ContentBlock::text(long),
         ])));
         let summary = super::late_close_summary(&joined);
         assert!(summary.starts_with("Closed task: cas-x"), "{summary}");

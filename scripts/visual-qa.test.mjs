@@ -505,14 +505,13 @@ test('JavaScript requirement needs a reason and cannot waive print loss', async 
   }
 });
 
-test('acceptance surfaces pass and the historical Figure 3 defect fails', async () => {
+test('clean exemplars pass while historical phone overflow and Figure 3 defects fail', async () => {
   const artifactDir = await acceptanceDir('visual-qa-acceptance-');
   const exemplarNames = ['product-page.html', 'report.html', 'dashboard.html', 'before-after.html'];
   // Use the runner's bounded capture pool for the independent clean pages.
-  // This keeps all 20 clean captures while avoiding five serial browsers.
+  // Keep every clean exemplar at both widths and in both schemes.
   const cleanPages = exemplarNames.map((name) =>
     join(repoRoot, 'cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars', name));
-  cleanPages.push(await revisionFixture('2420a246'));
   const clean = await runVisualQa({
     urls: cleanPages, artifactDir: join(artifactDir, 'clean'),
     schemes: ['light', 'dark'], viewports: [
@@ -522,6 +521,14 @@ test('acceptance surfaces pass and the historical Figure 3 defect fails', async 
   });
   assert.equal(clean.status, 'PASS', JSON.stringify(clean.findings));
   assert.equal(clean.screenshots.length, cleanPages.length * 4);
+
+  // The old report fixed Figure 3 but still expands the phone page to 1051px.
+  // Page-level overflow is now a defect, rather than a passing historical baseline.
+  const phoneOverflow = await acceptanceRender(await revisionFixture('2420a246'), join(artifactDir, 'review-2420a246'));
+  assert.equal(phoneOverflow.status, 'FAIL');
+  assert.equal(phoneOverflow.findings.length, 2);
+  assert.ok(phoneOverflow.findings.every(finding => finding.type === 'page-overflow'
+    && finding.viewport.width === 390 && finding.scrollWidth > finding.clientWidth));
 
   const defectiveReview = await acceptanceRender(await revisionFixture('cbac967b'), join(artifactDir, 'review-cbac967b'));
   assert.equal(defectiveReview.status, 'FAIL');

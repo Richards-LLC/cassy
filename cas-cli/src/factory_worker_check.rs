@@ -2136,7 +2136,29 @@ fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], 
 fn detached_runner_command_with_run(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, run: Option<&str>, test_env: &[String]) -> Command {
     let mut command = Command::new("/bin/sh");
     command
-        .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
+        .args(["-c", r#"
+runner=
+interrupted=
+forward_signal() {
+    interrupted=$1
+    if [ -n "$runner" ]; then kill -"$1" "$runner" 2>/dev/null || :; fi
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+"$0" "$@" &
+runner=$!
+if [ -n "$interrupted" ]; then forward_signal "$interrupted"; fi
+while :; do
+    interrupted=
+    wait "$runner"
+    code=$?
+    # A trapped signal interrupts wait before the producer drains its groups.
+    [ -n "$interrupted" ] || break
+done
+echo "worker-check: EXIT $code"
+exit "$code"
+"#])
         .arg(executable)
         .args(["factory", "worker-check", "--cas-root"])
         .arg(cas_root);
@@ -2820,115 +2842,105 @@ else:
     #[cfg(unix)]
     #[test]
     fn term_to_worker_check_parent_cleans_cargo_descendants() {
-        use std::os::unix::process::CommandExt;
-        use std::process::Stdio;
         use std::time::{Duration, Instant};
 
         const NAME: &str = "factory_worker_check::tests::term_to_worker_check_parent_cleans_cargo_descendants";
         const FIXTURE: &str = "CAS_WORKER_TERM_PARENT_FIXTURE";
         if let Some(root) = std::env::var_os(FIXTURE) {
             let root = PathBuf::from(root);
-            let mut command = Command::new("python3");
-            command.arg("-c").arg("import pathlib, runpy, sys; guard = runpy.run_path(sys.argv[1], run_name='signal_fixture'); guard['verified'](pathlib.Path(sys.argv[2]).read_text(), sys.argv[3], ['nextest', 'run', '-p', 'cas', '--lib'], pathlib.Path(sys.argv[4]))")
-                .arg(root.join("worker-proof-guards.py"))
-                .arg(root.join("verified.sh"))
-                .arg(root.join("fake-cargo.py"))
-                .arg(root.join("count"))
-                .env("VERIFIED_TEST_REPO_ROOT", &root)
-                .env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "60")
-                .env("PID_FILE", root.join("pids"))
-                .env("CARGO", root.join("fake-cargo.py"))
-                .env("PYTHONPATH", &root)
-                // CI runs the suite under run-verified-tests.sh with a
-                // relative VERIFIED_TEST_LOG; the nested runner must not
-                // inherit it, or it cannot open the log and never starts Cargo.
-                .env_remove("VERIFIED_TEST_LOG")
-                .stdout(Stdio::null()).stderr(Stdio::null());
-            command.process_group(0);
-            let signals = WorkerWaitSignals::install().unwrap();
-            let mut child = command.spawn().unwrap();
-            let status = wait_for_worker_command(&mut child).unwrap();
-            drop(signals);
-            assert!(!status.success(), "TERM must stop the worker command");
-            return;
+            let repo = root.join("worktrees/cancel-worker");
+            let mut env = crate::test_support::TestEnvGuard::new();
+            env.set_current_dir(&repo);
+            let id = std::fs::read_to_string(root.join("run-id")).unwrap();
+            let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(cancel)"].map(str::to_owned);
+            let result = crate::factory_worker_runs::monitor(&root, &id, || {
+                execute_at_with_scope(&root, &args, &repo, &root.join("cargo"), None, None)
+            });
+            assert!(result.is_err());
+            std::process::exit(1);
         }
 
-        let root = tempfile::tempdir().unwrap();
-        let fake = root.path().join("fake-cargo.py");
-        std::fs::write(
-            root.path().join("worker-proof-guards.py"),
-            include_str!("../../scripts/worker-proof-guards.py"),
-        )
-        .unwrap();
-        std::fs::write(root.path().join("verified.sh"), include_str!("../../scripts/run-verified-tests.sh")).unwrap();
-        std::fs::write(root.path().join("sitecustomize.py"), r#"import os, signal, time
-real_killpg = os.killpg
-def slow_group_term(group, signum):
-    if signum == signal.SIGTERM:
-        time.sleep(1.2)
-    return real_killpg(group, signum)
-os.killpg = slow_group_term
-"#).unwrap();
-        std::fs::write(&fake, r#"#!/usr/bin/env python3
-import os, pathlib, subprocess, sys
-marker = pathlib.Path(os.environ['PID_FILE'])
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', str(marker)])
-ready = marker.with_suffix('.ready')
-ready.write_text(f'{os.getpid()} {child.pid}')
-ready.replace(marker)
-print('    Finished `test` profile in 0.01s', flush=True)
-child.wait()
-"#).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut parent = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
-            .env(FIXTURE, root.path())
-            .stdout(Stdio::null()).stderr(Stdio::inherit())
-            .process_group(0)
-            .spawn().unwrap();
-        let marker = root.path().join("pids");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let repo = root.join("worktrees/cancel-worker");
+        fixture_commit(&repo);
+        env.set_current_dir(&repo);
+        fake_cargo(&root.join("cargo"), r#"exec python3 -c '
+import os, pathlib, subprocess
+root = pathlib.Path.cwd().parent.parent
+if (root / "retry").exists():
+    print("     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped", flush=True)
+else:
+    child = subprocess.Popen(["sleep", "120"], close_fds=False)
+    marker = root / "pids.ready"
+    marker.write_text(f"{os.getpid()} {child.pid} {os.getpgid(os.getppid())}")
+    marker.replace(root / "pids")
+    child.wait()
+'"#);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("cancel-id".into(), "cancel-worker".into(), cas_types::AgentRole::Worker);
+        worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        worker.metadata.insert("clone_path".into(), repo.display().to_string());
+        agents.register(&worker).unwrap();
+        let log = root.join("run.log");
+        std::fs::write(&log, "").unwrap();
+        let id = crate::factory_worker_runs::register(&root, &repo, &log, chrono::Utc::now()).unwrap().unwrap();
+        std::fs::write(root.join("run-id"), &id).unwrap();
+        let launcher = root.join("producer");
+        fake_cargo(&launcher, r#"exec "$CAS_WORKER_TERM_TEST_EXE" --exact "$CAS_WORKER_TERM_TEST_NAME" --nocapture --test-threads=1"#);
+        let args = ["-p", "cas", "--lib"].map(str::to_owned);
+        let mut command = detached_runner_command_with_run(&launcher, &root, &args, None, Some(&id), &[]);
+        command.env(FIXTURE, &root)
+            .env("CAS_WORKER_TERM_TEST_EXE", std::env::current_exe().unwrap())
+            .env("CAS_WORKER_TERM_TEST_NAME", NAME)
+            .env_remove("VERIFIED_TEST_LOG");
+        struct Owned {
+            child: std::process::Child,
+            marker: PathBuf,
+            cleanup_groups: bool,
         }
-        let pids: Vec<i32> = marker.exists()
-            .then(|| std::fs::read_to_string(&marker).unwrap())
-            .unwrap_or_default().split_whitespace()
-            .map(|pid| pid.parse().unwrap()).collect();
-        if pids.len() == 2 {
-            unsafe { libc::kill(parent.id() as i32, libc::SIGTERM) };
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut status = None;
-        while status.is_none() && Instant::now() < deadline {
-            status = parent.try_wait().unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if status.is_none() {
-            // The fixture's leader is still unreaped; only its owned group.
-            unsafe { libc::killpg(parent.id() as i32, libc::SIGKILL) };
-            status = Some(parent.wait().unwrap());
-        }
-        let survivors: Vec<_> = pids.into_iter().enumerate().filter(|(_, pid)| {
-            let output = Command::new("ps").args(["-p", &pid.to_string(), "-o", "stat="])
-                .output().unwrap();
-            let state = String::from_utf8_lossy(&output.stdout);
-            !state.trim().is_empty() && !state.trim().starts_with('Z')
-        }).collect();
-        for (index, pid) in &survivors {
-            let output = Command::new("ps").args(["-ww", "-p", &pid.to_string(), "-o", "command="])
-                .output().unwrap();
-            let command = String::from_utf8_lossy(&output.stdout);
-            let owned = if *index == 0 { command.contains(fake.to_str().unwrap()) }
-                        else { command.contains(root.path().to_str().unwrap()) && command.contains("time.sleep(60)") };
-            if owned {
-                unsafe { libc::kill(*pid, libc::SIGKILL) };
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                if self.cleanup_groups && let Ok(text) = std::fs::read_to_string(&self.marker) {
+                    let pids: Vec<i32> = text.split_whitespace().map(|pid| pid.parse().unwrap()).collect();
+                    for group in [pids[0], pids[2]] { unsafe { libc::killpg(group, libc::SIGKILL); } }
+                }
+                let _ = self.child.kill();
+                let _ = self.child.wait();
             }
         }
-        assert!(marker.exists(), "fake Cargo never reached discovery");
-        assert_eq!(status.unwrap().code(), Some(0), "parent signal fixture failed");
-        assert!(survivors.is_empty(), "Cargo descendants survived: {survivors:?}");
+        let mut owned = Owned { child: spawn_detached(command).unwrap(), marker: root.join("pids"), cleanup_groups: true };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !owned.marker.exists() && Instant::now() < deadline {
+            assert!(owned.child.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pids: Vec<i32> = std::fs::read_to_string(&owned.marker).unwrap().split_whitespace().map(|pid| pid.parse().unwrap()).collect();
+        assert!(try_lock_lane(&root, &repo).unwrap().is_none());
+        assert_eq!(crate::factory_target_cache::owner::for_retirement(&root, &repo).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
+        // The returned session leader is exactly the PID execute_detached prints.
+        assert_eq!(unsafe { libc::kill(owned.child.id() as i32, libc::SIGTERM) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = owned.child.try_wait().unwrap() { break status; }
+            assert!(Instant::now() < deadline, "detached cancellation did not drain");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.code(), Some(1));
+        assert!(!worker_group_has_live_members(pids[0]));
+        assert!(!worker_group_has_live_members(pids[2]));
+        owned.cleanup_groups = false;
+        assert!(try_lock_lane(&root, &repo).unwrap().is_some());
+        assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
+        let run: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("worker-runs").join(format!("{id}.json"))).unwrap()).unwrap();
+        assert!(run["finished_at"].is_string());
+        assert_eq!(run["exit_code"], 1);
+        std::fs::write(root.join("retry"), "").unwrap();
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(cancel)"].map(str::to_owned);
+        execute_at_with_scope(&root, &args, &repo, &root.join("cargo"), None, None).unwrap();
     }
 
     #[cfg(unix)]

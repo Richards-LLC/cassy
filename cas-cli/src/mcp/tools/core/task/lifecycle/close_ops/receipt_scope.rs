@@ -700,12 +700,12 @@ mod tests {
         for introduced in [false, true] {
             if introduced {
                 std::fs::write(repo.join("HANDOFF.md"), "worker checkpoint\n").unwrap();
-                git(&["add", "."]); git(&["commit", "-qm", "checkpoint"]);
+                git(&["add", "HANDOFF.md"]); git(&["commit", "-qm", "checkpoint"]);
             }
             let head = git(&["rev-parse", "HEAD"]);
             let changed = if introduced { vec!["HANDOFF.md".into(), "guide.md".into()] } else { vec!["guide.md".into()] };
             let refusals = park_refusals(&root, repo, &task, &changed, &head, &base, None);
-            assert_eq!(refusals.iter().any(|reason| reason.starts_with("ROOT_HANDOFF_COMMITTED:")), introduced, "{refusals:?}");
+            assert_eq!(refusals.iter().any(|reason| reason.split_once(':').is_some_and(|(code, _)| code == "ROOT_HANDOFF_COMMITTED")), introduced, "{refusals:?}");
         }
     }
 

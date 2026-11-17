@@ -887,8 +887,8 @@ where
     pub(crate) fn delivery_landing(&mut self, commit: &str, target: &str) -> Result<String, CiWatchError> {
         let source = self.resolve_commit(commit)?.ok_or_else(|| CiWatchError::Unavailable("delivery commit unavailable".into()))?;
         if source == target { return Ok(source); }
-        let output = self.git(&["rev-list".into(), "--first-parent".into(), "--reverse".into(),
-            "--ancestry-path".into(), format!("{source}..{target}")])?;
+        let output = self.git(&["rev-list", "--first-parent", "--reverse",
+            "--ancestry-path", &format!("{source}..{target}")])?;
         let candidate = output.stdout.lines().next().filter(|_| output.success)
             .ok_or_else(|| CiWatchError::Unavailable("delivery landing unavailable".into()))?.trim().to_string();
         if self.resolve_commit(&format!("{candidate}^1"))?.as_deref() == Some(source.as_str()) {

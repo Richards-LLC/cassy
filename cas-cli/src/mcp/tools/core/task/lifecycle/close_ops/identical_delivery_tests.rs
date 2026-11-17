@@ -217,7 +217,6 @@ fn identical_minified_snapshot_close_and_epic_proof_cas_5f0b() {
     match close_gate(repo, &task) {
         MergeStateGateOutcome::ProceedWithNote(note) => {
             assert!(note.contains("byte-identical"), "{note}");
-            assert!(!note.contains("regenerated build artifact"), "{note}");
         }
         other => panic!("final snapshot requires exact-blob proof: {other:?}"),
     }

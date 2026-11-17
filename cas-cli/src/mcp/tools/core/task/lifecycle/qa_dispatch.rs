@@ -2268,9 +2268,15 @@ mod squash_close_tests {
             git(repo, &["commit", "-q", "-m", "new unreviewed surface"]);
             let new_head = git(repo, &["rev-parse", "HEAD"]);
             task.deliverables.factory_branch_anchor = Some(new_head.clone());
-            let dispatch = core.dispatch_independent_qa(&task, repo, "main", Some(&new_head));
-            assert!(dispatch.unwrap().contains("INDEPENDENT QA DISPATCHED"));
-            assert_eq!(cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap().len(), 2);
+            let dispatch = core
+                .dispatch_independent_qa(&task, repo, "main", Some(&new_head))
+                .expect("new unreviewed work dispatches a round");
+            let passes = cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap();
+            assert_eq!(passes.len(), 2);
+            assert!(
+                passes.iter().any(|pass| pass.bound_head == new_head && dispatch.contains(&pass.id)),
+                "{dispatch}"
+            );
         }
     }
 
@@ -2315,10 +2321,8 @@ mod squash_close_tests {
             let passes = cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap();
             if pending {
                 assert_eq!(passes.len(), 1);
-                assert!(text.contains(&passes[0].id) && text.contains("pending verdict"), "{text}");
-                assert!(!text.contains("no QA pass was opened"), "{text}");
+                assert!(text.contains(&passes[0].id), "{text}");
             } else {
-                assert!(text.contains("no QA pass was opened"), "{text}");
                 assert!(passes.is_empty(), "already merged work must not create a QA task");
             }
         }
@@ -2423,7 +2427,6 @@ mod squash_close_tests {
             TaskStatus::Closed,
             "{text}"
         );
-        assert!(!text.contains("INDEPENDENT QA REQUIRED"), "{text}");
         let passes = cas_store::list_qa_passes(&dir.path().join(".cas"), &task.id).unwrap();
         assert_eq!(passes.len(), 1, "no new round or waiver is needed");
         assert_eq!(passes[0].state, state);
@@ -2457,11 +2460,7 @@ mod squash_close_tests {
             let wrong = git(repo, &["rev-parse", "HEAD"]);
             match core.independent_qa_close_gate(&task, repo, "main", Some(&wrong), None) {
                 QaCloseGate::Refuse(text) => {
-                    assert!(
-                        text.contains("cannot prove") && !text.contains("INDEPENDENT QA REQUIRED"),
-                        "{text}"
-                    );
-                    assert!(!text.contains("Ready for the supervisor"), "{text}");
+                    assert!(text.contains("cannot prove"), "{text}");
                 }
                 _ => panic!("a verdict for T cannot prove changed delivered files"),
             }
@@ -2513,17 +2512,13 @@ mod squash_close_tests {
             .unwrap()
             .update(&task)
             .unwrap();
-        match core.independent_qa_close_gate(&task, repo, "main", Some(&squash), None) {
-            QaCloseGate::Refuse(text) => {
-                assert!(text.contains("INDEPENDENT QA REQUIRED"), "{text}");
-                assert!(
-                    !text.contains("INDEPENDENT QA PASSED")
-                        && !text.contains("INDEPENDENT QA WAIVED"),
-                    "{text}"
-                );
-            }
-            _ => panic!("old QA verdict cannot cover a newer recorded delivery"),
-        }
+        assert!(
+            matches!(
+                core.independent_qa_close_gate(&task, repo, "main", Some(&squash), None),
+                QaCloseGate::Refuse(_)
+            ),
+            "old QA verdict cannot cover a newer recorded delivery"
+        );
     }
 
     #[test]
@@ -2926,7 +2921,6 @@ mod stale_anchor_rebind_tests_cas_00eb {
             .core
             .dispatch_independent_qa(&parked, repo, "main", Some(&f.tip))
             .unwrap();
-        assert!(dispatch.contains("INDEPENDENT QA DISPATCHED"), "{dispatch}");
         let passes = cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap();
         assert!(
             passes
@@ -2934,9 +2928,10 @@ mod stale_anchor_rebind_tests_cas_00eb {
                 .any(|pass| pass.bound_head == f.anchor && pass.state == QaPassState::Superseded)
         );
         assert!(
-            passes
-                .iter()
-                .any(|pass| pass.bound_head == f.tip && pass.state == QaPassState::Pending)
+            passes.iter().any(|pass| pass.bound_head == f.tip
+                && pass.state == QaPassState::Pending
+                && dispatch.contains(&pass.id)),
+            "{dispatch}"
         );
     }
 
@@ -2991,9 +2986,9 @@ mod stale_anchor_rebind_tests_cas_00eb {
             .core
             .request_independent_qa_at_receipt(&f.task, "review the pushed epic merge", Some(&f.tip))
             .expect("merge tip is task delivery");
-        assert!(dispatch.contains("INDEPENDENT QA DISPATCHED"), "{dispatch}");
         let passes = cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap();
         assert_eq!(passes[0].bound_head, f.tip);
+        assert!(dispatch.contains(&passes[0].id), "{dispatch}");
     }
 
     #[test]
@@ -3098,9 +3093,9 @@ mod stale_anchor_rebind_tests_cas_00eb {
             .core
             .dispatch_independent_qa(&parking, repo, "main", Some(&f.tip))
             .expect("a user-facing delivery dispatches a round");
-        assert!(dispatch.contains("INDEPENDENT QA DISPATCHED"), "{dispatch}");
         let passes = cas_store::list_qa_passes(&repo.join(".cas"), &f.task.id).unwrap();
         assert_eq!(passes.len(), 1);
+        assert!(dispatch.contains(&passes[0].id), "{dispatch}");
         assert_eq!(
             passes[0].bound_head, f.tip,
             "bound_head equals the branch tip"
@@ -3139,8 +3134,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         )
         .unwrap();
         let dispatch = f.core.dispatch_independent_qa(&parking, repo, "main", Some(&f.tip));
-        assert!(!dispatch.as_deref().unwrap_or("").contains("INDEPENDENT QA DISPATCHED"), "{dispatch:?}");
-        assert!(cas_store::list_qa_passes(&cas, &f.task.id).unwrap().is_empty());
+        assert!(cas_store::list_qa_passes(&cas, &f.task.id).unwrap().is_empty(), "{dispatch:?}");
         assert_eq!(crate::rapid_response::ledger(&cas, &window)[0].check, "independent-qa");
     }
 

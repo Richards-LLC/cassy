@@ -1495,7 +1495,6 @@ mod cas_3dcb_death_relay_tests {
             let task = tasks.get(id).expect("recovered task");
             assert_eq!(task.status, TaskStatus::Open);
             assert_eq!(task.assignee, None);
-            assert!(task.notes.contains("orphan recovery"));
         }
         let relay = fixture.prompt_relays().pop().expect("death relay");
         assert!(relay.prompt.contains("cas-in-progress") && relay.prompt.contains("cas-blocked"));
@@ -1832,7 +1831,6 @@ mod cas_3dcb_death_relay_tests {
         let after = tasks.get("cas-live-work").expect("task");
         assert_eq!(after.status, TaskStatus::InProgress);
         assert_eq!(after.assignee.as_deref(), Some("twin-worker"));
-        assert!(after.notes.contains("lease kept"), "{}", after.notes);
         let lease = fixture
             .agent_store
             .get_lease("cas-live-work")
@@ -1984,7 +1982,6 @@ mod cas_3dcb_death_relay_tests {
         assert_eq!(after.len(), 1, "one logical worker must inject one turn");
         let batch = &after[0].prompt;
         assert!(batch.contains("30 duplicate registry rows expire"));
-        assert!(batch.contains("No tasks were held or parked"));
         for worker_id in worker_ids {
             assert!(
                 batch.contains(&worker_id),

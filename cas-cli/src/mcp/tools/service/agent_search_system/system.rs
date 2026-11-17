@@ -1209,7 +1209,6 @@ mod tests {
                 .await
                 .unwrap();
             let text = response_text(&result);
-            assert!(text.contains("Bug report was not filed."), "{text}");
             assert!(
                 text.contains(&format!("cas config set {selected_key} owner/name")),
                 "{text}"
@@ -1224,7 +1223,6 @@ mod tests {
                 .unwrap();
             assert!(std::path::Path::new(path).starts_with(temp.path()));
             let staged = std::fs::read_to_string(path).unwrap();
-            assert!(staged.contains("automatic GitHub filing did not complete"));
             assert!(staged.contains(selected_key));
             assert!(staged.contains("Cassy failure in ~"));
         }

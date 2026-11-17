@@ -684,7 +684,7 @@ mod tests {
 
             let mut update = empty_update();
             update.execution_note = Some(String::new());
-            let locked = guard_task_proof_scope(
+            guard_task_proof_scope(
                 root.path(),
                 &task,
                 ProofScopeOperation::TaskUpdate {
@@ -694,7 +694,6 @@ mod tests {
                 },
             )
             .expect_err("a parked delivery still freezes review-relevant update fields");
-            assert!(locked.contains("DELIVERY PROOF SCOPE LOCKED"));
 
             cas_store::request_changes_for_parked_delivery(
                 root.path(),

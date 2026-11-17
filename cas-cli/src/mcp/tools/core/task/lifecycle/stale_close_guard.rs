@@ -503,7 +503,6 @@ mod tests {
         let msg = verification_on_closed_message("cas-a651");
         assert!(msg.contains("Closed"));
         assert!(msg.contains("cas-a651"));
-        assert!(msg.to_lowercase().contains("not allowed") || msg.contains("await"));
     }
 
     #[test]

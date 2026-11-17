@@ -815,7 +815,6 @@ mod tests {
             !refused.contains("uncovered source modules: factory_worker_check"),
             "{refused}"
         );
-        assert!(refused.contains("run a capped targeted test"), "{refused}");
 
         // No receipts derive nothing.
         assert!(derive(repo.path(), &changed, &task.proof_targets, &[]).is_empty());

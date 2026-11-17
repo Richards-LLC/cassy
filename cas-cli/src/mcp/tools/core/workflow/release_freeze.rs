@@ -451,13 +451,11 @@ mod tests {
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         assert!(check_merge(&root, lane, Some("cas-feat")).is_ok(), "unfrozen");
 
-        let receipt = freeze(&root, "cas-tr", "supervisor calm-koala", Some("4.2.1")).unwrap();
-        assert!(receipt.starts_with("TRAIN FROZEN"), "{receipt}");
+        freeze(&root, "cas-tr", "supervisor calm-koala", Some("4.2.1")).unwrap();
         // A second machine opening the same synced row sees the same gate.
         let peer = crate::store::open_task_store(&root).unwrap().get("cas-tr").unwrap();
         assert!(freeze_of(&peer).is_some());
-        let refused = check_merge(&root, lane, Some("cas-feat")).unwrap_err();
-        assert!(refused.contains("train frozen for release, parked for the next train"), "{refused}");
+        assert!(check_merge(&root, lane, Some("cas-feat")).is_err(), "feature while frozen");
         assert!(check_merge(&root, lane, Some("cas-fix")).is_err(), "repair without a red");
 
         let tip = git(repo, &["rev-parse", lane]);

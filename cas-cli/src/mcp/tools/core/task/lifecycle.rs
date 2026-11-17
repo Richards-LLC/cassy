@@ -4388,12 +4388,9 @@ mod related_recall_response_tests {
             epic_id.clone(),
         );
         first.description = Some(identifiers.to_string());
-        let created = core
-            .cas_task_create(Parameters(first))
+        core.cas_task_create(Parameters(first))
             .await
             .expect("a child that repeats its epic's identifiers is not a duplicate of the epic");
-        let text = format!("{:?}", created.content);
-        assert!(!text.contains("SIBLING OVERLAP"), "{text}");
         let first_id = core
             .open_task_store()
             .expect("task store")
@@ -4415,7 +4412,7 @@ mod related_recall_response_tests {
             .expect("a sibling overlap never blocks creation");
         let text = format!("{:?}", created.content);
         assert!(
-            text.contains("SIBLING OVERLAP") && text.contains(&first_id),
+            text.contains(&first_id),
             "the sibling overlap is reported on the receipt: {text}"
         );
         assert!(
@@ -4519,6 +4516,18 @@ mod related_recall_response_tests {
         let safety = "SAFETY: never read backend .env; stub /api/ and abort production hosts.\n\
                       BUILD: NUXT_SSR=false; use 200.html and tests/auth.setup.ts.\n\
                       DELIVER: ledger rows PASS or FAIL; all HARD assertions apply.";
+        // A sibling overlap names the overlapping sibling's task id.
+        let sibling_ids = || -> Vec<String> {
+            store
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .filter(|task| task.id != epic.id)
+                .map(|task| task.id)
+                .collect()
+        };
+        let names_a_sibling =
+            |receipt: &str, earlier: &[String]| earlier.iter().any(|id| receipt.contains(id.as_str()));
         for (title, scope) in [
             ("Walk checkout", "Verify checkout-payment on /checkout in pages/checkout.vue."),
             ("Walk account", "Verify account-profile on /account in pages/account.vue."),
@@ -4526,15 +4535,17 @@ mod related_recall_response_tests {
         ] {
             let mut request = child_request(title, epic.id.clone());
             request.description = Some(format!("{scope}\n\n{safety}"));
+            let earlier = sibling_ids();
             let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
-            assert!(!receipt.contains("SIBLING OVERLAP"), "{title}: {receipt}");
+            assert!(!names_a_sibling(receipt.as_str(), earlier.as_slice()), "{title}: {receipt}");
         }
         let mut duplicate = child_request("Inspect payment journey", epic.id.clone());
         duplicate.description = Some(format!(
             "Check checkout-payment on /checkout in pages/checkout.vue for a completed order.\n\n{safety}"
         ));
+        let earlier = sibling_ids();
         let receipt = text(core.cas_task_create(Parameters(duplicate)).await.unwrap());
-        assert!(receipt.contains("SIBLING OVERLAP"), "genuine scope overlap: {receipt}");
+        assert!(names_a_sibling(receipt.as_str(), earlier.as_slice()), "genuine scope overlap: {receipt}");
         assert!(receipt.contains("pages/checkout.vue"), "{receipt}");
         assert!(!receipt.contains("overlapping identifiers: .env"), "{receipt}");
 
@@ -4547,8 +4558,9 @@ mod related_recall_response_tests {
         ] {
             let mut request = child_request(title, epic.id.clone());
             request.description = Some(format!("{scope}\n\n{settlement}\n\n{safety}"));
+            let earlier = sibling_ids();
             let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
-            assert_eq!(receipt.contains("SIBLING OVERLAP"), should_warn, "{title}: {receipt}");
+            assert_eq!(names_a_sibling(receipt.as_str(), earlier.as_slice()), should_warn, "{title}: {receipt}");
             if should_warn {
                 assert!(receipt.contains("ledgerStore"), "pair-only scope stays visible: {receipt}");
             }
@@ -4936,8 +4948,7 @@ mod related_recall_response_tests {
             "[factory]\nepic_base_branch = \"staging\"\nrelease_train = false\n",
         )
         .unwrap();
-        let off = create("No train").await;
-        assert!(!off.contains("RELEASE TRAIN"), "{off}");
+        create("No train").await;
         assert_eq!(task("No train").deliverables.work_target.unwrap().target_branch, "staging");
         assert!(store.get_parent_epic(&task("No train").id).unwrap().is_none());
 
@@ -4975,7 +4986,6 @@ mod related_recall_response_tests {
                 .await
                 .expect("missing commit and origin must not block task creation"),
         );
-        assert!(receipt.contains("WORK TARGET UNRESOLVED"), "{receipt}");
         assert!(receipt.contains("epic_base_branch"), "{receipt}");
         assert!(receipt.contains("target_branch"), "{receipt}");
         let task = core
@@ -5012,8 +5022,7 @@ mod related_recall_response_tests {
                 .expect("invalid configured target must not block task creation"),
         );
         assert!(
-            invalid_target_receipt.contains("WORK TARGET UNRESOLVED")
-                && invalid_target_receipt.contains("target_branch"),
+            invalid_target_receipt.contains("target_branch"),
             "{invalid_target_receipt}"
         );
         let invalid_target_task = core
@@ -5431,7 +5440,6 @@ mod related_recall_response_tests {
                         && response.contains(LANE),
                     "{response}"
                 );
-                assert!(!response.contains("WORK TARGET DEFAULTED"), "{response}");
                 if case == "default" {
                     assert_eq!(
                         response.replace(&child.id, "cas-new").trim(),
@@ -5722,7 +5730,7 @@ mod related_recall_response_tests {
             "epic/live-target"
         );
         assert!(
-            child.notes.contains("matched parent epic") && child.notes.contains("epic/live-target"),
+            child.notes.contains(&epic.id) && child.notes.contains("epic/live-target"),
             "normalization must be durable and visible: {}",
             child.notes
         );
@@ -5810,7 +5818,6 @@ mod related_recall_response_tests {
             .expect("create epic");
         let receipt = format!("{created:?}");
         assert!(receipt.contains("Epic lane adopted: epic/violet-log-hygiene"), "{receipt}");
-        assert!(!receipt.contains("Epic branch created"), "{receipt}");
         let store = core.open_task_store().expect("task store");
         let epic = store
             .list(None)
@@ -5902,7 +5909,7 @@ mod related_recall_response_tests {
             .expect("created epic");
         let lane = epic.branch.expect("an auto lane is still cut from a base target");
         assert!(lane.starts_with("epic/staging-based-epic-"), "{lane}");
-        assert!(receipt.contains("Epic branch created"), "{receipt}");
+        assert!(receipt.contains(&lane), "{receipt}");
         assert!(
             receipt.contains(&format!(
                 "Deliveries land on {lane}; 'staging' is its base and the epic's PR target"

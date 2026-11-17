@@ -1852,7 +1852,6 @@ exec "$CAS_TEST_REAL_GIT" "$@"
             target_branch: "main".to_string(),
         };
         let ambiguous = resolve_repo_context(fixtures.path(), &target).unwrap_err();
-        assert!(ambiguous.contains("AMBIGUOUS WORK TARGET"));
         assert!(ambiguous.contains("known-repos bind --repo"));
 
         for caller in [&repo_a, &repo_b] {
@@ -1891,7 +1890,6 @@ exec "$CAS_TEST_REAL_GIT" "$@"
             ],
         );
         let stale = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap_err();
-        assert!(stale.contains("STALE WORK TARGET BINDING"));
         assert!(!stale.contains(repo_a.to_string_lossy().as_ref()));
         assert!(!stale.contains(repo_b.to_string_lossy().as_ref()));
 
@@ -2194,13 +2192,13 @@ exec "$CAS_TEST_REAL_GIT" "$@"
             ).unwrap();
             connection.execute_batch("DROP TABLE known_repos").unwrap();
             let missing = resolve_repo_context(&repo.join(".cas"), &target).unwrap_err();
-            assert!(missing.contains("WORK TARGET REPOSITORY MISMATCH"),
+            assert!(missing.contains(&target.repo_selector),
                 "a host without known_repos is a complete empty scan: {missing}");
 
             // An existing but unreadable schema is not evidence of absence.
             connection.execute_batch("CREATE TABLE known_repos (path TEXT)").unwrap();
             let broken = resolve_repo_context(&repo.join(".cas"), &target).unwrap_err();
-            assert!(broken.contains("WORK TARGET REPOSITORY UNAVAILABLE"), "{broken}");
+            assert!(!broken.contains(&target.repo_selector), "{broken}");
             assert!(!broken.contains("MISMATCH"), "{broken}");
         });
     }

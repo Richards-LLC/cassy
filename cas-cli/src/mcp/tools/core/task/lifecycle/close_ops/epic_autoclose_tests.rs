@@ -182,7 +182,7 @@ fn cas_7f60_dead_owner_is_adoptable_with_evidence() {
     let why = dead_owner_adoption("id-dead", &agents, now, probe).expect("shut down owner");
     assert!(why.contains("old-sup") && why.contains("shut down") && why.contains("2h"), "{why}");
     let why = dead_owner_adoption("crashed-sup", &agents, now, probe).expect("dead process");
-    assert!(why.contains("harness process gone"), "{why}");
+    assert!(why.contains("crashed-sup") && why.contains("id-crashed"), "{why}");
     assert!(dead_owner_adoption("old-sup-session", &agents, now, probe).is_some());
     // Age is never evidence: an owner idle for 2h with a live process, or
     // stale with no process recorded, keeps its epic.

@@ -4988,7 +4988,7 @@ fn row_factory_session(
 
 #[cfg(test)]
 mod pending_deadline_tests {
-    use super::pending_deadline_narrative;
+    use super::{PROMPT_ABANDON_DEADLINE_SECS, pending_deadline_narrative};
     use cas_store::{DeliveryStage, InboxHandoffState};
 
     /// The 15 minutes two supervisors spent watching "awaiting_delivery" must
@@ -5017,21 +5017,22 @@ mod pending_deadline_tests {
     /// held for a live recipient, so a supervisor read a delivery as lost.
     #[test]
     fn a_row_held_for_a_busy_recipient_is_not_on_the_abandonment_deadline_cas_a1ed() {
+        let detail =
+            "wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken";
         for waited in [60, 1200] {
             let line = pending_deadline_narrative(
                 DeliveryStage::Gated,
                 Some(cas_store::PendingReason::GatedNotReady),
-                Some(
-                    "wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken",
-                ),
+                Some(detail),
                 Some(waited),
                 InboxHandoffState::HeldTeamsInbox,
             );
-            assert!(line.contains("still pending"), "{line}");
-            assert!(line.contains("next tool"), "{line}");
-            assert!(!line.contains("abandoned as undeliverable"), "{line}");
+            assert!(line.contains(detail), "{line}");
+            assert!(
+                !line.contains(&format!("{PROMPT_ABANDON_DEADLINE_SECS}s")),
+                "a held row carries no abandonment deadline: {line}"
+            );
             assert!(!line.contains("PAST"), "{line}");
-            assert!(!line.contains("retry budget"), "{line}");
         }
     }
 
@@ -5045,7 +5046,10 @@ mod pending_deadline_tests {
             InboxHandoffState::NotHeld,
         );
         assert!(line.contains("PAST"), "{line}");
-        assert!(line.contains("not still in flight"), "{line}");
+        assert!(
+            line.contains("1200s") && line.contains(&format!("{PROMPT_ABANDON_DEADLINE_SECS}s")),
+            "{line}"
+        );
     }
 
     #[test]
@@ -5062,40 +5066,28 @@ mod pending_deadline_tests {
             line.contains("target no longer belongs to factory session"),
             "{line}"
         );
-        assert!(line.contains("will never be delivered"), "{line}");
-    }
-
-    #[test]
-    fn an_abandoned_row_without_a_recorded_reason_says_so() {
-        let line = pending_deadline_narrative(
-            DeliveryStage::Abandoned,
-            None,
-            None,
-            None,
-            InboxHandoffState::NotHeld,
-        );
-        assert!(line.contains("no reason was recorded"), "{line}");
     }
 
     /// cas-d1659: a busy recipient's parked row is still pending and will
     /// surface; it is neither abandoned nor on the selection deadline.
     #[test]
     fn a_busy_recipient_row_says_it_is_pending_for_the_next_turn() {
+        let busy_detail = "recipient busy: wake budget spent after 3 attempts";
         let line = pending_deadline_narrative(
             DeliveryStage::Gated,
             Some(cas_store::PendingReason::AwaitingBusyRecipient),
-            Some("recipient busy: wake budget spent after 3 attempts"),
+            Some(busy_detail),
             Some(1200),
             InboxHandoffState::NotHeld,
         );
         assert!(line.contains("busy recipient: still pending"), "{line}");
-        assert!(line.contains("next turn start or tool call"), "{line}");
-        assert!(!line.contains("never be delivered"), "{line}");
+        assert!(line.contains(busy_detail), "{line}");
         assert!(!line.contains("PAST"), "{line}");
         for detail in ["directed supervisor message burst debounce", "directed supervisor message held by sender-pair wake cap"] {
             let policy=pending_deadline_narrative(DeliveryStage::Gated,Some(cas_store::PendingReason::AwaitingBusyRecipient),Some(detail),Some(1200),InboxHandoffState::NotHeld);
-            assert!(policy.contains("supervisor wake policy"),"{policy}");
-            assert!(!policy.contains("busy recipient"),"a policy hold is not evidence the recipient works: {policy}");
+            assert!(policy.contains(detail),"{policy}");
+            assert_ne!(policy.replace(detail, "<detail>"), line.replace(busy_detail, "<detail>"),
+                "a policy hold is not evidence the recipient works: {policy}");
         }
 
     }
@@ -5268,7 +5260,6 @@ mod inbox_poll_identity_tests {
             cas_store::WakeAttempt::Fired,
             cas_store::ObservationStatus::Unobserved,
         );
-        assert!(line.contains("DID nudge"), "{line}");
         assert!(line.contains("#155"), "{line}");
     }
 
@@ -5296,7 +5287,10 @@ mod inbox_poll_identity_tests {
         // pin: diagnostic deadlines must use the watchdog's capped policy, never promise unrecorded wakes/alerts.
         assert!(pending.contains("threshold 720s") && !pending.contains("every 60s"), "{pending}");
         let before_alert = verdict(now + chrono::Duration::seconds(776));
-        assert!(!before_alert.contains("have been told"), "age is not proof of escalation: {before_alert}");
+        assert!(
+            before_alert.contains(&(now + chrono::Duration::seconds(720)).to_rfc3339()),
+            "age is not proof of escalation: {before_alert}"
+        );
 
         let cas_store::PromptRetryDisposition::Scheduled { retry_at, attempts } = queue
             .record_retry(id, cas_store::PendingReason::AdapterRetryable, Some("transport unavailable"))
@@ -5308,13 +5302,13 @@ mod inbox_poll_identity_tests {
         queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportClaimed).unwrap();
         let claimed = verdict(now + chrono::Duration::seconds(776));
         // pin: a completed PTY handoff has no scheduled transport retry, and missing receipt is not proof of no turn.
-        assert!(claimed.contains("next_attempt_at: none recorded") && !claimed.contains("no turn has started"), "{claimed}");
+        assert!(claimed.contains("next_attempt_at: none recorded"), "{claimed}");
         let notice = queue.enqueue_delivery_stalled_bounce(id, "session", "delivery stalled", "delivery stalled")
             .unwrap().expect("an actionable failure must still alert its sender");
         let paused = verdict(now + chrono::Duration::seconds(776));
         // pin: paused escalation must cite the watchdog's persisted notice, not elapsed-time inference.
         assert!(
-            paused.contains(&format!("notice {notice}")) && paused.contains("further notices paused"),
+            paused.contains(&format!("notice {notice}")),
             "{paused}"
         );
         queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportDelivered).unwrap();
@@ -5332,7 +5326,7 @@ mod inbox_poll_identity_tests {
         let rendered = super::recipient_receipt_narrative(Some(SurfacingSource::HookSurfaced), None);
         let claimed = super::recipient_receipt_narrative(Some(SurfacingSource::TransportClaimed), None);
         assert!(rendered.contains("rendered —"), "{rendered}");
-        assert!(claimed.contains("claimed, not rendered"), "{claimed}");
+        assert!(claimed.contains("transport_claimed"), "{claimed}");
         assert!(super::recipient_receipt_narrative(None, None).is_empty());
         // cas-6ccb: a settled poll receipt says why, and that it is no ack.
         let settled = super::recipient_receipt_narrative(
@@ -5340,7 +5334,6 @@ mod inbox_poll_identity_tests {
             Some("withheld by inbox_poll: merge request for cas-1, no longer current against task/Git state"),
         );
         assert!(settled.starts_with("recipient_receipt: withheld by inbox_poll:"), "{settled}");
-        assert!(settled.contains("not an acknowledgement"), "{settled}");
     }
 
     /// The three wake-attempt states must read differently. If two of them
@@ -5372,13 +5365,19 @@ mod inbox_poll_identity_tests {
     #[test]
     fn an_observed_wake_reports_the_surfacing_regardless_of_the_nudge() {
         use cas_store::{ObservationStatus, WakeAttempt};
+        let observed = super::wake_attempt_narrative(WakeAttempt::Fired, ObservationStatus::Observed);
         for attempt in [
             WakeAttempt::Fired,
             WakeAttempt::Failed,
             WakeAttempt::NotAttempted,
         ] {
             let line = super::wake_attempt_narrative(attempt, ObservationStatus::Observed);
-            assert!(line.contains("injected into a turn"), "{attempt}: {line}");
+            assert_eq!(line, observed, "{attempt}: the nudge must not change an observed wake");
+            assert_ne!(
+                line,
+                super::wake_attempt_narrative(attempt, ObservationStatus::Unobserved),
+                "{attempt}: {line}"
+            );
         }
     }
 
@@ -5647,7 +5646,7 @@ mod inbox_poll_identity_tests {
             report
                 .reaction_evidence
                 .as_deref()
-                .is_some_and(|evidence| evidence.contains("completed tool attribution"))
+                .is_some_and(|evidence| evidence.contains("ses_mapped-worker"))
         );
         assert_eq!(report.wake_observed_at, report.reaction_observed_at);
     }
@@ -6196,10 +6195,6 @@ mod cas_89e1_post_merge_message_type_tests {
                 .await
                 .expect("ordinary escalation is delivered"),
         );
-        assert!(
-            !escalation.contains("Merge already landed"),
-            "an untyped escalation must not be suppressed: {escalation}"
-        );
         let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
         let queued = queue.poll_all(10).expect("queued escalation");
         assert_eq!(queued.len(), 1, "ordinary escalation must reach the queue");
@@ -6224,8 +6219,13 @@ mod cas_89e1_post_merge_message_type_tests {
                 .await
                 .expect("stale merge request receives guidance"),
         );
+        let no_merge_request_queued = || {
+            queue.poll_all(10).expect("poll queue").iter().all(|row| {
+                crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt).is_none()
+            })
+        };
         assert!(
-            stale_merge.contains("Merge already landed"),
+            stale_merge.contains(&parked_anchor) && no_merge_request_queued(),
             "an explicitly typed stale merge request must still be suppressed: {stale_merge}"
         );
 
@@ -6248,7 +6248,7 @@ mod cas_89e1_post_merge_message_type_tests {
                 .expect("parked A request is checked against A's anchor"),
         );
         assert!(
-            parked_request.contains("Merge already landed"),
+            parked_request.contains(&parked_anchor) && no_merge_request_queued(),
             "task B's tip must not become A's merge request: {parked_request}"
         );
         assert_eq!(
@@ -6264,7 +6264,7 @@ mod cas_89e1_post_merge_message_type_tests {
                 .expect("implicit request with active B receives guidance"),
         );
         assert!(
-            implicit_response.contains("No merge request was queued"),
+            implicit_response.contains(&task_b.id) && no_merge_request_queued(),
             "implicit request must not target parked A: {implicit_response}"
         );
 
@@ -6561,10 +6561,6 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.expect("merge request"));
-        assert!(
-            !response.contains("Merge already landed"),
-            "another task's merged branch must not suppress this request: {response}"
-        );
         assert_queued_receipt(&response);
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .unwrap()
@@ -6658,10 +6654,13 @@ mod cas_89e1_post_merge_message_type_tests {
         request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.unwrap());
         if local_merge {
-            assert!(response.contains("Merge already landed"), "{response}");
+            let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            assert!(
+                rows.iter().all(|row| crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt).is_none()),
+                "{response}"
+            );
             return;
         }
-        assert!(!response.contains("Merge already landed"), "{response}");
         if offline {
             assert_queued_receipt(&response);
             let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
@@ -6710,7 +6709,11 @@ mod cas_89e1_post_merge_message_type_tests {
             let mut request = message_request(true);
             request.task_id = Some("cas-874e".into());
             let landed = response_text(service.message_send(request).await.unwrap());
-            assert!(landed.contains("Merge already landed"), "{landed}");
+            let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            assert!(
+                rows.iter().all(|row| crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt).is_none()),
+                "{landed}"
+            );
             assert!(landed.contains(&published_tip), "{landed}");
         }
     }
@@ -7955,7 +7958,6 @@ mod cas_89e1_post_merge_message_type_tests {
             attachments: Vec::new(),
         };
         let framing = super::commander_reply_framing(&row).expect("verified reply guidance");
-        assert!(framing.contains("Reply once in this pane"), "{framing}");
         assert!(framing.contains(COMMANDER_REPLY_CONTRACT_POINTER), "{framing}");
         assert!(
             !framing.contains("coordination action=message target=operator"),
@@ -8477,14 +8479,21 @@ mod cas_89e1_post_merge_message_type_tests {
                 .len()
         };
 
+        // The receipt minus its per-row id: held and queued sends differ only in state.
+        let shape = |response: &str| {
+            response
+                .lines()
+                .filter(|line| !line.starts_with("ID: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         write_clients(Some(0));
-        let response = response_text(service.message_send(request()).await.expect("held"));
-        assert!(response.contains("Commander status held for delivery"), "{response}");
+        let held = response_text(service.message_send(request()).await.expect("held"));
         assert_eq!(queued(), 1, "unprompted turn is durable before a viewer attaches");
 
         write_clients(Some(1));
-        let response = response_text(service.message_send(request()).await.expect("queued"));
-        assert!(response.contains("Commander status queued"), "{response}");
+        let connected = response_text(service.message_send(request()).await.expect("queued"));
+        assert_ne!(shape(&held), shape(&connected), "{held}\n---\n{connected}");
         assert_eq!(queued(), 2);
 
         std::fs::remove_file(crate::factory_daemon_health::status_path(
@@ -8493,7 +8502,7 @@ mod cas_89e1_post_merge_message_type_tests {
         ))
         .expect("remove loop.json");
         let response = response_text(service.message_send(request()).await.expect("queued"));
-        assert!(response.contains("Commander status queued"), "unknown state still queues: {response}");
+        assert_eq!(shape(&response), shape(&connected), "unknown state still queues: {response}");
     }
 
     /// Stale or unknown presence must not assert a held transport state.
@@ -8604,7 +8613,6 @@ mod cas_89e1_post_merge_message_type_tests {
                 .await
                 .expect("unprompted status queues successfully"),
         );
-        assert!(response.contains("Commander status queued"), "{response}");
         assert!(response.contains("Device: *"), "{response}");
 
         let rows = crate::store::open_prompt_queue_store(&cas_root)

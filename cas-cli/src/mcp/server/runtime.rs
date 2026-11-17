@@ -1742,13 +1742,16 @@ url = "https://context7.invalid/mcp"
             .await
             .unwrap_err()
             .to_string();
-        assert!(foreign.contains("external tool is not explicitly allowlisted"));
+        assert!(foreign.contains("proxy policy denied") && foreign.contains("[proxy].allowlist"));
         let direct_delegation = engine
             .call_tool(&caller, "review", "start_review", None)
             .await
             .unwrap_err()
             .to_string();
-        assert!(direct_delegation.contains("requires the registered supervisor gateway"));
+        assert!(
+            direct_delegation.contains("proxy policy denied")
+                && !direct_delegation.contains("[proxy].allowlist")
+        );
 
         let ordinary = engine
             .call_tool(&caller, "github", "list_issues", None)

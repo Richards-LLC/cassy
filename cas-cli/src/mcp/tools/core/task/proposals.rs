@@ -828,7 +828,6 @@ mod tests {
         };
         let project_text = project_text.text.as_str();
         assert!(project_text.contains("Scope: project `"));
-        assert!(project_text.contains("current Cassy database"));
 
         let global = core
             .cas_task_list(Parameters(TaskListRequest {

@@ -839,7 +839,7 @@ mod tests {
                 .get("cas-train")
                 .unwrap()
                 .notes
-                .contains("TRAIN SUITE OVERRIDE")
+                .contains("merge the reviewed repair")
         );
         // Exercise the ordinary merge entry, rather than just the reservation
         // helper. Singles cannot overtake the queued first delivery.

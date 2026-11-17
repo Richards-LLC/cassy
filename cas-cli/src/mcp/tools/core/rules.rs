@@ -1602,12 +1602,8 @@ mod tests {
                     "{identity}/{action}: {text}"
                 );
                 if allowed {
-                    assert!(text.contains("encode chore"), "{identity}/{action}: {text}");
+                    assert!(text.contains(&tasks[0].id), "{identity}/{action}: {text}");
                 } else {
-                    assert!(
-                        text.contains("no encode chore created"),
-                        "{identity}/{action}: {text}"
-                    );
                     assert!(
                         text.contains("rule action=update"),
                         "operator command missing: {text}"

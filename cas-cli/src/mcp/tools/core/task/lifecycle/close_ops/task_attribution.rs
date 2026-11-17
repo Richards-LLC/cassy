@@ -4134,10 +4134,7 @@ mod tests {
                 .unwrap_err();
         scope.supervisor_override_reason = Some("record previously delivered hotfix".into());
         let note = validate_task_commit_receipt(p, &receipt, "main", &scope).unwrap();
-        assert!(
-            note.contains("Registered supervisor override")
-                && note.contains("record previously delivered hotfix")
-        );
+        assert!(note.contains("record previously delivered hotfix"), "{note}");
         let outcome = check_zero_commit_close(
             p,
             "main",
@@ -4151,7 +4148,7 @@ mod tests {
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::ProceedWithReceipt(ref decision)
-            if decision.contains("Registered supervisor override")),
+            if decision.contains("record previously delivered hotfix")),
             "{outcome:?}"
         );
         // An epoch exception does not authorize an unmerged receipt.

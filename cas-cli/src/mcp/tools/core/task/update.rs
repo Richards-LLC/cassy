@@ -4389,8 +4389,7 @@ mod epic_move_work_target_tests {
         .unwrap();
         let refused = core.cas_task_update(Parameters(req)).await.unwrap_err().message.to_string();
         assert!(
-            refused.contains("DELIVERY PROOF SCOPE LOCKED") && refused.contains("proof_scope_fix")
-                && refused.contains("epic/new"),
+            refused.contains("proof_scope_fix") && refused.contains("epic/new"),
             "{refused}"
         );
         assert_eq!(branch_of(&store, &parked.id), "epic/old");

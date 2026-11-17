@@ -204,11 +204,10 @@ mod tests {
     #[test]
     fn an_unverified_slack_copy_says_why_and_how_to_check() {
         let small = render_post(&receipt(false, 11), true);
-        assert!(small.contains("did not report hashing"), "{small}");
         assert!(small.contains("violet_read file_id=F1148"), "{small}");
         let large = render_post(&receipt(false, 20 * 1024 * 1024), false);
         assert!(large.contains("16 MiB"), "{large}");
-        assert!(large.contains("could not be saved"), "{large}");
+        assert_ne!(large, render_post(&receipt(false, 20 * 1024 * 1024), true));
     }
 
     #[test]

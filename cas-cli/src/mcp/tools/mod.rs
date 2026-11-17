@@ -485,6 +485,9 @@ fn commit_content_held_by_head(path: &std::path::Path, commit: &str) -> bool {
 pub(crate) struct ParkedDelivery {
     pub task_id: String,
     pub tip: String,
+    /// The delivery's recorded parked branch. A successor rebased onto it
+    /// shares the tip on another branch (GH #2003).
+    pub branch: Option<String>,
 }
 
 pub(crate) fn parked_delivery_at_tip(
@@ -515,6 +518,7 @@ pub(crate) fn parked_delivery_at_tip(
                     .is_some_and(same)
         })
         .map(|task| ParkedDelivery {
+            branch: task.deliverables.parked_branch.clone(),
             task_id: task.id,
             tip: tip.to_string(),
         })

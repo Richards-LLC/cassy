@@ -5998,6 +5998,9 @@ fn factory_write_decision(
             }),
         }
     };
+    let directory_sinks: std::collections::HashSet<_> = shell_effects.directory_sinks.iter()
+        .filter_map(|raw| absolute(raw, &cwd).and_then(|path| resolve_through_links(&path, &aliases)))
+        .filter_map(|path| canonicalize_for_containment(&path)).collect();
     let mut uses = Vec::new();
     let admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
         policy.matching(&resolved, mode, task_ids).map(|root| {
@@ -6146,7 +6149,11 @@ fn factory_write_decision(
         ) else {
             continue;
         };
-        let mode = mode.unwrap_or(if std::fs::symlink_metadata(&resolved).is_ok() {
+        let mode = mode.unwrap_or(if directory_sinks.contains(&resolved) && resolved.is_dir() {
+            // mv/cp/install into an existing directory creates a child; it
+            // does not overwrite or rename the directory itself.
+            WriteMode::Create
+        } else if std::fs::symlink_metadata(&resolved).is_ok() {
             WriteMode::Edit
         } else {
             WriteMode::Create

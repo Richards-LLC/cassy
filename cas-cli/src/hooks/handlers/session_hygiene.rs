@@ -892,25 +892,15 @@ pub(crate) fn render_unfiled_reports_banner(staged: &[String]) -> SessionStartBa
     SessionStartBanner { full, compact }
 }
 
-/// Unset `[issues] repo` in a project that stages requests (cas-20f27).
-///
-/// Without a target the filing flow has nowhere to push, so every report takes
-/// the durable-fallback path and silently accumulates. Fires only when the
-/// project shows it wants the flow (a `docs/requests/` directory exists), and
-/// deliberately never proposes a value: `origin` in a downstream project is the
-/// consumer's own repo, and guessing routes Cassy bugs into the wrong tracker
-/// (filing-cas-bugs.md rule).
+/// Missing effective issue destination in a project that stages requests.
+/// Use the same read-only project resolver as `cas config get issues.repo`;
+/// an origin fallback suppresses a false missing-tracker warning without
+/// writing inferred values into config.toml.
 pub fn build_session_start_issues_target_banner_sized(
     cas_root: &Path,
     config: &crate::config::Config,
 ) -> Option<SessionStartBanner> {
-    let configured = config
-        .issues
-        .as_ref()
-        .and_then(|issues| issues.repo.as_deref())
-        .map(str::trim)
-        .filter(|repo| !repo.is_empty());
-    if configured.is_some() {
+    if config.issue_repo_registry_for_project(cas_root).project.is_some() {
         return None;
     }
     let repo_root = cas_root.parent()?;

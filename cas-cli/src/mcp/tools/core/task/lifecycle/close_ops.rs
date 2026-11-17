@@ -30696,7 +30696,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "release-inventory-target", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "methodology-cleared", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "release-inventory-target", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -30776,6 +30776,7 @@ mod merge_state_gate_tests {
             task.deliverables.factory_branch_anchor = Some(source.clone());
             task.deliverables.parked_branch = Some("factory/worker".into());
             task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-192b0-fixture".into(), target_branch: "main".into() });
+            if row == "methodology-cleared" { task.execution_note = Some("no-code".into()); }
             tasks.add(&task).unwrap();
             if matches!(row, "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
@@ -30836,7 +30837,7 @@ mod merge_state_gate_tests {
                 tasks.update(&task).unwrap();
             }
             assert_ne!(landed, candidate.proof.head_commit);
-            if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
+            if matches!(row, "queue-landed" | "methodology-cleared" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             if row == "queue-target-progress" {
@@ -30891,6 +30892,16 @@ mod merge_state_gate_tests {
                 assert!(git_commit_is_ancestor(p, &source, "origin/main"));
                 assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "origin/main"));
             }
+            if row == "methodology-cleared" {
+                core.cas_task_update(Parameters(serde_json::from_value(serde_json::json!({
+                    "id": task.id, "proof_scope_fix": true, "execution_note": "",
+                    "reason": "Correct the methodology label on the unchanged merged delivery",
+                })).unwrap())).await.unwrap();
+                task = tasks.get(&task.id).unwrap();
+                assert!(task.execution_note.is_none());
+                assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
+                    cas_types::VerificationDispatchState::Resolved);
+            }
             // Probe the same containment guard as well as full close, so a
             // prior content gate cannot conceal a permissive partial-patch rule.
             match verified_delivery::current(&root, &task) {
@@ -30903,7 +30914,7 @@ mod merge_state_gate_tests {
                     }
                     assert_eq!(
                         reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                        matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "containment guard: {row}",
+                        matches!(row, "queue-landed" | "methodology-cleared" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "containment guard: {row}",
                     );
                 },
                 _ => panic!("missing task-bound review: {row}"),
@@ -30980,7 +30991,7 @@ mod merge_state_gate_tests {
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "methodology-cleared" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }

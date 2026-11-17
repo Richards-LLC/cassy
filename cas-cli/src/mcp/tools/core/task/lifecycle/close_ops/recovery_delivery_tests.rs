@@ -2332,3 +2332,33 @@ async fn resumed_retargeted_delivery_uses_complete_net_scope_cas_ded9() {
     active.status = TaskStatus::InProgress;
     assert!(task_commit_identity_in_repo(&repo, &active, None).is_err());
 }
+
+/// GH #2041: a live supervisor's explicit stability decision applies at park,
+/// before the later risk gates, without forging a passing runner receipt.
+#[tokio::test]
+async fn supervisor_stability_exception_reaches_park_gh2041() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    git(&f.worker_path, &["reset", "--hard", "main"]);
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    start_on_lane(tasks.as_ref(), &git(repo, &["rev-parse", "main"]));
+    std::fs::write(f.worker_path.join("owned.test.js"), "test('custom config case', () => {});\n").unwrap();
+    git(&f.worker_path, &["add", "owned.test.js"]);
+    git(&f.worker_path, &["commit", "-qm", "test(cas-c6e1-fixture): custom config case"]);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &tip]);
+    let request = |override_: bool| Parameters(TaskCloseRequest {
+        id: TASK.into(), reason: Some("Reviewed direct five-pass evidence for custom runner config".into()),
+        commit_receipt: Some(tip.clone()), supervisor_override: Some(override_),
+        no_delivery: None, stranded_branch_override: None, search_manifest: None,
+    });
+    let held = text(f.core.cas_task_close(request(false)).await.unwrap());
+    assert!(crate::gates::codes_in(&held).contains(&"G-61"), "{held}");
+    f.core.set_agent_id_for_testing("supervisor-session".into());
+    let parked = text(f.core.cas_task_close(request(true)).await.unwrap());
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{parked}");
+    assert!(tasks.get(TASK).unwrap().notes.contains("G-61"));
+    assert!(crate::factory_worker_check::PassingTests::new(&repo.join(".cas"), &f.worker_path, &tip)
+        .packages().is_empty());
+}

@@ -322,6 +322,7 @@ fn first_attempt() -> u64 { 1 }
 pub(crate) fn delivery_ci_rearms(
     root: &Path, session: &str, transport: &impl CiTransport,
 ) -> Result<Vec<(cas_types::Agent, String, serde_json::Value)>, CiWatchError> {
+    return Ok(Vec::new()); // Red control: omit automatic CI rerun re-arming.
     let probe = || -> anyhow::Result<Vec<(cas_types::Agent, String, serde_json::Value)>> {
         let mut rearms = Vec::new();
         let tasks = crate::store::open_task_store_local(root)?;

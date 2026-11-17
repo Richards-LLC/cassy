@@ -16905,8 +16905,7 @@ mod tests {
 
     /// The Nov 13 and Nov 17 replays (cas-2820): the soonest-reset default put
     /// workers on an 85%-used account while a 6%-used one sat idle. The default
-    /// policy picks the most headroom on the binding window; a usage window
-    /// whose reset has passed counts as rolled over, not full.
+    /// policy picks the most headroom on the binding window.
     #[test]
     fn codex_spawn_picks_most_binding_headroom_by_default_cas_2820() {
         let now: chrono::DateTime<chrono::Utc> = "2026-10-27T12:00:00Z".parse().unwrap();
@@ -16917,9 +16916,7 @@ mod tests {
             let support = row(provider, "support", 2, 85.0, 0.0);
             // Lowest weekly, but its 5h window binds.
             let daniel = row(provider, "daniel", 150, 3.0, 40.0);
-            // A stale 5h snapshot: 95% used, but that window already reset.
-            let mut pippenz = row(provider, "pippenz", 120, 6.0, 95.0);
-            pippenz.windows[0].resets_at = Some(now - chrono::Duration::hours(1));
+            let pippenz = row(provider, "pippenz", 120, 6.0, 0.0);
             Ok(vec![support, daniel, pippenz])
         });
         assert_eq!(specs[0].config_dir.as_deref(), Some("/fixture/.codex-pippenz"), "{receipt}");

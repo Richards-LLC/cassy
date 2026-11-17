@@ -209,18 +209,40 @@ impl CasCore {
                 queue.supervisor = actor.id.clone();
             }
             // GH #1819: entries already merged or closed need no daemon pass.
-            settle(&path, &mut queue, &*tasks)?;
+            settle(&self.cas_root, &path, &mut queue, &*tasks)?;
             let prior_override = queue.ci_override.clone();
-            if queue.active() {
-                if let Some(ordered) = ordered {
-                    ensure!(
-                        ordered
-                            .iter()
-                            .map(String::as_str)
-                            .eq(queue.entries.iter().map(|e| e.task.as_str())),
-                        crate::gates::tag("G-113", "active train merge has a different ordered list; resume without task_ids")
-                    );
+            if let Some(ordered) = ordered {
+                let existing = queue
+                    .entries
+                    .iter()
+                    .map(|entry| entry.task.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let append = ordered
+                    .iter()
+                    .filter(|id| !existing.contains(*id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !append.is_empty() {
+                    let agents = self
+                        .open_agent_store()
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                        .list(None)?;
+                    let mut seen = existing;
+                    let additions = validated_entries(
+                        &self.cas_root,
+                        &repo,
+                        &target,
+                        train,
+                        session,
+                        &*tasks,
+                        &agents,
+                        append,
+                        &mut seen,
+                    )?;
+                    queue.entries.extend(additions);
                 }
+            }
+            if queue.active() {
                 queue.ci_override = crate::train_ci::guard(
                     self,
                     train,
@@ -241,13 +263,11 @@ impl CasCore {
                         .map_err(|error| anyhow::anyhow!(error.message.to_string()))?;
                 }
             }
-            if queue.active() || ordered.is_none() {
-                save(&path, &queue)?;
-                let receipt = queue.render();
-                return Ok(if queue.ci_override.is_some() && queue.ci_override != prior_override {
-                    crate::gates::override_tag("G-114", receipt)
-                } else { receipt });
-            }
+            save(&path, &queue)?;
+            let receipt = queue.render();
+            return Ok(if queue.ci_override.is_some() && queue.ci_override != prior_override {
+                crate::gates::override_tag("G-114", receipt)
+            } else { receipt });
         }
         let ci_override =
             crate::train_ci::guard(self, train, &target, None, supervisor_override, reason)?;
@@ -272,53 +292,18 @@ impl CasCore {
             .open_agent_store()
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
             .list(None)?;
-        let mut entries = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
-        for id in ids {
-            ensure!(seen.insert(id.clone()), crate::gates::tag("G-113", format!("duplicate train delivery {id}")));
-            let task = tasks.get(&id)?;
-            ensure!(
-                task.status == TaskStatus::AwaitingMerge,
-                crate::gates::tag("G-113", format!("{id} is not parked"))
-            );
-            ensure!(
-                tasks
-                    .get_parent_epic(&id)?
-                    .is_some_and(|parent| parent.id == train),
-                crate::gates::tag("G-113", format!("{id} belongs to another train"))
-            );
-            if let Some(owner) = crate::factory_session_scope::foreign_owner_of_merge(
-                &agents,
-                Some(session),
-                task.deliverables.parked_branch.as_deref().unwrap_or(""),
-                Some(&task),
-                chrono::Utc::now(),
-            ) {
-                anyhow::bail!(crate::gates::tag("G-93", owner.refusal("train_merge", session)));
-            }
-            if let Some(work) = task.deliverables.work_target.as_ref() {
-                let context =
-                    super::super::task::repo_context::resolve_repo_context(&self.cas_root, work)
-                        .map_err(anyhow::Error::msg)?;
-                ensure!(
-                    context.target_branch == target
-                        && context.git_common_dir
-                            == GitOperations::new(repo.clone()).canonical_repo_key()?,
-                    crate::gates::tag("G-113", format!("{id} targets another repository or branch"))
-                );
-            }
-            entries.push(Entry {
-                task: id,
-                branch: task
-                    .deliverables
-                    .parked_branch
-                    .context(crate::gates::tag("G-113", "parked delivery lacks branch"))?,
-                sha: task
-                    .deliverables
-                    .factory_branch_anchor
-                    .context(crate::gates::tag("G-113", "parked delivery lacks anchor"))?,
-            });
-        }
+        let entries = validated_entries(
+            &self.cas_root,
+            &repo,
+            &target,
+            train,
+            session,
+            &*tasks,
+            &agents,
+            ids,
+            &mut seen,
+        )?;
         let queue = Queue {
             id: uuid::Uuid::new_v4().to_string(),
             train: train.into(),
@@ -341,13 +326,79 @@ impl CasCore {
     }
 }
 
+fn validated_entries(
+    root: &Path,
+    repo: &Path,
+    target: &str,
+    train: &str,
+    session: &str,
+    tasks: &dyn crate::store::TaskStore,
+    agents: &[cas_types::Agent],
+    ids: Vec<String>,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> Result<Vec<Entry>> {
+    let common = GitOperations::new(repo.to_path_buf()).canonical_repo_key()?;
+    let mut entries = Vec::with_capacity(ids.len());
+    for id in ids {
+        ensure!(
+            seen.insert(id.clone()),
+            crate::gates::tag("G-113", format!("duplicate train delivery {id}"))
+        );
+        let task = tasks.get(&id)?;
+        ensure!(
+            task.status == TaskStatus::AwaitingMerge,
+            crate::gates::tag("G-113", format!("{id} is not parked"))
+        );
+        ensure!(
+            tasks
+                .get_parent_epic(&id)?
+                .is_some_and(|parent| parent.id == train),
+            crate::gates::tag("G-113", format!("{id} belongs to another train"))
+        );
+        if let Some(owner) = crate::factory_session_scope::foreign_owner_of_merge(
+            agents,
+            Some(session),
+            task.deliverables.parked_branch.as_deref().unwrap_or(""),
+            Some(&task),
+            chrono::Utc::now(),
+        ) {
+            anyhow::bail!(crate::gates::tag("G-93", owner.refusal("train_merge", session)));
+        }
+        if let Some(work) = task.deliverables.work_target.as_ref() {
+            let context = super::super::task::repo_context::resolve_repo_context(root, work)
+                .map_err(anyhow::Error::msg)?;
+            ensure!(
+                context.target_branch == target && context.git_common_dir == common,
+                crate::gates::tag("G-113", format!("{id} targets another repository or branch"))
+            );
+        }
+        entries.push(Entry {
+            task: id,
+            branch: task
+                .deliverables
+                .parked_branch
+                .context(crate::gates::tag("G-113", "parked delivery lacks branch"))?,
+            sha: task
+                .deliverables
+                .factory_branch_anchor
+                .context(crate::gates::tag("G-113", "parked delivery lacks anchor"))?,
+        });
+    }
+    Ok(entries)
+}
+
 /// Advance past entries that need no merge: already published to the target,
 /// or no longer this exact parked delivery. Each step is durable, so a resume
 /// after a crash repeats nothing.
-fn settle(path: &Path, queue: &mut Queue, tasks: &dyn crate::store::TaskStore) -> Result<()> {
+fn settle(
+    root: &Path,
+    path: &Path,
+    queue: &mut Queue,
+    tasks: &dyn crate::store::TaskStore,
+) -> Result<()> {
     while queue.active() {
         let entry = &queue.entries[queue.next];
-        // gate[G-115 train-merge integrity]: Train entry awaiting dispatch or returned entry skip
+        // gate[G-115 train-merge integrity]: Advance only published, rejected or changed entries
         let outcome = if published(queue, entry, false)? {
             format!("{} merged {}", entry.task, entry.sha)
         } else {
@@ -356,12 +407,26 @@ fn settle(path: &Path, queue: &mut Queue, tasks: &dyn crate::store::TaskStore) -
                 && task.deliverables.factory_branch_anchor.as_deref() == Some(&entry.sha)
                 && task.deliverables.parked_branch.as_deref() == Some(&entry.branch)
             {
-                return Ok(());
+                let rejected = match cas_store::get_latest_verification_dispatch(root, &entry.task)? {
+                    Some(dispatch) if dispatch.state == VerificationDispatchState::Resolved => {
+                        cas_store::get_verification_for_dispatch(root, &dispatch.id)?
+                            .is_some_and(|verdict| {
+                                verdict.status == cas_types::VerificationStatus::Rejected
+                            })
+                    }
+                    _ => false,
+                };
+                if rejected {
+                    format!("{} rejected verification", entry.task)
+                } else {
+                    return Ok(());
+                }
+            } else {
+                crate::gates::tag("G-115", format!(
+                    "{} returned or changed; skipped exact parked delivery",
+                    entry.task
+                ))
             }
-            crate::gates::tag("G-115", format!(
-                "{} returned or changed; skipped exact parked delivery",
-                entry.task
-            ))
         };
         queue.outcomes.push(outcome);
         queue.next += 1;
@@ -446,7 +511,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         loop {
             // Settled entries advance even while CI holds the next merge.
-            settle(&path, &mut queue, &*tasks)?;
+            settle(root, &path, &mut queue, &*tasks)?;
             if !queue.active() {
                 break;
             }
@@ -681,9 +746,13 @@ mod tests {
         }
 
         async fn start(&self) {
+            self.start_with(&self.ids).await;
+        }
+
+        async fn start_with(&self, ids: &[String]) {
             let service = crate::mcp::CasService::new(self.core.clone(), None);
             let request = serde_json::from_value(serde_json::json!({
-                "action": "train_merge", "id": "cas-train", "task_ids": self.ids
+                "action": "train_merge", "id": "cas-train", "task_ids": ids
             }))
             .unwrap();
             let result = service.factory(Parameters(request)).await.unwrap();
@@ -791,6 +860,82 @@ mod tests {
         assert_eq!(queue.outcomes.len(), 3, "{:?}", queue.outcomes);
         admit(&fixture.root, fixture._repo.path(), "epic/train", Some("cas-later"), None)
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_delivery_drops_its_position_and_active_train_accepts_appends() {
+        let mut fixture = Fixture::build(false);
+        fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+        fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+        std::fs::write(
+            fixture.root.join("config.toml"),
+            "[verification]\nenabled=true\n[qa]\nmode='batch'\n",
+        )
+        .unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut rejected_task = tasks.get(&fixture.ids[0]).unwrap();
+        rejected_task.depth = TaskDepth::Deep;
+        tasks.update(&rejected_task).unwrap();
+
+        fixture.start_with(&fixture.ids[..1]).await;
+        // Let the real queued merge path prepare its exact pre-merge dispatch.
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[0])
+            .unwrap()
+            .expect("queued merge prepares a pre-merge verification dispatch");
+        let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+        let rejected = service
+            .verification(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action":"add", "task_id":fixture.ids[0], "dispatch_id":dispatch.id,
+                    "status":"rejected", "summary":"Reject this exact train candidate",
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(rejected.is_error, Some(true), "{rejected:?}");
+        assert_eq!(
+            cas_store::get_verification_for_dispatch(&fixture.root, &dispatch.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            cas_types::VerificationStatus::Rejected
+        );
+
+        // Reproduce the incident: another task list arrives while this run is
+        // active. It appends in order, and the rejected position is settled.
+        let appended = service
+            .factory(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action":"train_merge", "id":"cas-train",
+                    "task_ids":fixture.ids[1..],
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(appended.is_error, Some(true), "{appended:?}");
+        let queue_path = path(&fixture.root, fixture._repo.path(), "epic/train").unwrap();
+        let queued = read(&queue_path).unwrap().unwrap();
+        assert_eq!(queued.next, 1, "{}", queued.render());
+        assert_eq!(queued.entries.len(), 3, "{}", queued.render());
+        assert!(queued.outcomes[0].contains(&fixture.ids[0]), "{:?}", queued.outcomes);
+        let still_parked = tasks.get(&fixture.ids[0]).unwrap();
+        assert_eq!(still_parked.status, TaskStatus::AwaitingMerge);
+        assert_eq!(
+            still_parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(fixture.shas[0].as_str())
+        );
+
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        let complete = read(&queue_path).unwrap().unwrap();
+        assert!(!complete.active(), "{}", complete.render());
+        let operations = GitOperations::new(fixture._repo.path().to_path_buf());
+        assert!(!operations.is_ancestor(&fixture.shas[0], "origin/epic/train"));
+        assert!(operations.is_ancestor(&fixture.shas[1], "origin/epic/train"));
+        assert!(operations.is_ancestor(&fixture.shas[2], "origin/epic/train"));
+        assert_eq!(tasks.get(&fixture.ids[0]).unwrap().status, TaskStatus::AwaitingMerge);
     }
 
     #[tokio::test]

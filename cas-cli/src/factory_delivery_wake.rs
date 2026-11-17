@@ -8,7 +8,7 @@ use cas_types::{Agent, Task, TaskStatus};
 use fs2::FileExt;
 use serde_json::{Value, json};
 
-use crate::mcp::tools::core::task::lifecycle::supervisor_push;
+use crate::mcp::tools::core::task::lifecycle::{close_ops, supervisor_push};
 
 pub(crate) const MISSING_WAKE: &str = "DELIVERY_WAKE_MISSING";
 
@@ -62,13 +62,49 @@ pub(crate) fn arm_task(root: &Path, task: &Task, actor: &str) -> Result<()> {
     let Some(supervisor) = owner(root, task, actor)? else { return Ok(()) };
     let sha = task.deliverables.factory_branch_anchor.as_deref()
         .filter(|sha| full_sha(sha)).context("parked delivery has no full commit SHA")?;
-    let target = task.deliverables.work_target.as_ref().map(|target| target.target_branch.as_str())
-        .or(task.branch.as_deref()).context("parked delivery has no target branch")?;
-    let target = crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch(target);
+    let tasks = crate::store::open_task_store_local(root)?;
+    let epic = tasks.get_parent_epic(&task.id)?;
+    let target = if let Some(target) = close_ops::effective_close_work_target(task, epic.as_ref()) {
+        target.target_branch
+    } else {
+        let worktree_parent = task.worktree_id.as_deref().and_then(|id|
+            crate::store::open_worktree_store(root).ok()?.get(id).ok().map(|worktree| worktree.parent_branch));
+        close_ops::resolve_close_parent_branch(
+            worktree_parent, epic.as_ref().and_then(|parent| parent.branch.clone()),
+            epic.as_ref().and_then(|parent| parent.deliverables.work_target.as_ref().map(|target| target.target_branch.clone())),
+            root.parent().unwrap_or(root),
+        ).map_err(anyhow::Error::msg)?
+    };
+    let target = crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch(&target);
     arm_event(root, &supervisor, &task.id, "branch_contained_in",
         &json!({"commit": sha, "target_branch": target}), false)?;
     arm_event(root, &supervisor, &task.id, "ci_completed",
         &json!({"sha": sha, "workflow": "CI"}), false)
+}
+
+/// A retried close has committed a new delivery boundary. Establish its
+/// watches before retiring automatic watches for the superseded boundary;
+/// explicit manual reminders keep their own lifecycle.
+pub(crate) fn advance_task(root: &Path, task: &Task, actor: &str, previous: Option<&str>) -> Result<()> {
+    arm_task(root, task, actor)?;
+    let Some(previous) = previous.filter(|old| Some(*old) != task.deliverables.factory_branch_anchor.as_deref()) else { return Ok(()) };
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false)
+        .read(true).write(true).open(root.join("delivery-wakes.lock"))?;
+    lock.lock_exclusive()?;
+    let reminders = crate::store::open_reminder_store(root)?;
+    for row in reminders.list_for_task(&task.id)? {
+        if matches!(row.status, ReminderStatus::Pending | ReminderStatus::Suspended)
+            && matches!(row.trigger_event.as_deref(), Some("ci_completed" | "branch_contained_in"))
+            && row.trigger_filter.as_ref().is_some_and(|filter| filter["delivery_wake"] == true
+                && filter.get("sha").or_else(|| filter.get("commit")).and_then(Value::as_str) == Some(previous))
+        {
+            match reminders.cancel(row.id, &row.owner_id) {
+                Ok(()) | Err(cas_store::StoreError::NotFound(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn arm_task_id(root: &Path, task: &str, actor: &str) {

@@ -7512,6 +7512,11 @@ impl CasCore {
             }
             Ok(persisted_at) => {
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
+                if let Err(error) = crate::factory_delivery_wake::advance_task(
+                    &self.cas_root, &advanced, &actor, task.deliverables.factory_branch_anchor.as_deref(),
+                ) {
+                    tracing::error!(task_id=%task.id, %error, "advanced delivery completion wakes not refreshed");
+                }
                 let actor_name = self
                     .open_agent_store()
                     .ok()

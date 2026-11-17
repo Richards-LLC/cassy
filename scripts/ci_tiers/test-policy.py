@@ -1122,6 +1122,66 @@ else:
         self.assertEqual((fixture / 'rustup/install-count').read_text(), 'install\n')
         self.assertEqual((fixture / 'github-env').read_text().splitlines(), ['RUSTUP_TOOLCHAIN=stable'] * 2)
 
+    def test_self_hosted_setup_bootstraps_pinned_rust_once_without_sccache(self):
+        action = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        steps = action['runs']['steps']
+        setup = next(step for step in steps if step.get('id') == 'self-hosted-rust')
+        for environment in ('self-hosted', 'github-hosted'):
+            context = {'runner.environment': environment, 'env.RUSTC_WRAPPER': 'sccache',
+                       'steps.setup-sccache.outcome': 'success'}
+            self.assertEqual(self.gh_expr(setup['if'], context), environment == 'self-hosted')
+            for step in steps:
+                if step.get('id') == 'setup-sccache' or 'sccache --start-server' in step.get('run', ''):
+                    self.assertEqual(self.gh_expr(step['if'], context), environment != 'self-hosted')
+        self.root.joinpath('rust-toolchain.toml').write_text('[toolchain]\nchannel="1.88.1-fixture"\n')
+        commands = self.root / 'bin'; commands.mkdir()
+        commands.joinpath('python3').symlink_to(sys.executable)
+        commands.joinpath('flock').write_text(f'#!{sys.executable}\nimport fcntl,sys\nfcntl.flock(int(sys.argv[2]),fcntl.LOCK_EX)\n')
+        rustup = self.root / 'rustup-fixture'
+        rustup.write_text(f'''#!{sys.executable}
+import os,sys
+from pathlib import Path
+home=Path(os.environ['RUSTUP_HOME']); args=sys.argv[1:]
+if args[:1]==['run']:
+    sys.exit(0 if (home/'pinned').exists() and (home/'pinned').read_text().strip()==args[1] else 1)
+if args[:2]==['toolchain','install']:
+    (home/'pinned').write_text(args[2]); sys.exit(0)
+sys.exit(1)
+''')
+        cargo = self.root / 'cargo-fixture'; cargo.write_text('#!/bin/sh\nexit 0\n')
+        installer = self.root / 'installer'
+        installer.write_text('''#!/bin/sh
+printf '%s\n' "$*" >> "$INSTALL_CALLS"
+mkdir -p "$CARGO_HOME/bin"
+cp "$FIXTURE_RUSTUP" "$CARGO_HOME/bin/rustup"
+cp "$FIXTURE_CARGO" "$CARGO_HOME/bin/cargo"
+printf '%s\n' "$FIXTURE_PIN" > "$RUSTUP_HOME/pinned"
+''')
+        commands.joinpath('curl').write_text(f'''#!{sys.executable}
+import os,shutil,sys
+shutil.copyfile(os.environ['FIXTURE_INSTALLER'],sys.argv[sys.argv.index('-o')+1])
+''')
+        for executable in [rustup, cargo, *commands.iterdir()]:
+            executable.chmod(0o755)
+        temporary = self.root / 'tmp'; temporary.mkdir()
+        env = dict(PATH=str(commands) + ':/usr/bin:/bin', RUNNER_TEMP=str(temporary),
+            CARGO_HOME=str(self.root / 'cargo'), RUSTUP_HOME=str(self.root / 'rustup'),
+            GITHUB_ENV=str(self.root / 'env'), GITHUB_PATH=str(self.root / 'path'),
+            INSTALL_CALLS=str(self.root / 'installs'), FIXTURE_RUSTUP=str(rustup),
+            FIXTURE_CARGO=str(cargo), FIXTURE_INSTALLER=str(installer), FIXTURE_PIN='1.88.1-fixture')
+        for _ in range(2):
+            result = self.run_body(setup['run'], env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = (self.root / 'installs').read_text().splitlines()
+        self.assertEqual(len(calls), 1)
+        self.assertIn('1.88.1-fixture', shlex.split(calls[0]))
+        exported = dict(line.split('=', 1) for line in (self.root / 'env').read_text().splitlines())
+        self.assertEqual(exported['RUSTUP_TOOLCHAIN'], '1.88.1-fixture')
+        self.assertEqual(exported['RUSTC_WRAPPER'], '')
+        self.assertEqual(exported['SCCACHE_GHA_ENABLED'], 'false')
+        self.assertTrue((self.root / 'cargo/bin/cargo').is_file())
+        self.assertEqual((self.root / 'path').read_text().splitlines(), [str(self.root / 'cargo/bin')] * 2)
+
     def test_shared_rustup_helper_rejects_corrupt_registry_and_files(self):
         for state in ['missing-registry', 'missing-files', 'broken-cargo']:
             with self.subTest(state=state):

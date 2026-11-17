@@ -21,7 +21,7 @@ fn active_target(root: &Path, target: &str, cwd: &Path) -> bool {
 fn impact(run: &serde_json::Value) -> bool {
     run["name"]
         .as_str()
-        .is_some_and(|name| name == "Scoped Validation — impact own tests" || name.starts_with("Scoped Validation — impact ring "))
+        .is_some_and(|name| name.starts_with("Scoped Validation — impact "))
 }
 
 fn rows(output: &GhApiOutput, sha: &str) -> Option<Vec<serde_json::Value>> {

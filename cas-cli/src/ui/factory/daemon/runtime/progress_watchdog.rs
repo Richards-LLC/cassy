@@ -63,8 +63,13 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             dependency_held.insert(task.id.clone());
         }
         // An unreadable receipt is uncertainty, never proof of a stall.
-        if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task).ok()? {
-            refusals.insert(task.id.clone(), refusal);
+        match crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task) {
+            Ok(Some(refusal)) => { refusals.insert(task.id.clone(), refusal); }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "close refusal unreadable; excluding only this task from stall judgement");
+                dependency_held.insert(task.id.clone());
+            }
         }
     }
     // cas-c1fb: historical local assignees do not make a peer's release

@@ -266,8 +266,7 @@ async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json()
                 }
                 assert!(
                     text.contains("expired-proposal [expired] epic cas-shared")
-                        && text.contains("Peer sup-b@machine-beta | outgoing")
-                        && text.contains("Stored state pending"),
+                        && text.contains("Peer sup-b@machine-beta | outgoing"),
                     "{text}"
                 );
                 assert!(

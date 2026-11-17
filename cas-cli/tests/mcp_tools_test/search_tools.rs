@@ -529,10 +529,15 @@ async fn test_search_filter_by_type() {
         personal: None,
     };
 
-    service
-        .cas_remember(Parameters(req))
-        .await
-        .expect("remember should succeed");
+    let remembered = extract_text(
+        service
+            .cas_remember(Parameters(req))
+            .await
+            .expect("remember should succeed"),
+    );
+    let entry_id = extract_entry_id(&remembered)
+        .expect("remember returns the entry id")
+        .to_string();
 
     let task_req = TaskCreateRequest {
         depth: None,
@@ -577,11 +582,8 @@ async fn test_search_filter_by_type() {
         .expect("search should succeed");
 
     let text = extract_text(result);
-    // Should only return tasks if any match
-    if !text.contains("No results") {
-        // If we got results, they should be task-related
-        assert!(!text.contains("entry") || text.contains("task"));
-    }
+    // A task-only search never returns the matching memory entry.
+    assert!(!text.contains(&entry_id), "{text}");
 }
 
 #[tokio::test]

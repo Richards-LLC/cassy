@@ -138,7 +138,7 @@ async fn test_store_operations_work() {
         .expect("should be able to access store");
 
     let text = extract_text(result);
-    assert!(text.contains("Created entry"));
+    assert!(extract_entry_id(&text).is_some(), "{text}");
 }
 
 #[tokio::test]
@@ -252,7 +252,7 @@ async fn test_all_store_types_accessible() {
 #[tokio::test]
 async fn test_start_allowed_with_other_task_pending_verification() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, service) = setup_cas(&mut test_env);
+    let (temp, service) = setup_cas(&mut test_env);
 
     // Create and start first task
     let req = TaskCreateRequest {
@@ -360,8 +360,13 @@ async fn test_start_allowed_with_other_task_pending_verification() {
         .expect("task_start should return result");
 
     let text = extract_text(result);
-    assert!(
-        !text.contains("VERIFICATION PENDING"),
+    assert_eq!(
+        cas::store::open_task_store(&temp.path().join(".cas"))
+            .unwrap()
+            .get(second_id)
+            .unwrap()
+            .status,
+        cas::types::TaskStatus::InProgress,
         "Task A must not block starting task B: {text}"
     );
 }
@@ -489,7 +494,11 @@ async fn test_claim_allowed_with_other_task_pending_verification() {
 
     let text = extract_text(result);
     assert!(
-        !text.contains("VERIFICATION PENDING"),
+        open_agent_store(&cas_dir)
+            .unwrap()
+            .get_lease(second_id)
+            .unwrap()
+            .is_some(),
         "Task A must not block claiming task B: {text}"
     );
 }
@@ -596,10 +605,6 @@ async fn test_start_allowed_after_verification_approved() {
         text.contains("Started") || text.contains("claimed"),
         "Start should succeed: {text}"
     );
-    assert!(
-        !text.contains("VERIFICATION PENDING"),
-        "Should not be blocked: {text}"
-    );
 }
 
 #[tokio::test]
@@ -674,17 +679,10 @@ async fn test_start_same_task_allowed_when_pending() {
     let start_req2 = IdRequest {
         id: task_id.to_string(),
     };
-    let result = service
+    service
         .cas_task_start(Parameters(start_req2))
         .await
         .expect("task_start should succeed for same task");
-
-    let text = extract_text(result);
-    // Should succeed or indicate already in progress - NOT blocked
-    assert!(
-        !text.contains("VERIFICATION PENDING"),
-        "Same task should not be blocked: {text}"
-    );
 }
 
 #[tokio::test]

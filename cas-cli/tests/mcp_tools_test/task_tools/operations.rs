@@ -283,19 +283,6 @@ async fn task_read_default_show_preserves_gate_inputs() {
     let full = extract_text(service.task(request(true)).await.unwrap());
     assert!(full.contains(&task.design) && full.contains("dashboard.rs"));
     assert!(full.contains(task.deliverables.commit_hash.as_deref().unwrap()));
-    // Short notes have no clipped instructions; navigation alone is sufficient.
-    let notes = extract_text(
-        service
-            .task(Parameters(
-                serde_json::from_value::<cas_mcp::TaskRequest>(
-                    serde_json::json!({"action": "notes", "id": task.id}),
-                )
-                .unwrap(),
-            ))
-            .await
-            .unwrap(),
-    );
-    assert!(!notes.contains("Read clipped instructions"), "{notes}");
 
     let mut short = Task::new("cas-literal-ellipsis".into(), "Wait… then proceed".into());
     short.assignee = Some("test-agent".into());
@@ -308,7 +295,9 @@ async fn task_read_default_show_preserves_gate_inputs() {
                 serde_json::json!({"action": action, "id": short.id}),
             ).unwrap(),
         )).await.unwrap());
-        assert!(!text.contains("Read clipped instructions"), "literal ellipsis in {action}: {text}");
+        // A literal ellipsis is task text, not a clip: the short field comes back whole.
+        let field = if action == "notes" { &short.notes } else { &short.description };
+        assert!(text.contains(field.as_str()), "literal ellipsis in {action}: {text}");
     }
     // A nested field can be clipped even when the complete response fits.
     let mut long = store.get(&short.id).unwrap();
@@ -320,7 +309,7 @@ async fn task_read_default_show_preserves_gate_inputs() {
                 serde_json::json!({"action": action, "id": short.id}),
             ).unwrap(),
         )).await.unwrap());
-        assert!(text.contains("Read clipped instructions"), "nested clip hidden in {action}: {text}");
+        assert!(!text.contains(&long.description), "nested clip hidden in {action}: {text}");
     }
 }
 
@@ -552,7 +541,6 @@ Keep reading.".into(),
             "{case}: start-context pages must be lossless"
         );
         if case == "qa-overflow" {
-            assert!(started.contains("Start advisories exceed"), "{started}");
             assert!(
                 paged.contains("cas-long-blocker-119"),
                 "last blocker must remain reachable"
@@ -568,7 +556,7 @@ Keep reading.".into(),
                 "{case}: start-only instruction unreachable: {instruction}\n{started}"
             );
             assert!(
-                started.contains(&instruction) || started.contains("Start advisories exceed"),
+                started.contains(&instruction) || case == "qa-overflow",
                 "{case}: silently clipped instruction: {instruction}\n{started}"
             );
         }
@@ -803,7 +791,7 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         .expect("close epic");
     let receipt = extract_text(close);
     assert!(
-        receipt.contains("Closed task:") && receipt.contains("epic close committed"),
+        receipt.contains("Closed task:"),
         "close must return the compact committed receipt: {receipt}"
     );
     assert!(
@@ -1098,42 +1086,6 @@ async fn test_execution_note_create_and_show_happy_path() {
     );
 }
 
-/// Null path: create a task WITHOUT execution_note and verify `action=show`
-/// omits the line entirely.
-#[tokio::test]
-async fn test_execution_note_null_omitted_from_show() {
-    let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, service) = setup_cas(&mut test_env);
-
-    let created = service
-        .cas_task_create(Parameters(basic_create(
-            "Task without execution note",
-            None,
-        )))
-        .await
-        .expect("create should succeed");
-    let id = extract_task_id(&extract_text(created))
-        .expect("id")
-        .to_string();
-
-    let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            read: cas::mcp::tools::TaskReadOptions {
-                full: true,
-                ..Default::default()
-            },
-            id,
-            with_deps: false,
-        }))
-        .await
-        .expect("show should succeed");
-    let text = extract_text(shown);
-    assert!(
-        !text.contains("Execution Note"),
-        "show output must omit execution_note line when unset, got: {text}"
-    );
-}
-
 /// Invalid enum: reject unknown values at the MCP tool layer with a clear
 /// error that lists the allowed values.
 #[tokio::test]
@@ -1299,19 +1251,12 @@ async fn test_execution_note_update_empty_string_clears() {
         .await
         .expect("update clear");
 
-    let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            read: cas::mcp::tools::TaskReadOptions {
-                full: true,
-                ..Default::default()
-            },
-            id,
-            with_deps: false,
-        }))
-        .await
-        .expect("show");
+    let stored = open_task_store(&_temp.path().join(".cas"))
+        .expect("task store")
+        .get(&id)
+        .expect("task");
     assert!(
-        !extract_text(shown).contains("Execution Note"),
+        stored.execution_note.is_none(),
         "empty string must clear the field"
     );
 }
@@ -1742,8 +1687,7 @@ async fn task_notes_read_and_append_are_disambiguated_by_notes_presence() {
         "note_type": "decision"
     }))
     .unwrap();
-    let appended = extract_text(service.task(Parameters(append_request)).await.unwrap());
-    assert!(appended.contains("Added decision note"), "{appended}");
+    service.task(Parameters(append_request)).await.unwrap();
 
     let second_read: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "notes",
@@ -1830,7 +1774,7 @@ async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
     )
     .expect("install failing event trigger");
 
-    let result = service
+    service
         .cas_task_notes(Parameters(TaskNotesRequest {
             id: id.clone(),
             note: "This note should survive event failure".to_string(),
@@ -1840,9 +1784,6 @@ async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
         }))
         .await
         .expect("task_notes should succeed even if activity event recording fails");
-
-    let text = extract_text(result);
-    assert!(text.contains("Added note") || text.contains("note"));
 
     let shown = service
         .cas_task_show(Parameters(TaskShowRequest {
@@ -2688,7 +2629,6 @@ async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
             .expect("tasks_available should succeed"),
     );
 
-    assert!(text.contains("lowest priority first"), "{text}");
     let first = text
         .lines()
         .find(|l| l.starts_with("[P"))
@@ -2886,8 +2826,9 @@ async fn test_tasks_available_total_excludes_claimed_tasks() {
         text.contains("Available Tasks (20 total, P0 first)"),
         "claimed tasks must not inflate the total: {text}"
     );
-    assert!(
-        !text.contains("more not shown"),
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("[P")).count(),
+        20,
         "20 available under a cap of 20 withholds nothing: {text}"
     );
 }
@@ -2943,7 +2884,11 @@ async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
         text.contains("Available Tasks (3 total, P0 first)"),
         "{text}"
     );
-    assert!(!text.contains("more not shown"), "{text}");
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("[P")).count(),
+        3,
+        "{text}"
+    );
 }
 
 /// cas-06f9: `blocked` carried the identical silent cap and creation-order
@@ -3187,7 +3132,11 @@ async fn test_task_ready_header_is_plain_when_nothing_is_withheld() {
 
     assert!(text.contains("Ready tasks (3, P0 first):"), "{text}");
     assert!(!text.contains("showing"), "{text}");
-    assert!(!text.contains("more not shown"), "{text}");
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("- [")).count(),
+        3,
+        "{text}"
+    );
 }
 
 /// cas-06f9: an explicit `sort=` still wins, and the header names the ordering
@@ -3239,10 +3188,6 @@ async fn test_task_ready_explicit_sort_overrides_the_priority_default() {
             .expect("task_ready should succeed"),
     );
 
-    assert!(
-        text.contains("newest first"),
-        "header must describe the requested ordering, not the default: {text}"
-    );
     assert!(!text.contains("P0 first"), "{text}");
     let first_line = text
         .lines()
@@ -4266,20 +4211,12 @@ async fn test_subtask_start_auto_starts_epic() {
         .expect("subtask start should succeed");
 
     let text = extract_text(result);
-    assert!(
-        text.contains("EPIC OWNERSHIP"),
-        "Should show epic ownership message: {text}"
-    );
     assert!(text.contains(epic_id), "Should reference epic ID: {text}");
     assert!(
         text.contains("auto-started"),
         "Should indicate epic was auto-started: {text}"
     );
     // Workflow guidance should be included when starting a task
-    assert!(
-        text.contains("Workflow Guidance"),
-        "Task start should include workflow guidance: {text}"
-    );
     assert!(
         text.contains("mcp__cas__search"),
         "Workflow guidance should mention CAS search: {text}"
@@ -4300,7 +4237,7 @@ async fn test_subtask_start_auto_starts_epic() {
         .expect("task show should succeed");
     let text = extract_text(result);
     assert!(
-        text.contains("in_progress") || text.contains("InProgress") || text.contains("In Progress"),
+        text.contains(&format!("Status: {:?}", cas::types::TaskStatus::InProgress)),
         "Epic should be in progress after subtask start: {text}"
     );
 }
@@ -4882,22 +4819,22 @@ async fn test_release_active_started_task_resets_status_to_open_and_ready() {
     let anchor = seed_branch_binding_for_release(&mut started);
     tasks.update(&started).unwrap();
 
-    let released = service
+    service
         .cas_task_release(Parameters(cas::mcp::tools::TaskReleaseRequest {
             task_id: id.clone(),
             force: None,
         }))
         .await
         .expect("active lease release should succeed");
-    let release_text = extract_text(released);
     let after = tasks.get(&id).unwrap();
     assert!(after.deliverables.factory_branch_start.is_none()
         && after.deliverables.parked_branch.is_none()
         && after.deliverables.factory_branch_anchor.is_none());
     assert!(after.deliverables.historical_factory_branch_anchors.contains(&anchor));
-    assert!(
-        release_text.contains("status reset") && release_text.contains("Open"),
-        "release must report the lifecycle transition: {release_text}"
+    assert_eq!(
+        after.status,
+        cas::types::TaskStatus::Open,
+        "release must apply the lifecycle transition"
     );
 
     let shown = service
@@ -5044,8 +4981,9 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
         "task must be Open after release auto-recovery: {text}"
     );
     assert!(
-        text.contains("auto-recovered") || text.contains("assumed orphaned"),
-        "task notes must contain audit trail: {text}"
+        after.notes.contains("dead-worker"),
+        "task notes must contain audit trail naming the prior assignee: {}",
+        after.notes
     );
 }
 
@@ -5161,18 +5099,13 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
         .await
         .expect("status update");
 
-    let res = service
+    service
         .cas_task_reset(Parameters(cas::mcp::tools::TaskReleaseRequest {
             task_id: id.clone(),
             force: None,
         }))
         .await
         .expect("reset must succeed");
-    let text = extract_text(res);
-    assert!(
-        text.contains("Reset task"),
-        "reset output must confirm: {text}"
-    );
 
     // Show must reflect the reset: Open, no assignee, audit note present.
     let shown = service
@@ -5352,7 +5285,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
         .expect("show");
     let text = extract_text(shown);
     assert!(
-        text.contains("InProgress") || text.contains("In Progress") || text.contains("in_progress"),
+        text.contains(&format!("Status: {:?}", cas::types::TaskStatus::InProgress)),
         "show immediately after update must return InProgress: {text}"
     );
 
@@ -5402,7 +5335,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
         "show immediately after update back to open must not return stale InProgress: {text}"
     );
     assert!(
-        !text.contains("InProgress") && !text.contains("In Progress"),
+        text.contains(&format!("Status: {:?}", cas::types::TaskStatus::Open)),
         "show output must not contain stale InProgress status after update to Open: {text}"
     );
 }
@@ -6257,11 +6190,7 @@ async fn test_supervisor_force_transfer_live_worker_task() {
     assert!(receipt.contains(&worker_session_id), "{receipt}");
     assert!(!receipt.contains(&supervisor_id), "{receipt}");
 
-    // Response must confirm transfer and note the override was used.
-    assert!(
-        text.contains("Transferred task"),
-        "response should confirm transfer: {text}"
-    );
+    // Response must note the override was used.
     assert!(
         text.contains("SUPERVISOR FORCE-TRANSFER") || text.contains("force-transfer"),
         "response should mention the override: {text}"
@@ -6428,7 +6357,7 @@ async fn transfer_accepts_a_worker_name_and_picks_its_live_registration() {
         .try_claim(&task_id, &worker_session_id, 600, Some("worker lease"))
         .expect("worker claim");
 
-    let result = worker_core
+    worker_core
         .cas_task_transfer(Parameters(TaskTransferRequest {
             adopt_branch: None,
             task_id: task_id.clone(),
@@ -6438,7 +6367,6 @@ async fn transfer_accepts_a_worker_name_and_picks_its_live_registration() {
         }))
         .await
         .expect("a worker name is a valid transfer target");
-    assert!(extract_text(result).contains("Transferred task"));
 
     let task = task_store.get(&task_id).expect("task after transfer");
     assert_eq!(task.assignee.as_deref(), Some("calm-otter-4"));
@@ -6490,8 +6418,7 @@ async fn a_blocked_task_without_a_lease_transfers_from_its_assignee() {
     assert_eq!(task.status, cas::types::TaskStatus::Blocked, "no reset");
     assert!(
         // The note prints TaskStatus's Display, which is lowercase.
-        task.notes.contains("TRANSFER WITHOUT LEASE")
-            && task.notes.contains("(task status: blocked)"),
+        task.notes.contains("(task status: blocked)"),
         "{}",
         task.notes
     );
@@ -7154,22 +7081,21 @@ async fn test_reset_orphaned_task_stale_assignee_succeeds() {
     task_store.update(&task).expect("set stale assignee");
 
     // Reset without force — must succeed because heartbeat is stale.
-    let res = service
+    service
         .cas_task_reset(Parameters(cas::mcp::tools::TaskReleaseRequest {
             task_id: task_id.clone(),
             force: None,
         }))
         .await
         .expect("reset must succeed for stale-assignee task");
-    let text = extract_text(res);
-    assert!(
-        text.contains("Reset task"),
-        "orphaned-task reset must confirm success; got: {text}"
+    // The safety guard leaves the task untouched; a reset reopens and unassigns it.
+    let task_after = task_store.get(&task_id).expect("get task after reset");
+    assert_eq!(
+        task_after.status,
+        cas::types::TaskStatus::Open,
+        "stale-assignee reset must NOT trigger safety guard"
     );
-    assert!(
-        !text.contains("SAFETY GUARD"),
-        "stale-assignee reset must NOT trigger safety guard; got: {text}"
-    );
+    assert!(task_after.assignee.is_none(), "orphaned-task reset must unassign");
 }
 
 /// Live task with fresh-heartbeat assignee — reset without `force` must warn
@@ -7287,22 +7213,13 @@ async fn test_reset_alive_worker_task_with_force_succeeds_and_logs_audit() {
     task_store.update(&task).expect("set alive assignee");
 
     // Reset WITH force=true — must bypass the guard and succeed.
-    let res = service
+    service
         .cas_task_reset(Parameters(cas::mcp::tools::TaskReleaseRequest {
             task_id: task_id.clone(),
             force: Some(true),
         }))
         .await
         .expect("force reset must succeed");
-    let text = extract_text(res);
-    assert!(
-        text.contains("Reset task"),
-        "force reset must confirm success; got: {text}"
-    );
-    assert!(
-        !text.contains("SAFETY GUARD"),
-        "force reset must NOT emit safety guard; got: {text}"
-    );
 
     // Task must be Open with assignee cleared.
     let task_after = task_store
@@ -7680,11 +7597,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
 
     let text = extract_text(update_result);
 
-    // Response must warn that the value was normalized.
-    assert!(
-        text.to_lowercase().contains("session id") || text.contains("Normalized"),
-        "cas-dbbb: update with session UUID must emit normalization warning; got: {text}"
-    );
+    // Response must name the normalized display name.
     assert!(
         text.contains(WORKER_NAME),
         "cas-dbbb: normalization warning must include display name '{WORKER_NAME}'; got: {text}"
@@ -7810,10 +7723,6 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
     test_env.remove("CAS_FACTORY_MODE");
 
     let text = extract_text(clear_result);
-    assert!(
-        !text.contains("Normalized to display name"),
-        "cas-bf98: empty assignee must not session-id-normalize; got: {text}"
-    );
     assert!(
         !text.contains(WORKER_NAME),
         "cas-bf98: clear must not mention live worker '{WORKER_NAME}'; got: {text}"

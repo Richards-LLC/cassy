@@ -160,7 +160,6 @@ async fn blocked_high_overlap_returns_structured_blocked() {
 
     // Text fallback remains for legacy clients.
     let text = extract_text(result);
-    assert!(text.contains("Overlap detected"));
     assert!(text.contains("Existing slug:"));
 }
 

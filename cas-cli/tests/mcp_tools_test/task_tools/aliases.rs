@@ -41,7 +41,7 @@ async fn task_get_alias_resolves_to_show() {
 #[tokio::test]
 async fn task_dep_add_blocked_by_alias_resolves_to_to_id() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, core) = setup_cas(&mut test_env);
+    let (temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
     let dependent = create_task(&service, "dependent").await;
     let blocker = create_task(&service, "blocker").await;
@@ -55,8 +55,12 @@ async fn task_dep_add_blocked_by_alias_resolves_to_to_id() {
     .expect("blocked_by alias should deserialize");
     let text = extract_text(service.task(Parameters(request)).await.unwrap());
 
+    let deps = cas::store::open_task_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get_dependencies(&dependent)
+        .unwrap();
     assert!(
-        text.contains("Added dependency"),
+        deps.iter().any(|dep| dep.to_id == blocker),
         "dep_add response: {text}"
     );
 }
@@ -64,7 +68,7 @@ async fn task_dep_add_blocked_by_alias_resolves_to_to_id() {
 #[tokio::test]
 async fn task_dep_remove_blocked_by_alias_resolves_to_to_id() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, core) = setup_cas(&mut test_env);
+    let (temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
     let dependent = create_task(&service, "dependent for remove").await;
     let blocker = create_task(&service, "blocker for remove").await;
@@ -87,8 +91,12 @@ async fn task_dep_remove_blocked_by_alias_resolves_to_to_id() {
     .expect("blocked_by alias should deserialize for dep_remove");
     let text = extract_text(service.task(Parameters(remove)).await.unwrap());
 
+    let deps = cas::store::open_task_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get_dependencies(&dependent)
+        .unwrap();
     assert!(
-        text.contains("Removed dependency"),
+        deps.iter().all(|dep| dep.to_id != blocker),
         "dep_remove response: {text}"
     );
 }
@@ -137,10 +145,5 @@ async fn coordination_inbox_alias_resolves_to_inbox_poll() {
         "action": "inbox"
     }))
     .expect("inbox alias should deserialize");
-    let text = extract_text(service.coordination(Parameters(request)).await.unwrap());
-
-    assert!(
-        text.contains("No unread messages") || text.contains("Inbox"),
-        "inbox response: {text}"
-    );
+    service.coordination(Parameters(request)).await.unwrap();
 }

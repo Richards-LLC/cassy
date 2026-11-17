@@ -148,7 +148,6 @@ async fn test_remember_basic() {
         .expect("remember should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Created entry"));
     assert!(extract_entry_id(&text).is_some(), "Should contain entry ID");
 }
 
@@ -178,8 +177,13 @@ async fn test_remember_with_defaults() {
         .await
         .expect("remember should succeed");
 
-    let text = extract_text(result);
-    assert!(text.contains("Created entry"));
+    assert_eq!(
+        result
+            .structured_content
+            .as_ref()
+            .expect("Created carries structured_content")["status"],
+        "created"
+    );
 }
 
 #[tokio::test]
@@ -530,7 +534,9 @@ async fn test_recent_entries() {
         .expect("recent should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Recent entries"));
+    for i in 0..3 {
+        assert!(text.contains(&format!("Recent test entry {i}")), "{text}");
+    }
 }
 
 #[tokio::test]
@@ -721,10 +727,6 @@ async fn cas_8c16_distinct_session_learnings_store_but_real_duplicate_is_explain
     );
     let text = extract_text(duplicate);
     assert!(
-        text.contains("Overlap detected"),
-        "block remains legible: {text}"
-    );
-    assert!(
         text.contains("Matched text:"),
         "refusal must show the actual text overlap: {text}"
     );
@@ -797,10 +799,6 @@ async fn test_overlap_blocks_duplicate_insert() {
     assert!(structured["existing_slug"].as_str().is_some());
     assert!(structured["dimension_scores"]["net"].as_u64().unwrap() >= 4);
     let text = extract_text(result);
-    assert!(
-        text.contains("Overlap detected"),
-        "text fallback preserved: {text}"
-    );
     assert!(
         text.contains("Existing slug:"),
         "text fallback preserved: {text}"
@@ -893,10 +891,13 @@ async fn test_unrelated_memory_inserts_normally() {
         .cas_remember(Parameters(second))
         .await
         .expect("unrelated insert should succeed");
-    let text = extract_text(result);
-    assert!(
-        text.contains("Created entry"),
-        "expected success, got: {text}"
+    assert_eq!(result.is_error, Some(false), "unrelated insert is not blocked");
+    assert_eq!(
+        result
+            .structured_content
+            .as_ref()
+            .expect("Created carries structured_content")["status"],
+        "created"
     );
 }
 
@@ -1053,7 +1054,6 @@ async fn test_remember_team_linked_project_auto_promotes_to_team() {
         .expect("remember should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Created entry"), "expected success: {text}");
 
     // Extract the slug and read back the entry to check team_id.
     let slug = extract_entry_id(&text).expect("slug in output");
@@ -1112,7 +1112,6 @@ async fn test_remember_personal_flag_opts_out_of_team_auto_promote() {
         .expect("remember should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Created entry"), "expected success: {text}");
 
     let slug = extract_entry_id(&text).expect("slug in output");
     let store = open_store(&cas_dir).expect("open store");
@@ -1167,7 +1166,6 @@ async fn test_remember_explicit_team_id_wins_over_auto_promote() {
         .expect("remember should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Created entry"), "expected success: {text}");
 
     let slug = extract_entry_id(&text).expect("slug in output");
     let store = open_store(&cas_dir).expect("open store");

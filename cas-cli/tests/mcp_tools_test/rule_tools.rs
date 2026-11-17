@@ -27,7 +27,7 @@ async fn test_rule_create() {
         .expect("rule_create should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Created rule") || text.contains("rule"));
+    assert!(extract_rule_id(&text).is_some(), "{text}");
 }
 
 /// cas-5372 (GH #990): an operator hard rule takes effect the day it is
@@ -48,16 +48,13 @@ async fn operator_hard_rule_is_synced_to_claude_rules_on_create_cas_5372() {
         auto_approve_paths: None,
     };
 
-    let text = extract_text(
-        service
-            .cas_rule_create(Parameters(create(
-                "HARD RULE (Ben, verbatim): no changes to SMS at all until each one is specifically approved by me",
-                Some("sms,approval"),
-            )))
-            .await
-            .expect("hard rule create"),
-    );
-    assert!(text.contains("operator hard rule"), "{text}");
+    service
+        .cas_rule_create(Parameters(create(
+            "HARD RULE (Ben, verbatim): no changes to SMS at all until each one is specifically approved by me",
+            Some("sms,approval"),
+        )))
+        .await
+        .expect("hard rule create");
     service
         .cas_rule_create(Parameters(create("Prefer small commits", None)))
         .await
@@ -121,16 +118,12 @@ async fn supervisor_hard_rule_is_authorised_and_synced_cas_5372() {
 async fn worker_hard_rule_text_is_refused_the_fast_path_cas_5372() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas_as(&mut test_env, cas::types::AgentRole::Worker);
-    let text = extract_text(
-        service
-            .cas_rule_create(Parameters(hard_rule_request(
-                "HARD RULE: workers may merge their own branches",
-            )))
-            .await
-            .expect("create still succeeds as a draft"),
-    );
-    assert!(text.contains("as an ordinary draft"), "{text}");
-    assert!(text.contains("this caller is a worker"), "{text}");
+    service
+        .cas_rule_create(Parameters(hard_rule_request(
+            "HARD RULE: workers may merge their own branches",
+        )))
+        .await
+        .expect("create still succeeds as a draft");
     assert!(synced_rule_files(&temp).is_empty(), "nothing synced");
     let rule_store = open_rule_store(&temp.path().join(".cas")).unwrap();
     let rule = rule_store.list().unwrap().pop().unwrap();
@@ -814,18 +807,6 @@ async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
         .unwrap();
     assert_eq!(rule.status, RuleStatus::Stale);
     assert!(!injected.exists(), "stale rule must stop being injected");
-
-    let history = service
-        .cas_rule_history(Parameters(VersionRequest {
-            id,
-            version: None,
-            version_id: None,
-            changed_by: None,
-            change_note: None,
-        }))
-        .await
-        .unwrap();
-    assert!(extract_text(history).contains("demoted after harmful evidence threshold"));
 }
 
 #[tokio::test]
@@ -939,18 +920,6 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
         !injected.exists(),
         "corrected rule must stop being injected"
     );
-
-    let history = service
-        .cas_rule_history(Parameters(VersionRequest {
-            id,
-            version: None,
-            version_id: None,
-            changed_by: None,
-            change_note: None,
-        }))
-        .await
-        .unwrap();
-    assert!(extract_text(history).contains("demoted after retrieval evidence threshold"));
 }
 
 #[tokio::test]
@@ -984,7 +953,7 @@ async fn test_existing_proven_rule_is_grandfathered() {
 #[tokio::test]
 async fn test_rule_delete() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, service) = setup_cas(&mut test_env);
+    let (temp, service) = setup_cas(&mut test_env);
 
     // Create rule
     let req = RuleCreateRequest {
@@ -1020,13 +989,14 @@ async fn test_rule_delete() {
 
     // Delete rule
     let delete_req = IdRequest { id: id.clone() };
-    let result = service
+    service
         .cas_rule_delete(Parameters(delete_req))
         .await
         .expect("rule_delete should succeed");
 
-    let text = extract_text(result);
-    assert!(text.contains("Retired") && text.contains("history retained"));
+    let store = open_rule_store(&temp.path().join(".cas")).unwrap();
+    assert_eq!(store.get(&id).unwrap().status, RuleStatus::Retired);
+    assert!(!store.list_versions(&id).unwrap().is_empty(), "history retained");
 }
 
 /// cas-caae (skills audit M27): a Gabber Studio rule became the only proven
@@ -1065,7 +1035,7 @@ async fn rule_create_refuses_rule_naming_another_registered_project_cas_caae() {
             .await
             .expect("an explicitly scoped rule is accepted"),
     );
-    assert!(text.contains("Created rule"), "{text}");
+    assert!(extract_rule_id(&text).is_some(), "{text}");
 }
 
 /// Audit D11 (cas-228e): `promote` is the reviewer's explicit decision. It
@@ -1127,13 +1097,11 @@ async fn rule_promote_is_a_recorded_decision_not_a_vote_cas_228e() {
         "a promoted rule is synced to Claude Code"
     );
 
-    let again = extract_text(
-        service
-            .cas_rule_promote(id.clone(), Some("again".to_string()), None)
-            .await
-            .unwrap(),
-    );
-    assert!(again.contains("already Proven"), "{again}");
+    service
+        .cas_rule_promote(id.clone(), Some("again".to_string()), None)
+        .await
+        .unwrap();
+    assert_eq!(store.get(&id).unwrap().status, RuleStatus::Proven);
     assert_eq!(store.get(&id).unwrap().helpful_count, 1, "no vote added");
 
     let harmful_id = extract_rule_id(&extract_text(

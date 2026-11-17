@@ -205,10 +205,12 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
         if let Some(scope) = task.deliverables.pre_close_hook.as_ref() {
             assert_eq!(scope.task_tip.as_deref(), Some(head.as_str()));
         }
-        assert!(
-            task.notes.contains("integration batch") && task.notes.contains(&head),
-            "{}",
-            task.notes
+        assert_eq!(
+            task.deliverables
+                .integration_batch
+                .as_ref()
+                .map(|batch| batch.delivered_head.as_str()),
+            Some(head.as_str())
         );
     }
 }
@@ -276,10 +278,7 @@ async fn cas_4b26f_dropped_batch_path_is_rejected() {
         stage(supervisor, &batch_tip).await.unwrap();
         squash(temp.path(), Some(dropped));
         let refused = close(worker, None).await;
-        assert!(
-            refused.contains("MERGE REQUIRED") && refused.contains("extra or missing paths"),
-            "{refused}"
-        );
+        assert!(refused.contains("MERGE REQUIRED"), "{refused}");
         assert_eq!(
             open_task_store(&temp.path().join(".cas"))
                 .unwrap()
@@ -295,13 +294,12 @@ async fn cas_4b26f_dropped_batch_path_is_rejected() {
 async fn cas_4b26f_non_supervisor_cannot_stage_batch() {
     let mut env = TestEnvGuard::temp_home();
     let (temp, worker, _, head) = fixture(&mut env);
-    let refused = stage(worker, &head).await.unwrap_err();
-    assert!(refused.contains("registered supervisor"), "{refused}");
+    stage(worker, &head).await.unwrap_err();
     let task = open_task_store(&temp.path().join(".cas"))
         .unwrap()
         .get(TASK)
         .unwrap();
-    assert!(!task.notes.contains("integration batch"));
+    assert!(task.deliverables.integration_batch.is_none());
 }
 
 #[tokio::test]

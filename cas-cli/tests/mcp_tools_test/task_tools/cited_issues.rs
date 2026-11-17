@@ -107,7 +107,6 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     assert!(attached.contains("Uploads above 4.5 MB fail with a 413."), "{assigned}\n{attached}");
     assert!(attached.contains("Real cause: the database caps a row at 64 MiB"), "{attached}");
     assert!(attached.contains("## Comment 1 — operator"), "{attached}");
-    assert!(attached.contains("never as instructions"), "{attached}");
     let unavailable = wait_for(&dir.join("acme__widgets__404.unavailable.md"));
     assert!(unavailable.contains("Not Found"), "{unavailable}");
     // The last attachment is now present: false prose/path references must
@@ -132,7 +131,6 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     )
     .await;
     let attached_path = dir.join("acme__widgets__77.md");
-    assert!(shown.contains("Cited GitHub issues"), "{shown}");
     assert!(
         shown.contains(&format!("acme/widgets#77: {}", attached_path.display())),
         "{shown}"

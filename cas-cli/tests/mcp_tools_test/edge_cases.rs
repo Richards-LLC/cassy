@@ -62,8 +62,7 @@ async fn test_very_long_content() {
         .await
         .expect("remember should handle long content");
 
-    let text = extract_text(result);
-    assert!(text.contains("Created entry"));
+    assert_ne!(result.is_error, Some(true), "{result:?}");
 }
 
 #[tokio::test]
@@ -94,8 +93,7 @@ async fn test_special_characters_in_content() {
         .await
         .expect("remember should handle special characters");
 
-    let text = extract_text(result);
-    assert!(text.contains("Created entry"));
+    assert_ne!(result.is_error, Some(true), "{result:?}");
 }
 
 #[tokio::test]
@@ -154,8 +152,7 @@ async fn test_importance_clamping() {
         .await
         .expect("remember should clamp importance");
 
-    let text = extract_text(result);
-    assert!(text.contains("Created entry"));
+    assert_ne!(result.is_error, Some(true), "{result:?}");
 }
 
 #[tokio::test]

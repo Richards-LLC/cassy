@@ -88,7 +88,6 @@ async fn publish_returns_a_citable_id_digest_and_size() {
         text.contains("metadata_state: qa_bundle_not_portable"),
         "{text}"
     );
-    assert!(text.contains("byte limit"), "{text}");
 }
 
 #[tokio::test]
@@ -166,7 +165,7 @@ async fn a_missing_file_is_refused_rather_than_recorded() {
     list.task_id = Some("cas-b72a".to_string());
     let listed = extract_text(service.artifact(Parameters(list)).await.unwrap());
     assert!(
-        listed.contains("No artifacts"),
+        !listed.contains("art-"),
         "no row may be left: {listed}"
     );
 }

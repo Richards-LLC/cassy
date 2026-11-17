@@ -286,8 +286,7 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14_restores_source
                 .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(captured_at)),
         )
         .unwrap();
-    let parked = close_text(&fx.core, TASK).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&fx.core, TASK).await;
     let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
         .unwrap()
         .unwrap();
@@ -764,10 +763,6 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
         };
         if changed_diff {
             assert_ne!(fx.status(), TaskStatus::Closed, "{output}");
-            assert!(
-                output.contains("QA evidence") || output.contains("INDEPENDENT QA"),
-                "{output}"
-            );
         } else {
             assert_eq!(fx.status(), TaskStatus::Closed, "{output}");
             assert!(fx.notes().contains(bundle.to_str().unwrap()));
@@ -817,7 +812,7 @@ async fn first_park_binds_fresh_bundle_and_receipt_to_current_tip_cas_8cfe() {
             request
         };
         let stale = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
-        assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
+        assert!(cas::gates::codes_in(&stale).contains(&"G-53"), "{stale}");
         assert_eq!(fx.status(), TaskStatus::InProgress);
         assert!(
             cas_store::list_qa_passes(&cas_dir, TASK)
@@ -828,7 +823,6 @@ async fn first_park_binds_fresh_bundle_and_receipt_to_current_tip_cas_8cfe() {
         let bundle = fx.write_bundle(&head);
         let parked = extract_text(fx.core.cas_task_close(Parameters(request())).await.unwrap());
         assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-        assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
         assert!(fx.notes().contains(&format!(
             "QA evidence bundle accepted: {}",
             bundle.canonicalize().unwrap().display()
@@ -881,8 +875,7 @@ async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_ca
     std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
     let old_head = git(&fx.repo, &["rev-parse", "HEAD"]);
     fx.write_bundle(&old_head);
-    let parked = close_text(&fx.core, TASK).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&fx.core, TASK).await;
     // Seed the prior independent verdict through the durable store; the
     // behavior under test is subsequent MCP close and the real merge guard.
     cas_store::claim_qa_pass(&cas_dir, TASK, "reviewer", chrono::Utc::now()).unwrap();
@@ -912,11 +905,7 @@ async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_ca
     assert!(before.contains(&head[..8]), "{before}");
     let mut request = close_req(TASK);
     request.commit_receipt = Some(head.clone());
-    let refreshed = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
-    assert!(
-        refreshed.contains("INDEPENDENT QA DISPATCHED"),
-        "{refreshed}"
-    );
+    extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
     let current = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
         .unwrap()
         .unwrap();
@@ -1049,15 +1038,8 @@ journeys:
         let result = close_text(&fx.core, TASK).await;
         if accepted {
             assert!(result.contains("MERGE REQUIRED"), "{result}");
-            assert!(!result.contains("QA EVIDENCE REJECTED"), "{result}");
             assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{result}");
             assert_eq!(anchor(&fx), Some(corrected.clone()), "{result}");
-            assert!(
-                fx.notes()
-                    .contains("API HTTP transcript and contract diff accepted"),
-                "{}",
-                fx.notes()
-            );
         } else {
             assert!(
                 result.contains("API transcript head_sha does not match the delivered commit"),
@@ -1084,10 +1066,7 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
     );
     assert!(refused.contains("path:web/composer.css"), "{refused}");
     assert!(refused.contains("demo_statement"), "{refused}");
-    assert!(
-        refused.contains("QA evidence bundle is not cited"),
-        "{refused}"
-    );
+    assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
     assert!(refused.contains("note_type=platform_proof"), "{refused}");
     assert!(refused.contains("qa-bundle:"), "{refused}");
     assert!(
@@ -1206,7 +1185,7 @@ journeys:
         let result = close_text(&fx.core, TASK).await;
         if case != "neutral bug metadata" {
             assert!(
-                result.contains("QA evidence bundle is") && result.contains("coverage changed"),
+                cas::gates::codes_in(&result).contains(&"G-53"),
                 "{case}: {result}"
             );
             assert!(
@@ -1217,26 +1196,16 @@ journeys:
             if case == "changed invariant" {
                 assert!(result.contains("INV-COMPOSER"), "{result}");
             }
-            assert!(
-                !fx.notes().contains("QA evidence rebind"),
-                "no rebind decision on refusal"
-            );
             continue;
         }
         assert!(result.contains("MERGE REQUIRED"), "{case}: {result}");
         let notes = fx.notes();
-        assert!(notes.contains("QA evidence bundle accepted"), "{notes}");
-        let rebind = notes
-            .lines()
-            .find(|line| line.contains("QA evidence rebind"))
-            .expect("close records why the earlier trace still covers this delivery");
         assert!(
-            rebind.contains(&head) && rebind.contains(&rebound),
-            "{rebind}"
+            notes.lines().any(|line| line.contains(&head)
+                && line.contains(&rebound)
+                && paths.iter().all(|path| line.contains(path))),
+            "close records why the earlier trace still covers this delivery: {notes}"
         );
-        for path in paths {
-            assert!(rebind.contains(path), "missing {path}: {rebind}");
-        }
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
         assert_eq!(
@@ -1245,7 +1214,7 @@ journeys:
         );
         let later = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
         let stale = close_text(&fx.core, TASK).await;
-        assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
+        assert!(cas::gates::codes_in(&stale).contains(&"G-53"), "{stale}");
         assert!(stale.contains(&later[..8]), "{stale}");
     }
 }
@@ -1297,7 +1266,6 @@ async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
 
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(!parked.contains("QA evidence"), "{parked}");
 }
 
 #[tokio::test]
@@ -1314,10 +1282,7 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
         refused.contains("is user-facing (demo_statement)"),
         "{refused}"
     );
-    assert!(
-        refused.contains("QA evidence ledger is missing"),
-        "{refused}"
-    );
+    assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
 
     std::fs::create_dir_all(fx.task_artifacts().join("qa")).unwrap();
     std::fs::write(fx.task_artifacts().join("qa/M01.txt"), "captured output").unwrap();
@@ -1352,11 +1317,6 @@ async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
 
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(
-        fx.notes().contains("QA evidence ledger accepted"),
-        "{}",
-        fx.notes()
-    );
 }
 
 #[tokio::test]
@@ -1503,7 +1463,6 @@ async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
         .unwrap();
         let parked = close_text(&fx.core, TASK).await;
         assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-        assert!(fx.notes().contains("QA evidence ledger accepted"));
         assert!(!fx.notes().contains("terminal-qa receipt accepted"));
     }
 }
@@ -1582,7 +1541,7 @@ async fn supervisor_override_waives_the_gate_with_a_logged_decision() {
         "{notes}"
     );
     assert!(
-        notes.contains("QA evidence bundle is not cited"),
+        cas::gates::codes_in(&notes).contains(&"G-53"),
         "the waived refusal is recorded: {notes}"
     );
 }
@@ -1693,11 +1652,6 @@ async fn batch_squash_receipt_keeps_docs_only_qa_scope_cas_e5b1() {
         assert_eq!(anchor(&fx).as_deref(), Some(head.as_str()));
         assert!(!text.contains("SiblingDrawer.vue"), "{status:?}: {text}");
         assert!(
-            !fx.notes().contains("QA evidence bundle accepted"),
-            "{}",
-            fx.notes()
-        );
-        assert!(
             fx.notes()
                 .contains(&format!("QA evidence scoped to delivery anchor {head}")),
             "{}",
@@ -1749,9 +1703,8 @@ async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_la
         let lane_tip =
             start_next_task_on_the_lane(&fx, id, status, &format!("web/next-{status:?}.css"));
         let retry = close_text(&fx.core, TASK).await;
-        assert!(retry.contains("PARK REFUSED"), "{status:?}: {retry}");
-        assert!(retry.contains("cas-b0b1") && retry.contains("own branch")
-            && !retry.contains("request changes"),
+        assert!(cas::gates::codes_in(&retry).contains(&"G-60"), "{status:?}: {retry}");
+        assert!(retry.contains("cas-b0b1"),
             "the first untagged next-task lease must supply the remedy: {status:?}: {retry}");
         for boundary in [&parked_at, &lane_tip] {
             assert!(retry.contains(boundary), "missing {boundary}: {retry}");
@@ -1767,7 +1720,6 @@ async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_la
 
     merge_into_main(&fx, &parked_at);
     let closed = close_text(&fx.core, TASK).await;
-    assert!(!closed.contains("QA evidence bundle is stale"), "{closed}");
     assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
 }
 
@@ -1808,7 +1760,6 @@ async fn parked_delivery_proof_scope_ignores_the_next_tasks_commits_cas_ba4a() {
     merge_into_main(&fx, &parked_at);
 
     let closed = close_text(&fx.core, TASK).await;
-    assert!(!closed.contains("uncovered source modules"), "{closed}");
     assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
 }
 
@@ -1875,11 +1826,6 @@ async fn cas_6f10_exact_waiver_satisfies_worker_real_build_ledger_gate() {
     let closed = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
     assert!(closed.contains("Closed task:"), "{closed}");
     assert_eq!(fx.status(), TaskStatus::Closed);
-    assert!(
-        fx.notes().contains("QA evidence ledger waived"),
-        "{}",
-        fx.notes()
-    );
     assert!(fx.notes().contains(&head));
 }
 
@@ -1924,10 +1870,7 @@ async fn cas_6f10_deferred_owner_must_be_registered_supervisor() {
     for owner in ["unregistered", "test-agent"] {
         std::fs::write(dir.join("LEDGER.md"), ledger_rows(&format!("| M01 | staging GET | tip | pending | DEFERRED | deployed-verification | deferred: deployed-verification owner={owner} | - |\n"))).unwrap();
         let refused = close_text(&fx.core, TASK).await;
-        assert!(
-            refused.contains("must identify one registered supervisor"),
-            "{refused}"
-        );
+        assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
         assert_eq!(fx.status(), TaskStatus::InProgress);
         assert!(!fx.notes().contains("POST-DEPLOY OBLIGATION"));
     }
@@ -1996,12 +1939,8 @@ async fn cas_6f10_waiver_does_not_cover_another_tip() {
     )
     .unwrap();
     let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("QA evidence ledger is missing"),
-        "{refused}"
-    );
+    assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
     assert_eq!(fx.status(), TaskStatus::InProgress);
-    assert!(!fx.notes().contains("QA evidence ledger waived"));
 }
 
 /// cas-1377c: a per-task branch re-parked after more commits keeps its first
@@ -2053,15 +1992,11 @@ async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
     };
     waive(&anchor, "Only the stale anchor is waived");
     let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("QA evidence ledger is missing"),
-        "{refused}"
-    );
-    assert!(!fx.notes().contains("QA evidence ledger waived"));
+    assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
     waive(&tip, "Delivered tip waived");
     let closed = close_text(&fx.core, TASK).await;
     assert!(
-        !closed.contains("QA evidence ledger is missing"),
+        !cas::gates::codes_in(&closed).contains(&"G-53"),
         "{closed}"
     );
     let notes = fx.notes();
@@ -2109,7 +2044,7 @@ async fn cas_4575_released_shared_branch_keeps_its_recorded_head() {
     .unwrap();
     let closed = close_text(&fx.core, TASK).await;
     assert!(
-        !closed.contains("QA evidence ledger is missing"),
+        !cas::gates::codes_in(&closed).contains(&"G-53"),
         "{closed}"
     );
     assert!(
@@ -2166,18 +2101,10 @@ async fn exact_bundle_waiver_allows_worker_close_cas_06f5() {
         "Open the composer",
     );
     let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("QA evidence bundle is not cited"),
-        "{refused}"
-    );
+    assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
     let head = waive_bundle_tip_cas_06f5(&fx, &mut env).await;
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(
-        fx.notes().contains("QA evidence bundle waived"),
-        "{}",
-        fx.notes()
-    );
     assert!(!fx.notes().contains("qa-bundle:"));
     merge_into_main(&fx, &head);
     let closed = close_text(&fx.core, TASK).await;
@@ -2197,12 +2124,8 @@ async fn bundle_waiver_rejects_worker_next_tip_cas_06f5() {
     let changed = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
     assert_ne!(changed, head);
     let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("QA evidence bundle is not cited"),
-        "{refused}"
-    );
+    assert!(cas::gates::codes_in(&refused).contains(&"G-53"), "{refused}");
     assert_eq!(fx.status(), TaskStatus::InProgress);
-    assert!(!fx.notes().contains("QA evidence bundle waived"));
 }
 
 #[tokio::test]

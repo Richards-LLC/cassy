@@ -37,11 +37,7 @@ async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
         "superseded_by": "https://github.com/example/repo/pull/258"
     }))
     .unwrap();
-    let result = extract_text(service.task(Parameters(request)).await.unwrap());
-    assert!(
-        result.contains("Cancelled task without delivery"),
-        "{result}"
-    );
+    service.task(Parameters(request)).await.unwrap();
 
     let persisted = store.get(&task.id).unwrap();
     assert_eq!(persisted.status, TaskStatus::Cancelled);

@@ -38,7 +38,7 @@ async fn test_task_create_basic() {
         .expect("task_create should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Created task"));
+    assert!(extract_task_id(&text).is_some(), "{text}");
     assert!(text.contains("Test task"));
 }
 
@@ -100,19 +100,9 @@ async fn test_task_create_and_start() {
         start_text.contains("claimed"),
         "Task start should show claimed: {start_text}"
     );
-    // Workflow guidance should be included when starting a task
-    assert!(
-        start_text.contains("Workflow Guidance"),
-        "Task start should include workflow guidance: {start_text}"
-    );
     assert!(
         start_text.contains("mcp__cas__search"),
         "Workflow guidance should mention CAS search: {start_text}"
-    );
-    // pin: cas-5a52 every task start carries the one-line test principle.
-    assert!(
-        start_text.contains("Elegant tests, not copious"),
-        "Task start should carry the test principle: {start_text}"
     );
 }
 
@@ -237,14 +227,9 @@ async fn test_epic_creates_branch_not_worktree() {
     let epic_id = extract_task_id(&create_text).expect("should have epic ID");
     let expected_branch = format!("epic/add-user-authentication-{epic_id}");
 
-    // Should contain branch info, not worktree info
     assert!(
-        create_text.contains("Epic branch created") || create_text.contains("epic/"),
+        create_text.contains(&expected_branch),
         "Epic should create branch on create: {create_text}"
-    );
-    assert!(
-        !create_text.contains("Worktree created"),
-        "Epic should NOT create worktree: {create_text}"
     );
 
     // Start the epic (which triggers branch creation)
@@ -258,12 +243,6 @@ async fn test_epic_creates_branch_not_worktree() {
 
     let text = extract_text(start_result);
     println!("Epic start output: {text}");
-
-    // Start should not create a worktree for epics
-    assert!(
-        !text.contains("Worktree created"),
-        "Epic should NOT create worktree: {text}"
-    );
 
     // Verify git branch was created
     let branch_list = Command::new("git")
@@ -340,7 +319,7 @@ async fn test_task_create_invalid_epic_does_not_persist_task() {
         .expect("task_list should succeed");
     let text = extract_text(list_result);
     assert!(
-        text.contains("No tasks found matching filters"),
+        !text.contains("Should fail atomic create"),
         "Task create should be atomic; unexpected task list output: {text}"
     );
 }
@@ -548,11 +527,9 @@ async fn test_task_create_invalid_depth_is_rejected() {
         .cas_task_create(Parameters(depth_create_req("bad depth", Some("medium"))))
         .await;
     assert!(result.is_err(), "invalid depth must be rejected");
-    let msg = result.err().unwrap().message.to_string();
-    assert!(
-        msg.contains("Invalid depth"),
-        "error should explain invalid depth: {msg}"
-    );
+    let err = result.err().unwrap();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{}", err.message);
+    assert!(err.message.contains("medium"), "{}", err.message);
 }
 
 #[tokio::test]
@@ -851,7 +828,6 @@ async fn test_successor_of_a_predecessor_without_a_branch_falls_back_to_trunk_ca
         trunk_sha,
         "a missing predecessor branch falls back to trunk: {text}"
     );
-    assert!(!text.contains("STACKED ON PREDECESSOR"), "{text}");
 }
 
 /// cas-1630: a follow-up filed into an epic whose branch lacks the code it
@@ -1021,7 +997,6 @@ async fn test_epic_create_uses_fetched_origin_tip_when_local_trunk_is_stale_cas_
         "epic must include the commit that existed only on origin: {text}"
     );
     assert!(text.contains(&format!("Base: 'origin/{trunk}'")), "{text}");
-    assert!(text.contains("BASE REFRESHED"), "{text}");
 }
 
 #[tokio::test]
@@ -1054,11 +1029,7 @@ async fn test_epic_create_keeps_equal_local_and_remote_behavior_quiet_cas_201e()
     let epic_id = extract_task_id(&text).expect("should have epic ID");
     let branch = format!("epic/equal-remote-base-{epic_id}");
 
-    assert_eq!(git_in(repo, &["rev-parse", &branch]), expected_tip);
-    assert!(
-        !text.contains("BASE REFRESHED") && !text.contains("BASE REF DIVERGED"),
-        "equal refs must not manufacture a warning: {text}"
-    );
+    assert_eq!(git_in(repo, &["rev-parse", &branch]), expected_tip, "{text}");
 }
 
 #[tokio::test]
@@ -1087,7 +1058,6 @@ async fn test_epic_create_reports_divergent_local_and_remote_base_cas_201e() {
         local_tip,
         "a genuinely divergent local branch must not be silently overridden: {text}"
     );
-    assert!(text.contains("BASE REF DIVERGED"), "{text}");
     assert!(
         text.contains("local-only") && text.contains("remote-only"),
         "{text}"

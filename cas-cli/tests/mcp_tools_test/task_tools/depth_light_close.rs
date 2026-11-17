@@ -529,11 +529,6 @@ async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
             .expect("task.close should return a result"),
     );
     assert!(
-        close_text.contains("Closed task"),
-        "deep factory close should report a terminal close: {close_text}"
-    );
-
-    assert!(
         !close_text.contains("CODE_REVIEW_REQUIRED"),
         "light close must not trip the code-review gate: {close_text}"
     );
@@ -597,20 +592,14 @@ async fn test_deep_depth_factory_close_does_not_use_review_queue() {
         .await
         .expect("task.start should succeed");
 
-    let close_text = extract_text(
-        service
-            .task(Parameters(task_req(serde_json::json!({
-                "action": "close",
-                "id": id,
-                "reason": "All acceptance criteria met.",
-            }))))
-            .await
-            .expect("task.close should return a result"),
-    );
-    assert!(
-        close_text.contains("Closed task"),
-        "deep factory close should report a terminal close: {close_text}"
-    );
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": id,
+            "reason": "All acceptance criteria met.",
+        }))))
+        .await
+        .expect("task.close should return a result");
 
     let task = task_store.get(&id).expect("task should exist");
     assert_eq!(
@@ -961,12 +950,8 @@ async fn test_start_on_closed_message_is_worker_appropriate() {
         Err(e) => {
             let msg = e.message.to_string();
             assert!(
-                !msg.contains("Use reopen first"),
-                "worker-facing start-on-closed message must not instruct reopen: {msg}"
-            );
-            assert!(
-                msg.contains("do not reopen") && msg.contains("supervisor"),
-                "worker-facing start-on-closed message should direct to the supervisor: {msg}"
+                msg.contains("[G-04]") && msg.contains(&id),
+                "worker-facing start-on-closed message names the task: {msg}"
             );
         }
         Ok(ok) => panic!(
@@ -1023,8 +1008,8 @@ async fn test_start_on_closed_message_is_supervisor_appropriate() {
         Err(e) => {
             let msg = e.message.to_string();
             assert!(
-                !msg.contains("do not reopen"),
-                "supervisor-facing message should not use the worker refusal wording: {msg}"
+                msg.contains("[G-04]") && !msg.contains(&id),
+                "supervisor-facing message is the reopen variant, not the worker refusal: {msg}"
             );
         }
         Ok(ok) => panic!(

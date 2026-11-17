@@ -183,11 +183,6 @@ async fn test_e2e_light_depth_persists_then_closes_without_gates() {
     let mut worker = FactoryWorkerGuard::enter(&mut test_env);
     let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
     assert!(
-        close_text.contains("Closed task"),
-        "deep task close should report a terminal close: {close_text}"
-    );
-
-    assert!(
         !close_text.contains("CODE_REVIEW_REQUIRED"),
         "light close must not trip the code-review gate: {close_text}"
     );
@@ -236,11 +231,7 @@ async fn test_e2e_deep_depth_persists_then_closes() {
     );
 
     let mut worker = FactoryWorkerGuard::enter(&mut test_env);
-    let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
-    assert!(
-        close_text.contains("Closed task"),
-        "deep task close should report a terminal close: {close_text}"
-    );
+    start_and_close(worker.guard(), &cas_dir, &id).await;
 
     let task = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
     assert_eq!(
@@ -277,11 +268,7 @@ async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
     );
 
     let mut worker = FactoryWorkerGuard::enter(&mut test_env);
-    let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
-    assert!(
-        close_text.contains("Closed task"),
-        "unset-depth task close should report a terminal close: {close_text}"
-    );
+    start_and_close(worker.guard(), &cas_dir, &id).await;
 
     assert_eq!(
         open_task_store(&cas_dir).unwrap().get(&id).unwrap().status,

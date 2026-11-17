@@ -257,12 +257,9 @@ async fn list_and_status_report_an_empty_store_without_erroring() {
     let mut test_env = TestEnvGuard::temp_home();
     let (_temp, core) = setup_cas(&mut test_env);
 
-    let list = extract_text(
-        core.knowledge_list(Parameters(req("list")))
-            .await
-            .expect("list should succeed on an empty store"),
-    );
-    assert!(list.contains("No distilled pages yet"), "list output: {list}");
+    core.knowledge_list(Parameters(req("list")))
+        .await
+        .expect("list should succeed on an empty store");
 
     let status = extract_text(
         core.knowledge_status(Parameters(req("status")))
@@ -271,15 +268,12 @@ async fn list_and_status_report_an_empty_store_without_erroring() {
     );
     assert!(status.contains("pages:   0"), "status output: {status}");
 
-    let search = extract_text(
-        core.knowledge_search(Parameters(KnowledgeRequest {
-            query: Some("anything".to_string()),
-            ..req("search")
-        }))
-        .await
-        .expect("search should succeed on an empty store"),
-    );
-    assert!(search.contains("No distilled pages match"), "search output: {search}");
+    core.knowledge_search(Parameters(KnowledgeRequest {
+        query: Some("anything".to_string()),
+        ..req("search")
+    }))
+    .await
+    .expect("search should succeed on an empty store");
 }
 
 #[tokio::test]

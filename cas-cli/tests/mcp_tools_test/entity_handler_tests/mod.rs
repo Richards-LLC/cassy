@@ -269,7 +269,7 @@ async fn test_entity_extract_query_filter() {
     store.add(&entry1).unwrap();
 
     let id2 = gen_entry_id(&*store);
-    let entry2 = Entry::new(id2, "Python is excellent for data science".to_string());
+    let entry2 = Entry::new(id2.clone(), "Python is excellent for data science".to_string());
     store.add(&entry2).unwrap();
 
     // Extract entities from entries containing "TypeScript"
@@ -285,11 +285,10 @@ async fn test_entity_extract_query_filter() {
         .cas_entity_extract(Parameters(req))
         .await
         .unwrap();
-    let text = extract_text(result);
-    assert!(
-        text.contains("Entity extraction complete"),
-        "Should complete extraction"
-    );
+    let _ = extract_text(result);
+    // The filtered-out entry is never processed, so it gains no mentions.
+    let mentions = open_entity_store(&cas_dir).unwrap().get_entry_mentions(&id2).unwrap();
+    assert!(mentions.is_empty(), "{mentions:?}");
 }
 
 #[tokio::test]
@@ -308,7 +307,7 @@ async fn test_entity_extract_scope_filter() {
 
     // Create a project entry
     let id2 = gen_entry_id(&*store);
-    let mut entry2 = Entry::new(id2, "Project entry mentioning Go".to_string());
+    let mut entry2 = Entry::new(id2.clone(), "Project entry mentioning Go".to_string());
     entry2.scope = Scope::Project;
     store.add(&entry2).unwrap();
 
@@ -325,11 +324,10 @@ async fn test_entity_extract_scope_filter() {
         .cas_entity_extract(Parameters(req))
         .await
         .unwrap();
-    let text = extract_text(result);
-    assert!(
-        text.contains("Entity extraction complete"),
-        "Should complete extraction"
-    );
+    let _ = extract_text(result);
+    // The filtered-out entry is never processed, so it gains no mentions.
+    let mentions = open_entity_store(&cas_dir).unwrap().get_entry_mentions(&id2).unwrap();
+    assert!(mentions.is_empty(), "{mentions:?}");
 }
 
 #[tokio::test]
@@ -348,7 +346,7 @@ async fn test_entity_extract_tags_filter() {
 
     // Create entry without tags
     let id2 = gen_entry_id(&*store);
-    let entry2 = Entry::new(id2, "Entry about C++ programming".to_string());
+    let entry2 = Entry::new(id2.clone(), "Entry about C++ programming".to_string());
     store.add(&entry2).unwrap();
 
     // Extract from entries with "programming" tag
@@ -364,11 +362,10 @@ async fn test_entity_extract_tags_filter() {
         .cas_entity_extract(Parameters(req))
         .await
         .unwrap();
-    let text = extract_text(result);
-    assert!(
-        text.contains("Entity extraction complete"),
-        "Should complete extraction"
-    );
+    let _ = extract_text(result);
+    // The filtered-out entry is never processed, so it gains no mentions.
+    let mentions = open_entity_store(&cas_dir).unwrap().get_entry_mentions(&id2).unwrap();
+    assert!(mentions.is_empty(), "{mentions:?}");
 }
 
 #[tokio::test]
@@ -397,10 +394,12 @@ async fn test_entity_extract_entity_type_filter() {
         .cas_entity_extract(Parameters(req))
         .await
         .unwrap();
-    let text = extract_text(result);
+    let _ = extract_text(result);
+    // Only entities of the requested type are created.
+    let entities = open_entity_store(&cas_dir).unwrap().list_entities(None).unwrap();
     assert!(
-        text.contains("Entity extraction complete"),
-        "Should complete extraction"
+        entities.iter().all(|entity| entity.entity_type == EntityType::Tool),
+        "{entities:?}"
     );
 }
 

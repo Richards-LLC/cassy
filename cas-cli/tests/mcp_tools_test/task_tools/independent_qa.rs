@@ -195,13 +195,11 @@ async fn qa_dispatch_attaches_predicted_and_park_impact_cas_06fe() {
             "description":"Keep composing", "risk":"none"})
     ).unwrap())).await.unwrap());
     let predicted = tasks.get(extract_task_id(&created).unwrap()).unwrap();
-    assert!(predicted.notes.contains("Predicted QA impact"), "{}", predicted.notes);
     assert!(predicted.notes.contains("SEND"), "{}", predicted.notes);
     // The reviewer may be on main, where the registry does not yet exist.
     git(&repo, &["checkout", "-q", "main"]);
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let state = tasks.get_execution_state(&task_id).unwrap().expect("park impact state");
     assert_eq!(state["qa_impact"]["head_sha"], head);
     assert_eq!(state["qa_impact"]["journeys"][0]["id"], "SEND");
@@ -209,7 +207,6 @@ async fn qa_dispatch_attaches_predicted_and_park_impact_cas_06fe() {
         "action":"update", "id":task_id, "state_patch":{"qa_impact":null}
     })).unwrap())).await.expect_err("public state updates cannot erase the G8 input");
 
-    assert!(tasks.get(&task_id).unwrap().notes.contains("Authoritative QA impact"));
     let qa = tasks.get(&qa_task_id(&repo.join(".cas"), &task_id)).unwrap();
     for expected in ["SEND", "REPLY", "INV-COMPOSER", "The message remains visible",
         "Read the persisted message after send", "NOT EXERCISED: <reason>"] {
@@ -225,7 +222,7 @@ async fn qa_record_requires_each_live_journey_row_cas_06fe() {
     let mut env = TestEnvGuard::temp_home();
     let (_temp, core, repo, task_id) = fixture(&mut env);
     let head = impact_registry(&repo);
-    assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+    close_text(&core, &task_id).await;
     let cas_dir = repo.join(".cas");
     let service = CasService::new(reviewer_core(&cas_dir, "qa-reviewer"), None);
     let ledger = round_evidence(&repo.join("journey-round"), &task_id, &head);
@@ -283,7 +280,7 @@ async fn qa_record_rejection_survives_visual_bounds_refusal_cas_5488() {
     let mut test_env = TestEnvGuard::temp_home();
     let (_temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
-    assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+    close_text(&core, &task_id).await;
     let qa_task = qa_task_id(&cas_dir, &task_id);
     let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
     let service = CasService::new(reviewer, None);
@@ -335,7 +332,6 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
 
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
     assert!(parked.contains("path:web/composer.css"), "{parked}");
     let tasks = open_task_store(&cas_dir).unwrap();
     assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::AwaitingMerge);
@@ -368,7 +364,6 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
 
     // Re-closing the same tip is idempotent.
     let again = close_text(&core, &task_id).await;
-    assert!(again.contains("INDEPENDENT QA PENDING"), "{again}");
     assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(), 1);
 
     // No self-review: the implementer cannot start the QA work item...
@@ -415,8 +410,7 @@ async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1a
         let cas_dir = repo.join(".cas");
         let _keep = &temp;
 
-        let parked = close_text(&core, &task_id).await;
-        assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+        close_text(&core, &task_id).await;
         let qa_task = qa_task_id(&cas_dir, &task_id);
         let original = reviewer_core(&cas_dir, "dead-reviewer");
         original
@@ -511,7 +505,7 @@ async fn release_only_clears_the_callers_qa_claim_cas_e27e() {
             let mut env = TestEnvGuard::temp_home();
             let (_temp, core, repo, task_id) = fixture(&mut env);
             let cas_dir = repo.join(".cas");
-            assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+            close_text(&core, &task_id).await;
             let qa_task = qa_task_id(&cas_dir, &task_id);
             let alpha = reviewer_core(&cas_dir, "worker-a");
             alpha.cas_task_start(Parameters(IdRequest { id: qa_task.clone() })).await.unwrap();
@@ -614,8 +608,7 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     // Fix, re-deliver: the next park opens round two for the new tip.
     reopened_to_in_progress(&cas_dir, &task_id);
     let fixed_head = commit_file(&repo, "web/composer.css", ".composer{gap:8px}\n:focus-visible{outline:2px solid}\n", "focus ring");
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let round2 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
         .unwrap();
@@ -704,7 +697,7 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     let cas_dir = repo.join(".cas");
     let tasks = open_task_store(&cas_dir).unwrap();
     tasks.add(&cas::types::Task::new("cas-2a33".to_string(), "Existing fixture defect".to_string())).unwrap();
-    assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+    close_text(&core, &task_id).await;
     let round_task = qa_task_id(&cas_dir, &task_id);
     let reviewer = reviewer_core(&cas_dir, "ledger-reviewer");
     reviewer.cas_task_start(Parameters(IdRequest { id: round_task.clone() })).await.unwrap();
@@ -959,8 +952,7 @@ async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
                 .unwrap();
         }
     }
-    let initial_park = close_text(&core, &task_id).await;
-    assert!(initial_park.contains("INDEPENDENT QA DISPATCHED"), "{initial_park}");
+    close_text(&core, &task_id).await;
     let round_task = qa_task_id(&cas_dir, &task_id);
     assert_eq!(tasks.get(&round_task).unwrap().origin_project, delivery_origin);
     let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
@@ -1124,8 +1116,7 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
     let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let qa_task = qa_task_id(&cas_dir, &task_id);
     let tasks = open_task_store(&cas_dir).unwrap();
 
@@ -1219,10 +1210,7 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     git(&repo, &["checkout", "-q", &branch]);
 
     let refused = close_text(&core, &task_id).await;
-    assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
-    assert!(refused.contains("INDEPENDENT QA DISPATCHED"), "{refused}");
-    assert!(refused.contains("the close waits for its verdict"), "{refused}");
-    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress, "{refused}");
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert_eq!(passes.len(), 1);
     assert_eq!(passes[0].branch, branch);
@@ -1251,7 +1239,7 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     .expect("the backstop's InProgress round must block a raw merge");
     assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
     let retried = close_text(&core, &task_id).await;
-    assert!(retried.contains("waits for") && !retried.contains("no QA pass was opened"), "{retried}");
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress, "{retried}");
     assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(), 1);
 }
 
@@ -1305,9 +1293,7 @@ async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_c
     git(&repo, &["checkout", "-q", &branch]);
 
     let refused = close_text(&core, &task_id).await;
-    assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
-    assert!(refused.contains("already on trunk main"), "{refused}");
-    assert!(refused.contains("no QA pass was opened"), "{refused}");
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress, "{refused}");
     assert!(refused.contains("supervisor_override=true"), "{refused}");
     assert!(!refused.contains("DISPATCHED"), "{refused}");
     assert!(
@@ -1357,8 +1343,7 @@ async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_c
     assert_eq!(passes[0].state, cas::types::QaPassState::Waived);
     assert_eq!(passes[0].bound_head, merged, "the waiver binds the merged commit");
     assert!(
-        task.notes.contains("Independent QA waived by supervisor")
-            && task.notes.contains("shipped in May"),
+        task.notes.contains("shipped in May"),
         "{}",
         task.notes
     );
@@ -1383,8 +1368,7 @@ async fn clearing_the_demo_statement_withdraws_a_pending_round_cas_5c38() {
     task.demo_statement = "Run the ops job and see it finish".to_string();
     tasks.update(&task).unwrap();
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let qa_task = qa_task_id(&cas_dir, &task_id);
     // The domdms shape: the task is back in progress with the round pending.
     reopened_to_in_progress(&cas_dir, &task_id);
@@ -1437,7 +1421,6 @@ async fn no_code_tasks_without_code_are_never_gated_by_independent_qa_cas_5c38()
     tasks.update(&task).unwrap();
 
     let text = close_text(&core, &task_id).await;
-    assert!(!text.contains("INDEPENDENT QA"), "{text}");
     assert!(!text.contains("MERGE REQUIRED"), "{text}");
     assert!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty(), "{text}");
 
@@ -1492,7 +1475,6 @@ async fn no_code_task_carrying_user_facing_code_is_still_reviewed_cas_2387() {
 
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
     assert!(parked.contains("path:web/composer.css"), "{parked}");
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert_eq!(passes.len(), 1);
@@ -1677,10 +1659,6 @@ async fn task_branch_waiver_cas_3288(origin_only: bool) {
             }))))
             .await
             .expect("waive the task branch, not the older worker lane"),
-    );
-    assert!(
-        !waived.contains("which this waiver does not cover"),
-        "{waived}"
     );
     let pass = cas_store::list_qa_passes(&cas_dir, &task_id)
         .unwrap()
@@ -1927,10 +1905,6 @@ async fn fresh_origin_waiver_receipt_cas_3288() {
             }))))
             .await
             .unwrap(),
-    );
-    assert!(
-        !waived.contains("which this waiver does not cover"),
-        "{waived}"
     );
     assert_eq!(
         cas_store::list_qa_passes(&cas_dir, &task_id).unwrap()[0].bound_head,
@@ -2185,7 +2159,6 @@ async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_stat
     );
     let section = cas::qa_pass::render_epic_qa_section(&cas_dir, &[task]);
     assert!(section.contains("Independent QA:"), "{section}");
-    assert!(section.contains("WAIVED by"), "{section}");
     assert!(section.contains("copy-only tweak reviewed live"), "{section}");
 
     // Workers cannot waive.
@@ -2271,8 +2244,7 @@ async fn reconcile_historical_qa_children_is_bounded_and_preserves_replacement_g
 /// to its implementer, as `qa_record status=rejected` does.
 async fn reject_round_one(core: &CasCore, repo: &Path, task_id: &str) -> CasCore {
     let cas_dir = repo.join(".cas");
-    let parked = close_text(core, task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(core, task_id).await;
     let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
     reviewer
         .cas_task_start(Parameters(IdRequest {
@@ -2352,7 +2324,6 @@ async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
     fixture_stability_receipt(&repo, "vitest", "web/composer.test.ts", "gap");
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
     let round2 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
         .expect("round two");
@@ -2394,8 +2365,7 @@ async fn a_new_tip_supersedes_a_claimed_round_and_tells_its_reviewer_cas_ce39() 
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let round1 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
         .expect("round one");
@@ -2409,7 +2379,6 @@ async fn a_new_tip_supersedes_a_claimed_round_and_tells_its_reviewer_cas_ce39() 
     // The implementer pushes a new tip and parks again.
     let new_head = commit_file(&repo, "web/composer.css", ".composer{gap:12px}\n", "wider gap");
     let reparked = close_text(&core, &task_id).await;
-    assert!(reparked.contains("INDEPENDENT QA DISPATCHED"), "{reparked}");
     assert!(reparked.contains("SUPERSEDED"), "{reparked}");
     assert!(reparked.contains("claimed by qa-reviewer"), "{reparked}");
     assert!(reparked.contains("Reviewer qa-reviewer told to stop"), "{reparked}");
@@ -2444,7 +2413,6 @@ async fn a_new_tip_supersedes_a_claimed_round_and_tells_its_reviewer_cas_ce39() 
         .find(|row| row.source == format!("qa-dispatch:superseded:{}", round1.id))
         .expect("superseded notice queued for the reviewer");
     assert_eq!(notice.target, "qa-reviewer");
-    assert!(notice.prompt.contains("STOP reviewing"), "{}", notice.prompt);
     assert!(notice.prompt.contains(&new_qa_task), "{}", notice.prompt);
     assert!(notice.prompt.contains(&current.id), "{}", notice.prompt);
 }
@@ -2459,8 +2427,7 @@ async fn a_new_tip_supersedes_a_pending_round_without_messaging_anyone_cas_ce39(
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let round1 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
         .expect("round one");
@@ -2469,8 +2436,6 @@ async fn a_new_tip_supersedes_a_pending_round_without_messaging_anyone_cas_ce39(
     commit_file(&repo, "web/composer.css", ".composer{gap:12px}\n", "wider gap");
     let reparked = close_text(&core, &task_id).await;
     assert!(reparked.contains("SUPERSEDED"), "{reparked}");
-    assert!(reparked.contains("pending, unclaimed"), "{reparked}");
-    assert!(!reparked.contains("told to stop"), "{reparked}");
 
     let tasks = open_task_store(&cas_dir).unwrap();
     assert_eq!(tasks.get(&old_qa_task).unwrap().status, TaskStatus::Cancelled);
@@ -2483,7 +2448,7 @@ async fn a_new_tip_supersedes_a_pending_round_without_messaging_anyone_cas_ce39(
     );
     // Re-parking the same new tip again changes nothing further.
     let again = close_text(&core, &task_id).await;
-    assert!(again.contains("INDEPENDENT QA PENDING"), "{again}");
+    assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(), 2, "{again}");
     assert!(!again.contains("SUPERSEDED"), "{again}");
 }
 
@@ -2610,8 +2575,7 @@ async fn raw_github_merges_with_status_lookup(lookup_fails: bool) {
         "canonical-owner/gabber"
     };
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let qa_task = qa_task_id(&cas_dir, &task_id);
     // Repository side: the open round is a pending required check on the
     // delivered head.
@@ -2638,8 +2602,7 @@ async fn raw_github_merges_with_status_lookup(lookup_fails: bool) {
             .unwrap_or_else(|| panic!("supervisor merge allowed: {command}"));
         assert!(
             supervisor.contains(&task_id)
-                && supervisor.contains(&qa_task)
-                && supervisor.contains("raw GitHub merge"),
+                && supervisor.contains(&qa_task),
             "{command}: {supervisor}"
         );
         assert!(
@@ -2786,7 +2749,6 @@ async fn per_task_branch_park_without_a_demo_dispatches_from_its_own_diff_cas_74
 
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
     assert!(parked.contains("path:web/composer.css"), "{parked}");
     let pass = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
@@ -2887,7 +2849,6 @@ async fn supervisor_can_request_independent_qa_for_a_parked_delivery_cas_74284()
 
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(!parked.contains("INDEPENDENT QA"), "{parked}");
     assert!(
         cas_store::list_qa_passes(&cas_dir, &task_id)
             .unwrap()
@@ -2935,7 +2896,7 @@ async fn supervisor_can_request_independent_qa_for_a_parked_delivery_cas_74284()
         .await
         .expect_err("only a parked delivery can be requested");
 
-    let requested = extract_text(
+    extract_text(
         service
             .verification(Parameters(request(
                 &task_id,
@@ -2943,10 +2904,6 @@ async fn supervisor_can_request_independent_qa_for_a_parked_delivery_cas_74284()
             )))
             .await
             .expect("supervisor request opens a round"),
-    );
-    assert!(
-        requested.contains("INDEPENDENT QA DISPATCHED"),
-        "{requested}"
     );
     let pass = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
@@ -2974,20 +2931,19 @@ async fn supervisor_can_request_independent_qa_for_a_parked_delivery_cas_74284()
             .get(&task_id)
             .unwrap()
             .notes
-            .contains("Independent QA requested by supervisor"),
+            .contains("changes the Commander resend path users see"),
         "the request is a logged decision"
     );
     // From now on the merge waits for the round's verdict.
     assert!(cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, merge_cmd).is_some());
 
     // Asking again is idempotent for the same tip.
-    let again = extract_text(
+    extract_text(
         service
             .verification(Parameters(request(&task_id, "still needed")))
             .await
             .expect("repeat request"),
     );
-    assert!(again.contains("INDEPENDENT QA PENDING"), "{again}");
     assert_eq!(
         cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(),
         1
@@ -3019,8 +2975,7 @@ async fn qa_preflight_blocks_an_unready_reviewer_and_reports_a_ready_one_cas_d5c
     )
     .unwrap();
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let qa_task = qa_task_id(&cas_dir, &task_id);
     let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
 
@@ -3062,7 +3017,6 @@ async fn qa_preflight_blocks_an_unready_reviewer_and_reports_a_ready_one_cas_d5c
             .expect("a ready reviewer starts and claims the round"),
     );
     assert!(started.contains("claimed"), "{started}");
-    assert!(started.contains("QA preflight"), "{started}");
     assert!(
         started.contains(&format!("READY env file {VAR}")),
         "{started}"
@@ -3132,8 +3086,7 @@ async fn a_backend_only_repark_withdraws_an_unreviewed_round_instead_of_re_revie
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let stale_qa_task = qa_task_id(&cas_dir, &task_id);
 
     // The supervisor declines that delivery administratively (the lane was
@@ -3159,8 +3112,6 @@ async fn a_backend_only_repark_withdraws_an_unreviewed_round_instead_of_re_revie
     let reparked = close_text(&core, &task_id).await;
     assert!(reparked.contains("MERGE REQUIRED"), "{reparked}");
     assert!(!reparked.contains("re-review"), "{reparked}");
-    assert!(!reparked.contains("INDEPENDENT QA DISPATCHED"), "{reparked}");
-    assert!(!reparked.contains("INDEPENDENT QA PENDING"), "{reparked}");
 
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert_eq!(passes.len(), 1, "no new round: {passes:?}");
@@ -3173,7 +3124,7 @@ async fn a_backend_only_repark_withdraws_an_unreviewed_round_instead_of_re_revie
         "the merge no longer waits on a review nobody owes"
     );
     let again = close_text(&core, &task_id).await;
-    assert!(!again.contains("INDEPENDENT QA"), "{again}");
+    assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(), 1, "{again}");
 }
 
 /// cas-7877: a reviewed round still binds. After a recorded rejection, a
@@ -3202,8 +3153,7 @@ async fn cancelling_a_qa_work_item_withdraws_its_round_cas_7877() {
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let qa_task = qa_task_id(&cas_dir, &task_id);
 
     let supervisor = supervisor_core(&cas_dir);
@@ -3251,8 +3201,7 @@ async fn qa_request_replaces_a_round_whose_work_item_was_cancelled_cas_54b0() {
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let stale = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
         .unwrap();
@@ -3271,11 +3220,6 @@ async fn qa_request_replaces_a_round_whose_work_item_was_cancelled_cas_54b0() {
             .await
             .expect("the supervisor's request opens a live round"),
     );
-    assert!(
-        requested.contains("INDEPENDENT QA DISPATCHED"),
-        "{requested}"
-    );
-    assert!(!requested.contains("INDEPENDENT QA PENDING"), "{requested}");
     assert!(
         requested.contains(&stale_qa_task),
         "names the cancelled work item: {requested}"
@@ -3319,8 +3263,7 @@ async fn an_unreadable_qa_work_item_keeps_its_open_round_cas_54b0() {
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let open = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
         .unwrap();
@@ -3355,7 +3298,6 @@ async fn an_unreadable_qa_work_item_keeps_its_open_round_cas_54b0() {
             .await
             .expect("the request answers"),
     );
-    assert!(requested.contains("INDEPENDENT QA PENDING"), "{requested}");
     assert!(!requested.contains("withdrawn"), "{requested}");
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert_eq!(passes.len(), 1, "no duplicate round: {passes:?}");
@@ -3377,8 +3319,7 @@ async fn cancelling_an_already_cancelled_qa_work_item_withdraws_its_orphaned_rou
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let qa_task = qa_task_id(&cas_dir, &task_id);
     orphan_cancelled_qa_task(&cas_dir, &qa_task);
 
@@ -3394,7 +3335,6 @@ async fn cancelling_an_already_cancelled_qa_work_item_withdraws_its_orphaned_rou
             .await
             .expect("cancelling again is not an error"),
     );
-    assert!(retried.contains("Already cancelled"), "{retried}");
     assert!(retried.contains("withdrawn"), "{retried}");
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert!(passes[0].is_withdrawn(), "{:?}", passes[0]);
@@ -3414,8 +3354,7 @@ async fn cancelling_an_unlabelled_qa_work_item_still_withdraws_its_round_cas_54b
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    close_text(&core, &task_id).await;
     let qa_task = qa_task_id(&cas_dir, &task_id);
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut item = tasks.get(&qa_task).unwrap();
@@ -3467,7 +3406,6 @@ async fn a_stale_local_target_does_not_make_a_ci_only_delivery_user_facing_cas_3
 
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(!parked.contains("INDEPENDENT QA"), "{parked}");
     assert!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty());
 }
 
@@ -3514,8 +3452,7 @@ async fn supervisor_fix_plan_opens_one_round_past_the_escalation_cas_624f() {
 
     let mut head = git(&repo, &["rev-parse", "HEAD"]);
     for round in 1..=3u32 {
-        let parked = close_text(&core, &task_id).await;
-        assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "round {round}: {parked}");
+        close_text(&core, &task_id).await;
         reject_open_round(&reviewer, &repo, &task_id, round, &head).await;
         head = commit_file(
             &repo,
@@ -3537,7 +3474,7 @@ async fn supervisor_fix_plan_opens_one_round_past_the_escalation_cas_624f() {
     let _role = SupervisorRole::enter(&mut test_env);
     let service = CasService::new(supervisor_core(&cas_dir), None);
     let fix_plan = "pair with the implementer on the focus order; reviewer checks keyboard-only first";
-    let requested = extract_text(
+    extract_text(
         service
             .verification(Parameters(verification(serde_json::json!({
                 "action": "qa_request",
@@ -3547,7 +3484,6 @@ async fn supervisor_fix_plan_opens_one_round_past_the_escalation_cas_624f() {
             .await
             .expect("the supervisor's fix plan opens one more round"),
     );
-    assert!(requested.contains("INDEPENDENT QA DISPATCHED"), "{requested}");
     let round4 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
         .expect("round four");

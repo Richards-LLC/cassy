@@ -29695,10 +29695,16 @@ mod merge_state_gate_tests {
     fn ct2_p1_park_sends_one_relay_after_upkeep_notes() {
         use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};
 
+        const TIP: &str = "1234567890abcdef1234567890abcdef12345678";
         let _env = TestEnvGuard::temp_home();
         for final_append in [false, true] {
             let dir = TempDir::new().unwrap();
             let (core, tasks, queue, mut task) = close_relay_fixture_cas_3a82(dir.path());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: "main".into(),
+            });
+            tasks.update(&task).unwrap();
+            task = tasks.get(&task.id).unwrap();
             // Deterministically interleave the writes a long close can encounter:
             // its upkeep audits, a receipt imported by another store connection,
             // and another append after the last upkeep audit but before parking.
@@ -29726,14 +29732,28 @@ mod merge_state_gate_tests {
             // be written against the original snapshot, not mistaken for a
             // conflicting change made by another actor.
             let mut parking = task.clone();
-            parking.deliverables.factory_branch_anchor = Some("delivery-tip".into());
+            parking.deliverables.factory_branch_anchor = Some(TIP.into());
             parking.notes.push_str("\n\nDelivery anchor advanced during close");
             core.park_task_awaiting_merge(
                 &tasks, &parking, &task, "MERGE REQUIRED", "delivery is ready for merge",
-                Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+                Some(TIP.into()), false, Some("factory/relay-worker-cas-3a82".into()),
                 Some("PASS delivery-tip: relay fixture"),
             ).unwrap();
             let parked = tasks.get(&task.id).unwrap();
+            let watches = crate::store::open_reminder_store(dir.path()).unwrap().list_all_pending().unwrap();
+            assert_eq!(watches.len(), 2);
+            for watch in &watches {
+                assert_eq!(watch.owner_id, "relay-supervisor-id");
+                assert_eq!(watch.target_id, "relay-supervisor-id");
+                assert_eq!(watch.task_id.as_deref(), Some(task.id.as_str()));
+                assert!(watch.cross_session);
+            }
+            assert!(watches.iter().any(|watch| watch.trigger_event.as_deref() == Some("ci_completed")
+                && watch.trigger_filter.as_ref().unwrap()["sha"] == TIP
+                && watch.trigger_filter.as_ref().unwrap()["workflow"] == "CI"));
+            assert!(watches.iter().any(|watch| watch.trigger_event.as_deref() == Some("branch_contained_in")
+                && watch.trigger_filter.as_ref().unwrap()["commit"] == TIP
+                && watch.trigger_filter.as_ref().unwrap()["target_branch"] == "main"));
             assert_eq!(parked.status, TaskStatus::AwaitingMerge);
             for note in ["UPKEEP: registry checked", "Receipt imported during close",
                 "UPKEEP: documentation checked", "Final receipt imported before park",
@@ -29753,7 +29773,7 @@ mod merge_state_gate_tests {
             let payload: serde_json::Value = serde_json::from_str(&relays[0].payload).unwrap();
             assert_eq!(payload["transition"], "task_awaiting_merge");
             assert_eq!(payload["task_id"], task.id);
-            assert_eq!(payload["branch_tip"], "delivery-tip");
+            assert_eq!(payload["branch_tip"], TIP);
             let prompts = cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap();
             assert_eq!(prompts.len(), 1);
             assert!(prompts[0].prompt.contains("task_awaiting_merge"));
@@ -29766,7 +29786,7 @@ mod merge_state_gate_tests {
             assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
             let refused = core.park_task_awaiting_merge(
                 &tasks, &stale_close, &stale_close, "MERGE REQUIRED", "stale close still running",
-                Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+                Some(TIP.into()), false, Some("factory/relay-worker-cas-3a82".into()),
                 Some("PASS delivery-tip: stale close"),
             ).expect_err("GH #1276: a stale close cannot erase the review rejection");
             assert!(refused.to_string().contains("task changed"));

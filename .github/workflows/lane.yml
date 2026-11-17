@@ -383,7 +383,8 @@ jobs:
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.rust-unaffected != 'true'
     needs: ci-diff
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Two 25-minute own-test attempts plus setup and the archive (cas-02ab).
+    timeout-minutes: 60
     env: &lane-impact-env
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
@@ -434,9 +435,17 @@ jobs:
           python3 scripts/ci-test-impact.py lane --phase plan --out target/ci-impact/lane.json \
             --recorded-base-ref "$record" --github-output "$GITHUB_OUTPUT"
 
+      # cas-02ab: 38 green runs on Nov 17 took 0.0-19.1 min here (p50 9.6). A
+      # wedged compile stops at 25 min with its last cargo/rustc/linker phase
+      # named in an ::error:: and reruns once; heartbeats print every 3 min
+      # and are kept in the evidence upload. Only the deadline retries.
       - id: own
         name: Build the selection and run own tests
-        run: python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json --github-output "$GITHUB_OUTPUT"
+        timeout-minutes: 52
+        run: >-
+          python3 scripts/ci-step-watchdog.py --label "Build the selection and run own tests"
+          --timeout-minutes 25 --log target/ci-impact/own-watchdog.log --
+          python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json --github-output "$GITHUB_OUTPUT"
 
       # Publish the named failures before archiving or rebuilding the base.
       # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
@@ -496,7 +505,7 @@ jobs:
         run: ./scripts/ci-sccache-summary.sh "Scoped Validation — impact own tests"
 
   # A hosted runner that stops responding uploads no log and runs no always()
-  # step, so its 45-minute timeout reads only as "cancelled" (cas-3a12). Name
+  # step, so its 60-minute timeout reads only as "cancelled" (cas-3a12). Name
   # the plan and elapsed time as a failure instead; a superseded run skips this.
   lane-impact-overrun:
     name: Scoped Validation — impact overrun
@@ -517,7 +526,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/ci-test-impact.py history
-          python3 scripts/ci-test-impact.py lane --phase overrun --budget-minutes 45
+          python3 scripts/ci-test-impact.py lane --phase overrun --budget-minutes 60
 
   lane-impact-ring:
     name: Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}

@@ -2349,7 +2349,7 @@ async fn supervisor_stability_exception_reaches_park_gh2041() {
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &tip]);
     let request = |override_: bool| Parameters(TaskCloseRequest {
-        id: TASK.into(), reason: Some("Reviewed direct five-pass evidence for custom runner config".into()),
+        id: TASK.into(), reason: Some("Reviewed stability exception for custom runner config".into()),
         commit_receipt: Some(tip.clone()), supervisor_override: Some(override_),
         no_delivery: None, stranded_branch_override: None, search_manifest: None,
     });

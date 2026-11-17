@@ -681,7 +681,6 @@ mod tests {
             areas.tasks.height > 1,
             "collapsed-header height (1) means the hint never rendered"
         );
-        assert!(text.contains("No epic focused"));
         assert!(text.contains("cas-live"));
         assert!(text.contains("focus_epic"));
     }

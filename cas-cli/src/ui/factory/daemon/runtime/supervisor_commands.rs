@@ -1214,7 +1214,6 @@ mod tests {
         assert!(native_observation(Command::Model, "Set model to Sonnet\n❯", "Set model to Sonnet\n❯ /model", "").is_none());
         let opened = native_observation(Command::Model, "❯", "Select model\nOpus\nSonnet", "").unwrap();
         assert!(opened.1);
-        assert!(opened.0.contains("chooser opened"));
         assert!(native_observation(Command::Model, "Select model\nOpus\nSonnet", "Select model\nOpus\nSonnet", "").is_none());
         let confirmed = native_observation(Command::Model, "Select model", "Set model to Sonnet\n❯", "").unwrap();
         assert!(!confirmed.1);

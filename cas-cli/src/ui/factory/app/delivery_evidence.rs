@@ -673,7 +673,7 @@ mod tests {
         assert_eq!(row.unmerged_count, 0, "fixture must match epic_status: {row:?}");
         let state = classify(&facts).expect("contained delivery needs a close notice");
         assert!(!matches!(state, SupervisorActionableState::MergeBranches { .. }), "contained delivery cannot demand another merge: {state:?}");
-        assert!(state.next_step_text().contains("awaiting worker close"));
+        assert!(matches!(state, SupervisorActionableState::MergeCloseBlocked { .. }), "{state:?}");
         let now = Utc::now();
         let mut tracker = SupervisorStallTracker::default();
         let activity = Some(now - chrono::Duration::seconds(600));

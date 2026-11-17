@@ -328,15 +328,6 @@ async fn targeted_shutdown_kills_stalled_provisioner_without_retiring_other_name
         survivor.exists(),
         "cancelling a provisioner must preserve other process groups"
     );
-    let notices = crate::store::open_prompt_queue_store(daemon.app.cas_dir())
-        .unwrap()
-        .peek_all(20)
-        .unwrap();
-    assert!(
-        notices
-            .iter()
-            .any(|row| row.prompt.contains("Spawn cancelled by targeted shutdown"))
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]

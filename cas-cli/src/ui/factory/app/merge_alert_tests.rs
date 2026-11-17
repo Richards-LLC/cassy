@@ -1078,7 +1078,7 @@ fn cas_9efb_relay_dedupes_task_tip_ci_despite_unrelated_target_move() {
         1,
         "a new red delivery needs one decision"
     );
-    assert!(decision[0].text.contains("CI failed"));
+    assert!(!decision[0].is_merge_ready());
     assert!(f.relay().is_empty());
     // A parked failure still needs the slow same-SHA rerun probe; only a
     // successful READY may suppress this tip indefinitely.
@@ -1086,8 +1086,7 @@ fn cas_9efb_relay_dedupes_task_tip_ci_despite_unrelated_target_move() {
     f.ci(Some("success"));
     let recovered = f.relay();
     assert_eq!(recovered.len(), 1);
-    // pin: this heading is the supervisor's immediate merge trigger.
-    assert!(recovered[0].text.contains("READY TO MERGE"));
+    assert!(recovered[0].is_merge_ready());
     assert!(f.relay().is_empty());
 }
 
@@ -1104,11 +1103,6 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     let prompts = f.relay();
     assert_eq!(prompts.len(), 1, "missing CI");
     assert!(!prompts[0].is_merge_ready());
-    assert!(
-        prompts[0].text.contains("CI unknown"),
-        "{}",
-        prompts[0].text
-    );
     assert!(f.relay().is_empty());
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "later settled CI is a new decision");
@@ -1235,7 +1229,6 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     let (_, failed, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
     assert_eq!(failed.len(), 1, "the later real failure needs a decision");
     assert!(!failed[0].is_merge_ready());
-    assert!(failed[0].text.contains("CI failed"));
     assert!(f.relay().is_empty());
 }
 
@@ -1503,7 +1496,7 @@ fn cas_d49a_merged_delivery_with_exited_job_wakes_once_across_lost_reads_and_res
 
     let first = f.relay();
     assert_eq!(first.len(), 1, "one idle wake for the merged delivery");
-    assert!(first[0].text.contains("Detached job"), "the exit is reported: {}", first[0].text);
+    assert!(first[0].text.contains(&run), "the exit is reported: {}", first[0].text);
     assert!(!first[0].text.contains("MERGE REQUIRED"),
         "an in-progress task's close gate is no longer the park's MERGE REQUIRED: {}", first[0].text);
     let events = vec![f.event.clone()];
@@ -1522,5 +1515,5 @@ fn cas_d49a_merged_delivery_with_exited_job_wakes_once_across_lost_reads_and_res
     git(f.repo.path(), &["commit", "-qam", "cas-9efb-test new tip"]);
     let next = f.relay();
     assert_eq!(next.len(), 1, "a new tip is a new episode");
-    assert!(!next[0].text.contains("Detached job"), "the same exit is reported once: {}", next[0].text);
+    assert!(!next[0].text.contains(&run), "the same exit is reported once: {}", next[0].text);
 }

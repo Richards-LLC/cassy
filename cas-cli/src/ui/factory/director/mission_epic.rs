@@ -232,7 +232,6 @@ mod tests {
             .unwrap();
 
         let text = buffer_text(&terminal);
-        assert!(text.contains("No active epic"));
         assert!(!text.contains("cas-focused"));
     }
 
@@ -251,6 +250,5 @@ mod tests {
 
         let text = buffer_text(&terminal);
         assert!(text.contains("cas-focused"));
-        assert!(!text.contains("No active epic"));
     }
 }

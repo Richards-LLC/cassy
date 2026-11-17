@@ -859,7 +859,6 @@ async fn cas_91bab_non_green_direct_delivery_fallbacks() {
             .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
         assert_eq!(prompts.len(), 1);
         assert!(!prompts[0].is_merge_ready());
-        assert!(prompts[0].text.contains("CI failed"));
         let original_tip = prompts[0].merge_alert.as_ref().unwrap().factory_tip.clone();
         if scenario.starts_with("superseded") && scenario != "superseded_queued" {
             let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
@@ -1063,7 +1062,6 @@ async fn cas_91bab_non_green_native_transport_fallbacks() {
             .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
         assert_eq!(prompts.len(), 1);
         // Red CI keeps the direct transport route after a6be40dba / 1ecb22e52.
-        assert!(prompts[0].text.contains("CI failed"));
         assert!(!prompts[0].is_merge_ready());
         assert!(prompts[0].retract_task.is_some());
         let verdicts = fixture

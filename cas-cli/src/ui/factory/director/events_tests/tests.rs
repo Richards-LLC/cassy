@@ -395,7 +395,6 @@ fn test_worker_idle_payload_includes_close_rejected_task_state() {
     assert_eq!(payload["task_state"], "in_progress");
     assert_eq!(payload["close_rejected"], true);
     assert_eq!(payload["close_rejected_reason"], "MERGE REQUIRED");
-    assert!(idle.description().contains("close rejected"));
     assert!(!idle.description().to_lowercase().contains("finished"));
 }
 

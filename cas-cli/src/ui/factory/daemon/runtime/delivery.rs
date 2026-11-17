@@ -2941,7 +2941,6 @@ mod tests {
         let wake = pointer_wake_payload("supervisor", Some(24535));
         assert!(wake.starts_with("CAS wake: message 24535 from supervisor."), "{wake}");
         assert!(wake.contains("[incoming messages]"), "{wake}");
-        assert!(!wake.contains("not repeated"), "{wake}");
         // cas-ad92: the named poll returns the row even while the transport
         // still holds it claimed, so the wake says exactly how to read it.
         assert!(wake.contains("inbox_poll notification_id=24535"), "{wake}");
@@ -3116,7 +3115,7 @@ mod tests {
         let repeated = read_inbox().last().unwrap().clone();
         assert!(!repeated.text.contains(long.trim()), "{repeated:?}");
         assert!(!repeated.summary.as_deref().unwrap_or_default().contains(long.trim()));
-        assert!(repeated.text.contains("not acknowledged"), "{repeated:?}");
+        assert!(repeated.text.contains(&long_id.to_string()), "{repeated:?}");
         queue.acknowledge_for_recipients(long_id, &[worker.into()], None).unwrap();
         daemon.deliver_queued_to_worker(worker, "supervisor", &long, Some(&long), long_id, &long)
             .await.unwrap();

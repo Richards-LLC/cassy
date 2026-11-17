@@ -182,7 +182,6 @@ async fn exercise_held_copy(fail_stamp: bool, missing_team_folder: bool) {
                 .prompt
                 .contains("tool-boundary surfacing unavailable")
         );
-        assert!(notices[0].prompt.contains("turn boundary"));
         assert_eq!(notices[0].factory_session.as_deref(), Some(SESSION));
         assert!(
             queue

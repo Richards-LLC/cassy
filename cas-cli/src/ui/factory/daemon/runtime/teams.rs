@@ -4444,7 +4444,7 @@ mod tests {
     #[test]
     fn worker_pre_commit_hook_content_has_marker() {
         assert!(
-            TeamsManager::WORKER_PRE_COMMIT_HOOK.contains("Cassy factory worker guard"),
+            TeamsManager::WORKER_PRE_COMMIT_HOOK.contains(TeamsManager::GUARD_MARKER),
             "hook content must contain the guard marker for idempotent install"
         );
     }
@@ -4688,7 +4688,7 @@ mod tests {
             "existing hook content must be preserved in the merged hook"
         );
         assert!(
-            final_content.contains("Cassy factory worker guard"),
+            final_content.contains(TeamsManager::GUARD_MARKER),
             "guard marker must be appended"
         );
     }
@@ -5516,7 +5516,7 @@ mod tests {
             "project hook content must survive cleanup: {remaining:?}"
         );
         assert!(
-            !remaining.contains("Cassy factory worker guard"),
+            !remaining.contains(TeamsManager::GUARD_MARKER),
             "Cassy guard block must be fully stripped: {remaining:?}"
         );
 

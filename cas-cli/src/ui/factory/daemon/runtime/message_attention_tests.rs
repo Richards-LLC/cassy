@@ -193,10 +193,7 @@ impl Fixture {
             .into_iter()
             .filter(|row| {
                 row.source == "delivery-watchdog"
-                    || row
-                        .summary
-                        .as_deref()
-                        .is_some_and(|s| s.starts_with("Unread on idle worker"))
+                    || (row.source == "daemon" && row.prompt.contains("notification_id="))
                     || row.prompt.contains("kind=\"supervisor_unread\"")
             })
             .collect()
@@ -441,10 +438,8 @@ fn cas_07ee_same_recipient_unrelated_codex_turn_still_alarms() {
         .insert("worker".into(), Instant::now() - Duration::from_secs(900));
     f.daemon.relay_idle_unacked_messages(f.queue.as_ref());
     assert!(
-        f.queue.peek_all(100).unwrap().iter().any(|row| row
-            .summary
-            .as_deref()
-            .is_some_and(|s| s.starts_with("Unread on idle worker"))),
+        f.queue.peek_all(100).unwrap().iter().any(|row| row.source == "daemon"
+            && row.prompt.contains(&format!("notification_id={id};"))),
         "a completed unrelated turn followed by idle must still raise idle-unread"
     );
     assert!(
@@ -494,10 +489,8 @@ fn cas_07ee_untyped_approvals_still_raise_idle_unread() {
             .insert("worker".into(), Instant::now() - Duration::from_secs(900));
         f.daemon.relay_idle_unacked_messages(f.queue.as_ref());
         assert!(
-            f.queue.peek_all(20).unwrap().iter().any(|row| row
-                .summary
-                .as_deref()
-                .is_some_and(|s| s.starts_with("Unread on idle worker"))),
+            f.queue.peek_all(20).unwrap().iter().any(|row| row.source == "daemon"
+                && row.prompt.contains(&format!("notification_id={id};"))),
             "untyped text cannot establish informational intent: {body}"
         );
     }

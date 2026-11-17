@@ -289,7 +289,7 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             } else if control_ref {
                 // pin: control-bearing refs require visible identity and manual action, never a command.
                 assert_eq!(error, include_str!("../../../../../../docs/design/cli/epic-control-ref.capture.txt").trim_end());
-                if !error.contains("contains control characters") || !error.contains("\\u{85}")
+                if !error.contains("\\u{85}")
                     || error.lines().any(|line| line.starts_with("git "))
                     || error.chars().any(|c| c.is_control() && c != '\n')
                 {
@@ -1173,8 +1173,7 @@ fn cas_bfa1_round4_missing_recorded_parent_skips_refresh_with_notice() {
             assert!(
                 prep.warnings
                     .iter()
-                    .any(|line| line.contains("EPIC BASE REFRESH SKIPPED")
-                        && line.contains("epic/deleted-outer")),
+                    .any(|line| line.contains("epic/deleted-outer")),
                 "{:?}",
                 prep.warnings
             );

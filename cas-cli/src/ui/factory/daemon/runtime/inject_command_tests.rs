@@ -795,7 +795,7 @@ async fn urgent_row_holds_for_an_in_flight_tool_call_then_names_cassy_cas_73f7()
             .unwrap();
         let late = passes_per_pane(&mut daemon, Duration::from_secs(6), |echoed| typed(echoed, WORKER) == 1).await;
         let busy = late.get(WORKER).cloned().unwrap_or_default();
-        assert!(busy.contains('\x1b') && busy.contains("this was not the operator"), "{target}: {busy:?}");
+        assert!(busy.contains('\x1b') && busy.contains("C4A-HOLD"), "{target}: {busy:?}");
         assert_eq!(typed(&late, IDLE), 0, "{target}: the idle member is not retyped: {late:?}");
     }
 }

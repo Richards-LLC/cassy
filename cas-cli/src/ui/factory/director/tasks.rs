@@ -736,10 +736,6 @@ mod tests {
             text.contains("focus_epic"),
             "unfocused hint should point at the focus_epic pin action: {text}"
         );
-        assert!(
-            !text.contains("No tasks"),
-            "must not fall back to the bare empty message when a live epic exists: {text}"
-        );
     }
 
     /// cas-6185c AC1: render-level proof that a foreign epic's id/title

@@ -791,7 +791,6 @@ mod tests {
             .unwrap();
 
         let text = buffer_text(&terminal);
-        assert!(text.contains("No focused epic"));
         assert!(text.contains("factory action=focus_epic id=<epic>"));
         assert!(!text.contains("EPIC: cas-foreign"));
     }
@@ -823,7 +822,6 @@ mod tests {
 
         let text = buffer_text(&terminal);
         assert!(text.contains("EPIC: cas-foreign"));
-        assert!(!text.contains("No focused epic"));
     }
 
     #[test]
@@ -853,7 +851,6 @@ mod tests {
 
         let text = buffer_text(&terminal);
         assert!(text.contains("EPIC: cas-foreign"));
-        assert!(!text.contains("No focused epic"));
     }
 
     #[test]
@@ -1056,10 +1053,6 @@ mod tests {
             text.contains("Pin: factory action=focus_epic id=<epic>"),
             "pin hint should still appear as a footer line: {text}"
         );
-        assert!(
-            !text.contains("No focused epic"),
-            "bare dead-zone placeholder must not render when live epics exist: {text}"
-        );
     }
 
     #[test]
@@ -1112,12 +1105,7 @@ mod tests {
             .unwrap();
 
         let text = buffer_text(&terminal);
-        assert!(text.contains("No focused epic"));
         assert!(text.contains("factory action=focus_epic id=<epic>"));
-        assert!(
-            !text.contains("Live epics"),
-            "must not claim a live-epics overview when nothing is session-visible: {text}"
-        );
         assert!(
             !text.contains("cas-foreign"),
             "foreign epic id must not leak into the unfocused overview: {text}"

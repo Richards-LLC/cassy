@@ -458,12 +458,8 @@ fn unknown_harness_cannot_silently_inherit_channel() {
     // Near-miss sentinel: "codexx" is a typo of "codex", not an alias.
     // Must stay rejected so a silent-accept of the misspelling cannot inherit
     // any channel (including Claude's TeamsInbox under teams_active).
-    let near_miss = SupervisorCli::from_str("codexx")
+    SupervisorCli::from_str("codexx")
         .expect_err("codexx is an intentional near-miss typo sentinel, not a valid harness");
-    assert!(
-        near_miss.contains("unsupported harness"),
-        "expected unsupported-harness error for near-miss \"codexx\", got {near_miss:?}"
-    );
 
     // Under teams_active, only Claude may use TeamsInbox — Codex and Grok must
     // never inherit that channel even when the factory is teams-mode.

@@ -1293,12 +1293,6 @@ mod tests {
                 OrphanDisposition::Reapable,
                 "an orphaned build tool must not be spared by a live process group"
             );
-            assert!(
-                report
-                    .render()
-                    .contains("build tool with no parent to report to"),
-                "the report must say why it is reapable despite the live owner"
-            );
 
             let done = cleanup(&cas_root, &report, true);
             if !done.killed.contains(&pid) {

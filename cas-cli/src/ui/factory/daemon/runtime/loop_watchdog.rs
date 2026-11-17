@@ -1394,10 +1394,9 @@ mod tests {
 
         let warn = log
             .lines()
-            .find(|line| line.contains("daemon step over budget"))
+            .find(|line| line.contains("cas::loop_watchdog") && line.contains("budget_ms="))
             .unwrap_or_else(|| panic!("no over-budget log line: {log}"));
         assert!(warn.contains("WARN"), "{warn}");
-        assert!(warn.contains("cas::loop_watchdog"), "{warn}");
         assert!(warn.contains("lane=control"), "{warn}");
         assert!(warn.contains("step=prompt queue: stub step"), "{warn}");
         assert!(warn.contains("elapsed_ms=45"), "{warn}");

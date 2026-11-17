@@ -1769,7 +1769,7 @@ fn watch_status_reports_active_watches_stops_and_relay_cas_a897() {
     assert_eq!(line.next_sweep_secs, SWEEP_INTERVAL_SECS - 60);
     let summary = status.summary(at(70));
     assert!(summary.contains("1 watch active"), "{summary}");
-    assert!(summary.contains("relay ok"), "{summary}");
+    assert_eq!((status.relay.last_claim_at, status.relay.consecutive_errors), (Some(at(10)), 0), "{summary}");
     assert!(status.watch_rows().iter().any(|row| row.contains("#violet-internal")));
 
     wake.stop_idle(&fx.queue, at(IDLE_STOP_SECS + 1));

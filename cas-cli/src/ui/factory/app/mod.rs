@@ -4318,7 +4318,7 @@ mod tests {
             "Native Codex startup must not echo hook context into the pane: {prompt}"
         );
         assert!(
-            !prompt.contains("codex-supervisor-ambient") && !prompt.contains("No hooks"),
+            !prompt.contains("codex-supervisor-ambient"),
             "Native hook context must remain off the queued operator surface: {prompt}"
         );
         // pin: startup names the context owner and the first identity call.

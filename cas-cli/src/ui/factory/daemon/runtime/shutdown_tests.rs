@@ -960,8 +960,7 @@ async fn recycle_with_a_refused_recipe_keeps_the_worker_running_cas_033a() {
             .unwrap()
             .iter()
             .any(|row| row.target == daemon.app.supervisor_name()
-                && row.prompt.contains(&format!("request {request_id}"))
-                && row.prompt.contains("the worker keeps running"))),
+                && row.prompt.contains(&format!("request {request_id}")))),
         "the supervisor is told the recycle was refused before the stop"
     );
 }

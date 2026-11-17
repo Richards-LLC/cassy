@@ -956,7 +956,15 @@ impl TeamsManager {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let body = serde_json::to_string_pretty(&Self::worker_settings_contents())?;
+        let mut body = Self::worker_settings_contents();
+        // cas-3751a: the launch adds the checkout's exact paths to this block.
+        if let Some(sandbox) = crate::store::find_cas_root()
+            .ok()
+            .and_then(|root| crate::worker_sandbox_profile::worker_sandbox_block(&root))
+        {
+            body["sandbox"] = sandbox;
+        }
+        let body = serde_json::to_string_pretty(&body)?;
         std::fs::write(path, body)?;
         tracing::info!("Wrote worker settings at {:?}", path);
         Ok(())

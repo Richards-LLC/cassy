@@ -54,6 +54,7 @@ impl Backend for Claude {
         if let Some(account) = super::skill_catalog::claude_account(launch.config_dir) {
             super::skill_catalog::apply_claude(&mut config, &account, &cwd);
         }
+        apply_worker_sandbox(&mut config, &cwd);
         finish_worker_config(
             &mut config,
             launch.supervisor_cli,
@@ -110,6 +111,41 @@ impl Backend for Claude {
     fn turn_cancel_bytes(&self) -> &'static [u8] {
         &[0x1b]
     }
+}
+
+/// cas-3751a: complete the worker settings' `sandbox` block with this
+/// checkout's exact paths and mark the harness as sandboxed, so the stage-A
+/// text guards only log for Bash. Settings without a `sandbox` block (Linux,
+/// sandbox off, no settings file) launch unchanged.
+fn apply_worker_sandbox(config: &mut PtyConfig, cwd: &Path) {
+    use crate::worker_sandbox;
+    let Some(flag) = config.args.iter().position(|arg| arg == "--settings") else {
+        return;
+    };
+    let raw = &config.args[flag + 1];
+    let text = if raw.trim_start().starts_with('{') {
+        raw.clone()
+    } else {
+        match std::fs::read_to_string(raw) {
+            Ok(text) => text,
+            Err(_) => return,
+        }
+    };
+    let Ok(serde_json::Value::Object(mut settings)) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(sandbox) = settings.get_mut("sandbox") else {
+        return;
+    };
+    let git = worker_sandbox::git_paths(cwd);
+    for dir in git.iter().flat_map(|git| git.create.iter()) {
+        if let Err(error) = std::fs::create_dir_all(dir) {
+            tracing::warn!(path = %dir.display(), %error, "worker sandbox: could not pre-create git dir");
+        }
+    }
+    worker_sandbox::apply_worktree(sandbox, cwd, git.as_ref());
+    config.args[flag + 1] = serde_json::Value::Object(settings).to_string();
+    config.env.push((worker_sandbox::SANDBOX_ENV.into(), worker_sandbox::SHADOW.into()));
 }
 
 /// One role-aware application for initial, dynamic and recycled Claude panes.

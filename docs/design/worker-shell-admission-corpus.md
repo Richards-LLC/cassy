@@ -81,7 +81,7 @@ well-formed. `⏎` is a newline (0x0A) and `␍` a carriage return (0x0D).
 | L03a | `printf 'a\tb'` with a literal tab | ALLOW |
 | L04 | `echo 'unterminated` / `echo "unterminated` / `echo $'x` / `` echo `x `` / `echo $(x` / `echo $((1` / `echo ${x` / a trailing `\` (one row each) | DENY shell.lexer_ambiguity |
 | L05 | `cat <<'EOF'`⏎`x` (no delimiter line before end of input) | DENY shell.lexer_ambiguity |
-| L06 | `cat <<-'EOF'`⏎`x`⏎`  EOF` (spaces, not tabs, before the delimiter) | DENY shell.lexer_ambiguity |
+| L06 | `cat <<-'EOF'`⏎`x`⏎two spaces then `EOF` (spaces, not tabs, before the delimiter) | DENY shell.lexer_ambiguity |
 | L06a | The same with a tab before `EOF` | ALLOW |
 | L07 | `cat <<E"O"F`⏎`x`⏎`EOF` and `cat <<$D`⏎`x`⏎`$D` and `cat <<''` (one row each) | DENY shell.lexer_ambiguity |
 | L08 | `cat <<'A' <<'B'`⏎`a`⏎`A`⏎`b`⏎`B` | ALLOW only if both bodies are assigned in order; otherwise DENY shell.lexer_ambiguity |

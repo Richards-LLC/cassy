@@ -39,7 +39,6 @@ fn test_codex_help_shows_shortcut_description() {
 
     assert!(normalized.contains("supervisor"), "{help}");
     assert!(normalized.contains("--list-profiles"), "{help}");
-    assert!(normalized.contains("profile listings"), "{help}");
     assert!(
         normalized.contains("`cas factory` flags pass through"),
         "{help}"

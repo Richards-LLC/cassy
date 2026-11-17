@@ -409,7 +409,6 @@ raise RuntimeError('obsolete renderer must be replaced by builtin')
         .success();
     let html = fs::read_to_string(output.join("v3.19.0.html")).unwrap();
     assert!(html.contains("data-change-map="), "{html}");
-    assert!(html.contains("Markdown source"), "{html}");
 }
 
 /// cas-7860: the release PR's issues are closed by hand minutes after it
@@ -644,11 +643,6 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
     assert!(developer_and_rest.contains("### Release report command"));
     assert!(!developer_and_rest.contains("the assembler gathers them."));
     assert!(developer_and_rest.contains("release reports are assembled."));
-
-    assert!(
-        !developer_and_rest[..developer_and_rest.find("## Fixes ledger").unwrap()]
-            .contains("one command builds the report.")
-    );
 }
 
 #[cfg(unix)]

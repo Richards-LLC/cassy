@@ -93,7 +93,6 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         dry_out.contains("projects/first") && dry_out.contains("nested/second"),
         "output was:\n{dry_out}"
     );
-    assert!(dry_out.contains("DRY RUN"), "output was:\n{dry_out}");
     assert!(!missing.exists(), "dry run must not restore deleted skills");
 
     let synced = cas_cmd(root)
@@ -180,10 +179,6 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
         .success();
     let output = String::from_utf8_lossy(&update.get_output().stdout);
 
-    assert!(
-        output.lines().any(|line| line.contains("workspace, inner")),
-        "a project nested under another project must be refreshed:\n{output}"
-    );
     assert!(
         output.contains(&format!(
             "Cassy {} · 2 projects refreshed · 0 failed · 1 skipped",

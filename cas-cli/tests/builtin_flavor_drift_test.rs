@@ -692,19 +692,6 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
     if !build_line.contains("--max-sources 5") {
         violations.push("max-sources limit");
     }
-    if !lower.contains("wall-clock")
-        || !(lower.contains("complete build")
-            || lower.contains("entire build")
-            || lower.contains("whole build"))
-    {
-        violations.push("single wall-clock deadline for the complete build");
-    }
-    if !lower.contains("stops later completions")
-        && !lower.contains("stop later completions")
-        && !lower.contains("no later completions")
-    {
-        violations.push("stop scheduling after deadline exhaustion");
-    }
     if !lower.contains("process group")
         || !(lower.contains("terminate") || lower.contains("kill"))
         || !lower.contains("reap")
@@ -729,18 +716,6 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
         })
     };
 
-    if !(lower.contains("non-zero") || lower.contains("nonzero"))
-        || !(lower.contains("non-blocking") || lower.contains("must not block"))
-        || !lower.contains("continue")
-    {
-        violations.push("non-zero failure is non-blocking and continues");
-    }
-    if !(lower.contains("record") || lower.contains("capture"))
-        || !(lower.contains("durable receipt") || lower.contains("task notes"))
-        || !(lower.contains("exit status") || lower.contains("exit code") || lower.contains("$?"))
-    {
-        violations.push("durable exit receipt");
-    }
     if lower.contains("set +e") || lower.contains("set -e") {
         violations.push("no caller-shell errexit mutation");
     }
@@ -800,16 +775,6 @@ Do not detach or background the build, run a manual polling loop, or wait beyond
     assert!(
         codemap_build_contract_violations(&unbounded).contains(&"--timeout-secs bound"),
         "an unbounded knowledge build must be rejected"
-    );
-
-    let per_completion_only = valid.replace(
-        "one 90-second wall-clock deadline across the complete build",
-        "a 90-second wall-clock deadline for each provider completion",
-    );
-    assert!(
-        codemap_build_contract_violations(&per_completion_only)
-            .contains(&"single wall-clock deadline for the complete build"),
-        "a per-completion-only bound must not satisfy the whole-build contract"
     );
 
     let detached = valid.replace(

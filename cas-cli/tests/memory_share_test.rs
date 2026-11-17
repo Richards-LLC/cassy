@@ -186,12 +186,8 @@ fn share_by_id_refuses_preference_entry() {
         all: false,
         dry_run: false,
     };
-    let err = execute_share(&args, temp.path()).expect_err("must refuse Preference");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("not eligible"),
-        "error must explain ineligibility, got: {msg}"
-    );
+    execute_share(&args, temp.path()).expect_err("must refuse Preference");
+    assert_eq!(team_queue_len(temp.path()), 0);
 }
 
 #[test]

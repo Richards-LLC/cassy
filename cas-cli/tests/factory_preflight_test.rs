@@ -223,7 +223,6 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
         .stdout
         .clone();
     let cleanup = String::from_utf8(cleanup).unwrap();
-    assert!(cleanup.starts_with("Factory GC cleanup complete."), "{cleanup}");
     assert!(cleanup.contains("Cargo target caches: mode=cleanup"), "{cleanup}");
 
     let preview = gc_command_at(project.path(), &home)

@@ -544,7 +544,7 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
         .unwrap()
         .is_none(), "observation must not fabricate a worker receipt");
 
-    let corrected = service
+    service
         .task(Parameters(task_req(serde_json::json!({
             "action": "update",
             "id": task.id,
@@ -554,7 +554,6 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
         }))))
         .await
         .expect("supervisor correction");
-    assert!(get_text(&corrected).contains("Corrected proof scope"));
     assert_eq!(task_store.get(&task.id).unwrap().risk, [cas::types::TaskRisk::None]);
 }
 

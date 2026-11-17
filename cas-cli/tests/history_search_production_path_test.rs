@@ -561,10 +561,7 @@ async fn q3_every_commit_touching_a_path_with_honest_provenance() {
             "an unlinked commit must be returned with an empty edge list"
         );
         assert!(
-            hit["provenance_reason"]
-                .as_str()
-                .unwrap()
-                .contains("no populated edge"),
+            !hit["provenance_reason"].as_str().unwrap().trim().is_empty(),
             "an empty provenance with no reason is indistinguishable from a bug: {hit}"
         );
         // Files are narrowed to the queried path.

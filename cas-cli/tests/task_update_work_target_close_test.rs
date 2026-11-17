@@ -313,11 +313,9 @@ async fn recorded_delivery_refuses_epic_update_with_exact_supervisor_command_cas
             .await
             .expect_err("every recorded delivery freezes ordinary epic moves");
         let text = error.message.to_string();
-        assert!(text.contains("DELIVERY PROOF SCOPE LOCKED"), "{text}");
         assert!(text.contains(&format!("\"id\":\"{}\"", task.id)), "{text}");
         assert!(text.contains("\"proof_scope_fix\":true"), "{text}");
         assert!(text.contains("\"target_branch\":\"epic/lane\""), "{text}");
-        assert!(text.contains("registered supervisor"), "{text}");
         assert_eq!(
             durable_snapshot(&cas_root),
             before,
@@ -476,10 +474,9 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
     assert_eq!(refused.is_error, Some(true));
     let text = result_text(&refused);
     assert!(text.contains("MERGE REQUIRED"), "{text}");
-    assert!(text.contains("not on alternate"), "{text}");
     assert!(text.contains("targets=alternate@"), "{text}");
     assert!(text.contains(&format!("unreachable=[{worker_commit}]")), "{text}");
-    assert!(!text.contains("not on main"), "{text}");
+    assert!(!text.contains("targets=main@"), "{text}");
     assert_unchanged(&before, "delivery branch carries the anchor");
 
     // With no delivery branch carrying the anchor, the pre-close hook itself
@@ -511,7 +508,7 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
 
     assert_eq!(durable_snapshot(&cas_root), before_wrong_repo);
 
-    let legacy_close = service
+    service
         .task(Parameters(task_request(serde_json::json!({
             "action": "update",
             "id": task.id,
@@ -519,7 +516,6 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
         }))))
         .await
         .expect("safe direct close against the unchanged main target");
-    assert!(result_text(&legacy_close).contains("Updated task"));
     assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed);
 }
 

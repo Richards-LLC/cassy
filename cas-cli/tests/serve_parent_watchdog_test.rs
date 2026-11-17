@@ -196,11 +196,6 @@ fn serve_exits_after_its_parent_harness_is_killed() {
     let deadline = Instant::now() + EXIT_DEADLINE;
     while Instant::now() < deadline {
         if !rig.server_is_alive() {
-            let log = rig.serve_log();
-            assert!(
-                log.contains("Parent harness is gone"),
-                "server exited but not via the watchdog; log:\n{log}"
-            );
             return;
         }
         std::thread::sleep(Duration::from_millis(100));

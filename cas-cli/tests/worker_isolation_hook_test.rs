@@ -88,7 +88,7 @@ fn codex_worker_apply_patch_into_the_main_checkout_is_refused_cas_49c0() {
         main.path().canonicalize().unwrap().join("cas-cli/src/mcp/tools/service/core.rs")
     });
     assert!(refused.contains("deny"), "{refused}");
-    assert!(refused.contains("FACTORY WORKSPACE CONTRACT"), "{refused}");
+    assert!(refused.contains("[H-29]") || refused.contains("[H-28]"), "{refused}");
     assert!(
         refused.contains(&main_name.display().to_string())
             || refused.contains(&main_file.display().to_string()),
@@ -106,7 +106,7 @@ fn codex_worker_apply_patch_into_the_main_checkout_is_refused_cas_49c0() {
         "*** Begin Patch\n*** Add File: src/new.rs\n+pub fn new() {}\n*** End Patch\n",
     );
     assert!(
-        !allowed.contains("FACTORY WORKSPACE CONTRACT"),
+        !allowed.contains("[H-29]") && !allowed.contains("[H-28]"),
         "a patch inside the worktree is not refused: {allowed}"
     );
 }
@@ -154,7 +154,7 @@ fn native_codex_cargo_admission_denies_stalled_policy_cas_2c8e() {
                 specific["permissionDecisionReason"]
                     .as_str()
                     .unwrap()
-                    .contains("GUARD UNAVAILABLE")
+                    .contains("[H-01]")
             );
         } else {
             assert_eq!(specific["permissionDecision"], "allow", "{value}");

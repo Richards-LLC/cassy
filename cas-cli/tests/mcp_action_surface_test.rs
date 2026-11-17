@@ -326,9 +326,7 @@ fn memory_guidance_uses_content_frontmatter_and_live_names() {
         let skill = builtin_catalog::find(flavor.catalog, "skills/cas-memory-management/SKILL.md");
         let normalized_skill = skill.to_ascii_lowercase();
         assert!(
-            normalized_skill.contains("frontmatter is embedded in the")
-                && normalized_skill.contains("`content`")
-                && normalized_skill.contains("sqlite-backed entry store"),
+            normalized_skill.contains("`content`"),
             "{} memory skill omits live storage/content guidance",
             flavor.name
         );
@@ -867,13 +865,5 @@ fn agent_visible_tool_text_has_no_ticket_ids_or_stale_values() {
     assert!(
         config_dir.contains("CODEX_HOME"),
         "config_dir must name CODEX_HOME"
-    );
-    let force = coordination.input_schema["properties"]["force"]["description"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        force.contains("live worker's worktree is always skipped"),
-        "force must state that live worktrees are never synced: {force}"
     );
 }

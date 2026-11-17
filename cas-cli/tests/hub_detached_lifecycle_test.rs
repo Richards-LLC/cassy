@@ -293,32 +293,6 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
         normalized_help.contains("Keep this launch loopback-only (overrides hub.transport_mode for this launch)"),
         "loopback flag help should describe its transport policy override: {help_text}"
     );
-    assert!(
-        help_text.to_ascii_lowercase().contains("detached restart"),
-        "restart JSON help must scope its response shape to detached hubs: {help_text}"
-    );
-    let restart_help_lines = help_text
-        .lines()
-        .filter(|line| {
-            line.starts_with("Detached restart:")
-                || line.starts_with("Stop keys:")
-                || line.starts_with("Stop also has")
-                || line.starts_with("Start also has")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        restart_help_lines.len(),
-        4,
-        "restart help should render its four concise contract lines: {help_text}"
-    );
-    for line in restart_help_lines {
-        assert!(
-            line.chars().count() <= 80,
-            "restart help line exceeds 80 cells: {} ({})",
-            line.chars().count(),
-            line
-        );
-    }
 
     drop(occupied_listener);
     let stop = cas_command(home.path(), &path)

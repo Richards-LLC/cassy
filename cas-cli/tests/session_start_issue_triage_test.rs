@@ -7,6 +7,11 @@ use tempfile::TempDir;
 
 use crate::test_env_guard;
 
+/// SessionStart's triage cache (`issue_triage.rs` `CACHE_FILE`); only a
+/// successful `gh` fetch writes it.
+#[cfg(unix)]
+const TRIAGE_CACHE: &str = "github-issue-triage-cache.json";
+
 /// Build a `cas` invocation that cannot see this machine's factory session.
 ///
 /// cas-caaf: overriding `HOME` is not enough. The SessionStart payload has a
@@ -134,8 +139,7 @@ fn issue_triage_is_silent_for_workers_and_when_repo_is_unset() {
         r#"printf '%s\n' '{"data":{"repository":{"issues":{"totalCount":1,"nodes":[]}}}}'"#,
     );
     let (worker, _) = session_start(&worker_project, "worker", &fake_bin, &call_log);
-    assert!(!worker.contains("GitHub issue triage"), "{worker}");
-    assert!(!call_log.exists(), "worker session invoked gh");
+    assert!(!call_log.exists(), "worker session invoked gh: {worker}");
 
     let unset_project = TempDir::new().unwrap();
     init(&unset_project);
@@ -144,8 +148,7 @@ fn issue_triage_is_silent_for_workers_and_when_repo_is_unset() {
         r#"printf '%s\n' '{"data":{"repository":{"issues":{"totalCount":1,"nodes":[]}}}}'"#,
     );
     let (unset, _) = session_start(&unset_project, "supervisor", &fake_bin, &call_log);
-    assert!(!unset.contains("GitHub issue triage"), "{unset}");
-    assert!(!call_log.exists(), "unset issues.repo invoked gh");
+    assert!(!call_log.exists(), "unset issues.repo invoked gh: {unset}");
 }
 
 #[cfg(unix)]
@@ -162,7 +165,11 @@ fn issue_triage_failures_are_silent_and_timeout_is_bounded() {
     let missing_log = missing_project.path().join("missing-gh.log");
     let (missing, elapsed) =
         session_start(&missing_project, "supervisor", &empty_bin, &missing_log);
-    assert!(!missing.contains("GitHub issue triage"), "{missing}");
+    // The triage banner renders only from a cache that a successful fetch writes.
+    assert!(
+        !missing_project.path().join(".cas").join(TRIAGE_CACHE).exists(),
+        "{missing}"
+    );
     assert!(elapsed < Duration::from_secs(3), "missing gh: {elapsed:?}");
 
     // Authentication, network, and rate-limit failures all reach CAS as a
@@ -181,7 +188,10 @@ fn issue_triage_failures_are_silent_and_timeout_is_bounded() {
         let (fake_bin, call_log) = install_fake_gh(&project, body);
 
         let (output, elapsed) = session_start(&project, "supervisor", &fake_bin, &call_log);
-        assert!(!output.contains("GitHub issue triage"), "{name}: {output}");
+        assert!(
+            !project.path().join(".cas").join(TRIAGE_CACHE).exists(),
+            "{name}: {output}"
+        );
         assert!(
             elapsed < Duration::from_secs(3),
             "{name} blocked SessionStart for {elapsed:?}"

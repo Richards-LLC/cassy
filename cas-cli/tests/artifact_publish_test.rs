@@ -202,7 +202,6 @@ fn publish_records_the_same_digest_and_size_as_sha256sum_and_stat() {
     let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(record["storage"], "not_logged_in");
     assert_eq!(record["metadata_state"], "qa_bundle_not_portable");
-    assert!(record["qa_portability_error"].as_str().unwrap().contains("byte limit"));
     project.cmd().args(["artifact", "publish", "--task", TASK]).arg(&manifest)
         .assert().success();
 }

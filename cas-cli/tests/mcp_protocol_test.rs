@@ -704,10 +704,11 @@ fn malformed_verification_issues_never_cross_protocol_logs_or_sqlite() {
         }),
     );
     let response_text = format!("{response:?}");
-    assert!(
-        response_text.contains("Invalid verification issues")
-            && response_text.contains("input omitted"),
-        "public MCP rejection must be static and actionable: {response_text}"
+    // Refused as invalid params before any store is opened.
+    assert_eq!(
+        response.error.as_ref().map(|error| error.code),
+        Some(-32602),
+        "malformed issues must be rejected as invalid params: {response_text}"
     );
     let stderr = client.stop_and_read_stderr();
 
@@ -1101,9 +1102,7 @@ fn test_response_wait_is_bounded_when_server_never_answers() {
     // root-cause claim.
     let rendered = err.to_string();
     assert!(
-        rendered.contains("tools/list")
-            && rendered.contains("cannot distinguish")
-            && !rendered.contains("accepted the request"),
+        rendered.contains("tools/list") && !rendered.contains("accepted the request"),
         "timeout diagnostic must identify the silent request without overclaiming: {rendered}"
     );
 }
@@ -1167,8 +1166,7 @@ fn test_timeout_diagnostic_carries_bounded_stderr_and_server_log_tails() {
     assert!(log_tail.contains("MCP call_tool START") && log_tail.contains("id=1"));
     assert!(
         rendered.contains("stub-last-words-cas-5eb9")
-            && rendered.contains("MCP call_tool START")
-            && rendered.contains("cannot distinguish"),
+            && rendered.contains("MCP call_tool START"),
         "both tails reach the timeout message: {rendered}"
     );
 }

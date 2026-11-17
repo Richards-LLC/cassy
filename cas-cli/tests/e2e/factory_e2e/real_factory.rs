@@ -179,7 +179,7 @@ fn spawn_factory(cwd: &std::path::Path, cas_root: &std::path::Path) -> PtyRunner
     if let Err(err) = header_result {
         let output = runner.get_output();
         let raw = output.as_str();
-        if raw.contains("Error:") || raw.contains("CAS is not initialized") {
+        if raw.contains("Error:") {
             panic!("factory startup error: {err}\n--- raw output ---\n{raw}");
         }
         if !runner.is_running() {

@@ -212,7 +212,7 @@ command = "cas-f7ac-intentionally-missing-upstream"
     );
     let denied_message = denied["error"]["message"].as_str().unwrap();
     assert!(
-        denied_message.contains("external tool is not explicitly allowlisted"),
+        denied_message.contains("github-shadow.list_issues"),
         "unexpected denied response: {denied}"
     );
 

@@ -734,7 +734,7 @@ exit 0
                                 let whole = with_email.starts_with(b"\x1b[F");
                                 pty.write(if whole { with_email } else { b"\x1b[F\r" }).await.unwrap();
                                 step = if whole { 2 } else { 1 };
-                            } else if step == 1 && text.contains("Email for the new") {
+                            } else if step == 1 && text.contains("<email>") {
                                 pty.write(with_email).await.unwrap();
                                 step = 2;
                             } else if step == 2 && !trigger.is_empty() && text.contains(trigger) {
@@ -813,7 +813,7 @@ async fn bare_picker_on_a_real_tty_forwards_the_selected_profile_cas_fa64() {
                 Some(PtyEvent::Output(bytes)) => {
                     output.extend(bytes);
                     if !selected
-                        && String::from_utf8_lossy(&output).contains("Choose Claude account")
+                        && String::from_utf8_lossy(&output).contains("list-profiles")
                     {
                         // main starts selected; the next sorted account is alt.
                         pty.write(b"\x1b[B\r").await.unwrap();

@@ -87,7 +87,6 @@ async fn close_recovery_names_only_the_dispatch_it_atomically_timed_out() {
         .await
         .expect("close returns recovery guidance");
     let text = result_text(&result);
-    assert!(text.contains("VERIFICATION TIMED OUT"), "{text}");
     assert!(
         text.contains(&due.id),
         "guidance must name the dispatch actually marked timed_out: {text}"

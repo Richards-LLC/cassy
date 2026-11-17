@@ -616,6 +616,8 @@ fn reject_retry_configuration(
 }
 
 // gate-audit[force]: Suite-header changes include descendant tests in the selected proof; this broadens test coverage and never bypasses a refusal.
+// gate-audit[strict]: selector Chooses the changed-scope pass that raises G-61 for an unresolvable callee or title; the non-strict inventory pass never selects tests for proof.
+// gate-audit[unresolved]: selector Inherited title-resolution state; it only makes a changed test fail closed and never accepts a refused identity.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     node: Node<'_>,

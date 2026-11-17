@@ -1046,6 +1046,10 @@ fn test_mcp_tool_call_invalid_arguments() {
         },
         "Should indicate error for missing required field"
     );
+
+    // A mistyped argument is a JSON-RPC invalid-params error, not a tool result.
+    let response = client.call_tool("task", json!({"action": "list", "limit": "many"}));
+    assert_eq!(response.error.as_ref().map(|error| error.code), Some(-32602));
 }
 
 #[test]

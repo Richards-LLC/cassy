@@ -233,7 +233,7 @@ impl ServerHandler for CasService {
                     let tcc = rmcp::handler::server::tool::ToolCallContext::new(
                         &service, request, context,
                     );
-                    let result = service.tool_router.call(tcc).await.and_then(completed_tool_call);
+                    let result = dispatch_tool(&service, tcc).await;
                     crate::gates::facts::observe_tool_result(
                         &service.inner.cas_root, arguments.as_ref(), &result,
                     );
@@ -262,6 +262,23 @@ impl ServerHandler for CasService {
             .map(Into::into)
         }
     }
+}
+
+/// Run the named route directly. `ToolRouter::call` turns an argument
+/// deserialization failure into an `isError` tool result; Cassy has always
+/// answered it with a JSON-RPC invalid-params error, which callers rely on.
+async fn dispatch_tool(
+    service: &CasService,
+    context: rmcp::handler::server::tool::ToolCallContext<'_, CasService>,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    let router = &service.tool_router;
+    let name = context.name().to_owned();
+    let route = router
+        .map
+        .get(name.as_str())
+        .filter(|_| !router.is_disabled(&name))
+        .ok_or_else(|| rmcp::ErrorData::invalid_params("tool not found", None))?;
+    (route.call)(context).await.and_then(completed_tool_call)
 }
 
 /// Cassy tools always answer inline: none asks the client for input or

@@ -1841,8 +1841,8 @@ mod tests {
         let rows = "describe.each(['x'])('suite %s', () => {\n  it.each([1, 2])('row %i', () => {});\n});";
         let template = Identity { parameterized: true, ..id("a.test.ts", "suite %s row %i") };
         assert_eq!(source_tests("a.test.ts", rows, &[(2, 2)]).unwrap(), [template.clone()]);
-        assert!(template.selects(&id("a.test.ts", "suite x row 2")));
-        assert!(!template.selects(&id("a.test.ts", "suite x other 2")));
+        let runtime = [id("a.test.ts", "suite x row 2"), id("a.test.ts", "suite x other 2")];
+        assert_eq!(runtime.map(|row| template.selects(&row)), [true, false]);
         // GH #1973: a TypeScript generic over an import type parses.
         let generic = "vi.mock('vue-i18n', async importOriginal => ({\n  ...(await importOriginal<typeof import('vue-i18n')>()),\n}));\nit('a', () => { expect(1).toBe(1); });";
         assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);

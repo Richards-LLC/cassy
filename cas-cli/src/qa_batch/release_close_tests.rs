@@ -29,7 +29,12 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut anchors = BTreeMap::new();
     let mut foreign = None;
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone"] {
+        if id == "cas-undone" {
+            std::fs::write(repo.join("shared.rs"), "fn shared() { baseline() }\n").unwrap();
+            git(&["add", "shared.rs"]);
+            git(&["commit", "-qm", "shared baseline"]);
+        }
         let base = git(&["rev-parse", "HEAD"]);
         git(&["checkout", "-qb", id]);
         let source = format!("{id}.rs");
@@ -37,6 +42,10 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         git(&["add", &source]);
         git(&["commit", "-qm", "delivery source"]);
         let first = git(&["rev-parse", "HEAD"]);
+        if id == "cas-undone" {
+            std::fs::write(repo.join("shared.rs"), "fn shared() { delivered() }\n").unwrap();
+            git(&["commit", "-qam", "deliver shared change"]);
+        }
         if id == "cas-redrafted" {
             // cas-f4a2 / v4.28: 03bc's red control reverted inside its own
             // delivery, aeb3's fragment draft rewritten before release prep
@@ -104,6 +113,23 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
             git(&["revert", "-m", "1", "--no-edit", &merge]);
         } else if id == "cas-partial" {
             git(&["revert", "--no-edit", &first]);
+        } else if id == "cas-evolved" {
+            // GH #2026: a train sibling's merge resolution rewrites the
+            // delivered line after it landed. That is evolution, not a revert.
+            git(&["checkout", "-qb", "sibling", &base]);
+            std::fs::write(repo.join(&source), "fn delivered() { sibling() }\n").unwrap();
+            git(&["add", &source]);
+            git(&["commit", "-qm", "sibling delivery"]);
+            let _conflict = Command::new("git").arg("-C").arg(&repo).args(["merge", "-q", "main"]).output().unwrap();
+            std::fs::write(repo.join(&source), "fn delivered() { evolved() }\n").unwrap();
+            git(&["add", &source]);
+            git(&["commit", "-qm", "sync train into sibling"]);
+            git(&["checkout", "-q", "main"]);
+            git(&["merge", "--no-ff", "-qm", "merge sibling", "sibling"]);
+        } else if id == "cas-undone" {
+            // An unlabeled edit restoring the pre-delivery line is a revert.
+            std::fs::write(repo.join("shared.rs"), "fn shared() { baseline() }\n").unwrap();
+            git(&["commit", "-qam", "tidy shared"]);
         }
         let mut task = Task::new(id.into(), id.into());
         task.origin_project = Some("reverted".into());
@@ -174,21 +200,21 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(
         &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag: tag.clone() },
     )).unwrap();
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-resynced", "cas-foreign-cut"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-resynced", "cas-foreign-cut", "cas-undone"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "{id}");
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "RELEASE_MEMBER_REVERTED"), "{id}: {:?}", result.members.get(id));
         assert!(inventory.exceptions.iter().any(|e| e.task_id == id && serde_json::to_value(&e.code).unwrap() == "reverted"));
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == id));
     }
-    for id in ["cas-retained", "cas-redrafted"] {
+    for id in ["cas-retained", "cas-redrafted", "cas-evolved"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{id}: {:?}", result.members.get(id));
     }
-    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut"] {
+    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone"] {
         let task = tasks.get(id).unwrap();
         assert_eq!(release_tag_ships_delivery(&repo,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
             task.deliverables.factory_branch_anchor.as_deref().unwrap(), &scope.final_release_sha, id),
-            id == "cas-retained" || id == "cas-redrafted", "{id}");
+            ["cas-retained", "cas-redrafted", "cas-evolved"].contains(&id), "{id}");
     }
     assert!(prepare_release_tag_receipt(&root, &["cas-retained".into()], &tag).is_ok());
     for id in ["cas-reverted", "cas-partial", "cas-unfolded"] {

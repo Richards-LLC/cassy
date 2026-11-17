@@ -198,7 +198,11 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
             path.startswith("scripts/") and stem(path) in {subject, stem(test)} for path in changed)
         if test in changed or stem_related or provisioned_related or terminal_qa_related or boundary_related:
             selected.append((test, command))
-    return selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
+    # Several inputs may name one command; run it once, under its first identity.
+    seen: set[str] = set()
+    return [(test, command) for test, command in
+            selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
+            if not (command in seen or seen.add(command))]
 
 
 def main() -> int:

@@ -7649,7 +7649,6 @@ impl CasService {
         // cas-baa8: caches factory.scratch_root moved off the checkout.
         host.push_str(&crate::factory_scratch::render_relocated_until(
             &self.inner.cas_root, target_cache_report.as_ref().ok(), Some(report_deadline)));
-        host.push_str(&crate::factory_review_scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
         host.push_str(&crate::factory_review_scratch::unmanaged_large_until(&self.inner.cas_root, Some(report_deadline)));
         match crate::artifacts::retention::host::preview(&self.inner.cas_root, report_deadline) {
             Ok(report) => host.push_str(&report.render()),

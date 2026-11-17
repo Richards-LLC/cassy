@@ -315,7 +315,19 @@ async fn worker_request_builds_in_the_daemon_and_tells_only_the_worker() {
 
 #[tokio::test]
 async fn refused_requests_name_why_and_queue_nothing() {
+    use clap::CommandFactory;
     let fixture = Fixture::new();
+    // The supervisor copies this command into the real CLI. Check its parsed
+    // task/revision payload, independent of the surrounding refusal prose.
+    let candidate_target = |reply: &str| {
+        reply.split('`').find_map(|command| {
+            let argv = shell_words::split(command).ok()?;
+            let parsed = crate::cli::Cli::command().try_get_matches_from(argv).ok()?;
+            let build = parsed.subcommand_matches("qa")?
+                .subcommand_matches("candidate")?.subcommand_matches("build")?;
+            Some((build.get_one::<String>("task")?.clone(), build.get_one::<String>("rev")?.clone()))
+        })
+    };
     // Reachable from the project's own history, never from this worker's HEAD.
     git(
         &fixture.project,
@@ -344,6 +356,7 @@ async fn refused_requests_name_why_and_queue_nothing() {
     }
     std::fs::remove_file(queue_dir(&fixture.cas_root).join(RUNNER_HEARTBEAT)).unwrap();
     let reply = fixture.request(OWN_TASK, &fixture.head).await;
+    assert_eq!(candidate_target(&reply), Some((OWN_TASK.into(), fixture.head.clone())));
 
     // The daemon's own context decides: a worker's `cas serve` is confined
     // differently from the process that builds.
@@ -354,6 +367,7 @@ async fn refused_requests_name_why_and_queue_nothing() {
     )
     .unwrap();
     let reply = fixture.request(OWN_TASK, &fixture.head).await;
+    assert_eq!(candidate_target(&reply), Some((OWN_TASK.into(), fixture.head.clone())));
     for part in ["refused", "macos", "cas qa candidate build"] {
         assert!(reply.contains(part), "{part} in {reply}");
     }

@@ -29792,7 +29792,7 @@ mod merge_state_gate_tests {
             && row.trigger_filter.as_ref().and_then(|filter| filter.get("sha").or_else(|| filter.get("commit")))
                 == Some(&serde_json::Value::String(next.clone()))).count(), 2);
         assert_eq!(automatic.iter().filter(|row| row.status == ReminderStatus::Cancelled).count(), 2);
-        assert_eq!(history.iter().find(|row| row.id == manual.id).unwrap().status, ReminderStatus::Pending);
+        assert_eq!(history.iter().find(|row| row.id == manual).unwrap().status, ReminderStatus::Pending);
         core.advance_awaiting_merge_anchor(&tasks, &advanced, repo, "main", Some(&next)).unwrap();
         assert_eq!(reminders.list_for_task(&task.id).unwrap().len(), history.len());
         crate::ui::factory::daemon::runtime::progress_watchdog::sweep(&root, "relay-fixture-session", chrono::Utc::now());

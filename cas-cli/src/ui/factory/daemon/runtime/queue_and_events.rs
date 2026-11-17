@@ -13947,6 +13947,20 @@ mod tests {
     }
 
     #[test]
+    fn retired_spawn_failure_is_quiet_gh2040() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("old-worker".into(), "old-worker".into(), cas_types::AgentRole::Worker);
+        worker.factory_session = Some("factory-session".into());
+        worker.status = cas_types::AgentStatus::Shutdown;
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", None,
+            &worker.name, "register", false, "boot failed").unwrap().is_none());
+        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+    }
+
+    #[test]
     fn cleanup_warns_supervisor_once_after_bound_cas_af63() {
         use crate::ui::factory::app::render_and_ops::epic_workers::{WorkerCleanupJob, CrashCleanupOutcome, WORKER_CLEANUP_WARN_AFTER};
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -13970,9 +13984,8 @@ mod tests {
         assert_eq!(rows.len(), 1, "a held cleanup needs one supervisor warning");
         assert_eq!(rows[0].target, daemon.app.supervisor_name());
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
-        assert!(rows[0].prompt.contains("slow-worker"));
-        assert!(super::FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon,
-            daemon.app.supervisor_name(), &rows[0].source, &rows[0].prompt).is_some());
+        assert!(crate::prompt_revalidation::parse_blocker_envelope(&rows[0].prompt).is_none());
+        assert_eq!(rows[0].priority, cas_store::NotificationPriority::Normal);
         drop(held);
         daemon.app.join_worker_worktree_cleanups();
     }

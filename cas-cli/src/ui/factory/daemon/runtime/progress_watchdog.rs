@@ -323,6 +323,26 @@ mod tests {
     use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
 
     #[test]
+    fn unreadable_refusal_does_not_hide_other_work_cas_6583() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut owner = Agent::new_with_role("owner".into(), "supervisor".into(), AgentRole::Supervisor);
+        owner.factory_session = Some("refusal-isolation".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        for id in ["cas-unreadable", "cas-actionable"] {
+            let mut task = Task::new(id.into(), id.into());
+            task.assignee = Some(owner.name.clone());
+            tasks.add(&task).unwrap();
+        }
+        tasks.patch_execution_state("cas-unreadable", &serde_json::json!({"close_refusal": {"invalid": true}})).unwrap();
+        let (_, waiting, _, _, _) = super::observe(&root, "refusal-isolation", chrono::Utc::now()).unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert!(waiting[0].contains("cas-actionable"));
+    }
+
+    #[test]
     fn missing_delivery_wake_is_a_one_cycle_defect_cas_f16b() {
         const SESSION: &str = "unarmed-delivery-f16b";
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -464,7 +484,7 @@ mod tests {
         epic.task_type = cas_types::TaskType::Epic;
         epic.status = TaskStatus::Blocked;
         epic.assignee = Some(supervisor.name.clone());
-        epic.notes = "[2026-11-06 18:00] 🚫 BLOCKER owner: operator; operator-only desktop verification remains.".into();
+        epic.notes = "[2026-11-06 18:00] ✅ DECISION HOLD owner: operator; deferred desktop verification.".into();
         tasks.add(&epic).unwrap();
         let mut child = Task::new("cas-e239-merged".into(), "All release work merged".into());
         child.status = TaskStatus::Closed;
@@ -482,7 +502,7 @@ mod tests {
 
         // A newer blocker returns responsibility to the factory. Historical
         // operator ownership must not hide this genuine stall.
-        epic.notes.push_str("\n\n[2026-11-06 18:01] 🚫 BLOCKER owner: worker; release repair has not started; operator check is complete.");
+        epic.notes.push_str("\n\n[2026-11-06 18:01] ✅ DECISION RESUME\n\n[2026-11-06 18:02] 🚫 BLOCKER owner: worker; release repair has not started; operator check is complete.");
         tasks.update(&epic).unwrap();
         for minutes in [181, 226, 271, 316] {
             super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));

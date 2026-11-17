@@ -2587,6 +2587,12 @@ async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
     spawns.mark_processed(request).unwrap();
     spawns.record_spawn_state(request, cas_store::SpawnLifecycleState::Registered,
         Some(WORKER), None).unwrap();
+    call(&f.supervisor, serde_json::json!({
+        "action":"update", "assignee":WORKER, "task_ids":[pending[0], pending[3]],
+    })).await;
+    let before_start = queues.get("queue-session", WORKER).unwrap();
+    assert_eq!(before_start.current_task.as_deref(), Some(first.id.as_str()));
+    assert_eq!(before_start.pending, [pending[0], pending[3]]);
     call(&f.worker, serde_json::json!({"action":"start", "id":first.id})).await;
     std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
     git(&checkout, &["add", "own.rs"]);

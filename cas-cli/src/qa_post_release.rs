@@ -1442,3 +1442,33 @@ fn start_landed(cas_root: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[test]
+fn terminal_close_hold_notices_retire_before_transport_gh1813() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", "close-holds");
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut supervisor = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+    supervisor.factory_session = Some("close-holds".into());
+    crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    let mut task = cas_types::Task::new("cas-held".into(), "close held".into());
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    tasks.add(&task).unwrap();
+    let reply = crate::mcp::tools::core::task::close_refusal::gate("fixture_gate", "resolve_fixture", "held");
+    crate::mcp::tools::core::task::close_refusal::record(&root, &task.id, &Ok(reply)).unwrap();
+    crate::supervisor_notices::enqueue_keyed(&root, &crate::supervisor_notices::Recipient::agent(&supervisor),
+        "batch_close_hold", "held", "fixture-hold", Some(serde_json::json!({"held_by_kind": {"fixture_gate": [{"task_id":task.id}]}}))).unwrap();
+    crate::ui::factory::daemon::runtime::progress_watchdog::sweep(&root, "close-holds", chrono::Utc::now());
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let rows = queue.peek_all(10).unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows { assert!(batch_notice_deliverable(&root, queue.as_ref(), row).unwrap()); }
+    task.status = cas_types::TaskStatus::Closed;
+    tasks.update(&task).unwrap();
+    for row in &rows {
+        assert!(!batch_notice_deliverable(&root, queue.as_ref(), row).unwrap());
+        assert!(queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_some());
+    }
+}

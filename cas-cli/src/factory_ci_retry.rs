@@ -432,3 +432,23 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
         }
     }
 }
+
+#[cfg(test)]
+#[tokio::test]
+async fn reopened_merge_intent_retires_without_worker_blocker_cas_ae2c() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut supervisor = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+    supervisor.factory_session = Some("ci-retry".into());
+    crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+    let mut task = cas_types::Task::new("cas-reopened".into(), "returned delivery".into());
+    task.status = cas_types::TaskStatus::InProgress;
+    crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+    let request = Retry { task: task.id, worktree: "worker".into(), branch: "factory/worker".into(),
+        sha: "a".repeat(40), ci_sha: "a".repeat(40), target: "epic/train".into(), repo: temp.path().into(),
+        supervisor: supervisor.id, session: "ci-retry".into(), force: false, allow_trunk: false,
+        cleanup: None, armed_at: Some(chrono::Utc::now()) };
+    assert!(attempt(&root, &request).await.unwrap());
+    assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+}

@@ -751,4 +751,43 @@ mod tests {
         assert_eq!(Ok(first), second, "the retry holds on the same dispatch");
         assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
     }
+    /// cas-dae1: ordinary parked deliveries carry their cited worktree logs,
+    /// without requiring a routed-build marker or a manual publish round trip.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_park_publishes_cited_worktree_evidence_cas_dae1() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/artifacts/begin"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-log", "upload_url": format!("{}/blob", server.uri()), "required_headers": {}
+            }))).expect(1).mount(&server).await;
+        Mock::given(method("PUT")).and(path("/blob"))
+            .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/artifacts/cloud-log/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
+            .expect(1).mount(&server).await;
+        let task = cas_types::Task::new("cas-dae1-fixture".into(), "ordinary park".into());
+        let mut owner = PeerReviewer::new(&server.uri(), task);
+        env.set("CAS_ROOT", &owner.root);
+        let log = owner.repo.join("target/runner.log");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "test: PASS fixture\n").unwrap();
+        std::fs::create_dir_all(owner.evidence_dir()).unwrap();
+        owner.task.deliverables.parked_close_reason = Some(format!("VERIFIED `{}`", log.display()));
+        tokio::task::spawn_blocking(move || {
+            publish_routed_evidence(&owner.root, &owner.task).unwrap();
+            let records = SqliteArtifactStore::open(&owner.root).unwrap().list_for_task(&owner.task.id).unwrap();
+            assert_eq!(records.len(), 1);
+            validate(&records[0], &owner.task.id).unwrap();
+            assert_eq!(records[0].name, "runner.log");
+            let task = crate::store::open_task_store(&owner.root).unwrap().get(&owner.task.id).unwrap();
+            assert!(from_notes(&task.notes, &records[0].id, &task.id).unwrap().is_some());
+            let sync: EvidenceSync = task.notes.lines().find_map(|line|
+                line.strip_prefix(EVIDENCE_SYNC).and_then(|json| serde_json::from_str(json).ok())).unwrap();
+            assert_eq!(sync.files.len(), 1);
+            assert!(safe_relative(&sync.files[0].name));
+            assert_eq!(sync.files[0].artifact_id.as_deref(), Some(records[0].id.as_str()));
+        }).await.unwrap();
+    }
+
 }

@@ -1,111 +1,189 @@
 # Worker shell admission: one grammar, deny by default
 
-Status: revision 2 (2026-11-17) IN REVIEW. Revision 1 was approved by both
-supervisors and the operator on 2026-11-12; see Reviews. Revision 2 changes
-three things, all listed in [Revision 2](#revision-2-2026-11-17): a lexer-agreement
-rule that applies before any ALLOW, the measurement method, and the integration
-plan for the credential-context work that landed separately.
+Status: revision 3 (2026-11-17) IN REVIEW. Revision 1 was approved by both
+supervisors and the operator on 2026-11-12. Revision 2 was rejected on
+2026-11-17. Revision 3 answers every defect in that review; see
+[Revision 3](#revision-3-2026-11-17).
 
-## Revision 2 (2026-11-17)
+## Revision 3 (2026-11-17)
 
-### R2.1 Lexer agreement before any ALLOW
+Revision 2 (38552c5e16) was rejected with 11 defects by an independent
+review: `artifacts/cas-24f2/design-r2-review-2026-11-17.md`. Revision 3
+replaces it. Each subsection names the defects it answers (D1–D11).
 
-The 5d392 bypass (soundwave, November 17) used a carriage return: the guard's
-lexer read a line break where bash reads an ordinary character. The worker
-then ran something other than what the guard had checked. The same flaw is in
-the interim candidate. `shell_admission.rs` on `factory/ready-sparrow-54`
-(c8923e65) treats `\r` as a line end at lines 688, 949 and 1866. It finds
-heredoc delimiters with `str::lines()` at line 1971, which also splits on
-`\r\n`. Bash splits only on `\n`, so `EOF\r` does not end a heredoc
-opened with `EOF`.
+### R3.1 What went wrong in 5d392, and where else it can happen (D1, D2)
 
-Rule: a parse-based ALLOW is valid only when the lexer and bash must read the
-text the same way. When they could disagree, the command is refused before
-any policy runs, under one new rule id, `shell.lexer_ambiguity`. It applies
-to every ALLOW path that reads the tree, including all eleven policy decisions
-and the credential checks. These inputs are refused:
+The 5d392 bypass was not a bash disagreement. Tree-sitter-python read a
+comment past a lone `\r`, while CPython ended the line there, so the
+Python write-API scan checked different code from what CPython ran (cas-5d392
+notes). The general lesson: **whenever the guard parses text that another
+program will run, the guard's parse must match that program's, or the guard
+must refuse.** That applies to bash and to every interpreter whose input the
+guard inspects: Python and Node reading a heredoc, `python3 -c`, and
+`literal_python_source_edit`.
 
-| Input | Why the lexer could disagree with bash |
+The review also confirmed a Python hole: with `# -*- coding: utf-7 -*-`,
+CPython decodes `+AAo-` as a newline and runs a statement hidden in a comment,
+from a file or from stdin.
+
+Places in the interim candidate (`factory/ready-sparrow-54`, c8923e65) where
+the guard and the runner can split text differently:
+
+| Location | What it does |
 | --- | --- |
-| A carriage return (`\r`) anywhere | Bash treats it as a word character, not a line end |
-| Any other C0 control except tab and newline, and DEL (0x7F) | Terminal, locale and builtin handling differ (NUL ends a C string; `\v`/`\f` are not IFS by default) |
-| An unterminated single, double or `$'…'` quote, backquote, `$(`, `$((`, `${` or escape at end of input | Bash would read more input or fail; the guard cannot know which |
-| A heredoc that does not end on a line exactly equal to its delimiter (after tab removal for `<<-`), or that runs to end of input | Bash reads to end of input; the guard's body is not bash's body |
-| A heredoc delimiter that is partly quoted, contains an expansion or is empty | Bash's delimiter rules (quote removal, no expansion) are easy to get wrong |
-| Two or more heredocs on one line whose bodies the lexer cannot assign in order | Bash reads the bodies in redirect order |
+| `shell_admission.rs` 688, 949, 1866 | `\r` treated as a line end |
+| `shell_admission.rs` 966 | words split on any Unicode whitespace (`char::is_whitespace`) |
+| `shell_admission.rs` 1971, `heredoc_delimiters` | `str::lines()` and Unicode whitespace for delimiters |
+| `pre_tool.rs` 4414, 4444 | heredoc candidate lines `trim_end_matches('\r')` |
+| `shell_effects.rs` 367–368 | same CR trim |
 
-Implementation rules that keep the lexer bash-exact:
+The candidate already refuses CR, VT and non-ASCII whitespace when a heredoc
+is present (`shell_effects.rs` 499–503), with tests for CR delimiters
+(`pre_tool.rs` ~8937–8945). Revision 2 overstated the flaw. The real gaps
+are: those inputs without a heredoc, the hidden-statement and lookalike
+shapes in R3.2, and Python/Node bodies.
 
-1. Only byte `\n` ends a line. `str::lines()`, `split_whitespace()` and other
-   Unicode-aware splitting are not used in the lexer or the heredoc reader.
-2. IFS is space, tab and newline only.
-3. The lexer runs on the exact bytes the harness passes to bash. Nothing is
-   trimmed or normalized first.
-4. `shell.lexer_ambiguity` wins over every other rule id. The refusal names
-   the byte offset and the character class, never the raw character.
+### R3.2 The fix is structural: one tokenizer owns heredocs (D3)
 
-Well-formed heredocs stay admitted (#1866, #1814, cas-17a5 and R18 must still
-ALLOW). Only the ambiguous shapes above are refused. Reviewer question 5 asks
-whether all heredocs should be refused instead.
+Listing ambiguous inputs one by one cannot close the class. Revision 3
+changes the lexer's structure so it reads the stream the way bash does:
 
-Each input class above is a corpus row (rows L01–L09 in the corpus note),
-paired with the same command in its well-formed spelling as an ALLOW row.
+1. **One tokenizer recognises `<<`.** It is the only code that decides
+   whether `<<` starts a heredoc. Comments (`# <<X`), arithmetic
+   (`$((1<<2))`, `((x<<=1))`), parameter operators (`${v/<<x/y}`) and quoted
+   text never start one, because the tokenizer is in the right state when it
+   reads them. Every other `<<` scanner is deleted, including
+   `heredoc_delimiters`, `check_heredoc_boundaries` and the
+   `pre_tool.rs`/`shell_effects.rs` line loops.
+2. **Bodies are read in the stream.** At each newline token the tokenizer
+   reads the pending heredoc bodies in redirect order, before lexing the next
+   line. No pre-pass and no projection removes bodies first.
+3. **Line joining follows bash.** Outside single quotes, `\` then newline is
+   removed before tokenizing, including inside a `<<` operator (`<\⏎<`) and a
+   delimiter word (`EO\⏎F`). In an unquoted-delimiter body, `\⏎` is joined
+   before the line is compared with the delimiter, so `x\` then `EOF` is one
+   body line and not the end. In a quoted-delimiter body nothing is joined.
+4. **Delimiters.** The delimiter is the word after quote removal: plain,
+   `'…'`, `"…"`, backslashes and mixtures (`E"O"F`) are admitted. A
+   delimiter that is empty, uses `$'…'` or `$"…"`, or contains `$` or a
+   backquote is refused (`shell.lexer_ambiguity`).
+5. **Exactly one body per `<<`, and one `<<` per body.** A `<<` whose body
+   doesn't end on its exact delimiter line, or input left over after the
+   last body, is refused. `<<-` strips only leading tabs. A heredoc inside
+   `$(…)` whose delimiter line is followed by `)` on the same line (`EOF)`)
+   is refused, because bash 3.2 and 5.3 disagree on it (D3e).
+6. **Characters.** Only byte `\n` ends a line. Unquoted word boundaries are
+   the bash metacharacters: space, tab, newline, `|&;()<>`. These are lexical
+   boundaries, not IFS (D8). Any other whitespace is a word character to
+   bash. So the tokenizer refuses any non-ASCII whitespace, such as U+00A0,
+   rather than guess (D3d): `echo x > W/a⍽/../../out/p` is refused. CR, the
+   other C0 controls except tab and newline, and DEL are refused anywhere
+   (`shell.lexer_ambiguity`).
 
-### R2.2 Measurement: wired in, measured after publication
+### R3.3 Where the check runs (D4, D5)
 
-Revision 1 measured the 14-day rate by replaying old transcripts in a
-synthetic worktree. That measured a fixture, not workers. Missing cwds,
-deleted worktrees and grants made it a fixture-context rate only (see the
-replaced section below). Revision 2 replaces it with counters in the hook. The
-replay receipts below stay as history and as the pre-merge regression check.
-They are no longer the acceptance rate.
+- **At hook entry**, on the raw command bytes, before any policy or any old
+  lexing path. That covers the paths that don't read the tree today:
+  `pre_tool.rs` 3661, 4472, 6251 and the credential gate. This entry check
+  is the only character check, so no path can skip it.
+- **On every decoded payload, at every depth.** Text produced by decoding
+  `$'…'` (`shell_admission.rs` 579), a `-c` payload, an `eval` literal and a
+  heredoc body fed to an interpreter goes through the same check again.
+- **Interpreter bodies.** A heredoc or `-c` body for Python or Node that the
+  guard inspects is refused if it has a `coding:` declaration, CR, FF, VT, NUL
+  or any non-ASCII character. The scan for writes stays as it is for every
+  other body.
+- **The shell is recorded, not assumed.** The lexer models bash. For each
+  harness the delivery records the shell that actually runs commands, its
+  version and any wrapper. Measured here: the Claude harness runs
+  `/opt/homebrew/bin/bash` 5.3.9 (`$SHELL`, `$BASH_VERSION`), while
+  `/bin/bash` is 3.2. Codex on this Mac and both harnesses on soundwave are
+  measured in step 2 of R3.6. If a harness runs a non-bash shell, the grammar
+  admits nothing for that harness until it is modelled (question 8).
 
-1. **Counted at the decision.** Every worker Bash PreToolUse decision adds
-   one row to the local quality-event ledger: harness, decision (allow or
-   deny), the rule id for a deny, the guard version and a SHA-256 of the
-   command bytes. No command text is stored.
-2. **False denies are labelled, never inferred.**
-   - A worker that reports a refusal with `system action=report_cas_bug`
-     carries the rule id as the leading gate code. The report is matched to
-     the deny event by command hash and counts as a claimed false deny.
-   - A supervisor or the operator confirms or rejects the claim with one
-     labelling action, which records the verdict and who gave it.
-   - Unclaimed denies count as true denies. Claimed but unlabelled denies are
-     reported separately as an upper bound.
-3. **Rate.** For each rule and harness: confirmed false denies, total
-   decisions (the denominator), and the rate, plus the unlabelled upper bound.
-   One report command prints it for any window.
-4. **Window.** The 14 days start when the release with the grammar is
-   published. The base rate is the same counters from the last release
-   without the grammar, over the 14 days before publication. The wiring ships
-   one release ahead of the grammar, or in the same release if that is
-   approved (reviewer question 6).
+### R3.4 Rule ids (D6)
 
-### R2.3 Integrating the credential-context work
+- `shell.unterminated` keeps every unterminated quote, substitution,
+  arithmetic, escape and compound. The malformed-substitution control keeps
+  `shell.unterminated` unchanged.
+- `shell.lexer_ambiguity` is only for R3.2/R3.3 inputs: a control or
+  non-ASCII whitespace character, an inexact or leftover heredoc, a refused
+  delimiter form, and the interpreter-body refusals.
+- When both apply, the first by byte offset wins, and each row asserts one id.
 
-cas-707a2 reworked credential-read cwd tracking on the release train
-(`shell_read_contexts` returning `Option`, `UNKNOWN_DIRECTORY`, per-statement
-cwd alternatives). The interim candidate rewrote the same code independently.
-A trial merge of `factory/ready-sparrow-54` into the train tip conflicts in
-`operator_credentials.rs` (2 hunks), `pre_tool.rs` (1) and
-`pre_tool/shell_effects.rs` (8).
+### R3.5 Measurement (D9, D10; Q6)
 
-Plan: cas-707a2's behaviour is authoritative, because it is merged and
-reviewed. The merge keeps its read-context types and refusals and feeds them
-from the admission tree instead of a second lexer. Every cas-707a2 test stays
-unchanged. Where the two implementations decide differently, the cas-707a2
-decision is kept and the difference is listed in the delivery.
+- **Counters ship one release ahead of the grammar**, so the base window uses
+  the same counters as the candidate window (Q6). The replay receipts are
+  history and the pre-merge regression check; they are not the base rate.
+- **Identity without leaking secrets.** Each decision records an HMAC-SHA-256
+  of the command bytes, keyed by a per-machine secret stored under the
+  operator directory, readable by no agent. It also records the harness, the
+  decision, the rule id, the guard version, the session id and an event id.
+  These rows are excluded from Cloud sync. No command text is stored.
+- **Claims use the event id, not the command.** Every refusal prints its
+  event id. A worker reports a suspected false deny with the event id; the
+  bug-report path matches on it and never needs the raw command, so nothing
+  secret reaches GitHub.
+- **Retries counted once.** Decisions are deduplicated per session and HMAC
+  before counting.
+- **Two rates, both labelled as estimates.** Workers usually rephrase a
+  denied command instead of reporting it, so claimed-and-confirmed false
+  denies are a lower bound. A rephrase signal is also counted: within the
+  same session, a deny followed within 10 minutes by an admitted command with
+  the same program word. The report prints, per rule and harness: decisions,
+  denies, confirmed false denies (lower bound), and confirmed plus
+  rephrase-followed denies (upper bound). The 14-day window starts when the
+  grammar release is published. The base is the same report over the 14 days
+  before it, on the release with the counters and no grammar.
 
-### R2.4 Delivery order (replaces the revision 1 plan)
+### R3.6 Integrating the credential-context work: deny if either denies (D11; Q7)
 
-1. This revision reviewed (gating, as before).
-2. Merge the interim candidate onto the train with R2.3, and add R2.1 to the
-   lexer.
-3. One table-driven corpus test through the real hook, covering every repro,
-   bypass, lexer-ambiguity and control row. It names the rule id and asserts
-   the decision and rule id per row.
-4. The measurement wiring (R2.2). The 14-day measurement runs after
-   publication and is reported then; it does not block the merge.
+- **cwd resolution** comes from cas-707a2 (types `ShellReadContext`,
+  `UNKNOWN_DIRECTORY`, per-statement alternatives) and its tests (Q7).
+- **Decisions: deny if either version denies.** Every deny the interim
+  candidate has and cas-707a2 lacks is kept and gets a corpus row:
+  2eb0fd6 (credential env read from a file into a subprocess,
+  sparrow `operator_credentials.rs` 923–954); 233b5f75 (credential reads
+  through redirects and xargs argument files); f64f1c40 (unresolved
+  directories). cas-707a2's denies are kept unchanged.
+- **H-09 on collector error.** The train skips H-09 when
+  `shell_effects::collect` errors (`pre_tool.rs` 546–557) and relies on H-29
+  to deny. A corpus row pins that the command is still denied.
+- **`worker_denied_tools.rs`** changed on both sides. The merge keeps both
+  sets of denied tools; its tests from both sides stay.
+
+### R3.7 Proof beyond examples (review: "Is the corpus enough?")
+
+1. **The corpus**: one table-driven test through the real hook, one decision
+   and one rule id per row (rows in the corpus note).
+2. **A differential test against bash.** For each corpus ALLOW row, wrap the
+   command in a function and have the measured bash reprint it
+   (`f(){ …; }; declare -f f`). The guard's statement split and heredoc body
+   assignment must match bash's reprint. The test runs both bash 3.2 and 5.3
+   where present.
+3. **Mutation.** For every ALLOW row, insert each R3.2/R3.3 ambiguous input
+   (CR, each control, U+00A0, `\⏎`, `# <<X`, `$((1<<2))`, `${v/<<x/y}`, a
+   stray `<<`) at every byte offset. Each mutant must either DENY or split
+   exactly as bash's reprint does. Failures name the row, the offset and the
+   inserted input.
+
+### R3.8 Delivery order
+
+1. This revision reviewed (gating).
+2. Measure each harness's shell (R3.3), and ship the counters (R3.5) in the
+   next release.
+3. Merge the interim candidate onto the train under R3.6, then rebuild the
+   tokenizer under R3.2 and add the hook-entry check (R3.3).
+4. Corpus, differential and mutation tests (R3.7).
+5. The 14-day measurement after the grammar release, reported then. It does
+   not block the merge.
+
+### Out of scope, for the operator
+
+`/opt/homebrew` and `~/.local` are writable operator roots that are also on
+PATH. A worker could put a binary there that an admitted command name then
+runs. The grammar cannot see that; it is a write-roots decision.
 
 ## Problem
 
@@ -213,7 +291,7 @@ assert the rule id, never the prose.
 | `shell.dynamic_command` | A command word or xargs command that is not a literal | The program to run is unknown | Name the program |
 | `shell.coproc` | `coproc` | Rarely needed; its two forms are ambiguous | Use a pipeline or a background job |
 | `shell.unterminated` | An unterminated quote, substitution or heredoc | The parse is incomplete | Close the construct |
-| `shell.lexer_ambiguity` | A carriage return, another control character, or a heredoc or quote shape bash could read differently (R2.1) | The guard could check different text from what bash runs | Remove the control character; end each heredoc on its exact delimiter line |
+| `shell.lexer_ambiguity` | A control or non-ASCII whitespace character, an inexact or leftover heredoc, a refused delimiter form, or an interpreter body with a coding line or non-ASCII text (R3.2–R3.4) | The guard could check different text from what bash or the interpreter runs | Remove the character; end each heredoc on its exact delimiter line; write interpreter code to a file |
 | `shell.depth` | Nesting deeper than 6 | Bounded analysis | Flatten the command or use a script file |
 | `shell.unknown_syntax` | Anything else the parser does not recognize | Deny by default | Named in the refusal text |
 
@@ -275,7 +353,7 @@ Rows:
 
 ## False-deny measurement (14 days, base and candidate)
 
-Revision 2 replaces this method with the in-hook counters in R2.2. This
+Revision 3 replaces this method with the in-hook counters in R3.5. This
 section is the revision 1 record; its receipts remain the pre-merge regression
 check for the interim candidates.
 
@@ -503,14 +581,15 @@ an explicit parser entry before admission.
 3. Is a depth limit of 6 acceptable?
 4. Is the false-deny label rule above acceptable, or should every deny be
    labeled by the operator?
-5. (Revision 2) R2.1 keeps well-formed heredocs admitted and refuses only the
-   ambiguous shapes. Should all heredocs be refused instead? That would turn
-   #1866, #1814, cas-17a5 and R18 into denies.
-6. (Revision 2) Should the measurement wiring ship one release before the
-   grammar, so the base rate is measured live, or in the same release, with
-   the base taken from the replay receipts?
-7. (Revision 2) Is cas-707a2 authoritative where it and the interim candidate
-   disagree (R2.3)?
+5. Answered (revision 2 review): keep well-formed heredocs admitted, after
+   the R3.2 structural fix.
+6. Answered: ship the counters one release ahead of the grammar.
+7. Answered: cas-707a2 for cwd resolution; deny if either version denies.
+8. (Revision 3) If a harness runs commands under a shell other than bash,
+   should that harness be forced to bash, or should the guard admit nothing
+   there until that shell is modelled?
+9. (Revision 3) The per-machine HMAC key lives under the operator directory.
+   Is that the right home, and should rotating it be an operator command?
 
 ## Reviews
 
@@ -519,6 +598,7 @@ an explicit parser entry before admission.
 | Supervisor (prowl, quick-hawk-35) | APPROVE | 2026-11-12 2:49 PM ET | 1: keep literal scripts admitted as opaque effect units; the write-root check still applies to the path. 2: refuse coproc outright. 3: depth 6 accepted; report the depth distribution from the replay, and raise it before merge if a real command needs more. 4: label rule accepted; the rule-based reviewer labels every deny and the operator spot-checks a random 20 rows. |
 | Supervisor (soundwave) | APPROVE | 2026-11-12 2:50 PM ET | Q1 keep literal scripts opaque: yes. Q2 refuse coproc: yes. Q3 depth 6: yes. Q4 rule-labelled false denies with operator spot-check: yes. Required changes (prowl accepts both): A, the measurement includes Codex session logs and reports per harness; B, replay receipts never copy raw secret-shaped command text. Both are folded into the measurement section. |
 | Operator | APPROVE | 2026-11-12 2:51 PM ET | Approved with soundwave's changes A and B (recorded on cas-24f2 by the prowl supervisor). |
-| Supervisor (prowl) | PENDING (revision 2) | | |
-| Supervisor (soundwave) | PENDING (revision 2) | | |
-| Operator | PENDING (revision 2) | | |
+| Independent review (revision 2) | REJECT | 2026-11-17 ~9:30 AM ET | 11 defects; `artifacts/cas-24f2/design-r2-review-2026-11-17.md`. Answered in revision 3. |
+| Supervisor (prowl) | PENDING (revision 3) | | |
+| Supervisor (soundwave) | PENDING (revision 3) | | |
+| Operator | PENDING (revision 3) | | |

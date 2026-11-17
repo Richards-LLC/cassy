@@ -67,25 +67,49 @@ ownership remains with its sibling task. #1700 remains out of scope.
 | B14 | `eval "$cmd"` | shell.dynamic_eval |
 | B15 | `$cmd /outside/p` | shell.dynamic_command |
 
-## Lexer-ambiguity rows (revision 2, R2.1)
+## Lexer-agreement rows (revision 3, R3.1–R3.6)
 
-Each DENY row is paired with an ALLOW row: the same command, written
-well-formed. `⏎` is a newline (0x0A) and `␍` a carriage return (0x0D).
+Each row asserts exactly one decision and one rule id. `⏎` is a newline
+(0x0A), `␍` a carriage return (0x0D) and `⍽` a no-break space (U+00A0). Rows
+marked "pair" have an ALLOW row with the same command written well-formed.
 
 | Id | Command | Expected |
 | --- | --- | --- |
-| L01 | `cat <<'EOF' > W/n.md`⏎`x`⏎`EOF␍`⏎`touch /outside/p`⏎`EOF` (5d392 shape: bash keeps reading past `EOF␍`) | DENY shell.lexer_ambiguity |
-| L01a | The same with `EOF` and no `␍` | ALLOW |
-| L02 | `echo ok␍touch /outside/p` | DENY shell.lexer_ambiguity |
-| L03 | `echo ok` followed by a NUL, a vertical tab, a form feed, ESC or DEL (one row each) | DENY shell.lexer_ambiguity |
+| L01 | `cat <<EOF > W/n.md`⏎`x\`⏎`EOF`⏎`cat <<'Z'`⏎`EOF`⏎`touch /outside/p`⏎`Z` (bash joins `x\⏎EOF`, ends the body at the second `EOF` and runs the touch; a line-based reader sees the touch as `Z` body data) | DENY (workspace write: the touch is parsed as a command) |
+| L01a | `cat <<'EOF' > W/n.md`⏎`x\`⏎`EOF` (quoted body: no joining) | ALLOW |
+| L02 | `echo ok␍touch /outside/p` (no heredoc) | DENY shell.lexer_ambiguity |
+| L03 | `echo ok` with a NUL, VT, FF, ESC or DEL (one row each, no heredoc) | DENY shell.lexer_ambiguity |
 | L03a | `printf 'a\tb'` with a literal tab | ALLOW |
-| L04 | `echo 'unterminated` / `echo "unterminated` / `echo $'x` / `` echo `x `` / `echo $(x` / `echo $((1` / `echo ${x` / a trailing `\` (one row each) | DENY shell.lexer_ambiguity |
-| L05 | `cat <<'EOF'`⏎`x` (no delimiter line before end of input) | DENY shell.lexer_ambiguity |
-| L06 | `cat <<-'EOF'`⏎`x`⏎two spaces then `EOF` (spaces, not tabs, before the delimiter) | DENY shell.lexer_ambiguity |
-| L06a | The same with a tab before `EOF` | ALLOW |
-| L07 | `cat <<E"O"F`⏎`x`⏎`EOF` and `cat <<$D`⏎`x`⏎`$D` and `cat <<''` (one row each) | DENY shell.lexer_ambiguity |
-| L08 | `cat <<'A' <<'B'`⏎`a`⏎`A`⏎`b`⏎`B` | ALLOW only if both bodies are assigned in order; otherwise DENY shell.lexer_ambiguity |
-| L09 | `python3 - <<'PY'`⏎`print(1)`⏎`PY␍`⏎`import os; os.system('touch /outside/p')`⏎`PY` | DENY shell.lexer_ambiguity |
+| L04 | `echo x > W/a⍽/../../out/p` | DENY shell.lexer_ambiguity |
+| L05 | `echo hi # <<EOF`⏎`touch /outside/p` | DENY (workspace write; the comment starts no heredoc) |
+| L06 | `echo $((1<<2))`⏎`touch /outside/p` and `echo ${v/<<x/y}`⏎`touch /outside/p` (one row each) | DENY (workspace write) |
+| L06a | `echo $((1<<2))` | ALLOW |
+| L07 | `cat <\⏎<EOF > W/n.md`⏎`x`⏎`EOF` and `cat <<EO\⏎F > W/n.md`⏎`x`⏎`EOF` (one row each) | ALLOW (joined before tokenizing) |
+| L08 | `cat <<E"O"F > W/n.md`⏎`x`⏎`EOF` | ALLOW (control preserved) |
+| L09 | `cat <<$'EOF'`, `cat <<$"EOF"`, `cat <<$D`, `cat <<''` (one row each, with bodies) | DENY shell.lexer_ambiguity |
+| L10 | `cat <<'EOF'`⏎`x` (no delimiter line) | DENY shell.lexer_ambiguity |
+| L11 | `cat <<-'EOF'`⏎`x`⏎ two spaces then `EOF` | DENY shell.lexer_ambiguity |
+| L11a | The same with a tab before `EOF` | ALLOW |
+| L12 | `cat <<'A' <<'B'`⏎`a`⏎`A`⏎`b`⏎`B` | ALLOW (bodies in redirect order) |
+| L13 | `x=$(cat <<EOF`⏎`y`⏎`EOF)` | DENY shell.lexer_ambiguity (bash 3.2 and 5.3 disagree) |
+| L14 | `echo 'unterminated` | DENY shell.unterminated (control) |
+| P01 | `python3 - <<'PY'`⏎`# c␍open('/outside/p','w')`⏎`PY` (5d392 shape: comment ends at `␍` for CPython) | DENY shell.lexer_ambiguity |
+| P02 | `python3 - <<'PY'`⏎`# -*- coding: utf-7 -*-`⏎`#+AAo-open('/outside/p','w')`⏎`PY` | DENY shell.lexer_ambiguity |
+| P03 | `python3 - <<'PY'`⏎`print("é")`⏎`PY` (non-ASCII in an interpreter body) | DENY shell.lexer_ambiguity |
+| P04 | `node - <<'JS'`⏎`// c␍require('fs').writeFileSync('/outside/p','')`⏎`JS` | DENY shell.lexer_ambiguity |
+| P05 | `python3 -c $'print(1)\rimport os'` (decoded payload) | DENY shell.lexer_ambiguity |
+| P05a | `python3 - <<'PY'`⏎`print(1)`⏎`PY` | ALLOW |
+
+## Credential rows kept by "deny if either denies" (R3.6)
+
+| Id | Source | Command shape | Expected |
+| --- | --- | --- | --- |
+| C01 | 2eb0fd6 | A credential environment file read into a subprocess's environment (sparrow `operator_credentials.rs` 923–954) | DENY (H-09) |
+| C02 | 233b5f75 | A credential file read through a `<` redirect, and through an `xargs -a` argument file (one row each) | DENY (H-09) |
+| C03 | f64f1c40 | A relative credential read after `cd` into an unresolved directory | DENY (H-09) |
+| C04 | train `pre_tool.rs` 546–557 | A command for which `shell_effects::collect` errors | DENY (H-29 stands in for the skipped H-09) |
+
+Every cas-707a2 test keeps its decision.
 
 ## Controls
 

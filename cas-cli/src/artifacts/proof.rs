@@ -782,6 +782,7 @@ mod tests {
                 "artifact_id": "cloud-log", "upload_url": format!("{}/blob", server.uri()), "required_headers": {}
             }))).expect(1).mount(&server).await;
         Mock::given(method("PUT")).and(path("/blob"))
+            .and(wiremock::matchers::body_bytes(b"test: PASS fixture\n".to_vec()))
             .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
         Mock::given(method("POST")).and(path("/api/artifacts/cloud-log/complete"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"url": null})))
@@ -800,6 +801,7 @@ mod tests {
             assert_eq!(records.len(), 1);
             validate(&records[0], &owner.task.id).unwrap();
             assert_eq!(records[0].name, "runner.log");
+            assert_eq!(records[0].sha256, digest_file(&log).unwrap().0);
             let task = crate::store::open_task_store(&owner.root).unwrap().get(&owner.task.id).unwrap();
             assert!(from_notes(&task.notes, &records[0].id, &task.id).unwrap().is_some());
             // Ordinary evidence uses fetchable references without a strict

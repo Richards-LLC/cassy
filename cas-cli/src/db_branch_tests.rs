@@ -11,7 +11,7 @@ struct StubNeon {
     fail_delete: bool,
 }
 
-const CONNECTION: &str = "postgresql://owner:s3cr'et$raw@ep-x.neon.tech/neondb?sslmode=require&channel_binding=require";
+const CONNECTION: &str = "postgresql://owner:s3cret'raw$raw@ep-x.neon.tech/neondb?sslmode=require&channel_binding=require";
 
 impl StubNeon {
     fn with(branches: &[(&str, &str, bool)]) -> Self {

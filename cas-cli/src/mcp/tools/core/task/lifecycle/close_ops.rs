@@ -9761,7 +9761,7 @@ impl CasCore {
                         && let Some(paths) =
                             task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
                     {
-                        gate_refusals.extend(receipt_scope::park_refusals(
+                        let mut receipt_refusals = receipt_scope::park_refusals(
                             &self.cas_root,
                             worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
                             &task,
@@ -9771,7 +9771,24 @@ impl CasCore {
                             task_attribution::range_bounds(
                                 &close_project_root, &resolved_parent_branch, window, Some(tip),
                             ).as_deref(),
-                        ));
+                        );
+                        // GH #2041: authority and reason were validated at entry.
+                        // Waive only stability, retaining crate/content obligations.
+                        let before = receipt_refusals.len();
+                        if supervisor_override {
+                            receipt_refusals.retain(|refusal| {
+                                !refusal.starts_with("CHANGED_TEST_STABILITY_REQUIRED:")
+                                    && !refusal.starts_with("CHANGED_TEST_DISCOVERY_FAILED:")
+                            });
+                        }
+                        if receipt_refusals.len() != before {
+                            accepted_override_codes.push("G-61");
+                            parking.notes.push_str(&format!(
+                                "\n\nDECISION: authenticated supervisor waived park test stability [G-61] at {tip}. Reason: {}",
+                                req.reason.as_deref().unwrap_or_default().trim(),
+                            ));
+                        }
+                        gate_refusals.extend(receipt_refusals);
                     }
                     // Publish ordinary local proof too, without adding a gate.
                     // Routed builds retain their existing strict publication rule.
@@ -9906,6 +9923,8 @@ impl CasCore {
                     let artifacts_root = self.load_config().factory().artifacts_root;
                     let msg = gate_text::upkeep_receipt(&self.cas_root,
                         artifacts_root.as_deref(), &task.id, "park", msg, &registry_upkeep_notices);
+                    let msg = accepted_override_codes.iter().fold(msg, |message, code|
+                        crate::gates::override_tag(code, message));
                     return Ok(Self::tool_error(msg));
                 }
             }

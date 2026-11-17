@@ -365,6 +365,9 @@ fn drain(directory: &Path, candidate: &Candidate, refs: &References, lock: &File
     ensure!(!fs::symlink_metadata(&data)?.file_type().is_symlink(), "symlinked trash data");
     ensure!(!cited(candidate, refs), "cited by live work or retained releases");
     ensure!(!crate::factory_target_cache::review_output_in_use_until(directory, lock, deadline), "live or unverifiable native process");
+    // This boundary also handles trash left by an interrupted sweep. Do not
+    // reuse a pre-rename cleanliness snapshot when deleting its source bytes.
+    inspect_tree(&data, deadline, None)?;
     // Each successful unlink is accounted even if a later unlink fails.
     row.disposition = "reclaimed".into();
     for entry in walkdir::WalkDir::new(&data).follow_links(false).contents_first(true) {

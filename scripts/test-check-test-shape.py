@@ -278,22 +278,17 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         self.assertFalse(self.hits('#[tokio::test]\n// pin: compatibility\nasync fn t() { assert_eq!(LIMIT, 3); }'))
 
     def test_non_rust_text_is_clean(self):
-        # GH #1914: a constructor's literal is a structured identity, not a needle into the source.
-        self.assertFalse(shape.lint_text_pins('assert_eq!(source_tests("a.test.ts", source, &[(7, 7)]).unwrap(), [id("a.test.ts", "group changed")]);', 'src/a_tests.rs'))
-        self.assertTrue(shape.lint_text_pins('assert!(source.contains(&String::from("group changed")));', 'src/a_tests.rs'))
-        # vdispatch-05ed86ae: an identity's title is data at any length, and a
-        # wrapper around a wording pin over the source is still a pin.
-        self.assertFalse(shape.lint_text_pins('assert_eq!(found, [id("a.test.ts", "cas-ae48: returns the original conversation when the retry budget is exhausted.")]);', 'src/a_tests.rs'))
-        self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow.lines().next(), Some("Always merge staging first"));', 'src/a_tests.rs'))
-        # vdispatch-7f22ae6f: a test path inside a string-joining macro does not launder wording.
-        self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow, concat!("a.test.ts", "Always merge staging first"));', 'src/a_tests.rs'))
-        # fbdbc2ac and c114629b reviews: the identity is exempt only as the
-        # entire compared argument; every other consumer stays a pin.
+        # Refusal regressions: a test path beside wording never launders it.
+        # The runtime-identity exemption is removed (cas-769b); these are the
+        # bypasses its reviews reproduced.
         wording = 'Always merge staging first'
         reads = {'src/a_tests.rs': 'let workflow = include_str!("../workflow.md"); ',
                  'test_shape.py': 'workflow = Path("w.md").read_text()\n',
                  'x.test.ts': 'const workflow = readFileSync("w.md", "utf8"); '}
         for path, consumer in [
+            ('src/a_tests.rs', 'assert!(source.contains(&String::from("W")));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow.lines().next(), Some("W"));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, concat!("a.test.ts", "W"));'),
             ('src/a_tests.rs', 'assert_eq!(workflow, [id("a.test.ts", "W")].join(""));'),
             ('src/a_tests.rs', 'assert_eq!(workflow, id("a.test.ts", "W").to_string());'),
             ('src/a_tests.rs', 'assert_eq!(workflow, id("a.test.ts", "W").name);'),
@@ -302,6 +297,7 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
             ('src/a_tests.rs', 'assert_eq!(workflow, render(id("a.test.ts", "W")));'),
             ('src/a_tests.rs', 'assert_eq!(workflow, String::new() + id("a.test.ts", "W"));'),
             ('src/a_tests.rs', 'assert_eq!(workflow, Array("a.test.ts", "W")\n    .join(""));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, [id("a.test.ts", "W"), id("b.test.ts", "x")][0].name);'),
             ('test_shape.py', 'assert workflow == str(Identity("test_a.py", "W"))'),
             ('test_shape.py', 'assert workflow == " ".join(Identity("test_a.py", "W"))'),
             ('test_shape.py', 'assert workflow == "%s" % (Identity("test_a.py", "W"),)'),
@@ -317,23 +313,13 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
             ('x.test.ts', 'expect(workflow).toEqual("" + id("a.test.ts", "W"));'),
             ('x.test.ts', 'expect(workflow).toEqual(id("a.test.ts", "W")?.join(""));'),
             ('x.test.ts', 'expect(workflow).toEqual(JSON.stringify(id("a.test.ts", "W")));'),
-            # c114629b review: indexing and an array continued onto the next line.
             ('x.test.ts', 'expect(workflow).toEqual(Array("a.test.ts", "W")[1]);'),
             ('x.test.ts', 'expect(workflow).toEqual([Array("a.test.ts", "W"),\n].join(""));'),
-            ('src/a_tests.rs', 'assert_eq!(workflow, [id("a.test.ts", "W"), id("b.test.ts", "x")][0].name);'),
             ('x.test.ts', 'expect(workflow).toContain(id("a.test.ts", "W"));'),
+            ('x.test.ts', 'expect(workflow.split("\\n")).toEqual(Array("a.test.ts", "W"));'),
         ]:
             with self.subTest(path=path, consumer=consumer):
                 self.assertTrue(shape.lint_text_pins(reads[path] + consumer.replace('W', wording), path))
-        for path, identity in [
-            ('src/a_tests.rs', 'assert_eq!(found, vec![Identity::exact("a.test.ts", "W")]);'),
-            ('src/a_tests.rs', 'assert_eq!(\n    found,\n    [id("a.test.ts", "W")]\n);'),
-            ('test_shape.py', 'assert found == [Identity("test_a.py", "W")]'),
-            ('x.test.ts', 'expect(found).toEqual([new Identity("a.test.ts", "W")]);'),
-            ('x.test.ts', 'expect(id("a.test.ts", "W")).toEqual(found);'),
-        ]:
-            with self.subTest(path=path, identity=identity):
-                self.assertFalse(shape.lint_text_pins(identity.replace('W', wording), path))
         self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
         self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
         self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner"), "the outage is announced once").toHaveLength(1);', 'reconnect.journey.ts'))

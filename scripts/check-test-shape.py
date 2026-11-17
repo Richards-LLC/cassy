@@ -680,94 +680,7 @@ def text_literals(source, path):
             continue
 
 
-SEARCH_CALLS = frozenset((
-    'contains', 'includes', 'indexOf', 'find', 'rfind', 'assertIn', 'assertRegex', 'toContain',
-    'toMatch', 'starts_with', 'ends_with', 'startsWith', 'endsWith', 'match', 'matches', 'search', 'test'))
-# Free functions that build text from several values; macros, methods and
-# groupings are refused by syntax.
-TEXT_BUILDERS = frozenset(('format', 'str', 'String', 'concat', 'join', 'sprintf', 'Sprintf'))
-# A keyword before `(` opens a grouping or tuple, not a call.
-GROUPING_KEYWORDS = frozenset((
-    'in', 'not', 'and', 'or', 'is', 'return', 'yield', 'await', 'assert', 'if', 'elif', 'while',
-    'for', 'match', 'case', 'typeof', 'void', 'delete', 'throw', 'else', 'lambda'))
-ASSERTION_CALLEE = re.compile(r'(?:debug_)?assert\w*|expect|to[A-Z]\w*|assert[A-Z]\w*')
-CALLEE = re.compile(r'(?:(?P<dot>\.)\s*)?(?P<path>[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*)\s*'
-                    r'(?P<bang>!)?\s*(?:::\s*<[^<>]*>\s*)?$')
-
-
-def opener_of(context, index):
-    """Index of the bracket left open at `index`, or None."""
-    depth = 0
-    for position in range(index - 1, -1, -1):
-        if context[position] in ')]}':
-            depth += 1
-        elif context[position] in '([{':
-            if not depth:
-                return position
-            depth -= 1
-    return None
-
-
-def closer_of(context, opener):
-    """Index of the bracket closing `opener` on this line, or None."""
-    depth = 0
-    for position in range(opener + 1, len(context)):
-        if context[position] in '([{':
-            depth += 1
-        elif context[position] in ')]}':
-            if not depth:
-                return position
-            depth -= 1
-    return None
-
-
-def runtime_identity_argument(context, offset, line_literals):
-    """A literal in a runtime test identity is structured data only when the
-    identity is the entire compared argument of an assertion:
-    `assert_eq!(found, [id("a.test.ts", "group changed")])` or
-    `expect(id("a.test.ts", "...")).toEqual(found)`. The identity is a plain
-    function, path or `new` call whose arguments are only literals, at least
-    two, another of them a test file path. Its closing delimiter resolves on
-    the line and the very next token closes the assertion; a single-element
-    array or `vec!` around it is the argument. Anything else fails closed:
-    indexing, a method, an operator, a wrapping call, a joining macro or a
-    continuation on the next line all keep the wording a pin.
-    `context` has every literal on the line blanked; `line_literals` holds
-    their (start, end, body) relative to the line."""
-    open_index = opener_of(context, offset)
-    if open_index is None or context[open_index] != '(':
-        return False
-    callee = CALLEE.search(context[:open_index])
-    if (not callee or callee['dot'] or callee['bang'] or callee['path'] in GROUPING_KEYWORDS
-            or re.split(r'\s*::\s*', callee['path'])[-1] in TEXT_BUILDERS):
-        return False
-    close = closer_of(context, open_index)
-    if close is None or context[open_index + 1:close].strip(' \t,'):
-        return False  # Unclosed on this line, or a non-literal argument.
-    arguments = [(left, body) for left, right, body in line_literals if open_index < left and right <= close]
-    if len(arguments) < 2 or not any(
-            left != offset and not re.search(r'\s', body) and is_test_file(body) for left, body in arguments):
-        return False
-    start, end = callee.start('path'), close
-    before = context[:start].rstrip()
-    after = context[end + 1:].lstrip()
-    if before.endswith('[') and after.startswith(']'):
-        start = len(before) - 1
-        end = context.index(']', end + 1)
-        vec = re.search(r'\bvec\s*!\s*$', context[:start])
-        start = vec.start() if vec else start
-    argument_start = context[:start].rstrip()
-    if not argument_start.endswith(('(', ',')) or not context[end + 1:].lstrip().startswith(')'):
-        return False
-    assertion = opener_of(context, start)
-    if assertion is None or context[assertion] != '(' or closer_of(context, assertion) != context.index(')', end + 1):
-        return False
-    name = CALLEE.search(context[:assertion])
-    name = re.split(r'\s*::\s*', name['path'])[-1] if name else ''
-    return bool(ASSERTION_CALLEE.fullmatch(name)) and name not in SEARCH_CALLS
-
-
-def is_exact_text_pin(body, context, structured=False):
+def is_exact_text_pin(body, context):
     """Recognize long exact prose and short needles into source-like inputs."""
     if ('/' in body and not re.search(r'\s', body)
             or re.fullmatch(r'[A-Z][A-Z0-9_]*=[A-Za-z0-9_.-]+', body)):
@@ -788,8 +701,6 @@ def is_exact_text_pin(body, context, structured=False):
         r'\b(?:contains|includes|indexOf|find|assertIn|assertRegex|toContain|'
         r'toMatch|toEqual|toBe|assert\w*)\b|(?:===|==)', context, re.I,
     ) is not None
-    if structured:
-        return False  # A runtime identity's title is data at any length.
     return (prose and assertion) or (len(body.strip()) >= 12 and len(words) >= 2 and source_input and search)
 
 
@@ -1015,10 +926,7 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
             right = min(literal_end, line_end) - line_start
             context_chars[left:right] = ' ' * (right - left)
         context = ''.join(context_chars)
-        line_literals = [(max(left, line_start) - line_start, min(right, line_end) - line_start, text)
-                         for left, right, text in literals if left < line_end and right > line_start]
-        offset = max(start, line_start) - line_start
-        if is_exact_text_pin(body, context, runtime_identity_argument(context, offset, line_literals)):
+        if is_exact_text_pin(body, context):
             hits.append((changed_literal_lines[0] if changed_literal_lines else start_line, 'exact-text pin'))
     return sorted(set(hits))
 

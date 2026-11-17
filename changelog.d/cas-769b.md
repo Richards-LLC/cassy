@@ -14,7 +14,8 @@
   `pnpm exec`, `vitest run`, package-relative paths and a suite's own
   `--config` were refused with a Cargo-only message. Now: they run, and any
   other flag is refused with the JavaScript command shape.
-- **test-shape stops calling machine data prose** — Before: structured test
-  identities, `data-*` attribute state and explicit `CHANGELOG.md` fixture reads
-  were refused as prose or Rust source. Now: they pass, and real prose and
-  source-text pins are still refused.
+- **test-shape stops calling machine data prose** — Before: `data-*`
+  attribute state and explicit `CHANGELOG.md` fixture reads were refused as
+  prose or Rust source. Now: they pass, and real prose and source-text pins are
+  still refused. A test path next to wording, such as
+  `id("a.test.ts", "...")`, does not exempt the wording.

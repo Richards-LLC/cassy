@@ -400,18 +400,31 @@ fn first_parse_error(node: Node<'_>) -> Option<Node<'_>> {
 }
 
 /// cas-6aa9: tree-sitter-typescript 0.23.2, the newest release, cannot parse
-/// `import(…)` as a call's type argument (`f<typeof import('m')>()`, pulse-card
-/// auth.test.ts:28). Blank that type query to an identifier of the same byte
-/// length, so every offset, line and test title is unchanged.
+/// two valid type-argument forms: `import(…)` as a call's type argument
+/// (`f<typeof import('m')>()`, pulse-card auth.test.ts:28) and type arguments
+/// on a tagged template (`prisma.$queryRaw<Row[]>`…``, GH #2054). Blank the
+/// first to an identifier and the second to spaces of the same byte length,
+/// so every offset, line and test title is unchanged.
 fn mask_type_imports(source: &str) -> std::borrow::Cow<'_, str> {
     static TYPE_IMPORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r#"<\s*(?:typeof\s+)?(import\s*\(\s*(?:'[^'\n]*'|"[^"\n]*")\s*\))"#).unwrap()
     });
-    TYPE_IMPORT.replace_all(source, |caps: &regex::Captures<'_>| {
+    static TEMPLATE_TYPE_ARGUMENTS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"[\w$](<[^<>`;=()\n]*(?:<[^<>`;=()\n]*>[^<>`;=()\n]*)*>)\s*`").unwrap()
+    });
+    let imports = TYPE_IMPORT.replace_all(source, |caps: &regex::Captures<'_>| {
         let (whole, query) = (&caps[0], caps.get(1).unwrap());
         let start = query.start() - caps.get(0).unwrap().start();
         format!("{}{}", &whole[..start], "_".repeat(query.len()))
-    })
+    });
+    if !TEMPLATE_TYPE_ARGUMENTS.is_match(&imports) {
+        return imports;
+    }
+    std::borrow::Cow::Owned(TEMPLATE_TYPE_ARGUMENTS.replace_all(&imports, |caps: &regex::Captures<'_>| {
+        let (whole, arguments) = (&caps[0], caps.get(1).unwrap());
+        let start = arguments.start() - caps.get(0).unwrap().start();
+        format!("{}{}{}", &whole[..start], " ".repeat(arguments.len()), &whole[start + arguments.len()..])
+    }).into_owned())
 }
 
 fn declared_identities<'a>(
@@ -1780,9 +1793,10 @@ mod tests {
         };
         git(&["init", "--quiet"]);
         let file = "auth.test.ts";
+        // Both constructs pulse-card bisected: GH #2052 and GH #2054.
         let source = |body: &str| format!(
             "vi.mock('#imports', async importOriginal => ({{\n  ...(await importOriginal<typeof import('#imports')>()),\n}}));\n\
-             describe('auth', () => {{\n  test('signs out', () => {{ {body} }});\n}});\n"
+             describe('auth', () => {{\n  test('signs out', async () => {{ {body} await prisma.$queryRaw<CrossPostCommenter[]>`SELECT 1`; }});\n}});\n"
         );
         std::fs::write(repo.path().join(file), source("expect(1).toBe(1);")).unwrap();
         git(&["add", "."]);

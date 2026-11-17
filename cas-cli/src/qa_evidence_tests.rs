@@ -1105,6 +1105,42 @@ fn delivery_test_diff_reads_only_js_test_files() {
     );
 }
 
+/// GH #1877: runtime reasons and pre-existing markers are measured per test,
+/// so removing a skip from one test cannot authorize skipping another.
+#[test]
+fn playwright_skip_migration_preserves_per_test_counts_gh1877() {
+    let fx = Fixture::new();
+    let path = "e2e/orders.spec.ts";
+    std::fs::create_dir_all(fx.repo.join("e2e")).unwrap();
+    std::fs::write(fx.repo.join(path), r#"test('existing', async () => {
+  test.skip();
+  test.skip();
+});
+test('other', async () => {});
+"#).unwrap();
+    git_ok(&fx.repo, &["add", "."]);
+    git_ok(&fx.repo, &["-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "existing tests"]);
+    let base = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    std::fs::write(fx.repo.join(path), r#"test('existing', async () => {
+    test.skip();
+    test.skip("No fixture details");
+});
+test('other', async () => { test.skip(); });
+test.skip('new disabled test', async () => {});
+"#).unwrap();
+    git_ok(&fx.repo, &["add", "."]);
+    git_ok(&fx.repo, &["-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "migrate skips"]);
+    let head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    let markers = added_skip_markers(&delivery_test_diff(&fx.repo, &base, &head, &[path.into()]).unwrap());
+    assert_eq!(markers.iter().map(|m| (m.line, m.allowed.is_some())).collect::<Vec<_>>(),
+        [(2, true), (3, true), (5, false), (6, false)]);
+    let notes = fx.notes();
+    let context = EvidenceContext { task_id: TASK, task_artifacts_dir: &fx.task_dir, repo: &fx.repo,
+        delivered_head: &head, notes: &notes, deployed_origins: &[], capture_configured: false, rebind_scope: None };
+    assert!(run_close_gate(&context, EvidenceTier::None, &[], &markers[..2]).is_ok());
+    assert!(run_close_gate(&context, EvidenceTier::None, &[], &markers[2..]).is_err());
+}
+
 #[test]
 fn close_gate_rejects_unexplained_markers_before_evidence() {
     let fx = Fixture::new();

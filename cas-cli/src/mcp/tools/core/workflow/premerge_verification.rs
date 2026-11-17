@@ -1153,7 +1153,7 @@ impl CasCore {
                 matches!(issue.triage.severity, FindingSeverity::Awkward | FindingSeverity::Cosmetic)
                 && matches!(issue.category.as_str(), "documentation" | "evidence" | "receipt"
                     | "incomplete_close_reason" | "unnecessary_complexity")));
-        if !eligible || task.status != TaskStatus::AwaitingMerge
+        if !eligible || !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked)
             || !supervisor_push::premerge_repair_worker_available(&self.cas_root, task).map_err(fail)?
         { return Ok(None); }
         let Some(candidate) = candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)? else { return Ok(None); };
@@ -2222,6 +2222,104 @@ mod tests {
             let payload: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
             assert_eq!(payload["context"]["rejection_action"], "hold_escalate", "{name}");
         }
+    }
+
+    #[tokio::test]
+    async fn premerge_repair_completion_receipt_requires_new_source_cas_ed08() {
+        use cas_types::{Agent, AgentRole, ClaimResult, TaskStatus, WorkTarget, Worktree, WorkerDeliveryState};
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        let base = commit_file(repo, ".gitignore", ".cas/\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='fixture'\n[verification]\nenabled=true\n[qa]\nevidence_gate=false\nindependent_pass=false\n").unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let worker = Agent::new_with_role("worker-id".into(), "w".into(), AgentRole::Worker);
+        let owner = Agent::new_with_role("owner-id".into(), "owner".into(), AgentRole::Supervisor);
+        let agents = core.open_agent_store().unwrap();
+        agents.register(&worker).unwrap(); agents.register(&owner).unwrap();
+        core.set_agent_id_for_testing(worker.id.clone());
+        let worktree = Worktree::new(Worktree::generate_id(), "factory/w".into(), "main".into(), repo.into());
+        core.open_worktree_store().unwrap().add(&worktree).unwrap();
+        let mut task = Task::new("cas-ed08-receipt".into(), "Correct the returned delivery".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        task.origin_project = Some("fixture".into());
+        task.worktree_id = Some(worktree.id);
+        task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() });
+        task.deliverables.premerge_repair = Some(cas_types::PremergeRepair {
+            dispatch_id: "declined-dispatch".into(), rejected_anchor: source.clone(),
+            repair_cycle: task.deliverables.delivery_cycle,
+        });
+        let tasks = core.open_task_store().unwrap();
+        tasks.add(&task).unwrap();
+        let ClaimResult::Success(lease) = agents.try_claim(&task.id, &worker.id, 600, Some(&owner.id)).unwrap()
+            else { panic!("fixture lease"); };
+        let mut input = cas_types::WorkerCompletionReceiptInput {
+            task_id: task.id.clone(), worker_agent_id: worker.id.clone(), repo_selector: "project:fixture".into(),
+            source_branch: "factory/w".into(), commit_sha: source.clone(), merge_base_sha: base.clone(),
+            target_branch: "main".into(), target_sha: base, proof_reference: "fixture-proof".into(),
+            scope_summary: "bounded repair".into(), artifact_path: None,
+        };
+        let request = || serde_json::from_value(serde_json::json!({"id": task.id, "reason": "Corrected delivery; proof deferred to merge queue"})).unwrap();
+        let result = core.cas_task_close_with_dispositions(Parameters(request()), Some(serde_json::to_string(&input).unwrap()), None, None, None, None, None).await;
+        assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_none(), "unchanged source minted a review: {result:?}");
+        let error = result.expect_err("same source must fail at the dispatch boundary");
+        assert_eq!(error.data.as_ref().unwrap()["reason"], "premerge_repair_requires_new_commit");
+        let assert_no_intent = || {
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            for table in ["worker_completion_receipts", "worker_delivery_transactions", "worker_delivery_events", "verification_dispatches"] {
+                let count: u64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+                assert_eq!(count, 0, "{table}");
+            }
+            assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+        };
+        assert_no_intent();
+        // The common mint also fails closed without a provable source.
+        assert!(cas_store::create_verification_dispatch(&root, &task.id, &worker.id, &owner.id,
+            chrono::Utc::now() + chrono::Duration::minutes(10)).is_err());
+        assert_no_intent();
+        let corrected = commit_file(repo, "work.txt", "corrected\n", "apply findings");
+        task = tasks.get(&task.id).unwrap();
+        task.deliverables.factory_branch_anchor = Some(corrected.clone());
+        tasks.update(&task).unwrap();
+        let candidate = core.build_completion_candidate(&task, repo, "factory/w", "main").unwrap();
+        let old_receipt = cas_store::build_worker_completion_receipt_in_cycle(&input, &worker.name,
+            chrono::Utc::now(), task.deliverables.delivery_cycle);
+        // An advanced task anchor or synthetic candidate head cannot launder
+        // the rejected source inside an immutable completion receipt.
+        for constructor in 0..3 {
+            let deadline = chrono::Utc::now() + chrono::Duration::minutes(10);
+            let result = match constructor {
+                0 => cas_store::create_worker_delivery_with_dispatch(&root, &old_receipt, WorkerDeliveryState::AwaitingVerification,
+                    &worker.id, &owner.id, deadline),
+                1 => cas_store::create_worker_delivery_with_dispatch_for_lease(&root, &old_receipt, WorkerDeliveryState::AwaitingVerification,
+                    &worker.id, lease.epoch, &owner.id, deadline),
+                _ => cas_store::create_worker_delivery_with_dispatch_for_lease_at_repository(&root, &old_receipt, WorkerDeliveryState::AwaitingVerification,
+                    &worker.id, lease.epoch, &owner.id, deadline, &candidate.proof),
+            };
+            assert!(result.is_err(), "constructor {constructor} accepted unchanged receipt");
+            assert_no_intent();
+        }
+        input.commit_sha = corrected.clone();
+        let request = serde_json::from_value(serde_json::json!({"id": task.id, "reason": "Corrected delivery; proof deferred to merge queue"})).unwrap();
+        let result = core.cas_task_close_with_dispositions(Parameters(request), Some(serde_json::to_string(&input).unwrap()), None, None, None, None, None).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let (receipt, delivery) = cas_store::get_latest_worker_delivery(&root, &task.id).unwrap().unwrap();
+        assert_eq!(receipt.commit_sha, corrected);
+        assert_eq!(delivery.state, WorkerDeliveryState::AwaitingVerification);
+        let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        assert_eq!(dispatch.receipt_id.as_deref(), Some(receipt.id.as_str()));
+        assert_eq!(dispatch.state, cas_types::VerificationDispatchState::Pending);
+        assert!(agents.get_lease(&task.id).unwrap().is_none());
+        assert_ne!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
     }
 
     #[tokio::test]

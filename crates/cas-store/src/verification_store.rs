@@ -2632,11 +2632,26 @@ fn request_changes_for_parked_delivery_impl(
                 && row.state == VerificationDispatchState::Resolved)
             || deliverables.premerge_repair.as_ref().is_some_and(|receipt|
                 receipt.dispatch_id == dispatch_id || receipt.repair_cycle == current)
-            || deliverables.factory_branch_anchor.as_deref() != Some(anchor)
-            || status != TaskStatus::AwaitingMerge.to_string()
+            || !matches!(status.as_str(), "awaiting_merge" | "blocked")
         {
             return Ok(None);
         }
+        // A receipt-path verdict projects Blocked before this continuation.
+        // Only its exact failed transaction can return that state; an external
+        // hold or a stale receipt must remain held. Its immutable source is
+        // authoritative even when the task has no parked anchor.
+        let source = if let Some((receipt_id, transaction_id)) = dispatch.as_ref()
+            .expect("current resolved dispatch checked above").receipt().map_err(StoreError::Parse)?.transaction()
+        {
+            if !delivery.as_ref().is_some_and(|(id, receipt, state)|
+                id == transaction_id && receipt == receipt_id && *state == WorkerDeliveryState::VerificationFailed)
+            { return Ok(None); }
+            tx.query_row("SELECT commit_sha FROM worker_completion_receipts WHERE id = ?1 AND task_id = ?2",
+                params![receipt_id, task_id], |row| row.get::<_, String>(0)).optional()?
+        } else if status == TaskStatus::AwaitingMerge.to_string() {
+            deliverables.factory_branch_anchor.clone()
+        } else { None };
+        if source.as_deref() != Some(anchor) { return Ok(None); }
         let rejected: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM verifications WHERE dispatch_id = ?1 AND status = 'rejected')",
             params![dispatch_id], |row| row.get(0),
@@ -2737,7 +2752,8 @@ fn request_changes_for_parked_delivery_impl(
     if let Some((transaction_id, _, state)) = delivery.as_ref()
         && matches!(
             state,
-            WorkerDeliveryState::AwaitingVerification
+            WorkerDeliveryState::VerificationFailed
+                | WorkerDeliveryState::AwaitingVerification
                 | WorkerDeliveryState::AwaitingMerge
                 | WorkerDeliveryState::MergeAuthorized
                 | WorkerDeliveryState::CloseReady

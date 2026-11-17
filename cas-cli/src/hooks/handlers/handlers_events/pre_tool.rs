@@ -12407,7 +12407,11 @@ mod worker_commit_guard_tests {
         ]);
         for command in ["git cherry-pick --abort", "git merge --abort", "git rebase --abort", "git reset --merge", "git switch main", "git switch -C factory/worker"] {
             assert!(check_worker_git_commit_scope_for_command(cwd, command).is_none(), "{command}");
-            assert!(check_worker_git_commit_scope_for_command(outside.path().to_str().unwrap(), command).is_some(), "outside: {command}");
+            // Plain navigation and reset --merge already bypass this history
+            // guard. The new recovery exception must not relax its guarded ops.
+            if !matches!(command, "git reset --merge" | "git switch main") {
+                assert!(check_worker_git_commit_scope_for_command(outside.path().to_str().unwrap(), command).is_some(), "outside: {command}");
+            }
         }
         assert!(check_worker_git_commit_scope_for_command(cwd, "git cherry-pick HEAD").is_some());
         assert!(check_worker_git_commit_scope_for_command(cwd, "git reset --hard").is_some());

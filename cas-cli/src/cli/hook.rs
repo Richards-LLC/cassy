@@ -144,9 +144,16 @@ fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
             && remote_ref == format!("refs/heads/{branch}"), "H-40: deletion requires an owned diagnostic ref");
         let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         cas_store::shared_db::install_busy_handler(&conn)?;
-        let recorded: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM worker_completion_receipts WHERE source_branch=?1)
-            OR EXISTS(SELECT 1 FROM observed_delivery_merges WHERE source_branch=?1)", [&branch], |row| row.get(0))?;
-        ensure!(!recorded, "H-40: this branch has a recorded delivery");
+        // These stores create their tables lazily. An absent table has no
+        // binding; do not initialize or scan an entire store to delete a ref.
+        for (table, column) in [("worker_completion_receipts", "source_branch"),
+            ("observed_delivery_merges", "source_branch"), ("qa_passes", "branch")] {
+            let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |row| row.get(0))?;
+            if exists {
+                let recorded: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {column}=?1)"), [&branch], |row| row.get(0))?;
+                ensure!(!recorded, "H-40: this branch has a recorded delivery or review");
+            }
+        }
         let tasks = store::open_task_store(&root)?.list(None)?;
         for task in tasks {
             ensure!(task.branch.as_deref() != Some(branch.as_str())
@@ -154,8 +161,6 @@ fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
                 && task.deliverables.factory_branch_start.as_ref().is_none_or(|start| start.branch != branch)
                 && !task.deliverables.handoff_branches.contains(&branch),
                 "H-40: {} retains this delivery branch", task.id);
-            ensure!(cas_store::list_qa_passes(&root, &task.id)?.iter().all(|pass| pass.branch != branch),
-                "H-40: {} has a review bound to this branch", task.id);
         }
         return Ok(());
     }

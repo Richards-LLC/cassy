@@ -5125,7 +5125,9 @@ mod tests {
         if std::env::var_os("CAS_TEST_CHECKPOINT_HOOK_CHILD").is_some() {
             let cli = crate::cli::Cli::try_parse_from(["cas", "hook", "WorkerCheckpointPush"]).unwrap();
             let Some(crate::cli::Commands::Hook(args)) = &cli.command else { unreachable!() };
-            std::process::exit(if crate::cli::hook::execute(args, &cli).is_ok() { 0 } else { 1 });
+            let result = crate::cli::hook::execute(args, &cli);
+            if let Err(error) = &result { eprintln!("{error:#}"); }
+            std::process::exit(if result.is_ok() { 0 } else { 1 });
         }
         let _home = crate::test_support::TestEnvGuard::temp_home();
         for (case, status, reviewed, foreign_owner, bound, stale_lease, allow) in [

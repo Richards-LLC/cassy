@@ -772,6 +772,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
+ "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "unicode-normalization",

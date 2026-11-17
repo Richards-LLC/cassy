@@ -921,6 +921,9 @@ fn alias_references_store(reference: &str, include_parent: bool) -> bool {
 }
 
 fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
+    if literal_python_source_edit(script, cwd) {
+        return false;
+    }
     static PYTHON_GLOB_OPERAND: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| {
             regex::Regex::new(r"\bglob\.(?:glob|iglob)\(\s*(?:os\.path\.expanduser\(\s*)?$")
@@ -990,6 +993,187 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
             && ["neonctl/credentials.json", "com.vercel.cli/auth.json"]
                 .iter()
                 .any(|suffix| components.contains(suffix)))
+}
+
+/// Admit a bounded source-edit program by its actual file targets, rather than
+/// scanning replacement text as executable code. Every statement and call must
+/// be understood; unknown operations (including nested execution) fall back to
+/// the conservative script scan above. Never execute Python to classify it.
+fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
+    use std::collections::HashMap;
+    use tree_sitter::Node;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Value {
+        Text,
+        File,
+        Written,
+        Predicate,
+    }
+
+    fn text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
+        &source[node.byte_range()]
+    }
+
+    // Plain and raw strings are inert; f-string expressions are executable.
+    fn literal<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
+        if node.kind() != "string" {
+            return None;
+        }
+        let spelling = text(node, source);
+        let quote = spelling.find(['\'', '"'])?;
+        if !spelling[..quote]
+            .chars()
+            .all(|ch| matches!(ch, 'r' | 'R' | 'u' | 'U'))
+        {
+            return None;
+        }
+        let spelling = &spelling[quote..];
+        let width = if spelling.starts_with("\"\"\"") || spelling.starts_with("'''") {
+            3
+        } else {
+            1
+        };
+        spelling.get(width..spelling.len().checked_sub(width)?)
+    }
+
+    fn value(
+        node: Node<'_>,
+        source: &str,
+        vars: &HashMap<String, Value>,
+        cwd: &Path,
+        depth: usize,
+    ) -> Option<Value> {
+        if depth > 32 {
+            return None;
+        }
+        match node.kind() {
+            "identifier" => vars.get(text(node, source)).copied(),
+            "string" => literal(node, source).map(|_| Value::Text),
+            "parenthesized_expression" => value(node.named_child(0)?, source, vars, cwd, depth + 1),
+            "comparison_operator" => {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .all(|part| value(part, source, vars, cwd, depth + 1) == Some(Value::Text))
+                    .then_some(Value::Predicate)
+            }
+            "call" => {
+                let function = node.child_by_field_name("function")?;
+                let arguments = node.child_by_field_name("arguments")?;
+                let mut cursor = arguments.walk();
+                let args: Vec<_> = arguments.named_children(&mut cursor).collect();
+                if function.kind() == "identifier"
+                    && text(function, source) == "Path"
+                    && args.len() == 1
+                {
+                    let path = literal(args[0], source)?;
+                    // Do not guess Python escapes, dynamic targets or paths
+                    // outside the checkout's working directory.
+                    return (!path.contains('\\')
+                        && lexical_absolute(Path::new(path), cwd).starts_with(cwd)
+                        && !path_references_store(path, cwd, false))
+                    .then_some(Value::File);
+                }
+                if function.kind() != "attribute" {
+                    return None;
+                }
+                let receiver = value(
+                    function.child_by_field_name("object")?,
+                    source,
+                    vars,
+                    cwd,
+                    depth + 1,
+                )?;
+                let method = text(function.child_by_field_name("attribute")?, source);
+                match (receiver, method, args.len()) {
+                    (Value::File, "read_text", 0) => Some(Value::Text),
+                    (Value::File, "write_text", 1)
+                        if value(args[0], source, vars, cwd, depth + 1) == Some(Value::Text) =>
+                    {
+                        Some(Value::Written)
+                    }
+                    (Value::Text, "replace", 2)
+                        if args.iter().all(|arg| {
+                            value(*arg, source, vars, cwd, depth + 1) == Some(Value::Text)
+                        }) =>
+                    {
+                        Some(Value::Text)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    if !source.contains("from pathlib import Path") || !source.contains("write_text") {
+        return false;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .is_err()
+    {
+        return false;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return false;
+    }
+    let mut imported = false;
+    let mut writes = false;
+    let mut vars = HashMap::new();
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        match statement.kind() {
+            "comment" => {}
+            "import_from_statement" if text(statement, source) == "from pathlib import Path" => {
+                imported = true
+            }
+            "assert_statement"
+                if imported
+                    && statement.named_child_count() == 1
+                    && statement
+                        .named_child(0)
+                        .and_then(|node| value(node, source, &vars, cwd, 0))
+                        == Some(Value::Predicate) => {}
+            "expression_statement" if imported && statement.named_child_count() == 1 => {
+                let Some(expression) = statement.named_child(0) else {
+                    return false;
+                };
+                let result = if expression.kind() == "assignment" {
+                    let Some(left) = expression.child_by_field_name("left") else {
+                        return false;
+                    };
+                    let Some(right) = expression.child_by_field_name("right") else {
+                        return false;
+                    };
+                    if left.kind() != "identifier"
+                        || text(left, source) == "Path"
+                        || expression.child_by_field_name("type").is_some()
+                    {
+                        return false;
+                    }
+                    let Some(result) = value(right, source, &vars, cwd, 0) else {
+                        return false;
+                    };
+                    vars.insert(text(left, source).to_string(), result);
+                    result
+                } else {
+                    let Some(result) = value(expression, source, &vars, cwd, 0) else {
+                        return false;
+                    };
+                    result
+                };
+                writes |= result == Value::Written;
+            }
+            _ => return false,
+        }
+    }
+    imported && writes
 }
 
 fn quoted_strings(source: &str) -> Vec<(usize, String)> {

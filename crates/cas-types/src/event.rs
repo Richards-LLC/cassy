@@ -358,6 +358,10 @@ mod tests {
             EventType::from_str("TASK_STARTED").unwrap(),
             EventType::TaskStarted
         );
+        // cas-3751a: shadow facts are stored and counted by this identifier.
+        let shadowed = EventType::GateShadowed.to_string();
+        assert_eq!(shadowed, "gate_shadowed");
+        assert_eq!(EventType::from_str(&shadowed).unwrap(), EventType::GateShadowed);
     }
 
     /// cas-eeab: verify AuditTrailGap Display/FromStr round-trip and icon are

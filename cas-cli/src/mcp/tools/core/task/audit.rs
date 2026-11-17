@@ -42,7 +42,7 @@ pub(crate) fn proof_scope_fix_note(
     target: &str,
 ) -> String {
     format!(
-        "[{}] {PROOF_SCOPE_FIX}{} ({}): {} {} No failed-review verdict was recorded; ordinary delivery and close proofs still apply.",
+        "[{}] {PROOF_SCOPE_FIX}{} ({}): {} {} Ordinary delivery and close proofs still apply; no failed-review verdict was recorded.",
         at.format("%Y-%m-%d %H:%M"),
         actor.name,
         actor.id,

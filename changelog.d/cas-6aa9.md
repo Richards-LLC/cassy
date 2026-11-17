@@ -1,0 +1,3 @@
+### Fixed — Factory
+
+- **Capped JavaScript checks parse TypeScript type imports, and name the spot when they can't parse** — Was: a valid TypeScript test using `importOriginal<typeof import('#imports')>()`, the usual Vitest partial-mock pattern, made the capped runner refuse the whole file with "JavaScript parse error" and no location. That construct is a gap in tree-sitter-typescript 0.23.2, the newest grammar release, and the delivery could not park. Now: such a type argument is read as a plain type name before parsing; line numbers, offsets and test titles are unchanged. Any remaining parse error names its `path:line:column` and the text it could not read.

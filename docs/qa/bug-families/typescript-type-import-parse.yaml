@@ -1,0 +1,6 @@
+title: A TypeScript call whose type argument is `typeof import('module')` parses in the capped JavaScript discovery, and any remaining parse error names path:line:column
+statement: tree-sitter-typescript 0.23.2 misparses `f<typeof import('m')>()`; the capped runner blanks that type query to a same-length identifier before parsing so test identities still resolve, and a parse refusal reports the first unparsed or missing node's location and text.
+fixed_by: [cas-6aa9]
+tasks: [cas-6aa9]
+journeys: [FACTORY-CLOSE]
+invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]

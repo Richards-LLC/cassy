@@ -333,12 +333,54 @@ fn source_tree(path: &str, source: &str) -> Result<tree_sitter::Tree> {
     };
     parser.set_language(&language.into())?;
     let tree = parser
-        .parse(source, None)
-        .context("JavaScript test parse")?;
-    if tree.root_node().has_error() {
-        bail!("cannot resolve changed tests in {path}: JavaScript parse error");
+        .parse(mask_type_imports(source).as_ref(), None)
+        .with_context(|| format!("JavaScript test parse of {path}"))?;
+    if let Some(node) = first_parse_error(tree.root_node()) {
+        let at = node.start_position();
+        let near: String = source
+            .get(node.start_byte()..node.end_byte())
+            .unwrap_or_default()
+            .split('\n')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(40)
+            .collect();
+        bail!(
+            "cannot resolve changed tests in {path}: JavaScript parse error at {path}:{}:{} ({} `{near}`); rewrite that construct or move it out of the test file",
+            at.row + 1,
+            at.column + 1,
+            if node.is_missing() { "missing token" } else { "unparsed" },
+        );
     }
     Ok(tree)
+}
+
+/// The outermost unparsed or missing node, in source order.
+fn first_parse_error(node: Node<'_>) -> Option<Node<'_>> {
+    if node.is_error() || node.is_missing() {
+        return Some(node);
+    }
+    if !node.has_error() {
+        return None;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor).find_map(first_parse_error)
+}
+
+/// cas-6aa9: tree-sitter-typescript 0.23.2, the newest release, cannot parse
+/// `import(…)` as a call's type argument (`f<typeof import('m')>()`, pulse-card
+/// auth.test.ts:28). Blank that type query to an identifier of the same byte
+/// length, so every offset, line and test title is unchanged.
+fn mask_type_imports(source: &str) -> std::borrow::Cow<'_, str> {
+    static TYPE_IMPORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"<\s*(?:typeof\s+)?(import\s*\(\s*(?:'[^'\n]*'|"[^"\n]*")\s*\))"#).unwrap()
+    });
+    TYPE_IMPORT.replace_all(source, |caps: &regex::Captures<'_>| {
+        let (whole, query) = (&caps[0], caps.get(1).unwrap());
+        let start = query.start() - caps.get(0).unwrap().start();
+        format!("{}{}", &whole[..start], "_".repeat(query.len()))
+    })
 }
 
 fn declared_identities<'a>(
@@ -1684,6 +1726,45 @@ mod tests {
         let mixed = git(&["rev-parse", "HEAD"]);
         let refusal = changed_tests(repo.path(), &head, &mixed, &[file.to_string()]).unwrap_err().to_string();
         assert!(refusal.contains("G-61"), "{refusal}");
+    }
+
+    /// pulse-card auth.test.ts (GH #2052): `importOriginal<typeof import('#imports')>()`
+    /// is valid TypeScript that tree-sitter-typescript 0.23.2 cannot parse, so
+    /// the capped run refused the whole file. It now resolves its changed test;
+    /// a real parse error names its path:line:column.
+    #[test]
+    fn typescript_type_import_argument_parses_and_parse_errors_name_their_location_cas_6aa9() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        let file = "auth.test.ts";
+        let source = |body: &str| format!(
+            "vi.mock('#imports', async importOriginal => ({{\n  ...(await importOriginal<typeof import('#imports')>()),\n}}));\n\
+             describe('auth', () => {{\n  test('signs out', () => {{ {body} }});\n}});\n"
+        );
+        std::fs::write(repo.path().join(file), source("expect(1).toBe(1);")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        std::fs::write(repo.path().join(file), source("expect(2).toBe(2);")).unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
+
+        std::fs::write(repo.path().join(file), source("const value = ;")).unwrap();
+        git(&["commit", "--quiet", "-am", "broken"]);
+        let refusal = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap_err().to_string();
+        assert!(refusal.contains("auth.test.ts:5:"), "{refusal}");
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid

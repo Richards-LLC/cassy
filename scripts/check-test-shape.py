@@ -747,7 +747,69 @@ def runtime_identity_argument(context, offset, line_literals):
         return False  # Unclosed on this line, or a non-literal argument.
     arguments = [(left, body) for left, right, body in line_literals if open_index < left and right <= close]
     return len(arguments) >= 2 and any(
-        left != offset and not re.search(r'\s', body) and is_test_file(body) for left, body in arguments)
+        left != offset and not re.search(r'\s', body) and is_test_file(body) for left, body in arguments
+    ) and consumed_as_identity(context, callee.start('path'), close)
+
+
+# The value's consumer decides: an assertion compares an identity; any other
+# call may render it to text. Matchers such as `toEqual` count; search
+# matchers are refused before this point.
+ASSERTION_CALLEE = re.compile(r'(?:debug_)?assert\w*|expect|to[A-Z]\w*|assert[A-Z]\w*')
+
+
+def consumed_as_identity(context, start, end):
+    """Walk outward from the identity span `context[start:end + 1]` to the
+    assertion that compares it. Only arrays, tuples, braces and `vec!` may sit
+    between them. A text consumer launders the wording: a method or field
+    after any level (`.join(`, `.toString(`, `Array.from(...).join`), an
+    operator around it (`+`, `%`, spread `...`), or any other enclosing call
+    (`String(`, `format!(`, `" ".join(`, an unknown helper).
+    A group left open at the end of the line continues out of sight."""
+    while True:
+        before = context[:start].rstrip()
+        after = context[end + 1:].lstrip()
+        if before.endswith(('+', '%', '...', '${')) or after.startswith(('.', '+', '%', '?.')):
+            return False
+        depth, opener = 0, None
+        for index in range(start - 1, -1, -1):
+            if context[index] in ')]}':
+                depth += 1
+            elif context[index] in '([{':
+                if depth:
+                    depth -= 1
+                    continue
+                opener = index
+                break
+        if opener is None:
+            return True  # The statement's top level on this line.
+        if not after:
+            return False  # Its consumer continues on the next line, unseen.
+        if context[opener] == '(':
+            callee = re.search(r'(?P<path>[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*)\s*(?P<bang>!)?\s*$',
+                               context[:opener])
+            name = re.split(r'\s*::\s*', callee['path'])[-1] if callee else ''
+            if callee and ASSERTION_CALLEE.fullmatch(name):
+                return True
+            if callee and name not in GROUPING_KEYWORDS:
+                return False  # Any other call may turn the identity into text.
+            start = opener
+        else:
+            macro = re.search(r'(?P<name>[A-Za-z_]\w*)\s*!\s*$', context[:opener])
+            if macro and macro['name'] != 'vec':
+                return False
+            start = macro.start() if macro else opener
+        depth, close = 0, None
+        for index in range(opener + 1, len(context)):
+            if context[index] in '([{':
+                depth += 1
+            elif context[index] in ')]}':
+                if not depth:
+                    close = index
+                    break
+                depth -= 1
+        if close is None:
+            return True  # Opened here and closed on a later line.
+        end = close
 
 
 def is_exact_text_pin(body, context, structured=False):

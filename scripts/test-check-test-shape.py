@@ -287,6 +287,48 @@ async fn checkpoint_rebase_merge_parks_live_proof_cas_28c5() {
         self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow.lines().next(), Some("Always merge staging first"));', 'src/a_tests.rs'))
         # vdispatch-7f22ae6f: a test path inside a string-joining macro does not launder wording.
         self.assertTrue(shape.lint_text_pins('let workflow = include_str!("../workflow.md"); assert_eq!(workflow, concat!("a.test.ts", "Always merge staging first"));', 'src/a_tests.rs'))
+        # fbdbc2ac review: the identity's consumer decides. Every text-producing
+        # consumer stays a pin; only an assertion comparing the identity passes.
+        wording = 'Always merge staging first'
+        reads = {'src/a_tests.rs': 'let workflow = include_str!("../workflow.md"); ',
+                 'test_shape.py': 'workflow = Path("w.md").read_text()\n',
+                 'x.test.ts': 'const workflow = readFileSync("w.md", "utf8"); '}
+        for path, consumer in [
+            ('src/a_tests.rs', 'assert_eq!(workflow, [id("a.test.ts", "W")].join(""));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, id("a.test.ts", "W").to_string());'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, id("a.test.ts", "W").name);'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, format!("{:?}", id("a.test.ts", "W")));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, String::from(id("a.test.ts", "W")));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, render(id("a.test.ts", "W")));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, String::new() + id("a.test.ts", "W"));'),
+            ('src/a_tests.rs', 'assert_eq!(workflow, Array("a.test.ts", "W")\n    .join(""));'),
+            ('test_shape.py', 'assert workflow == str(Identity("test_a.py", "W"))'),
+            ('test_shape.py', 'assert workflow == " ".join(Identity("test_a.py", "W"))'),
+            ('test_shape.py', 'assert workflow == "%s" % (Identity("test_a.py", "W"),)'),
+            ('test_shape.py', 'assert workflow == format(Identity("test_a.py", "W"))'),
+            ('test_shape.py', 'assert workflow == f"{Identity(\'test_a.py\', \'W\')}"'),
+            ('test_shape.py', 'assert workflow == "" + Identity("test_a.py", "W")'),
+            ('x.test.ts', 'expect(workflow).toEqual(Array("a.test.ts", "W").join(""));'),
+            ('x.test.ts', 'expect(workflow).toEqual(Array.from(id("a.test.ts", "W")).join(""));'),
+            ('x.test.ts', 'expect(workflow).toEqual([...id("a.test.ts", "W")].join(""));'),
+            ('x.test.ts', 'expect(workflow).toEqual(id("a.test.ts", "W").toString());'),
+            ('x.test.ts', 'expect(workflow).toEqual(String(id("a.test.ts", "W")));'),
+            ('x.test.ts', 'expect(workflow).toEqual(`${id("a.test.ts", "W")}`);'),
+            ('x.test.ts', 'expect(workflow).toEqual("" + id("a.test.ts", "W"));'),
+            ('x.test.ts', 'expect(workflow).toEqual(id("a.test.ts", "W")?.join(""));'),
+            ('x.test.ts', 'expect(workflow).toEqual(JSON.stringify(id("a.test.ts", "W")));'),
+        ]:
+            with self.subTest(path=path, consumer=consumer):
+                self.assertTrue(shape.lint_text_pins(reads[path] + consumer.replace('W', wording), path))
+        for path, identity in [
+            ('src/a_tests.rs', 'assert_eq!(found, vec![Identity::exact("a.test.ts", "W")]);'),
+            ('src/a_tests.rs', 'assert_eq!(\n    found,\n    [id("a.test.ts", "W")]\n);'),
+            ('test_shape.py', 'assert found == [Identity("test_a.py", "W")]'),
+            ('x.test.ts', 'expect(found).toEqual([new Identity("a.test.ts", "W")]);'),
+            ('x.test.ts', 'expect(id("a.test.ts", "W")).toEqual(found);'),
+        ]:
+            with self.subTest(path=path, identity=identity):
+                self.assertFalse(shape.lint_text_pins(identity.replace('W', wording), path))
         self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
         self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
         self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner"), "the outage is announced once").toHaveLength(1);', 'reconnect.journey.ts'))

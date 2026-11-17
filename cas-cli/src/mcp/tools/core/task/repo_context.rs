@@ -838,10 +838,13 @@ pub(crate) fn unanchored_task_start_warning(
 fn candidate_paths(
     cas_root: &Path,
     local: Result<Option<candidate_probe::Candidate>, String>,
-) -> (Vec<candidate_probe::Candidate>, bool) {
+) -> (Vec<candidate_probe::Candidate>, Vec<String>) {
     let deadline = Deadline::after(candidate_probe::SCAN_BUDGET);
     let mut raw = Vec::new();
-    let mut scan_incomplete = local.is_err();
+    let mut failures = Vec::new();
+    if let Err(error) = &local {
+        failures.push(format!("{}: {error}", cas_root.display()));
+    }
     match crate::store::known_repos::open_host_known_repo_store()
         .and_then(|store| store.list().map_err(Into::into))
     {
@@ -849,7 +852,7 @@ fn candidate_paths(
         // Hosts before the known-repository migration have a complete empty
         // registry. Other read errors cannot prove a target is absent.
         Err(error) if error.to_string().contains("no such table: known_repos") => {}
-        Err(_) => scan_incomplete = true,
+        Err(error) => failures.push(format!("known-repository registry: {error}")),
     }
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
@@ -864,7 +867,7 @@ fn candidate_paths(
             continue;
         }
         if deadline.remaining().is_zero() {
-            scan_incomplete = true;
+            failures.push(format!("{}: scan deadline exhausted before probing this root", path.display()));
             break;
         }
         match candidate_probe::probe(&path, deadline) {
@@ -872,10 +875,10 @@ fn candidate_paths(
                 candidates.push(candidate);
             }
             Ok(_) => {}
-            Err(_) => scan_incomplete = true,
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
         }
     }
-    (candidates, scan_incomplete)
+    (candidates, failures)
 }
 
 fn bounded_registry_paths(candidate_limit: usize) -> Result<Vec<PathBuf>, BoundedRepoError> {
@@ -1056,7 +1059,7 @@ pub(crate) fn resolve_repo_context(
     }
     let mut matches = Vec::new();
     let mut observed = Vec::new();
-    let (candidates, scan_incomplete) = candidate_paths(cas_root, local);
+    let (candidates, scan_failures) = candidate_paths(cas_root, local);
     for candidate in candidates {
         let identities = candidate.identities;
         if identities.iter().any(|identity| {
@@ -1093,9 +1096,14 @@ pub(crate) fn resolve_repo_context(
                 target_branch,
             })
         }
-        [] if scan_incomplete => Err(
-            "WORK TARGET REPOSITORY UNAVAILABLE: known-root scan did not complete; retry after storage access recovers".to_string(),
-        ),
+        [] if !scan_failures.is_empty() => Err(format!(
+            "WORK TARGET REPOSITORY UNAVAILABLE: could not resolve `{}` @ `{}`. \
+             Incomplete known-root probes: {}. Completed identity sets: {}. \
+             Check the declared target and the listed roots, then retry. \
+             No merge/reachability check was run.",
+            target.repo_selector, target.target_branch, scan_failures.join("; "),
+            if observed.is_empty() { "none".to_string() } else { observed.join(", ") },
+        )),
         [] => Err(format!(
             "⚠️ WORK TARGET REPOSITORY MISMATCH\n\n\
              Task targets `{}` (normalized `{}`), but no current-host known \

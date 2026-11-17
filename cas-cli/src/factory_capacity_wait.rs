@@ -439,10 +439,8 @@ pub(crate) fn view(root: &Path, worker: &str, now: DateTime<Utc>) -> Result<Opti
 /// refusal measured; every later report pairs it with this reading.
 fn live_admission(root: &Path) -> String {
     let config = crate::config::Config::load(root).unwrap_or_default().factory();
-    crate::factory_build_guard::inspect_capacity(root, &config)
-        .receipt_notice(false)
-        .trim_start()
-        .to_owned()
+    let snapshot = crate::factory_build_guard::inspect_capacity(root, &config);
+    format!("{}; {}", snapshot.receipt_notice(false).trim_start(), snapshot.disk_reading())
 }
 
 pub(crate) fn render(root: &Path, session: Option<&str>, now: DateTime<Utc>) -> String {
@@ -602,7 +600,7 @@ fn reconcile_with_inventory(
         let workers = waits.iter().map(|wait| format!("- {} ({}): {}", wait.worker_name, wait.task_id, wait.cause)).collect::<Vec<_>>().join("\n");
         let caches = inventory.caches.iter().map(|(path, bytes)| format!("- {}: {bytes} bytes", path.display())).collect::<Vec<_>>().join("\n");
         let total = reclaimable_bytes.map_or_else(|| "unknown (inventory incomplete)".to_string(), |bytes| format!("{bytes} bytes"));
-        let detail = format!("Disk pressure is delaying builds. Waiting workers:\n{workers}\nReclaimable target caches (logical bytes): {total}\n{}\nThis notice updates only when waiting workers or reclaimable bytes change; tasks and leases remain active.", if caches.is_empty() { "- none found" } else { &caches });
+        let detail = format!("Disk pressure is delaying builds. Waiting workers (cause at last refusal):\n{workers}\nNow: {}\nReclaimable target caches (logical bytes): {total}\n{}\nThis notice updates only when waiting workers or reclaimable bytes change; tasks and leases remain active.", live_admission(root), if caches.is_empty() { "- none found" } else { &caches });
         let recipient = crate::supervisor_notices::resolve(&agents, None, waits[0].session.as_deref());
         crate::supervisor_notices::enqueue(root, &recipient, "capacity_wait", &detail, &occurrence)?;
         pressure.get_mut(&key).expect("pressure episode").notified = true;
@@ -671,6 +669,9 @@ mod tests {
         for name in ["capacity-first", "capacity-second", "/fixture/retired-cache"] {
             assert!(prompt.contains(name)); // Fixture identities, not human-readable wording.
         }
+        // cas-234d: the notice carries a disk reading measured now, not only
+        // the figure the first refusal recorded.
+        assert!(prompt.contains("disk_available="));
         // One worker can finish a build and rejoin while another still
         // waits: the waiting set and pressure episode have not changed.
         admitted(&root, &repos[1]).unwrap();

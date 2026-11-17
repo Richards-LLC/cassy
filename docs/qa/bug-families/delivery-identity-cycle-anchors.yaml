@@ -1,0 +1,7 @@
+title: Replacement, rebound and retargeted deliveries are refused although their recorded cycle commits are the task's own
+statement: Task start, close and rebind judged delivery ownership by commit subjects, ignored the cycle anchors Cassy recorded for the task, and let the #1353 redirect fall back to the bare branch. A delivery whose own recorded or granted commits named another task, or that held only a retired anchor, was refused or misattributed. Recorded commits and merge_source grants held under a live anchor now count as the task's own at start, close and rebind, and the redirect applies only when real delivered work exists.
+found: {date: '2026-11-16', source: 'T2 recurrence GH #1888, #1939, #1944, #1976, #1988'}
+fixed_by: [cas-f45f]
+tasks: [cas-f45f]
+journeys: [FACTORY-CLOSE]
+invariants: []

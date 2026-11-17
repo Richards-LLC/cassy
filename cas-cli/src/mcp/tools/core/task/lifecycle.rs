@@ -501,16 +501,24 @@ fn reconcile_reused_factory_branch(
                 let sha = metadata.next()?;
                 let parents: Vec<_> = metadata.collect();
                 let subject = message.trim().lines().next().unwrap_or("");
+                // cas-f45f (GH #1976, #1988): a supervisor's merge_source grant
+                // adopts the named commit and its ancestors, as at close.
+                let granted = |commit: &str| {
+                    identity.approved_merge_parents.iter().any(|source| git.is_ancestor(commit, source))
+                };
                 let target_merge = parents.len() > 1
                     && parents[1..]
                         .iter()
-                        .all(|parent| git.is_ancestor(parent, &target_tip));
+                        .all(|parent| git.is_ancestor(parent, &target_tip) || granted(*parent));
                 // Target-sync subjects often name the target epic. Parent
                 // provenance intentionally wins over that subject here; this
                 // also trusts manual merge resolutions as synchronization.
                 // Every off-target ancestor still faces the ownership check.
-                let task_owned =
-                    !close_ops::task_attribution::commit_claims_another_task(worktree_path, sha, identity)
+                // cas-f45f (GH #1944): Cassy's own record of a task commit and
+                // a grant answer before the subject rule.
+                let task_owned = identity.matches_known_commit(sha)
+                    || granted(sha)
+                    || !close_ops::task_attribution::commit_claims_another_task(worktree_path, sha, identity)
                         && (identity
                             .task_id
                             .as_deref()
@@ -655,6 +663,40 @@ mod reused_factory_branch_tests {
         assert!(error.contains(&worker_tip), "{error}");
 
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), worker_tip);
+    }
+
+    /// GH #1976, #1988 (cas-f45f): a lane that lands someone else's PR, one
+    /// commit naming another task, resumes once the supervisor grants that
+    /// PR's head. Without the grant the same lane still occupies.
+    #[test]
+    fn granted_import_is_task_work_at_resume_and_ungranted_still_occupies() {
+        let repo = repo();
+        git(repo.path(), &["checkout", "-b", "teammate/pr"]);
+        for (file, subject) in [("widget", "Add teammate widget"), ("red", "test(cas-f4a2): reuse the red test")] {
+            std::fs::write(repo.path().join(file), "teammate\n").expect("teammate file");
+            git(repo.path(), &["add", file]);
+            git(repo.path(), &["commit", "-m", subject]);
+        }
+        let pr_head = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "-b", "factory/test-worker", "main"]);
+        git(repo.path(), &["merge", "--no-ff", "teammate/pr", "-m", "Land the teammate PR for cas-1976a"]);
+        let tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        let identity = |grants: Vec<String>| super::close_ops::TaskCommitIdentity {
+            approved_merge_parents: grants,
+            task_id: Some("cas-1976a".into()),
+            ..Default::default()
+        };
+
+        let ungranted = identity(Vec::new());
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&ungranted), None, |_| None)
+            .expect("ungranted import is reported");
+        assert!(matches!(result, ReusedFactoryBranchStart::Occupied { .. }), "{result:?}");
+
+        let granted = identity(vec![pr_head]);
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", Some(&granted), None, |_| None)
+            .expect("granted import resumes");
+        assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), tip);
     }
 
     #[test]

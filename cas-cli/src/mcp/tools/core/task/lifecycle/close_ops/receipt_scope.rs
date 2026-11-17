@@ -1111,6 +1111,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mixed_rust_inputs_keep_identified_stability_beside_widening_cas_31eb() {
+        use crate::factory_worker_check::{self, stability, widened, PassingTests};
+        let repo = changelog_fixture();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        std::fs::write(repo.path().join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+        std::fs::write(repo.path().join("src/lib.rs"), "mod uncertain;\n").unwrap();
+        std::fs::write(repo.path().join("src/uncertain.rs"), "#[path = \"a.rs\"] mod nested;\n").unwrap();
+        std::fs::write(repo.path().join("src/a.rs"), "pub fn helper() {}\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "base");
+        assert!(std::process::Command::new("git").current_dir(repo.path())
+            .args(["update-ref", "refs/heads/main", &base]).status().unwrap().success());
+        std::fs::write(repo.path().join("src/lib.rs"), "mod uncertain;\n#[test]\nfn known() {}\n").unwrap();
+        std::fs::write(repo.path().join("src/uncertain.rs"), "#[path = \"\\u{0061}.rs\"] mod nested;\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "mixed delivery");
+        let paths = vec!["src/lib.rs".to_string(), "src/uncertain.rs".to_string()];
+        let (tests, scopes) = stability::requirements(repo.path(), &head, "main", &paths, Some(&[(base, head.clone())])).unwrap();
+        assert_eq!(tests, [stability::Identity::exact("src/lib.rs", "known")]);
+        assert_eq!(scopes, [widened::Scope::Crate("fixture".into())]);
+        factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(known)");
+        widened::record(root.path(), repo.path(), &head,
+            widened::Proof { runner: "nextest".into(), scope: scopes[0].clone() }, 1).unwrap();
+        let passing = PassingTests::new(root.path(), repo.path(), &head);
+        assert!(widened::missing(&passing, &scopes).is_empty());
+        assert_eq!(stability::missing(&passing, &tests), tests);
+        let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
+        assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty());
+        stability::record(root.path(), repo.path(), &head, stability::Proof {
+            runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1,
+        }).unwrap();
+        assert!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty());
+    }
+
     fn changelog_fixture() -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {

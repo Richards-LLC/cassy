@@ -2712,16 +2712,26 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         let root = env.home().join("project/.cas");
-        for seeded_failure in [true, false] {
-            let repo = root.join(format!("worktrees/worker-{seeded_failure}"));
+        for (seeded_failure, mixed) in [(true, false), (false, false), (false, true)] {
+            let repo = root.join(format!("worktrees/worker-{seeded_failure}-{mixed}"));
             fixture_commit(&repo);
             std::fs::create_dir_all(repo.join("src")).unwrap();
             std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n").unwrap();
+            let prelude = if mixed { "mod uncertain;\n" } else { "" };
+            if mixed {
+                std::fs::write(repo.join("src/uncertain.rs"), "#[path = \"a.rs\"] mod nested;\n").unwrap();
+                std::fs::write(repo.join("src/a.rs"), "#[test]\nfn opaque() {}\n").unwrap();
+            }
+            std::fs::write(repo.join("src/lib.rs"), format!("{prelude}#[test]\nfn untouched() {{ let raw = 1; let _borrow = &raw; }}\n")).unwrap();
             fixture_commit_as(&repo, "base");
             let base = fixture_head(&repo);
             git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n#[test]\nfn owned_new() {}\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), format!("{prelude}#[test]\nfn untouched() {{ let raw = 1; let _borrow = &raw; }}\n#[test]\nfn owned_new() {{}}\n")).unwrap();
+            if mixed {
+                // Valid Rust escape, outside the JSON string subset the
+                // static module-path adapter can currently classify.
+                std::fs::write(repo.join("src/uncertain.rs"), "#[path = \"\\u{0061}.rs\"] mod nested;\n").unwrap();
+            }
             fixture_commit_as(&repo, "new test");
             env.set_current_dir(&repo);
             let cargo = repo.join("target/fake-cargo");
@@ -2732,11 +2742,13 @@ import sys
 p = Path('target/attempts')
 n = int(p.read_text()) + 1 if p.exists() else 1
 p.write_text(str(n))
-selection = sys.argv[sys.argv.index('-E') + 1]
+selection = sys.argv[sys.argv.index('-E') + 1] if '-E' in sys.argv else 'untouched opaque'
 retries = sys.argv[sys.argv.index('--retries') + 1] if '--retries' in sys.argv else None
 with Path('target/retries').open('a') as output:
     output.write(str(retries) + '\n')
 names = ['owned_new'] + (['untouched'] if 'untouched' in selection else [])
+if 'opaque' in selection:
+    names.append('uncertain::nested::opaque')
 with Path('target/executed').open('a') as output:
     output.write(','.join(names) + '\n')
 if {seeded_failure} and n % 3 == 0:
@@ -2765,7 +2777,8 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
                 let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
                 assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 5);
                 assert_eq!(receipt["test"]["stability"]["tests"][0]["name"], "owned_new");
-                assert_eq!(receipt["test"]["count"], 2);
+                assert_eq!(receipt["test"]["count"], if mixed { 3 } else { 2 });
+                assert_eq!(receipt["test"]["widened"].is_object(), mixed);
                 assert_eq!(std::fs::read_to_string(repo.join("target/retries")).unwrap().lines().collect::<Vec<_>>(), vec!["0"; 5]);
                 let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
                 assert_eq!(executed.lines().filter(|line| line.split(',').any(|name| name == "untouched")).count(), 1);

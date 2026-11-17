@@ -850,7 +850,12 @@ fn resolve_repository_handles_git_file_worktrees() {
 fn resolve_repository_falls_back_to_parent_dir_outside_git() {
     use crate::daemon::indexing::resolve_repository;
 
-    let temp = tempfile::TempDir::new().expect("temp dir");
+    // The capped runner's TMPDIR can itself be inside the checkout.
+    let temp_root = std::env::temp_dir();
+    let outside_git = temp_root.ancestors().find(|path|
+        path.ancestors().all(|parent| !parent.join(".git").exists())).expect("non-Git parent");
+    let temp = tempfile::Builder::new().prefix("cas-nongit-")
+        .tempdir_in(outside_git).expect("temp dir");
     let dir = temp.path().join("loose-files");
     std::fs::create_dir_all(&dir).expect("dir");
     let file = dir.join("thing.rs");

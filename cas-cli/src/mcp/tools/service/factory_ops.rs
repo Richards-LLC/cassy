@@ -21918,7 +21918,12 @@ effort = "high"
 
     #[test]
     fn collect_git_status_degrades_on_non_git_dir() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // Keep this fixture outside Git even under a checkout-local TMPDIR.
+        let temp_root = std::env::temp_dir();
+        let outside_git = temp_root.ancestors().find(|path|
+            path.ancestors().all(|parent| !parent.join(".git").exists())).expect("non-Git parent");
+        let tmp = tempfile::Builder::new().prefix("cas-nongit-")
+            .tempdir_in(outside_git).expect("tempdir");
         // Plain dir with no git repo — all fields must be sentinels, no panic.
         let status = collect_worker_git_status(tmp.path());
         // branch and head_sha degrade to "?" (not empty, not a real branch name)

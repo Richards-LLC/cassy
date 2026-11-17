@@ -2015,6 +2015,8 @@ mod tests {
         core.open_agent_store().unwrap().register(&worker).unwrap();
         let repo = dir.path();
         run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
         let base = commit_file(repo, ".gitignore", ".cas/\n", "base");
         run(repo, &["checkout", "-q", "-b", "factory/w"]);
         let source = commit_file(repo, "work.txt", "delivery\n", "delivery");

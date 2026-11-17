@@ -202,6 +202,12 @@
       "f31246ee1bd8851fac86500808937bf76ce180dd8eea080bfb5f6064642dc4d8",
       "f31a6d62922c26a987de4e5adf140fa7bee37349f998bb8ddd9b9f8a376ce2b5"
     ],
+    "skills/cas-client-report/SKILL.md": [
+      "dc718498887fc699c605bd954b1660f1e3e8bea1733c068829f0389634fe3941"
+    ],
+    "skills/cas-client-report/references/accounting-entries.md": [
+      "e2e2620488e9bcf882dd75588b9da2979507392dfe303dfcda252dc0996f3225"
+    ],
     "skills/cas-code-review/SKILL.md": [
       "105536e6d431ca44750aad86cf2c0ba7cee1fb49140bce2903a39523752592ec",
       "1c1426419ca274b39cdb5c97bfb1f7816a62328f4cda9dc414827ed35e75a60c",
@@ -405,6 +411,7 @@
       "fd1e13f47f3c3eb2cf489c308a6431623b5b3da5291e48cfb45ccd915b00c04a"
     ],
     "skills/cas-customer-release-notes/SKILL.md": [
+      "01209b53e4a4374e4ea2e3eba13f9b8d5bc200db24238c06b231787d3cc01fef",
       "c3533122c07f8700e7eb7905c2066f93b51157a4fbf0672d8613e204bbfc2d57"
     ],
     "skills/cas-customer-release-notes/references/PROFILE-template.md": [
@@ -742,7 +749,8 @@
       "ce64da4e01d01457a25de640fa2ce5fbc3c31931971908f63dcab0ba62ba1832"
     ],
     "skills/cas-feature-report/SKILL.md": [
-      "6a09efeebedb6c0ba3807096527caaea2904749342cdaf1b705e8fc0513baede"
+      "6a09efeebedb6c0ba3807096527caaea2904749342cdaf1b705e8fc0513baede",
+      "bb4c6e2f3a9ed75e308b89e3248f9d9dcb160c75d564d1b4907cbb224bb702aa"
     ],
     "skills/cas-feature-report/references/report-contract.md": [
       "0bbf2ea200df40061d9495daf52fcfad624ce2f93b962d0387515ddb1d05cc63"
@@ -828,6 +836,7 @@
       "fdc2745314047cd96c8f5573396d3d09ef4210227ca1b49ba9b7da3d1b638703"
     ],
     "skills/cas-html-reports/SKILL.md": [
+      "02c6dc60f1d06974de416c94e7867b25ba28df49a9ea5ff0f1b8ddc45381db08",
       "0e0db41a1a44cfdf5a0b9b0a73fd019a952552ff5de1d6bd77f90a0642a1f012",
       "20d0a7086e3e5a141347fcd7cd27536e8ed5a2e5c11b67d31f18ca00c1acfd63",
       "3679f5f2849e76e95d580b627f1a0f9bdfe19002e6dffaad30016a1bd3343d4b",
@@ -940,6 +949,7 @@
     ],
     "skills/cas-html-reports/references/report-types.md": [
       "3e6ee141f83fcd33f1d7fde8cbecb9446c15c3cbe2c4db8bdc1fd1d73ae28173",
+      "4320e57b4a5ab8a090d6f8119dc42d10609bb4784e9041dcef6617df9fb74d27",
       "862b7dea5b648ec2185d90d1903120de7e4d9ad90ee97e716e420a56e153e0ce",
       "bd97cffcc8d346cd623d34455248b0743e2a10e40526007448f1488938a11337",
       "d3664b6620d9c399cdaa7f660c12090dd17adfb5495322f366e8e723c60ad690",
@@ -1806,6 +1816,7 @@
       "5c166935fdd927c7f4b23c585410a8e240f0d833e91cd6c5f149222f41767414",
       "5ff0058f1e47b4c957d625e888b7f176df9868ec602824aa3b33d551b848d06d",
       "7f9a9ab2c612ba6fa1f748a23eb6c9ac48d6becbb2a6732515e6f2646ee620fe",
+      "81bb619656004d1a342c9394579835b5f8dc4b1cd2bd6c64bb6d7c28a7b2feb3",
       "8f01d9a216d56dc8116318d026a276506db34480ccdfb316c9adb2414922b3cd",
       "d3a25e2b6d07ecacfdcd5f14a489dd2f6167678d321de0612e564429ca6e7237",
       "f06713cbbca25ef5e4a04acd9e796940821f56021b5cac11ffa79dd3d0b0479e",
@@ -4837,7 +4848,8 @@
       "cd0e25a1c4fbb2cd915e7d68f9e75afd88da2601a513dac72408473dff153134",
       "d406f0d54227a3a76f04f37812e6ef9afb139bac7277bdd29d604cedb7f68817",
       "ea7ce94cbca85cc91b0927b0d05b3cb71471eaa338e3d4cbecdf357d30101ae5",
-      "f0e2db61f9910db9a18413306fcff18527e2077d72282429ae2398701a4b2bec"
+      "f0e2db61f9910db9a18413306fcff18527e2077d72282429ae2398701a4b2bec",
+      "feed44da80e9baba7dc9a452352a42dd9cf6ee3d3a9ab20d6bac2b57249e8756"
     ],
     "skills/violet/references/publication.md": [
       "1eb1f9da0c40f3909caa428df64591aa556221a72289ff467afd0daebc196369",

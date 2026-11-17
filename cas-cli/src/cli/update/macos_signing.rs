@@ -194,6 +194,7 @@ mod tests {
 
         // Two ad-hoc "releases" with different bytes, as the update installs them.
         let mut requirements = Vec::new();
+        let mut original_requirements = Vec::new();
         for (release, source) in [("old", "/usr/bin/true"), ("new", "/usr/bin/false")] {
             let installed = root.join(release).join("cas");
             std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
@@ -203,11 +204,9 @@ mod tests {
                 &["--force", "--sign", "-", installed.to_str().unwrap()],
                 root,
             );
-            assert!(
-                requirement(&installed).contains("cdhash"),
-                "{}",
-                requirement(&installed)
-            );
+            let before = requirement(&installed);
+            assert!(before.contains("cdhash"), "{before}");
+            original_requirements.push(before);
             assert!(stabilize(&installed, Some(&keychain)).unwrap());
             run(
                 "/usr/bin/codesign",
@@ -216,6 +215,7 @@ mod tests {
             );
             requirements.push(requirement(&installed));
         }
+        assert_ne!(original_requirements[0], original_requirements[1]);
         assert_eq!(requirements[0], requirements[1]);
         assert!(
             requirements[0].contains(IDENTIFIER) && !requirements[0].contains("cdhash"),

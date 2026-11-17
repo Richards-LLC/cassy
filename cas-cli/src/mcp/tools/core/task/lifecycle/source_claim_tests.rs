@@ -230,6 +230,16 @@ async fn task_create_claims_only_explicit_github_bindings() {
     .await
     .expect("create closes-reference task");
 
+    for title in [
+        "Richards-LLC/cassy#2035: owner/repo title binding",
+        "#2036: default-repo title binding",
+        "Title suffix binding (GH #2037)",
+    ] {
+        core.cas_task_create(Parameters(create_request(title, "")))
+            .await
+            .expect("create issue-bound intake task");
+    }
+
     let tasks = core
         .open_task_store()
         .expect("task store")
@@ -277,14 +287,18 @@ async fn task_create_claims_only_explicit_github_bindings() {
         .filter(|request| request.url.path().ends_with("/claim"))
         .map(|request| request.url.path().to_string())
         .collect();
+    let title_bindings = [2035, 2036, 2037].map(|number| {
+        format!("https://github.com/richards-llc/cassy/issues/{number}")
+    });
     let expected_claims = [explicit_ref, fixes_issue, closes_issue]
         .into_iter()
         .map(source_claim_path)
+        .chain(title_bindings.iter().map(|source| source_claim_path(source)))
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         claims.into_iter().collect::<std::collections::BTreeSet<_>>(),
         expected_claims,
-        "only explicit external_ref and Fixes/Closes #N should reach the source claim path"
+        "only explicit external_ref, issue-owning title forms, and Fixes/Closes #N should reach the source claim path"
     );
 
     let persisted_agent = core.open_agent_store().unwrap().get(&agent.id).unwrap();

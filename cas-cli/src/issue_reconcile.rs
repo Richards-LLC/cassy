@@ -142,9 +142,9 @@ pub enum ExternalRefHint {
     None,
 }
 
-/// The `external_ref` a new task should carry. A citation is only owning when
-/// it follows an explicit `Fixes #N` or `Closes #N` marker. Other title and
-/// description citations are context and only produce a hint.
+/// The `external_ref` a new task should carry. Ownership comes from an
+/// explicit external ref, an issue-owning title boundary, or `Fixes`/`Closes`.
+/// Other title and description citations are context and only produce a hint.
 pub fn external_ref_hint(
     title: &str,
     description: &str,
@@ -161,7 +161,12 @@ pub fn external_ref_hint(
         }
     }
 
-    let mut closing_refs = closing_issue_refs(title, default_repo);
+    let mut closing_refs = title_binding_refs(title, default_repo);
+    for issue in closing_issue_refs(title, default_repo) {
+        if !closing_refs.contains(&issue) {
+            closing_refs.push(issue);
+        }
+    }
     for issue in closing_issue_refs(description, default_repo) {
         if !closing_refs.contains(&issue) {
             closing_refs.push(issue);
@@ -191,6 +196,49 @@ static CLOSING_ISSUE_REF: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:fixes|closes)\s+(?:GH\s*)?#([0-9]+)\b")
         .expect("valid explicit GitHub issue closing reference regex")
 });
+
+static ISSUE_TITLE_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9._-]+))?#([0-9]+):")
+        .expect("valid issue title prefix regex")
+});
+static ISSUE_TITLE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\(GH\s*#([0-9]+)\)\s*$")
+        .expect("valid issue title suffix regex")
+});
+
+/// Issue references at the title boundary that represent intake ownership.
+/// Ordinary mentions elsewhere in a brief remain citations only.
+fn title_binding_refs(title: &str, default_repo: Option<&str>) -> Vec<IssueRef> {
+    let default = default_repo.and_then(|repo| {
+        let (owner, name) = repo.trim().split_once('/')?;
+        (!owner.is_empty() && !name.is_empty()).then(|| (owner.to_string(), name.to_string()))
+    });
+    let mut refs = Vec::new();
+    let mut add = |owner: String, repo: String, number: &str| {
+        if let Ok(number) = number.parse::<u64>()
+            && number > 0
+        {
+            let issue = IssueRef { owner, repo, number };
+            if !refs.contains(&issue) {
+                refs.push(issue);
+            }
+        }
+    };
+    if let Some(captures) = ISSUE_TITLE_PREFIX.captures(title) {
+        if let Some(owner) = captures.get(1) {
+            add(owner.as_str().to_string(), captures[2].to_string(), &captures[3]);
+        } else if let Some((owner, repo)) = &default {
+            add(owner.clone(), repo.clone(), &captures[3]);
+        }
+    }
+    if let Some(captures) = ISSUE_TITLE_SUFFIX.captures(title)
+        && let Some((owner, repo)) = &default
+    {
+        add(owner.clone(), repo.clone(), &captures[1]);
+    }
+    drop(add);
+    refs
+}
 
 /// Issue references explicitly attached to a supported closing keyword.
 /// Bare `#N` is accepted here because the keyword makes its issue meaning
@@ -782,6 +830,29 @@ mod tests {
             ExternalRefHint::None
         );
         assert!(external_ref_hint_note(&ExternalRefHint::None).is_empty());
+    }
+
+    #[test]
+    fn issue_owning_title_boundaries_set_external_ref() {
+        for (title, number) in [
+            ("Richards-LLC/cassy#1216: epic create ignores target", 1216),
+            ("#1217: epic create ignores target", 1217),
+            ("Epic create ignores target (GH #1218)", 1218),
+        ] {
+            let expected = format!("https://github.com/Richards-LLC/cassy/issues/{number}");
+            assert_eq!(
+                external_ref_hint(title, "", None, Some(REPO)),
+                ExternalRefHint::Set {
+                    url: expected,
+                    issue: format!("Richards-LLC/cassy#{number}"),
+                },
+                "{title}"
+            );
+        }
+        assert!(matches!(
+            external_ref_hint("Mention GH #1219 in the middle", "", None, Some(REPO)),
+            ExternalRefHint::Suggest { .. }
+        ));
     }
 
     #[test]

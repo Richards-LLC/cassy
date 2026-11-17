@@ -1099,12 +1099,36 @@ impl CasCore {
         let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id).map_err(fail)?;
         let findings = verdict.as_ref().map(|verdict| format!("\n{}\nFindings: {}", verdict.summary,
             serde_json::to_string(&verdict.issues).unwrap_or_default())).unwrap_or_default();
-        let action = if status == VerificationStatus::Approved {
-            "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed."
-        } else {
-            "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue."
+        let rejection = if status == VerificationStatus::Rejected {
+            use cas_types::{FindingSeverity, IssueSeverity};
+            let rounds = self.open_verification_store()?.get_for_task(&dispatch.task_id).map_err(fail)?
+                .iter()
+                .filter(|row| row.status == VerificationStatus::Rejected)
+                .filter_map(|row| row.dispatch_id.clone())
+                .collect::<std::collections::HashSet<_>>().len();
+            let eligible = verdict.as_ref().is_some_and(|row| {
+                row.issues.iter().any(|issue| issue.severity == IssueSeverity::Blocking)
+                    && row.issues.iter().all(|issue| {
+                        matches!(issue.triage.severity, FindingSeverity::Awkward | FindingSeverity::Cosmetic)
+                            && (issue.severity != IssueSeverity::Blocking
+                                || matches!(issue.category.as_str(), "documentation" | "evidence" | "receipt"
+                                    | "incomplete_close_reason" | "unnecessary_complexity"))
+                    })
+            });
+            Some((match rounds {
+                1 => "repair",
+                2 if eligible => "extra_round",
+                _ => "hold_escalate",
+            }, rounds))
+        } else { None };
+        let action = match rejection.map(|(action, _)| action) {
+            Some("repair") => "This delivery remains unpublished. Return only this delivery to its implementer for repair; unrelated deliveries may continue.",
+            Some("extra_round") => "This second rejection has only non-behavioural blockers. Return this delivery to the same implementer for one automatic extra repair round without an operator hold. The corrected candidate still requires independent approval. A third rejection holds and escalates; unrelated deliveries may continue.",
+            Some("hold_escalate") => "Hold this unpublished delivery and escalate to the operator before another repair round. The automatic extra round is unavailable: findings are behavioural or incomplete, or the repair budget is exhausted. Unrelated deliveries may continue.",
+            _ if status == VerificationStatus::Approved => "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed.",
+            _ => "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue.",
         };
-        crate::supervisor_notices::enqueue(
+        crate::supervisor_notices::enqueue_with_context(
             &self.cas_root,
             &recipient,
             "premerge_verification",
@@ -1113,6 +1137,10 @@ impl CasCore {
                 dispatch.task_id, dispatch.id
             ),
             &format!("{}:{status}", dispatch.id),
+            rejection.map(|(action, rounds)| serde_json::json!({
+                "task_id": dispatch.task_id, "dispatch_id": dispatch.id,
+                "rejection_action": action, "rejected_rounds": rounds,
+            })),
         )
         .map_err(fail)?;
         Ok(format!("\n{action}"))
@@ -1955,6 +1983,88 @@ mod tests {
         commit_file(&repo, "local.md", "local\n", "local");
         let refused = refresh_review_target(&repo, "epic/train").unwrap_err();
         assert!(refused.starts_with("TARGET_DIVERGED_FROM_ORIGIN"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn premerge_rejection_round_policy_replays_cas_ed08() {
+        use cas_types::{FindingSeverity, IssueSeverity, VerificationIssue};
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role("owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        // Replay the structured findings from ver-ca026909ea7b (cas-2f46)
+        // and ver-22c4d2451b27 (cas-d740), independent of their summary prose.
+        let simplicity: VerificationIssue = serde_json::from_value(serde_json::json!({
+            "file": "scripts/ci-queue-flakes.py", "line": 320,
+            "severity": "blocking", "category": "unnecessary_complexity",
+            "problem": "unused --expect", "triage": {"severity": "awkward"}
+        })).unwrap();
+        let data_loss: VerificationIssue = serde_json::from_value(serde_json::json!({
+            "file": "cas-cli/src/factory_review_scratch.rs", "line": 1221,
+            "severity": "blocking", "category": "missing_validation",
+            "problem": "citation protection bypass", "triage": {"severity": "data_loss"}
+        })).unwrap();
+        let mut cases = vec![
+            ("cas-2f46", 2, vec![simplicity.clone()], "extra_round"),
+            ("cas-d740", 2, vec![data_loss], "hold_escalate"),
+            ("first", 1, vec![simplicity.clone()], "repair"),
+            ("exhausted", 3, vec![simplicity.clone()], "hold_escalate"),
+            ("empty", 2, vec![], "hold_escalate"),
+        ];
+        for category in ["documentation", "evidence", "receipt", "incomplete_close_reason"] {
+            let mut issue = simplicity.clone();
+            issue.category = category.into();
+            cases.push((category, 2, vec![simplicity.clone(), issue], "extra_round"));
+        }
+        let mut unknown = simplicity.clone();
+        unknown.category = "correctness".into();
+        cases.push(("mixed", 2, vec![simplicity.clone(), unknown], "hold_escalate"));
+        let mut warning = simplicity.clone();
+        warning.severity = IssueSeverity::Warning;
+        cases.push(("warnings_only", 2, vec![warning.clone()], "hold_escalate"));
+        for (name, severity) in [("broken", FindingSeverity::Broken), ("data_loss", FindingSeverity::DataLoss), ("money", FindingSeverity::Money)] {
+            warning.triage.severity = severity;
+            cases.push((name, 2, vec![simplicity.clone(), warning.clone()], "hold_escalate"));
+        }
+        let missing_triage: VerificationIssue = serde_json::from_value(serde_json::json!({
+            "file": "proof", "category": "evidence", "problem": "missing receipt"
+        })).unwrap();
+        cases.push(("missing_triage", 2, vec![missing_triage], "hold_escalate"));
+
+        for (name, rounds, issues, action) in cases {
+            let task = Task::new(name.into(), "Review".into());
+            core.open_task_store().unwrap().add(&task).unwrap();
+            for round in 1..=rounds {
+                let dispatch = cas_store::create_verification_dispatch(&root, &task.id, "worker", &owner.id,
+                    chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
+                let mut verdict = Verification::new(format!("ver-{name}-{round}"), task.id.clone());
+                verdict.status = VerificationStatus::Rejected;
+                verdict.provenance = VerificationProvenance::System;
+                verdict.dispatch_id = Some(dispatch.id.clone());
+                verdict.issues = issues.clone();
+                cas_store::add_system_verification(&root, &verdict).unwrap();
+                let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+                cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, &owner.id, None, true).unwrap();
+                if round == rounds {
+                    // Replaying the same verdict must not consume another round
+                    // or enqueue a second repair/escalation notice.
+                    for _ in 0..2 {
+                        core.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
+                    }
+                }
+            }
+            let notices = crate::store::open_supervisor_queue_store(&root).unwrap()
+                .poll(&owner.id, 10).unwrap();
+            assert_eq!(notices.len(), 1, "{name}");
+            let payload: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
+            assert_eq!(payload["context"]["rejection_action"], action, "{name}");
+            assert_eq!(payload["context"]["rejected_rounds"], rounds, "{name}");
+            assert_eq!(core.open_task_store().unwrap().get(&task.id).unwrap().status, task.status);
+        }
     }
 
     #[tokio::test]

@@ -1460,10 +1460,9 @@ fn terminal_close_hold_notices_retire_before_transport_gh1813() {
     crate::mcp::tools::core::task::close_refusal::record(&root, &task.id, &Ok(reply)).unwrap();
     crate::supervisor_notices::enqueue_keyed(&root, &crate::supervisor_notices::Recipient::agent(&supervisor),
         "batch_close_hold", "held", "fixture-hold", Some(serde_json::json!({"held_by_kind": {"fixture_gate": [{"task_id":task.id}]}}))).unwrap();
-    crate::ui::factory::daemon::runtime::progress_watchdog::sweep(&root, "close-holds", chrono::Utc::now());
     let queue = crate::store::open_prompt_queue_store(&root).unwrap();
     let rows = queue.peek_all(10).unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
     for row in &rows { assert!(batch_notice_deliverable(&root, queue.as_ref(), row).unwrap()); }
     task.status = cas_types::TaskStatus::Closed;
     tasks.update(&task).unwrap();

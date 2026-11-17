@@ -760,6 +760,7 @@ mod tests {
         // identity still wins when supplied by the gate.
         epic.status = TaskStatus::Closed;
         tasks.update(&epic).unwrap();
+        assert!(!crate::qa_post_release::batch_notice_deliverable(&root, queue.as_ref(), notices[0]).unwrap());
         let mut post_release = Task::new("cas-098dd-post-release".into(), "Post-release observation pending".into());
         post_release.task_type = cas_types::TaskType::Epic;
         post_release.status = TaskStatus::Blocked;

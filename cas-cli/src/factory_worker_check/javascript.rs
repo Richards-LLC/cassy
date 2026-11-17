@@ -120,7 +120,6 @@ pub(crate) fn changed_tests(
         } else {
             String::new()
         };
-        let all = parsed_tests(path, &source, &[(1, usize::MAX)], false)?;
         let stem = Path::new(path)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -128,6 +127,13 @@ pub(crate) fn changed_tests(
         let test_file = stem.ends_with(".test")
             || stem.ends_with(".spec")
             || path.split('/').any(|part| part == "__tests__");
+        let all = match parsed_tests(path, &source, &[(1, usize::MAX)], false) {
+            Ok(all) => all,
+            // GH #2054: a source file the parser cannot read declares no
+            // tests; only a test file's parse error refuses (cas-6aa9).
+            Err(_) if !test_file => continue,
+            Err(error) => return Err(error),
+        };
         if test_file && all.is_empty() && !source.trim().is_empty() && !diff.is_empty() {
             bail!(
                 "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
@@ -1795,6 +1801,15 @@ mod tests {
         std::fs::write(repo.path().join(file), source("expect(3).toBe(3);")).unwrap();
         git(&["commit", "--quiet", "-am", "repaired"]);
         let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
+
+        // GH #2054: an unparseable source file in the delivery holds no tests.
+        let service = "comment-analytics.service.ts";
+        std::fs::write(repo.path().join(service), "export const total = ;\n").unwrap();
+        std::fs::write(repo.path().join(file), source("expect(4).toBe(4);")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "service"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[service.to_string(), file.to_string()]).unwrap();
         assert_eq!(tests, [id(file, "auth signs out")]);
     }
 

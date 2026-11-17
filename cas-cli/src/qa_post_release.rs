@@ -1152,9 +1152,16 @@ fn batch_offer_evidence(root: &Path, task: &Task) -> Result<Option<(String, Stri
 /// ownership and outstanding evidence. Unknown state holds rather than routes.
 pub(crate) fn batch_notice_deliverable(root: &Path, queue: &dyn cas_store::PromptQueueStore, row: &cas_store::QueuedPrompt) -> Result<bool> {
     if row.origin != Some(cas_store::QueueOrigin::Daemon) { return Ok(true); }
-    let Some(source_id) = row.source.strip_prefix("supervisor-notice:")
-        .or_else(|| row.source.strip_prefix("lifecycle-wake:worker-attention:"))
-    else { return Ok(true); };
+    let source_id = if let Some(id) = row.source.strip_prefix("supervisor-notice:") {
+        id
+    } else if let Some(id) = row.source.strip_prefix("lifecycle-wake:worker-attention:") {
+        // Other attention kinds own their wake policy and may have no close
+        // outbox record. Never make their delivery depend on this lookup.
+        let close_notice = row.prompt.split_once('>').is_some_and(|(tag, _)|
+            tag.starts_with("<worker-attention ") && tag.contains(" kind=\"progress_close_refused\""));
+        if !close_notice { return Ok(true); }
+        id
+    } else { return Ok(true); };
     let id = source_id.parse::<i64>().ok()
         .context("batch notice identity unavailable")?;
     let notices = crate::store::open_supervisor_queue_store(root)?;

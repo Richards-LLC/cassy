@@ -123,9 +123,21 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
-    // Judge this delivery's immutable delta. A downstream project's inherited
-    // HANDOFF.md is its own document; a deleted checkpoint is already repaired.
-    if changed_paths.iter().any(|path| path == "HANDOFF.md")
+    // Judge the immutable delivery delta as well as caller paths: an earlier
+    // push can introduce a retained checkpoint absent from a later path list.
+    // A project-owned file already present at the base remains inherited.
+    let git = |args: &[&str]| std::process::Command::new("git").args(args)
+        .current_dir(proof_repo).output().ok().filter(|output| output.status.success());
+    let handoff_changed = changed_paths.iter().any(|path| path == "HANDOFF.md") || {
+        let ranges = delivery_ranges.map(<[_]>::to_vec).unwrap_or_else(|| {
+            git(&["merge-base", head, target]).map(|output|
+                vec![(String::from_utf8_lossy(&output.stdout).trim().to_string(), head.to_string())])
+                .unwrap_or_default()
+        });
+        ranges.iter().any(|(base, tip)| git(&["diff", "--name-only", base, tip, "--", "HANDOFF.md"])
+            .is_some_and(|output| !output.stdout.is_empty()))
+    };
+    if handoff_changed
         && std::process::Command::new("git")
         .args(["ls-tree", "--name-only", head, "--", "HANDOFF.md"])
         .current_dir(proof_repo)

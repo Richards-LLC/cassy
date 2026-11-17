@@ -3199,8 +3199,14 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     let request = serde_json::from_value(serde_json::json!({
         "action":"update", "assignee":WORKER, "task_ids":["cas-8488-one"],
     })).unwrap();
-    assert!(f.supervisor.task(Parameters(request)).await.is_err(),
-        "Queue assignment must refuse a shared checkout before accepting a backlog");
+    let shared_branch = git(f.dir.path(), &["branch", "--show-current"]);
+    let accepted = f.supervisor.task(Parameters(request)).await.unwrap();
+    assert!(!accepted.is_error.unwrap_or(false), "{accepted:?}");
+    assert_eq!(git(f.dir.path(), &["branch", "--show-current"]), shared_branch);
+    let queued = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap()
+        .get("queue-session", WORKER).unwrap();
+    assert_eq!(queued.pending, ["cas-8488-one"]);
+    assert_eq!(f.task("cas-8488-one").status, TaskStatus::Open);
     agents.update(&isolated).unwrap();
     let _ = call(&f.supervisor, serde_json::json!({
         "action":"update", "assignee":WORKER,

@@ -595,6 +595,7 @@ impl CasService {
     /// project's tracker and its open tasks. A match gets the evidence
     /// and a +1, and its identity is returned so nothing new is filed. With no
     /// project tracker, or GitHub unreachable, open tasks are still matched.
+    // gate-audit[skip_task]: input The QA delivery under review is never its own match; never an override.
     pub(in crate::mcp::tools::service) fn add_evidence_to_open_match(
         &self,
         fingerprint: &RefusalFingerprint,

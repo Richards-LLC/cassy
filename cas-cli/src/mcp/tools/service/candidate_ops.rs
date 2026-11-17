@@ -88,11 +88,11 @@ impl CasService {
             )));
         }
         if !queue::runner_is_live(cas_root) {
-            return Err(refuse(
+            return Err(refuse(format!(
                 "no factory daemon with a candidate queue is running for this project; \
                  it may predate the queue, so ask the supervisor to run \
                  `cas qa candidate build --task {task} --rev {revision}` directly",
-            ));
+            )));
         }
         if let Some(problem) = queue::sandbox_refusal(cas_root) {
             return Err(refuse(format!(

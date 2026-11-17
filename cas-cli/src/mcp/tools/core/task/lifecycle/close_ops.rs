@@ -38520,6 +38520,29 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         }
     }
 
+    /// GH #1989: path history cannot report a loss when the authored final
+    /// snapshot is byte-identical on the target, even after a dropping merge.
+    #[test]
+    fn byte_identical_target_restoration_is_present_gh1989() {
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        std::fs::write(repo.join("own.ts"), "export const delivered = 1;\n").unwrap();
+        git(repo, &["add", "own.ts"]);
+        git(repo, &["commit", "-qm", "fix(cas-test1): delivered snapshot"]);
+        let anchor = rev_parse_local(repo, "HEAD");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", "-s", "ours", "factory/worker", "-m", "integrate without content"]);
+        std::fs::write(repo.join("own.ts"), "export const delivered = 1;\n").unwrap();
+        git(repo, &["add", "own.ts"]);
+        git(repo, &["commit", "-qm", "chore: restore final snapshot"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        assert_eq!(tree_path_blob(repo, &anchor, "own.ts"), tree_path_blob(repo, "main", "own.ts"));
+        assert!(matches!(run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", repo),
+            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)));
+    }
+
     /// cas-f38ca: byte identity alone never clears a delivery the task itself
     /// reverted; the anchor and target both lack the file, exactly as the
     /// task's base did, so the delivery is still refused (cas-0930).

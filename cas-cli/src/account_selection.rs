@@ -413,7 +413,18 @@ pub(crate) mod tests {
             // cas-c58f: an expired 95% 5h snapshot is only assumed empty.
             let mut assumed_empty = row(provider, "assumed", 6, 30.0, 95.0);
             assumed_empty.windows[0].resets_at = Some(now - chrono::Duration::hours(1));
+            let mut stale_cleared = row(provider, "stale-cleared", 6, 10.0, 0.0);
+            stale_cleared.usage_observed_at = Some(now - chrono::Duration::minutes(10));
+            stale_cleared.windows[0].used_percent = None;
+            stale_cleared.windows[0].resets_at = None;
             for (case, rows, selection, threshold, expected) in [
+                (
+                    "stale cleared window is not observed empty",
+                    vec![stale_cleared, row(provider, "observed", 6, 40.0, 20.0)],
+                    AccountSelection::MostHeadroom,
+                    90,
+                    Some("observed"),
+                ),
                 (
                     "soonest reset",
                     vec![b.clone(), a.clone()],

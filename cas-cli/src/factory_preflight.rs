@@ -2973,14 +2973,9 @@ mod tests {
             "remote",
             "add",
             "origin",
-            "git@example.invalid:org/preflight-boundary.git",
+            "fixture@example.invalid:/org/preflight-boundary.git",
         ]);
         std::fs::create_dir(project.path().join(".cas")).unwrap();
-        std::fs::write(
-            project.path().join(".cas/config.toml"),
-            "[project]\ncanonical_id = \"preflight-boundary\"\n",
-        )
-        .unwrap();
 
         let active = crate::mcp::tools::core::task::repo_context::resolve_path_context(
             project.path(),
@@ -2992,7 +2987,7 @@ mod tests {
             "main",
         )
         .unwrap();
-        assert_eq!(active.repo_selector, "project:preflight-boundary");
+        assert_eq!(active.repo_selector, "remote:example.invalid/org/preflight-boundary");
         assert_eq!(active.repo_selector, configured.repo_selector);
         let resolved = crate::mcp::tools::core::task::repo_context::resolve_repo_context(
             &project.path().join(".cas"),
@@ -3011,7 +3006,7 @@ mod tests {
         let facts = collect_repository_facts(project.path(), &project.path().join(".cas"), &probe);
         assert!(
             matches!(facts, Ok(RepositoryFacts { ref selector, ref target_branch })
-                if selector == "project:preflight-boundary" && target_branch == "main"),
+                if selector == "remote:example.invalid/org/preflight-boundary" && target_branch == "main"),
             "unexpected repository facts: {facts:?}"
         );
     }

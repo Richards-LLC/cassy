@@ -3478,6 +3478,8 @@ mod tests {
 
         let project = tempfile::tempdir().unwrap();
         let worktree = project.path().canonicalize().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .current_dir(&worktree).status().unwrap().success());
 
         for (command, args, backend) in [
             (
@@ -3586,6 +3588,11 @@ mod tests {
             assert!(path.starts_with(worktree.join(".cas")),
                 "{backend} brief must stay inside its ignored worktree .cas directory for external_directory=deny: {}", path.display());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), assignment);
+            let status = std::process::Command::new("git")
+                .args(["status", "--porcelain", "--untracked-files=all"])
+                .current_dir(&worktree).output().unwrap();
+            assert!(status.status.success());
+            assert!(status.stdout.is_empty(), "brief dirtied checkout: {}", String::from_utf8_lossy(&status.stdout));
             drop(pty);
             assert!(!path.exists(), "worker teardown must remove the brief");
         }

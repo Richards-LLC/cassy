@@ -1,0 +1,233 @@
+{
+ "comment": "cas-ac77 shell-guard bypass corpus (r2/r3 reviews plus OS escapes). Each probe tries to create $O, a file outside the sandbox's writable roots; rows marked inside plant a protected file inside the worktree and print *PLANTED*. Env: O, OUT, REL_IN (O relative to ./in), REL_W (O relative to the worktree).",
+ "probes": [
+  {
+   "id": "plain_redirect",
+   "source": "baseline",
+   "script": "echo x > \"$O\""
+  },
+  {
+   "id": "comment_bs",
+   "source": "r3",
+   "script": "echo a # c \\\ntouch \"$O\""
+  },
+  {
+   "id": "dbl_bs_body",
+   "source": "r3",
+   "script": "cat <<EOF >/dev/null\nx\\\\\nEOF\ntouch \"$O\""
+  },
+  {
+   "id": "unquoted_hd_join",
+   "source": "r2 D3a",
+   "script": "cat <<EOF >/dev/null\nx\\\nEOF\ncat <<'Z' >/dev/null\nEOF\ntouch \"$O\"\nZ 2>/dev/null; true"
+  },
+  {
+   "id": "hd_lookalike_comment",
+   "source": "r2 D3b",
+   "script": "echo hi # <<EOF\ntouch \"$O\""
+  },
+  {
+   "id": "hd_lookalike_arith",
+   "source": "r2 D3b",
+   "script": "echo $((1<<2))\ntouch \"$O\""
+  },
+  {
+   "id": "dollar_bracket",
+   "source": "r3",
+   "script": "echo $[1<<2]\ntouch \"$O\"\n2] 2>/dev/null; true"
+  },
+  {
+   "id": "hd_in_comsub",
+   "source": "r3",
+   "script": "cat <<EOF >/dev/null; x=$(echo a\ntouch \"$O\"\nEOF\necho b)\nEOF"
+  },
+  {
+   "id": "extglob_shopt",
+   "source": "r3",
+   "script": "shopt -s extglob\necho @(a<<b) >/dev/null\ntouch \"$O\"\nb) 2>/dev/null; true"
+  },
+  {
+   "id": "extglob_bash_O",
+   "source": "r3",
+   "script": "bash -O extglob -c 'echo @(a<<b) >/dev/null\ntouch \"$O\"\nb) 2>/dev/null; true'"
+  },
+  {
+   "id": "funsub53",
+   "source": "r3",
+   "script": "x=${ touch \"$O\"; }",
+   "min_bash": [
+    5,
+    3
+   ]
+  },
+  {
+   "id": "bash_env",
+   "source": "r3",
+   "script": "BASH_ENV=/dev/stdin bash -c : <<<\"touch $O\""
+  },
+  {
+   "id": "bash_func_export",
+   "source": "r3",
+   "script": "env \"BASH_FUNC_cd%%=() { touch $O; }\" bash -c \"cd .\""
+  },
+  {
+   "id": "fn_shadow_cd",
+   "source": "r3",
+   "script": "mkdir -p in; cd(){ command cd \"$OUT\"; }; cd in; echo x > \"$(basename \"$O\")\""
+  },
+  {
+   "id": "builtin_eval",
+   "source": "r3",
+   "script": "c=\"touch $O\"; builtin eval \"$c\""
+  },
+  {
+   "id": "env_S",
+   "source": "r3",
+   "script": "env -S \"touch $O\""
+  },
+  {
+   "id": "eval_join",
+   "source": "r3",
+   "script": "eval echo a \";\" touch \"$O\""
+  },
+  {
+   "id": "ifs_split",
+   "source": "r3",
+   "script": "IFS=,; f=\"x,$O\"; touch $f"
+  },
+  {
+   "id": "brace_escape",
+   "source": "r3",
+   "script": "mkdir -p in; touch in/{x,$REL_IN}"
+  },
+  {
+   "id": "glob_link",
+   "source": "r3",
+   "script": "mkdir -p in; ln -sf \"$O\" in/l; echo x > in/[l]"
+  },
+  {
+   "id": "devfd_bash",
+   "source": "r3",
+   "script": "bash /dev/fd/3 3<<EOF\ntouch \"$O\"\nEOF"
+  },
+  {
+   "id": "devfd_python",
+   "source": "r3",
+   "script": "python3 /dev/fd/3 3<<PY\nopen(\"$O\",\"w\").write(\"x\")\nPY",
+   "needs": "python3"
+  },
+  {
+   "id": "procsub_bash",
+   "source": "r3",
+   "script": "bash <(echo \"touch $O\")"
+  },
+  {
+   "id": "symlink_stdin",
+   "source": "r3",
+   "script": "ln -sf /dev/stdin s.sh; echo \"touch $O\" | bash s.sh; rm -f s.sh"
+  },
+  {
+   "id": "two_step_script",
+   "source": "r3",
+   "script": "printf \"touch %s\\n\" \"$O\" > step.sh; bash step.sh; rm -f step.sh"
+  },
+  {
+   "id": "nbsp_path",
+   "source": "r2 D3d",
+   "script": "mkdir -p \"a \"; echo x > \"a /../$REL_W\""
+  },
+  {
+   "id": "py_utf7_cookie",
+   "source": "r2 D1",
+   "script": "printf \"# -*- coding: utf-7 -*-\\n#+AAo-open(%s,%s).write(%s)\\n\" \"'$O'\" \"'w'\" \"'x'\" > c7.py; python3 c7.py; rm -f c7.py",
+   "needs": "python3"
+  },
+  {
+   "id": "py_fstring",
+   "source": "r3 D1",
+   "script": "python3 - <<PY\nx = f\"{'\"'}\"; open(\"$O\",\"w\"); z = \"'\"\nPY",
+   "needs": "python3"
+  },
+  {
+   "id": "node_regex",
+   "source": "r3 D1",
+   "script": "node -e \"x = /'/; require('fs').writeFileSync('$O','')\"",
+   "needs": "node"
+  },
+  {
+   "id": "node_private",
+   "source": "r3 D1",
+   "script": "node -e \"class A { #x = require('fs').writeFileSync('$O','') }; new A()\"",
+   "needs": "node"
+  },
+  {
+   "id": "alias_snapshot",
+   "source": "r3 D5",
+   "script": "shopt -s expand_aliases; alias gp=\"touch\"\ngp \"$O\""
+  },
+  {
+   "id": "hardlink_write",
+   "source": "os",
+   "script": "ln \"$OUT/victim\" hl 2>/dev/null && echo pwn >> hl; rm -f hl; grep -q pwn \"$OUT/victim\" && touch \"$O\" 2>/dev/null; grep -q pwn \"$OUT/victim\" && echo VICTIM-MODIFIED"
+  },
+  {
+   "id": "rename_out",
+   "source": "os",
+   "script": "echo x > mv.tmp; mv mv.tmp \"$O\""
+  },
+  {
+   "id": "cp_out",
+   "source": "os",
+   "script": "echo x > cp.tmp; cp cp.tmp \"$O\"; rm -f cp.tmp"
+  },
+  {
+   "id": "perl_write",
+   "source": "os",
+   "script": "perl -e 'open(F,\">\",$ARGV[0]) or die; print F \"x\"' \"$O\"",
+   "needs": "perl"
+  },
+  {
+   "id": "sh_write",
+   "source": "os",
+   "script": "/bin/sh -c 'echo x > \"$1\"' _ \"$O\""
+  },
+  {
+   "id": "zsh_write",
+   "source": "os",
+   "script": "/bin/zsh -c 'echo x > \"$1\"' _ \"$O\"",
+   "needs": "zsh"
+  },
+  {
+   "id": "dd_write",
+   "source": "os",
+   "script": "echo x | dd of=\"$O\" 2>/dev/null"
+  },
+  {
+   "id": "tee_write",
+   "source": "os",
+   "script": "echo x | tee \"$O\" >/dev/null"
+  },
+  {
+   "id": "mkfifo_out",
+   "source": "os",
+   "script": "mkfifo \"$O\""
+  },
+  {
+   "id": "mkdir_out",
+   "source": "os",
+   "script": "mkdir \"$O\""
+  },
+  {
+   "id": "git_hooks_inside",
+   "source": "os",
+   "script": "git init -q gr 2>/dev/null; echo \"touch $O\" > gr/.git/hooks/post-checkout && echo HOOK-PLANTED",
+   "inside": true
+  },
+  {
+   "id": "bashrc_inside",
+   "source": "os",
+   "script": "echo \"touch $O\" >> .bashrc && echo BASHRC-PLANTED",
+   "inside": true
+  }
+ ]
+}

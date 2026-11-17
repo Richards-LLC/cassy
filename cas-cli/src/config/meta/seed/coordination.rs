@@ -135,6 +135,16 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         keywords: &["factory", "claude", "worker", "mcp", "scope", "inherit"],
         use_cases: &["Let Claude workers use additional native MCP servers in this project"],
     });
+    registry.register(ConfigMeta {
+        key: "factory.claude.worker_sandbox", section: "factory",
+        name: "Claude Worker OS Sandbox",
+        description: "shadow (default) runs macOS Claude workers' Bash tool in the OS sandbox with the generated profile, and the text guards it replaces only log would-deny counts. off launches workers without the sandbox and the text guards enforce. Linux, supervisors and MCP are unchanged.",
+        value_type: ConfigType::String, default: "shadow",
+        constraint: Constraint::OneOf(vec!["shadow".into(), "off".into()]),
+        advanced: false, requires_feature: None,
+        keywords: &["factory", "claude", "worker", "sandbox", "seatbelt", "shadow"],
+        use_cases: &["Turn the Claude worker OS sandbox off if it blocks normal work"],
+    });
     // FACTORY SECTION
     // ============================================================
     for (key, name, description) in [

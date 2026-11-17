@@ -91,6 +91,8 @@ pub enum EventType {
     GateOverridden,
     /// A supervisor declared a refusal a false positive
     GateFalsePositive,
+    /// A text guard would have refused, but the OS sandbox enforces it (cas-3751a shadow mode)
+    GateShadowed,
 }
 
 impl fmt::Display for EventType {
@@ -129,6 +131,7 @@ impl fmt::Display for EventType {
             EventType::GateRefused => write!(f, "gate_refused"),
             EventType::GateOverridden => write!(f, "gate_overridden"),
             EventType::GateFalsePositive => write!(f, "gate_false_positive"),
+            EventType::GateShadowed => write!(f, "gate_shadowed"),
         }
     }
 }
@@ -171,6 +174,7 @@ impl FromStr for EventType {
             "gate_refused" => Ok(EventType::GateRefused),
             "gate_overridden" => Ok(EventType::GateOverridden),
             "gate_false_positive" => Ok(EventType::GateFalsePositive),
+            "gate_shadowed" => Ok(EventType::GateShadowed),
             _ => Err(TypeError::Parse(format!("invalid event type: {s}"))),
         }
     }
@@ -314,6 +318,7 @@ impl Event {
             EventType::GateRefused => "⛔",
             EventType::GateOverridden => "⤼",
             EventType::GateFalsePositive => "≠",
+            EventType::GateShadowed => "◌",
         }
     }
 }

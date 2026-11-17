@@ -351,6 +351,7 @@ impl Config {
             "release.claude_account_allowlist" => Some(release.claude_account_allowlist.join(",")),
             "release.auto_cut_max_per_day" => Some(release.auto_cut_max_per_day.to_string()),
             "release.auto_cut_min_interval_hours" => Some(release.auto_cut_min_interval_hours.to_string()),
+            "release.supervisor_lifts_operator_freeze" => Some(release.supervisor_lifts_operator_freeze.to_string()),
             // Notifications section
             "notifications.enabled" => Some(notifications.enabled.to_string()),
             "notifications.on_permission_prompt" => {

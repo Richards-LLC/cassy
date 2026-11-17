@@ -1,0 +1,3 @@
+## Core Concepts
+
+- **Supervisor freeze lift** - the train's live registered supervisor lifts a release freeze with `factory action=train_freeze id=<train> decision=lift reason="<why>"`. The reason is required. The lift records a decision on the train (who, when, why, the tip) and sends the operator a Commander notice. A freeze the operator applied in Commander stays the operator's unless they set the operator-only `release.supervisor_lifts_operator_freeze`; a live supervisor of another factory session is refused. After any lift, auto-cut does not re-freeze the same tip; the next merge re-arms it. Supervisors lift when a Cassy gate blocks the cut or the operator asked for new work in the release.

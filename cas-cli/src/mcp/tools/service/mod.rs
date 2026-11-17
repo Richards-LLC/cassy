@@ -672,7 +672,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\": only Commander operator/publication lifts; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
+        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\"; the train supervisor's decision=lift with a reason is audited and sent to the operator; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
     )]
     pub async fn factory(
         &self,
@@ -1326,7 +1326,7 @@ impl CasService {
                     ])
                 }
                 "train_merge" => Some(&["action", "id", "task_ids", "supervisor_override", "reason"]),
-                "train_freeze" => Some(&["action", "id", "reason"]),
+                "train_freeze" => Some(&["action", "id", "reason", "decision"]),
                 "claim" => Some(&["action", "external_ref", "request_id"]),
                 "claim_status" => Some(&["action", "request_id"]),
                 "release_claim" => Some(&["action", "resource_id", "expected_generation", "request_id"]),
@@ -1435,13 +1435,19 @@ impl CasService {
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))
                 }
 
-                // train_freeze requires reason="release-freeze: <reason>".
-                // Only a published release or the operator's Commander lift
-                // ends it; it is not a supervisor-reversible CI hold.
+                // train_freeze requires reason="release-freeze: <reason>";
+                // decision=lift (cas-444b) is the train supervisor's audited
+                // lift. Neither is a temporary CI hold.
                 "train_freeze" => {
                     let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_freeze requires id=<release-train epic>"))?;
+                    if req.decision.as_deref().is_some_and(|decision| decision != "lift") {
+                        return Err(Self::error(ErrorCode::INVALID_PARAMS, "train_freeze decision must be lift or omitted"));
+                    }
                     let inner = this.inner.clone();
-                    tokio::task::spawn_blocking(move || inner.train_freeze(&train, req.reason.as_deref()))
+                    tokio::task::spawn_blocking(move || match req.decision.as_deref() {
+                        Some("lift") => inner.train_lift(&train, req.reason.as_deref()),
+                        _ => inner.train_freeze(&train, req.reason.as_deref()),
+                    })
                         .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                         .map(Self::success)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))

@@ -33,8 +33,10 @@ fn allow_list(sandbox: &Value) -> Vec<PathBuf> {
 }
 
 /// cas-ac77 incident (9:57 AM ET Nov 17): an allowlisted common `.git`
-/// re-opened `.git/config` and `.git/hooks` inside the sandbox. No generated
-/// write path may contain them, for a linked worktree or a primary checkout.
+/// re-opened `.git/config` and `.git/hooks` inside the sandbox. For a linked
+/// worktree no generated write path contains the shared `.git` paths; for a
+/// primary checkout, whose directory holds `.git`, they are explicitly denied
+/// (a deny outranks an allow).
 #[test]
 fn generated_profile_never_allowlists_the_shared_git_dir() {
     let tmp = tempfile::tempdir().unwrap();
@@ -47,16 +49,26 @@ fn generated_profile_never_allowlists_the_shared_git_dir() {
             cas_root: &tmp.path().join("cas"),
         });
         apply_worktree(&mut sandbox, checkout, Some(&git));
-        for protected in [common.join("config"), common.join("hooks/pre-push"), common.join("refs/heads/main")] {
-            let covering: Vec<_> = allow_list(&sandbox)
-                .into_iter()
-                .filter(|path| protected.starts_with(path))
-                .collect();
-            assert!(covering.is_empty(), "{} is writable through {covering:?}", protected.display());
-        }
-        let deny = &sandbox["filesystem"]["denyWrite"];
-        for protected in [common.join("config"), common.join("hooks")] {
-            assert!(deny.as_array().unwrap().contains(&Value::String(protected.display().to_string())));
+        let allow = allow_list(&sandbox);
+        assert!(!allow.contains(&common), "the shared .git is allowlisted for {}", checkout.display());
+        let deny: Vec<PathBuf> = sandbox["filesystem"]["denyWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| PathBuf::from(path.as_str().unwrap()))
+            .collect();
+        let linked = checkout == &worktree;
+        for (protected, always) in [
+            (common.join("config"), true),
+            (common.join("hooks/pre-push"), true),
+            (common.join("refs/heads/main"), linked),
+        ] {
+            if !always {
+                continue;
+            }
+            let writable = allow.iter().any(|path| protected.starts_with(path))
+                && !deny.iter().any(|path| protected.starts_with(path));
+            assert!(!writable, "{} is writable for {}", protected.display(), checkout.display());
         }
     }
 }

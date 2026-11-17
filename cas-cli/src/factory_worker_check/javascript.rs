@@ -197,8 +197,33 @@ fn declaration(
     source: &str,
     aliases: &BTreeMap<String, String>,
 ) -> Option<(bool, bool)> {
-    let function = node.child_by_field_name("function")?;
-    let name = text(function, source);
+    callee(node.child_by_field_name("function")?, source, aliases)
+}
+
+/// cas-6a3c: `(cond ? describe : describe.skip)(…)` declares a suite when both
+/// branches declare the same kind; jest names its tests with that title.
+fn callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> Option<(bool, bool)> {
+    match function.kind() {
+        "parenthesized_expression" => callee(function.named_child(0)?, source, aliases),
+        "ternary_expression" => {
+            let (suite, supported) = callee(function.child_by_field_name("consequence")?, source, aliases)?;
+            let (other, also) = callee(function.child_by_field_name("alternative")?, source, aliases)?;
+            (suite == other).then_some((suite, supported && also))
+        }
+        _ => named_declaration(text(function, source), aliases),
+    }
+}
+
+/// A conditional callee that names the test API yet resolves to no single kind.
+fn unresolved_callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> bool {
+    matches!(function.kind(), "parenthesized_expression" | "ternary_expression")
+        && callee(function, source, aliases).is_none()
+        && text(function, source)
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .any(|word| matches!(word, "test" | "it" | "describe") || aliases.contains_key(word))
+}
+
+fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(bool, bool)> {
     let parts: Vec<_> = name.split('.').collect();
     let raw_root = name
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
@@ -524,6 +549,15 @@ fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String,
             aliases.insert(text(alias, source).to_string(), name.to_string());
         }
     }
+    // `const suite = cond ? describe : describe.skip;` aliases a conditional callee.
+    if node.kind() == "variable_declarator"
+        && let (Some(name), Some(value)) = (node.child_by_field_name("name"), node.child_by_field_name("value"))
+        && name.kind() == "identifier"
+        && matches!(value.kind(), "parenthesized_expression" | "ternary_expression")
+        && let Some((suite, true)) = callee(value, source, aliases)
+    {
+        aliases.insert(text(name, source).to_string(), if suite { "describe" } else { "test" }.to_string());
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         imported_aliases(child, source, aliases);
@@ -595,6 +629,20 @@ fn walk(
     aliases: &BTreeMap<String, String>,
     tests: &mut Vec<(Identity, String)>,
 ) -> Result<()> {
+    if strict
+        && node.kind() == "call_expression"
+        && (force || overlaps(node, lines))
+        && let Some(function) = node.child_by_field_name("function")
+        && unresolved_callee(function, source, aliases)
+    {
+        bail!(crate::gates::tag(
+            "G-61",
+            format!(
+                "cannot resolve the test callee at {path}:{}: both branches of a conditional must be the same describe/test kind; use them directly",
+                node.start_position().row + 1
+            )
+        ));
+    }
     if node.kind() == "call_expression"
         && let Some((suite, supported)) = declaration(node, source, aliases)
     {
@@ -1584,6 +1632,56 @@ mod tests {
             (proof.runner.as_str(), proof.consecutive_passes),
             ("node", 5)
         );
+    }
+
+    /// pulse-card cas-1bf9d (GH #2036): `(url ? describe : describe.skip)(…)`
+    /// lost its suite title, so the anchored name pattern filtered the changed
+    /// case out and the capped run reported it skipped. A conditional or an
+    /// alias of one keeps the title; a mixed one is refused by name.
+    #[test]
+    fn conditional_describe_keeps_its_title_in_the_capped_identity_cas_6a3c() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let file = "legal.integration.test.mjs";
+        let source = |body: &str, prelude: &str| format!(
+            "import {{ describe, test }} from 'node:test';\nconst url = 'postgresql://127.0.0.1/db';\n{prelude}\n\
+             (url ? describe : describe.skip)('legal', () => {{\n  test('keeps consent', () => {{ {body} }});\n}});\n\
+             suite('aliased', () => {{\n  test('keeps consent', () => {{ {body} }});\n}});\n"
+        );
+        let prelude = "const suite = url ? describe : describe.skip;";
+        std::fs::write(repo.path().join(file), source("throw 0;", prelude)).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(file), source("", prelude)).unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()]).unwrap();
+        assert_eq!(tests, [id(file, "aliased keeps consent"), id(file, "legal keeps consent")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", &tests).unwrap();
+        assert_eq!(proof.consecutive_passes, 5);
+
+        // Branches of different kinds cannot name a runtime identity.
+        std::fs::write(repo.path().join(file), source("", "").replace("describe.skip)", "test)")).unwrap();
+        git(&["commit", "--quiet", "-am", "mixed"]);
+        let mixed = git(&["rev-parse", "HEAD"]);
+        let refusal = changed_tests(repo.path(), &head, &mixed, &[file.to_string()]).unwrap_err().to_string();
+        assert!(refusal.contains("G-61"), "{refusal}");
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid

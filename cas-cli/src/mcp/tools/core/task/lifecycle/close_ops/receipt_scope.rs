@@ -123,9 +123,10 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
-    // Inspect the immutable delivery tree: a retained handoff may be absent
-    // from the latest diff, and the checkout can already have removed it.
-    if std::process::Command::new("git")
+    // Judge this delivery's immutable delta. A downstream project's inherited
+    // HANDOFF.md is its own document; a deleted checkpoint is already repaired.
+    if changed_paths.iter().any(|path| path == "HANDOFF.md")
+        && std::process::Command::new("git")
         .args(["ls-tree", "--name-only", head, "--", "HANDOFF.md"])
         .current_dir(proof_repo)
         .output()

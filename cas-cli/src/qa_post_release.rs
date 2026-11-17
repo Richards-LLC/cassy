@@ -1151,10 +1151,11 @@ fn batch_offer_evidence(root: &Path, task: &Task) -> Result<Option<(String, Stri
 /// hourly overdue notices are obsolete; current offers need both current
 /// ownership and outstanding evidence. Unknown state holds rather than routes.
 pub(crate) fn batch_notice_deliverable(root: &Path, queue: &dyn cas_store::PromptQueueStore, row: &cas_store::QueuedPrompt) -> Result<bool> {
-    if row.origin != Some(cas_store::QueueOrigin::Daemon)
-        || !row.source.starts_with("supervisor-notice:")
-    { return Ok(true); }
-    let id = row.source.strip_prefix("supervisor-notice:").and_then(|id| id.parse::<i64>().ok())
+    if row.origin != Some(cas_store::QueueOrigin::Daemon) { return Ok(true); }
+    let Some(source_id) = row.source.strip_prefix("supervisor-notice:")
+        .or_else(|| row.source.strip_prefix("lifecycle-wake:worker-attention:"))
+    else { return Ok(true); };
+    let id = source_id.parse::<i64>().ok()
         .context("batch notice identity unavailable")?;
     let notices = crate::store::open_supervisor_queue_store(root)?;
     let notice = notices.get(id)?.context("batch notice unavailable")?;
@@ -1180,6 +1181,54 @@ pub(crate) fn batch_notice_deliverable(root: &Path, queue: &dyn cas_store::Promp
         } else {
             false // Pre-upgrade offers have no verifiable task scope.
         }
+    } else if payload["kind"] == "progress_close_refused" {
+        let id = payload["task_id"].as_str().context("close refusal task identity unavailable")?;
+        let tasks = crate::store::open_task_store_local(root)?;
+        let task = tasks.get(id)?;
+        match crate::mcp::tools::core::task::close_refusal::current(tasks.as_ref(), &task)? {
+            Some(refusal) => payload["occurrence"].as_str() == Some(format!("close-gate-held:{id}:{}",
+                crate::mcp::tools::core::task::close_refusal::key(&refusal)).as_str()),
+            None => false,
+        }
+    } else if payload["kind"] == "batch_close_hold" {
+        let tasks = crate::store::open_task_store_local(root)?;
+        let mut context = payload["context"].clone();
+        let mut groups = serde_json::Map::new();
+        let mut total = 0;
+        let mut remaining = Vec::new();
+        if let Some(held) = context["held_by_kind"].as_object() {
+            for (kind, values) in held {
+                let values = values.as_array().context("close hold members unavailable")?;
+                let mut live = Vec::new();
+                for member in values {
+                    total += 1;
+                    let id = member["task_id"].as_str().context("close hold task identity unavailable")?;
+                    if !tasks.get(id)?.is_terminal() {
+                        remaining.push(id.to_string());
+                        live.push(member.clone());
+                    }
+                }
+                if !live.is_empty() { groups.insert(kind.clone(), live.into()); }
+            }
+        }
+        if !remaining.is_empty() && remaining.len() < total {
+            // Retire the old group rather than repeat a closed member as held.
+            // Remaining members keep a fresh, idempotent action notice.
+            let mut detail = String::new();
+            for members in groups.values().filter_map(|value| value.as_array()) {
+                for member in members {
+                    detail.push_str(&format!("- {}: {}\nSupervisor action: {}\n",
+                        member["task_id"].as_str().unwrap_or_default(),
+                        member["reason"].as_str().unwrap_or_default(),
+                        member["next_action"].as_str().unwrap_or_default()));
+                }
+            }
+            context["held_by_kind"] = groups.into();
+            crate::supervisor_notices::enqueue_keyed(root, &crate::supervisor_notices::Recipient {
+                id: notice.supervisor_id.clone(), name: row.target.clone(), session: row.factory_session.clone(),
+            }, "batch_close_hold", &detail, &format!("batch-close-hold-current:{}:{}", notice.id, remaining.join(",")), Some(context))?;
+            false
+        } else { !remaining.is_empty() }
     } else { return Ok(true); };
     if !current {
         // A transported row retains its transport history; skipping its body
@@ -1200,10 +1249,13 @@ pub(crate) fn refresh_batch_notices(root: &Path, queue: &dyn cas_store::PromptQu
     let notices = crate::store::open_supervisor_queue_store(root)?;
     for agent in agents.iter().filter(|agent| agent.role == cas_types::AgentRole::Supervisor && (agent.name == recipient || agent.id == recipient)) {
         for notice in notices.list_pending(&agent.id)? {
-            if notice.event_type != "supervisor_notice" { continue; }
             let payload: serde_json::Value = serde_json::from_str(&notice.payload)?;
-            if payload["kind"] != "qa_batch_overdue" && payload["kind"] != "batch_receipt_offer" { continue; }
-            if let Some(row) = queue.latest_from_source_to_targets(&format!("supervisor-notice:{}", notice.id), &[&agent.name], session)? {
+            let source = match payload["kind"].as_str() {
+                Some("qa_batch_overdue" | "batch_receipt_offer" | "batch_close_hold") => format!("supervisor-notice:{}", notice.id),
+                Some("progress_close_refused") => format!("lifecycle-wake:worker-attention:{}", notice.id),
+                _ => continue,
+            };
+            if let Some(row) = queue.latest_from_source_to_targets(&source, &[&agent.name], session)? {
                 batch_notice_deliverable(root, queue, &row)?;
             }
         }
@@ -1456,10 +1508,12 @@ fn terminal_close_hold_notices_retire_before_transport_gh1813() {
     let mut task = cas_types::Task::new("cas-held".into(), "close held".into());
     let tasks = crate::store::open_task_store_local(&root).unwrap();
     tasks.add(&task).unwrap();
+    let mut other = cas_types::Task::new("cas-still-held".into(), "remaining hold".into());
+    tasks.add(&other).unwrap();
     let reply = crate::mcp::tools::core::task::close_refusal::gate("fixture_gate", "resolve_fixture", "held");
     crate::mcp::tools::core::task::close_refusal::record(&root, &task.id, &Ok(reply)).unwrap();
     crate::supervisor_notices::enqueue_keyed(&root, &crate::supervisor_notices::Recipient::agent(&supervisor),
-        "batch_close_hold", "held", "fixture-hold", Some(serde_json::json!({"held_by_kind": {"fixture_gate": [{"task_id":task.id}]}}))).unwrap();
+        "batch_close_hold", "held", "fixture-hold", Some(serde_json::json!({"held_by_kind": {"fixture_gate": [{"task_id":task.id}, {"task_id":other.id}]}}))).unwrap();
     let queue = crate::store::open_prompt_queue_store(&root).unwrap();
     let rows = queue.peek_all(10).unwrap();
     assert_eq!(rows.len(), 1);
@@ -1470,4 +1524,12 @@ fn terminal_close_hold_notices_retire_before_transport_gh1813() {
         assert!(!batch_notice_deliverable(&root, queue.as_ref(), row).unwrap());
         assert!(queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_some());
     }
+    let remaining = queue.peek_all(10).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].prompt.contains(&other.id));
+    assert!(!remaining[0].prompt.contains(&task.id));
+    assert!(batch_notice_deliverable(&root, queue.as_ref(), &remaining[0]).unwrap());
+    other.status = cas_types::TaskStatus::Closed;
+    tasks.update(&other).unwrap();
+    assert!(!batch_notice_deliverable(&root, queue.as_ref(), &remaining[0]).unwrap());
 }

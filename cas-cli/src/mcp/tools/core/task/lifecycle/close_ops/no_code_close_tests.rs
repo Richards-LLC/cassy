@@ -2565,6 +2565,22 @@ async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
         task.status = TaskStatus::Open;
         task.assignee = None;
         f.put(&task);
+    }
+    // A single-task spawn has no queue yet. Replacing its tail while its
+    // registered process is still booting must first recover that promise.
+    agents.register(&worker).unwrap();
+    call(&f.supervisor, serde_json::json!({
+        "action":"update", "assignee":WORKER, "task_ids":[pending[0]],
+    })).await;
+    let initial_queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap()
+        .get("queue-session", WORKER).unwrap();
+    assert_eq!(initial_queue.current_task.as_deref(), Some(first.id.as_str()));
+    assert_eq!(initial_queue.pending, [pending[0]]);
+    call(&f.supervisor, serde_json::json!({
+        "action":"update", "assignee":WORKER, "task_ids":[],
+    })).await;
+    agents.unregister(&worker.id).unwrap();
+    for id in pending {
         call(&f.supervisor, serde_json::json!({
             "action":"update", "id":id, "assignee":WORKER,
         })).await;

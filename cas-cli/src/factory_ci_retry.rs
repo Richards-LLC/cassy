@@ -313,6 +313,11 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
         landing_notice(root, request, &supervisor)?;
         return Ok(true);
     }
+    // request_changes or a newer park already owns the next action. Retiring
+    // this obsolete intent is not a worker blocker, even after its timeout.
+    if task.status != cas_types::TaskStatus::AwaitingMerge
+        || task.deliverables.factory_branch_anchor.as_deref() != Some(&request.sha)
+    { return Ok(true); }
     if request
         .armed_at
         .is_none_or(|start| chrono::Utc::now() - start >= chrono::Duration::hours(2))
@@ -325,10 +330,7 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
         )?;
         return Ok(true);
     }
-    if task.status != cas_types::TaskStatus::AwaitingMerge
-        || task.deliverables.factory_branch_anchor.as_deref() != Some(&request.sha)
-        || !source_matches(request)?
-    {
+    if !source_matches(request)? {
         notice(
             root,
             request,

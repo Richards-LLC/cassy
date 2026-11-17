@@ -63,8 +63,13 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             dependency_held.insert(task.id.clone());
         }
         // An unreadable receipt is uncertainty, never proof of a stall.
-        if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task).ok()? {
-            refusals.insert(task.id.clone(), refusal);
+        match crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task) {
+            Ok(Some(refusal)) => { refusals.insert(task.id.clone(), refusal); }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "close refusal unreadable; excluding only this task from stall judgement");
+                dependency_held.insert(task.id.clone());
+            }
         }
     }
     // cas-c1fb: historical local assignees do not make a peer's release
@@ -99,6 +104,7 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         // cas-e239: a blocked operator check is not locally actionable.
         // Inspect only the current blocker, never historical operator waits.
         if task.status == TaskStatus::Blocked {
+            if is_held(&task.notes) { return false; }
             use crate::mcp::tools::core::task::block_hold;
             let reason = block_hold::latest_blocker_reason(&task.notes)
                 .or_else(|| block_hold::read(store.as_ref(), &task.id).ok().flatten().map(|hold| hold.reason));
@@ -240,6 +246,8 @@ fn is_held(notes: &str) -> bool {
     for entry in notes.split("\n[") {
         if let Some((_, rest)) = entry.split_once("DECISION") {
             held = rest.trim_start().starts_with("HOLD");
+        } else if entry.contains("🚫 BLOCKER") {
+            held = false;
         }
     }
     held
@@ -502,7 +510,7 @@ mod tests {
 
         // A newer blocker returns responsibility to the factory. Historical
         // operator ownership must not hide this genuine stall.
-        epic.notes.push_str("\n\n[2026-11-06 18:01] ✅ DECISION RESUME\n\n[2026-11-06 18:02] 🚫 BLOCKER owner: worker; release repair has not started; operator check is complete.");
+        epic.notes.push_str("\n\n[2026-11-06 18:01] 🚫 BLOCKER owner: worker; release repair has not started; operator check is complete.");
         tasks.update(&epic).unwrap();
         for minutes in [181, 226, 271, 316] {
             super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));

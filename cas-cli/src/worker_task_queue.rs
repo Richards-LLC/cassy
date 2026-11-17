@@ -64,20 +64,51 @@ async fn wait_for_worker_lock(root: &Path, worker: &Agent, operation: &str) -> R
     }).await.map_err(error)?
 }
 
-/// A queue may switch branches only inside this worker's own checkout.
-pub(crate) fn ensure_owned_queue_checkout(_root: &Path, worker: &Agent, _task_id: Option<&str>) -> Result<(), McpError> {
+/// Validate an isolated checkout, or prepare a safely available shared root.
+pub(crate) fn ensure_owned_queue_checkout(root: &Path, worker: &Agent, task_id: Option<&str>) -> Result<(), McpError> {
     let checkout = worker.metadata.get("clone_path").ok_or_else(|| {
-        error(format!(
-            "Worker {} needs an isolated checkout for task queues; respawn with isolate=true",
-            worker.name
-        ))
+        error(format!("Worker {} needs an isolated checkout for task queues; respawn with isolate=true", worker.name))
     })?;
-    crate::factory_isolation::verify_worker_worktree_binding(
-        &worker.name,
-        Path::new(checkout),
-        None,
-    )
-    .map_err(error)
+    let checkout = Path::new(checkout);
+    let binding = crate::factory_isolation::verify_worker_worktree_binding(&worker.name, checkout, None);
+    if binding.is_ok() { return Ok(()); }
+    let original = binding.unwrap_err().to_string();
+    let refused = || error(&original);
+    // This allowance belongs only to the actual shared project root. A stale
+    // nested directory or another worker's linked worktree stays protected.
+    if checkout.canonicalize().ok() != root.parent().and_then(|path| path.canonicalize().ok())
+        || crate::factory_isolation::worktree_root_at(checkout).and_then(|path| path.canonicalize().ok())
+            != checkout.canonicalize().ok()
+    { return Err(refused()); }
+    // Configuration/selection records queue state; it does not acquire Git.
+    let Some(task_id) = task_id else { return Ok(()); };
+    let tasks = crate::store::open_task_store_local(root).map_err(|_| refused())?;
+    let task = tasks.get(task_id).map_err(|_| refused())?;
+    // The queued-start caller has not loaded the task yet. Read its declared
+    // execution mode here so no-code work preserves the shared checkout.
+    if task.execution_note.as_deref() == Some("no-code") { return Ok(()); }
+    let locks = root.join("locks");
+    std::fs::create_dir_all(&locks).map_err(|_| refused())?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(locks.join("shared-queue-checkout.lock")).map_err(|_| refused())?;
+    lock.try_lock_exclusive().map_err(|_| refused())?;
+    let git = |args: &[&str]| std::process::Command::new("git").current_dir(checkout)
+        .args(args).output().map_err(|_| refused());
+    let status = git(&["status", "--porcelain"])?;
+    if !status.status.success() || !status.stdout.is_empty() { return Err(refused()); }
+    let agents = crate::store::open_agent_store(root).map_err(|_| refused())?;
+    if agents.list_active_leases().map_err(|_| refused())?.iter().any(|lease|
+        lease.agent_id != worker.id && lease.expires_at > chrono::Utc::now())
+        || tasks.list(None).map_err(|_| refused())?.iter().any(|task|
+            !matches!(task.task_type, TaskType::Epic | TaskType::Gate)
+            && matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
+            && ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref()))
+    { return Err(refused()); }
+    let branch = crate::factory_isolation::expected_worker_branch(&worker.name);
+    let exists = git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])?.status.success();
+    let switched = if exists { git(&["switch", &branch])? } else { git(&["switch", "-c", &branch])? };
+    if !switched.status.success() { return Err(refused()); }
+    crate::factory_isolation::verify_worker_worktree_binding(&worker.name, checkout, None).map_err(error)
 }
 
 /// Only this module can construct a start principal on behalf of a worker.
@@ -232,7 +263,7 @@ impl CasCore {
         if task_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             ensure_owned_queue_checkout(&self.cas_root, &worker, None)?;
         }
-        if let Some(ids) = task_ids {
+        if let Some(mut ids) = task_ids {
             if expected.is_some_and(|expected| expected != queue.revision) {
                 return Err(error(
                     "Worker task queue revision changed; inspect it before replacing",
@@ -258,9 +289,20 @@ impl CasCore {
                 source_notices.push_str(&admission.notice);
                 source_admissions.push(admission);
             }
-            // Open work without a live lease is pending, even when an old
-            // execution left it as the durable cursor (cas-6184).
+            // A single-task spawn can still be booting before its durable
+            // queue is created. Initialize its promised head before the tail.
+            if queue.revision == 0 && queue.current_task.is_none()
+                && let Some((_, Some(receipt))) = assignment_worker(&self.cas_root, &worker.name, Some(&worker)).map_err(error)?
+                && !matches!(receipt.state, cas_store::SpawnLifecycleState::Failed | cas_store::SpawnLifecycleState::Stopped)
+                && let Some(id) = receipt.task_id
+                && let Ok(task) = tasks.get(&id)
+                && task.status == TaskStatus::Open
+                && task.assignee.as_deref().is_none_or(|owner| owner == worker.name || owner == worker.id)
+            { queue.current_task = Some(id); }
+            // Only a formerly running Open cursor without a live lease is
+            // stale (cas-6184). An unstarted promised head is still pending.
             if let Some(id) = queue.current_task.as_deref()
+                && queue.current_started
                 && tasks.get(id).map_err(error)?.status == TaskStatus::Open
                 && self.open_agent_store()?.get_lease(id).map_err(error)?
                     .is_none_or(|lease| lease.status != cas_types::LeaseStatus::Active
@@ -292,11 +334,12 @@ impl CasCore {
             }) {
                 queue.current_started = true;
             }
-            if ids.iter().any(|id| Some(id) == queue.current_task.as_ref()) {
+            if queue.current_started && ids.iter().any(|id| Some(id) == queue.current_task.as_ref()) {
                 return Err(error(
                     "The current task is already running; supply only pending task IDs",
                 ));
             }
+            ids.retain(|id| Some(id) != queue.current_task.as_ref());
             queue.pending = ids;
             queues
                 .save(session, &worker.name, &mut queue)

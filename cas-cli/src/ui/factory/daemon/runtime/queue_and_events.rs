@@ -1447,6 +1447,26 @@ pub(crate) fn enqueue_spawn_warning_notice(
     worker_name: &str,
     warning: &str,
 ) -> anyhow::Result<i64> {
+    // A deliberate retirement or an already-rebound promise cannot ask the
+    // supervisor to recover the old launch. Preserve the spawn audit itself.
+    let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
+    if agents.iter().filter(|agent| agent.name == worker_name
+        && agent.factory_session.as_deref() == Some(factory_session))
+        .max_by_key(|agent| agent.registered_at)
+        .is_some_and(|agent| agent.status == cas_types::AgentStatus::Shutdown)
+    { return Ok(None); }
+    if let Some(request_id) = request_id {
+        let spawn = crate::store::open_spawn_queue_store(cas_dir)?
+            .recent_spawn_lifecycle(factory_session, 100)?.into_iter().find(|row| row.id == request_id);
+        if let Some(task_id) = spawn.and_then(|row| row.task_id) {
+            let task = crate::store::open_task_store_local(cas_dir)?.get(&task_id)?;
+            if task.is_terminal() || task.status == cas_types::TaskStatus::AwaitingMerge
+                || (task.status == cas_types::TaskStatus::InProgress
+                    && task.assignee.as_deref().is_some_and(|owner| owner != worker_name
+                        && !agents.iter().any(|agent| agent.name == worker_name && agent.id == owner)))
+            { return Ok(None); }
+        }
+    }
     let queue = open_prompt_queue_store(cas_dir)?;
     let request = request_id
         .map(|id| format!("request {id}"))
@@ -11690,9 +11710,9 @@ impl FactoryDaemon {
                     let queue = open_prompt_queue_store(&root)?;
                     queue.enqueue_idempotent(
                         "director", &supervisor,
-                        &crate::prompt_revalidation::attach_blocker_envelope(&body, &worker, None),
+                        &body,
                         Some(&session), Some(&format!("Worker cleanup still running: {worker}")),
-                        Some(cas_store::NotificationPriority::High), &key,
+                        Some(cas_store::NotificationPriority::Normal), &key,
                         Some(&cas_store::QueueOrigin::Daemon),
                     )?;
                     super::delivery::wake_daemon_after_enqueue(&root);

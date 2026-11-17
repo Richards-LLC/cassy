@@ -744,10 +744,12 @@ pub(crate) fn apply_idle_liveness(
     if prompt.retract_task.is_none() && observation.state != Liveness::WaitingForInput {
         return false;
     }
-    prompt.text = prompt.text.replace(
-        &format!("Worker {worker} is idle while task"),
-        &format!("Worker {worker} has a pending delivery while task"),
-    );
+    if prompt.retract_task.is_some() {
+        prompt.text = prompt.text.replace(
+            &format!("Worker {worker} is idle while task"),
+            &format!("Worker {worker} has a pending delivery while task"),
+        );
+    }
     prompt.text = format!("{}\n{}", observation.detail(), prompt.text);
     true
 }

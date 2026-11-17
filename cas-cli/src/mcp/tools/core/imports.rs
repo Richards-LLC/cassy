@@ -2,7 +2,7 @@ pub(super) use std::borrow::Cow;
 
 pub(super) use rmcp::ErrorData as McpError;
 pub(super) use rmcp::handler::server::wrapper::Parameters;
-pub(super) use rmcp::model::{CallToolResult, Content, ErrorCode};
+pub(super) use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 
 pub(super) use crate::mcp::daemon::{ActivityTracker, EmbeddedDaemon};
 pub(super) use crate::mcp::server::CasCore;

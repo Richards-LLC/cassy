@@ -242,6 +242,24 @@ fn worker_shell_absolute_and_home_credential_reads_are_refused_cas_da9a() {
 }
 
 #[test]
+fn worker_python_file_to_provider_env_is_refused_cas_f3cf() {
+    let (_env, cwd) = role_env("worker");
+    let file = cwd.path().join("fixture-material");
+    let command = format!(r#"python3 - <<'PY'
+import os, subprocess
+from pathlib import Path
+e = os.environ.copy()
+e['NEON_API_KEY'] = Path({file:?}).read_text().strip()
+p = subprocess.run(['neonctl', 'projects', 'list'], env=e, text=True, capture_output=True)
+print(p.stdout)
+PY"#);
+    assert_operator_credential_refusal(
+        handle_pre_tool_use(&bash(&command, cwd.path()), None).unwrap(),
+        &command,
+    );
+}
+
+#[test]
 fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
     let (_env, cwd) = role_env("worker");
     let project = tempfile::tempdir().unwrap();

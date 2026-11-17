@@ -20,7 +20,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::Content;
+use rmcp::model::ContentBlock;
 use rmcp::model::{CallToolResult, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
@@ -261,7 +261,7 @@ impl CasService {
         let Ok(mut ok) = result else {
             return result;
         };
-        ok.content.push(Content::text(format!("\n\n{notice}")));
+        ok.content.push(ContentBlock::text(format!("\n\n{notice}")));
         Ok(ok)
     }
 
@@ -1174,9 +1174,9 @@ impl CasService {
             match outcome {
                 Ok(result) => {
                     crate::telemetry::track_mcp_tool("mcp_proxy", "execute", true);
-                    let mut content = vec![Content::text(result.text)];
+                    let mut content = vec![ContentBlock::text(result.text)];
                     for img in result.images {
-                        content.push(Content::image(img.data, img.mime_type));
+                        content.push(ContentBlock::image(img.data, img.mime_type));
                     }
                     if result.is_error {
                         Ok(CallToolResult::error(content))
@@ -2026,8 +2026,8 @@ mod tests {
         let text = result
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()

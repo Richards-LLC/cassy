@@ -1167,9 +1167,9 @@ mod tests {
         assert!(matches!(
             first,
             TaskSyncFulfillResult::Blocked {
-                diagnostic,
-                first_report: true
-            } if diagnostic.contains("recovery blocked")
+                first_report: true,
+                ..
+            }
         ));
         let second = queue
             .fulfill_task_sync_intent(

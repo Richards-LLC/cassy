@@ -350,7 +350,7 @@ mod rate_limit_tests {
             report
                 .errors
                 .iter()
-                .any(|cause| cause.contains("rate limited"))
+                .any(|cause| cause.contains("(429)"))
         );
         let before_retry = now + Duration::from_secs(10);
         assert!(poller.poll(before_retry).await.is_none());

@@ -777,7 +777,8 @@ mod tests {
             std::fs::create_dir_all(&main).unwrap();
             let environment = LaunchEnvironment { set: Vec::new(), remove: vec![key.into()], ..environment };
             let notices = ensure_account_links_in(cli, &environment, h);
-            assert!(notices[0].contains("is a retired account folder that came back"), "{notices:?}");
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(notices[0].contains(&format!("~/.{}", provider.name())), "{notices:?}");
             assert!(!main.join("skills").exists());
         }
     }
@@ -935,7 +936,7 @@ mod tests {
             if provider == crate::accounts::Provider::Claude {
                 assert!(rows[0].usage.as_ref().unwrap().contains("as of 5:00 AM ET"), "{:?}", rows[0].usage);
             } else {
-                assert!(!rows[0].usage.as_ref().unwrap().contains("as of"));
+                assert!(!rows[0].usage.as_ref().unwrap().contains("5:00 AM ET"), "{:?}", rows[0].usage);
             }
             let mut idle_accounts = accounts.clone();
             idle_accounts[0].windows.remove(0);

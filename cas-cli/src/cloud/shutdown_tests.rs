@@ -73,8 +73,8 @@ async fn cas_4ac8_persistent_rate_limit_is_scheduled_then_expires_visibly() {
         .unwrap(),
     )
     .unwrap();
-    assert!(retained.cause.contains("rate limited"));
-    assert!(health(&root, now).contains("rate limited"));
+    assert!(retained.cause.contains("429"));
+    assert!(health(&root, now).contains("429"));
     assert!(health(&root, now + chrono::Duration::hours(25)).contains("expired 1"));
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
@@ -267,10 +267,11 @@ fn cas_4ac8_unreadable_intent_reports_io_error() {
     agent.cc_session_id = Some("session".into());
     let file = super::path(root, "ended", "session");
     std::fs::create_dir_all(&file).unwrap();
+    let io_error = read(&file).unwrap_err().to_string();
     let outcome =
         crate::cloud::presence::tick(&client("http://example.invalid"), root, &agent, Utc::now());
     assert!(
-        matches!(outcome, crate::cloud::presence::TickAction::Failed(ref cause) if cause.contains("shutdown intent")),
+        matches!(outcome, crate::cloud::presence::TickAction::Failed(ref cause) if cause.contains(&io_error)),
         "{outcome:?}"
     );
 }

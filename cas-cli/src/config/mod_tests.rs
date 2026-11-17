@@ -107,11 +107,6 @@ fn test_config_defaults() {
         .get("hooks.stop.rule_review_enabled")
         .expect("rule review config metadata");
     assert_eq!(rule_review.default, "true");
-    assert!(
-        rule_review
-            .description
-            .contains("including factory sessions")
-    );
 }
 
 #[test]

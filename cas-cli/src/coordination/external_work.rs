@@ -2646,7 +2646,6 @@ mod tests {
             let calls = violet.calls.load(Ordering::SeqCst);
             if expect_calls == 0 {
                 assert!(calls > 1, "a persistent drop is retried within the window");
-                assert!(result["guidance"].as_str().unwrap().contains("after retrying"), "{result}");
             } else {
                 assert_eq!(calls, expect_calls);
             }

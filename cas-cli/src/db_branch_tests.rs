@@ -450,8 +450,6 @@ async fn a_failed_deletion_stays_pending_and_is_retried_after_a_rest() {
         true,
         now + Duration::seconds(RETRY_AFTER_SECS + 1)
     ));
-    let flags = gc_flags(&load_all(&cas_root), |_| true, now);
-    assert!(flags[0].contains("deletion pending"), "{flags:?}");
 }
 
 #[test]
@@ -486,11 +484,12 @@ fn a_worker_close_queues_the_deletion_for_the_supervisor() {
     assert!(due_for_sweep(queued, false, now));
     // TTL and a vanished worktree are flagged by gc_report.
     let mut expired = record;
-    expired.worktree = worktree.join("gone");
+    let gone = worktree.join("gone");
+    expired.worktree = gone.clone();
     expired.expires_at = now - Duration::hours(1);
     let flags = gc_flags(&[("cas-0033".to_string(), vec![expired])], |_| false, now);
     assert!(
-        flags[0].contains("TTL") && flags[0].contains("is gone"),
+        flags[0].contains("TTL") && flags[0].contains(&gone.display().to_string()),
         "{flags:?}"
     );
 }

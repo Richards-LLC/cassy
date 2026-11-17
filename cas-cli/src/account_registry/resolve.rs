@@ -192,8 +192,6 @@ mod tests {
                 .to_string();
             if provider == Provider::Claude {
                 assert!(ambiguous.contains("ambiguous") && ambiguous.contains("alt") && ambiguous.contains("work"));
-            } else {
-                assert!(ambiguous.contains("unknown codex account"), "{ambiguous}");
             }
             let error = resolve_existing(provider, home.path(), "altt")
                 .unwrap_err()

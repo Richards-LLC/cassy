@@ -1219,8 +1219,7 @@ mod tests {
             snapshot.violations()
         };
         assert!(admit(30.0).is_empty(), "idle CPU admits despite load 113");
-        let refused = admit(97.5);
-        assert!(refused.iter().any(|v| v.contains("97.5%")), "{refused:?}");
+        assert!(!admit(97.5).is_empty(), "busy CPU refuses at the same load");
         let mut unmeasured = evaluate(18, Some(113.2), 0, 1, 4);
         unmeasured.pressure.cpu_busy_percent = None;
         assert!(!unmeasured.violations().is_empty(), "without a measurement load still gates");

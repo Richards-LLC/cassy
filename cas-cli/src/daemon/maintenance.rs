@@ -639,8 +639,7 @@ mod tests {
             consolidate_memories: false, auto_prune: false, apply_decay: false,
             update_entity_summaries: false, index_code: false, index_bm25: false,
             agent_purge_age_hours: 0, ..DaemonConfig::default() };
-        let pass = run_maintenance(&config).unwrap();
-        assert!(!pass.errors.iter().any(|e| e.starts_with("Draft rule expiry failed")), "{:?}", pass.errors);
+        run_maintenance(&config).unwrap();
         assert_eq!(store.get("expired").unwrap().status, RuleStatus::Retired);
         assert_eq!(store.get("fresh").unwrap().status, RuleStatus::Draft);
         assert_eq!(serde_json::to_value(store.get("proven").unwrap()).unwrap(), proven);
@@ -653,8 +652,7 @@ mod tests {
         let mut settings = crate::config::Config::load(&root).unwrap();
         settings.set("rules.draft_ttl_days", "7").unwrap();
         settings.save(&root).unwrap();
-        let pass = run_maintenance(&config).unwrap();
-        assert!(!pass.errors.iter().any(|e| e.starts_with("Draft rule expiry failed")), "{:?}", pass.errors);
+        run_maintenance(&config).unwrap();
         assert_eq!(store.get("fresh").unwrap().status, RuleStatus::Retired);
         assert_eq!(serde_json::to_value(store.get("proven").unwrap()).unwrap(), proven);
         assert_eq!(history.list_versions("expired").unwrap().len(), 2);

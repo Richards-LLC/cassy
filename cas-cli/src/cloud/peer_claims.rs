@@ -2191,7 +2191,7 @@ mod tests {
             log.rewind().unwrap();
             let mut text = String::new();
             log.read_to_string(&mut text).unwrap();
-            assert!(text.contains("pending claim releases") && text.contains("lock"), "{text}");
+            assert!(text.contains("WARN") && text.contains("error="), "{text}");
         }
     }
 

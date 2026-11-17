@@ -224,7 +224,9 @@ fn scan_reads_the_default_branch_and_the_task_store() {
     assert_eq!(report.finished_epics[0].epic_id, "cas-e1");
     assert!(report.idle.is_empty());
     let (text, _) = session_start_block(&report).unwrap();
-    assert!(text.contains("delivered then reverted") && text.contains("cas-r1"), "{text}");
+    let reverted: Vec<&str> = report.reverted.iter().map(|f| f.task_id.as_str()).collect();
+    assert_eq!(reverted, vec!["cas-r1"]);
+    assert!(text.contains("cas-r1"), "{text}");
     assert!(!text.contains("task action=close id=cas-r1"), "{text}");
 
     // Later normal delivery restores the receipt. Partial restoration of

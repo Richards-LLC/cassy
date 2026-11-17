@@ -540,10 +540,9 @@ async fn cas_4ac8_presence_names_rate_limiting() {
     })
     .await
     .unwrap();
-    assert!(
-        crate::cloud::presence::render_line(Some(&record), chrono::Utc::now())
-            .contains("rate limited")
-    );
+    assert_eq!(record.state, crate::cloud::presence::PresenceState::Failing);
+    let cause = record.cause.as_deref().unwrap_or_default();
+    assert!(cause.contains("(429)"), "{cause}");
 }
 
 #[tokio::test]

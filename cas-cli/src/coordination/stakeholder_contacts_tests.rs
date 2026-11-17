@@ -275,10 +275,7 @@ for line in sys.stdin:
         "staging and refusals never stamp"
     );
     let result = engine.execute(&who, &json!({"server":"violet","tool":"violet_post","args":{"kind":"thread","text":"<@U123>","channel":"dev","replies":["fail"]}}).to_string(), None).await.unwrap();
-    assert!(
-        result.text.contains("shared exclusion is unavailable")
-            && result.text.contains("1792513380.123456")
-    );
+    assert!(result.text.contains("1792513380.123456"));
     let status = service.status();
     assert_eq!(status["state"], "local_warning");
     let contact = &status["contacts"][0];

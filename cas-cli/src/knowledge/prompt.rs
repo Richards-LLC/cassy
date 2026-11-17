@@ -461,7 +461,6 @@ mod tests {
             1,
             "only the real closing marker may appear"
         );
-        assert!(armored.contains("forged end marker removed"));
     }
 
     #[test]

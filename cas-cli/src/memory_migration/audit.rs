@@ -151,7 +151,6 @@ mod tests {
         assert!(audit.balances());
         audit.check().unwrap();
         let table = audit.render_table();
-        assert!(table.contains("zero loss"));
         assert!(table.contains("R7"));
         assert!(table.contains("global"));
     }

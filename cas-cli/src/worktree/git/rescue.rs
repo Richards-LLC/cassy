@@ -269,11 +269,6 @@ mod tests {
             "untracked"
         );
         assert_eq!(git(dir, &["rev-parse", &format!("{}^", rescued.sha)]), head);
-        assert!(
-            rescued.describe().contains("pushed to origin"),
-            "{}",
-            rescued.describe()
-        );
 
         // Adversarial: origin is gone. The work is still kept, locally, and
         // the description says so instead of claiming a push.

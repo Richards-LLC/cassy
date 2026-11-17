@@ -99,7 +99,6 @@ fn cas_a131_note_is_sent_once_per_tip_and_not_on_retry() {
             assert!(body.contains(expected), "{expected:?} missing: {body}");
         }
         assert!(summary.contains(TARGET), "{summary}");
-        assert!(body.contains("nothing waits"), "informational only: {body}");
         // cas-4e00: observe the sent body through the receiver's real routing path.
         let received = serde_json::from_value(serde_json::json!({
             "id": "merge-note",

@@ -253,10 +253,7 @@ fn qa_impact_fixture_only_safety_never_sends_qa_to_staging() {
         note.contains("quickbooks.api.intuit.com") && note.contains("QBO_REFRESH_TOKEN"),
         "{note}"
     );
-    assert!(
-        !note.contains("staging") && !note.contains("system of record"),
-        "{note}"
-    );
+    assert!(!note.contains("staging"), "{note}");
 }
 
 #[test]

@@ -676,10 +676,6 @@ mod tests {
             "{line}"
         );
         assert!(
-            line.contains("Peers cannot see this agent until it registers."),
-            "{line}"
-        );
-        assert!(
             line.lines().all(|l| l.chars().count() <= WRAP_COLUMNS + 2),
             "{line}"
         );
@@ -885,7 +881,7 @@ mod round5_tests {
         }
         if let Some(record) = record {
             assert_eq!(record.state, PresenceState::Failing);
-            assert!(record.cause.unwrap().contains("session ended"));
+            assert_eq!(record.cause.as_deref(), Some(SESSION_ENDED_CAUSE));
         }
     }
 

@@ -506,9 +506,7 @@ mod tests {
         assert_eq!(
             notices
                 .iter()
-                .filter(|notice| notice
-                    .prompt
-                    .contains("staffing paused for a design review"))
+                .filter(|notice| notice.source == "epic-design-review")
                 .count(),
             1,
             "repeated admission checks must not spam the supervisor"

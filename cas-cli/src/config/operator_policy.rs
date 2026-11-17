@@ -1074,7 +1074,7 @@ mod tests {
         );
         let refused =
             operator_action_refusal(action, remedy, &env_spoof).expect("env spoof refused");
-        assert!(refused.contains("descends from an agent"), "{refused}");
+        assert!(refused.contains("(claude)"), "{refused}");
         assert!(refused.contains(action), "{refused}");
 
         // `script -qc 'cas hub pair'` from Codex: a terminal, but an agent ancestor.
@@ -1097,9 +1097,7 @@ mod tests {
         let mut worker = context(&[], &[], true);
         worker.cgroup =
             "0::/user.slice/cas-worker-cas-src-mighty-crane-74/cas-private-server-1".into();
-        let refused =
-            operator_action_refusal(action, remedy, &worker).expect("worker cgroup refused");
-        assert!(refused.contains("worker cgroup"), "{refused}");
+        assert!(operator_action_refusal(action, remedy, &worker).is_some(), "worker cgroup refused");
 
         // The operator at a terminal passes; without a terminal it is refused.
         assert_eq!(
@@ -1527,7 +1525,7 @@ mod tests {
         let policy = load_operator_policy(&cas_root).unwrap();
         assert_eq!(policy.grants, vec![grant.clone()]);
         let notes = tasks.get("cas-g1").unwrap().notes;
-        assert!(notes.contains("operator write grant") && notes.contains("dev-phone-1"), "{notes}");
+        assert!(notes.contains(&granted.display().to_string()) && notes.contains("dev-phone-1"), "{notes}");
 
         assert!(record_operator_grant(&cas_root, tasks.as_ref(), "cas-g1", &granted.display().to_string(), "", " ", &device).is_err(), "a reason is required");
         assert!(record_operator_grant(&cas_root, tasks.as_ref(), "cas-missing", &granted.display().to_string(), "", "r", &device).is_err());

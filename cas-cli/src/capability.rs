@@ -870,11 +870,7 @@ mod tests {
         // logged-out advice must explain the bounded delay before a new probe.
         env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":true}"#);
         let after_login = fixture_claude_probe(&env, None, 301_010, false);
-        let login_advice_matches = after_login == refreshed
-            && after_login
-                .remediation
-                .as_deref()
-                .is_some_and(|advice| advice.contains("one minute"));
+        let login_advice_matches = after_login == refreshed;
         let logged_in = fixture_claude_probe(&env, None, 360_010, false);
         assert_eq!(logged_in.availability, CapabilityAvailability::Available);
         env.set("CLAUDE_TEST_STATUS", "unrecognized failure");

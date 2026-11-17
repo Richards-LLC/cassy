@@ -53,7 +53,9 @@ async fn source_claim_fixture() -> (
         "origin",
         "https://github.com/richards-llc/cassy.git",
     ]);
-    let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+    let cas_root = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("create project CAS directory");
+    let core = CasCore::with_daemon(cas_root.clone(), None, None);
     let agent = crate::types::Agent::new_with_role(
         "issue-source-test-agent".into(),
         "issue-source-test".into(),
@@ -64,14 +66,14 @@ async fn source_claim_fixture() -> (
         .register(&agent)
         .expect("register source owner");
     core.set_agent_id_for_testing(agent.id.clone());
-    crate::cloud::set_canonical_id_in_config_toml(temp.path(), ISSUE_CLAIM_PROJECT)
+    crate::cloud::set_canonical_id_in_config_toml(&cas_root, ISSUE_CLAIM_PROJECT)
         .expect("pin test project identity");
     crate::cloud::CloudConfig {
         endpoint: server.uri(),
         token: Some("source-claim-test-token".into()),
         ..Default::default()
     }
-    .save_to_cas_dir(temp.path())
+    .save_to_cas_dir(&cas_root)
     .expect("save isolated test cloud config");
 
     let claim_agent = agent.id.clone();

@@ -1,3 +1,5 @@
+## Core Concepts
+
 ### Artifact inventory, retention and candidate fallback
 
 Artifact list reads the named task's synced publication references as well as its local artifact ledger. CLI JSON and MCP structured results carry `task_id`, `state: "partial"` and `artifacts`; the local catalog cannot prove an exhaustive Cloud inventory. Listing does not fetch bytes or mutate task/publication records. Explicit artifact fetch remains the recovery route for a known ID missing from synced notes.

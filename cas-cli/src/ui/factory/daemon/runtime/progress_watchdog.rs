@@ -290,7 +290,6 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
 }
 
 fn report_unwatched(cas_dir: &Path, session: &str) -> anyhow::Result<HashSet<String>> {
-    return Ok(HashSet::new()); // Red control: omit the missing-wake defect report.
     let agents = crate::store::open_agent_store(cas_dir)?;
     let registered = agents.list(None)?;
     let members: HashSet<_> = registered.iter().filter(|agent| agent.factory_session.as_deref() == Some(session))

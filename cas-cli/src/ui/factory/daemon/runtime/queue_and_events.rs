@@ -13958,6 +13958,17 @@ mod tests {
         assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", None,
             &worker.name, "register", false, "boot failed").unwrap().is_none());
         assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+        let spawns = crate::store::open_spawn_queue_store(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-replaced".into(), "replacement active".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("replacement".into());
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        let request = spawns.enqueue_spawn(1, &["never-registered".into()], false, None,
+            Some("factory-session"), Some(&task.id)).unwrap();
+        for stage in ["register", "preassign"] {
+            assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", Some(request),
+                "never-registered", stage, false, "boot failed").unwrap().is_none());
+        }
     }
 
     #[test]

@@ -65,7 +65,7 @@ async fn wait_for_worker_lock(root: &Path, worker: &Agent, operation: &str) -> R
 }
 
 /// A queue may switch branches only inside this worker's own checkout.
-pub(crate) fn ensure_owned_queue_checkout(worker: &Agent) -> Result<(), McpError> {
+pub(crate) fn ensure_owned_queue_checkout(_root: &Path, worker: &Agent, _task_id: Option<&str>) -> Result<(), McpError> {
     let checkout = worker.metadata.get("clone_path").ok_or_else(|| {
         error(format!(
             "Worker {} needs an isolated checkout for task queues; respawn with isolate=true",
@@ -230,7 +230,7 @@ impl CasCore {
         let mut source_admissions = Vec::new();
         let mut checked_sources = std::collections::HashSet::new();
         if task_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
-            ensure_owned_queue_checkout(&worker)?;
+            ensure_owned_queue_checkout(&self.cas_root, &worker, None)?;
         }
         if let Some(ids) = task_ids {
             if expected.is_some_and(|expected| expected != queue.revision) {
@@ -473,7 +473,7 @@ impl CasCore {
         if queue.revision == 0 {
             return Ok(None);
         }
-        ensure_owned_queue_checkout(&worker)?;
+        ensure_owned_queue_checkout(&self.cas_root, &worker, None)?;
         let retrying = queue.starting && queue.dispatch_from.as_deref() == predecessor;
         let tasks = self.open_task_store()?;
         let agents = self.open_agent_store()?;

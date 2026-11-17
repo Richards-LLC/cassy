@@ -3532,3 +3532,41 @@ async fn close_future_frame_stays_under_stack_budget_cas_5dc9e() {
          Box the growing future (crate::async_runtime::heap_future) or move new close-body code into a helper fn; \
          do not raise the thread stack size.");
 }
+
+/// GH2022: queue admission reads the declared task before judging a shared
+/// checkout. A no-code task never acquires or mutates that checkout.
+#[test]
+fn shared_queue_checkout_rebinds_only_executable_work_gh2022() {
+    let mut env = TestEnvGuard::temp_home();
+    for (no_code, dirty, foreign_active) in [(false, false, false), (false, true, false), (false, false, true), (true, true, true)] {
+        let f = fixture(&mut env, "main");
+        let root = f.cas_dir();
+        let checkout = root.join("worktrees").join(WORKER);
+        git(f.dir.path(), &["worktree", "remove", checkout.to_str().unwrap()]);
+        git(f.dir.path(), &["switch", "-c", "factory/retired-worker"]);
+        let agents = open_agent_store(&root).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), f.dir.path().display().to_string());
+        agents.update(&worker).unwrap();
+        let mut task = assigned("cas-shared-queue", TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        task.execution_note = no_code.then(|| "no-code".into());
+        f.put(&task);
+        if foreign_active {
+            let mut other = assigned("cas-other-active", TaskType::Task, "main");
+            other.assignee = Some("another-worker".into());
+            f.put(&other);
+        }
+        if dirty { std::fs::write(f.dir.path().join("operator-draft.txt"), "unsaved\n").unwrap(); }
+        let before = git(f.dir.path(), &["status", "--porcelain"]);
+        let result = crate::worker_task_queue::ensure_owned_queue_checkout(&root, &worker, Some(&task.id));
+        assert_eq!(result.is_ok(), no_code || (!dirty && !foreign_active), "{result:?}");
+        assert_eq!(git(f.dir.path(), &["status", "--porcelain"]), before);
+        if no_code || dirty || foreign_active {
+            assert_eq!(git(f.dir.path(), &["branch", "--show-current"]), "factory/retired-worker");
+        } else {
+            assert_eq!(crate::factory_isolation::classify_worker_binding(&worker.name,
+                crate::factory_isolation::branch_at(f.dir.path()).as_deref()), crate::factory_isolation::WorkerBinding::Own);
+        }
+    }
+}

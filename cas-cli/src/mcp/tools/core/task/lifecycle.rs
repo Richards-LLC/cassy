@@ -2569,7 +2569,7 @@ impl CasCore {
         if queued_start {
             let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
                 crate::gates::tag("G-09", "Queued start requires its registered worker")))?;
-            crate::worker_task_queue::ensure_owned_queue_checkout(worker)?;
+            crate::worker_task_queue::ensure_owned_queue_checkout(&self.cas_root, worker, Some(&req.id))?;
         }
         let task_store = self.open_task_store()?;
 

@@ -77,7 +77,7 @@ describe("work events (cas-ff22)", () => {
     const event = workEventsPage({ request_id: "r", events: [wire("task", 1, { kind: "task", label })], has_earlier: false })!.events[0]!;
     expect(taskChip(event)?.subject).toBe(title);
     expect(taskChip(event)?.tone).toBe("idle");
-    const bare = { ...event, label: `${title} started` };
+    const bare = { ...event, label: "cas-b200 started" };
     expect(taskChip(bare)?.subject).toBe(bare.label);
     const node = document.createElement("div");
     const context = { detail: () => undefined, requestDetail: () => {}, isOpen: () => false, setOpen: () => {} };

@@ -8420,7 +8420,7 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
 //      subagent_type="task-verifier", clears `pending_verification` for the
 //      current agent's jailed tasks. The hook path is exercised end-to-end by
 //      `cas-cli/tests/e2e/hook_e2e/jail_core.rs::test_agent_tool_spawns_task_verifier_and_unjails`
-//      (feature-gated behind `claude_rs_e2e`; see docs/verifier-dispatch-trace.md).
+//      (feature-gated behind `claude_e2e`; see docs/verifier-dispatch-trace.md).
 //      The tests below simulate the post-hook state by clearing
 //      `pending_verification` directly and writing an approved Verification
 //      row, which is what the hook + task-verifier subagent would have done.

@@ -6,7 +6,7 @@ use super::external_work::{
 };
 use crate::config::{Config, StakeholderContactPolicy};
 use cmcp_core::{PreparedProxyCall, ProxyCallEvent, ProxyCallInterceptor, ProxyCaller};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -220,7 +220,7 @@ impl StakeholderContacts {
             }
         } else if response["code"] == "completed" && response["post_receipt"]["ok"] == true {
             // A reconciled replay returns its original receipt, never posts twice.
-            prepared.response = Some(CallToolResult::success(vec![Content::text(
+            prepared.response = Some(CallToolResult::success(vec![ContentBlock::text(
                 response["post_receipt"].to_string(),
             )]));
         } else {
@@ -485,7 +485,7 @@ fn local_contacts(policies: &[StakeholderContactPolicy], evidence: &[Value]) -> 
 }
 
 fn refusal(code: &str, message: &str, detail: Value) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(
+    CallToolResult::error(vec![ContentBlock::text(
         json!({"ok":false,
         "error":{"code":code,"message":message,"retryable":false,"detail":detail}})
         .to_string(),

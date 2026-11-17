@@ -60,6 +60,7 @@ pub(crate) mod factory_build_memory;
 pub(crate) mod factory_candidate_queue;
 #[doc(hidden)]
 pub mod factory_ci_retry;
+pub(crate) mod factory_delivery_wake;
 pub(crate) mod factory_worker_check;
 pub(crate) mod factory_capacity_wait;
 pub(crate) mod factory_worker_runs;
@@ -96,6 +97,7 @@ pub mod task_simulators;
 pub mod db_branch;
 pub mod deliverable;
 pub mod hooks;
+pub(crate) mod issue_intake;
 pub mod issue_reconcile;
 pub mod hub;
 pub mod hybrid_search;

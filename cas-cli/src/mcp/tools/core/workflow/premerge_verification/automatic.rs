@@ -224,24 +224,52 @@ fn sandbox_preflight() -> Result<(), String> {
 
 const LAUNCH_ATTEMPTS: u32 = 4;
 const LAUNCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+/// cas-111e: contention waits double from the retry delay up to this cap and
+/// stop after the window, without spending launch attempts.
+const CONTENTION_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+const CONTENTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Waits that clear on their own: another start for the same parent awaiting
+/// SubagentStart, or a busy shared store.
+fn contended(error: &str) -> bool {
+    error.contains("already awaiting SubagentStart")
+        || error.contains("wait budget is spent")
+        || error.contains("verifier_factory_store_busy")
+        || error.contains("database is locked")
+}
 
 /// cas-d824: a failed start is re-attempted here, on the thread that already
 /// owns the request, rather than waiting for an operator to repeat the merge.
-/// Scope and terminal-task refusals are permanent; anything else (a spent
-/// store wait budget, a busy daemon) is retried with a growing delay. Returns
-/// the attempt number that failed last with its error.
+/// Scope and terminal-task refusals are permanent. Contention queues behind
+/// its holder with a doubling delay for up to `window` and spends no attempt
+/// (cas-111e); anything else is retried with a growing delay. Returns the
+/// attempts spent and the true blocker.
 fn request_with_retry(
     attempts: u32,
     delay: std::time::Duration,
+    window: std::time::Duration,
     mut request: impl FnMut() -> Result<(), String>,
 ) -> Result<(), (u32, String)> {
-    let mut attempt = 1;
+    let started = std::time::Instant::now();
+    let (mut attempt, mut waits) = (1, 0u32);
     loop {
         match request() {
             Ok(()) => return Ok(()),
             Err(error) => {
                 let permanent = error.contains("verifier_factory_scope")
                     || error.contains("verifier_factory_task_terminal");
+                if !permanent && contended(&error) {
+                    let pause = delay.saturating_mul(1 << waits.min(16)).min(CONTENTION_BACKOFF_CAP);
+                    if started.elapsed() + pause >= window {
+                        return Err((attempt, format!(
+                            "{error}; still contended after {} s and {} waits",
+                            started.elapsed().as_secs(), waits + 1,
+                        )));
+                    }
+                    std::thread::sleep(pause);
+                    waits += 1;
+                    continue;
+                }
                 if permanent || attempt >= attempts {
                     return Err((attempt, error));
                 }
@@ -306,6 +334,7 @@ pub(super) fn launch(
                 if let Err((attempts, error)) = request_with_retry(
                     LAUNCH_ATTEMPTS,
                     LAUNCH_RETRY_DELAY,
+                    CONTENTION_WINDOW,
                     || super::factory_launch::request(&session, &dispatch.id),
                 ) {
                     let _ = attention(&worker, &dispatch, &format!(
@@ -375,17 +404,13 @@ fn launch_with_preparation(
         .get(&live.owner_agent_id)
         .map_err(|e| e.to_string())?
         .factory_session;
-    cas_store::issue_server_verifier_handoff(
+    // One transaction: a bind lost to contention must not strand a pending
+    // handoff that refuses every later start for this owner (cas-111e).
+    cas_store::issue_and_bind_server_verifier_handoff(
         &core.cas_root,
         &task.id,
         &live.id,
-        &live.owner_agent_id,
         &format!("daemon:{}", live.id),
-    )
-    .map_err(|e| e.to_string())?;
-    cas_store::bind_server_verifier_handoff_and_register_child(
-        &core.cas_root,
-        &live.owner_agent_id,
         &child,
     )
     .map_err(|e| e.to_string())?;
@@ -852,19 +877,19 @@ mod tests {
     #[test]
     fn failed_launch_is_retried_unless_permanent_cas_d824() {
         let calls = std::cell::Cell::new(0);
-        let transient = request_with_retry(4, std::time::Duration::ZERO, || {
+        let transient = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
             if calls.get() < 3 { Err("verifier_factory_launch: store wait budget spent".into()) } else { Ok(()) }
         });
         assert_eq!((transient, calls.get()), (Ok(()), 3));
         calls.set(0);
-        let permanent = request_with_retry(4, std::time::Duration::ZERO, || {
+        let permanent = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
             Err("verifier_factory_scope: not this session".into())
         });
         assert_eq!((permanent.is_err(), calls.get()), (true, 1));
         calls.set(0);
-        let exhausted = request_with_retry(4, std::time::Duration::ZERO, || {
+        let exhausted = request_with_retry(4, std::time::Duration::ZERO, std::time::Duration::ZERO, || {
             calls.set(calls.get() + 1);
             Err("verifier_factory_launch: busy".into())
         });
@@ -923,6 +948,89 @@ mod tests {
                 .unwrap_or(serde_json::Value::Null);
             assert_eq!(context["qa"]["mode"], serde_json::to_value(mode).unwrap());
         }
+    }
+
+    /// A real store with one live supervisor owner and a pending dispatch per task.
+    fn contention_fixture(tasks: &[&str]) -> (tempfile::TempDir, CasCore, cas_types::Agent, Vec<(Task, VerificationDispatch)>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let dispatches = tasks.iter().map(|id| {
+            let task = Task::new((*id).into(), (*id).into());
+            core.open_task_store().unwrap().add(&task).unwrap();
+            let dispatch = cas_store::create_verification_dispatch_bound(
+                &root, &task.id, &owner.id, &owner.id,
+                &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::minutes(10), false,
+            ).unwrap();
+            (task, dispatch)
+        }).collect();
+        (dir, core, owner, dispatches)
+    }
+
+    /// The daemon launch, stopped right after its claim so no harness runs.
+    fn claim(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<(), String> {
+        let output = core.cas_root.join(format!("{}.json", dispatch.id));
+        let handle = launch_with_preparation(core, task, dispatch, output, |_| Err("stop after claim".into()))?;
+        handle.expect("the dispatch was pending").join().unwrap();
+        Ok(())
+    }
+
+    /// cas-111e (cas-2820, Nov 17 10:44 AM ET): a second dispatch for the same
+    /// supervisor hit "already awaiting SubagentStart" four times in seconds.
+    /// It now waits for the first spawn to bind and then launches.
+    #[test]
+    fn second_dispatch_queues_behind_a_pending_subagent_start_cas_111e() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let (_dir, core, owner, dispatches) = contention_fixture(&["cas-111e-a", "cas-111e-b"]);
+        env.set("CAS_ROOT", &core.cas_root);
+        let [(first_task, first), (task, second)] = dispatches.try_into().unwrap();
+        cas_store::issue_server_verifier_handoff(&core.cas_root, &first_task.id, &first.id, &owner.id, "toolu_first").unwrap();
+        let root = core.cas_root.clone();
+        let parent = owner.id.clone();
+        let binder = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let child = cas_types::Agent::new_sub_agent("task-verifier-first".into(), "task-verifier".into(), parent.clone());
+            cas_store::bind_server_verifier_handoff_and_register_child(&root, &parent, &child).unwrap();
+        });
+        let calls = std::cell::Cell::new(0);
+        let launched = request_with_retry(LAUNCH_ATTEMPTS, std::time::Duration::from_millis(50), std::time::Duration::from_secs(20), || {
+            calls.set(calls.get() + 1);
+            claim(&core, &task, &second)
+        });
+        binder.join().unwrap();
+        assert_eq!(launched, Ok(()));
+        assert!(calls.get() > 1, "the second start waited for the first to bind");
+    }
+
+    /// cas-111e: a busy shared store backs off across passes instead of
+    /// spending every launch attempt inside one contention episode.
+    #[test]
+    fn store_contention_backs_off_without_spending_launch_attempts_cas_111e() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let (_dir, core, _owner, dispatches) = contention_fixture(&["cas-111e-c"]);
+        env.set("CAS_ROOT", &core.cas_root);
+        let [(task, dispatch)] = dispatches.try_into().unwrap();
+        let shared = cas_store::shared_db::shared_connection(&core.cas_root.join("cas.db")).unwrap();
+        let (held, holding) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        });
+        holding.recv().unwrap();
+        let errors = std::cell::RefCell::new(Vec::new());
+        let launched = request_with_retry(LAUNCH_ATTEMPTS, std::time::Duration::from_millis(50), std::time::Duration::from_secs(20), || {
+            let _budget = cas_store::wait_budget::bound_waits_for(std::time::Duration::from_millis(20));
+            claim(&core, &task, &dispatch).inspect_err(|error| errors.borrow_mut().push(error.clone()))
+        });
+        holder.join().unwrap();
+        assert_eq!(launched, Ok(()), "{:?}", errors.borrow());
+        assert!(errors.borrow().len() >= LAUNCH_ATTEMPTS as usize, "contention outlasted the attempt budget: {:?}", errors.borrow());
     }
 
     #[test]
@@ -1033,6 +1141,15 @@ mod tests {
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
         let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // cas-3f0a: the review broker binds the real GUI socket path,
+        // HOME/.cas/factory-<session>.gui.sock (ui/factory/session.rs:252).
+        // Production refuses an over-long one at startup (validate_daemon_start,
+        // session.rs:238); the fixture's HOME under the capped runner's deep
+        // TMPDIR exceeds macOS SUN_LEN, so HOME is a short alias of it.
+        let socket_home = crate::test_paths::short_socket_tempdir();
+        let home_alias = socket_home.path().join("h");
+        std::os::unix::fs::symlink(env.home(), &home_alias).unwrap();
+        env.set("HOME", &home_alias);
         let bin = env.home().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         env.set("CAS_TEST_HUB_PATH", &bin);
@@ -1628,8 +1745,9 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         let (fallback, notice) = command(env.home(), &env.home().join("verdict.json")).unwrap();
         assert!(fallback.get_args().any(|arg| arg == "-p"), "{fallback:?}");
         assert!(
+            // HOME is the short socket alias (cas-3f0a); compare the directories.
             fallback.get_envs().any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
-                && value.is_some_and(|dir| std::path::Path::new(dir) == claude_home)),
+                && value.is_some_and(|dir| std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&claude_home).ok())),
             "{fallback:?}"
         );
         let notice = notice.expect("fallback notice");

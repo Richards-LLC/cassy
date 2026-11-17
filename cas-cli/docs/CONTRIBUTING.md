@@ -552,6 +552,18 @@ omit it to wait for all runs for that full SHA. Local events such as
 `remind_ttl_secs` defaults to 3,600 seconds for time and local-event reminders,
 and 604,800 seconds (7 days) for external events. Explicit `0` means no expiry.
 
+Parked deliveries automatically create task-bound, durable supervisor-owned
+`ci_completed` (full SHA and `CI` workflow) and `branch_contained_in` wakes.
+Merge requests reuse those watches; pending-CI merge retries also arm the CI
+SHA they actually await. No manual reminder is needed for these phases.
+CI completion receipts retain run ID and attempt, so the existing GitHub poll
+can re-arm a rerun on the same SHA, including one completed between polls.
+The dry-run poll only observes re-arming candidates. A missing delivery wake
+raises `DELIVERY_WAKE_MISSING` during the next progress-watchdog cycle and is
+excluded from worker-stall/operator-page timing until its watch is repaired.
+Automatic delivery watches retire when the task closes; manually requested
+cross-session reminders retain their existing explicit opt-in behavior.
+
 Supervisor stall notices use the full `epic_status` delivery containment
 computation. A parked delivery already contained in its target, including a
 rewritten or intentionally evolved delivery, gets an "awaiting worker close"
@@ -1824,9 +1836,11 @@ workers use the shared recommendation. The receipt names the account and reason;
 an explicit directory or requester account wins. `cas claude` / `cas codex`
 and Commander's New-session sheet highlight the recommendation but still ask.
 
-`cas config set --global accounts.selection soonest-reset` (default) chooses the earliest
-weekly reset group, within 24 hours of the earliest eligible reset, then the
-most weekly and 5h headroom. `most-headroom` ignores reset proximity. Set
+`accounts.selection most-headroom` (default) chooses the most headroom on the
+binding window, the fuller of weekly and 5h, with ties broken by the earliest
+reset. `cas config set --global accounts.selection soonest-reset` instead chooses
+the earliest weekly reset group, within 24 hours of the earliest eligible reset,
+then the most weekly and 5h headroom. Set
 `accounts.threshold` (default `90`, range `1..100`) to exclude accounts at or
 above that usage in either window. Disabled, logged-out/stale and unknown or
 stale usage accounts are excluded. No eligible account preserves the existing
@@ -2834,6 +2848,10 @@ explicitly unknown. PID reuse cannot keep an exited run active. These local
 records live under `.cas/worker-runs/`; no migration or authority capability is
 created. Linux and macOS resolve the actual stdout log file, and detached calls
 without a regular log are refused.
+
+TERM, INT or HUP sent to the printed detached PID forwards to its capped
+producer. The wrapper waits for the producer to drain its owned Cargo groups,
+release its leases and record completion before writing the exit trailer.
 
 Before recycling a worker, Cassy sends TERM to each of its registered,
 fingerprinted detached producers and lets the capped runner drain its guard
@@ -5069,8 +5087,8 @@ handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 `factory action=train_freeze id=<train> reason="release-freeze: <reason>"`
 needs a live registered supervisor and a nonempty reason after that explicit
 confirmation prefix. Without it the call refuses before freezing. This is a
-release freeze, not a temporary CI hold: only the operator can lift it in
-Commander, or a published release covering its tip ends it.
+release freeze, not a temporary CI hold: a published release covering its tip,
+the operator's Commander lift or the train supervisor's audited lift ends it.
 Commander's `freeze_train` operation does the same for the operator. Both
 `freeze_train` and `lift_train_freeze` require only a verified pairing's baseline
 `machine:read` scope, without worker-management permissions. Preview pairings
@@ -5092,8 +5110,24 @@ jobs; a failed cancel does not undo the merge
 (`worktree_ops/frozen_train_ci.rs`). Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
-contains the frozen tip), or through the operator-only Commander
-`lift_train_freeze` operation. There is no supervisor lift.
+contains the frozen tip), through the operator's Commander
+`lift_train_freeze` operation, or through the supervisor lift (cas-444b):
+`factory action=train_freeze id=<train> decision=lift reason="<why>"`. The
+caller must be a live registered supervisor, the reason is required
+(`TRAIN_LIFT_REASON_REQUIRED`), and a live supervisor of another factory session
+than the train owner's is refused (`TRAIN_LIFT_NOT_TRAIN_SUPERVISOR`). Freezes
+from auto-cut or a supervisor carry a `release-train-freeze-supervisor-liftable`
+label. A freeze without it is the operator's: a Commander freeze, a freeze from
+before the label existed, or a Cassy freeze the operator froze again (the repeat
+removes the label). A supervisor lift of one is refused
+(`TRAIN_LIFT_OPERATOR_FREEZE`) unless the operator set the operator-only
+`release.supervisor_lifts_operator_freeze`. Both lifts append a
+`RELEASE FREEZE LIFTED: <json>` decision to the train (actor, time, reason, lane
+tip, frozen tip); the supervisor lift also queues a `release_freeze_lifted`
+operator notice. Auto-cut reads that decision and never re-freezes the lifted
+tip (cas-b523); the next merge moves the tip and re-arms it. Lift when a Cassy
+gate blocks the cut on a green frozen tip, or when the operator asked for new
+work in the release; never as a temporary CI hold.
 
 ### Temporary CI merge hold follow-up
 

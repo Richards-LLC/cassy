@@ -90,6 +90,9 @@ pub(crate) struct HostPressure {
     cpu_some_avg10: Option<f64>,
     memory_some_avg10: Option<f64>,
     available_memory_bytes: Option<u64>,
+    /// Measured CPU busy percent over a short window. Hosts without PSI
+    /// (macOS) gate on this instead of the I/O-inflated load average.
+    cpu_busy_percent: Option<f64>,
 }
 
 impl HostPressure {
@@ -126,6 +129,7 @@ impl HostPressure {
             cpu_some_avg10: psi("cpu"),
             memory_some_avg10: psi("memory"),
             available_memory_bytes,
+            cpu_busy_percent: None,
         }
     }
 
@@ -135,8 +139,9 @@ impl HostPressure {
             |bytes| format!("{:.2}GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)),
         );
         format!(
-            "cpu_psi_some_avg10={}%; memory_psi_some_avg10={}%; available_memory={memory}",
+            "cpu_psi_some_avg10={}%; cpu_busy={}%; memory_psi_some_avg10={}%; available_memory={memory}",
             format_load(self.cpu_some_avg10),
+            format_load(self.cpu_busy_percent),
             format_load(self.memory_some_avg10)
         )
     }
@@ -263,6 +268,7 @@ impl BuildGuardSnapshot {
             // Injected proc fixtures must not accidentally sample the host.
             self.load_1m = macos_load_1m();
             self.pressure.available_memory_bytes = macos_available_memory();
+            self.pressure.cpu_busy_percent = macos_cpu_busy_percent();
         }
         self.limits = config.build_guard.effective();
         self
@@ -306,6 +312,15 @@ impl BuildGuardSnapshot {
                 if cpu > self.limits.max_cpu_pressure_percent {
                     violations.push(format!(
                         "CPU PSI some avg10 {cpu:.2}% exceeds {:.2}%",
+                        self.limits.max_cpu_pressure_percent
+                    ));
+                }
+            } else if let Some(busy) = self.pressure.cpu_busy_percent {
+                // cas-234d: macOS load counts threads blocked on I/O
+                // (Spotlight, fseventsd), so measured CPU busy gates instead.
+                if busy > self.limits.max_cpu_pressure_percent {
+                    violations.push(format!(
+                        "CPU busy {busy:.1}% exceeds {:.2}%",
                         self.limits.max_cpu_pressure_percent
                     ));
                 }
@@ -377,6 +392,16 @@ impl BuildGuardSnapshot {
             self.max_concurrent_builders,
             retry,
         )
+    }
+
+    /// The disk reading taken with this snapshot, for notices that outlive
+    /// the refusal that first measured it.
+    pub(crate) fn disk_reading(&self) -> String {
+        match &self.disk {
+            Some(Ok(disk)) => format!("disk_available={:.2}GiB", disk.available_bytes as f64 / 1024_f64.powi(3)),
+            Some(Err(error)) => format!("disk_probe_failed={error}"),
+            None => "disk_available=unknown".to_string(),
+        }
     }
 
     pub(crate) fn receipt_notice(&self, forced: bool) -> String {
@@ -613,6 +638,61 @@ fn macos_load_1m() -> Option<f64> {
     (unsafe { libc::getloadavg(&mut load, 1) } == 1)
         .then_some(load)
         .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+/// Busy percent between two cumulative `[user, system, idle, nice]` tick
+/// samples; `None` when no time elapsed or the counters went backwards.
+#[cfg(any(target_os = "macos", test))]
+fn cpu_busy_from_ticks(before: [u64; 4], after: [u64; 4]) -> Option<f64> {
+    let delta = |index: usize| after[index].checked_sub(before[index]);
+    let (user, system, idle, nice) = (delta(0)?, delta(1)?, delta(2)?, delta(3)?);
+    let total = user + system + idle + nice;
+    (total > 0).then(|| (user + system + nice) as f64 * 100.0 / total as f64)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // libc exposes Mach host statistics, but deprecates mach_task_self.
+fn macos_cpu_ticks() -> Option<[u64; 4]> {
+    unsafe extern "C" {
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
+    }
+    let mut info = std::mem::MaybeUninit::<libc::host_cpu_load_info>::zeroed();
+    let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+    // SAFETY: the zeroed buffer is sized for HOST_CPU_LOAD_INFO and count is
+    // its integer count; the host send right is released before returning.
+    let status = unsafe {
+        let host = libc::mach_host_self();
+        let status = libc::host_statistics(
+            host,
+            libc::HOST_CPU_LOAD_INFO,
+            info.as_mut_ptr().cast(),
+            &mut count,
+        );
+        mach_port_deallocate(libc::mach_task_self(), host);
+        status
+    };
+    if status != libc::KERN_SUCCESS {
+        return None;
+    }
+    // SAFETY: a successful call populated the buffer.
+    let ticks = unsafe { info.assume_init() }.cpu_ticks;
+    let tick = |state: libc::c_int| u64::from(ticks[state as usize]);
+    Some([
+        tick(libc::CPU_STATE_USER),
+        tick(libc::CPU_STATE_SYSTEM),
+        tick(libc::CPU_STATE_IDLE),
+        tick(libc::CPU_STATE_NICE),
+    ])
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cpu_busy_percent() -> Option<f64> {
+    let before = macos_cpu_ticks()?;
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    cpu_busy_from_ticks(before, macos_cpu_ticks()?)
 }
 
 #[cfg(target_os = "macos")]
@@ -1124,6 +1204,37 @@ mod tests {
         assert!(!snapshot.violations().is_empty());
         let refusal = snapshot.refusal_message();
         assert!(refusal.contains("expected_build=yes"), "{refusal}");
+    }
+
+    #[test]
+    fn cas_234d_macos_gates_on_measured_cpu_busy_not_io_inflated_load() {
+        // Prowl, Nov 14: load 113 on 18 cores, 1 rustc, 21% idle. Ticks are
+        // [user, system, idle, nice] deltas between two samples.
+        let busy = |ticks: [u64; 4]| cpu_busy_from_ticks([0; 4], ticks);
+        assert_eq!(busy([40, 38, 21, 1]), Some(79.0));
+        assert_eq!(busy([0; 4]), None);
+        let admit = |busy: f64| {
+            let mut snapshot = evaluate(18, Some(113.2), 0, 1, 4);
+            snapshot.pressure.cpu_busy_percent = Some(busy);
+            snapshot.violations()
+        };
+        assert!(admit(30.0).is_empty(), "idle CPU admits despite load 113");
+        let refused = admit(97.5);
+        assert!(refused.iter().any(|v| v.contains("97.5%")), "{refused:?}");
+        let mut unmeasured = evaluate(18, Some(113.2), 0, 1, 4);
+        unmeasured.pressure.cpu_busy_percent = None;
+        assert!(!unmeasured.violations().is_empty(), "without a measurement load still gates");
+        // A stale cause never stands in for the live disk reading.
+        let mut snapshot = evaluate(18, Some(1.0), 0, 1, 4);
+        snapshot.disk = Some(Ok(FilesystemCapacity {
+            total_bytes: 926 * 1024 * 1024 * 1024,
+            available_bytes: 151 * 1024 * 1024 * 1024,
+            used_percent: 84,
+            high_watermark_percent: 89,
+            low_watermark_percent: 80,
+            pressure: false,
+        }));
+        assert_eq!(snapshot.disk_reading(), "disk_available=151.00GiB");
     }
 
     #[test]

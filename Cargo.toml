@@ -17,6 +17,7 @@ members = [
     "crates/cas-factory",
     "crates/cas-tui-test",
     "crates/cas-mcp-proxy",
+    "crates/cas-claude",
     "crates/ghostty_vt_sys",
     "crates/ghostty_vt",
 ]

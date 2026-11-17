@@ -8,10 +8,9 @@ use crate::cloud::{CloudConfig, TeamRegistration};
 const EPIC_OWNER_TARGET_STALE_SECS: i64 = 300;
 
 fn update_result(task: &Task, message: String) -> CallToolResult {
-    CallToolResult {
-        structured_content: Some(serde_json::json!({"id": task.id, "priority": task.priority.0})),
-        ..CasCore::success(format!("{message}\nPriority: P{}", task.priority.0))
-    }
+    let mut result = CasCore::success(format!("{message}\nPriority: P{}", task.priority.0));
+    result.structured_content = Some(serde_json::json!({"id": task.id, "priority": task.priority.0}));
+    result
 }
 
 // Branch-only retargeting preserves a declared repository, but legacy

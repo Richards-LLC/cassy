@@ -1897,7 +1897,7 @@ mod tests {
         let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()], None).unwrap();
         assert_eq!(tests, [id(file, "aliased keeps consent"), id(file, "legal keeps consent")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", &tests).unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests).unwrap();
         assert_eq!(proof.consecutive_passes, 5);
 
         // Branches of different kinds cannot name a runtime identity.
@@ -2021,7 +2021,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(runner_hint(repo.path(), "api/app-boot.test.cjs"), Some("node --test"));
-        assert_eq!(runner_files(&["node".into(), "--test".into(), "api/app-boot.test.cjs".into()]).map(|(runner, _)| runner), Some("node"));
+        assert_eq!(invocation(&["node".into(), "--test".into(), "api/app-boot.test.cjs".into()]).map(|invocation| invocation.runner), Some("node"));
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
 

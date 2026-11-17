@@ -481,25 +481,43 @@ fn evidence_dir(cas_root: &Path, task: &cas_types::Task) -> anyhow::Result<PathB
         .map_err(anyhow::Error::msg)
 }
 
-/// cas-e571: a build routed from another machine publishes every file in its
-/// task evidence directory through the artifact path at park, then records a
-/// sha256 manifest, so the routing machine's reviewer can materialize it.
-pub(crate) fn publish_routed_evidence(cas_root: &Path, task: &cas_types::Task) -> Result<(), String> {
-    let Some(source) = crate::factory_build_routing::routed_from(task) else { return Ok(()) };
+/// Publish park evidence for a reviewer on either machine. Routed builds keep
+/// their strict manifest; ordinary deliveries use the existing portable artifact
+/// references, without introducing a new review-admission gate (cas-dae1).
+pub(crate) fn publish_routed_evidence(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    proof_repo: &Path,
+) -> Result<(), String> {
+    let source = crate::factory_build_routing::routed_from(task);
     let machine_id = cas_types::Agent::get_or_generate_machine_id();
-    if source == machine_id {
-        return Ok(());
-    }
+    let routed = source.as_deref().is_some_and(|source| source != machine_id);
     let dir = evidence_dir(cas_root, task).map_err(|error| error.to_string())?;
     let fail = |detail: String| format!(
-        "EVIDENCE SYNC FAILED: {detail}. This build was routed from {source}, whose reviewer reads \
-         the task evidence directory under {source}'s artifacts root; this machine's is {}. \
-         Re-run close once Cloud accepts the upload.", dir.display());
-    if !dir.exists() {
-        return Ok(());
+        "EVIDENCE PUBLICATION INCOMPLETE: {detail}. Task {} has local evidence in {}; publish it before a peer reviews the delivery.",
+        task.id, dir.display());
+    let mut paths = if dir.exists() {
+        evidence_files(&dir).map_err(|error| fail(error.to_string()))?
+    } else { Vec::new() };
+    // A close can also cite a capped runner log in the worker checkout.
+    // Publish only evidence locations, never arbitrary source mentions.
+    for (index, segment) in task.deliverables.parked_close_reason.as_deref().unwrap_or_default().split('`').enumerate() {
+        let tokens = if index % 2 == 1 { vec![segment] } else { segment.split_whitespace().collect() };
+        for token in tokens {
+            let token = token.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\''));
+            let token = token.split_once('=').map_or(token, |(_, value)| value);
+            let expanded = crate::qa_evidence::expand_home(token);
+            let path = if expanded.is_absolute() { expanded } else { proof_repo.join(expanded) };
+            if !path.starts_with(proof_repo.join("target"))
+                && !token.contains("/.cas/artifacts/") && !token.starts_with(".cas/artifacts/")
+            { continue; }
+            if path.is_file() && !paths.iter().any(|(_, existing)| *existing == path) {
+                let leaf = path.file_name().and_then(|name| name.to_str()).unwrap_or("proof.log");
+                paths.push((format!("cited/{leaf}"), path));
+            }
+        }
     }
-    let paths = evidence_files(&dir)
-        .map_err(|error| fail(format!("cannot read {}: {error}", dir.display())))?;
+    if paths.is_empty() { return Ok(()); }
     let store = SqliteArtifactStore::open(cas_root).map_err(|error| fail(error.to_string()))?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
@@ -534,6 +552,8 @@ pub(crate) fn publish_routed_evidence(cas_root: &Path, task: &cas_types::Task) -
         };
         files.push(SyncedFile { name, sha256, artifact_id: Some(artifact_id) });
     }
+    if !routed { return Ok(()); }
+    let source = source.unwrap_or_default();
     let manifest = EvidenceSync { machine_id, root: dir.display().to_string(), files };
     let note = format!(
         "[{}] Evidence synced for review on {source}\n{EVIDENCE_SYNC}{}",
@@ -775,18 +795,16 @@ mod tests {
         std::fs::create_dir_all(owner.evidence_dir()).unwrap();
         owner.task.deliverables.parked_close_reason = Some(format!("VERIFIED `{}`", log.display()));
         tokio::task::spawn_blocking(move || {
-            publish_routed_evidence(&owner.root, &owner.task).unwrap();
+            publish_routed_evidence(&owner.root, &owner.task, &owner.repo).unwrap();
             let records = SqliteArtifactStore::open(&owner.root).unwrap().list_for_task(&owner.task.id).unwrap();
             assert_eq!(records.len(), 1);
             validate(&records[0], &owner.task.id).unwrap();
             assert_eq!(records[0].name, "runner.log");
             let task = crate::store::open_task_store(&owner.root).unwrap().get(&owner.task.id).unwrap();
             assert!(from_notes(&task.notes, &records[0].id, &task.id).unwrap().is_some());
-            let sync: EvidenceSync = task.notes.lines().find_map(|line|
-                line.strip_prefix(EVIDENCE_SYNC).and_then(|json| serde_json::from_str(json).ok())).unwrap();
-            assert_eq!(sync.files.len(), 1);
-            assert!(safe_relative(&sync.files[0].name));
-            assert_eq!(sync.files[0].artifact_id.as_deref(), Some(records[0].id.as_str()));
+            // Ordinary evidence uses fetchable references without a strict
+            // routed-build manifest introducing a new admission requirement.
+            assert!(!task.notes.lines().any(|line| line.starts_with(EVIDENCE_SYNC)));
         }).await.unwrap();
     }
 

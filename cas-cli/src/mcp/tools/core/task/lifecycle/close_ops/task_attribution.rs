@@ -1332,6 +1332,14 @@ pub(super) fn final_path_snapshot_proven(
     if imported_baselines.contains(&snapshot) {
         return Some(false);
     }
+    // GH #1989: the current tree is authoritative for an authored final
+    // snapshot. A dropping merge followed by restoration cannot make those
+    // same bytes absent. Imported baselines and self-reverts still fail above.
+    if authored_blobs.contains(&snapshot)
+        && tree_path_blob(repo, measured_target, path)? == snapshot
+    {
+        return Some(true);
+    }
     let mut commits = attributed_content_commits(repo, tip, window, &window.identity, &ranges)?;
     // A recorded sync can regenerate a bundle itself. Credit that new merge
     // output only for a task-authored artifact, never a parent/imported blob.

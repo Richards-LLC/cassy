@@ -9773,12 +9773,24 @@ impl CasCore {
                             ).as_deref(),
                         ));
                     }
-                    // cas-e571: a build routed from another machine ships
-                    // its evidence to that machine's reviewer before parking.
-                    if gate_refusals.is_empty()
-                        && let Err(refusal) = crate::artifacts::proof::publish_routed_evidence(&self.cas_root, &task)
-                    {
-                        gate_refusals.push(refusal);
+                    // Publish ordinary local proof too, without adding a gate.
+                    // Routed builds retain their existing strict publication rule.
+                    let mut publication_warning = String::new();
+                    if gate_refusals.is_empty() {
+                        let mut evidence_task = task.clone();
+                        evidence_task.deliverables.parked_close_reason = req.reason.clone();
+                        if let Err(warning) = crate::artifacts::proof::publish_routed_evidence(
+                            &self.cas_root, &evidence_task,
+                            worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                        ) {
+                            if crate::factory_build_routing::routed_from(&task)
+                                .is_some_and(|source| source != cas_types::Agent::get_or_generate_machine_id())
+                            { gate_refusals.push(warning); }
+                            else {
+                                publication_warning = format!("\nWARNING (non-blocking): {warning}");
+                                let _ = task_store.append_note(&task.id, &warning);
+                            }
+                        }
                     }
                     if !gate_refusals.is_empty() {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
@@ -9880,7 +9892,7 @@ impl CasCore {
                     } else {
                         msg
                     };
-                    let msg = format!("{msg}{impact_warning}");
+                    let msg = format!("{msg}{impact_warning}{publication_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
                         &close_project_root,
@@ -30892,7 +30904,7 @@ mod merge_state_gate_tests {
             if row == "methodology-cleared" {
                 use crate::mcp::CasService;
                 env.set("CAS_AGENT_ROLE", "supervisor");
-                core.task(Parameters(serde_json::from_value(serde_json::json!({
+                CasService::new(core.clone(), None).task(Parameters(serde_json::from_value(serde_json::json!({
                     "action": "update", "id": task.id, "proof_scope_fix": true, "execution_note": "",
                     "reason": "Correct the methodology label on the unchanged merged delivery",
                 })).unwrap())).await.unwrap();

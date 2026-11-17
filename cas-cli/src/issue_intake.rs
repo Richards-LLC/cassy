@@ -3,7 +3,7 @@
 
 const FINGERPRINT_MARKER: &str = "**Fingerprint**: `";
 
-/// Lowercased words with ids, numbers and hashes collapsed to `#` and gate
+/// Lowercased words with paths, ids, numbers and hashes collapsed to `#` and gate
 /// tags removed, so one refusal reads the same in every report.
 fn normalize_refusal(text: &str) -> String {
     let mut words: Vec<String> = Vec::new();
@@ -12,7 +12,11 @@ fn normalize_refusal(text: &str) -> String {
         if word.is_empty() || crate::gates::find(word).is_some() {
             continue;
         }
-        let word = if word.chars().any(|c| c.is_ascii_digit()) || raw.contains('…') {
+        let word = if word.chars().any(|c| c.is_ascii_digit())
+            || raw.contains('…')
+            || raw.contains('/')
+            || std::path::Path::new(word).extension().is_some()
+        {
             "#".to_string()
         } else {
             word.to_lowercase()

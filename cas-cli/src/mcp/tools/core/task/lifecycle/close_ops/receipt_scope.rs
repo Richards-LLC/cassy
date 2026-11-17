@@ -1000,6 +1000,48 @@ mod tests {
         }
     }
 
+    /// cas-769b at 5ddb6860: the delivery edited a test, the target rewrote
+    /// it, and the sync resolved to the target side. Park walked the delivery
+    /// range and still owed that test 5x while the runner, reading the net
+    /// diff, refused to repeat it. Both now read the same net model.
+    #[test]
+    fn superseded_delivery_test_edit_owes_no_stability_cas_e751() {
+        use crate::factory_worker_check::stability::{self, Identity};
+        let repo = changelog_fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        std::fs::write(repo.path().join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
+        std::fs::write(repo.path().join("src/lib.rs"), "mod child;\n").unwrap();
+        // Unchanged padding keeps the added test outside the conflicting hunk.
+        let test = |owned: &str, body: &str|
+            format!("{owned}// one\n// two\n// three\n#[test]\nfn superseded() {{ {body} }}\n");
+        std::fs::write(repo.path().join("src/child.rs"), test("", "")).unwrap();
+        let base = commit_changelog_fixture(repo.path(), "base test");
+        git(&["update-ref", "refs/heads/main", &base]);
+        std::fs::write(repo.path().join("src/child.rs"), test("#[test]\nfn owned() {}\n", "assert!(true);")).unwrap();
+        let delivered = commit_changelog_fixture(repo.path(), "fix(cas-769b): edit and add tests");
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(repo.path().join("src/child.rs"), test("", "assert_eq!(1, 1);")).unwrap();
+        commit_changelog_fixture(repo.path(), "fix(cas-763f): train rewrites the test");
+        git(&["checkout", "-q", "delivery"]);
+        git(&["merge", "-q", "-X", "theirs", "main", "-m", "sync train"]);
+        let head = commit_changelog_fixture(repo.path(), "after sync");
+
+        let paths = vec!["src/child.rs".to_string()];
+        let required = stability::required(repo.path(), &head, "main", &paths,
+            Some(&[(base, delivered)])).unwrap();
+        let owned = Identity::exact("src/child.rs", "child::owned");
+        assert_eq!(required, vec![owned]);
+        let merge_base = std::process::Command::new("git").args(["merge-base", "main", &head])
+            .current_dir(repo.path()).output().unwrap();
+        let runner = stability::rust::net_changed(repo.path(),
+            String::from_utf8_lossy(&merge_base.stdout).trim(), &head).unwrap();
+        assert_eq!(runner.into_iter().map(|test| test.identity).collect::<Vec<_>>(), required);
+    }
+
     fn changelog_fixture() -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {

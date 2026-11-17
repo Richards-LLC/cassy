@@ -109,7 +109,8 @@ pub(crate) fn missing(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Ide
     tests.iter().filter(|test| !covered.contains(*test)).cloned().collect()
 }
 
-/// Tests this delivery changed. Rust keeps its per-range adapter. JavaScript
+/// Tests this delivery changed. Rust keeps its per-range ownership adapter,
+/// intersected with the same surviving net changes the capped runner repeats. JavaScript
 /// reads only the delivered head over the net diff from the scoped proof base
 /// (`merge-base(target, head)`), so reverted edits, target content merged into
 /// the lane and unparseable intermediate commits never count; with delivery
@@ -122,15 +123,17 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     let fallback = [(base.clone(), head.to_owned())];
     let owned = ranges.map(|ranges| delivery_commits(repo, ranges)).transpose()?;
     let ranges = ranges.unwrap_or(&fallback);
-    let live = rust::live(repo, head, paths)?;
+    // Historical ranges establish ownership, not whether a test edit survived.
+    // After integration, keep the attributed base rather than collapsing proof
+    // onto the already-landed tip. Otherwise compare with the current target.
+    let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
+    let live = rust::net_changed(repo, net_base, head)?.into_iter()
+        .map(|test| test.identity).collect::<BTreeSet<_>>();
     let mut required = BTreeSet::new();
     for (from, to) in ranges {
         required.extend(rust::changed(repo, from, to, paths)?.into_iter()
             .map(|test| test.identity).filter(|identity| live.contains(identity)));
     }
-    // After integration, keep the attributed base rather than collapsing proof
-    // onto the already-landed tip. Otherwise compare with the current target.
-    let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
     required.extend(super::javascript::changed_tests(repo, net_base, head, paths, owned.as_ref())?);
     Ok(required.into_iter().collect())
 }
@@ -168,7 +171,9 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
         ["jest", "vitest", "playwright"].map(|runner| command(runner, file)).join(" or "),
     )));
     if rust {
-        commands.push("`cargo nextest run -p <crate> --lib -E 'test(<name>)'`".into());
+        // cas-e751: outside the worker hook the capped runner needs --cas-root.
+        commands.push(format!("`cargo nextest run -p <crate> --lib -E 'test(<name>)'` (the worker hook caps it; elsewhere {})",
+            command("nextest run -p <crate> --lib -E", "'test(<name>)'")));
     }
     commands
 }

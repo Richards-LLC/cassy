@@ -141,7 +141,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
 for (const width of [1280, 390] as const) for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`Project epics ${width} ${colorScheme}`, () => {
     test.use({ viewport: { width, height: width === 1280 ? 800 : 844 }, colorScheme });
-    test(`HUB-J26 project epics in Tasks & progress ${width} ${colorScheme}`, journeyPart, async ({ page, journey }) => {
+    const projectEpics = async ({ page, journey }: { page: import("@playwright/test").Page; journey: Journey }) => {
       const at = new Date(journeyNow()).toISOString();
       const local: FleetWorld = {
         agents: ["builder", "reviewer"].map((name, i) => ({ name, generation: 1, status: "active", current_task: i ? "rail-1" : "train-0", liveness: "executing" })),
@@ -273,6 +273,8 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         expect(await opening.locator(".live-epic-tasks").evaluate(node => getComputedStyle(node).animationName)).toBe("none");
         expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
       });
-    });
+    };
+    // cas-stability-identities: ["Project epics 1280 light HUB-J26 project epics in Tasks & progress 1280 light", "Project epics 1280 dark HUB-J26 project epics in Tasks & progress 1280 dark", "Project epics 390 light HUB-J26 project epics in Tasks & progress 390 light", "Project epics 390 dark HUB-J26 project epics in Tasks & progress 390 dark"]
+    test(`HUB-J26 project epics in Tasks & progress ${width} ${colorScheme}`, journeyPart, projectEpics);
   });
 }

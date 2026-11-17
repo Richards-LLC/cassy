@@ -11,7 +11,7 @@ struct StubNeon {
     fail_delete: bool,
 }
 
-const CONNECTION: &str = "postgresql://owner:s3cret@ep-x.neon.tech/neondb?sslmode=require";
+const CONNECTION: &str = "postgresql://owner:s3cr'et$raw@ep-x.neon.tech/neondb?sslmode=require&channel_binding=require";
 
 impl StubNeon {
     fn with(branches: &[(&str, &str, bool)]) -> Self {
@@ -257,10 +257,16 @@ async fn provision_writes_a_private_git_excluded_env_file_and_records_the_branch
     let env = worktree.join(ENV_FILE);
     assert_eq!(record.env_file, env);
     let body = std::fs::read_to_string(&env).unwrap();
-    assert!(
-        body.contains(&format!("DATABASE_URL={CONNECTION}\n")),
-        "{body}"
-    );
+    // Both dotenv consumers and a sourced shell must use the disposable
+    // branch, including projects whose datasource reads DIRECT_URL.
+    let values = dotenvy::from_read_iter(body.as_bytes())
+        .collect::<Result<std::collections::BTreeMap<_, _>, _>>().unwrap();
+    assert_eq!(values.get("DATABASE_URL").map(String::as_str), Some(CONNECTION));
+    assert_eq!(values.get("DIRECT_URL").map(String::as_str), Some(CONNECTION));
+    let sourced = std::process::Command::new("sh")
+        .args(["-c", ". \"$1\"; test \"$DATABASE_URL\" = \"$2\" && test \"$DIRECT_URL\" = \"$2\"", "sh"])
+        .arg(&env).arg(CONNECTION).status().unwrap();
+    assert!(sourced.success());
     assert!(
         body.contains(&format!("CAS_DB_BRANCH_ID={}\n", record.branch_id)),
         "{body}"

@@ -133,7 +133,11 @@ pub(crate) fn changed_tests(
                 "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
             );
         }
-        let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)?
+        // The unchanged base can hold a construct the parser cannot read; only
+        // the delivered tip must parse (cas-6aa9). No base inventory means
+        // every changed test is new.
+        let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)
+            .unwrap_or_default()
             .into_iter()
             .collect();
         for (identity, body) in parsed_tests(path, &source, &changed_lines(&diff)?, true)? {
@@ -337,24 +341,45 @@ fn source_tree(path: &str, source: &str) -> Result<tree_sitter::Tree> {
         .with_context(|| format!("JavaScript test parse of {path}"))?;
     if let Some(node) = first_parse_error(tree.root_node()) {
         let at = node.start_position();
-        let near: String = source
-            .get(node.start_byte()..node.end_byte())
-            .unwrap_or_default()
-            .split('\n')
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .take(40)
-            .collect();
-        bail!(
-            "cannot resolve changed tests in {path}: JavaScript parse error at {path}:{}:{} ({} `{near}`); rewrite that construct or move it out of the test file",
-            at.row + 1,
-            at.column + 1,
-            if node.is_missing() { "missing token" } else { "unparsed" },
-        );
+        return Err(ParseError {
+            path: path.to_string(),
+            line: at.row + 1,
+            column: at.column + 1,
+            missing: node.is_missing(),
+            near: source
+                .get(node.start_byte()..node.end_byte())
+                .unwrap_or_default()
+                .split('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(40)
+                .collect(),
+        }
+        .into());
     }
     Ok(tree)
 }
+
+/// A file the capped runner cannot parse, located for the person fixing it (cas-6aa9).
+#[derive(Debug)]
+pub(crate) struct ParseError {
+    path: String,
+    line: usize,
+    column: usize,
+    missing: bool,
+    near: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ParseError { path, line, column, near, .. } = self;
+        let kind = if self.missing { "missing token" } else { "unparsed" };
+        write!(f, "cannot resolve changed tests in {path}: JavaScript parse error at {path}:{line}:{column} ({kind} `{near}`); rewrite that construct or move it out of the test file")
+    }
+}
+
+impl std::error::Error for ParseError {}
 
 /// The outermost unparsed or missing node, in source order.
 fn first_parse_error(node: Node<'_>) -> Option<Node<'_>> {
@@ -1761,10 +1786,16 @@ mod tests {
         let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap();
         assert_eq!(tests, [id(file, "auth signs out")]);
 
+        // A broken tip is refused at its location; a broken base is not.
         std::fs::write(repo.path().join(file), source("const value = ;")).unwrap();
         git(&["commit", "--quiet", "-am", "broken"]);
-        let refusal = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap_err().to_string();
-        assert!(refusal.contains("auth.test.ts:5:"), "{refusal}");
+        let refusal = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap_err();
+        let located = refusal.downcast_ref::<ParseError>().expect("a located parse refusal");
+        assert_eq!((located.path.as_str(), located.line), (file, 5));
+        std::fs::write(repo.path().join(file), source("expect(3).toBe(3);")).unwrap();
+        git(&["commit", "--quiet", "-am", "repaired"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid

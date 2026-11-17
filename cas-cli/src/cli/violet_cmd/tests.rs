@@ -1554,3 +1554,39 @@ fn release_report_pdf_upload_without_session_focus_skips_github_cas_9b5b() {
     assert_eq!(hub.calls().len(), 1);
     assert!(!calls.exists(), "unfocused upload must not query GitHub");
 }
+
+#[test]
+fn explicit_managed_reply_fields_reach_violet_cas_e3beb() {
+    let root = "1760616000.123456";
+    let operation = "00007e91-1111-4111-8111-000000007e91";
+    let request = "00000091-2222-4222-8222-000000000091";
+    let intent = json!({"coordination_operation_id":operation,"expected_generation":7});
+    let hub = ScriptedHub::with(vec![json!({"ok":true})]);
+    let argv = ["post", "--channel", "dev", "--reply-to", root, "--text", "update",
+        "--coordination-operation-id", operation, "--expected-generation", "7", "--request-id", request];
+    run_cli_claimed(&argv, &hub, true, &no_gate, Some(intent.clone())).1.unwrap();
+    let calls = hub.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0], ("violet_post".into(), json!({"kind":"message","channel":"dev",
+        "reply_to":root,"text":"update","coordination_operation_id":operation,
+        "expected_generation":7,"request_id":request})));
+    // An explicit stale intent cannot override the journal's current authority.
+    let stale = json!({"coordination_operation_id":operation,"expected_generation":8});
+    let denied = ScriptedHub::default();
+    assert_eq!(run_cli_claimed(&argv, &denied, true, &no_gate, Some(stale)).1.unwrap_err().code,
+        "reply_intent_mismatch");
+    assert_eq!(denied.connects(), 0);
+}
+
+#[test]
+fn reactions_reach_violet_cas_e3beb() {
+    let root = "1760616000.123456";
+    for action in ["add", "remove"] {
+        let hub = ScriptedHub::with(vec![json!({"ok":true,
+            "reaction":{"name":"eyes","action":action,"changed":true}})]);
+        run_cli(&["react", "--channel", "dev", "--message-id", root,
+            "--reaction", "eyes", "--action", action], &hub, true, &no_gate).1.unwrap();
+        assert_eq!(hub.calls(), vec![("violet_post".into(), json!({"kind":"reaction",
+            "channel":"dev","message_id":root,"reaction":"eyes","action":action}))]);
+    }
+}

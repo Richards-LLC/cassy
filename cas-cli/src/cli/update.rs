@@ -43,6 +43,7 @@ mod bindings;
 pub(crate) mod findings;
 mod fixture;
 mod live;
+mod macos_signing;
 mod preview;
 
 /// Wrap the warning's prose without dropping words or adding elision. The

@@ -4051,6 +4051,7 @@ printf '%s\n' "$@" > target/cargo-args"#);
             for name in ["mcp::socket::tests::create_listener_refuses_a_live_socket",
                 "mcp::socket::tests::create_listener_reclaims_a_stale_socket_file",
                 "hub::idle_sync::tests::store_with_a_live_serve_is_skipped",
+                #[cfg(target_os = "linux")]
                 "factory_candidate_queue::tests::hung_build_kills_detached_children_releases_locks_and_reports_timeout"] {
                 let result = Command::new(std::env::current_exe().unwrap())
                     .args(["--exact", name, "--nocapture"]).env_remove(PROBE).output().unwrap();

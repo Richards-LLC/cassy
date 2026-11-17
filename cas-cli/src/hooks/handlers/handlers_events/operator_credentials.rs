@@ -1109,6 +1109,12 @@ fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
     if !source.contains("from pathlib import Path") || !source.contains("write_text") {
         return false;
     }
+    // The allow path is sound only if tree-sitter sees the statements CPython
+    // runs. CPython also ends a line at a bare CR; tree-sitter's comment token
+    // runs to '\n'. Any such control byte keeps the conservative scan.
+    if source.contains(['\r', '\x0c', '\x0b', '\0']) {
+        return false;
+    }
     let mut parser = tree_sitter::Parser::new();
     if parser
         .set_language(&tree_sitter_python::LANGUAGE.into())
@@ -1120,7 +1126,11 @@ fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
         return false;
     };
     let root = tree.root_node();
-    if root.has_error() {
+    fn malformed(node: Node<'_>) -> bool {
+        let mut cursor = node.walk();
+        node.is_error() || node.is_missing() || node.children(&mut cursor).any(malformed)
+    }
+    if root.has_error() || malformed(root) {
         return false;
     }
     let mut imported = false;

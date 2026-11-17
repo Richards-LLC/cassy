@@ -313,6 +313,11 @@ async fn task_create_claims_only_explicit_github_bindings() {
     let mut expected_sources = [explicit_ref, fixes_issue, closes_issue]
         .into_iter()
         .map(|source| crate::cloud::peer_claims::github_source_key(source).unwrap())
+        .chain(
+            title_bindings
+                .iter()
+                .map(|source| crate::cloud::peer_claims::github_source_key(source).unwrap()),
+        )
         .collect::<Vec<_>>();
     expected_sources.sort();
     assert_eq!(source_claims, expected_sources);

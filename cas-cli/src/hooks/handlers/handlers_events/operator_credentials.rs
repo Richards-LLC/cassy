@@ -123,8 +123,8 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
                 return true;
             }
         }
-        if super::pre_tool::shell_heredoc_bodies(&context.command).iter().any(|body| {
-            directories.iter().any(|cwd| script_constructs_store_path(body, cwd))
+        if super::pre_tool::shell_heredoc_bodies_with_quoting(&context.command).iter().any(|(body, literal)| {
+            directories.iter().any(|cwd| script_constructs_store_path(body, cwd, *literal))
         }) { return true; }
     }
     false
@@ -246,7 +246,7 @@ fn statement_references_store(
     is_script_interpreter(&executable)
         && args
             .iter()
-            .any(|arg| script_constructs_store_path(arg, cwd))
+            .any(|arg| script_constructs_store_path(arg, cwd, true))
 }
 
 /// The directory the command runs in after its wrapper prefix: `env -C DIR`
@@ -920,8 +920,10 @@ fn alias_references_store(reference: &str, include_parent: bool) -> bool {
     false
 }
 
-fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
-    if literal_python_source_edit(script, cwd) {
+/// `literal` is false for a heredoc body the shell expands before the
+/// interpreter reads it; only unexpanded text can be judged as source data.
+fn script_constructs_store_path(script: &str, cwd: &Path, literal: bool) -> bool {
+    if literal && literal_python_source_edit(script, cwd) {
         return false;
     }
     static PYTHON_GLOB_OPERAND: std::sync::LazyLock<regex::Regex> =
@@ -1110,9 +1112,15 @@ fn literal_python_source_edit(source: &str, cwd: &Path) -> bool {
         return false;
     }
     // The allow path is sound only if tree-sitter sees the statements CPython
-    // runs. CPython also ends a line at a bare CR; tree-sitter's comment token
-    // runs to '\n'. Any such control byte keeps the conservative scan.
-    if source.contains(['\r', '\x0c', '\x0b', '\0']) {
+    // runs. CPython also ends a line at a bare CR, and a PEP 263 coding cookie
+    // (e.g. utf-7) can decode comment bytes into new lines. Only printable
+    // ASCII, '\n' and '\t' without a cookie read the same to both.
+    if !source.bytes().all(|byte| matches!(byte, b'\n' | b'\t' | b' '..=b'~'))
+        || source.lines().take(2).any(|line| {
+            line.trim_start().starts_with('#')
+                && (line.contains("coding:") || line.contains("coding="))
+        })
+    {
         return false;
     }
     let mut parser = tree_sitter::Parser::new();
@@ -1229,5 +1237,27 @@ mod source_edit_tests {
         );
         assert!(literal_python_source_edit(&edit(""), dir.path()), "control edit is admitted");
         assert!(!literal_python_source_edit(&edit("\n#x\rs = s"), dir.path()));
+    }
+
+    /// cas-5d392: a PEP 263 coding cookie lets CPython decode comment bytes
+    /// into statements tree-sitter never parses.
+    #[test]
+    fn coding_cookie_is_not_a_literal_source_edit_cas_5d392() {
+        let dir = tempfile::tempdir().unwrap();
+        let edit = "from pathlib import Path\np = Path('fixture.rs')\ns = p.read_text()\np.write_text(s.replace('old', 'new'))";
+        assert!(literal_python_source_edit(edit, dir.path()), "control edit is admitted");
+        assert!(!literal_python_source_edit(&format!("# coding: utf-7\n{edit}"), dir.path()));
+    }
+
+    /// cas-5d392: the shell expands an unquoted heredoc body before Python
+    /// reads it, so only a quoted delimiter's body is judged as source data.
+    #[test]
+    fn expanded_heredoc_body_is_not_a_literal_source_edit_cas_5d392() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = |delimiter: &str| format!(
+            "python3 - <<{delimiter}\nfrom pathlib import Path\np = Path('fixture.rs')\ns = p.read_text()\np.write_text(s.replace('old', '~/.config/neonctl/credentials.json'))\nPY"
+        );
+        assert!(!super::shell_references_store(&command("'PY'"), dir.path(), 0), "quoted body is data");
+        assert!(super::shell_references_store(&command("PY"), dir.path(), 0));
     }
 }

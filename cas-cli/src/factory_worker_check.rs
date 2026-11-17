@@ -2361,8 +2361,15 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let mut widened_proof = None;
     let owned_tests = if let Some(test) = &test {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
-        match stability::rust::selected(&repo, &base, &head, test) {
-            Ok(tests) => tests,
+        match stability::rust::selected_inputs(&repo, &base, &head, test) {
+            Ok((tests, uncertain)) => {
+                if uncertain {
+                    let scope = widened::Scope::Crate(test.package.clone());
+                    widened::invalidate(&cas_root, &repo, &head, &scope)?;
+                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
+                }
+                tests
+            },
             Err(error) if error.downcast_ref::<stability::rust::MissingTest>().is_some() => {
                 bail!(crate::gates::tag("G-61", format!("CHANGED_TEST_DISCOVERY_FAILED: {error:#}")));
             }
@@ -2564,7 +2571,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         cargo_args.insert(4, "--lib".into());
     }
     // Native retries must not turn a failing invocation into stability proof.
-    if !owned_tests.is_empty() {
+    if !owned_tests.is_empty() && widened_proof.is_none() {
         cargo_args.extend(["--retries".into(), "0".into()]);
     }
     command

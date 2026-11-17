@@ -127,7 +127,7 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     // After integration, keep the attributed base rather than collapsing proof
     // onto the already-landed tip. Otherwise compare with the current target.
     let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
-    let live = rust::net_changed(repo, net_base, head)?.into_iter()
+    let live = rust::changed(repo, net_base, head, paths)?.into_iter()
         .map(|test| test.identity).collect::<BTreeSet<_>>();
     let mut required = BTreeSet::new();
     for (from, to) in ranges {

@@ -245,7 +245,7 @@ pub fn render_skill(ctx: &RenderContext, target: TemplateTarget) -> String {
 
 fn render_ids_table(projects: &[ProjectSummary]) -> String {
     if projects.is_empty() {
-        return "_No Vercel projects captured. Run `cas integrate vercel refresh --update-ids` to fetch._".to_string();
+        return "_No Vercel projects captured. Add each projectId and teamId to this `vercel-ids` keep block; refresh preserves it._".to_string();
     }
     let mut out = String::new();
     out.push_str("| Project | projectId | teamId |\n");

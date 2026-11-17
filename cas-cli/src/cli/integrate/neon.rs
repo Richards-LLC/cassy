@@ -404,7 +404,7 @@ pub fn parse_describe_project(value: &serde_json::Value) -> Result<NeonProjectDe
                  \n\
                  If this is a freshly-created project, the default database may \
                  not have provisioned yet — wait a few seconds and re-run \
-                 `cas integrate neon refresh --update-ids`. Otherwise pass \
+                 `cas integrate neon init`. Otherwise pass \
                  `InitChoices.database_name = Some(...)` (or open a bug). \
                  \n\
                  Response: {inner}"

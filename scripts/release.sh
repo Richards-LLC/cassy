@@ -471,12 +471,13 @@ publish_branch() {
 }
 
 # GH #2027: a Cassy gate refusing the cut of a green train tip is a release
-# red, so a release-repair task may merge into the frozen train (G-100).
-# Best effort: an older installed CLI cannot record it, and it never changes the refusal.
+# red, so a release-repair task may merge into the frozen train (G-100). The
+# cut's candidate records it: the installed CLI may predate `release refused`.
+# Best effort: a failed record never changes the refusal.
 refuse_cut() {
     if "$train_tracking"; then
-        "$cas_bin" release refused --train "$(jq -r .train_id <<<"$context")" --branch "$branch" \
-            --commit "$cut_start" --gate "$1" >&2 \
+        CAS_ROOT="$release_store_root" "$release_candidate" release refused --train "$(jq -r .train_id <<<"$context")" \
+            --branch "$branch" --commit "$cut_start" --gate "$1" >&2 \
             || say "warning: release red not recorded; a repair merge into a frozen train needs an operator freeze lift"
     fi
     die "$2"

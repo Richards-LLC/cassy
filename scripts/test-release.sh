@@ -86,14 +86,17 @@ case "$1 $2" in
        already_closed:count("already_closed"),not_eligible:count("not_eligible"),by_reason:{},
        review_missing:held("REVIEW_MISSING"),lane_ci_missing:held("LANE_CI_MISSING"),members_by_id:$m}' ;;
   "qa candidate")
-    case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
+    case "$3" in build) ;; path) printf '%s\n' "$(dirname "$0")/cas-candidate" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
-  "release refused") ;;
+  # The installed CLI predates `release refused`; the cut's candidate has it (GH #2027).
+  "release refused")
+    [[ "$(basename "$0")" == cas-candidate ]] || { echo "error: unrecognized subcommand 'refused'" >&2; exit 2; } ;;
   "ledger estimate") echo 'typical 16 min, bad day 31 min; 20 references'; exit "${FAKE_ESTIMATE_EXIT:-0}" ;;
   *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
 esac
 EOF
 chmod +x "$tmp/bin/cas"
+cp "$tmp/bin/cas" "$tmp/bin/cas-candidate"
 export CAS_BIN="$tmp/bin/cas" FAKE_CAS_LOG="$tmp/cas.log"
 # The cut derives the live store root itself (cas-8e1b); never inherit one.
 unset CAS_ROOT
@@ -725,7 +728,9 @@ cut_own_review_missing() {
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review-ci.log" 2>&1 || status=$?
     # GH #2027: the refused green tip is recorded as a release red for G-100.
     [[ "$status" == 1 ]] && grep -q 'LANE_CI_MISSING.*cas-000a, cas-000b' "$tmp/own-review-ci.log" &&
-        grep -qx "release refused --train cas-0001 --branch epic/own-review --commit $start --gate LANE_CI_MISSING" "$FAKE_CAS_LOG" || return 1
+        grep -qx "release refused --train cas-0001 --branch epic/own-review --commit $start --gate LANE_CI_MISSING" "$FAKE_CAS_LOG" &&
+        grep -q '^CAS_ROOT=/[^ ]*/\.cas release refused$' "$FAKE_CAS_LOG" &&
+        ! grep -q 'release red not recorded' "$tmp/own-review-ci.log" || return 1
     status=0
     FAKE_REVIEW_MISSING='["cas-000a","cas-000b","cas-dead"]' FAKE_WOULD_CLOSE=1 \
         run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?

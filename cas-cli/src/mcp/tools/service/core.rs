@@ -388,8 +388,14 @@ impl CasService {
                 req.delivery_mode.as_deref(),
             )
             .await;
-        if tracked_finding_accepted && let Ok(result) = created.as_mut() {
-            crate::gates::append_override_tags(result, &["G-148"]);
+        if tracked_finding_accepted
+            && let Ok(result) = created.as_mut()
+            && result.is_error != Some(true)
+        {
+            result.content.push(rmcp::model::Content::text(crate::gates::override_tag(
+                "G-148",
+                "Accepted a finding an open task already records.",
+            )));
         }
         if created.as_ref().is_ok_and(|result| result.is_error != Some(true))
             && let Some(epic) = finding_epic.as_deref()

@@ -41,25 +41,25 @@ test('symlinked CLI with no inputs fails with a message', async () => {
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-for (const matrix of ['schemes', 'viewports']) {
-  test(`empty ${matrix} cannot produce a passing zero-capture run`, async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'qa-empty-matrix-'));
-    try {
-      const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-        import { runVisualQa } from ${JSON.stringify(new URL('./visual-qa.mjs', import.meta.url).href)};
-        try {
-          const result = await runVisualQa(${JSON.stringify({ urls: [fixture], artifactDir: dir, [matrix]: [] })});
-          process.exitCode = result.exitCode;
-        } catch (error) {
-          console.error(error.message);
-          process.exitCode = 2;
-        }
-      `], { encoding: 'utf8' });
-      assert.equal(child.status, 2, child.stdout + child.stderr);
-      assert.ok(child.stderr.trim());
-    } finally { await rm(dir, { recursive: true, force: true }); }
-  });
-}
+const emptyMatrix = (matrix) => async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qa-empty-matrix-'));
+  try {
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { runVisualQa } from ${JSON.stringify(new URL('./visual-qa.mjs', import.meta.url).href)};
+      try {
+        const result = await runVisualQa(${JSON.stringify({ urls: [fixture], artifactDir: dir, [matrix]: [] })});
+        process.exitCode = result.exitCode;
+      } catch (error) {
+        console.error(error.message);
+        process.exitCode = 2;
+      }
+    `], { encoding: 'utf8' });
+    assert.equal(child.status, 2, child.stdout + child.stderr);
+    assert.ok(child.stderr.trim());
+  } finally { await rm(dir, { recursive: true, force: true }); }
+};
+test('empty schemes cannot produce a passing zero-capture run', emptyMatrix('schemes'));
+test('empty viewports cannot produce a passing zero-capture run', emptyMatrix('viewports'));
 
 test('hub fixture CLI enters its help path through a symlink', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'qa-hub-entrypoint-'));

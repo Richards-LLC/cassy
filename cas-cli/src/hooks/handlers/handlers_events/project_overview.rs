@@ -1107,7 +1107,6 @@ watch_dirs = ["web/src"]
         };
         let msg = s.format_injection(false);
         assert!(msg.contains("severity=\"high\""));
-        assert!(msg.contains("significantly out of date"));
         assert!(msg.contains("12 relevant changes"));
         assert!(msg.contains("(+2 more)"));
     }

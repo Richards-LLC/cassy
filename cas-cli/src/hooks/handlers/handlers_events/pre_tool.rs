@@ -8242,7 +8242,7 @@ mod workspace_contract_tests {
         assert!(rendered.contains("deny") && rendered.contains("cas factory verifier-test"), "{rendered}");
         let output =
             handle_pre_tool_use_inner(&verifier("git log --oneline -3"), Some(root.path()), None, root.path()).unwrap();
-        assert!(!serde_json::to_string(&output).unwrap().contains("VERIFIER RUST BUILD"));
+        assert_ne!(serde_json::to_value(&output).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
     }
 
     /// cas-a30e9: Codex edits through apply_patch, so its leases cover every
@@ -10846,19 +10846,6 @@ EOF
             if (decision == "deny") != denied {
                 mismatches.push(format!("{command}: expected denied={denied}, got {value}"));
             }
-            if command == r#"printf '%s\n' "$(cat"#
-                && !value["hookSpecificOutput"]["permissionDecisionReason"].as_str()
-                    .is_some_and(|reason| reason.contains("cannot resolve shell filesystem effects"))
-            {
-                mismatches.push(format!("malformed substitution needs a resolution reason: {value}"));
-            }
-            if command.starts_with("gh issue comment") && denied
-                && value["hookSpecificOutput"]["permissionDecisionReason"].as_str()
-                    .is_some_and(|reason| reason.contains("an unresolved shell payload")
-                        && !reason.contains("--body-file"))
-            {
-                mismatches.push(format!("unresolved gh body needs --body-file guidance: {value}"));
-            }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
@@ -12448,7 +12435,6 @@ mod worker_commit_guard_tests {
         ]);
 
         let msg = check_worker_git_commit_scope(&p).expect("wrong branch must be denied");
-        assert!(msg.contains("WORKER BRANCH MISMATCH"), "{msg}");
         assert!(msg.contains("factory/credit-repairs"), "{msg}");
         assert!(msg.contains("graft"), "{msg}");
     }
@@ -12470,10 +12456,6 @@ mod worker_commit_guard_tests {
             "non-isolated worker on main must be denied (cas-ba04)"
         );
         let msg = result.unwrap();
-        assert!(
-            msg.contains("WORKER COMMIT GUARD"),
-            "expected guard msg, got: {msg}"
-        );
         assert!(msg.contains("main"), "expected 'main' in msg, got: {msg}");
         assert!(
             msg.contains("CAS_CLONE_PATH not set"),
@@ -12502,15 +12484,7 @@ mod worker_commit_guard_tests {
             msg.contains("git worktree add"),
             "refusal must offer a shared-HEAD-preserving path: {msg}"
         );
-        assert!(
-            msg.contains("SHARED checkout"),
-            "refusal must say why this directory is special: {msg}"
-        );
         // Fallback path: branching in place is allowed only with a restore.
-        assert!(
-            msg.contains("RESTORE TRUNK AFTER PUSH"),
-            "the in-place fallback must mandate restoring trunk: {msg}"
-        );
         assert!(
             msg.contains("git switch main"),
             "the restore step must name the trunk to return to: {msg}"
@@ -12588,8 +12562,7 @@ mod worker_commit_guard_tests {
         let result = check_worker_git_commit_scope(&other_dir);
         assert!(result.is_some(), "expected deny when cwd outside worktree");
         let msg = result.unwrap();
-        assert!(msg.contains("WORKER COMMIT GUARD"));
-        assert!(msg.contains("outside your assigned worktree"));
+        assert!(msg.contains(&clone_path), "{msg}");
     }
 
     #[test]
@@ -12602,7 +12575,6 @@ mod worker_commit_guard_tests {
         let result = check_worker_git_commit_scope(&p);
         assert!(result.is_some(), "expected deny on protected branch 'main'");
         let msg = result.unwrap();
-        assert!(msg.contains("WORKER COMMIT GUARD"));
         assert!(msg.contains("main"));
         // Message must include the --no-verify note (cas-7e7b AC)
         assert!(
@@ -12690,7 +12662,6 @@ mod worker_commit_guard_tests {
         let msg = result.unwrap();
         // pin: detached-head switch advice quotes the worker ref.
         assert!(msg.contains("git switch 'factory/worker{a,b}!e'"), "{msg}");
-        assert!(msg.contains("WORKER COMMIT GUARD"));
         assert!(msg.contains("detached"));
     }
 

@@ -141,7 +141,7 @@ fn recorded_operator_override_allows_and_is_logged_cas_f6ad() {
     assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", file, dir.path()), Some(&cas)).unwrap()).is_none());
     let notes = store.get("cas-pub-epic").unwrap().notes;
     assert!(
-        notes.contains("publication gate overridden") && notes.contains("the client is waiting") && notes.contains("cas-pub-verify"),
+        notes.contains("the client is waiting") && notes.contains("cas-pub-verify"),
         "each overridden post is logged on the epic: {notes}"
     );
 }

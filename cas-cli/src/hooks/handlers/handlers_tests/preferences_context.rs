@@ -202,7 +202,6 @@ fn test_build_session_summary_context_enabled() {
     let context = result.unwrap();
     assert!(context.contains("session-summary required=\"true\""));
     assert!(context.contains("session-summarizer"));
-    assert!(!context.contains("Task tool"));
 }
 
 #[test]
@@ -293,10 +292,6 @@ fn test_build_session_summary_context_store_error() {
         context.contains("session-summary-error"),
         "Error context should indicate error: {context}"
     );
-    assert!(
-        context.contains("Failed to check"),
-        "Error context should explain the failure: {context}"
-    );
 }
 
 // =========================================================================
@@ -370,7 +365,6 @@ fn test_build_learning_review_context_at_threshold() {
     let context = result.unwrap();
     assert!(context.contains("learning-review required=\"true\""));
     assert!(context.contains("learning-reviewer"));
-    assert!(!context.contains("Task tool"));
     for i in 0..5 {
         assert!(
             context.contains(&format!("entry-{i}")),

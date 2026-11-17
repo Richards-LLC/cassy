@@ -920,7 +920,8 @@ mod pre_compact_flush_tests {
                 .prompt
                 .contains("compacting, will resume task cas-41c28-test")
         );
-        assert!(messages[0].prompt.contains("on branch"));
+        let branch = &persisted.metadata["context_checkpoint_branch"];
+        assert!(messages[0].prompt.contains(branch.as_str()), "{}", messages[0].prompt);
     }
 
     // -------------------------------------------------------------------------

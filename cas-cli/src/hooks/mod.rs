@@ -389,7 +389,7 @@ mod internal_llm_tests {
                 .list_recent(20)
                 .expect("real activity")
                 .iter()
-                .any(|event| event.summary.contains("Memory stored")),
+                .any(|event| event.event_type == cas_types::EventType::MemoryStored),
             "a real user prompt must retain the ordinary memory/activity path"
         );
     }

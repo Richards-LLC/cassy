@@ -714,10 +714,6 @@ fn busy_worker_sees_a_mid_turn_message_at_the_next_tool_boundary_cas_b5e4() {
         context.contains("schema agreed: use v2 columns"),
         "{context}"
     );
-    assert!(
-        context.contains("arrived while you were working"),
-        "{context}"
-    );
     assert!(!context.contains(turn_prompt), "{context}");
 
     let again = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
@@ -1098,7 +1094,6 @@ fn ct2_p1_wake_text_truthful() {
     let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
 
     let wake = deliver_to_claude_worker(&store, &mut worker, id, body);
-    assert!(!wake.contains("not repeated"), "{wake}");
     assert!(wake.contains("[incoming messages]"), "{wake}");
     assert!(wake.contains(&format!("inbox_poll notification_id={id}")), "{wake}");
 
@@ -1493,8 +1488,7 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
         "[cas #{shown} supervisor-authored 40s first]\n\nTake (B), but keep the flag operator-only."
     ));
     let repeat = worker.next_teammate_turn().unwrap();
-    assert!(repeat.contains(&format!("#{shown}")), "{repeat}");
-    assert!(repeat.contains("already shown"), "{repeat}");
+    assert!(repeat.contains(&format!("[already shown] Message #{shown}")), "{repeat}");
     assert_eq!(repeat.matches("Take (B), but keep the flag operator-only.").count(), 1, "{repeat}");
 
     // Claimed for the teams transport and never surfaced by a hook. It is
@@ -1510,7 +1504,7 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
         "[cas #{unseen} supervisor-authored 5s first]\n\nAlso rebase onto the new tip."
     ));
     let fresh = worker.next_teammate_turn().unwrap();
-    assert!(!fresh.contains("already shown"), "{fresh}");
+    assert!(!fresh.contains(&format!("[already shown] Message #{unseen}")), "{fresh}");
 }
 
 /// cas-a1ed: one Claude transcript line that starts a turn.

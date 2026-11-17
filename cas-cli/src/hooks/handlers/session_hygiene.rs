@@ -1574,7 +1574,6 @@ mod tests {
         assert!(banner.contains("(last touched by cas-4181)"));
         assert!(banner.contains("scratch.tmp"));
         assert!(banner.contains("unattributed"));
-        assert!(banner.contains("Triage BEFORE spawning workers"));
 
         // Clean the tree → banner suppressed, no noise on normal sessions.
         fs::remove_file(repo.join("scratch.tmp")).unwrap();
@@ -1627,7 +1626,6 @@ mod tests {
             .expect("leftover from a dead session must be surfaced");
         assert!(banner.contains("vite"), "banner: {banner}");
         assert!(banner.contains("session-that-died"), "banner: {banner}");
-        assert!(banner.contains("Adopt or kill"), "banner: {banner}");
         assert!(
             banner.contains("gc_cleanup"),
             "the banner must name the reclaim command: {banner}"

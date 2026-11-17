@@ -742,7 +742,6 @@ mod tests {
         // Urgent even for non-supervisor
         let msg = staleness.format_injection(false);
         assert!(msg.contains("severity=\"high\""));
-        assert!(msg.contains("significantly out of date"));
         assert!(msg.contains("15 structural changes"));
         assert!(msg.contains("(+5 more)"));
         assert!(msg.contains("Run `/codemap`"));

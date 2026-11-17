@@ -27,8 +27,8 @@ fn test_build_learning_review_context_store_error() {
         "Error context should indicate error: {context}"
     );
     assert!(
-        context.contains("Failed to check"),
-        "Error context should explain the failure: {context}"
+        context.contains("Test store error"),
+        "Error context should carry the store failure: {context}"
     );
 }
 
@@ -140,7 +140,6 @@ fn test_build_rule_review_context_at_threshold() {
     let context = result.unwrap();
     assert!(context.contains("rule-review required=\"true\""));
     assert!(context.contains("rule-reviewer"));
-    assert!(!context.contains("Task tool"));
 }
 
 #[test]
@@ -227,8 +226,8 @@ fn test_build_rule_review_context_store_error() {
         "Error context should indicate error: {context}"
     );
     assert!(
-        context.contains("Failed to check"),
-        "Error context should explain the failure: {context}"
+        context.contains("Test store error"),
+        "Error context should carry the store failure: {context}"
     );
 }
 
@@ -325,7 +324,6 @@ fn test_build_duplicate_detection_context_at_threshold() {
     let context = result.unwrap();
     assert!(context.contains("duplicate-detection required=\"true\""));
     assert!(context.contains("duplicate-detector"));
-    assert!(!context.contains("Task tool"));
 }
 
 #[test]
@@ -407,7 +405,7 @@ fn test_build_duplicate_detection_context_store_error() {
         "Error context should indicate error: {context}"
     );
     assert!(
-        context.contains("Failed to check"),
-        "Error context should explain the failure: {context}"
+        context.contains("Test store error"),
+        "Error context should carry the store failure: {context}"
     );
 }

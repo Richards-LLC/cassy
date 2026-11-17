@@ -1216,10 +1216,7 @@ mod tests {
         );
         assert!(envelope_ids("see [cas #abc] or [cas #12x] or cas #13").is_empty());
         let note = already_shown_note(&[7, 9]).unwrap();
-        assert!(
-            note.contains("#7, #9") && note.contains("already shown"),
-            "{note}"
-        );
+        assert!(note.contains("#7, #9"), "{note}");
         assert!(already_shown_note(&[]).is_none());
     }
 

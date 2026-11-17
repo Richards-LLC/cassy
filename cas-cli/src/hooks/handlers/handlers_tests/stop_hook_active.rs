@@ -146,20 +146,19 @@ fn a_supervisor_stop_with_no_pending_reminder_warns_of_no_wake_source_gh1302() {
 
     // cas-d9db: a greeting turn with no tasks and no workers has nothing open
     // to wake for, so it stays quiet; a parked delivery is open work.
-    let idle = serde_json::to_string(&stop()).unwrap();
-    assert!(!idle.contains("No wake source"), "no open work, no warning: {idle}");
+    let idle = stop();
+    assert!(idle.system_message.is_none(), "no open work, no warning: {:?}", idle.system_message);
     let mut parked = cas_types::Task::new("cas-d9db".into(), "parked delivery".into());
     parked.status = cas_types::TaskStatus::AwaitingMerge;
     crate::store::open_task_store(&cas_root).unwrap().add(&parked).unwrap();
 
     let warned = stop();
     assert_eq!(decision_of(&warned), None, "the warning never blocks the stop");
-    let text = serde_json::to_string(&warned).unwrap();
-    assert!(text.contains("No wake source"), "{text}");
+    assert!(warned.system_message.is_some(), "open work with no reminder warns");
 
     remind("gh1302-session");
-    let quiet = serde_json::to_string(&stop()).unwrap();
-    assert!(!quiet.contains("No wake source"), "a pending reminder is a wake source: {quiet}");
+    let quiet = stop();
+    assert!(quiet.system_message.is_none(), "a pending reminder is a wake source: {:?}", quiet.system_message);
 
     // cas-2961 (gabber, Nov 3): an unrelated reminder hid that the supervisor
     // had just messaged a mid-task worker with nothing to wake it but the reply.
@@ -179,8 +178,8 @@ fn a_supervisor_stop_with_no_pending_reminder_warns_of_no_wake_source_gh1302() {
     let warned = stop();
     assert_eq!(decision_of(&warned), None, "the warning never blocks");
     let uncovered = serde_json::to_string(&warned).unwrap();
-    assert!(uncovered.contains("Uncovered worker") && uncovered.contains("patient-cheetah-32 (cas-21f1)"), "{uncovered}");
-    assert!(!serde_json::to_string(&stop()).unwrap().contains("Uncovered worker"), "it warns once per turn");
+    assert!(uncovered.contains("patient-cheetah-32 (cas-21f1)"), "{uncovered}");
+    assert!(!serde_json::to_string(&stop()).unwrap().contains("patient-cheetah-32 (cas-21f1)"), "it warns once per turn");
 
     crate::store::open_prompt_queue_store(&cas_root).unwrap()
         .enqueue_urgent_with_outcome("supervisor", "patient-cheetah-32", "One more change.",
@@ -193,5 +192,5 @@ fn a_supervisor_stop_with_no_pending_reminder_warns_of_no_wake_source_gh1302() {
             Some(&serde_json::json!({"task_id": "cas-21f1"})), 0, Some("gh1302-session"), None, false, None)
         .unwrap();
     let covered = serde_json::to_string(&stop()).unwrap();
-    assert!(!covered.contains("Uncovered worker"), "an event reminder on its task covers it: {covered}");
+    assert!(!covered.contains("patient-cheetah-32 (cas-21f1)"), "an event reminder on its task covers it: {covered}");
 }

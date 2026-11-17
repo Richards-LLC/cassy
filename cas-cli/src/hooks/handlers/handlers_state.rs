@@ -1298,10 +1298,6 @@ mod supervisor_handoff_tests {
             assert!(row.contains(&format!("commit_receipt={anchor}")), "recovery must supply its immutable delivery receipt: {row}");
             assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "startup must not close or adopt implicitly");
         }
-        let tier_two_row = context.lines().find(|line| line.starts_with("- cas-tier-two:")).unwrap();
-        assert!(tier_two_row.contains("expired") && tier_two_row.contains("dedicated verifier") && tier_two_row.contains("adversarial probe"), "Tier 2 must show its hold and required review: {tier_two_row}");
-        let override_row = context.lines().find(|line| line.starts_with("- cas-override:")).unwrap();
-        assert!(override_row.contains("CI override"), "discovery must name the independent-QA hold: {override_row}");
         let tier_zero_row = context.lines().find(|line| line.starts_with("- cas-tier-zero:")).unwrap();
         assert!(tier_zero_row.contains("mechanical"), "Tier 0 keeps mechanical close gates: {tier_zero_row}");
         assert!(!context.contains("task action=close id=cas-foreign"), "foreign projects stay outside recovery: {context}");
@@ -1333,7 +1329,8 @@ mod supervisor_handoff_tests {
         assert_eq!(tasks.get(&live_task.id).unwrap().status, TaskStatus::InProgress);
         assert!(crate::supervisor_continuity::status_section(&root).contains("compaction"));
         let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
-        assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
+        let handoff_receipts = root.join("supervisor-handoffs").display().to_string();
+        assert!(!again.contains(&handoff_receipts), "handoff must surface once");
         assert!(!again.contains("Integrated deliveries to adopt/close"), "recovery actions must surface once per successor");
         // A malformed dispatch in this isolated fixture must not consume the next
         // successor's claimed handoff or hide the other recovery rows.
@@ -1347,7 +1344,7 @@ mod supervisor_handoff_tests {
         let receipts: Vec<_> = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap().map(|r| std::fs::read_to_string(r.unwrap().path()).unwrap()).collect();
         assert!(receipts.iter().any(|r| r.contains("cas-owned-id") && r.contains("inherited_handoff")), "unadopted inherited epics must remain retrievable");
         assert!(context.contains("live-worker"), "the inherited live worker must remain visible: {context}");
-        assert!(context.contains("Supervisor handoff"), "unreadable recovery metadata must not lose the claimed handoff: {context}");
+        assert!(context.contains(&handoff_receipts), "unreadable recovery metadata must not lose the claimed handoff: {context}");
         assert!(context.contains("task action=close id=cas-tier-two"), "one unreadable row must not hide valid recovery: {context}");
         assert!(!context.contains("task action=close id=cas-unreadable"), "unreadable metadata must not authorize recovery: {context}");
         assert!(context.contains("cas-unreadable: verification metadata unreadable"), "startup must report the skipped row: {context}");

@@ -186,8 +186,8 @@ async fn call(service: &CasService, request: serde_json::Value) -> String {
         .unwrap()
         .content
         .into_iter()
-        .filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text),
+        .filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -2810,8 +2810,8 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
         let received = f.worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
             "action":"inbox_poll",
         })).unwrap())).await.unwrap();
-        let received = received.content.iter().filter_map(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+        let received = received.content.iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None,
         }).collect::<Vec<_>>().join("\n");
         // pin: next.id is the dynamically selected queue successor, not fixed prose.
         assert!(received.contains(&next.id), "next-turn inbox omitted the started assignment: {received}");
@@ -2948,7 +2948,7 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
     if let Some(ids) = ids { request["task_ids"] = serde_json::json!(ids); }
     let request = serde_json::from_value(request).unwrap();
     let result = f.supervisor.factory(Parameters(request)).await.unwrap();
-    result.content.iter().filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None })
+    result.content.iter().filter_map(|content| match content { rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None })
         .collect::<Vec<_>>().join("\n")
 }
 

@@ -1824,9 +1824,11 @@ workers use the shared recommendation. The receipt names the account and reason;
 an explicit directory or requester account wins. `cas claude` / `cas codex`
 and Commander's New-session sheet highlight the recommendation but still ask.
 
-`cas config set --global accounts.selection soonest-reset` (default) chooses the earliest
-weekly reset group, within 24 hours of the earliest eligible reset, then the
-most weekly and 5h headroom. `most-headroom` ignores reset proximity. Set
+`accounts.selection most-headroom` (default) chooses the most headroom on the
+binding window, the fuller of weekly and 5h, with ties broken by the earliest
+reset. `cas config set --global accounts.selection soonest-reset` instead chooses
+the earliest weekly reset group, within 24 hours of the earliest eligible reset,
+then the most weekly and 5h headroom. Set
 `accounts.threshold` (default `90`, range `1..100`) to exclude accounts at or
 above that usage in either window. Disabled, logged-out/stale and unknown or
 stale usage accounts are excluded. No eligible account preserves the existing

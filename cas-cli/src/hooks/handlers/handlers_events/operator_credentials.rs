@@ -921,6 +921,9 @@ fn alias_references_store(reference: &str, include_parent: bool) -> bool {
 }
 
 fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
+    if script_passes_file_credential_to_child(script) {
+        return true;
+    }
     static PYTHON_GLOB_OPERAND: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| {
             regex::Regex::new(r"\bglob\.(?:glob|iglob)\(\s*(?:os\.path\.expanduser\(\s*)?$")
@@ -990,6 +993,221 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
             && ["neonctl/credentials.json", "com.vercel.cli/auth.json"]
                 .iter()
                 .any(|suffix| components.contains(suffix)))
+}
+
+/// cas-f3cf: a script that reads a file into an environment's provider
+/// credential variable and starts a child with that environment. The file's
+/// path does not matter. A bounded recognizer, not general dataflow: string
+/// literals never assign, and every scope counts as one, in source order.
+fn script_passes_file_credential_to_child(script: &str) -> bool {
+    use std::collections::HashSet;
+    use tree_sitter::Node;
+
+    /// The provider credentials the worker boundary already withholds.
+    fn credential_name(name: &str) -> bool {
+        cas_pty::PROTECTED_OPERATOR_ENV.contains(&name)
+            || crate::factory_worker_check::ISOLATED_TEST_CREDENTIALS.contains(&name)
+    }
+
+    struct Flow<'s> {
+        source: &'s str,
+        environments: HashSet<&'s str>,
+        file_values: HashSet<&'s str>,
+    }
+
+    impl<'s> Flow<'s> {
+        fn text(&self, node: Node<'_>) -> &'s str {
+            &self.source[node.byte_range()]
+        }
+
+        fn credential_key(&self, node: Node<'_>) -> bool {
+            python_string_literal(node, self.source).is_some_and(credential_name)
+        }
+
+        /// File contents, through any method chain such as `.strip()`.
+        fn reads_file(&self, node: Node<'_>) -> bool {
+            match node.kind() {
+                "identifier" => self.file_values.contains(self.text(node)),
+                "parenthesized_expression" | "await" => {
+                    node.named_child(0).is_some_and(|inner| self.reads_file(inner))
+                }
+                "call" => node.child_by_field_name("function").is_some_and(|function| {
+                    function.kind() == "attribute"
+                        && (function.child_by_field_name("attribute").is_some_and(|method| {
+                            matches!(self.text(method), "read_text" | "read_bytes" | "read")
+                        }) || function
+                            .child_by_field_name("object")
+                            .is_some_and(|object| self.reads_file(object)))
+                }),
+                _ => false,
+            }
+        }
+
+        /// An environment holding a file-read credential.
+        fn carries(&self, node: Node<'_>) -> bool {
+            let mut cursor = node.walk();
+            match node.kind() {
+                "identifier" | "attribute" => self.environments.contains(self.text(node)),
+                "parenthesized_expression" | "dictionary_splat" | "list_splat" => {
+                    node.named_child(0).is_some_and(|inner| self.carries(inner))
+                }
+                "dictionary" => node.named_children(&mut cursor).any(|part| match part.kind() {
+                    "pair" => {
+                        part.child_by_field_name("key").is_some_and(|key| self.credential_key(key))
+                            && part.child_by_field_name("value").is_some_and(|value| self.reads_file(value))
+                    }
+                    _ => self.carries(part),
+                }),
+                "call" => {
+                    let Some(arguments) = node.child_by_field_name("arguments") else {
+                        return false;
+                    };
+                    // `env.copy()`, `dict(env)` and `dict(env, KEY=file)`.
+                    let copies = node.child_by_field_name("function").is_some_and(|function| {
+                        function.kind() == "attribute"
+                            && function.child_by_field_name("object").is_some_and(|object| self.carries(object))
+                    });
+                    copies || self.arguments_carry(arguments)
+                }
+                _ => false,
+            }
+        }
+
+        fn arguments_carry(&self, arguments: Node<'_>) -> bool {
+            let mut cursor = arguments.walk();
+            arguments.named_children(&mut cursor).any(|argument| match argument.kind() {
+                "keyword_argument" => {
+                    let name = argument.child_by_field_name("name").map(|name| self.text(name));
+                    let value = argument.child_by_field_name("value");
+                    value.is_some_and(|value| {
+                        self.carries(value)
+                            || (name.is_some_and(credential_name) && self.reads_file(value))
+                    })
+                }
+                _ => self.carries(argument),
+            })
+        }
+
+        fn starts_child(&self, function: Node<'_>) -> bool {
+            let name = match function.kind() {
+                "attribute" => function.child_by_field_name("attribute").map(|name| self.text(name)),
+                "identifier" => Some(self.text(function)),
+                _ => None,
+            };
+            name.is_some_and(|name| {
+                matches!(
+                    name,
+                    "run" | "call" | "Popen" | "check_output" | "check_call" | "getoutput"
+                        | "getstatusoutput" | "system" | "popen" | "create_subprocess_exec"
+                        | "create_subprocess_shell"
+                ) || name.starts_with("exec")
+                    || name.starts_with("spawn")
+                    || name.starts_with("posix_spawn")
+            })
+        }
+
+        /// Visit in source order; true once a child receives the credential.
+        fn visit(&mut self, node: Node<'s>) -> bool {
+            if node.kind() == "call" {
+                let function = node.child_by_field_name("function");
+                let arguments = node.child_by_field_name("arguments");
+                if let (Some(function), Some(arguments)) = (function, arguments) {
+                    // A child inherits the process environment.
+                    if self.starts_child(function)
+                        && (self.arguments_carry(arguments)
+                            || ["os.environ", "environ"].iter().any(|env| self.environments.contains(env)))
+                    {
+                        return true;
+                    }
+                    if function.kind() == "attribute"
+                        && function.child_by_field_name("attribute").is_some_and(|method| {
+                            matches!(self.text(method), "update" | "setdefault" | "putenv")
+                        })
+                    {
+                        let object = function.child_by_field_name("object").map(|object| self.text(object));
+                        let mut cursor = arguments.walk();
+                        let parts: Vec<_> = arguments.named_children(&mut cursor).collect();
+                        let pair = parts.len() == 2 && self.credential_key(parts[0]) && self.reads_file(parts[1]);
+                        if let Some(object) = object.filter(|_| pair || self.arguments_carry(arguments)) {
+                            // `os.putenv` sets the process environment.
+                            self.environments.insert(if object == "os" { "os.environ" } else { object });
+                        }
+                    }
+                }
+            }
+            if node.kind() == "assignment"
+                && let (Some(left), Some(right)) =
+                    (node.child_by_field_name("left"), node.child_by_field_name("right"))
+            {
+                if self.visit(right) {
+                    return true;
+                }
+                match left.kind() {
+                    "subscript" => {
+                        let target = left.child_by_field_name("value").map(|value| self.text(value));
+                        let key = left.child_by_field_name("subscript");
+                        if let Some(target) = target
+                            && key.is_some_and(|key| self.credential_key(key))
+                            && self.reads_file(right)
+                        {
+                            self.environments.insert(target);
+                        }
+                    }
+                    "identifier" => {
+                        let name = self.text(left);
+                        // Rebinding a name discards what it held.
+                        self.environments.remove(name);
+                        self.file_values.remove(name);
+                        if self.carries(right) {
+                            self.environments.insert(name);
+                        }
+                        if self.reads_file(right) {
+                            self.file_values.insert(name);
+                        }
+                    }
+                    _ => {}
+                }
+                return false;
+            }
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            children.into_iter().any(|child| self.visit(child))
+        }
+    }
+
+    // CPython also ends a line at a bare CR; parse the lines it runs.
+    let source = script.replace("\r\n", "\n").replace('\r', "\n");
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&tree_sitter_python::LANGUAGE.into()).is_err() {
+        return false;
+    }
+    let Some(tree) = parser.parse(&source, None) else {
+        return false;
+    };
+    Flow { source: &source, environments: HashSet::new(), file_values: HashSet::new() }
+        .visit(tree.root_node())
+}
+
+/// Plain and raw strings are inert; f-string expressions are executable.
+fn python_string_literal<'a>(node: tree_sitter::Node<'_>, source: &'a str) -> Option<&'a str> {
+    if node.kind() != "string" {
+        return None;
+    }
+    let spelling = &source[node.byte_range()];
+    let quote = spelling.find(['\'', '"'])?;
+    if !spelling[..quote]
+        .chars()
+        .all(|ch| matches!(ch, 'r' | 'R' | 'u' | 'U'))
+    {
+        return None;
+    }
+    let spelling = &spelling[quote..];
+    let width = if spelling.starts_with("\"\"\"") || spelling.starts_with("'''") {
+        3
+    } else {
+        1
+    };
+    spelling.get(width..spelling.len().checked_sub(width)?)
 }
 
 fn quoted_strings(source: &str) -> Vec<(usize, String)> {

@@ -1,9 +1,9 @@
 //! Compact the tool list sent on `tools/list`.
 //!
-//! rmcp generates every input schema with schemars' `AddNullable` transform,
-//! and every optional field carries `#[serde(default)]`. That adds
-//! `"default": null` and `"nullable": true` (an OpenAPI 3.0 keyword, not JSON
-//! Schema 2020-12) to each optional parameter, plus schemars' non-standard
+//! Every optional field carries `#[serde(default)]`, and Cassy has always
+//! folded `["T", "null"]` types with schemars' `AddNullable` transform. That
+//! adds `"default": null` and `"nullable": true` (an OpenAPI 3.0 keyword, not
+//! JSON Schema 2020-12) to each optional parameter, plus schemars' non-standard
 //! integer `format`s and a per-tool `$schema`, `title` and root description
 //! that repeats the tool description. None of it changes what a client may
 //! send, and it was about 16% of the payload. [`compact_tool`] strips it.
@@ -200,7 +200,7 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
 
 /// Return `tool` with a compact input schema.
 pub(crate) fn compact_tool(mut tool: Tool) -> Tool {
-    let mut schema = tool.input_schema.as_ref().clone();
+    let mut schema = fold_null_types(tool.input_schema.as_ref().clone());
     narrow_split_tool(tool.name.as_ref(), &mut schema);
     for keyword in ["$schema", "title", "description"] {
         schema.remove(keyword);
@@ -208,6 +208,20 @@ pub(crate) fn compact_tool(mut tool: Tool) -> Tool {
     compact_schema(&mut schema);
     tool.input_schema = Arc::new(schema);
     tool
+}
+
+/// rmcp 3 stopped applying `AddNullable` when it generates input schemas.
+/// Applying it here keeps the exact schemas clients have always received:
+/// `["T", "null"]` becomes `"T"` and a null-only branch becomes
+/// `"const": null`; the `nullable` marker it adds is stripped below.
+fn fold_null_types(schema: JsonObject) -> JsonObject {
+    use schemars::transform::Transform;
+    let mut schema = schemars::Schema::from(schema);
+    schemars::transform::AddNullable::default().transform(&mut schema);
+    match schema.to_value() {
+        Value::Object(schema) => schema,
+        _ => unreachable!("a schema built from an object stays an object"),
+    }
 }
 
 fn compact_schema(schema: &mut JsonObject) {
@@ -267,8 +281,9 @@ mod tests {
             "required": ["action"],
             "properties": {
                 "action": {"type": "string", "enum": ["a", "b"], "description": "Operation"},
-                "title": {"default": null, "nullable": true, "type": "string", "description": "A property named title"},
-                "limit": {"default": null, "nullable": true, "type": "integer", "format": "uint", "minimum": 0},
+                "title": {"default": null, "type": ["string", "null"], "description": "A property named title"},
+                "limit": {"default": null, "type": ["integer", "null"], "format": "uint", "minimum": 0},
+                "targets": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 "when": {"type": "string", "format": "date-time"},
                 "flag": {"type": "boolean", "default": false}
             }
@@ -283,6 +298,7 @@ mod tests {
                     "action": {"type": "string", "enum": ["a", "b"], "description": "Operation"},
                     "title": {"type": "string", "description": "A property named title"},
                     "limit": {"type": "integer", "minimum": 0},
+                    "targets": {"anyOf": [{"type": "string"}, {"const": null}]},
                     "when": {"type": "string", "format": "date-time"},
                     "flag": {"type": "boolean", "default": false}
                 }

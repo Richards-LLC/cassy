@@ -28,11 +28,31 @@ async fn source_claim_fixture() -> (
     CasCore,
     crate::types::Agent,
 ) {
+    use std::process::Command;
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
     let temp = TempDir::new().expect("temporary project");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .output()
+            .expect("git runs for issue-repo fixture");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/richards-llc/cassy.git",
+    ]);
     let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
     let agent = crate::types::Agent::new_with_role(
         "issue-source-test-agent".into(),
@@ -192,13 +212,21 @@ async fn task_create_claims_only_explicit_github_bindings() {
         .await
         .expect("create explicit-ref task");
 
-    let closes_issue = "https://github.com/richards-llc/cassy/issues/2033";
+    let fixes_issue = "https://github.com/richards-llc/cassy/issues/2033";
     core.cas_task_create(Parameters(create_request(
         "Repair the issue binding behavior",
         "Fixes #2033 when the task reaches the release lane.",
     )))
     .await
     .expect("create closing-reference task");
+
+    let closes_issue = "https://github.com/richards-llc/cassy/issues/2034";
+    core.cas_task_create(Parameters(create_request(
+        "Repair another issue binding behavior",
+        "Closes #2034 when the task reaches the release lane.",
+    )))
+    .await
+    .expect("create closes-reference task");
 
     let tasks = core
         .open_task_store()
@@ -229,6 +257,15 @@ async fn task_create_claims_only_explicit_github_bindings() {
             .expect("closing task")
             .external_ref
             .as_deref(),
+        Some(fixes_issue)
+    );
+    assert_eq!(
+        tasks
+            .iter()
+            .find(|task| task.title == "Repair another issue binding behavior")
+            .expect("closes task")
+            .external_ref
+            .as_deref(),
         Some(closes_issue)
     );
 
@@ -238,14 +275,14 @@ async fn task_create_claims_only_explicit_github_bindings() {
         .filter(|request| request.url.path().ends_with("/claim"))
         .map(|request| request.url.path().to_string())
         .collect();
-    let expected_claims = [explicit_ref, closes_issue]
+    let expected_claims = [explicit_ref, fixes_issue, closes_issue]
         .into_iter()
         .map(source_claim_path)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         claims.into_iter().collect::<std::collections::BTreeSet<_>>(),
         expected_claims,
-        "only explicit external_ref and Fixes #N should reach the source claim path"
+        "only explicit external_ref and Fixes/Closes #N should reach the source claim path"
     );
 
     let persisted_agent = core.open_agent_store().unwrap().get(&agent.id).unwrap();
@@ -257,7 +294,7 @@ async fn task_create_claims_only_explicit_github_bindings() {
     )
     .expect("source claim metadata");
     source_claims.sort();
-    let mut expected_sources = [explicit_ref, closes_issue]
+    let mut expected_sources = [explicit_ref, fixes_issue, closes_issue]
         .into_iter()
         .map(|source| crate::cloud::peer_claims::github_source_key(source).unwrap())
         .collect::<Vec<_>>();

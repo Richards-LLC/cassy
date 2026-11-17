@@ -621,7 +621,9 @@ fn read_selected_log(path: &Path) -> Result<(PathBuf, Vec<u8>, String, u64)> {
     )?;
     let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
     if summaries.len() != 1 {
-        bail!("supervisor log must contain exactly one selected nextest summary");
+        // cas-e751: worker-check's producer log also holds the guard phase's
+        // summary; only its "Selected test log" isolates the requested run.
+        bail!("supervisor log must contain exactly one selected nextest summary; pass the \"Selected test log\" path worker-check prints, not its full output");
     }
     let run: u64 = summaries[0][1].parse()?;
     let count: u64 = summaries[0][2].parse()?;

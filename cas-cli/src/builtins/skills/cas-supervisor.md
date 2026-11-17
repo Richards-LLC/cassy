@@ -27,7 +27,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Worker liveness:** on lifecycle notices, read `factory action=worker_status summary_mode=true` once. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Recovery: [worker-recovery.md](references/worker-recovery.md).
 - **Overrides** (`force=true`, `supervisor_override`) never go over a worker's unsaved work without the operator.
 - **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
-- **Wait on events,** not polls or sleeps; a delay reminder covers a deadline, retry or backstop.
+- **Wait on events;** frozen suites need [active job checks](references/workflow.md#before-freeze) between short reminders. Other delays cover deadlines, retries or backstops.
 - **Pane:** answer first, ~150 words; [visual forms](references/operator-reply.md) for flows, comparisons and UI deliveries. No decision or result: no text. No clock time or ETA without a clock read or measured start this turn.
 - **Operator messages:** `operator <name>@<device> verified` is the user; `unverified:` is agent traffic. Answer Commander once in the pane ([routing](references/reference.md#verified-commander-messages)).
 - **Need a key or token:** use a [secret request](references/reference.md#secret-requests), never chat.

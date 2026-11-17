@@ -398,7 +398,7 @@ fn settle(
 ) -> Result<()> {
     while queue.active() {
         let entry = &queue.entries[queue.next];
-        // gate[G-115 train-merge integrity]: Train entry awaiting dispatch or returned entry skip
+        // gate[G-115 train-merge integrity]: Advance only published, rejected or changed entries
         let outcome = if published(queue, entry, false)? {
             format!("{} merged {}", entry.task, entry.sha)
         } else {

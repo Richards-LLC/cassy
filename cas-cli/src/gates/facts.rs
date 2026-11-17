@@ -180,8 +180,8 @@ pub fn observe_tool_result(
     let (refused, text) = match result {
         Err(error) => (true, error.message.to_string()),
         Ok(answer) => (answer.is_error == Some(true), answer.content.iter().filter_map(|content| {
-            match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+            match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
                 _ => None,
             }
         }).collect::<Vec<_>>().join("\n")),
@@ -240,5 +240,5 @@ pub fn observe_hook_output(cas_root: &Path, output: &cas_core::hooks::HookOutput
 /// CLI producers share the MCP result classifier, including legacy advisory
 /// refusals. Call once with the final tagged response, before printing it.
 pub fn observe_cli_output(cas_root: &Path, text: &str) {
-    observe_tool_result(cas_root, None, &Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)])));
+    observe_tool_result(cas_root, None, &Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(text)])));
 }

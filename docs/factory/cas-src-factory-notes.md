@@ -112,7 +112,7 @@ that drives the binary cites one of these sources:
 - **Project bug or feature:** `issues.repo` — the current project's own issue
   tracker. In cas-src, create the corresponding in-repo task.
 
-If you hit a bug during operation, file a ticket in the matching repo before moving on. Actionable requests for a Richards-LLC-controlled team belong on
+If you hit a bug during operation, find or file it in the matching repo (+1 an open match) before moving on. Actionable requests for a Richards-LLC-controlled team belong on
 that component's issue board; never write, commit, or push in that team's
 checkout from this repository.
 

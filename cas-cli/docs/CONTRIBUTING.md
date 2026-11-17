@@ -1824,9 +1824,11 @@ workers use the shared recommendation. The receipt names the account and reason;
 an explicit directory or requester account wins. `cas claude` / `cas codex`
 and Commander's New-session sheet highlight the recommendation but still ask.
 
-`cas config set --global accounts.selection soonest-reset` (default) chooses the earliest
-weekly reset group, within 24 hours of the earliest eligible reset, then the
-most weekly and 5h headroom. `most-headroom` ignores reset proximity. Set
+`accounts.selection most-headroom` (default) chooses the most headroom on the
+binding window, the fuller of weekly and 5h, with ties broken by the earliest
+reset. `cas config set --global accounts.selection soonest-reset` instead chooses
+the earliest weekly reset group, within 24 hours of the earliest eligible reset,
+then the most weekly and 5h headroom. Set
 `accounts.threshold` (default `90`, range `1..100`) to exclude accounts at or
 above that usage in either window. Disabled, logged-out/stale and unknown or
 stale usage accounts are excluded. No eligible account preserves the existing
@@ -2834,6 +2836,10 @@ explicitly unknown. PID reuse cannot keep an exited run active. These local
 records live under `.cas/worker-runs/`; no migration or authority capability is
 created. Linux and macOS resolve the actual stdout log file, and detached calls
 without a regular log are refused.
+
+TERM, INT or HUP sent to the printed detached PID forwards to its capped
+producer. The wrapper waits for the producer to drain its owned Cargo groups,
+release its leases and record completion before writing the exit trailer.
 
 Before recycling a worker, Cassy sends TERM to each of its registered,
 fingerprinted detached producers and lets the capped runner drain its guard

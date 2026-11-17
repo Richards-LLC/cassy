@@ -1,10 +1,26 @@
 use std::borrow::Cow;
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{AnnotateAble, ErrorCode, RawResource, Resource};
+use rmcp::model::{ErrorCode, Resource};
 
 use crate::mcp::server::CasCore;
 use crate::types::{RuleStatus, SkillStatus};
+
+/// A plain-text `cas://` resource listing entry.
+fn text_resource(
+    uri: String,
+    name: String,
+    title: Option<String>,
+    description: String,
+    size: Option<usize>,
+) -> Resource {
+    let mut resource = Resource::new(uri, name)
+        .with_description(description)
+        .with_mime_type("text/plain");
+    resource.title = title;
+    resource.size = size.map(|size| size as u64);
+    resource
+}
 
 impl CasCore {
     /// Build list of available resources
@@ -14,19 +30,13 @@ impl CasCore {
         if let Ok(store) = self.open_store() {
             if let Ok(entries) = store.list() {
                 for entry in entries.iter().take(100) {
-                    resources.push(
-                        RawResource {
-                            uri: format!("cas://entry/{}", entry.id),
-                            name: entry.id.clone(),
-                            title: entry.title.clone(),
-                            description: Some(entry.preview(80)),
-                            mime_type: Some("text/plain".to_string()),
-                            size: Some(entry.content.len() as u32),
-                            icons: None,
-                            meta: None,
-                        }
-                        .no_annotation(),
-                    );
+                    resources.push(text_resource(
+                        format!("cas://entry/{}", entry.id),
+                        entry.id.clone(),
+                        entry.title.clone(),
+                        entry.preview(80),
+                        Some(entry.content.len()),
+                    ));
                 }
             }
         }
@@ -34,22 +44,16 @@ impl CasCore {
         if let Ok(store) = self.open_task_store() {
             if let Ok(tasks) = store.list(None) {
                 for task in tasks.iter().filter(|t| !t.is_terminal()).take(50) {
-                    resources.push(
-                        RawResource {
-                            uri: format!("cas://task/{}", task.id),
-                            name: task.id.clone(),
-                            title: Some(task.title.clone()),
-                            description: Some(format!(
-                                "P{} {:?} - {}",
-                                task.priority.0, task.status, task.task_type
-                            )),
-                            mime_type: Some("text/plain".to_string()),
-                            size: None,
-                            icons: None,
-                            meta: None,
-                        }
-                        .no_annotation(),
-                    );
+                    resources.push(text_resource(
+                        format!("cas://task/{}", task.id),
+                        task.id.clone(),
+                        Some(task.title.clone()),
+                        format!(
+                            "P{} {:?} - {}",
+                            task.priority.0, task.status, task.task_type
+                        ),
+                        None,
+                    ));
                 }
             }
         }
@@ -57,19 +61,13 @@ impl CasCore {
         if let Ok(store) = self.open_rule_store() {
             if let Ok(rules) = store.list() {
                 for rule in rules.iter().filter(|r| r.status == RuleStatus::Proven) {
-                    resources.push(
-                        RawResource {
-                            uri: format!("cas://rule/{}", rule.id),
-                            name: rule.id.clone(),
-                            title: None,
-                            description: Some(rule.preview(80)),
-                            mime_type: Some("text/plain".to_string()),
-                            size: Some(rule.content.len() as u32),
-                            icons: None,
-                            meta: None,
-                        }
-                        .no_annotation(),
-                    );
+                    resources.push(text_resource(
+                        format!("cas://rule/{}", rule.id),
+                        rule.id.clone(),
+                        None,
+                        rule.preview(80),
+                        Some(rule.content.len()),
+                    ));
                 }
             }
         }
@@ -77,19 +75,13 @@ impl CasCore {
         if let Ok(store) = self.open_skill_store() {
             if let Ok(skills) = store.list(None) {
                 for skill in skills.iter().filter(|s| s.status == SkillStatus::Enabled) {
-                    resources.push(
-                        RawResource {
-                            uri: format!("cas://skill/{}", skill.id),
-                            name: skill.id.clone(),
-                            title: Some(skill.name.clone()),
-                            description: Some(skill.description.chars().take(80).collect()),
-                            mime_type: Some("text/plain".to_string()),
-                            size: None,
-                            icons: None,
-                            meta: None,
-                        }
-                        .no_annotation(),
-                    );
+                    resources.push(text_resource(
+                        format!("cas://skill/{}", skill.id),
+                        skill.id.clone(),
+                        Some(skill.name.clone()),
+                        skill.description.chars().take(80).collect(),
+                        None,
+                    ));
                 }
             }
         }

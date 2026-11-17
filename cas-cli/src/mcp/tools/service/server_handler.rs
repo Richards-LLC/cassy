@@ -2,10 +2,11 @@ use std::collections::HashMap;
 
 use rmcp::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, GetPromptRequestParams, GetPromptResult, Implementation,
+    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
+    Implementation,
     ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-    ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-    ServerCapabilities, ServerInfo,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceContents,
+    ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use tracing::{info, warn};
@@ -16,6 +17,11 @@ use crate::mcp::tools::service::CasService;
 /// Always injected by the client, and cut at 2 KB by Claude Code: keep it to
 /// routing guidance, well under 200 characters.
 pub(crate) const SERVER_INSTRUCTIONS: &str = "Cassy: tasks, memory, search and factory coordination. If these tools are deferred, load task, coordination, search and memory together before first use.";
+
+/// Newest MCP revision Cassy negotiates. rmcp would otherwise echo any newer
+/// revision a client requests; the ceiling keeps the handshake and result
+/// shapes clients have always received.
+pub(crate) const MCP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_03_26;
 
 const WORKER_MCP_ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -93,25 +99,25 @@ fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
 
 #[allow(clippy::manual_async_fn)]
 impl ServerHandler for CasService {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder()
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::new(
+            ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
                 .enable_resources_list_changed()
                 .enable_prompts()
                 .build(),
-            server_info: Implementation {
-                name: "cas".to_string(),
-                title: Some("Coding Agent System".to_string()),
-                description: Some("Unified context system for AI agents: persistent memory, tasks, rules, and skills across sessions.".to_string()),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(SERVER_INSTRUCTIONS.to_string()),
-        }
+        );
+        info.protocol_version = MCP_PROTOCOL_VERSION;
+        info.server_info = Implementation::new("cas", env!("CARGO_PKG_VERSION"))
+            .with_title("Coding Agent System")
+            .with_description("Unified context system for AI agents: persistent memory, tasks, rules, and skills across sessions.");
+        info.instructions = Some(SERVER_INSTRUCTIONS.to_string());
+        info
+    }
+
+    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
+        std::borrow::Cow::Borrowed(ProtocolVersion::known_up_to(&MCP_PROTOCOL_VERSION))
     }
 
     fn list_resources(
@@ -136,11 +142,7 @@ impl ServerHandler for CasService {
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "MCP resources/list DONE"
             );
-            Ok(ListResourcesResult {
-                resources,
-                next_cursor: None,
-                meta: None,
-            })
+            Ok(ListResourcesResult::with_all_items(resources))
         }
     }
 
@@ -148,13 +150,11 @@ impl ServerHandler for CasService {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::ErrorData>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<ReadResourceResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
             let content = self.inner.read_resource_content(&request.uri)?;
-            Ok(ReadResourceResult {
-                contents: vec![ResourceContents::text(content, &request.uri)],
-            })
+            Ok(ReadResourceResult::new(vec![ResourceContents::text(content, &request.uri)]).into())
         }
     }
 
@@ -165,11 +165,7 @@ impl ServerHandler for CasService {
     ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            Ok(ListPromptsResult {
-                prompts: CasCore::build_prompts(),
-                next_cursor: None,
-                meta: None,
-            })
+            Ok(ListPromptsResult::with_all_items(CasCore::build_prompts()))
         }
     }
 
@@ -177,7 +173,7 @@ impl ServerHandler for CasService {
         &self,
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<GetPromptResult, rmcp::ErrorData>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<GetPromptResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
             let args: HashMap<String, String> = request
@@ -186,7 +182,7 @@ impl ServerHandler for CasService {
                 .into_iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
                 .collect();
-            self.inner.get_prompt_content(&request.name, &args)
+            self.inner.get_prompt_content(&request.name, &args).map(Into::into)
         }
     }
 
@@ -207,11 +203,7 @@ impl ServerHandler for CasService {
                 "MCP tools/list DONE"
             );
 
-            Ok(ListToolsResult {
-                tools,
-                meta: None,
-                next_cursor: None,
-            })
+            Ok(ListToolsResult::with_all_items(tools))
         }
     }
 
@@ -219,9 +211,8 @@ impl ServerHandler for CasService {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
-    + Send
-    + '_ {
+    ) -> impl std::future::Future<Output = Result<CallToolResponse, rmcp::ErrorData>> + Send + '_
+    {
         async move {
             let start = std::time::Instant::now();
             let tool_name = request.name.clone();
@@ -231,7 +222,7 @@ impl ServerHandler for CasService {
             // `ToolCallContext` consumes `request` below.
             let timeout_arguments = request.arguments.clone();
             let caller_tool_use =
-                claude_tool_use_id(request.meta.as_ref()).or_else(|| claude_tool_use_id(Some(&context.meta)));
+                claude_tool_use_id(request.meta.as_deref()).or_else(|| claude_tool_use_id(Some(&*context.meta)));
             info!(method = "tools/call", tool = %tool_name, id = %request_id, "MCP call_tool START");
             // cas-b1dd: the handler owns its service clone so it can outlive an
             // early answer; a deadline never drops work past its commit.
@@ -242,7 +233,7 @@ impl ServerHandler for CasService {
                     let tcc = rmcp::handler::server::tool::ToolCallContext::new(
                         &service, request, context,
                     );
-                    let result = service.tool_router.call(tcc).await;
+                    let result = dispatch_tool(&service, tcc).await;
                     crate::gates::facts::observe_tool_result(
                         &service.inner.cas_root, arguments.as_ref(), &result,
                     );
@@ -268,14 +259,46 @@ impl ServerHandler for CasService {
                 caller_tool_use,
             )
             .await
+            .map(Into::into)
         }
+    }
+}
+
+/// Run the named route directly. `ToolRouter::call` turns an argument
+/// deserialization failure into an `isError` tool result; Cassy has always
+/// answered it with a JSON-RPC invalid-params error, which callers rely on.
+async fn dispatch_tool(
+    service: &CasService,
+    context: rmcp::handler::server::tool::ToolCallContext<'_, CasService>,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    let router = &service.tool_router;
+    let name = context.name().to_owned();
+    let route = router
+        .map
+        .get(name.as_str())
+        .filter(|_| !router.is_disabled(&name))
+        .ok_or_else(|| rmcp::ErrorData::invalid_params("tool not found", None))?;
+    (route.call)(context).await.and_then(completed_tool_call)
+}
+
+/// Cassy tools always answer inline: none asks the client for input or
+/// materializes a task, so any other response is a server bug.
+fn completed_tool_call(
+    response: CallToolResponse,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    match response {
+        CallToolResponse::Complete(result) => Ok(result),
+        other => Err(rmcp::ErrorData::internal_error(
+            format!("tool returned a non-inline response: {other:?}"),
+            None,
+        )),
     }
 }
 
 /// cas-badb (GH #1302): Claude Code tags every MCP call with the id of the
 /// `tool_use` that issued it. Subagents share the parent's MCP server, so this
 /// id is the only per-call evidence of who is calling.
-fn claude_tool_use_id(meta: Option<&rmcp::model::Meta>) -> Option<String> {
+fn claude_tool_use_id(meta: Option<&rmcp::model::MetaObject>) -> Option<String> {
     meta?
         .get("claudecode/toolUseId")?
         .as_str()
@@ -374,8 +397,8 @@ const LATE_CLOSE_NOTE_MARKER: &str = "CLOSE_OUTCOME";
 const POST_COMMIT_NOTE_MARKER: &str = "POST_COMMIT_OUTCOME";
 
 fn first_tool_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
-    result.content.iter().find_map(|content| match &content.raw {
-        rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+    result.content.iter().find_map(|content| match content {
+        rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
         _ => None,
     })
 }
@@ -600,7 +623,7 @@ impl CasService {
                         if !timings.is_empty() && matches!(action, "worktree_merge" | "close")
                             && let Ok(answer) = &mut result
                         {
-                            answer.content.push(rmcp::model::Content::text(format!("Timing (inclusive): {timings}")));
+                            answer.content.push(rmcp::model::ContentBlock::text(format!("Timing (inclusive): {timings}")));
                         }
                         result
                     },
@@ -626,7 +649,7 @@ impl CasService {
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
                 if let Some(id) = &continuation_id {
                     self.record_registration_outcome(handle, receipt.clone(), arguments, id.clone());
-                    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
                         "COMMITTED: {description}. Registration follow-up continues; its final outcome will appear in your inbox. Continuation: {id}. Do not retry."
                     ))]);
                     answer.structured_content = Some(serde_json::json!({
@@ -654,13 +677,13 @@ impl CasService {
                 // cas-3937: a factory merge is not a task mutation; name the
                 // call itself, and its committed merge, instead.
                 if tool_name != "task" {
-                    return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                    return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
                         "COMMITTED: `{tool_name} action={action}` write committed ({description}). \
                          Remaining work continues in the background; its outcome is in task notes. Do not retry.",
                         action = receipt.action(),
                     ) + &format!("\nTiming (inclusive, + running): {}", receipt.timings()))]));
                 }
-                Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
                     "COMMITTED: {description}. Remaining close follow-up continues in the background; \
                      read task notes for its outcome. Do not retry.\nTiming (inclusive, + running): {}",
                     receipt.timings(),
@@ -875,7 +898,7 @@ impl CasService {
             }
         };
         if let Some(context) = context {
-            output.content.push(rmcp::model::Content::text(context));
+            output.content.push(rmcp::model::ContentBlock::text(context));
         }
         Ok(output)
     }
@@ -2089,7 +2112,7 @@ mod tests {
                     store.update(&task).unwrap();
                     mutation_receipt::task_disposition_committed(id, &supplied_outcome);
                 }
-                Ok(rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(supplied_refusal)]))
+                Ok(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(supplied_refusal)]))
             }));
             service.record_late_close_outcome(
                 handle, receipt, std::time::Instant::now() - std::time::Duration::from_millis(142_500),
@@ -2107,7 +2130,7 @@ mod tests {
     fn late_close_summary_keeps_one_bounded_line_cas_3b81() {
         let long = format!("Closed task: cas-x - {}\nsecond line", "y".repeat(400));
         let joined = Ok(Ok(rmcp::model::CallToolResult::success(vec![
-            rmcp::model::Content::text(long),
+            rmcp::model::ContentBlock::text(long),
         ])));
         let summary = super::late_close_summary(&joined);
         assert!(summary.starts_with("Closed task: cas-x"), "{summary}");
@@ -2529,11 +2552,11 @@ mod tests {
 
     #[test]
     fn claude_tool_use_id_reads_call_meta_cas_badb() {
-        let meta: rmcp::model::Meta =
+        let meta: rmcp::model::MetaObject =
             serde_json::from_value(serde_json::json!({"claudecode/toolUseId": "toolu_1"})).unwrap();
         assert_eq!(super::claude_tool_use_id(Some(&meta)).as_deref(), Some("toolu_1"));
         assert_eq!(super::claude_tool_use_id(None), None);
-        let empty: rmcp::model::Meta = serde_json::from_value(serde_json::json!({})).unwrap();
+        let empty: rmcp::model::MetaObject = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(super::claude_tool_use_id(Some(&empty)), None);
     }
 

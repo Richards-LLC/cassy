@@ -28,7 +28,7 @@ macro_rules! simplest_complete {
 
 macro_rules! cassy_defects {
     () => {
-        "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately."
+        "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. Find or file in issues.components.cassy: `system action=report_cas_bug`, refusal first in `actual`, then continue; in Cassy's source repo, find or staff a fix task."
     };
 }
 

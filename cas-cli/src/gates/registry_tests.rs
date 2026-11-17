@@ -421,13 +421,13 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
 
     // The shared observer distinguishes a tagged accepted override from a
     // successful read quoting the same code.
-    let override_reply = Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(tag("G-108", "accepted"))]));
+    let override_reply = Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(tag("G-108", "accepted"))]));
     facts::observe_tool_result(dir.path(), None, &override_reply);
     assert!(!facts::summarize(&store, before).unwrap().contains_key("G-108"));
     let arguments = serde_json::json!({"supervisor_override":true,"task_id":"cas-ci","reason":"reviewed"});
     facts::observe_tool_result(dir.path(), arguments.as_object(), &override_reply);
     assert!(!facts::summarize(&store, before).unwrap().contains_key("G-108"));
-    let override_reply = Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
+    let override_reply = Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
         override_tag("G-108", override_tag("G-108", tag("G-114", "accepted"))))]));
     facts::observe_tool_result(dir.path(), None, &override_reply);
     assert_eq!(facts::summarize(&store, before).unwrap()["G-108"],

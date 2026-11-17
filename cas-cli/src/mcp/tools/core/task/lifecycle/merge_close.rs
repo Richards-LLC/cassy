@@ -532,8 +532,8 @@ impl CasCore {
         let close = crate::async_runtime::heap_future(|| self.cas_task_close(Parameters(request)));
         let result = as_cassy_merge_close(close).await;
         let text = match result {
-            Ok(result) => result.content.iter().filter_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+            Ok(result) => result.content.iter().filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None,
             }).collect::<Vec<_>>().join("\n"),
             Err(error) => error.message.to_string(),
         };
@@ -646,8 +646,8 @@ impl CasCore {
         let text = result
             .content
             .iter()
-            .filter_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()

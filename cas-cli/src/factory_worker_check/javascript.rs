@@ -1761,7 +1761,7 @@ fn validate_report(
     if !tests.is_empty() && results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
-    if results.is_empty() { bail!("{runner} executed zero tests"); }
+    if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
     Ok(results.len())
 }
 

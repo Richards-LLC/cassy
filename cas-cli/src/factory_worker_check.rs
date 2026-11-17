@@ -2363,7 +2363,9 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
         match stability::rust::selected(&repo, &base, &head, test) {
             Ok(tests) => tests,
-            Err(error) if error.downcast_ref::<stability::rust::MissingTest>().is_some() => return Err(error),
+            Err(error) if error.downcast_ref::<stability::rust::MissingTest>().is_some() => {
+                bail!(crate::gates::tag("G-61", format!("CHANGED_TEST_DISCOVERY_FAILED: {error:#}")));
+            }
             Err(error) => {
                 eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
                 let scope = widened::Scope::Crate(test.package.clone());

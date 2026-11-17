@@ -690,6 +690,9 @@ def lane_base(root, recorded_ref, inferred):
 
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+OWN_JOB = "Scoped Validation — impact own tests"
+
+
 def lane_overrun(root, args):
     """Name the plan and elapsed time of an own-tests job that ended without a
     verdict (cas-3a12). A hosted runner that stops responding uploads no log
@@ -699,10 +702,10 @@ def lane_overrun(root, args):
     _, fetch = github_fetcher()
     run, attempt = os.environ["GITHUB_RUN_ID"], os.environ.get("GITHUB_RUN_ATTEMPT", "1")
     jobs = json.loads(fetch(f"/actions/runs/{int(run)}/attempts/{int(attempt)}/jobs?per_page=100"))["jobs"]
-    job = next(job for job in jobs if job["name"].endswith(args.job))
+    job = next(job for job in jobs if job["name"].endswith(OWN_JOB))
     stamp = lambda value: datetime.datetime.fromisoformat(value.replace("Z", "+00:00")) if value else datetime.datetime.now(datetime.timezone.utc)
     minutes = (stamp(job["completed_at"]) - stamp(job["started_at"])).total_seconds() / 60
-    print(f"::error title=Lane impact overrun::{args.job} ended {job['conclusion'] or 'unfinished'} after {minutes:.1f} min "
+    print(f"::error title=Lane impact overrun::{OWN_JOB} ended {job['conclusion'] or 'unfinished'} after {minutes:.1f} min "
           f"(budget {args.budget_minutes} min) with a {selection['mode']} plan "
           f"({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}")
     return 1
@@ -857,7 +860,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize", "lane"])
     parser.add_argument("--phase", choices=["plan", "own", "ring", "attribute", "overrun"], default="plan")
-    parser.add_argument("--job", default="Scoped Validation — impact own tests")
     parser.add_argument("--budget-minutes", type=int, default=45)
     parser.add_argument("--receipt", choices=["own", "ring"], default="own")
     parser.add_argument("--archive", default="lane-impact.tar.zst")

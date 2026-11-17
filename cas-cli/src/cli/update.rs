@@ -4361,6 +4361,15 @@ fn remove_quarantine_if_present(_installed_binary: &Path) -> anyhow::Result<()> 
     Ok(())
 }
 
+fn stabilize_macos_identity(installed: &Path) {
+    if let Err(error) = macos_signing::stabilize(installed, None) {
+        report_update_warning(
+            &format!("could not re-sign {} with \"{}\": {error:#}", installed.display(), macos_signing::LOCAL_IDENTITY),
+            "macOS may ask again for privacy permissions; see docs/onboarding/macbook-from-zero.md, \"Keep macOS permissions across updates\"",
+        );
+    }
+}
+
 /// Time from process creation through dyld and CLI dispatch to the post-swap
 /// entry. The old updater cannot time this first launch, but its new child can
 /// include the measurement in the refresh receipt the old parent merges.
@@ -4500,6 +4509,7 @@ fn perform_update(
         // An older parent cannot, so execute_post_swap repeats this before
         // relaunching the hub and leaves the installed binary clean.
         remove_quarantine_if_present(&installed_binary)?;
+        stabilize_macos_identity(&installed_binary);
     }
 
     // cas-91ba: once the binary is swapped, THIS process is the old image.
@@ -4781,7 +4791,10 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
         .from
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
-    remove_quarantine_if_present(&std::env::current_exe()?)?;
+    let installed = std::env::current_exe()?;
+    remove_quarantine_if_present(&installed)?;
+    // Compatibility with parents that could not sign before the first launch.
+    stabilize_macos_identity(&installed);
     super::install_on_publish::refresh_installed();
     // The hub goes first so it picks up the new binary immediately rather than
     // waiting behind a full refresh. Its verification is drawn from data in

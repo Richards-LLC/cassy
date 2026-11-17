@@ -1,6 +1,6 @@
 ---
 name: cas-html-reports
-description: "Use when producing durable HTML analysis: investigations, audits, decision briefs, benchmarks, post-mortems or executive updates; published releases are cas-release-report and feature reports cas-feature-report; not client deliverables."
+description: "Use when producing internal HTML analyses, audits, decision briefs or benchmarks; releases use cas-release-report, feature showcases cas-feature-report and client findings cas-client-report."
 metadata:
   managed_by: cas
 ---
@@ -69,7 +69,7 @@ workflow anyway.
 close gate (G7) refuses the task and lists each gap: the brief and its audience, the critique floor,
 the brand tokens, network fetches, the verdict, the height budget and, for business readers, task
 ids and jargon. Authors and supervisors judge plan alignment; G7 does not evaluate the reasoning.
-Release, feature, SOW and customer deliverables keep their own skills.
+Client findings use `cas-client-report`; release, feature, SOW and customer-update deliverables keep their own skills.
 
 ## What counts as a report
 
@@ -83,8 +83,8 @@ A deliverable is a report when **all three** hold:
 Canonical cases: investigation and diagnostic write-ups, metrics and mining analyses, audits, decision
 briefs, comparisons and benchmarks, incident post-mortems, status summaries (a published version release uses `cas-release-report`), financial
 reports, executive and board updates, system explainers, research and market analyses. A client's
-SOW delivery uses `cas-sow-delivery-report`; a feature report, showcase or walkthrough of shipped
-work uses `cas-feature-report`.
+SOW delivery uses `cas-sow-delivery-report`; shipped-feature showcases use `cas-feature-report`;
+client-facing findings and recommendations use `cas-client-report`.
 
 ## When HTML is NOT required
 

@@ -1640,11 +1640,16 @@ impl ProxyEngine {
                     return Ok(violet_result(receipt));
                 }
                 if state == "not_posted" {
-                    return Ok(violet_result(serde_json::json!({
-                        "ok": false, "state": "not_posted", "request_id": request_id,
-                        "error": {"code": "not_posted", "retryable": false,
-                            "message": "Violet confirmed that this request did not post."},
-                    })));
+                    // Keep the provider's reason and original uncertain response (#1968).
+                    let mut body = lookup;
+                    body["ok"] = Value::Bool(false);
+                    body["request_id"] = Value::String(request_id.into());
+                    if !body["error"].is_object() {
+                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": false,
+                            "message": "Violet confirmed that this request did not post."});
+                    }
+                    if let Some(prior) = prior { body["post_response"] = prior; }
+                    return Ok(violet_result(body));
                 }
             }
         }
@@ -3592,7 +3597,7 @@ for line in sys.stdin:
                 mode = args.get("text", "posted")
                 state = mode if mode in ("outcome_unknown", "not_posted") else ("not_posted" if mode == "not_posted_detail" else "posted")
                 with open(state_path, "w") as handle:
-                    json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch"}, handle)
+                    json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch", "diagnostic": mode == "not_posted_detail"}, handle)
                 if mode == "transport_rollback":
                     with open(log + ".schema", "w") as handle:
                         handle.write("legacy")
@@ -3617,7 +3622,7 @@ for line in sys.stdin:
                 with open(state_path) as handle:
                     state = json.load(handle)
                 body = {"ok": state["state"] != "outcome_unknown", **state}
-                if state["state"] == "not_posted":
+                if state.get("diagnostic"):
                     body["reason"] = "occurrence_not_eligible"
                     body["error"] = {"code": "occurrence_not_eligible", "retryable": False,
                                      "message": "Provider rejected the occurrence", "detail": {"occurrence_id": "fixture-occurrence"}}

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -76,13 +77,19 @@ out.mkdir(parents=True)
   const runner = spawn(process.execPath, ['-e', `
     const server = require('node:child_process').spawn(process.argv[1],
       { shell: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    server.stdout.on('data', (bytes) => { if (String(bytes).includes('/commander/')) console.log(server.pid); });
-  `, `'${process.execPath}' hub-web/e2e/journeys/serve-dist.mjs ${port}`], {
+    let output = '';
+    server.stdout.on('data', (bytes) => {
+      output += bytes;
+      for (const line of output.split('\\n')) {
+        try { const event = JSON.parse(line); if (event.event === 'ready') console.log(JSON.stringify({ pid: server.pid, origin: event.origin })); } catch {}
+      }
+    });
+  `, `'${process.execPath}' hub-web/e2e/journeys/serve-dist.mjs 0`], {
     cwd: repo, env: { ...process.env, PATH: `${join(repo, 'tools')}:${process.env.PATH}`, JOURNEY_BUILD_MANIFEST: '' },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   const [line] = await once(runner.stdout, 'data');
-  const group = Number(String(line).trim());
+  const { pid: group, origin: cancelled } = JSON.parse(String(line).trim());
   const alive = () => { try { process.kill(-group, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; } };
   t.after(() => { if (alive()) process.kill(-group, 'SIGKILL'); });
   runner.kill('SIGKILL'); await once(runner, 'exit');
@@ -91,7 +98,7 @@ out.mkdir(parents=True)
   }
   assert.equal(alive(), false, 'the cancelled run left its webServer process group running');
   const rebind = createServer();
-  rebind.listen(port, '127.0.0.1'); await once(rebind, 'listening');
+  rebind.listen(Number(new URL(cancelled).port), '127.0.0.1'); await once(rebind, 'listening');
   await new Promise((resolve) => rebind.close(resolve));
 
   const manifest = join(repo, 'target/journey-dist/journey-build.json');

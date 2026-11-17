@@ -2140,7 +2140,8 @@ else:
         store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
         let preview = preview_shipped_train(&root, &train.id, "v4.3.0").unwrap();
         let line = preview.lines().find(|line| line.contains("cas-later001: ")).unwrap();
-        assert!(!line.contains(&format!("{}: HOLD", child.id)), "{preview}");
+        // In the later tag: the only hold left is its own CI-override close.
+        assert!(line.contains("CI_OVERRIDE"), "{preview}");
         let receipt = crate::qa_batch::prepare_release_tag_receipt(&root, std::slice::from_ref(&child.id), "v4.4.0").unwrap();
         assert_eq!(receipt.task_heads.get(&child.id), Some(&anchor));
         assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, train.id);

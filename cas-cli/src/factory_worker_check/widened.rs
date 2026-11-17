@@ -53,7 +53,7 @@ pub(crate) fn commands(cas_root: &Path, repo: &Path, paths: &[String], scopes: &
 
 /// Same receipt envelope and immutable-input checks as focused proof; one kind,
 /// with an explicit scope instead of invented source-to-runtime identities.
-pub(super) fn record(cas_root: &Path, repo: &Path, head: &str, proof: Proof, count: u64) -> Result<()> {
+pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, proof: Proof, count: u64) -> Result<()> {
     if clean_head(repo)? != head || count == 0 { bail!(crate::gates::tag("G-61", "widened run did not prove a nonempty clean delivery")); }
     let key = hex::encode(Sha256::digest(serde_json::to_vec(&proof)?));
     let selection = TargetedTest { package: proof.runner.clone(), harness: None, filter: format!("test(widened_{key})") };

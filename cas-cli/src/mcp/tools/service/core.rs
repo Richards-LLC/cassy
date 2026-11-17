@@ -283,6 +283,37 @@ impl CasService {
             },
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        // Find or file (cas-7823): a finding whose wrong output an open task
+        // already records adds evidence there instead of opening a twin.
+        // gate-audit[confirm_warning]: bypass G-148 Explicitly accepts a finding whose wrong output an open task already records.
+        let mut tracked_finding_accepted = false;
+        if finding_origin.is_some()
+            && let Some(fingerprint) = req
+                .repro
+                .as_deref()
+                .and_then(crate::issue_intake::RefusalFingerprint::of_last)
+            && let Some(open) = crate::issue_intake::open_task_match(
+                self.inner.open_task_store()?.as_ref(),
+                &fingerprint,
+            )
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+        {
+            if !req.confirm_warning.unwrap_or(false) {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    crate::gates::tag(
+                        "G-148",
+                        format!(
+                            "FINDING ALREADY TRACKED: open task {} ({:?}) records this wrong output. \
+                             Add the new evidence with task action=notes id={}; if this is a different \
+                             defect, retry with confirm_warning=true.",
+                            open.id, open.title, open.id
+                        ),
+                    ),
+                ));
+            }
+            tracked_finding_accepted = true;
+        }
         let mut req = req;
         if req.repro.as_deref().is_some_and(|s| !s.trim().is_empty()) {
             req.labels = Some(format!("{},runtime-repro", req.labels.as_deref().unwrap_or_default()));
@@ -347,7 +378,7 @@ impl CasService {
                 )
                 .await;
         }
-        let created = self
+        let mut created = self
             .inner
             .cas_task_create_with_delivery_mode(
                 inner_req,
@@ -357,6 +388,15 @@ impl CasService {
                 req.delivery_mode.as_deref(),
             )
             .await;
+        if tracked_finding_accepted
+            && let Ok(result) = created.as_mut()
+            && result.is_error != Some(true)
+        {
+            result.content.push(rmcp::model::Content::text(crate::gates::override_tag(
+                "G-148",
+                "Accepted a finding an open task already records.",
+            )));
+        }
         if created.as_ref().is_ok_and(|result| result.is_error != Some(true))
             && let Some(epic) = finding_epic.as_deref()
         {

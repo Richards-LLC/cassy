@@ -2077,8 +2077,8 @@ mod tests {
             ("unavailable", vec![simplicity.clone()], false),
             ("blocked", vec![simplicity.clone()], false),
         ];
-        // Today's 0553/02ab evidence and 1d3a simplicity findings use these
-        // existing categories and safe triage, not a summary-text classifier.
+        // Only explicit proof, paperwork, documentation and simplicity
+        // categories qualify. Runtime validation and duplication are ambiguous.
         for category in ["documentation", "evidence", "receipt", "incomplete_close_reason"] {
             let mut issue = simplicity.clone();
             issue.category = category.into();
@@ -2191,9 +2191,10 @@ mod tests {
                 let stale = restarted.prepare_premerge_verification(&task, repo, "factory/w", "main").unwrap_err();
                 assert_eq!(stale.data.as_ref().unwrap()["reason"], "premerge_repair_requires_new_commit");
                 assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);
+                if name != "cas-2f46" { continue; }
                 // A corrected delivery in this repair cycle gets review, but
                 // another rejection consumes no new automatic repair budget.
-                let next = if name == "cas-2f46" {
+                let next = {
                     let corrected = commit_file(repo, "work.txt", "corrected\n", "apply findings");
                     run(repo, &["update-ref", "refs/heads/factory/w", &corrected]);
                     current.deliverables.factory_branch_anchor = Some(corrected);
@@ -2203,9 +2204,6 @@ mod tests {
                     let next = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
                     assert_ne!(next.id, dispatch.id);
                     next
-                } else {
-                    cas_store::create_verification_dispatch(&root, &task.id, &worker.id, &owner.id,
-                        chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap()
                 };
                 verdict.id.push_str("-next");
                 verdict.dispatch_id = Some(next.id.clone());

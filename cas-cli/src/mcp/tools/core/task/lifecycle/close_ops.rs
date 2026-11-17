@@ -6303,12 +6303,20 @@ impl CasCore {
                 candidate_repository.as_ref().expect("new receipt has an unpublished candidate proof"),
             )
             .map(|(transaction, _)| transaction)
-            .map_err(|error| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(crate::gates::tag("G-28", format!(
-                    "DELIVERY RECEIPT REJECTED: exact verification proof boundary conflict: {error}"
-                ))),
-                data: None,
+            .map_err(|error| {
+                let data = match &error {
+                    cas_store::StoreError::PremergeRepairRequiresNewCommit { dispatch_id } => Some(serde_json::json!({
+                        "reason": "premerge_repair_requires_new_commit", "dispatch_id": dispatch_id,
+                    })),
+                    _ => None,
+                };
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(crate::gates::tag("G-28", format!(
+                        "DELIVERY RECEIPT REJECTED: exact verification proof boundary conflict: {error}"
+                    ))),
+                    data,
+                }
             })?
         };
 

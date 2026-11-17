@@ -1221,6 +1221,37 @@ fn create_verification_dispatch_bound_in_transaction(
         )));
     }
 
+    // Guard every mint, including receipt-path closes. Exact pending replays
+    // above remain idempotent; a synthetic candidate head is never a source.
+    let has_tasks: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+        [], |row| row.get(0),
+    )?;
+    if has_tasks && let Some(json) = conn.query_row(
+        "SELECT deliverables FROM tasks WHERE id = ?1", params![task_id], |row| row.get::<_, String>(0),
+    ).optional()? {
+        let deliverables: TaskDeliverables = serde_json::from_str(&json)?;
+        if let Some(repair) = &deliverables.premerge_repair
+            && repair.repair_cycle == crate::delivery_cycle::row_counter(&deliverables)
+        {
+            let source = if let Some((receipt_id, transaction_id)) = boundary.receipt().map_err(StoreError::Parse)?.transaction() {
+                // Atomic receipt constructors persist this row first, under
+                // the same write lock. Any refusal rolls the whole intent back.
+                conn.query_row(
+                    "SELECT r.commit_sha FROM worker_completion_receipts r
+                     JOIN worker_delivery_transactions t ON t.receipt_id = r.id
+                     WHERE r.id = ?1 AND t.id = ?2 AND r.task_id = ?3 AND t.task_id = ?3",
+                    params![receipt_id, transaction_id, task_id], |row| row.get::<_, String>(0),
+                ).optional()?
+            } else { deliverables.factory_branch_anchor.clone() };
+            if source.as_deref().is_none_or(|source|
+                !matches!(source.len(), 40 | 64) || !source.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || source.eq_ignore_ascii_case(&repair.rejected_anchor))
+            {
+                return Err(StoreError::PremergeRepairRequiresNewCommit { dispatch_id: repair.dispatch_id.clone() });
+            }
+        }
+    }
     let requested_at = Utc::now();
     let dispatch = VerificationDispatch {
         id: format!("vdispatch-{:032x}", rand::random::<u128>()),

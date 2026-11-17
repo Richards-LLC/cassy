@@ -756,6 +756,8 @@ struct ExternalVerificationCloseReceipt {
 pub(crate) enum SupervisorAuthorityError {
     Identity(String),
     Store(String),
+    /// cas-5d2e: the store was busy, so authority is unknown; retry later.
+    StoreBusy(String),
     NotRegistered { caller_id: String, error: String },
     NotLive(cas_types::Agent),
 }
@@ -792,7 +794,7 @@ pub(super) fn gate_supervisor_authority_error(
         SupervisorAuthorityError::Identity(error) => format!(
             "GATE {operation} REJECTED: gate tasks require an authenticated registered supervisor; caller identity could not be resolved ({error})."
         ),
-        SupervisorAuthorityError::Store(error) => format!(
+        SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
             "GATE {operation} REJECTED: supervisor authority could not be checked ({error})."
         ),
         SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
@@ -5632,16 +5634,25 @@ impl CasCore {
     pub(crate) fn resolve_live_supervisor_authority(
         &self,
     ) -> Result<cas_types::Agent, SupervisorAuthorityError> {
-        let caller_id = self
-            .get_registered_agent_id_read_only()
-            .map_err(|error| SupervisorAuthorityError::Identity(error.to_string()))?;
+        let caller_id = self.get_registered_agent_id_read_only().map_err(|error| {
+            let busy = error.data.as_ref().and_then(|data| data.get("error_code"))
+                == Some(&serde_json::json!(crate::mcp::server::STORE_BUSY_CODE));
+            if busy {
+                SupervisorAuthorityError::StoreBusy(error.message.to_string())
+            } else {
+                SupervisorAuthorityError::Identity(error.to_string())
+            }
+        })?;
         let caller = self
             .open_agent_store()
             .map_err(|error| SupervisorAuthorityError::Store(error.to_string()))?
             .get(&caller_id)
-            .map_err(|error| SupervisorAuthorityError::NotRegistered {
-                caller_id,
-                error: error.to_string(),
+            .map_err(|error| match crate::mcp::server::store_busy_error(&error) {
+                Some(_) => SupervisorAuthorityError::StoreBusy(error.to_string()),
+                None => SupervisorAuthorityError::NotRegistered {
+                    caller_id,
+                    error: error.to_string(),
+                },
             })?;
         if caller.role != cas_types::AgentRole::Supervisor || !caller.is_alive() {
             return Err(SupervisorAuthorityError::NotLive(caller));
@@ -5691,7 +5702,7 @@ impl CasCore {
             SupervisorAuthorityError::Identity(error) => format!(
                 "{label} CLOSE REJECTED: {flag}=true requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
             ),
-            SupervisorAuthorityError::Store(error) => format!(
+            SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
                 "{label} CLOSE REJECTED: supervisor authority could not be checked ({error})."
             ),
             SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
@@ -5787,7 +5798,7 @@ impl CasCore {
             SupervisorAuthorityError::Identity(error) => format!(
                 "EXTERNAL VERIFICATION RECEIPT REJECTED: an authenticated live registered supervisor is required; caller identity could not be resolved ({error})."
             ),
-            SupervisorAuthorityError::Store(error) => format!(
+            SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
                 "EXTERNAL VERIFICATION RECEIPT REJECTED: supervisor authority could not be checked ({error})."
             ),
             SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
@@ -5908,7 +5919,7 @@ impl CasCore {
                 SupervisorAuthorityError::Identity(error) => format!(
                     "TASK CANCEL REJECTED: cancel requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
                 ),
-                SupervisorAuthorityError::Store(error) => format!(
+                SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
                     "TASK CANCEL REJECTED: supervisor authority could not be checked ({error})."
                 ),
                 SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
@@ -8947,7 +8958,7 @@ impl CasCore {
                                 SupervisorAuthorityError::Identity(error) => format!(
                                     "EPIC CLOSE OVERRIDE REJECTED: stranded_branch_override requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
                                 ),
-                                SupervisorAuthorityError::Store(error) => format!(
+                                SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
                                     "EPIC CLOSE OVERRIDE REJECTED: supervisor authority could not be checked ({error})."
                                 ),
                                 SupervisorAuthorityError::NotRegistered { caller_id, error } => {

@@ -242,6 +242,40 @@ fn worker_shell_absolute_and_home_credential_reads_are_refused_cas_da9a() {
 }
 
 #[test]
+fn worker_python_source_edit_literals_are_data_cas_5d392() {
+    let (_env, cwd) = role_env("worker");
+    let command = r#"python3 - <<'PY'
+from pathlib import Path
+p = Path('cas-cli/src/hooks/handlers/handlers_tests/worker_denied_tools.rs')
+s = p.read_text()
+old = '''print(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())'''
+new = '''print((Path.home() / '.config' / 'neonctl' / 'credentials.json').read_text())'''
+assert old in s
+p.write_text(s.replace(old, new))
+PY"#;
+    let reason = denial(handle_pre_tool_use(&bash(command, cwd.path()), None).unwrap());
+    assert!(reason.is_none(), "{reason:?}");
+}
+
+#[test]
+fn worker_python_source_edit_cannot_hide_live_reads_cas_5d392() {
+    let (_env, cwd) = role_env("worker");
+    for script in [
+        "from pathlib import Path; p = Path('~/.config/neonctl/credentials.json').expanduser(); s = p.read_text(); p.write_text(s.replace('old', 'new'))",
+        "from pathlib import Path; p = Path.home() / '.config' / 'neonctl' / 'credentials.json'; s = p.read_text(); p.write_text(s.replace('old', 'new'))",
+        "from pathlib import Path; p = Path('fixture.rs'); s = p.read_text(); code = '''print(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())'''; exec(code); p.write_text(s.replace('old', code))",
+        "from pathlib import Path; p = Path('fixture.rs'); p.write_text(f\"{Path('~/.config/neonctl/credentials.json').expanduser().read_text()}\")",
+        "from pathlib import Path; p = Path('fixture.rs'); p.replace(Path.home() / '.config' / 'neonctl' / 'credentials.json'); p.write_text('new')",
+    ] {
+        let command = format!("python3 - <<'PY'\n{script}\nPY");
+        assert_operator_credential_refusal(
+            handle_pre_tool_use(&bash(&command, cwd.path()), None).unwrap(),
+            &command,
+        );
+    }
+}
+
+#[test]
 fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
     let (_env, cwd) = role_env("worker");
     let project = tempfile::tempdir().unwrap();

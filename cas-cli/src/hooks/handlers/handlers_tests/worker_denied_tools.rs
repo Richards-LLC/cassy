@@ -266,6 +266,8 @@ fn worker_python_source_edit_cannot_hide_live_reads_cas_5d392() {
         "from pathlib import Path; p = Path('fixture.rs'); s = p.read_text(); code = '''print(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())'''; exec(code); p.write_text(s.replace('old', code))",
         "from pathlib import Path; p = Path('fixture.rs'); p.write_text(f\"{Path('~/.config/neonctl/credentials.json').expanduser().read_text()}\")",
         "from pathlib import Path; p = Path('fixture.rs'); p.replace(Path.home() / '.config' / 'neonctl' / 'credentials.json'); p.write_text('new')",
+        // A bare CR ends a comment for CPython but not for tree-sitter.
+        "from pathlib import Path\np = Path('fixture.rs')\ns = p.read_text()\n#x\rcode = open(__import__('os').path.expanduser('~/.config/neonctl/credentials.json')).read()\np.write_text(s.replace('old', 'new'))",
     ] {
         let command = format!("python3 - <<'PY'\n{script}\nPY");
         assert_operator_credential_refusal(

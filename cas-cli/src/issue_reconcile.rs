@@ -5,9 +5,9 @@
 //! only in prose, PRs carried no `Fixes #N`, and nothing compared shipped
 //! tasks with open issues. This module gives three surfaces the comparison:
 //!
-//! - **Task create:** a task whose title cites exactly one issue records it as
-//!   `external_ref`. A task that cites issues only in its description, or
-//!   several, gets a hint to set it ([`external_ref_hint`]).
+//! - **Task create:** only an explicit `external_ref` or a closing reference
+//!   (`Fixes #N` / `Closes #N`) records an issue as `external_ref`. Other
+//!   citations get a hint to set it ([`external_ref_hint`]).
 //! - **Epic close:** the receipt warns about issues its children reference
 //!   that are still open ([`epic_open_issue_warning`]).
 //! - **`cas doctor`:** a row lists issues that are still open although every
@@ -22,12 +22,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use cas_types::{Task, TaskStatus};
 
 use crate::bounded_process::{Deadline, run_command};
 use crate::github_issue_attach::{GH_BIN_ENV, IssueRef, parse_issue_refs, task_brief_text};
+use regex::Regex;
 
 /// Total time one reconciliation may spend in `gh`.
 pub const GH_BUDGET: Duration = Duration::from_secs(6);
@@ -128,21 +130,21 @@ pub fn task_issue_refs(task: &Task, default_repo: Option<&str>) -> Vec<IssueRef>
 /// What task create does about a task's cited issues.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalRefHint {
-    /// The title cites exactly one issue: record it as `external_ref`.
+    /// The brief explicitly marks exactly one issue as fixed: record it as `external_ref`.
     Set {
         url: String,
         issue: String,
     },
-    /// Issues are cited, but not as one title issue: suggest setting it.
+    /// Issues are cited, but none has one explicit closing binding: suggest setting it.
     Suggest {
         issues: Vec<String>,
     },
     None,
 }
 
-/// cas-dd56 item 1: the `external_ref` a new task should carry. Only a title
-/// that cites exactly one issue sets it; description mentions are often
-/// context ("related to GH #1210"), so they only produce a hint.
+/// The `external_ref` a new task should carry. Ownership comes from an
+/// explicit external ref, an issue-owning title boundary, or `Fixes`/`Closes`.
+/// Other title and description citations are context and only produce a hint.
 pub fn external_ref_hint(
     title: &str,
     description: &str,
@@ -152,15 +154,31 @@ pub fn external_ref_hint(
     if external_ref.is_some_and(|value| !value.trim().is_empty()) {
         return ExternalRefHint::None;
     }
-    let in_title = parse_issue_refs(title, default_repo);
-    if let [issue] = in_title.as_slice() {
+    let mut cited = parse_issue_refs(title, default_repo);
+    for issue in parse_issue_refs(description, default_repo) {
+        if !cited.contains(&issue) {
+            cited.push(issue);
+        }
+    }
+
+    let mut closing_refs = title_binding_refs(title, default_repo);
+    for issue in closing_issue_refs(title, default_repo) {
+        if !closing_refs.contains(&issue) {
+            closing_refs.push(issue);
+        }
+    }
+    for issue in closing_issue_refs(description, default_repo) {
+        if !closing_refs.contains(&issue) {
+            closing_refs.push(issue);
+        }
+    }
+    if let [issue] = closing_refs.as_slice() {
         return ExternalRefHint::Set {
             url: issue_url(issue),
             issue: issue.display(),
         };
     }
-    let mut cited = in_title;
-    for issue in parse_issue_refs(description, default_repo) {
+    for issue in closing_refs {
         if !cited.contains(&issue) {
             cited.push(issue);
         }
@@ -174,11 +192,87 @@ pub fn external_ref_hint(
     }
 }
 
+static CLOSING_ISSUE_REF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:fixes|closes)\s+(?:GH\s*)?#([0-9]+)\b")
+        .expect("valid explicit GitHub issue closing reference regex")
+});
+
+static ISSUE_TITLE_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9._-]+))?#([0-9]+):")
+        .expect("valid issue title prefix regex")
+});
+static ISSUE_TITLE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\(GH\s*#([0-9]+)\)\s*$")
+        .expect("valid issue title suffix regex")
+});
+
+/// Issue references at the title boundary that represent intake ownership.
+/// Ordinary mentions elsewhere in a brief remain citations only.
+fn title_binding_refs(title: &str, default_repo: Option<&str>) -> Vec<IssueRef> {
+    let default = default_repo.and_then(|repo| {
+        let (owner, name) = repo.trim().split_once('/')?;
+        (!owner.is_empty() && !name.is_empty()).then(|| (owner.to_string(), name.to_string()))
+    });
+    let mut refs = Vec::new();
+    let mut add = |owner: String, repo: String, number: &str| {
+        if let Ok(number) = number.parse::<u64>()
+            && number > 0
+        {
+            let issue = IssueRef { owner, repo, number };
+            if !refs.contains(&issue) {
+                refs.push(issue);
+            }
+        }
+    };
+    if let Some(captures) = ISSUE_TITLE_PREFIX.captures(title) {
+        if let Some(owner) = captures.get(1) {
+            add(owner.as_str().to_string(), captures[2].to_string(), &captures[3]);
+        } else if let Some((owner, repo)) = &default {
+            add(owner.clone(), repo.clone(), &captures[3]);
+        }
+    }
+    if let Some(captures) = ISSUE_TITLE_SUFFIX.captures(title)
+        && let Some((owner, repo)) = &default
+    {
+        add(owner.clone(), repo.clone(), &captures[1]);
+    }
+    drop(add);
+    refs
+}
+
+/// Issue references explicitly attached to a supported closing keyword.
+/// Bare `#N` is accepted here because the keyword makes its issue meaning
+/// unambiguous; elsewhere callers still need an explicit issue reference.
+fn closing_issue_refs(text: &str, default_repo: Option<&str>) -> Vec<IssueRef> {
+    let Some((owner, repo)) = default_repo
+        .map(str::trim)
+        .and_then(|repo| repo.split_once('/'))
+        .filter(|(owner, repo)| !owner.is_empty() && !repo.is_empty())
+    else {
+        return Vec::new();
+    };
+    CLOSING_ISSUE_REF
+        .captures_iter(text)
+        .filter_map(|captures| captures[1].parse::<u64>().ok())
+        .filter(|number| *number > 0)
+        .map(|number| IssueRef {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number,
+        })
+        .fold(Vec::new(), |mut issues, issue| {
+            if !issues.contains(&issue) {
+                issues.push(issue);
+            }
+            issues
+        })
+}
+
 /// The receipt line for an [`ExternalRefHint`], empty for none.
 pub fn external_ref_hint_note(hint: &ExternalRefHint) -> String {
     match hint {
         ExternalRefHint::Set { url, issue } => format!(
-            "\n\n🔗 external_ref set to {url}: the title cites {issue}. Release and doctor \
+            "\n\n🔗 external_ref set to {url}: the brief explicitly marks {issue} as fixed. Release and doctor \
              issue checks use it to tell when the issue has shipped."
         ),
         ExternalRefHint::Suggest { issues } => format!(
@@ -700,12 +794,11 @@ mod tests {
     }
 
     #[test]
-    fn a_title_issue_sets_external_ref_and_prose_mentions_only_hint() {
+    fn only_explicit_fixing_references_set_external_ref() {
         assert_eq!(
             external_ref_hint("GH #1216: epic create ignores target", "", None, Some(REPO)),
-            ExternalRefHint::Set {
-                url: "https://github.com/Richards-LLC/cassy/issues/1216".into(),
-                issue: "Richards-LLC/cassy#1216".into(),
+            ExternalRefHint::Suggest {
+                issues: vec!["Richards-LLC/cassy#1216".into()],
             }
         );
         assert_eq!(
@@ -715,11 +808,9 @@ mod tests {
                 None,
                 Some(REPO)
             ),
-            ExternalRefHint::Suggest {
-                issues: vec![
-                    "Richards-LLC/cassy#1210".into(),
-                    "Richards-LLC/cassy#1211".into()
-                ],
+            ExternalRefHint::Set {
+                url: "https://github.com/Richards-LLC/cassy/issues/1210".into(),
+                issue: "Richards-LLC/cassy#1210".into(),
             }
         );
         assert_eq!(
@@ -739,6 +830,29 @@ mod tests {
             ExternalRefHint::None
         );
         assert!(external_ref_hint_note(&ExternalRefHint::None).is_empty());
+    }
+
+    #[test]
+    fn issue_owning_title_boundaries_set_external_ref() {
+        for (title, number) in [
+            ("Richards-LLC/cassy#1216: epic create ignores target", 1216),
+            ("#1217: epic create ignores target", 1217),
+            ("Epic create ignores target (GH #1218)", 1218),
+        ] {
+            let expected = format!("https://github.com/Richards-LLC/cassy/issues/{number}");
+            assert_eq!(
+                external_ref_hint(title, "", None, Some(REPO)),
+                ExternalRefHint::Set {
+                    url: expected,
+                    issue: format!("Richards-LLC/cassy#{number}"),
+                },
+                "{title}"
+            );
+        }
+        assert!(matches!(
+            external_ref_hint("Mention GH #1219 in the middle", "", None, Some(REPO)),
+            ExternalRefHint::Suggest { .. }
+        ));
     }
 
     #[test]

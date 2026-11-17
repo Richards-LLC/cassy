@@ -1781,7 +1781,7 @@ mod lifecycle_friction_tests {
                 .content
                 .into_iter()
                 .filter_map(|content| {
-                    if let rmcp::model::RawContent::Text(text) = content.raw {
+                    if let rmcp::model::ContentBlock::Text(text) = content {
                         Some(text.text)
                     } else {
                         None

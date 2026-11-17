@@ -353,6 +353,10 @@ pub struct ReleaseConfig {
     /// Minimum hours between one release freeze and the next automatic cut.
     #[serde(default = "default_auto_cut_min_interval_hours")]
     pub auto_cut_min_interval_hours: u32,
+    /// The operator's grant (cas-444b): the train's supervisor may lift a
+    /// freeze the operator applied in Commander. Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisor_lifts_operator_freeze: bool,
 }
 
 fn default_auto_cut_max_per_day() -> u32 { 4 }
@@ -364,6 +368,7 @@ impl Default for ReleaseConfig {
             claude_account_allowlist: Vec::new(),
             auto_cut_max_per_day: default_auto_cut_max_per_day(),
             auto_cut_min_interval_hours: default_auto_cut_min_interval_hours(),
+            supervisor_lifts_operator_freeze: false,
         }
     }
 }

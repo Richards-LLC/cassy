@@ -79,24 +79,34 @@ pub fn recommend<'a>(
             }
         });
     }
-    candidates.sort_by(|a, b| {
+    // The binding window is whichever of weekly and 5h is fuller (cas-2820).
+    let binding = |c: &(&Account, Option<DateTime<Utc>>, f64, f64)| c.2.max(c.3);
+    candidates.sort_by(|a, b| match config.selection {
+        // Most headroom on the binding window; ties by the earliest reset,
+        // an unknown weekly reset after every known one.
+        AccountSelection::MostHeadroom => binding(a)
+            .total_cmp(&binding(b))
+            .then(a.1.is_none().cmp(&b.1.is_none()))
+            .then(a.1.cmp(&b.1))
+            .then(a.0.folder.cmp(&b.0.folder)),
         // An unknown weekly reset is eligible, after every known reset.
-        a.1.is_none()
+        AccountSelection::SoonestReset => a.1.is_none()
             .cmp(&b.1.is_none())
             .then(a.2.total_cmp(&b.2))
             .then(a.3.total_cmp(&b.3))
             .then(a.1.cmp(&b.1))
-            .then(a.0.folder.cmp(&b.0.folder))
+            .then(a.0.folder.cmp(&b.0.folder)),
     });
-    let Some(&(account, reset, weekly, _)) = candidates.first() else {
+    let Some(&first) = candidates.first() else {
         return result;
     };
+    let (account, reset, headroom) = (first.0, first.1, 100.0 - binding(&first));
     for skipped in later {
         result
             .excluded
             .push((skipped, format!("resets later than {}; {}", account.name, crate::cli::limits::format_reset(skipped.windows.iter().find(|w| w.name == "weekly").and_then(|w| w.resets_at), now))));
     }
-    if reset.is_some() {
+    if reset.is_some() && config.selection == AccountSelection::SoonestReset {
         for &(skipped, candidate_reset, _, _) in candidates.iter().skip(1) {
             if candidate_reset.is_none() {
                 result
@@ -111,7 +121,7 @@ pub fn recommend<'a>(
     };
     result.recommended = Some(Recommendation {
         account,
-        reason: format!("{reset_reason}, {:.0}% left", 100.0 - weekly),
+        reason: format!("{reset_reason}, {headroom:.0}% left"),
     });
     result
 }

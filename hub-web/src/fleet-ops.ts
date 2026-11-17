@@ -219,7 +219,7 @@ export function freezeTrainAction(epicId: string): FleetAction {
   };
 }
 
-/** cas-2f4d: the operator's one-tap lift; no supervisor action lifts a freeze. */
+/** cas-2f4d: the operator's one-tap lift; supervisors use train_freeze decision=lift (cas-444b). */
 export function liftFreezeAction(epicId: string): FleetAction {
   return {
     id: `lift-freeze:${epicId}`,

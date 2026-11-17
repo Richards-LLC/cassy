@@ -1035,6 +1035,8 @@ mod tests {
         );
         assert_eq!(active_choice_index(&profiles), 0);
         let now = "2026-10-27T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        // The marked row follows the soonest-reset policy pinned here.
+        let soonest = crate::config::AccountsConfig { selection: crate::config::AccountSelection::SoonestReset, ..Default::default() };
         for provider in crate::accounts::Provider::ALL {
             let mut accounts = vec![
                 crate::account_selection::tests::row(provider, "main", 48, 0.0, 0.0),
@@ -1045,7 +1047,7 @@ mod tests {
             }
             let mut profiles = profiles.clone();
             for (profile, account) in profiles.iter_mut().zip(&accounts) { profile.directory = account.folder.clone(); }
-            apply_recommendation(&mut profiles, &accounts, provider, now, &Default::default());
+            apply_recommendation(&mut profiles, &accounts, provider, now, &soonest);
             // Weekly capacity is the first detail; the policy's choice is the
             // marked, preselected row. Only the glyph carries colour.
             let rows = text(&profiles, PickerStyle { glyphs: true, styled: true });
@@ -1061,7 +1063,7 @@ mod tests {
             assert!(rows.iter().all(|row| row.lines().all(|line| text_width(&strip_sgr(line)) <= ROW_WIDTH)));
             if provider == crate::accounts::Provider::Claude {
                 accounts[1].usage_observed_at = Some("2026-10-27T09:10:00Z".parse().unwrap());
-                apply_recommendation(&mut profiles, &accounts, provider, now, &Default::default());
+                apply_recommendation(&mut profiles, &accounts, provider, now, &soonest);
                 let rows = text(&profiles, PLAIN);
                 assert!(rows[1].contains("weekly 41% left as of 5:10 AM ET"), "{}", rows[1]);
                 assert!(rows.iter().all(|row| row.lines().all(|line| text_width(line) <= ROW_WIDTH)));
@@ -1072,7 +1074,7 @@ mod tests {
             accounts[1].windows[1].used_percent = None;
             accounts[1].windows[1].resets_at = None;
             accounts[0].windows.clear();
-            apply_recommendation(&mut profiles, &accounts, provider, now, &Default::default());
+            apply_recommendation(&mut profiles, &accounts, provider, now, &soonest);
             assert_eq!(
                 text(&profiles, PLAIN)[..2],
                 [

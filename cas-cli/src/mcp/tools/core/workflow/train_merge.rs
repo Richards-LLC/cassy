@@ -123,6 +123,14 @@ pub(crate) fn admit(
     Ok(())
 }
 
+/// The train whose active merge owns this target, if any.
+pub(crate) fn owner(root: &Path, repo: &Path, target: &str) -> Option<String> {
+    read(&path(root, repo, target).ok()?)
+        .ok()?
+        .filter(Queue::active)
+        .map(|queue| queue.train)
+}
+
 fn driver_lock(
     root: &Path,
     repo: &Path,
@@ -222,6 +230,16 @@ impl CasCore {
                     reason,
                 )?;
                 queue.session = session.into();
+                // A retried train_merge restarts the current entry's stopped
+                // automatic verifier; the dispatch claim prevents a second one.
+                let entry = &queue.entries[queue.next];
+                if let Some(dispatch) =
+                    cas_store::get_latest_verification_dispatch(&self.cas_root, &entry.task)?
+                        .filter(|dispatch| dispatch.state == VerificationDispatchState::Pending)
+                {
+                    self.emit_premerge_review_handoff(&tasks.get(&entry.task)?, &dispatch)
+                        .map_err(|error| anyhow::anyhow!(error.message.to_string()))?;
+                }
             }
             if queue.active() || ordered.is_none() {
                 save(&path, &queue)?;
@@ -402,7 +420,14 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             }
             continue;
         }
-        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        // GH #2018: without a daemon, an entry's verifier dispatch got only a
+        // manual worktree_merge handoff, which G-101 refuses during the train.
+        let daemon = crate::mcp::daemon::EmbeddedDaemon::new(crate::mcp::daemon::EmbeddedDaemonConfig {
+            cas_root: root.to_path_buf(),
+            cloud_sync_enabled: false,
+            ..Default::default()
+        });
+        let core = CasCore::with_daemon(root.to_path_buf(), None, Some(std::sync::Arc::new(daemon)));
         core.bind_agent_identity(
             queue.supervisor.clone(),
             crate::mcp::AgentIdentitySource::ServerInternal,
@@ -444,6 +469,12 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                     VerificationDispatchState::Pending | VerificationDispatchState::Claimed
                 )
             {
+                // GH #2018: an unclaimed dispatch needs its daemon verifier
+                // requested here; nothing else starts it while the train holds.
+                if dispatch.state == VerificationDispatchState::Pending {
+                    core.emit_premerge_review_handoff(&tasks.get(&entry.task)?, &dispatch)
+                        .map_err(|error| anyhow::anyhow!(error.message.to_string()))?;
+                }
                 queue.waiting = Some(crate::gates::tag("G-115", format!("{} awaiting dispatch {}", entry.task, dispatch.id)));
                 save(&path, &queue)?;
                 break;
@@ -927,6 +958,117 @@ mod tests {
             before,
             "completed queue is idempotent"
         );
+    }
+
+    /// GH #2018: a train entry that needs a verdict asks the factory daemon to
+    /// start its verifier during the resume pass. A manual handoff instead
+    /// named worktree_merge, which G-101 refuses while the train owns the target.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn resume_requests_daemon_verifier_for_train_entry_gh_2018() {
+        use crate::ui::factory::{
+            ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, PROTOCOL_VERSION, SessionState,
+            decode_length, encode_message, gui_socket_path, local_gui_capabilities,
+        };
+        use std::io::{Read, Write};
+        let mut fixture = Fixture::build(false);
+        fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+        fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+        std::fs::write(
+            fixture.root.join("config.toml"),
+            "[verification]\nenabled=true\n[qa]\nmode='batch'\n",
+        )
+        .unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut task = tasks.get(&fixture.ids[0]).unwrap();
+        task.depth = TaskDepth::Deep;
+        tasks.update(&task).unwrap();
+        fixture.start().await;
+        // The live stuck state: a daemonless pass left this exact dispatch
+        // Pending and unclaimed.
+        let parked = tasks.get(&fixture.ids[0]).unwrap();
+        assert!(fixture.core.prepare_premerge_verification(
+            &parked, fixture._repo.path(), "factory/worker-1", "epic/train",
+        ).is_err());
+        let pending = cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.state, VerificationDispatchState::Pending);
+        let broker_root = fixture.root.clone();
+        // The factory daemon's local control socket, as the real daemon serves it.
+        let socket = gui_socket_path("queue-session");
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let broker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let mut client = loop {
+                match listener.accept() {
+                    Ok((client, _)) => break client,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(20))
+                    }
+                    Err(_) => return None,
+                }
+            };
+            client.set_nonblocking(false).unwrap();
+            client
+                .write_all(&encode_message(&DaemonMessage::Welcome {
+                    session_name: "queue-session".into(),
+                    state: SessionState { focused_pane: None, panes: vec![], epic_id: None,
+                        epic_title: None, cols: 80, rows: 24 },
+                    scrollback: None, protocol_version: PROTOCOL_VERSION,
+                    capabilities: local_gui_capabilities(), pane_bootstrap: vec![],
+                }).unwrap())
+                .unwrap();
+            let mut header = [0; FRAME_HEADER_SIZE];
+            client.read_exact(&mut header).unwrap();
+            let mut body = vec![0; decode_length(&header)];
+            client.read_exact(&mut body).unwrap();
+            let ClientMessage::LaunchVerifier { dispatch_id } = serde_json::from_slice(&body).unwrap()
+            else {
+                panic!("unexpected factory control");
+            };
+            // The real daemon launch path claims the exact dispatch.
+            let review = crate::mcp::tools::core::workflow::premerge_verification::launch_factory_verifier(
+                &broker_root, "queue-session", &dispatch_id,
+            )
+            .unwrap();
+            let claimed = cas_store::get_verification_dispatch(&broker_root, &dispatch_id).unwrap();
+            client
+                .write_all(&encode_message(&DaemonMessage::VerifierLaunched {
+                    dispatch_id: dispatch_id.clone(),
+                }).unwrap())
+                .unwrap();
+            if let Some(review) = review {
+                review.join().unwrap();
+            }
+            Some((dispatch_id, claimed.state, claimed.verifier_agent_id))
+        });
+
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[0])
+            .unwrap()
+            .expect("the train entry needs a verdict");
+        let (launched, state, verifier) =
+            broker.join().unwrap().expect("one resume pass requests the daemon verifier");
+        assert_eq!((launched, state), (pending.id.clone(), VerificationDispatchState::Claimed));
+        assert!(verifier.is_some_and(|id| id.starts_with("task-verifier-")));
+        assert_eq!(dispatch.id, pending.id);
+        let operations = GitOperations::new(fixture._repo.path().to_path_buf());
+        assert!(!operations.is_ancestor(&fixture.shas[0], "epic/train"));
+        // The verdict resumes the same position without a single merge.
+        let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "add", "task_id": fixture.ids[0], "dispatch_id": dispatch.id,
+            "status": "approved", "summary": "Exact train candidate reviewed",
+        }))
+        .unwrap();
+        let approval = service.verification(Parameters(request)).await.unwrap();
+        assert_ne!(approval.is_error, Some(true), "{approval:?}");
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        assert!(operations.is_ancestor(&fixture.shas[0], "origin/epic/train"));
     }
 
     /// GH #2017: a delivery still parked on a train whose branch is gone from

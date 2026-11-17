@@ -84,6 +84,18 @@ impl CasCore {
         if let Some(target) = inherited_target.as_ref() {
             super::update::refuse_retarget_of_parked_delivery(&from_task, &to_task.id, target)?;
         }
+        // cas-f45f (GH #1939): a parent link retargets exactly like `epic=`,
+        // so an unchanged empty source follows the task to its new target.
+        let source_rebind = match inherited_target.as_ref() {
+            Some(target) => super::update::validate_empty_source_retarget(
+                &self.cas_root,
+                &from_task,
+                target,
+                self.get_agent_id().map_err(|error| error.to_string()),
+            )
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?,
+            None => None,
+        };
         if inherited_target.is_some() {
             super::lifecycle::proof_scope::guard_task_proof_scope(
                 &self.cas_root,
@@ -110,6 +122,9 @@ impl CasCore {
         }
 
         if let Some(target) = inherited_target {
+            if let Some(audit) = source_rebind.as_ref() {
+                super::update::rebind_empty_source(&mut from_task, &target, audit);
+            }
             from_task.deliverables.work_target = Some(target);
             from_task.updated_at = chrono::Utc::now();
             task_store.update(&from_task).map_err(|e| McpError {
@@ -119,6 +134,9 @@ impl CasCore {
                 )),
                 data: None,
             })?;
+            if let Some(audit) = source_rebind.as_ref() {
+                super::update::record_source_rebind(&self.cas_root, &from_task.id, audit);
+            }
         }
 
         // A late blocking edge must re-arm an open (including reopened) task.

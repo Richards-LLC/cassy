@@ -95,7 +95,7 @@ pub fn lookup_metadata(
         MetadataUnavailable {
             artifact_id: id.to_string(),
             task_id: task_id.map(str::to_string),
-            reason: "This machine lacks synced metadata; run `cas cloud sync`, then retry.",
+            reason: "publication_reference_missing: no local artifact record or synced task publication reference matches this ID. Sync this receiver and confirm that the publisher's publication note reached Cloud. If Cloud lacks that reference, the publisher must sync it before this receiver can recover it.",
         }
         .into()
     })

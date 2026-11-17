@@ -146,6 +146,9 @@ struct SupervisorRecordedProof {
     cargo_args: Vec<String>,
     log_path: PathBuf,
     log_sha256: String,
+    /// cas-763f: logs of repeats 2..=5 behind a recorded stability proof.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repeat_logs: Vec<(PathBuf, String)>,
     recorded_at: String,
 }
 
@@ -159,6 +162,9 @@ struct SupervisorTestEvidence {
     cargo_args: Vec<String>,
     log_path: PathBuf,
     exit_code: i32,
+    /// cas-763f: a peer machine's capped repeats 2..=5 of the changed tests.
+    #[serde(default)]
+    repeat_log_paths: Vec<PathBuf>,
 }
 
 impl TestReceipt {
@@ -477,40 +483,65 @@ pub(crate) fn record_supervisor_test(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    // cas-763f: as for a worker rerun, any recording of changed tests
+    // withdraws overlapping stability proof until this evidence passes.
+    let config = crate::config::Config::load(&root)?.factory();
+    let target = task.deliverables.work_target.as_ref()
+        .map(|work| work.target_branch.clone()).or(config.epic_base_branch);
+    let owned = stability::rust::selected(&repo, &diff_base(&repo, target.as_deref())?, &evidence.head, &test)?;
+    stability::invalidate(&root, &repo, &evidence.head,
+        &owned.iter().map(|test| test.identity.clone()).collect::<Vec<_>>())?;
     if evidence.exit_code != 0 {
         bail!(
             "supervisor test exited {}; no PASS receipt recorded",
             evidence.exit_code
         );
     }
-    let log_path = evidence.log_path.canonicalize()?;
-    if !std::fs::metadata(&log_path)?.is_file() {
-        bail!("supervisor log must be a regular file");
-    }
-    let mut log_file = File::open(&log_path)?;
-    let mut bytes = Vec::new();
-    use std::io::Read;
-    (&mut log_file)
-        .take(25 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.is_empty() || bytes.len() > 25 * 1024 * 1024 {
-        bail!("supervisor log must be non-empty and at most 25 MiB");
-    }
-    let log = std::str::from_utf8(&bytes).context("supervisor log must be UTF-8")?;
-    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
-    let log = ansi.replace_all(log, "");
-    let summary = regex::Regex::new(
-        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
-    )?;
-    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
-    if summaries.len() != 1 {
-        bail!("supervisor log must contain exactly one selected nextest summary");
-    }
-    let run: u64 = summaries[0][1].parse()?;
-    let count: u64 = summaries[0][2].parse()?;
-    if count == 0 || count != run {
-        bail!("supervisor log must show a nonzero selection with every executed test passed");
-    }
+    let (log_path, bytes, log, count) = read_selected_log(&evidence.log_path)?;
+    let mut repeat_logs = Vec::new();
+    let stability = if evidence.repeat_log_paths.is_empty() { None } else {
+        // cas-763f: five capped passes from a peer machine, one log per run.
+        if evidence.repeat_log_paths.len() + 1 != stability::REQUIRED_PASSES as usize {
+            bail!("stability evidence needs exactly {} per-repeat logs after the selected log",
+                stability::REQUIRED_PASSES - 1);
+        }
+        if owned.is_empty() {
+            bail!("this selection owns no changed tests; no stability evidence is needed");
+        }
+        // nextest names a test by binary id (package, or package::harness)
+        // and full path; a same-named test elsewhere is not this test.
+        let names_passed = |log: &str| owned.iter().all(|test| {
+            let binary = test.harness.as_ref()
+                .map_or_else(|| test.package.clone(), |harness| format!("{}::{harness}", test.package));
+            let suffix = format!(" {binary} {}", test.identity.name);
+            log.lines().any(|line| {
+                let line = line.trim_end();
+                line.trim_start().starts_with("PASS [") && line.ends_with(&suffix)
+            })
+        });
+        if !names_passed(&log) {
+            bail!("selected log does not show every changed test passing");
+        }
+        let mut seen = vec![(log_path.clone(), hex::encode(Sha256::digest(&bytes)))];
+        for path in &evidence.repeat_log_paths {
+            let (path, bytes, log, count) = read_selected_log(path)?;
+            let hash = hex::encode(Sha256::digest(&bytes));
+            if seen.iter().any(|(seen_path, seen_hash)| *seen_path == path || *seen_hash == hash) {
+                bail!("each repeat must be its own run log");
+            }
+            if count != owned.len() as u64 || !names_passed(&log) {
+                bail!("each repeat log must show exactly the changed tests passing");
+            }
+            seen.push((path, hash));
+        }
+        repeat_logs = seen.split_off(1);
+        Some(stability::Proof {
+            runner: "nextest".into(),
+            tests: owned.into_iter().map(|test| test.identity).collect(),
+            consecutive_passes: stability::REQUIRED_PASSES,
+            elapsed_ms: 0,
+        })
+    };
     // A receipt is not transferable across ownership or source mutations
     // while the log was read. The worker lane lock also fences capped writers.
     if tasks.get(task_id)?.assignee != task.assignee
@@ -526,6 +557,7 @@ pub(crate) fn record_supervisor_test(
         cargo_args: evidence.cargo_args,
         log_path,
         log_sha256: hex::encode(Sha256::digest(&bytes)),
+        repeat_logs,
         recorded_at: chrono::Utc::now().to_rfc3339(),
     };
     let record = CheckReceipt {
@@ -536,7 +568,7 @@ pub(crate) fn record_supervisor_test(
             filter: test.filter,
             harness: test.harness,
             count,
-            stability: None,
+            stability,
             selected_log: Some(provenance.log_path.clone()),
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
@@ -563,6 +595,40 @@ pub(crate) fn record_supervisor_test(
     std::fs::create_dir_all(path.parent().context("receipt directory")?)?;
     std::fs::write(path, serde_json::to_vec(&record)?)?;
     Ok(receipt)
+}
+
+/// One selected nextest run: its canonical path, bytes, ANSI-free text and
+/// passing count. Exactly one summary with every executed test passed.
+fn read_selected_log(path: &Path) -> Result<(PathBuf, Vec<u8>, String, u64)> {
+    let log_path = path.canonicalize()?;
+    if !std::fs::metadata(&log_path)?.is_file() {
+        bail!("supervisor log must be a regular file");
+    }
+    let mut log_file = File::open(&log_path)?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    (&mut log_file)
+        .take(25 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() > 25 * 1024 * 1024 {
+        bail!("supervisor log must be non-empty and at most 25 MiB");
+    }
+    let log = std::str::from_utf8(&bytes).context("supervisor log must be UTF-8")?;
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
+    let log = ansi.replace_all(log, "").into_owned();
+    let summary = regex::Regex::new(
+        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
+    )?;
+    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
+    if summaries.len() != 1 {
+        bail!("supervisor log must contain exactly one selected nextest summary");
+    }
+    let run: u64 = summaries[0][1].parse()?;
+    let count: u64 = summaries[0][2].parse()?;
+    if count == 0 || count != run {
+        bail!("supervisor log must show a nonzero selection with every executed test passed");
+    }
+    Ok((log_path, bytes, log, count))
 }
 
 fn lock_file(path: &Path) -> Result<File> {
@@ -2066,6 +2132,10 @@ fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Re
             }
         }
     }
+    diff_base(repo, target.as_deref())
+}
+
+fn diff_base(repo: &Path, target: Option<&str>) -> Result<String> {
     if let Some(target) = target {
         let remote = format!("refs/remotes/origin/{target}");
         return git(repo, &["merge-base", &remote, "HEAD"])

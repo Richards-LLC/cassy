@@ -5,27 +5,20 @@ no-code exclusions, live journeys unexercised. Keep its eight columns and counts
 In schema 2, graded runtime expectations cite `path:line`; PASS observations begin
 `visible:`, `terminal:` or `http:` with captured output. Database read-back only
 corroborates. Uncited expectations are spec questions. Legacy schema 1 stays valid.
+`cas qa ledger check <path> --task <id>` is the parser close and the verifier
+share; a structural PASS never proves the visible outcome.
 
-Run `cas qa ledger check <path> --task <id>` before close/review. CLI, close and
-verifier share diagnostics. A structural PASS never proves the visible outcome.
+Name the build revision, scope, surface and budget, and label evidence by how it
+was obtained: source reading and fixtures do not prove the real build. Telemetry
+findings cite saved sweep stdout and include all six parsed fields in the observed
+result.
 
-Name the build revision, scope, surface and budget. For a served app, record
-backend and frontend SHAs at walk start and end, including mixed builds
-([map the build](../SKILL.md#walk-rules)). Capture each exercised cell and
-describe what happened. Label evidence by how it was obtained; source reading
-and fixtures do not prove the real build. Telemetry findings cite saved sweep
-stdout and include all six parsed fields in the observed result.
+Independent channel/viewport surfaces run as separate walk-kit jobs, each with its
+own ledger, browser profile and test persona. The kit's `record()` stamps
+`progress_at` on every result; factory status flags a QA ledger whose progress
+stops for `factory.stall_threshold_secs`.
 
-Run independent channel/viewport surfaces as separate walk-kit jobs with their
-own ledger, browser profile and test persona. `createLedger.record()` publishes
-`progress_at` for every result, including another observation of one defect;
-`write()` preserves that time. The existing factory refresh and `worker_status`
-flag flat QA output at `factory.stall_threshold_secs`, independently of native
-execution liveness. Legacy ledgers without this field report progress unknown.
-With one unfinished QA lane in the focused epic and an eligible idle worker,
-the director suggests splitting independent surfaces or cases. Held workers,
-pending messages, existing assignments and unresolved reviewer handoffs exclude
-a worker; dependent steps remain together. No additional poller is started.
+## Binary sources
 
 A `real-build` row that drives a compiled binary needs a binary of the build
 revision, and the header names it: path, `--version` output and SHA-256. Three
@@ -41,14 +34,15 @@ sources qualify:
   `<artifacts_root>/<project-key>/<task-id>/candidates/<revision>/` with
   `VERSION.txt`, `SHA256SUMS` and `RECEIPT.json` beside the binary, and a later
   build leaves it alone, so cite that path. `cas qa candidate path --task
-  <task-id>` prints the newest build's path and refuses until one exists;
+  <task-id>` prints the newest build's path;
 - a CI release archive whose recorded commit or tree equals the revision;
 - the installed release, once the revision is published and `--version` names it.
 
-When the build guard refuses you a compile, do not work around it: request a
-candidate, and leave the binary cells `NOT EXERCISED: <reason>` until it
-arrives. An installed release whose version names another revision proves
-nothing about this one.
+When the build guard refuses you a compile, request a candidate and leave the
+binary cells `NOT EXERCISED: <reason>` until it arrives. An installed release
+whose version names another revision proves nothing about this one.
+
+## Candidate fixture isolation
 
 Before invoking a candidate `serve` or any stateful command, create a disposable
 fixture project with an empty `.cas` directory outside its source checkout. Give
@@ -60,7 +54,9 @@ unsetting `CAS_ROOT` alone can migrate that live store or sync it to Cloud. Keep
 the QA agent's own authenticated MCP environment separate from these subprocess
 overrides.
 
-After the rows, include these sections:
+## Sections after the rows
+
+Fill these from the constants grep and terminal-state dump in the skill's step 6:
 
 ```markdown
 ## Constants vs expectation
@@ -73,12 +69,8 @@ After the rows, include these sections:
 - Automation-caused artifacts, mis-taps, unavailable devices, and cells cut by the time box.
 ```
 
-Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`,
-`THRESHOLD`, `GRACE`, `DEBOUNCE`, and `RETRY`; an invisible, unpredictable
-threshold is a defect row. For terminal states, dump visible text from every
-surface and record claims that cannot both be true. File one task per defect;
-never fix code from the QA pass. Put the ledger path in the task note and close
-reason.
+An invisible, unpredictable threshold is a defect row; so is a pair of visible
+claims that cannot both be true.
 
 ## Server read-back and harness failures
 
@@ -99,11 +91,11 @@ When automation fails, adjudicate the product outcome in the same sweep:
   not block promotion or require a product fix or whole-sweep rerun.
 - Read-back mismatch or a visible product defect: record `FAIL` with a product
   defect task, even if a success toast appeared or server state otherwise matches.
-  These failures block promotion under the existing batch fix/re-walk policy.
+  These failures block promotion under the batch fix/re-walk policy.
 - Missing, stale or ambiguous read-back: record `NOT EXERCISED: <reason>` and keep
   the evidence owed. An unverified result cannot become a product PASS.
 
-The supervisor records this evidence-backed ruling in the release ledger before
-the batch receipt. Preserve native runner exit codes, failed attempts and CI
-receipts; a product ruling never rewrites an automated failure into a green run
-or bypasses a required mechanical gate.
+The supervisor records this ruling in the release ledger before the batch receipt.
+Preserve native runner exit codes, failed attempts and CI receipts; a product
+ruling never rewrites an automated failure into a green run or bypasses a required
+mechanical gate.

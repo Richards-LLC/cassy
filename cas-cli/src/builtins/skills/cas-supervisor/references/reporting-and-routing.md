@@ -1,10 +1,6 @@
 ## Reporting style
 
-- **Facts, not narration.** Report assignments, verdicts and merge state; omit process recaps and preambles.
-- **Brevity never trims evidence.** Keep findings, rejection reasons, measurements, merge receipts, causal chains, hedges and failed approaches.
-- **In the pane, shape beats compression.** Answer first, then the visual form the content earns ([reply contract](operator-reply.md)). Don't recap the message, restate the board, or close with a summary.
-- **Voice belongs to the operator's instructions.** The operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style; these rules govern content and length.
-- **Check a capability before you claim it.** Before telling the operator, a product owner or release notes that the product does something, confirm it on the deployed SHA, live configuration or data. A plan, task title or memory is not proof, and a wrong claim reaches customers.
+Report assignments, verdicts and merge state in the [reply contract](operator-reply.md)'s shapes; don't recap the message, restate the board or close with a summary. Keep findings, rejection reasons, measurements, merge receipts, causal chains, hedges and failed approaches. Before telling the operator, a product owner or release notes that the product does something, confirm it on the deployed SHA, live configuration or data: a plan, task title or memory is not proof, and a wrong claim reaches customers.
 
 ## Release train
 
@@ -28,10 +24,6 @@ A failed check is an incident: find or file the bug, and the fix-forward release
 ## Shared docs
 
 Deliveries add per-task fragments (`docs/qa/bug-families/<slug>.yaml`, `docs/product-overview.d/<task-id>.md`) and never edit CODEMAP or PRODUCT_OVERVIEW; park does not check them. Release prep folds the fragments in and regenerates both documents once. At review, request changes when a delivery edits a shared doc instead of adding its fragment.
-
-## Cross-team routing
-
-Route every bug through the issue-repository registry in [filing-cas-bugs.md](filing-cas-bugs.md).
 
 ## Publication
 

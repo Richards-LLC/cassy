@@ -72,16 +72,54 @@ fn refresh_epic_lane_binding(task: &mut Task) {
     }
 }
 
-struct RetargetedSourceRebind {
+pub(super) struct RetargetedSourceRebind {
     actor: String,
     target_tip: String,
     previous_start: cas_types::FactoryBranchStart,
 }
 
+const EMPTY_SOURCE_REBIND_REASON: &str =
+    "Automatic retarget of an unchanged source lane whose start is contained in the new target";
+
+/// Move the validated empty source to `target`, with its audit note.
+pub(super) fn rebind_empty_source(task: &mut Task, target: &cas_types::WorkTarget, audit: &RetargetedSourceRebind) {
+    let mut rebound_start = audit.previous_start.clone();
+    rebound_start.work_target = target.clone();
+    task.deliverables.factory_branch_start = Some(rebound_start.clone());
+    let audit_row = serde_json::json!({
+        "actor": &audit.actor,
+        "reason": EMPTY_SOURCE_REBIND_REASON,
+        "previous_start": &audit.previous_start,
+        "previous_tip": &audit.previous_start.base_sha,
+        "previous_anchor": task.deliverables.factory_branch_anchor,
+        "start": &rebound_start,
+        "tip": &audit.previous_start.base_sha,
+        "target_tip": &audit.target_tip,
+    });
+    if !task.notes.is_empty() { task.notes.push('\n'); }
+    task.notes.push_str(&format!(
+        "[{}] DELIVERY BRANCH REBOUND: {audit_row}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M")
+    ));
+}
+
+pub(super) fn record_source_rebind(cas_root: &std::path::Path, task_id: &str, audit: &RetargetedSourceRebind) {
+    crate::quality_ledger::intervention(
+        cas_root,
+        cas_store::InterventionKind::Rebind,
+        crate::quality_ledger::rebind_key(task_id, &audit.previous_start.branch, &audit.previous_start.base_sha),
+        Some(task_id),
+        Some(&audit.actor),
+        Some(EMPTY_SOURCE_REBIND_REASON),
+    );
+}
+
 /// Rebind an unchanged, empty source snapshot when an unparked task follows
 /// its parent to a later train. Other source states retain the existing epic
 /// move behavior and keep their recorded start for attribution and close.
-fn validate_empty_source_retarget(
+/// Both retarget paths use it: `task update epic=` and `dep_add` parent links
+/// (cas-f45f, GH #1939).
+pub(super) fn validate_empty_source_retarget(
     cas_root: &std::path::Path,
     task: &Task,
     target: &cas_types::WorkTarget,
@@ -2566,24 +2604,7 @@ impl CasCore {
             // by repeating `epic=`. A distinct explicit target is kept.
             if let Some(target) = retarget {
                 if let Some(audit) = source_rebind {
-                    let mut rebound_start = audit.previous_start.clone();
-                    rebound_start.work_target = target.clone();
-                    task.deliverables.factory_branch_start = Some(rebound_start.clone());
-                    let audit_row = serde_json::json!({
-                        "actor": &audit.actor,
-                        "reason": "Automatic retarget of an unchanged source lane whose start is contained in the new target",
-                        "previous_start": &audit.previous_start,
-                        "previous_tip": &audit.previous_start.base_sha,
-                        "previous_anchor": task.deliverables.factory_branch_anchor,
-                        "start": &rebound_start,
-                        "tip": &audit.previous_start.base_sha,
-                        "target_tip": &audit.target_tip,
-                    });
-                    if !task.notes.is_empty() { task.notes.push('\n'); }
-                    task.notes.push_str(&format!(
-                        "[{}] DELIVERY BRANCH REBOUND: {audit_row}",
-                        chrono::Utc::now().format("%Y-%m-%d %H:%M")
-                    ));
+                    rebind_empty_source(&mut task, &target, &audit);
                     retarget_rebind_event = Some(audit);
                     changes.push("factory_branch_start");
                 }
@@ -2901,18 +2922,7 @@ impl CasCore {
         })?;
 
         if let Some(audit) = retarget_rebind_event.as_ref() {
-            crate::quality_ledger::intervention(
-                &self.cas_root,
-                cas_store::InterventionKind::Rebind,
-                crate::quality_ledger::rebind_key(
-                    &task.id,
-                    &audit.previous_start.branch,
-                    &audit.previous_start.base_sha,
-                ),
-                Some(&task.id),
-                Some(&audit.actor),
-                Some("Automatic retarget of an unchanged source lane whose start is contained in the new target"),
-            );
+            record_source_rebind(&self.cas_root, &task.id, audit);
         }
 
         crate::epic_design_review::observe(&self.cas_root, &task.id)

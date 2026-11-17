@@ -24,7 +24,7 @@ mixed rendered changes still require the web bundle below.
 
 ## Playwright evidence bundle
 
-Rendered web/hub cells use the latest stable locked Playwright and matching browser binaries under the project's supported Node runtime. Follow [cas-playwright-tests](../../cas-playwright-tests/SKILL.md) for authoring/configuration; this reference owns evidence packaging. CLI cells use terminal captures.
+Rendered web/hub cells use the latest stable locked Playwright and matching browser binaries under the project's supported Node runtime. [cas-playwright-tests](../../cas-playwright-tests/SKILL.md) owns authoring and configuration; this reference owns evidence packaging.
 
 ## Layout
 
@@ -54,32 +54,25 @@ layout, colour, typography, imagery or motion. For `visual_change: false`, omit
 trace, assertions, ARIA, cell captures, polish and affected journey receipts/logs.
 A recording listed voluntarily still needs to be valid and fresh.
 
-Every web bundle needs polish evidence. A
-`journey` bundle ([journeys.md](journeys.md)) may set
-`visual_qa_status: "unavailable"` and omit the polish keys, because the release
-journey evaluation scores polish for it.
+Every web bundle cited at a delivery close needs polish evidence, a `journey`
+bundle ([journeys.md](journeys.md)) included.
 
 `bundle.json` records:
 
 - `schema: 1`, `task_id`, and `producer` (`cas-qa-craft`, `independent-qa`, or `journey`)
 - `head_sha`: the full SHA of the build under test
 - `pass_id`: for `independent-qa`, the immutable pass id from the dispatched QA task.
-  `qa_record` rejects a supplied id for another pass; historical bundles without
-  this field remain readable at their recorded paths.
 - `build_url`, `playwright_version`, `created_at` (RFC 3339)
 - `visual_change` (boolean) and `visual_qa_status` (`pass`, `fail`, or `unavailable`).
   `pass` is a claim that close checks against the run's own report,
   `visual-qa/visual-qa.json`. The bundled script reports `"status": "PASS"`.
   A project script's single-source report may instead say `"totalIssues": 0`
   with nonempty `renders`, `validRenders` equal to the render count, and
-  `"strict": true`. In either format, the JSON report is the verdict; the
-  Markdown heading and stdout footer may include the source name and counts.
-  The report's `generatedAt` must be later than the delivered commit. Every URL in
-  `urls` (or a single-source `input`) must be a local build: loopback,
-  `*.localhost`, or a file. The run
-  must not record `"strict": false`. A run against a production or other
-  remote origin never counts, because it checks what is deployed there,
-  not this commit. With no run, write `unavailable`; never `pass`.
+  `"strict": true`. Either way the JSON report is the verdict. Its
+  `generatedAt` must be later than the delivered commit, it must not record
+  `"strict": false`, and every URL in `urls` (or a single-source `input`) must
+  be a local build (loopback, `*.localhost` or a file): a remote origin checks
+  what is deployed there, not this commit. With no run, write `unavailable`.
   `scoped` is for a page that already had findings before this delivery. It
   needs `files.visual_qa_baseline_json`: the same strict script run against a
   local build of the base commit (`git merge-base <target> <head>`) over the
@@ -87,14 +80,11 @@ journey evaluation scores polish for it.
   report pairs once with a base finding by type, rule/reason, page, render
   state, scheme and full viewport. Element identity uses role + accessible
   name when supplied, or matching text + shared bounds within 0.5 CSS pixels.
-  CSS class renames do not add a finding when that identity agrees. Historical
-  reports without identity evidence require matching selectors; keep them
-  fail-closed. The delivered run must
+  CSS class renames do not add a finding when that identity agrees; reports
+  without identity evidence need matching selectors. The delivered run must
   still be fresh, strict and local. Classify base-build findings under
-  [independent-pass §3](independent-pass.md#3-correctness-paths): failures within
-  the delivery's stated purpose, acceptance criteria, demo statement, or a
-  journey invariant its diff adds or edits are unmet even when base shares them.
-  Only findings outside those scopes are pre-existing follow-ups in the ledger.
+  [independent-pass §3](independent-pass.md#3-correctness-paths); only findings
+  outside the delivery's scope are pre-existing follow-ups in the ledger.
   Both reports must record their findings in one of two shapes: a top-level
   `findings` list (the builtin visual-qa.mjs), or per render as
   `renders[].issues` with the page in `input` (a per-source project
@@ -122,42 +112,40 @@ journey evaluation scores polish for it.
   The visual-QA report's URLs may then be on that origin. The bundle must
   carry no credential: no storage state, cookie, session JWT, bearer token
   or auth header, including the headers Playwright records in `trace.zip`'s
-  network log. Close refuses such a bundle and names the file, never the
-  value. Log in through a setup project that is not traced. Before listing
-  the trace, replace each entire cookie or authorization value with exactly
-  `REDACTED`, `[REDACTED]`, `<redacted>`, `***`, or an empty value;
-  `visual-qa.mjs --scrub-trace` does this for the runner's trace. These
-  placeholders pass in JSON headers, text headers and cookie arrays; a real
-  value of 8 or more characters is refused. A placeholder embedded in a real
-  value does not exempt it. Saved storage-state files, session JWTs, bearer
-  tokens and API tokens remain refused.
+  network log; close refuses such a bundle and names the file. Log in through
+  an untraced setup project and scrub the runner's trace with
+  `visual-qa.mjs --scrub-trace` ([Config](#config)), which replaces each
+  entire cookie or authorization value with `[REDACTED]`.
 
 ## Before/after pairs
 
-Reports and release notes take their screenshots from one place per delivery
-task, so they can find them without asking:
+Reports and release notes read screenshots from one place per delivery task:
 `~/.cas/artifacts/<project-key>/<task-id>/qa/pairs/`. An independent round or a
-journey that captures a pair writes it there too, not under its own directory.
-For `visual_change: true`, run `cas deliverable capture --task <task-id> --target <target> --side both`.
-Projects with `[qa.capture]` configured require `files.pairs` or `pairs_status: "unavailable"`
-with a one-line `pairs_reason` in the bundle. An unavailable capture always permits close
-when no pairs are cited; a base build that cannot serve does not block delivery.
-Without capture configuration, absence is advisory. On deploy-only projects, run
-`cas deliverable capture --task <task-id> --side before` at task start, before deploying.
+journey that captures a pair writes it there too. For `visual_change: true`, run
+`cas deliverable capture --task <task-id> --target <target> --side both`; it
+captures both sides in one bounded run, writes the files and `pairs.json`, and
+reports `pairs_status`. On deploy-only projects, run
+`cas deliverable capture --task <task-id> --side before` at task start, before
+deploying. Projects with `[qa.capture]` configured require `files.pairs`, or
+`pairs_status: "unavailable"` with a one-line `pairs_reason` in the bundle and
+ledger; an unavailable capture permits close when no pairs are cited. Without
+capture configuration, absence is advisory.
 
-1. **Capture both sides in one session.** Before comes from a local build of
-   the merge base (`git merge-base <target> <head>`), or, when that cannot be
-   served, from the deployed production origin while the change is live only
-   on staging. After comes from the delivered build. Keep viewport, scheme,
-   login, data and masks identical, so the only difference is this delivery.
-   Use real captures only; never mock, edit or reconstruct a side.
-2. **Write the files.** `<id>.before.png` and `<id>.after.png` hold the full
-   captures; `<id>.before.jpg` and `<id>.after.jpg` are the embed copies, at
-   most 1440 px wide, quality 80 and 250 KB each. `<id>` is a stable
-   kebab-case shot name; reuse it for the same surface in later deliveries.
-3. **Write `pairs.json`.** Each side records its files, both PNG and JPG SHA-256 digests, the
-   commit or origin it came from, its source and its capture time. A shot with
-   only one side goes in `unpaired[]`: it is kept for the record and never rendered.
+The capture contract, whether the command or you produce it:
+
+1. **Both sides in one session.** Before comes from a local build of the merge
+   base (`git merge-base <target> <head>`), or, when that cannot be served, from
+   the deployed production origin while the change is live only on staging.
+   After comes from the delivered build. Viewport, scheme, login, data and
+   masks are identical. Real captures only; never mock, edit or reconstruct a side.
+2. **Files.** `<id>.before.png`/`<id>.after.png` are the full captures;
+   `<id>.before.jpg`/`<id>.after.jpg` are embed copies at most 1440 px wide,
+   quality 80 and 250 KB each. `<id>` is a stable kebab-case shot name, reused
+   for the same surface in later deliveries.
+3. **`pairs.json` (schema 2).** Each side records its files, PNG and JPG SHA-256
+   digests, the commit or origin, its source and capture time; paths resolve
+   inside the directory holding `pairs.json`. A shot with one side goes in
+   `unpaired[]` (same row shape), kept for the record and never rendered.
 
    ```json
    {"schema": 2, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
@@ -167,37 +155,20 @@ Without capture configuration, absence is advisory. On deploy-only projects, run
     "unpaired": []}
    ```
 
-   Use each stable `id` as the cell identity on both sides. Entries in `unpaired[]`
-   use the same row shape, with just `before` or `after`; each present side must
-   name nonempty `png` and `jpg` files with matching `sha256` and `jpg_sha256`,
-   resolved relative to, and confined inside, the directory containing `pairs.json`.
-   New manifests use schema 2, which requires both digests. Close also reads
-   historical schema 1 manifests that sealed only the PNG: it verifies that seal
-   and any supplied JPG seal, still requires both image files, and preserves the
-   original manifest bytes. This does not certify an unsealed historical JPG.
-   Unknown schema versions require a compatible reader or a provenance-preserving
-   migration, never a fabricated seal or a new BEFORE capture.
-   Every `pairs[]` row needs both sides; every `unpaired[]` row needs exactly one.
-   Keep every baseline cell, including cells with no AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
-   AFTER must contain every BEFORE id, and may add ids. A partial comparison that
-   drops BEFORE cells refuses and names all missing ids, even with no AFTER cells.
-   Capture the missing cells, or obtain an existing recorded exact-tip `qa_waive`
-   or `supervisor_override`; a manifest flag or ledger reason does not waive it.
-   BEFORE captures may predate the delivery; AFTER captures and `pairs.json` must
-   be fresh for the delivered build. Match `pairs.json` task and head to the bundle,
-   including when rebinding evidence after documentation-only commits.
+   Keep every baseline cell: AFTER must contain every BEFORE id across
+   `pairs[]` and `unpaired[]`, and may add ids. Close refuses a comparison that
+   drops BEFORE cells and names them; capture them, or cite an existing
+   exact-tip `qa_waive` or `supervisor_override` (a manifest flag or ledger
+   reason does not waive). BEFORE may predate the delivery; AFTER and
+   `pairs.json` must be fresh for the delivered build, with task and head
+   matching the bundle, including after documentation-only rebinds.
+4. **Status.** In `bundle.json`, set `files.pairs` to `pairs/pairs.json` and
+   `pairs_status` to `complete` (at least one pair, no unpaired rows or
+   findings), `partial` or `unavailable`; omit `files.pairs` when the manifest
+   cannot pass validation.
 
-4. **Record the status.** In `bundle.json`, set `files.pairs` to
-   `pairs/pairs.json` and `pairs_status` to `complete` (every shot paired),
-   `partial` (some shots in `unpaired[]` or capture findings) or `unavailable`
-   (no complete pair). A complete status requires at least one pair and no unpaired
-   rows or findings. For unavailable, give a one-line `pairs_reason` in `bundle.json`
-   and the ledger; omit `files.pairs` when the manifest cannot satisfy validation.
-
-Every consumer renders a pair the same way: only `pairs[]` entries, both
-sides labelled Before and After with Before first, from the JPG copies, one
-pair per change. With one side or none, it shows no image for that change.
-The [release-notes rubric](../../cas-release-notes/references/RUBRIC-template.md)
+Consumers render only `pairs[]` entries, Before first, from the JPG copies, one
+pair per change. The [release-notes rubric](../../cas-release-notes/references/RUBRIC-template.md)
 and the [report contract](../../cas-html-reports/references/technical-contract.md)
 add the per-surface limits.
 
@@ -209,11 +180,9 @@ For hub-web deliveries, workers run touched vitest files and tsc. Release batch 
 For browser deliveries, workers run touched unit and type checks; release batch QA owns affected journeys through the project's existing runner.
 <!-- cas-src:end -->
 
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 Named failure iteration may produce receipts; batch QA consumes matching
 receipts before running missing checks (see [independent-pass.md](independent-pass.md)).
-The hook denies factory worker and QA full or unfiltered runs. A failure control may rerun the failing
-spec at one worker, keeping the original failure.
+A failure control may rerun the failing spec at one worker, keeping the original failure.
 
 Documentation or ledger edits do not require a browser rerun of the QA bundle:
 set optional `executed_head_sha` in the bundle when rebinding, and keep
@@ -380,22 +349,20 @@ For polish evidence, also score what the delivery changed with the cas-ui-craft
 `references/critique-rubric.md` into `critique.md`, not the page's older
 backlog. Then write `bundle.json`.
 The floor is distinctiveness, fit, and hierarchy each ≥ 4, and no dimension at
-0. A score below the floor is a defect task, not a note. `<skills-dir>` is the
-harness skill directory (`.claude/skills`, `.codex/skills` or `.grok/skills`);
-the script ships with the cas-ui-craft skill. Only when it is missing (an
-install that predates it), take the four renders at 1280×800 and 390×800 in light and dark with
-`page.screenshot`, set `visual_qa_status: "unavailable"` and say so in the
-ledger's Honesty section. The close gate accepts only `"pass"` or `"scoped"`
-without a supervisor override, so ask for one with a `blocker=true` message before
-closing. Point `BASE_URL` at your own local serve of
-the delivered commit's build, never the deployed site.
+0. A score below the floor is a defect task, not a note. The script ships with
+the cas-ui-craft skill. If it is missing, take the four renders at 1280×800 and
+390×800 in light and dark with `page.screenshot`, set
+`visual_qa_status: "unavailable"` and say so in the Honesty section; close then
+needs a supervisor override, so ask with a `blocker=true` message before closing.
+Point `BASE_URL` at your own local serve of the delivered commit's build, never
+the deployed site.
 
 Cite the bundle in the ledger rows: the evidence path is `qa/M01.png`. Also
 cite it in one typed note,
 `task action=notes note_type=platform_proof notes="qa-bundle: <abs>/qa/bundle.json"`,
 and repeat that path in the close reason.
 
-## Supervisor review, in about two minutes
+## Supervisor review
 
 1. Open `bundle.json`. Check that `head_sha` is the delivered commit and that
    `critique_score` holds the floor.
@@ -412,19 +379,7 @@ and repeat that path in the close reason.
 
 `cas-playwright-debug` owns diagnosis when a step fails.
 
-## Historical measurements (not authoring guidance)
-
-- `trace.screenshots: true` capped the screencast at 800×450 content inside a
-  1280×720 frame. With `screenshots: false` it is full size. The per-action
-  PNGs from `snapshots.screen` sit in the zip under
-  `screenshots/call@<n>-after.png`. `trace screenshot <N>` reads only the
-  filmstrip, so it reports “No screenshot found”.
-- `page.screencast.start()` without `size` records 800×450. Pass
-  `page.viewportSize()`.
-- `showRecordingChapter(page, title, { duration })` blocks for its `duration`
-  (default 1000 ms). Call it only while recording; put the expected result in
-  the title. `showActions` returns a disposable; the annotations stop when it
-  is disposed.
-- `emulateMedia` keeps every feature you omit, so reset all three modes each
-  time. A matching `matchMedia` query is the proof that the mode took effect;
-  a screenshot identical to the default is not.
+Keep `trace.screenshots: false`: `true` shrinks the screencast to 800×450 inside
+its frame. The per-action PNGs from `snapshots.screen` sit in the zip under
+`screenshots/call@<n>-after.png`; `trace screenshot <N>` reads only the
+filmstrip and reports “No screenshot found”.

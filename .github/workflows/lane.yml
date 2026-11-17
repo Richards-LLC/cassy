@@ -495,6 +495,30 @@ jobs:
         if: always()
         run: ./scripts/ci-sccache-summary.sh "Scoped Validation — impact own tests"
 
+  # A hosted runner that stops responding uploads no log and runs no always()
+  # step, so its 45-minute timeout reads only as "cancelled" (cas-3a12). Name
+  # the plan and elapsed time as a failure instead; a superseded run skips this.
+  lane-impact-overrun:
+    name: Scoped Validation — impact overrun
+    if: ${{ !cancelled() && needs.lane-impact.result == 'cancelled' }}
+    needs: [ci-diff, lane-impact]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Report the overrun with its plan
+        env:
+          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/ci-test-impact.py history
+          python3 scripts/ci-test-impact.py lane --phase overrun --budget-minutes 45
+
   lane-impact-ring:
     name: Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}
     if: needs.lane-impact.outputs.ring-shards != '' && needs.lane-impact.outputs.ring-shards != '[]'

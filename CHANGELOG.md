@@ -7,6 +7,89 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.33.0] - 2026-11-17
+
+### Fixed — Lane CI
+
+- **Lane CI attributes failures on a branch's first push** — Before: with no
+  push base and no recorded start base, "impact own tests" ran
+  `git worktree add` with an empty ref, failed with `invalid reference` and
+  marked every own failure unresolved. Now: attribution uses the target
+  merge-base the impact plan already resolved. If no base resolves at all, own
+  failures stay red with the reason, and git is never called.
+
+### Fixed — Factory
+
+- **JavaScript stability checks run from the test's Jest or Vitest config** — The capped runner now starts each Jest, Vitest or Playwright file from the nearest directory holding that runner's config (or a `jest` key in package.json) and passes the config explicitly, so a nested package.json no longer hides the project's transforms. The changed-test stability refusal names the exact `cas factory worker-check` command for each changed test, and `worker-check --help` shows the Cargo and JavaScript forms.
+- **Verifier launches survive a supervisor handoff** — A review whose owner
+  retired can launch under the live supervisor that claimed its recorded
+  handoff, including across factory restarts. Recovery preserves the exact
+  review and audits its former owner. Live verifier claims remain protected;
+  unresolved ownership asks for repair before suggesting another merge.
+- **Verifier launch names a busy store instead of a missing supervisor** — When the owner's authority lookup times out on a busy store connection, a factory verifier launch reports `verifier_factory_store_busy` with the real cause and the retry command, rather than "live registered supervisor required" for a supervisor that is live.
+- **Supervisors can record stability proof from the other machine** — `record_test_receipt` accepts `repeat_log_paths` with the four repeat logs of a peer machine's capped run. When all five logs show exactly the changed tests passing, each as its own run, the receipt carries the five-pass stability proof that park requires. Short, failed, reused or mismatched log sets, including a same-named test from another package or harness, are refused, and any recording of the changed tests withdraws earlier overlapping stability proof until it passes. Previously a changed test that could only run on the other machine could not park without an override.
+- **Parked-branch notice names the right branch after a successor rebase** — Was: starting a queued task whose branch was rebased onto a parked predecessor said the predecessor "stays on" the successor's own branch. Now: the notice names the predecessor's recorded parked branch.
+- **A parked delivery on a deleted train no longer stalls every train merge** — Was: one delivery still parked against a train whose branch was gone from origin made each daemon pass fail with "could not refresh train", so every active train merge stayed at 0 processed with no reason shown. Now: that train is skipped and logged once, other trains' conflict checks and merges advance in the same pass, and a train merge on the unavailable target itself shows the reason as its hold.
+- **Codex pre-merge verifiers can reach Cassy** — The daemon-owned verifier on the Codex recipe now pre-approves Cassy's own MCP server, so its first tool call is no longer refused under `approval: never`. A merge retry after a failed verifier attempt reports the scheduled replacement instead of asking for a verdict that nobody was producing, and the factory daemon logs a refused verifier launch.
+- **Node test files can supply stability proof** — `cas factory worker-check -- node --test <file>` runs the changed `node:test` cases five times in a row and records the receipt that park requires. Previously park demanded that proof for hub-web's `node:test` files while worker-check refused to run them.
+- **Workers can send quiet messages** — Was: role contracts told workers to send FYIs with `wake=false`, but the `coordination` tool did not publish that parameter, so strict-schema clients rejected it. Now: `coordination` publishes `wake`, and the supervisor `factory` tool no longer lists it.
+- **Context checkpoints recycle the worker** — Was: the worker launch contract said to send `kind=status` with `need: respawn`, which only woke the supervisor. Now: it names `kind=respawn`, which queues the recycle with the worker's recipe and task bindings.
+- **Train merges start the pre-merge verifier automatically** — A train merge entry that needs a verdict now asks the factory daemon to start its verifier during the resume pass, as a single merge does, instead of leaving a pending dispatch and a manual handoff that the active train refused. Retrying the train merge restarts a stopped verifier on the same dispatch, and recovery notices name the train merge while a train owns the target.
+
+### Fixed — CI
+
+- **A lost lane impact run fails with its plan** — Was: when the hosted runner for "Scoped Validation — impact own tests" stopped responding, the job ran 55 minutes, uploaded no log and ended "cancelled", so every such lane needed a manual rerun and read as unknown. Now: a dependent "Scoped Validation — impact overrun" job fails and names the plan and the elapsed time against the 45-minute budget; a frozen-train repair treats it like the other impact jobs.
+- **Whole-workspace plans leave the full suite to the train** — Was: a lane whose impact plan widened to the whole workspace reran the full suite as up to three ring shards. Now: the lane runs that plan's own tests only, and the train's full set runs the rest.
+
+### Fixed — Security
+
+- **Credential reads keep their effective directory** — Factory credential checks retain the parent directory after child shell scopes and preserve alternatives across skipped branches, while keeping existing file-access and metadata policy. A directory change in a pipeline, background job or function body no longer counts as certain, an unresolved working directory is judged from every directory that could reach a store, and a command that cannot be projected is refused instead of falling back to the older checker.
+  `cd -` returns to the previous known directory, and only syntax before a statement can make it skippable. A statement after a closed loop, `if`, `case` or group runs unconditionally, and operands after an unquoted argument substitution stay with the command that reads them. Three intended refusals remain: a relative read after changing into a command substitution's output, into a loop variable's value, or into a variable assigned only on a skipped `&&` or `||` path is refused, because that directory cannot be resolved and could be a store.
+
+### Fixed — Session context
+
+- **Workers no longer start with another worker's handoff** — Was: a worker's SessionStart injected the newest role-wide worker handoff, which could describe another worker's unrelated task. Now: worker startup omits it; the assigned task brief and the task's `HANDOFF.md` carry the work. Supervisor handoffs keep their machine-scoped selection.
+
+### Changed — Agent instructions
+
+- **Instructions match the current release flow and are shorter** — Was: builtin skills and docs described the release audit running twice, omitted that legacy holds outside a release never refuse its cut, and repeated launch-contract rules in several files. Now: they describe the digest-verified Linux release, frozen-train repair admission, full-set receipt reuse, six Rust shards and jobless-run replacement, and each rule lives in one place.
+
+### Added — Reports
+
+- **Balanced journal grids** — Accounting reports validate account names, enabled account numbers, source amounts and debit/credit balance before rendering. Simple and compound before/after examples show numeric posting rows, clear memos and revision changes.
+
+### Fixed — Commander
+
+- **Older history loads after an upward gesture** — An already queued tail scroll no longer swallows an upward wheel gesture before the next frame, so reaching the history edge requests the next page.
+- **Closing Raw output leaves focus where you moved it** — On a phone, focusing Undo right after Escape closed Raw output could send focus back to the Raw output button, so the next key press missed Undo. Focus now returns to Raw output only when it was actually lost.
+
+### Fixed — Release
+
+- **A release cut on another machine admits members reviewed elsewhere** — Was: approvals lived only in the reviewing machine's database, so a cut on the other machine refused with REVIEW_MISSING and no supported remedy. Now: an approved pre-merge verdict is also recorded on its task row, which syncs with the task, and the cut admits that exact reviewed delivery when this machine has no verdict rows of its own.
+
+### Fixed — Cloud sync
+
+- **Guard task and memory writes with known revisions** — Personal and team task/memory pushes carry observed server revisions and retain a rejected base until reconciliation, preventing retries from silently dropping back to timestamp writes. After an authenticated task or memory pull reconciles a row, its queued body and observed base advance together so the pending edit can reach Cloud. Unreconciled revision conflicts remain explicitly visible instead of exhausting retries; CLI and doctor direct operators to pull and reconcile first. Rebuilt task payloads preserve canonical scope and origin, and notes use the established deduplication rules. Other entity kinds retain their existing wire behavior. Atomic preservation of concurrent task-note appends depends on petra-stella-cloud#268.
+- **Name missing artifact references** — Artifact lookup identifies a missing publication reference and conditionally directs recovery through receiver and publisher sync without claiming Cloud was checked.
+
+### Fixed — Factory delivery
+
+- **Recorded task commits stay the task's own** — Was: a commit the worker
+  made for its task, but whose subject named another task, was refused as
+  foreign at start and close. A supervisor's `merge_source` grant was ignored
+  at task start and inside a `--no-ff` import, so rebind, start and close
+  needed a history rewrite. Now: commits Cassy recorded in the task's delivery
+  cycle, and commits a grant adopts, count as the task's work at start, rebind
+  and close. Unrecorded, ungranted work is still refused.
+- **Returned tasks name their recorded branch** — Was: a returned task's start
+  checklist and close checks could measure an empty `factory/<worker>-<task>`
+  ref instead of the recorded lane. Now: that ref is used only when it carries
+  the task's delivered work.
+- **Parent links carry an unchanged empty source** — Was: retargeting a task
+  through a `dep_add` parent link left its start on the old target, so the
+  no-delivery close was refused G-47. Now: `dep_add` rebinds the unchanged
+  empty source exactly as `task update epic=` does.
+
 ## [4.32.0] - 2026-11-16
 
 ### Fixed — Factory

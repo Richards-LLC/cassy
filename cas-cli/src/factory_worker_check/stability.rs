@@ -21,7 +21,7 @@ pub(crate) struct Proof {
 }
 
 pub(super) fn valid(proof: &Proof) -> bool {
-    matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright")
+    matches!(proof.runner.as_str(), "nextest" | "vitest" | "jest" | "playwright" | "node")
         && proof.consecutive_passes >= REQUIRED_PASSES
         && !proof.tests.is_empty()
         && proof.tests.iter().all(|test| !test.name.is_empty()

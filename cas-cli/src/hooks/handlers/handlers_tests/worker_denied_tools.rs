@@ -383,6 +383,139 @@ fn worker_shell_cd_relative_reads_cannot_reach_operator_credentials_cas_da9a() {
 }
 
 #[test]
+fn worker_subshell_return_preserves_credential_cwd_cas_707a2() {
+    let (_env, _config_home) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let command = format!(
+        "cd ~; (cd '{}'); cat .config/neonctl/credentials.json",
+        project.path().display()
+    );
+    assert_operator_credential_refusal(
+        handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap(),
+        &command,
+    );
+    for command in [
+        "printf safe; (cd ~); cat .config/neonctl/credentials.json".to_string(),
+        format!(
+            "cd ~ && pushd '{}' && cat .config/neonctl/credentials.json; popd",
+            project.path().display()
+        ),
+    ] {
+        assert!(
+            denial(handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap())
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn worker_skipped_branch_preserves_credential_cwd_cas_707a2() {
+    let (_env, _config_home) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let command = format!(
+        "cd ~; if false; then cd '{}'; fi; cat .config/neonctl/credentials.json",
+        project.path().display()
+    );
+    assert_operator_credential_refusal(
+        handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap(),
+        &command,
+    );
+    std::fs::create_dir(project.path().join("inner")).unwrap();
+    for command in [
+        "if false; then cd ~; fi; cat README.md".to_string(),
+        "find ~ -name credentials.json -print".to_string(),
+        format!("cd '{}' && printf safe; grep -R fixture-only ..", project.path().join("inner").display()),
+        format!("cd '{}' && printf safe; for item in one; do printf safe; done; grep -R fixture-only ..", project.path().join("inner").display()),
+    ] {
+        assert!(
+            denial(handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap())
+                .is_none()
+        );
+    }
+}
+
+/// Each command runs from the project; `{p}` names it. Refusals first, then
+/// controls that must stay allowed.
+fn assert_credential_cwd_cases(refused: &[&str], allowed: &[&str]) {
+    let (_env, _config_home) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let spell = |command: &str| command.replace("{p}", &format!("'{}'", project.path().display()));
+    for command in refused.iter().map(|command| spell(command)) {
+        assert_operator_credential_refusal(
+            handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap(),
+            &command,
+        );
+    }
+    for command in allowed.iter().map(|command| spell(command)) {
+        let output = handle_pre_tool_use(&bash(&command, project.path()), Some(&cas_root)).unwrap();
+        assert!(denial(output).is_none(), "control was refused: {command}");
+    }
+}
+
+#[test]
+fn worker_unresolved_credential_cwd_is_refused_cas_707a2() {
+    assert_credential_cwd_cases(
+        &[
+            "cd ~; (cd {p}; cd \"$UNSET_DIR\"; :); cat .config/neonctl/credentials.json",
+            "cd ~; if false; then cd {p}; cd \"$UNSET_DIR\"; fi; cat .config/neonctl/credentials.json",
+            "cd \"$UNSET_DIR\"; cat .config/neonctl/credentials.json",
+            "cd ~; cd {p}; if false; then cd ..; fi; cd -; cat .config/neonctl/credentials.json",
+            "cd ~; true || { :; cd {p}; }; cat .config/neonctl/credentials.json",
+            "cd ~; for x in a; do D={p}; done; cd \"$D\"; cat .config/neonctl/credentials.json",
+            "cd ~; for x in; do \"done\"; D={p}; done; cd \"$D\"; cat .config/neonctl/credentials.json",
+        ],
+        &[
+            "cd \"$UNSET_DIR\" && git status",
+            "cd ~/.cas/*/x && grep -rn needle .",
+            "cd ~; cd {p}; cd - >/dev/null; cd {p}; cat .config/neonctl/credentials.json",
+            "D={p}; cd \"$D\" && cat .config/neonctl/credentials.json; for x in a; do :; done",
+            "for x in a; do :; done; D={p}; cd \"$D\" && cat .config/neonctl/credentials.json",
+        ],
+    );
+}
+
+#[test]
+fn worker_piped_or_background_cd_keeps_credential_cwd_cas_707a2() {
+    assert_credential_cwd_cases(
+        &[
+            "cd ~; cd {p} | :; cat .config/neonctl/credentials.json",
+            "cd ~; cd {p} & cat .config/neonctl/credentials.json",
+            "cd ~; true | cd {p} && cat .config/neonctl/credentials.json",
+            "cd ~; { cd {p}; } & cat .config/neonctl/credentials.json",
+        ],
+        &["cd ~ && cat README.md | head -1"],
+    );
+}
+
+#[test]
+fn worker_argument_substitution_keeps_credential_reader_cas_707a2() {
+    assert_credential_cwd_cases(
+        &[
+            "cat $(echo x) ~/.config/neonctl/credentials.json",
+            "cd ~ && cat $(echo x) .config/neonctl/credentials.json",
+            "cat $(echo x) $(echo y) ~/.config/neonctl/credentials.json",
+            "head -n $(echo 5) ~/.local/share/com.vercel.cli/auth.json",
+        ],
+        &["cat $(echo x) README.md"],
+    );
+}
+
+#[test]
+fn worker_function_body_cd_is_not_executed_cas_707a2() {
+    assert_credential_cwd_cases(
+        &[
+            "cd ~; f() { cd {p}; }; cat .config/neonctl/credentials.json",
+            "cd ~; function f { cd {p}; }; cat .config/neonctl/credentials.json",
+            "f() { cat .config/neonctl/credentials.json; }; cd ~; f",
+        ],
+        &["f() { cat README.md; }; cd ~; f"],
+    );
+}
+
+#[test]
 fn worker_recursive_copies_cannot_export_operator_config_cas_da9a() {
     let (_env, _config_home) = role_env("worker");
     let project = tempfile::tempdir().unwrap();

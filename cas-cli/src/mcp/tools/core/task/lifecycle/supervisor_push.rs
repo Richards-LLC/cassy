@@ -1508,11 +1508,12 @@ pub(crate) fn emit_candidate_verification_handoff(
     dispatch: &cas_types::VerificationDispatch,
     worker: &str,
     reason: &str,
+    retry: &str,
 ) -> Result<(), String> {
     let agents = crate::store::open_agent_store(cas_root).map_err(|error| error.to_string())?;
     let rows = agents.list(None).map_err(|error| error.to_string())?;
     let recipient = crate::supervisor_notices::resolve(&rows, Some(&dispatch.owner_agent_id), None);
-    let body = crate::prompt_revalidation::candidate_verification_dispatch_envelope(dispatch, worker, reason);
+    let body = crate::prompt_revalidation::candidate_verification_dispatch_envelope(dispatch, worker, reason, retry);
     let body = format!("{body}{}", crate::finding_triage::focus_brief(cas_root));
     if recipient.id == "operator" {
         return crate::supervisor_notices::enqueue(cas_root, &recipient, "candidate_verification_required", &body, &dispatch.id)

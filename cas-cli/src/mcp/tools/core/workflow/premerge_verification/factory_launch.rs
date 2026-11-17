@@ -76,6 +76,26 @@ pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
     request().map_err(|error| format!("verifier_factory_launch: {error:#}"))
 }
 
+/// The dispatch owner must be a live registered supervisor. cas-5d2e: a lookup
+/// that failed, such as on a busy store connection, keeps its own cause and
+/// code; only a caller who is not a live supervisor is reported as one.
+fn owner_authority(core: &CasCore) -> Result<(), String> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::SupervisorAuthorityError;
+    core.resolve_live_supervisor_authority()
+        .map(drop)
+        .map_err(|error| match &error {
+            SupervisorAuthorityError::NotLive(_) | SupervisorAuthorityError::NotRegistered { .. } => {
+                format!("verifier_factory_owner: live registered supervisor required ({error:?})")
+            }
+            SupervisorAuthorityError::StoreBusy(error) => {
+                format!("verifier_factory_store_busy: {error}")
+            }
+            SupervisorAuthorityError::Identity(error) | SupervisorAuthorityError::Store(error) => {
+                format!("verifier_factory_owner_lookup: {error}")
+            }
+        })
+}
+
 /// This local control carries identity only, never executable arguments or a root.
 pub(crate) fn launch(
     root: &Path,
@@ -107,8 +127,7 @@ pub(crate) fn launch(
     let core = CasCore::with_daemon(root.to_path_buf(), None, Some(std::sync::Arc::new(daemon)));
     core.bind_agent_identity(owner.id, crate::mcp::AgentIdentitySource::ServerInternal)
         .map_err(|e| e.to_string())?;
-    core.resolve_live_supervisor_authority()
-        .map_err(|error| format!("verifier_factory_owner: live registered supervisor required ({error:?})"))?;
+    owner_authority(&core)?;
     let task = core
         .open_task_store()
         .map_err(|e| e.to_string())?
@@ -119,6 +138,49 @@ pub(crate) fn launch(
     }
     // Claim stays synchronous and exact; provider probes and the review run off-loop.
     super::automatic::launch_local(&core, &task, &dispatch)
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    /// cas-5d2e: verifier launches for cas-c389 and cas-5a04 said "live
+    /// registered supervisor required" while the owner was live, because the
+    /// authority lookup hit a busy shared store connection.
+    #[test]
+    fn busy_owner_lookup_is_a_retryable_store_refusal_cas_5d2e() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        owner.pid = Some(std::process::id());
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal)
+            .unwrap();
+        owner_authority(&core).expect("a live registered supervisor owns the dispatch");
+
+        let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
+        let (held, holding) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            held.send(()).unwrap();
+            released.recv().unwrap();
+        });
+        holding.recv().unwrap();
+        let refused = {
+            let _budget = cas_store::wait_budget::bound_waits_for(Duration::from_millis(20));
+            owner_authority(&core).unwrap_err()
+        };
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(refused.starts_with("verifier_factory_store_busy:"), "{refused}");
+    }
 }
 
 #[cfg(test)]

@@ -31,6 +31,6 @@
 # gate[C-25 release]: Release prebuild macOS ARM64 (.github/workflows/release-prebuild.yml job build-macos)
 # gate[C-26 release]: Detect release version change on main push (.github/workflows/release.yml job detect)
 # gate[C-27 release]: Look up prebuilt release assets with fallback build (.github/workflows/release.yml job lookup-linux)
-# gate[C-28 release]: Packaged-asset ISA audit, signature check and launch smoke (.github/workflows/release.yml job audit-linux)
+# gate[C-28 release]: Audited-digest check, signature check and launch smoke on packaged assets (.github/workflows/release.yml job audit-linux)
 # gate[C-29 release]: Create Release (tag, notes, PR-opened timer) (.github/workflows/release.yml job release)
 # gate[C-31 release]: Deploy Commander to the hosted hub (.github/workflows/release.yml job deploy-hub)

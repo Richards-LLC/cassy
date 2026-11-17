@@ -484,11 +484,16 @@ impl CloudSyncer {
     /// path. A placeholder would be actively harmful: the server drops a row
     /// whose revision it cannot parse, and a fabricated "0" against an existing
     /// row is a guaranteed conflict.
-    fn with_base_revision(
+    pub(super) fn with_base_revision(
         &self,
         item: &QueuedSync,
         mut payload: serde_json::Value,
     ) -> serde_json::Value {
+        // Only these kinds have a pull path that reconciles a queued body.
+        // Leave other entity payloads on their existing compatibility path.
+        if !matches!(item.entity_type, EntityType::Task | EntityType::Entry) {
+            return payload;
+        }
         let Some(object) = payload.as_object_mut() else {
             return payload;
         };
@@ -504,8 +509,7 @@ impl CloudSyncer {
         payload
     }
 
-    /// Store the revisions the server echoed for accepted rows, and drop a base
-    /// this push proved stale.
+    /// Store accepted receipts; a rejection cannot authorize a new base.
     fn settle_revision_receipts(&self, entity_type: &str, response: &super::PushResponse) {
         let Some(entity) = crate::cloud::EntityType::from_collection_key(entity_type) else {
             return;
@@ -513,19 +517,8 @@ impl CloudSyncer {
         for (id, revision) in response.accepted_revisions_for(entity_type) {
             let _ = self.queue.record_revision(entity, &id, revision);
         }
-        for (id, current_revision) in response.revision_conflicts_for(entity_type) {
-            // Our base lost the race. Forget it rather than replacing it with
-            // the server's current revision: pretending we have seen that row
-            // would let the next push overwrite a change we never looked at.
-            // The next pull records the real revision and resolves the row.
-            let _ = self.queue.clear_revision(entity, &id);
-            tracing::debug!(
-                entity_type = entity_type,
-                entity_id = %id,
-                server_revision = ?current_revision,
-                "cloud rejected a stale base revision; dropped the local base and left the row queued"
-            );
-        }
+        // A rejected base remains guarded until a pull has reconciled the
+        // body and rebuilt the queued payload. Never fall back to timestamp LWW.
     }
 
     fn settle_personal_row_results(
@@ -834,7 +827,8 @@ impl CloudSyncer {
                                     };
                                     let diagnostic = match failure {
                                         PushItemizedFailure::Rejection(rejection) => format!(
-                                            "permanent cloud rejection: reason={}; entity={entity_type}; id={}; existing_project={}",
+                                            "{}: reason={}; entity={entity_type}; id={}; existing_project={}",
+                                            if reason == "revision_conflict" { "revision_reconciliation_required" } else { "cloud rejection" },
                                             rejection.reason.as_str(),
                                             rejection.id,
                                             rejection.existing_canonical_id,
@@ -847,7 +841,7 @@ impl CloudSyncer {
                                             response.raw_body
                                         ),
                                     };
-                                    if matches!(failure, PushItemizedFailure::Rejection(rejection) if rejection.reason.is_permanent())
+                                    if reason == "revision_conflict" || matches!(failure, PushItemizedFailure::Rejection(rejection) if rejection.reason.is_permanent())
                                     {
                                         let _ = self.queue.park_failed(
                                             item.id,

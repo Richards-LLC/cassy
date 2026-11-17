@@ -1,4 +1,4 @@
 title: Task source claims require an explicit issue binding
 statement: Task creation claims a GitHub issue only from an explicit external_ref or Fixes/Closes #N; incidental citations remain suggestions.
 tasks: [cas-bfc8]
-journeys: [FACTORY-SOURCE-WORK-DELEGATION]
+invariants: [FACTORY-SOURCE-WORK-DELEGATION]

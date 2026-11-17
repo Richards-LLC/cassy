@@ -29745,6 +29745,98 @@ mod merge_state_gate_tests {
         (core, tasks, queue, task)
     }
 
+    #[test]
+    fn parked_anchor_advance_replaces_completion_wakes_cas_f16b() {
+        use cas_store::{PromptQueueStore, ReminderStatus, ReminderTriggerType};
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "relay-fixture-session");
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["commit", "--allow-empty", "-qm", "base"]);
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let (core, tasks, _, mut task) = close_relay_fixture_cas_3a82(&root);
+        let branch = crate::factory_isolation::worker_task_branch("relay-worker", &task.id);
+        git(repo, &["checkout", "-qb", &branch]);
+        let first = commit_local(repo, "delivery.rs", "first delivery");
+        let origin = dir.path().join("origin.git");
+        git(repo, &["init", "--bare", "-q", origin.to_str().unwrap()]);
+        git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", &branch]);
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "main".into(),
+        });
+        tasks.update(&task).unwrap();
+        task = tasks.get(&task.id).unwrap();
+        core.park_task_awaiting_merge(&tasks, &task, &task, "MERGE REQUIRED", "delivery ready",
+            Some(first.clone()), false, Some(branch.clone()), None).unwrap();
+        let parked = tasks.get(&task.id).unwrap();
+        let reminders = crate::store::open_reminder_store(&root).unwrap();
+        assert_eq!(reminders.list_all_pending().unwrap().len(), 2);
+        let manual = reminders.create_with_scope("relay-supervisor-id", None, "manual old-SHA watch",
+            ReminderTriggerType::Event, None, Some("ci_completed"),
+            Some(&serde_json::json!({"sha": first, "workflow":"Release"})), 0,
+            Some("relay-fixture-session"), None, true, Some(&task.id)).unwrap();
+        let next = commit_local(repo, "correction.rs", &format!("fix({}): review correction", task.id));
+        core.advance_awaiting_merge_anchor(&tasks, &parked, repo, "main", Some(&next)).unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(first.as_str()));
+        git(repo, &["push", "-q", "origin", &branch]);
+        core.advance_awaiting_merge_anchor(&tasks, &parked, repo, "main", Some(&next)).unwrap();
+        let advanced = tasks.get(&task.id).unwrap();
+        assert_eq!(advanced.deliverables.factory_branch_anchor.as_deref(), Some(next.as_str()));
+        let history = reminders.list_for_task(&task.id).unwrap();
+        let automatic: Vec<_> = history.iter().filter(|row| row.trigger_filter.as_ref()
+            .is_some_and(|filter| filter["delivery_wake"] == true)).collect();
+        assert_eq!(automatic.iter().filter(|row| row.status == ReminderStatus::Pending
+            && row.trigger_filter.as_ref().and_then(|filter| filter.get("sha").or_else(|| filter.get("commit")))
+                == Some(&serde_json::Value::String(next.clone()))).count(), 2);
+        assert_eq!(automatic.iter().filter(|row| row.status == ReminderStatus::Cancelled).count(), 2);
+        assert_eq!(history.iter().find(|row| row.id == manual.id).unwrap().status, ReminderStatus::Pending);
+        core.advance_awaiting_merge_anchor(&tasks, &advanced, repo, "main", Some(&next)).unwrap();
+        assert_eq!(reminders.list_for_task(&task.id).unwrap().len(), history.len());
+        crate::ui::factory::daemon::runtime::progress_watchdog::sweep(&root, "relay-fixture-session", chrono::Utc::now());
+        let prompts = cas_store::SqlitePromptQueueStore::open(&root).unwrap().peek_all(20).unwrap();
+        assert!(prompts.iter().all(|row| !row.source.starts_with(&format!("lifecycle-wake:{}:", crate::factory_delivery_wake::MISSING_WAKE))));
+    }
+
+    #[test]
+    fn park_with_epic_inherited_target_arms_completion_wakes_cas_f16b() {
+        let _env = TestEnvGuard::temp_home();
+        for (branch, binding, expected) in [
+            (Some("epic/inherited"), Some("main"), "epic/inherited"),
+            (None, Some("staging"), "staging"),
+            (Some("epic/legacy"), None, "epic/legacy"),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let repo = dir.path();
+            git(repo, &["init", "-q", "-b", "main"]);
+            git(repo, &["commit", "--allow-empty", "-qm", "delivery"]);
+            let tip = rev_parse_local(repo, "HEAD");
+            let root = repo.join(".cas");
+            std::fs::create_dir_all(&root).unwrap();
+            let (core, tasks, _, task) = close_relay_fixture_cas_3a82(&root);
+            let mut epic = Task::new("cas-f16b-parent".into(), "Inherited delivery target".into());
+            epic.task_type = TaskType::Epic;
+            epic.branch = branch.map(str::to_string);
+            epic.deliverables.work_target = binding.map(|target| cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: target.into(),
+            });
+            tasks.add(&epic).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(task.id.clone(), epic.id,
+                cas_types::DependencyType::ParentChild)).unwrap();
+            assert!(task.deliverables.work_target.is_none() && task.branch.is_none());
+            core.park_task_awaiting_merge(&tasks, &task, &task, "MERGE REQUIRED", "delivery ready",
+                Some(tip.clone()), false, Some("factory/relay-worker".into()), None).unwrap();
+            let watches = crate::store::open_reminder_store(&root).unwrap().list_all_pending().unwrap();
+            assert_eq!(watches.len(), 2, "{expected}");
+            assert!(watches.iter().all(|row| row.owner_id == "relay-supervisor-id" && row.target_id == "relay-supervisor-id"));
+            assert!(watches.iter().any(|row| row.trigger_event.as_deref() == Some("branch_contained_in")
+                && row.trigger_filter.as_ref().unwrap()["target_branch"] == expected
+                && row.trigger_filter.as_ref().unwrap()["commit"] == tip));
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn ct2_p1_park_sends_one_relay_after_upkeep_notes() {
         use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};

@@ -17,11 +17,11 @@ fn active_target(root: &Path, target: &str, cwd: &Path) -> bool {
     crate::worktree::GitOperations::new(cwd.to_path_buf()).is_ancestor(&freeze.tip, target)
 }
 
+/// Own tests, ring shards and the overrun report that names a lost own run.
 fn impact(run: &serde_json::Value) -> bool {
-    run["name"].as_str().is_some_and(|name| {
-        name == "Scoped Validation — impact own tests"
-            || name.starts_with("Scoped Validation — impact ring ")
-    })
+    run["name"]
+        .as_str()
+        .is_some_and(|name| name == "Scoped Validation — impact own tests" || name.starts_with("Scoped Validation — impact ring "))
 }
 
 fn rows(output: &GhApiOutput, sha: &str) -> Option<Vec<serde_json::Value>> {
@@ -208,6 +208,8 @@ mod tests {
             ),
             run("Scoped Validation — impact own tests", "in_progress", None),
             run("Scoped Validation — impact ring 1/3", "queued", None),
+            // cas-3a12: waits on the own-tests job, like the ring.
+            run("Scoped Validation — impact overrun", "queued", None),
         ];
         for (case, frozen, changed, expected) in [
             ("unfrozen", false, None, "pending"),
@@ -218,8 +220,8 @@ mod tests {
             ("factory pending", true, Some((2, "pending")), "pending"),
             ("factory skipped", true, Some((2, "skipped")), "pending"),
             ("factory missing", true, Some((2, "missing")), "pending"),
-            ("journey pending", true, Some((5, "pending")), "pending"),
-            ("journey red", true, Some((5, "failure")), "red"),
+            ("journey pending", true, Some((6, "pending")), "pending"),
+            ("journey red", true, Some((6, "failure")), "red"),
             ("foreign sha", true, Some((0, "foreign")), "pending"),
             ("truncated", true, Some((0, "truncated")), "pending"),
             ("lifted", false, None, "pending"),

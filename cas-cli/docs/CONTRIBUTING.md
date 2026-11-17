@@ -5097,10 +5097,13 @@ contains the frozen tip), through the operator's Commander
 `factory action=train_freeze id=<train> decision=lift reason="<why>"`. The
 caller must be a live registered supervisor, the reason is required
 (`TRAIN_LIFT_REASON_REQUIRED`), and a live supervisor of another factory session
-than the train owner's is refused (`TRAIN_LIFT_NOT_TRAIN_SUPERVISOR`). Commander
-freezes carry a `release-train-frozen-by-operator` label; a supervisor lift of
-one is refused (`TRAIN_LIFT_OPERATOR_FREEZE`) unless the operator set the
-operator-only `release.supervisor_lifts_operator_freeze`. Both lifts append a
+than the train owner's is refused (`TRAIN_LIFT_NOT_TRAIN_SUPERVISOR`). Freezes
+from auto-cut or a supervisor carry a `release-train-freeze-supervisor-liftable`
+label. A freeze without it is the operator's: a Commander freeze, a freeze from
+before the label existed, or a Cassy freeze the operator froze again (the repeat
+removes the label). A supervisor lift of one is refused
+(`TRAIN_LIFT_OPERATOR_FREEZE`) unless the operator set the operator-only
+`release.supervisor_lifts_operator_freeze`. Both lifts append a
 `RELEASE FREEZE LIFTED: <json>` decision to the train (actor, time, reason, lane
 tip, frozen tip); the supervisor lift also queues a `release_freeze_lifted`
 operator notice. Auto-cut reads that decision and never re-freezes the lifted

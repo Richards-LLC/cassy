@@ -1221,14 +1221,17 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(store.cancel_pending_for_task("cas-issue-276").unwrap(), 1);
+        store.create_with_scope("supervisor-1", None, "automatic delivery phase", ReminderTriggerType::Event,
+            None, Some("ci_completed"), Some(&serde_json::json!({"delivery_wake": true})),
+            0, Some("factory-a"), None, true, Some("cas-issue-276")).unwrap();
+        assert_eq!(store.cancel_pending_for_task("cas-issue-276").unwrap(), 2);
         let pending = store.list_pending("worker-1").unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].cross_session);
         assert_eq!(pending[0].task_id.as_deref(), Some("cas-issue-276"));
         let history = store.list_for_task("cas-issue-276").unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history.iter().filter(|row| row.status == ReminderStatus::Cancelled).count(), 1);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.iter().filter(|row| row.status == ReminderStatus::Cancelled).count(), 2);
         store.mark_fired(pending[0].id, None).unwrap();
         let reopened = SqliteReminderStore::open(_temp.path()).unwrap();
         assert_eq!(reopened.list_for_task("cas-issue-276").unwrap().iter()

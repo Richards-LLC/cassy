@@ -6320,7 +6320,7 @@ impl CasCore {
                     }))
                 })
                 .await
-                    .unwrap_or_else(|error| CallToolResult::error(vec![Content::text(error.message.to_string())]));
+                    .unwrap_or_else(|error| CallToolResult::error(vec![ContentBlock::text(error.message.to_string())]));
                 crate::mcp::tools::service::mutation_receipt::merge_followup(
                     &close_result
                         .content
@@ -6698,22 +6698,22 @@ impl CasCore {
             // close. Keep that gate actionable without reporting merge failure.
             if push_outcome.is_published() {
                 close_result.is_error = Some(false);
-                close_result.content.insert(0, Content::text(format!(
+                close_result.content.insert(0, ContentBlock::text(format!(
                     "Merge landed; close held for {}. Target {} is published at {}. Follow the close gate below; no second merge is needed.",
                     task_id.unwrap_or("task"), worktree.parent_branch, merge_commit.as_deref().unwrap_or("unknown")
                 )));
             }
             close_result.content.insert(
                 0,
-                Content::text(format!(
+                ContentBlock::text(format!(
                     "{ci_prefix}{trunk_notice}{ci_policy_notice}"
                 )),
             );
             if !pushed_source_note.is_empty() {
-                close_result.content.push(Content::text(pushed_source_note));
+                close_result.content.push(ContentBlock::text(pushed_source_note));
             }
             if !push_outcome.is_published() {
-                close_result.content.push(Content::text(push_note));
+                close_result.content.push(ContentBlock::text(push_note));
             }
             return Ok(close_result);
         }

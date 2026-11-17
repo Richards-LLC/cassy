@@ -2450,7 +2450,7 @@ impl CasService {
                         task.delivery_mode,
                     ) {
                         Ok(fresh) => fresh,
-                        Err(message) => return Ok(CallToolResult::error(vec![Content::text(message)])),
+                        Err(message) => return Ok(CallToolResult::error(vec![ContentBlock::text(message)])),
                     }
                 } else { true };
                 let branch = if !source_is_fresh {

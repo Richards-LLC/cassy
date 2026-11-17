@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use rmcp::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, GetPromptRequestParams, GetPromptResult, Implementation,
+    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
+    Implementation,
     ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-    ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceContents,
     ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
@@ -141,11 +142,7 @@ impl ServerHandler for CasService {
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "MCP resources/list DONE"
             );
-            Ok(ListResourcesResult {
-                resources,
-                next_cursor: None,
-                meta: None,
-            })
+            Ok(ListResourcesResult::with_all_items(resources))
         }
     }
 
@@ -153,13 +150,11 @@ impl ServerHandler for CasService {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::ErrorData>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<ReadResourceResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
             let content = self.inner.read_resource_content(&request.uri)?;
-            Ok(ReadResourceResult {
-                contents: vec![ResourceContents::text(content, &request.uri)],
-            })
+            Ok(ReadResourceResult::new(vec![ResourceContents::text(content, &request.uri)]).into())
         }
     }
 
@@ -170,11 +165,7 @@ impl ServerHandler for CasService {
     ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            Ok(ListPromptsResult {
-                prompts: CasCore::build_prompts(),
-                next_cursor: None,
-                meta: None,
-            })
+            Ok(ListPromptsResult::with_all_items(CasCore::build_prompts()))
         }
     }
 
@@ -182,7 +173,7 @@ impl ServerHandler for CasService {
         &self,
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<GetPromptResult, rmcp::ErrorData>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<GetPromptResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
             let args: HashMap<String, String> = request
@@ -191,7 +182,7 @@ impl ServerHandler for CasService {
                 .into_iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
                 .collect();
-            self.inner.get_prompt_content(&request.name, &args)
+            self.inner.get_prompt_content(&request.name, &args).map(Into::into)
         }
     }
 
@@ -212,11 +203,7 @@ impl ServerHandler for CasService {
                 "MCP tools/list DONE"
             );
 
-            Ok(ListToolsResult {
-                tools,
-                meta: None,
-                next_cursor: None,
-            })
+            Ok(ListToolsResult::with_all_items(tools))
         }
     }
 
@@ -224,9 +211,8 @@ impl ServerHandler for CasService {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
-    + Send
-    + '_ {
+    ) -> impl std::future::Future<Output = Result<CallToolResponse, rmcp::ErrorData>> + Send + '_
+    {
         async move {
             let start = std::time::Instant::now();
             let tool_name = request.name.clone();
@@ -247,7 +233,7 @@ impl ServerHandler for CasService {
                     let tcc = rmcp::handler::server::tool::ToolCallContext::new(
                         &service, request, context,
                     );
-                    let result = service.tool_router.call(tcc).await;
+                    let result = service.tool_router.call(tcc).await.and_then(completed_tool_call);
                     crate::gates::facts::observe_tool_result(
                         &service.inner.cas_root, arguments.as_ref(), &result,
                     );
@@ -273,7 +259,22 @@ impl ServerHandler for CasService {
                 caller_tool_use,
             )
             .await
+            .map(Into::into)
         }
+    }
+}
+
+/// Cassy tools always answer inline: none asks the client for input or
+/// materializes a task, so any other response is a server bug.
+fn completed_tool_call(
+    response: CallToolResponse,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    match response {
+        CallToolResponse::Complete(result) => Ok(result),
+        other => Err(rmcp::ErrorData::internal_error(
+            format!("tool returned a non-inline response: {other:?}"),
+            None,
+        )),
     }
 }
 

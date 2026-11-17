@@ -390,8 +390,8 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
                         .content
                         .iter()
                         .filter_map(|content| {
-                            match &content.raw {
-                                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+                            match content {
+                                rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
                                 _ => None,
                             }
                         })
@@ -404,8 +404,8 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
         }
         Ok(result) => {
             landing_notice(root, request, &supervisor)?;
-            let close_held = result.content.iter().any(|content| matches!(&content.raw,
-                rmcp::model::RawContent::Text(text) if text.text.contains("Merge landed; close held")));
+            let close_held = result.content.iter().any(|content| matches!(content,
+                rmcp::model::ContentBlock::Text(text) if text.text.contains("Merge landed; close held")));
             tasks
                 .append_note(
                     &request.task,

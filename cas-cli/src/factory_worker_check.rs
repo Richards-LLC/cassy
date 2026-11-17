@@ -4882,7 +4882,7 @@ PY"#);
         use crate::store::{open_agent_store, open_supervisor_queue_store, open_task_store};
         use cas_types::{Agent, AgentRole, Task, TaskStatus};
         use rmcp::handler::server::wrapper::Parameters;
-        use rmcp::model::RawContent;
+        use rmcp::model::ContentBlock;
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_BUILD_GUARD", "off");
@@ -4930,8 +4930,8 @@ PY"#);
         let result = service.factory(Parameters(serde_json::from_value(serde_json::json!({
             "action": "worker_status", "summary_mode": true,
         })).unwrap())).await.unwrap();
-        let status = result.content.into_iter().filter_map(|content| match content.raw {
-            RawContent::Text(text) => Some(text.text), _ => None,
+        let status = result.content.into_iter().filter_map(|content| match content {
+            ContentBlock::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         // pin: capacity wait and next retry identify resource waiting to workers and supervisors.
 
@@ -5070,7 +5070,7 @@ PY"#);
         use crate::store::{open_agent_store, open_task_store};
         use cas_types::{Agent, AgentRole, Task, TaskStatus};
         use rmcp::handler::server::wrapper::Parameters;
-        use rmcp::model::RawContent;
+        use rmcp::model::ContentBlock;
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         // The guard is the subject here; the host fixture below supplies load.
@@ -5122,8 +5122,8 @@ PY"#);
         let result = CasService::new(core, None).factory(Parameters(serde_json::from_value(serde_json::json!({
             "action": "worker_status", "summary_mode": true,
         })).unwrap())).await.unwrap();
-        let status = result.content.into_iter().filter_map(|content| match content.raw {
-            RawContent::Text(text) => Some(text.text), _ => None,
+        let status = result.content.into_iter().filter_map(|content| match content {
+            ContentBlock::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         assert!(status.contains(&format!("load_1m={live:.2}")), "{status}");
         let wait = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();

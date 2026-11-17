@@ -1017,10 +1017,10 @@ impl CasService {
         })).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         match self.pattern_list(patterns).await {
             Ok(personal) => {
-                result.content.push(Content::text("Source: personal pattern (Cassy Cloud)"));
+                result.content.push(ContentBlock::text("Source: personal pattern (Cassy Cloud)"));
                 result.content.extend(personal.content);
             }
-            Err(error) => result.content.push(Content::text(format!(
+            Err(error) => result.content.push(ContentBlock::text(format!(
                 "Personal pattern source unavailable: {}", error.message
             ))),
         }

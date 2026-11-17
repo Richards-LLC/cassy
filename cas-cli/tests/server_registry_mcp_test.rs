@@ -10,7 +10,7 @@ use cas::mcp::{CasCore, CasService};
 use cas::store::init_cas_dir;
 use cas_mcp::types::CoordinationRequest;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::RawContent;
+use rmcp::model::ContentBlock;
 use tempfile::TempDir;
 
 struct TestEnv {
@@ -49,8 +49,8 @@ impl TestEnv {
             Ok(result) => result
                 .content
                 .iter()
-                .filter_map(|c| match &c.raw {
-                    RawContent::Text(text) => Some(text.text.clone()),
+                .filter_map(|c| match c {
+                    ContentBlock::Text(text) => Some(text.text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -67,8 +67,8 @@ impl TestEnv {
             Ok(result) => result
                 .content
                 .iter()
-                .filter_map(|c| match &c.raw {
-                    RawContent::Text(text) => Some(text.text.as_str()),
+                .filter_map(|c| match c {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -556,8 +556,8 @@ async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
             Ok(result) => result
                 .content
                 .iter()
-                .filter_map(|c| match &c.raw {
-                    RawContent::Text(t) => Some(t.text.as_str()),
+                .filter_map(|c| match c {
+                    ContentBlock::Text(t) => Some(t.text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

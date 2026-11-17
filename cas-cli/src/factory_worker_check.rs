@@ -239,6 +239,61 @@ pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
 
 /// Only positive named-test selectors may be joined by union/intersection.
 /// Exclude all(), negation, regex/globs and predicates that select a whole binary.
+/// The single nextest summary of a selected-test log, when every executed
+/// test passed. Shared by supervisor-recorded and carried receipts.
+fn passing_summary_count(log: &str) -> Result<u64> {
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
+    let log = ansi.replace_all(log, "");
+    let summary = regex::Regex::new(
+        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
+    )?;
+    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
+    if summaries.len() != 1 {
+        bail!("log must contain exactly one selected nextest summary");
+    }
+    let run: u64 = summaries[0][1].parse()?;
+    let count: u64 = summaries[0][2].parse()?;
+    if count == 0 || count != run {
+        bail!("log must show a nonzero selection with every executed test passed");
+    }
+    Ok(count)
+}
+
+/// cas-289b: a selected-test log's nextest PASS and Summary lines.
+fn passing_run_lines(log: &str) -> String {
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").expect("ANSI pattern");
+    let log = ansi.replace_all(log, "");
+    log.lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            line.starts_with("PASS [") || line.starts_with("Summary [")
+        })
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// cas-289b: whether carried run lines prove `count` passing tests, each of
+/// `package` (and `harness`) and selected by `filter`.
+fn passing_run_proves(run: &str, package: &str, harness: Option<&str>, filter: &str, count: u64) -> bool {
+    let Some((name, _)) = package_selector(package) else { return false };
+    let binary = match harness {
+        Some(harness) => format!("{name}::{harness}"),
+        None => name.to_string(),
+    };
+    let term = regex::Regex::new(r"test\((=?)([A-Za-z0-9_][A-Za-z0-9_:.-]*)\)").expect("filter term");
+    let selects = |test: &str| filter.split('|').any(|group| {
+        group.split('&').all(|part| term.captures(part).is_some_and(|term| {
+            if term[1].is_empty() { test.contains(&term[2]) } else { test == &term[2] }
+        }))
+    });
+    let line = regex::Regex::new(r"^ *PASS +\[[^\]]*\] +\( *[0-9]+/ *[0-9]+\) +(\S+) +(\S+)$").expect("PASS line");
+    let passes = run.lines().filter_map(|text| line.captures(text)).collect::<Vec<_>>();
+    passing_summary_count(run).ok() == Some(count)
+        && passes.len() as u64 == count
+        && passes.iter().all(|pass| pass[1] == binary && selects(&pass[2]))
+}
+
 fn named_filter(filter: &str) -> bool {
     regex::Regex::new(r"^[ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\)(?:[ \t]*[|&][ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\))*[ \t]*$")
         .is_ok_and(|pattern| pattern.is_match(filter))
@@ -497,20 +552,7 @@ pub(crate) fn record_supervisor_test(
         bail!("supervisor log must be non-empty and at most 25 MiB");
     }
     let log = std::str::from_utf8(&bytes).context("supervisor log must be UTF-8")?;
-    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
-    let log = ansi.replace_all(log, "");
-    let summary = regex::Regex::new(
-        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
-    )?;
-    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
-    if summaries.len() != 1 {
-        bail!("supervisor log must contain exactly one selected nextest summary");
-    }
-    let run: u64 = summaries[0][1].parse()?;
-    let count: u64 = summaries[0][2].parse()?;
-    if count == 0 || count != run {
-        bail!("supervisor log must show a nonzero selection with every executed test passed");
-    }
+    let count = passing_summary_count(log).map_err(|error| anyhow::anyhow!("supervisor {error}"))?;
     // A receipt is not transferable across ownership or source mutations
     // while the log was read. The worker lane lock also fences capped writers.
     if tasks.get(task_id)?.assignee != task.assignee
@@ -979,17 +1021,20 @@ impl<'a> PassingTests<'a> {
     /// This machine's passing receipts at the head, for the task row.
     pub(crate) fn portable(&self) -> Vec<cas_types::PortableTestReceipt> {
         self.records().iter().filter_map(|(tested_head, package, test)| {
-            let log = std::fs::read(test.selected_log.as_ref()?).ok()?;
-            Some(cas_types::PortableTestReceipt {
-                head: self.head.to_string(),
-                tested_head: tested_head.clone(),
-                package: package.clone()?,
-                harness: test.harness.clone(),
-                filter: test.filter.clone(),
-                count: test.count,
-                log_sha256: hex::encode(Sha256::digest(&log)),
-                passing_run: String::new(),
-            })
+            let log = std::fs::read_to_string(test.selected_log.as_ref()?).ok()?;
+            let passing_run = passing_run_lines(&log);
+            let package = package.clone()?;
+            passing_run_proves(&passing_run, &package, test.harness.as_deref(), &test.filter, test.count)
+                .then(|| cas_types::PortableTestReceipt {
+                    head: self.head.to_string(),
+                    tested_head: tested_head.clone(),
+                    package,
+                    harness: test.harness.clone(),
+                    filter: test.filter.clone(),
+                    count: test.count,
+                    log_sha256: hex::encode(Sha256::digest(passing_run.as_bytes())),
+                    passing_run,
+                })
         }).collect()
     }
 
@@ -1013,8 +1058,9 @@ impl<'a> PassingTests<'a> {
                     && synced.count > 0
                     && package_selector(&synced.package).is_some()
                     && synced.harness.as_deref().is_none_or(valid_package)
-                    && synced.log_sha256.len() == 64
-                    && synced.log_sha256.bytes().all(|byte| byte.is_ascii_hexdigit());
+                    && hex::encode(Sha256::digest(synced.passing_run.as_bytes())) == synced.log_sha256
+                    && passing_run_proves(&synced.passing_run, &synced.package,
+                        synced.harness.as_deref(), &synced.filter, synced.count);
                 let local = records.iter().any(|(_, package, test)| {
                     package.as_deref() == Some(synced.package.as_str())
                         && test.harness == synced.harness

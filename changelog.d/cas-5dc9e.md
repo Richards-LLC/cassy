@@ -1,3 +1,0 @@
-### Fixed — Factory delivery
-
-- **Task close no longer runs at the edge of the thread stack** — Was: in debug builds, a `task close` used 1.56 MB of its 2 MiB blocking-pool thread before the close logic even began, because each wrapper around the close future kept its own copy. About 20 more inline lines (cas-289b) were enough to abort lane CI with "tokio-runtime-worker has overflowed its stack". Now: the future is boxed once when it enters the blocking pool, so the same path uses 387 KB. A budget test fails with the measured size and the 512 KiB budget before a regression can overflow the stack.

@@ -1270,6 +1270,9 @@ impl CasService {
                 )
                 .await?
         {
+            if req.merge_request.unwrap_or(false) && let Some(task) = req.task_id.as_deref() {
+                crate::factory_delivery_wake::arm_task_id(&self.inner.cas_root, task, &source);
+            }
             return Ok(sent);
         }
 
@@ -3263,6 +3266,9 @@ impl CasService {
             };
 
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
+        if req.merge_request.unwrap_or(false) && let Some(task) = req.task_id.as_deref() {
+            crate::factory_delivery_wake::arm_task_id(&self.inner.cas_root, task, &source);
+        }
         // cas-fc42: a worker's typed ready message is its completion claim;
         // record it on its own task, where the director reads readiness.
         if let (false, Some(contract), Some(task_id), Some(sender)) = (

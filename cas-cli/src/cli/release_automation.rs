@@ -257,6 +257,26 @@ pub struct InstalledArgs {
     #[arg(long)]
     failed_attempts: Option<std::num::NonZeroU32>,
 }
+/// A cut `release.sh` refused on a green tip (GH #2027).
+#[derive(Debug, Args)]
+pub struct RefusedArgs {
+    #[arg(long)]
+    train: String,
+    #[arg(long)]
+    branch: String,
+    /// Full SHA of the green train tip the cut started from
+    #[arg(long)]
+    commit: String,
+    /// ZERO_WOULD_CLOSE, REVIEW_MISSING or LANE_CI_MISSING
+    #[arg(long)]
+    gate: String,
+}
+
+pub fn refused(args: &RefusedArgs, root: &Path) -> Result<()> {
+    let path = crate::train_ci::record_release_red(root, &args.train, &args.branch, &args.commit, &args.gate)?;
+    println!("release red recorded for {} at {}: {} ({})", args.train, &args.commit[..12], args.gate, path.display());
+    Ok(())
+}
 #[derive(Debug, Args)]
 pub struct BackfillArgs {
     /// Show the reconciliation and release-tag close verdicts without writing.

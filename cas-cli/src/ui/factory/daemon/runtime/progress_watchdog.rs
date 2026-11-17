@@ -63,13 +63,8 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             dependency_held.insert(task.id.clone());
         }
         // An unreadable receipt is uncertainty, never proof of a stall.
-        match crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task) {
-            Ok(Some(refusal)) => { refusals.insert(task.id.clone(), refusal); }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(task_id = %task.id, %error, "close refusal unreadable; excluding only this task from stall judgement");
-                dependency_held.insert(task.id.clone());
-            }
+        if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task).ok()? {
+            refusals.insert(task.id.clone(), refusal);
         }
     }
     // cas-c1fb: historical local assignees do not make a peer's release
@@ -344,7 +339,12 @@ mod tests {
             task.assignee = Some(owner.name.clone());
             tasks.add(&task).unwrap();
         }
-        tasks.patch_execution_state("cas-unreadable", &serde_json::json!({"close_refusal": {"invalid": true}})).unwrap();
+        // Replay an already-corrupt persisted row. The normal writer rightly
+        // rejects malformed state before it can reach the watchdog.
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+            "INSERT INTO task_execution_states(task_id,state,updated_at) VALUES (?1,?2,?3)",
+            rusqlite::params!["cas-unreadable", serde_json::json!({"close_refusal": {"invalid": true}}).to_string(), chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
         let (_, waiting, _, _, _) = super::observe(&root, "refusal-isolation", chrono::Utc::now()).unwrap();
         assert_eq!(waiting.len(), 1);
         assert!(waiting[0].contains("cas-actionable"));

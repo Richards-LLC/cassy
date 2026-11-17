@@ -952,7 +952,7 @@ mod tests {
             let base = commit_changelog_fixture(repo.path(), "base test");
             assert!(std::process::Command::new("git").args(["update-ref", "refs/heads/main", &base])
                 .current_dir(repo.path()).status().unwrap().success());
-            let identity = Identity { path: path.into(), name: if rust { "child::owned".into() } else { "owned".into() } };
+            let identity = Identity::exact(path, if rust { "child::owned" } else { "owned" });
             stability::record(root.path(), repo.path(), &base, Proof { runner: runner.into(),
                 tests: vec![identity.clone()], consecutive_passes: 5, elapsed_ms: 0 }).unwrap();
             std::fs::write(repo.path().join(path), format!("{old}{added}")).unwrap();
@@ -1033,7 +1033,7 @@ mod tests {
         let paths = vec!["src/child.rs".to_string()];
         let required = stability::required(repo.path(), &head, "main", &paths,
             Some(&[(base, delivered)])).unwrap();
-        let owned = Identity { path: "src/child.rs".into(), name: "child::owned".into() };
+        let owned = Identity::exact("src/child.rs", "child::owned");
         assert_eq!(required, vec![owned]);
         let merge_base = std::process::Command::new("git").args(["merge-base", "main", &head])
             .current_dir(repo.path()).output().unwrap();

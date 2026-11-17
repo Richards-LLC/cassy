@@ -68,7 +68,7 @@ impl Inventory<'_> {
                     let name = if prefix.is_empty() { name.into() } else { format!("{prefix}::{name}") };
                     let begin = attrs.iter().map(|(start, _)| *start).min().unwrap_or(node.start_byte());
                     self.tests.push(Test {
-                        identity: Identity { path: path.into(), name }, package: package.into(),
+                        identity: Identity::exact(path, name), package: package.into(),
                         harness: harness.map(str::to_owned), source: source[begin..node.end_byte()].into(),
                         parameterized: attrs.iter().any(|(_, attr)| !attr.contains("test]") && attribute.is_match(attr)
                             && !attr.contains("::test")),

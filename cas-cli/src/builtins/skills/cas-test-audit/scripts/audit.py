@@ -175,13 +175,13 @@ def scan(path, source):
             add(match.start(), 'fixed-sleep')
             add(match.start(), 'fixed-sleep', 'slow')
     # Assertions only: connection failures in retry helpers are not instant verdicts.
-    assertion = re.compile(r'\b(?:assert(?:_eq|_ne)?!|expect|assert\.(?:equal|ok|strictEqual))\s*\(')
+    assertion = re.compile(r'\b(?:assert(?:_eq|_ne)?!|expect|assert\.(?:equal|ok|strictEqual)|self\.assert(?:In|NotIn))\s*\(')
     for match in assertion.finditer(code):
         opening=code.find('(',match.start(),match.end())
         end=delimiters.get(opening)
         if end is None: continue
         selected_end=end
-        if path.endswith('.rs') or match[0].startswith('assert.'):
+        if path.endswith('.rs') or match[0].startswith(('assert.', 'self.')):
             # Ignore assertion diagnostics: they are explanatory prose, not pins.
             keep=2 if re.search(r'assert_(?:eq|ne)!|assert\.(?:equal|strictEqual)',match[0]) else 1
             position=opening+1; commas=0
@@ -211,8 +211,12 @@ def scan(path, source):
         raw = source[match.start():selected_end]
         values = [text for start,end,text in literals if match.start() <= start < selected_end and source[max(0,start-1):start] != 'b']
         if re.search(r'(?<!\.)\b(?:css|styles?)\b|getComputedStyle', body) and (values or 'getComputedStyle' in body): add(offset, 'style-assertion', 'style-pinned')
-        elif re.search(r'\b(?:stderr|stdout|message|reason)\b|toHaveText|toContainText|toThrow', body) and not re.search(r'\.(?:code|error_code|rule_id)\b', body):
-            if any(re.search(r'[A-Za-z]', value) and re.search(r'\s', value) and not re.fullmatch(r'HTTP [1-5]\d\d|(?:PASS|FAIL|SKIP) [\w.-]+',value) for value in values): add(offset, 'wording-assertion', 'wording-pinned')
+        elif re.search(r'\b(?:stderr|stdout|message|reason)\b|toHaveText|toContainText|toThrow|\.(?:contains|starts_with|ends_with|includes|toContain|toMatch)\s*\(|assert(?:In|NotIn)\b', body) and not re.search(r'\.(?:code|error_code|rule_id)\b', body):
+            # A literal the same test also supplies outside this assertion is
+            # caller payload echoed back, not wording.
+            low,high = container(offset)
+            supplied = {text for start,end,text in literals if low <= start < high and not offset <= start < selected_end}
+            if any(re.search(r'[A-Za-z]', value) and re.search(r'\s', value) and value not in supplied and not re.fullmatch(r'HTTP [1-5]\d\d|(?:PASS|FAIL|SKIP) [\w.-]+',value) for value in values): add(offset, 'wording-assertion', 'wording-pinned')
     for match in re.finditer(r'\b(?:bind|listen)\s*\([^;\n]*?\b([1-9][\d_]{1,4})\b', code): add(match.start(),'shared-port')
     for definition in re.finditer(r'\bconst\s+(\w+)\s*(?::[^=;]+)?=\s*([1-9][\d_]{1,4})\b', code):
         for use in re.finditer(r'\b(?:bind|listen)\s*\([^;\n]*?\b'+re.escape(definition[1])+r'\b',code): add(use.start(),'shared-port')

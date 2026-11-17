@@ -50,7 +50,8 @@ class Audit(unittest.TestCase):
             'case.rs': '''fn production_delay() { thread::sleep(Duration::from_secs(1)); }
 #[test] fn waits_for_event() { let tmp = tempfile::tempdir().unwrap(); listener.bind(("127.0.0.1",0)); child.kill().unwrap(); child.wait().unwrap(); assert!(!path.exists()); assert_eq!(error.code(), "scope_denied"); }
 #[test] fn diagnostics() { assert!(reason.is_empty(), "This explains a failure"); assert_eq!(stdout, b"caller payload bytes"); }
-#[test] fn bounded_poll() { while !ready() && Instant::now() < deadline { thread::sleep(Duration::from_millis(10)); } assert!(ready()); }''',
+#[test] fn bounded_poll() { while !ready() && Instant::now() < deadline { thread::sleep(Duration::from_millis(10)); } assert!(ready()); }
+#[test] fn echoes_caller_input() { let out = run("deploy the blue build"); assert!(out.contains("deploy the blue build")); }''',
             'production.ts': 'export function production(value) { return /ready/.test(value); }',
             'destructured.test.ts': 'test("one", async ({page}) => { await page.click("#one"); expect(run()).toBe(1); }); test("two", async ({page}) => { await page.click("#two"); expect(run()).toBe(2); });',
             'case.test.ts': '''test("virtual time", async () => { vi.useFakeTimers(); const note = "await page.waitForTimeout(100)"; setTimeout(done, 200); vi.advanceTimersByTime(200); expect(error.code).toBe("scope_denied"); });
@@ -67,7 +68,11 @@ test("second", () => { expect(run()).toBe(3); });
 test("prose", () => { expect(error.message).toBe("Permission was denied"); });
 test("style", () => { expect(css.includes("--brand-ink")).toBe(true); });
 test("slow", async () => { await page.waitForTimeout(2000); });''',
-            'no_assertions.rs': '#[test] fn nothing() { let x = 3; }'})
+            'no_assertions.rs': '#[test] fn nothing() { let x = 3; }',
+            'prose.rs': '#[test] fn heading() { assert!(rendered.contains("Merge already landed")); }',
+            'test_prose.py': "def test_heading(self):\n    self.assertIn('Merge already landed', out)\n"})
+        self.assertEqual({row['file'] for row in report['findings'] if row['pattern'] == 'wording-assertion'},
+                         {'case.test.ts', 'prose.rs', 'test_prose.py'})
         classes = {row['class'] for row in report['findings']}
         self.assertTrue({'dead', 'duplicate', 'wording-pinned', 'style-pinned', 'slow', 'restates-implementation'} <= classes)
         self.assertEqual(sum(report['counts'].values()), len(report['findings']))

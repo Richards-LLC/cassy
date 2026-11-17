@@ -9776,15 +9776,13 @@ impl CasCore {
                     drop(_phase);
                     // cas-289b: carry this machine's passing receipts at the
                     // parked tip, so a close on another machine can count them.
-                    if let Some(tip) = receipt_tip {
-                        let portable = crate::factory_worker_check::PassingTests::new(
-                            &self.cas_root,
-                            worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
-                            tip,
-                        ).with_target(&resolved_parent_branch).portable();
-                        if !portable.is_empty() {
-                            parking.deliverables.test_receipts = portable;
-                        }
+                    let portable = receipt_tip.map(|tip| crate::factory_worker_check::PassingTests::new(
+                        &self.cas_root,
+                        worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                        tip,
+                    ).with_target(&resolved_parent_branch).portable()).unwrap_or_default();
+                    if !portable.is_empty() {
+                        parking.deliverables.test_receipts = portable.clone();
                     }
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-00eb: a commit-time anchor recorded earlier in
@@ -9829,7 +9827,15 @@ impl CasCore {
                         ) {
                             return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
                         }
-
+                        // The advanced anchor keeps this machine's fresh receipts.
+                        if !portable.is_empty()
+                            && let Ok(latest) = task_store.get(&task.id)
+                            && latest.deliverables.test_receipts != portable
+                        {
+                            let mut fresh = latest.clone();
+                            fresh.deliverables.test_receipts = portable;
+                            let _ = task_store.update_if_current(&fresh, &latest);
+                        }
                     }
 
                     // cas-619f: a user-facing delivery needs an independent

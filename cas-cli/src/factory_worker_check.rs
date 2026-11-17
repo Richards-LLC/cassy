@@ -287,17 +287,11 @@ fn passing_run_proves(run: &str, package: &str, harness: Option<&str>, filter: &
         Some(harness) => format!("{name}::{harness}"),
         None => name.to_string(),
     };
-    let term = regex::Regex::new(r"test\((=?)([A-Za-z0-9_][A-Za-z0-9_:.-]*)\)").expect("filter term");
-    let selects = |test: &str| filter.split('|').any(|group| {
-        group.split('&').all(|part| term.captures(part).is_some_and(|term| {
-            if term[1].is_empty() { test.contains(&term[2]) } else { test == &term[2] }
-        }))
-    });
     let line = regex::Regex::new(r"^ *PASS +\[[^\]]*\] +\( *[0-9]+/ *[0-9]+\) +(\S+) +(\S+)$").expect("PASS line");
     let passes = run.lines().filter_map(|text| line.captures(text)).collect::<Vec<_>>();
     passing_summary_count(run).ok() == Some(count)
         && passes.len() as u64 == count
-        && passes.iter().all(|pass| pass[1] == binary && selects(&pass[2]))
+        && passes.iter().all(|pass| pass[1] == binary && stability::rust::filter_matches(filter, &pass[2]))
 }
 
 fn named_filter(filter: &str) -> bool {

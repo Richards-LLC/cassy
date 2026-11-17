@@ -1095,9 +1095,11 @@ async fn cassy_merge_close_counts_receipts_carried_from_the_worker_machine_cas_2
         task.deliverables.test_receipts = receipts;
         tasks.update(&task).unwrap();
     };
-    let tampered: [fn(&mut cas_types::PortableTestReceipt); 5] = [
+    let tampered: [fn(&mut cas_types::PortableTestReceipt); 6] = [
         |receipt| receipt.head = "f".repeat(40),
         |receipt| receipt.filter = "all()".into(),
+        // A broadened filter that still selects the carried run.
+        |receipt| receipt.filter = format!("{} | test(other)", receipt.filter),
         // A well-formed digest that is not the carried run's.
         |receipt| receipt.log_sha256 = "0".repeat(64),
         // A different valid filter than the run recorded.

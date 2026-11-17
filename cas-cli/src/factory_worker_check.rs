@@ -988,6 +988,7 @@ impl<'a> PassingTests<'a> {
                 filter: test.filter.clone(),
                 count: test.count,
                 log_sha256: hex::encode(Sha256::digest(&log)),
+                passing_run: String::new(),
             })
         }).collect()
     }
@@ -1619,7 +1620,10 @@ pub(crate) fn record_passing_test_with_log_for_tests(
     });
     let mut record: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let log = path.with_extension("log");
-    std::fs::write(&log, "Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+    std::fs::write(&log, format!(
+        "    Starting 1 test across 1 binary\n        PASS [   0.010s] (1/1) {package} {}::tests::passes\n     Summary [   0.010s] 1 test run: 1 passed, 0 skipped\n",
+        filter.trim_start_matches("test(").trim_end_matches(')'),
+    )).unwrap();
     record.test.as_mut().unwrap().selected_log = Some(log);
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
 }

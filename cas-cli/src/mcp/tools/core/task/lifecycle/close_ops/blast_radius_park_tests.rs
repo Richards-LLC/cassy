@@ -1010,9 +1010,15 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
 /// cas-289b (GH #2025): a worker's receipt files stay on its machine. The
 /// close on the machine that merges counts the receipts carried on the task
-/// row, and refuses one bound to another head, an unnamed filter or no log.
+/// row, and refuses one bound to another head or filter, a digest that is not
+/// its run's, or a run that did not pass.
 #[tokio::test]
 async fn cassy_merge_close_counts_receipts_carried_from_the_worker_machine_cas_289b() {
     let mut env = TestEnvGuard::temp_home();
@@ -1052,10 +1058,18 @@ async fn cassy_merge_close_counts_receipts_carried_from_the_worker_machine_cas_2
         task.deliverables.test_receipts = receipts;
         tasks.update(&task).unwrap();
     };
-    let tampered: [fn(&mut cas_types::PortableTestReceipt); 3] = [
+    let tampered: [fn(&mut cas_types::PortableTestReceipt); 5] = [
         |receipt| receipt.head = "f".repeat(40),
         |receipt| receipt.filter = "all()".into(),
-        |receipt| receipt.log_sha256.clear(),
+        // A well-formed digest that is not the carried run's.
+        |receipt| receipt.log_sha256 = "0".repeat(64),
+        // A different valid filter than the run recorded.
+        |receipt| receipt.filter = "test(other)".into(),
+        // A failing run, with its own matching digest.
+        |receipt| {
+            receipt.passing_run = receipt.passing_run.replace("1 passed", "0 passed, 1 failed");
+            receipt.log_sha256 = sha256_hex(receipt.passing_run.as_bytes());
+        },
     ];
     for tamper in tampered {
         let mut receipts = carried.clone();

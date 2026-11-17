@@ -52,6 +52,7 @@ async function openFailureFleet(page: Page, journey: Journey, width: number) {
 for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`fleet failure copy ${width} ${colorScheme} cas_a348`, () => {
     test.use({ viewport: { width, height: 844 }, colorScheme });
+    // cas-stability-identities: ["fleet failure copy 390 light cas_a348 HUB-J17 fleet failure copy 390 light cas_a348: worker failure and recovery", "fleet failure copy 390 dark cas_a348 HUB-J17 fleet failure copy 390 dark cas_a348: worker failure and recovery", "fleet failure copy 1280 light cas_a348 HUB-J17 fleet failure copy 1280 light cas_a348: worker failure and recovery", "fleet failure copy 1280 dark cas_a348 HUB-J17 fleet failure copy 1280 dark cas_a348: worker failure and recovery"]
     test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: worker failure and recovery`, journeyPart, async ({ page, journey }) => {
       const { row, panel, result } = await openFailureFleet(page, journey, width);
       await journey.stage("A server failure names the worker and offers a next step", async () => {
@@ -84,6 +85,7 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
       });
     });
+    // cas-stability-identities: ["fleet failure copy 390 light cas_a348 HUB-J17 fleet failure copy 390 light cas_a348: assignment failure", "fleet failure copy 390 dark cas_a348 HUB-J17 fleet failure copy 390 dark cas_a348: assignment failure", "fleet failure copy 1280 light cas_a348 HUB-J17 fleet failure copy 1280 light cas_a348: assignment failure", "fleet failure copy 1280 dark cas_a348 HUB-J17 fleet failure copy 1280 dark cas_a348: assignment failure"]
     test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: assignment failure`, journeyPart, async ({ page, journey }) => {
       const { result } = await openFailureFleet(page, journey, width);
       await journey.stage("A failed assignment names the task before its assignee", async () => {

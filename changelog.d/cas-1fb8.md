@@ -1,0 +1,3 @@
+### Changed — Build
+
+- **Cassy no longer depends on an outside Git repository for Claude Code calls** — Was: memory extraction, consolidation, session titles and summaries, preference capture and the live end-to-end suites went through `claude_rs`, a Git dependency on a repository Cassy does not own. That made it the workspace's only `git+` source and pulled an unused rmcp 0.14 into Cargo.lock. Now the in-repo `cas-claude` crate runs `claude --print --output-format stream-json` directly. It covers the same options (model, max turns, thinking tokens, system prompt, allowed tools, MCP config, cwd, environment, extra flags) and the same result fields. It also accepts the CLI's current string-valued `errors` list. The live suites' feature flag is now `claude_e2e`.

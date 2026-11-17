@@ -605,6 +605,12 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const elements = [...document.querySelectorAll('*')];
     const viewport = { width: window.innerWidth, height: window.innerHeight };
     const documentWidth = Math.max(document.documentElement.clientWidth, document.documentElement.scrollWidth, document.body?.scrollWidth || 0);
+    if (documentWidth > document.documentElement.clientWidth + boxTolerance) {
+      add('page-overflow', { element: document.documentElement, selector: 'html' }, {
+        scrollWidth: documentWidth, clientWidth: document.documentElement.clientWidth, viewport,
+        reason: 'page-wider-than-viewport',
+      });
+    }
     for (const element of elements) {
       if (nonVisualReason(element)) continue;
       const style = getComputedStyle(element);
@@ -788,6 +794,11 @@ async function importPlaywrightPackage(packageDir) {
  * @returns {Promise<{playwright: any, version: string, source: string}>}
  */
 export async function resolvePlaywright() {
+  const explicit = process.env.PLAYWRIGHT_MODULE;
+  if (explicit) {
+    const packageDir = explicit.endsWith('/.bin/playwright') ? join(dirname(explicit), '..', 'playwright') : explicit;
+    return { playwright: await importPlaywrightPackage(packageDir), version: readPackageVersion(packageDir) ?? 'unknown', source: `PLAYWRIGHT_MODULE: ${packageDir}` };
+  }
   try {
     const playwright = await import('playwright');
     let version = 'unknown';

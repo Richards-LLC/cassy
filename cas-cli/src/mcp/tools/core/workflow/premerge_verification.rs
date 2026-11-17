@@ -2070,16 +2070,15 @@ mod tests {
         ];
         // Today's 0553/02ab evidence and 1d3a simplicity findings use these
         // existing categories and safe triage, not a summary-text classifier.
-        for category in ["documentation", "evidence", "receipt", "incomplete_close_reason", "missing_validation", "code_duplication"] {
+        for category in ["documentation", "evidence", "receipt", "incomplete_close_reason"] {
             let mut issue = simplicity.clone();
             issue.category = category.into();
             cases.push((category, vec![issue], true));
         }
-        for category in ["correctness", "security", "unknown"] {
+        for category in ["missing_validation", "code_duplication", "correctness", "security", "unknown"] {
             let mut issue = simplicity.clone();
             issue.category = category.into();
-            issue.severity = IssueSeverity::Warning;
-            cases.push((category, vec![simplicity.clone(), issue], false));
+            cases.push((category, vec![issue], false));
         }
         let mut warning = simplicity.clone();
         warning.severity = IssueSeverity::Warning;
@@ -2118,9 +2117,13 @@ mod tests {
             verdict.provenance = VerificationProvenance::System;
             verdict.dispatch_id = Some(dispatch.id.clone());
             verdict.issues = issues.clone();
-            cas_store::add_system_verification(&root, &verdict).unwrap();
+            core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(crate::mcp::tools::VerificationAddRequest {
+                task_id: task.id.clone(), status: "rejected".into(), summary: "Review findings".into(),
+                confidence: Some(1.0), issues: Some(serde_json::to_string(&issues).unwrap()),
+                files_reviewed: Some("work.txt".into()), duration_ms: None,
+                verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
+            })).await.unwrap();
             let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-            cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, &owner.id, None, true).unwrap();
             for _ in 0..2 {
                 core.continue_premerge_after_verdict(&dispatch, verdict.status).await.unwrap();
             }

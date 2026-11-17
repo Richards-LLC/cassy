@@ -1677,7 +1677,7 @@ mod tests {
         assert_eq!(proof.consecutive_passes, 5);
 
         // Branches of different kinds cannot name a runtime identity.
-        std::fs::write(repo.path().join(file), source("", "").replace("describe.skip)", "test)")).unwrap();
+        std::fs::write(repo.path().join(file), source("", prelude).replace("describe.skip)(", "test)(")).unwrap();
         git(&["commit", "--quiet", "-am", "mixed"]);
         let mixed = git(&["rev-parse", "HEAD"]);
         let refusal = changed_tests(repo.path(), &head, &mixed, &[file.to_string()]).unwrap_err().to_string();

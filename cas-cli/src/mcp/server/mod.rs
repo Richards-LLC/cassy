@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content, ErrorCode};
+use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use rmcp::service::Peer;
 use rmcp::service::RoleServer;
 
@@ -387,13 +387,13 @@ impl CasCore {
 
     /// Create success result with text content
     pub(crate) fn success(text: impl Into<String>) -> CallToolResult {
-        CallToolResult::success(vec![Content::text(text.into())])
+        CallToolResult::success(vec![ContentBlock::text(text.into())])
     }
 
     /// Create tool error result (tool succeeded but operation failed)
     /// This sets is_error: true so Claude knows to handle the failure
     pub(crate) fn tool_error(text: impl Into<String>) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(text.into())])
+        CallToolResult::error(vec![ContentBlock::text(text.into())])
     }
 
     /// Create error result

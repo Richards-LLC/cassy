@@ -2271,4 +2271,86 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
             assert_eq!(invocations, if fail_at.is_some() { 3 } else { 5 });
         }
     }
+
+    #[test]
+    fn park_discovery_uses_delivered_identities_for_historical_ranges() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let path = "hub-web/e2e/journeys/fleet-ops.journey.ts";
+        let inline = r#"import { test, expect } from '@playwright/test';
+for (const width of [390, 1280]) {
+  test.describe(`fleet failure ${width}`, () => {
+    test(`case ${width}`, async () => { expect(1).toBe(1); });
+  });
+}
+"#;
+        git(&["init", "--quiet", "-b", "main"]);
+        std::fs::create_dir_all(repo.path().join("hub-web/e2e/journeys")).unwrap();
+        std::fs::write(repo.path().join(path), inline).unwrap();
+        git(&["add", path]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        let historical = inline.replace("expect(1).toBe(1)", "expect(1).toBe(2)");
+        std::fs::write(repo.path().join(path), historical).unwrap();
+        git(&["commit", "--quiet", "-am", "changed inline test"]);
+        let historical_head = git(&["rev-parse", "HEAD"]);
+        let shared = r#"import { test, expect } from '@playwright/test';
+for (const width of [390, 1280]) {
+  test.describe(`fleet failure ${width}`, () => {
+    const run = async () => { expect(1).toBe(2); };
+    // cas-stability-identities: ["fleet failure 390 case 390", "fleet failure 1280 case 1280"]
+    test(`case ${width}`, run);
+  });
+}
+"#;
+        std::fs::write(repo.path().join(path), shared).unwrap();
+        git(&["commit", "--quiet", "-am", "share callback and declare identities"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let paths = [path.to_string()];
+        let ranges = [(base, historical_head)];
+        let required = crate::factory_worker_check::stability::required(
+            repo.path(), &head, "main", &paths, Some(&ranges),
+        )
+        .unwrap();
+        assert_eq!(
+            required,
+            [
+                id(path, "fleet failure 1280 case 1280"),
+                id(path, "fleet failure 390 case 390"),
+            ]
+        );
+
+        let missing_identity = shared.replace(
+            "    // cas-stability-identities: [\"fleet failure 390 case 390\", \"fleet failure 1280 case 1280\"]\n",
+            "",
+        );
+        std::fs::write(repo.path().join(path), missing_identity).unwrap();
+        git(&["commit", "--quiet", "-am", "remove declared identities"]);
+        let missing_head = git(&["rev-parse", "HEAD"]);
+        assert!(
+            crate::factory_worker_check::stability::required(
+                repo.path(), &missing_head, "main", &paths, Some(&ranges),
+            )
+            .is_err(),
+            "park must continue to refuse shared callbacks without declared identities"
+        );
+    }
 }

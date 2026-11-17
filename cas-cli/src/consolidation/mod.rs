@@ -236,7 +236,7 @@ pub mod ai {
 
     use crate::consolidation::*;
     use crate::tracing::claude_wrapper::traced_prompt;
-    use claude_rs::QueryOptions;
+    use cas_claude::QueryOptions;
 
     /// Run AI-powered consolidation on a batch of entries
     pub async fn consolidate_batch(

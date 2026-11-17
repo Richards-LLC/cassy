@@ -464,6 +464,24 @@ Artifact lookup distinguishes missing publication metadata from byte availabilit
 
 - **Recorded delivery identity** - Cassy treats commits it recorded for a task, and commits a supervisor granted with `merge_source`, as the task's own at start, close and rebind, provided they sit under an anchor the task still holds. Replacement, rebound and retargeted deliveries are no longer refused just because their own cycle commits name another task in the subject line. A branch that only has a retired anchor or a bare target-sync merge still counts as undelivered.
 
+- **Rejected train entries** - A resolved rejected verdict lets the train skip that position while the task remains parked for repair. Active train merges accept appended task IDs in order.
+
+- **Release red from a refused cut** - when `scripts/release.sh` refuses to cut a train for REVIEW_MISSING, LANE_CI_MISSING or zero would-close, the cut's candidate binary runs `cas release refused` and records a release red for the green tip it started from. The release freeze then admits a `release-repair` task against that receipt, as it does for a train-suite red, without an operator lift; other merges into the frozen train stay refused and the train merge queue is not held. Recording is best effort and never changes the refusal.
+
+- **Supervisor freeze lift** - the train's live registered supervisor lifts a release freeze with `factory action=train_freeze id=<train> decision=lift reason="<why>"`. The reason is required. The lift records a decision on the train (who, when, why, the tip) and sends the operator a Commander notice. A freeze the operator applied or re-applied in Commander, or one from before this change, stays the operator's unless they set the operator-only `release.supervisor_lifts_operator_freeze`; a live supervisor of another factory session is refused. After any lift, auto-cut does not re-freeze the same tip; the next merge re-arms it. Supervisors lift when a Cassy gate blocks the cut or the operator asked for new work in the release.
+
+- **Find or file** - Cassy files a new issue or task only when no open one already names the same wrong output. The key is the refusal's registry gate codes plus its normalized text (lowercased, ids and numbers collapsed, at least four words): the first line of `actual` for `system action=report_cas_bug`, the last line of a finding's repro. A matching open issue gets the report as an evidence comment with +1; a matching open task gets an evidence note; a report with no key is refused. Finding task creates and QA ledger follow-ups use the same matcher against the configured project tracker (Cassy's own tracker in its source repository) and open tasks: a match gets the evidence and +1 and its identity is returned, and nothing new is filed or refused (cas-5edc). Filed issues record the key as a `Fingerprint` line so later reports with wrapped wording still match.
+
+**Auditable freeze-lift denials.** Release freeze lifts retain the existing supervisor, reason, train-ownership and operator-permission checks. Their refusals now carry registered gate G-157 for the gate registry and refusal facts, with existing machine error prefixes preserved.
+
+- **Explicit GitHub issue ownership** - MCP task creation creates a GitHub source claim for a supplied `external_ref`, an issue-owning title prefix or suffix, or an explicit `Fixes/Closes #N` binding. Other issue citations remain suggestions and do not claim the issue.
+
+Factory deliveries automatically arm supervisor-owned CI and published-merge completion events when parked or sent for merge. The events survive session restarts, deduplicate repeated requests and recognize new CI attempts on an unchanged commit. The progress watchdog reports an unwatched delivery during its next cycle instead of waiting for its stall timer. A corrected parked anchor refreshes its completion events and retires the prior tip's automatic watches; target selection follows close, including epic inheritance. Recorded holds retain their notices and completion coverage through release.
+
+- Worker credential protection follows a provider credential read from any file into a child process's environment and refuses it, independent of where the file lives.
+
+**Portable telemetry dependencies.** The Linux release dependency graph uses the ring TLS provider and excludes AWS-LC. PostHog remains on 0.3.7 while a follow-up replaces its legacy TLS dependency stack; its existing TLS and certificate-validation advisories remain a known residual. Telemetry call sites and the other dependency security updates are unchanged.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -571,6 +589,8 @@ Factory turn costs are recorded locally for Claude, Codex and Grok supervisors a
 Merged delivery close reads test receipts from the assigned worker's registered checkout even after recovery changes its path or branch. Receipts remain bound to the delivered commit and declared repository; the original proof target declaration stays unchanged.
 
 A supervisor command sent from Commander while the supervisor's native turn is open is queued and typed once at the turn boundary, the same way Finish already waited. The card stays Queued until then and can be dismissed without typing anything. If the session ends first, the card settles with the end reason.
+
+- **Account recommendation by headroom** - Workers, `cas claude` / `cas codex` and Commander recommend the subscription with the most headroom on its binding window, the fuller of the 5h and weekly windows, with ties broken by the earliest reset. A window whose reset has passed counts as rolled over, and each spawn rereads the native usage snapshots before choosing. `accounts.selection soonest-reset` restores the earlier policy of draining the account that resets first.
 
 ## Authoritative Sources
 

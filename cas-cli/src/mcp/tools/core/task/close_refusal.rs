@@ -55,12 +55,11 @@ pub(crate) fn current(store: &dyn TaskStore, task: &Task) -> Result<Option<Refus
 /// Give an actual gate a machine identity at its rejecting branch. Ordinary
 /// parameter errors and park handoffs never acquire a gate identity here.
 pub(crate) fn gate(code: &str, next_action: &str, message: impl Into<String>) -> CallToolResult {
-    CallToolResult {
-        structured_content: Some(serde_json::json!({
-            "code": code, "next_action": next_action, "operator_action_required": false,
-        })),
-        ..CallToolResult::error(vec![rmcp::model::Content::text(message.into())])
-    }
+    let mut result = CallToolResult::error(vec![rmcp::model::ContentBlock::text(message.into())]);
+    result.structured_content = Some(serde_json::json!({
+        "code": code, "next_action": next_action, "operator_action_required": false,
+    }));
+    result
 }
 
 /// Called after every close path, including early gates and background closes.
@@ -77,8 +76,8 @@ pub(crate) fn record(
         Ok(answer)
             if answer.is_error == Some(true)
                 && !answer.content.iter().any(|content| {
-                    matches!(&content.raw,
-                rmcp::model::RawContent::Text(text) if text.text.lines().any(is_merge_handoff))
+                    matches!(content,
+                rmcp::model::ContentBlock::Text(text) if text.text.lines().any(is_merge_handoff))
                 }) =>
         {
             Some(answer.structured_content.clone().unwrap_or(Value::Null))

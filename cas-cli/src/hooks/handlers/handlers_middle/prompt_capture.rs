@@ -603,7 +603,7 @@ async fn extract_preference_from_prompt_async(
     prompt: &str,
 ) -> Result<Option<ExtractedPreference>, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
-    use claude_rs::QueryOptions;
+    use cas_claude::QueryOptions;
 
     let prompt_text = format!(
         r#"Analyze this user prompt and determine if it expresses a coding preference or rule that should be remembered.

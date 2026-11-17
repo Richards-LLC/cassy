@@ -44,7 +44,7 @@ async fn synthesize_with_ai_async(
 ) -> Result<usize, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
     use crate::types::EntryType;
-    use claude_rs::QueryOptions;
+    use cas_claude::QueryOptions;
 
     // Build observation text for the prompt
     let obs_text: String = buffered

@@ -1,3 +1,0 @@
-### Fixed — Factory
-
-- **macOS build guard no longer refuses builds on Spotlight load** — Was: the guard compared the 1-minute load average with CPUs x `max_load_ratio`; on macOS that average counts I/O-blocked threads (Spotlight `mdworker`, `fseventsd`), so a 21%-idle 18-core host read load 113 and P0 builds waited 20+ minutes with no Cargo running. Now: macOS gates on CPU busy measured over a 250 ms window against `max_cpu_pressure_percent`, and the refusal names the measured percent; the load average is only a fallback when no measurement exists. Capacity-wait notices also carry a disk reading taken when the notice is written, not the figure from the first refusal.

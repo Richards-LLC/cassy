@@ -14569,8 +14569,8 @@ mod spawn_lifecycle_tests {
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -14646,8 +14646,8 @@ mod spawn_lifecycle_tests {
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -14656,8 +14656,8 @@ mod spawn_lifecycle_tests {
         let repeated = service.factory_spawn_workers(serde_json::from_value(serde_json::json!({
             "action": "spawn_workers", "count": 1, "cli": "claude"
         })).unwrap()).await.expect("repeat spawn");
-        let repeated = repeated.content.into_iter().filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        let repeated = repeated.content.into_iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         assert!(!repeated.contains("m-spawn-recall"), "repeated spawn memory: {repeated}");
         assert!(text.contains("Related prior context:"), "{text}");
@@ -14852,8 +14852,8 @@ mod tests {
                 response
                     .content
                     .into_iter()
-                    .filter_map(|content| match content.raw {
-                        rmcp::model::RawContent::Text(text) => Some(text.text),
+                    .filter_map(|content| match content {
+                        rmcp::model::ContentBlock::Text(text) => Some(text.text),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -15605,8 +15605,8 @@ mod tests {
         response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -16903,6 +16903,28 @@ mod tests {
         assert!(crate::config::Config::load(tempfile::tempdir().unwrap().path()).unwrap().factory().codex_home.is_none());
     }
 
+    /// The Nov 13 and Nov 17 replays (cas-2820): the soonest-reset default put
+    /// workers on an 85%-used account while a 6%-used one sat idle. The default
+    /// policy picks the most headroom on the binding window; a usage window
+    /// whose reset has passed counts as rolled over, not full.
+    #[test]
+    fn codex_spawn_picks_most_binding_headroom_by_default_cas_2820() {
+        let now: chrono::DateTime<chrono::Utc> = "2026-10-27T12:00:00Z".parse().unwrap();
+        let mut specs = build_spawn_specs_with_project_config(1, Some("codex"), None, None, None, None, None).unwrap();
+        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), &Default::default(), now, |provider| {
+            let row = crate::account_selection::tests::row;
+            // Fullest, but its weekly window resets first.
+            let support = row(provider, "support", 2, 85.0, 0.0);
+            // Lowest weekly, but its 5h window binds.
+            let daniel = row(provider, "daniel", 150, 3.0, 40.0);
+            // A stale 5h snapshot: 95% used, but that window already reset.
+            let mut pippenz = row(provider, "pippenz", 120, 6.0, 95.0);
+            pippenz.windows[0].resets_at = Some(now - chrono::Duration::hours(1));
+            Ok(vec![support, daniel, pippenz])
+        });
+        assert_eq!(specs[0].config_dir.as_deref(), Some("/fixture/.codex-pippenz"), "{receipt}");
+    }
+
     #[test]
     fn recommended_spawn_accounts_preserve_explicit_and_override_inherited() {
         let now = "2026-10-27T12:00:00Z".parse().unwrap();
@@ -16916,7 +16938,7 @@ mod tests {
         let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), &Default::default(), now, |provider| {
             let mut idle = crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 0.0);
             idle.windows.remove(0);
-            Ok(vec![idle, crate::account_selection::tests::row(provider, "later", 48, 0.0, 0.0)])
+            Ok(vec![idle, crate::account_selection::tests::row(provider, "later", 48, 80.0, 0.0)])
         });
         for (offset, provider) in [(0, crate::accounts::Provider::Claude), (3, crate::accounts::Provider::Codex)] {
             assert_eq!(specs[offset].config_dir.as_deref(), Some(format!("/fixture/{}chosen", provider.prefix()).as_str()));

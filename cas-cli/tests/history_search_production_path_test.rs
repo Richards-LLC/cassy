@@ -35,7 +35,7 @@ use cas::store::init_cas_dir;
 use cas_store::CodeStore;
 use cas_mcp::types::SearchContextRequest;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::RawContent;
+use rmcp::model::ContentBlock;
 use tempfile::TempDir;
 
 /// A repository with a known, asserted-on history.
@@ -452,8 +452,8 @@ impl Fixture {
         let text = result
             .content
             .iter()
-            .filter_map(|c| match &c.raw {
-                RawContent::Text(text) => Some(text.text.clone()),
+            .filter_map(|c| match c {
+                ContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -635,8 +635,8 @@ async fn q7_co_change_over_the_structural_index() {
     let text = result
         .content
         .iter()
-        .filter_map(|c| match &c.raw {
-            RawContent::Text(t) => Some(t.text.clone()),
+        .filter_map(|c| match c {
+            ContentBlock::Text(t) => Some(t.text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

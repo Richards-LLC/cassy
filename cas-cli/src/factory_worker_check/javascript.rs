@@ -120,7 +120,6 @@ pub(crate) fn changed_tests(
         } else {
             String::new()
         };
-        let all = parsed_tests(path, &source, &[(1, usize::MAX)], false)?;
         let stem = Path::new(path)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -128,12 +127,23 @@ pub(crate) fn changed_tests(
         let test_file = stem.ends_with(".test")
             || stem.ends_with(".spec")
             || path.split('/').any(|part| part == "__tests__");
+        let all = match parsed_tests(path, &source, &[(1, usize::MAX)], false) {
+            Ok(all) => all,
+            // GH #2054: a source file the parser cannot read declares no
+            // tests; only a test file's parse error refuses (cas-6aa9).
+            Err(_) if !test_file => continue,
+            Err(error) => return Err(error),
+        };
         if test_file && all.is_empty() && !source.trim().is_empty() && !diff.is_empty() {
             bail!(
                 "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
             );
         }
-        let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)?
+        // The unchanged base can hold a construct the parser cannot read; only
+        // the delivered tip must parse (cas-6aa9). No base inventory means
+        // every changed test is new.
+        let previous: BTreeMap<_, _> = parsed_tests(path, &old, &[(1, usize::MAX)], false)
+            .unwrap_or_default()
             .into_iter()
             .collect();
         for (identity, body) in parsed_tests(path, &source, &changed_lines(&diff)?, true)? {
@@ -197,8 +207,33 @@ fn declaration(
     source: &str,
     aliases: &BTreeMap<String, String>,
 ) -> Option<(bool, bool)> {
-    let function = node.child_by_field_name("function")?;
-    let name = text(function, source);
+    callee(node.child_by_field_name("function")?, source, aliases)
+}
+
+/// cas-6a3c: `(cond ? describe : describe.skip)(…)` declares a suite when both
+/// branches declare the same kind; jest names its tests with that title.
+fn callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> Option<(bool, bool)> {
+    match function.kind() {
+        "parenthesized_expression" => callee(function.named_child(0)?, source, aliases),
+        "ternary_expression" => {
+            let (suite, supported) = callee(function.child_by_field_name("consequence")?, source, aliases)?;
+            let (other, also) = callee(function.child_by_field_name("alternative")?, source, aliases)?;
+            (suite == other).then_some((suite, supported && also))
+        }
+        _ => named_declaration(text(function, source), aliases),
+    }
+}
+
+/// A conditional callee that names the test API yet resolves to no single kind.
+fn unresolved_callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> bool {
+    matches!(function.kind(), "parenthesized_expression" | "ternary_expression")
+        && callee(function, source, aliases).is_none()
+        && text(function, source)
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .any(|word| matches!(word, "test" | "it" | "describe") || aliases.contains_key(word))
+}
+
+fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(bool, bool)> {
     let parts: Vec<_> = name.split('.').collect();
     let raw_root = name
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
@@ -308,12 +343,88 @@ fn source_tree(path: &str, source: &str) -> Result<tree_sitter::Tree> {
     };
     parser.set_language(&language.into())?;
     let tree = parser
-        .parse(source, None)
-        .context("JavaScript test parse")?;
-    if tree.root_node().has_error() {
-        bail!("cannot resolve changed tests in {path}: JavaScript parse error");
+        .parse(mask_type_imports(source).as_ref(), None)
+        .with_context(|| format!("JavaScript test parse of {path}"))?;
+    if let Some(node) = first_parse_error(tree.root_node()) {
+        let at = node.start_position();
+        return Err(ParseError {
+            path: path.to_string(),
+            line: at.row + 1,
+            column: at.column + 1,
+            missing: node.is_missing(),
+            near: source
+                .get(node.start_byte()..node.end_byte())
+                .unwrap_or_default()
+                .split('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(40)
+                .collect(),
+        }
+        .into());
     }
     Ok(tree)
+}
+
+/// A file the capped runner cannot parse, located for the person fixing it (cas-6aa9).
+#[derive(Debug)]
+pub(crate) struct ParseError {
+    path: String,
+    line: usize,
+    column: usize,
+    missing: bool,
+    near: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ParseError { path, line, column, near, .. } = self;
+        let kind = if self.missing { "missing token" } else { "unparsed" };
+        write!(f, "cannot resolve changed tests in {path}: JavaScript parse error at {path}:{line}:{column} ({kind} `{near}`); rewrite that construct or move it out of the test file")
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// The outermost unparsed or missing node, in source order.
+fn first_parse_error(node: Node<'_>) -> Option<Node<'_>> {
+    if node.is_error() || node.is_missing() {
+        return Some(node);
+    }
+    if !node.has_error() {
+        return None;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor).find_map(first_parse_error)
+}
+
+/// cas-6aa9: tree-sitter-typescript 0.23.2, the newest release, cannot parse
+/// two valid type-argument forms: `import(…)` as a call's type argument
+/// (`f<typeof import('m')>()`, pulse-card auth.test.ts:28) and type arguments
+/// on a tagged template (`prisma.$queryRaw<Row[]>`…``, GH #2054). Blank the
+/// first to an identifier and the second to spaces of the same byte length,
+/// so every offset, line and test title is unchanged.
+fn mask_type_imports(source: &str) -> std::borrow::Cow<'_, str> {
+    static TYPE_IMPORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"<\s*(?:typeof\s+)?(import\s*\(\s*(?:'[^'\n]*'|"[^"\n]*")\s*\))"#).unwrap()
+    });
+    static TEMPLATE_TYPE_ARGUMENTS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"[\w$](<[^<>`;=()\n]*(?:<[^<>`;=()\n]*>[^<>`;=()\n]*)*>)\s*`").unwrap()
+    });
+    let imports = TYPE_IMPORT.replace_all(source, |caps: &regex::Captures<'_>| {
+        let (whole, query) = (&caps[0], caps.get(1).unwrap());
+        let start = query.start() - caps.get(0).unwrap().start();
+        format!("{}{}", &whole[..start], "_".repeat(query.len()))
+    });
+    if !TEMPLATE_TYPE_ARGUMENTS.is_match(&imports) {
+        return imports;
+    }
+    std::borrow::Cow::Owned(TEMPLATE_TYPE_ARGUMENTS.replace_all(&imports, |caps: &regex::Captures<'_>| {
+        let (whole, arguments) = (&caps[0], caps.get(1).unwrap());
+        let start = arguments.start() - caps.get(0).unwrap().start();
+        format!("{}{}{}", &whole[..start], " ".repeat(arguments.len()), &whole[start + arguments.len()..])
+    }).into_owned())
 }
 
 fn declared_identities<'a>(
@@ -524,6 +635,15 @@ fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String,
             aliases.insert(text(alias, source).to_string(), name.to_string());
         }
     }
+    // `const suite = cond ? describe : describe.skip;` aliases a conditional callee.
+    if node.kind() == "variable_declarator"
+        && let (Some(name), Some(value)) = (node.child_by_field_name("name"), node.child_by_field_name("value"))
+        && name.kind() == "identifier"
+        && matches!(value.kind(), "parenthesized_expression" | "ternary_expression")
+        && let Some((suite, true)) = callee(value, source, aliases)
+    {
+        aliases.insert(text(name, source).to_string(), if suite { "describe" } else { "test" }.to_string());
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         imported_aliases(child, source, aliases);
@@ -582,6 +702,8 @@ fn reject_retry_configuration(
 }
 
 // gate-audit[force]: Suite-header changes include descendant tests in the selected proof; this broadens test coverage and never bypasses a refusal.
+// gate-audit[strict]: selector Chooses the changed-scope pass that raises G-61 for an unresolvable callee or title; the non-strict inventory pass never selects tests for proof.
+// gate-audit[unresolved]: selector Inherited title-resolution state; it only makes a changed test fail closed and never accepts a refused identity.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     node: Node<'_>,
@@ -595,6 +717,20 @@ fn walk(
     aliases: &BTreeMap<String, String>,
     tests: &mut Vec<(Identity, String)>,
 ) -> Result<()> {
+    if strict
+        && node.kind() == "call_expression"
+        && (force || overlaps(node, lines))
+        && let Some(function) = node.child_by_field_name("function")
+        && unresolved_callee(function, source, aliases)
+    {
+        bail!(crate::gates::tag(
+            "G-61",
+            format!(
+                "cannot resolve the test callee at {path}:{}: both branches of a conditional must be the same describe/test kind; use them directly",
+                node.start_position().row + 1
+            )
+        ));
+    }
     if node.kind() == "call_expression"
         && let Some((suite, supported)) = declaration(node, source, aliases)
     {
@@ -913,6 +1049,10 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     }
     if source.contains("@jest/globals") {
         return Some("jest");
+    }
+    // GH #2055: a node:test file beside a Jest config is Node's own runner.
+    if source.contains("'node:test'") || source.contains("\"node:test\"") {
+        return Some("node --test");
     }
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
@@ -1586,6 +1726,111 @@ mod tests {
         );
     }
 
+    /// pulse-card cas-1bf9d (GH #2036): `(url ? describe : describe.skip)(…)`
+    /// lost its suite title, so the anchored name pattern filtered the changed
+    /// case out and the capped run reported it skipped. A conditional or an
+    /// alias of one keeps the title; a mixed one is refused by name.
+    #[test]
+    fn conditional_describe_keeps_its_title_in_the_capped_identity_cas_6a3c() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        let file = "legal.integration.test.mjs";
+        let source = |body: &str, prelude: &str| format!(
+            "import {{ describe, test }} from 'node:test';\nconst url = 'postgresql://127.0.0.1/db';\n{prelude}\n\
+             (url ? describe : describe.skip)('legal', () => {{\n  test('keeps consent', () => {{ {body} }});\n}});\n\
+             suite('aliased', () => {{\n  test('keeps consent', () => {{ {body} }});\n}});\n"
+        );
+        let prelude = "const suite = url ? describe : describe.skip;";
+        std::fs::write(repo.path().join(file), source("throw 0;", prelude)).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(file), source("", prelude)).unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()]).unwrap();
+        assert_eq!(tests, [id(file, "aliased keeps consent"), id(file, "legal keeps consent")]);
+        let cas_root = tempfile::tempdir().unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", &tests).unwrap();
+        assert_eq!(proof.consecutive_passes, 5);
+
+        // Branches of different kinds cannot name a runtime identity.
+        std::fs::write(repo.path().join(file), source("", prelude).replace("describe.skip)(", "test)(")).unwrap();
+        git(&["commit", "--quiet", "-am", "mixed"]);
+        let mixed = git(&["rev-parse", "HEAD"]);
+        let refusal = changed_tests(repo.path(), &head, &mixed, &[file.to_string()]).unwrap_err().to_string();
+        assert!(refusal.contains("G-61"), "{refusal}");
+    }
+
+    /// pulse-card auth.test.ts (GH #2052): `importOriginal<typeof import('#imports')>()`
+    /// is valid TypeScript that tree-sitter-typescript 0.23.2 cannot parse, so
+    /// the capped run refused the whole file. It now resolves its changed test;
+    /// a real parse error names its path:line:column.
+    #[test]
+    fn typescript_type_import_argument_parses_and_parse_errors_name_their_location_cas_6aa9() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "--quiet"]);
+        let file = "auth.test.ts";
+        // Both constructs pulse-card bisected: GH #2052 and GH #2054.
+        let source = |body: &str| format!(
+            "vi.mock('#imports', async importOriginal => ({{\n  ...(await importOriginal<typeof import('#imports')>()),\n}}));\n\
+             describe('auth', () => {{\n  test('signs out', async () => {{ {body} await prisma.$queryRaw<CrossPostCommenter[]>`SELECT 1`; }});\n}});\n"
+        );
+        std::fs::write(repo.path().join(file), source("expect(1).toBe(1);")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        std::fs::write(repo.path().join(file), source("expect(2).toBe(2);")).unwrap();
+        git(&["commit", "--quiet", "-am", "head"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
+
+        // A broken tip is refused at its location; a broken base is not.
+        std::fs::write(repo.path().join(file), source("const value = ;")).unwrap();
+        git(&["commit", "--quiet", "-am", "broken"]);
+        let refusal = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap_err();
+        let located = refusal.downcast_ref::<ParseError>().expect("a located parse refusal");
+        assert_eq!((located.path.as_str(), located.line), (file, 5));
+        std::fs::write(repo.path().join(file), source("expect(3).toBe(3);")).unwrap();
+        git(&["commit", "--quiet", "-am", "repaired"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()]).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
+
+        // GH #2054: an unparseable source file in the delivery holds no tests.
+        let service = "comment-analytics.service.ts";
+        std::fs::write(repo.path().join(service), "export const total = ;\n").unwrap();
+        std::fs::write(repo.path().join(file), source("expect(4).toBe(4);")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "service"]);
+        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[service.to_string(), file.to_string()]).unwrap();
+        assert_eq!(tests, [id(file, "auth signs out")]);
+    }
+
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
     /// apps/backend/jest.config.js and its ts-jest transform.
     #[test]
@@ -1637,6 +1882,14 @@ mod tests {
 
         assert_eq!(runner_hint(repo.path(), "web/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "api/a.test.ts"), Some("jest"));
+        // GH #2055 (cas-6aa9): a node:test file in a Jest package uses Node's runner.
+        std::fs::write(
+            repo.path().join("api/app-boot.test.cjs"),
+            "const { test } = require('node:test');\ntest('boots', () => {});\n",
+        )
+        .unwrap();
+        assert_eq!(runner_hint(repo.path(), "api/app-boot.test.cjs"), Some("node --test"));
+        assert_eq!(runner_files(&["node".into(), "--test".into(), "api/app-boot.test.cjs".into()]).map(|(runner, _)| runner), Some("node"));
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
 

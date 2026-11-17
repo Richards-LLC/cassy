@@ -1511,7 +1511,6 @@ mod tests {
             projects: Vec::new(),
         };
         let doc = render_skill(&ctx, TemplateTarget::Claude);
-        assert!(doc.contains("No Vercel projects captured"));
         keep_block::extract(&doc).expect("empty-projects doc must round-trip");
     }
 

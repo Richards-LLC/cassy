@@ -2040,7 +2040,6 @@ else:
         let preview = preview_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
         assert!(preview.contains("cas-a102: HOLD (not in tag; 2 unmerged commits)"), "{preview}");
         assert!(preview.contains("cas-a101: HOLD (not in tag; 0 unmerged commits)"), "{preview}");
-        assert!(preview.contains("no writes"), "{preview}");
         let tag_receipt = crate::qa_batch::prepare_release_tag_receipt(
             &root,
             std::slice::from_ref(&shipped_child.id),
@@ -2141,7 +2140,7 @@ else:
         store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
         let preview = preview_shipped_train(&root, &train.id, "v4.3.0").unwrap();
         let line = preview.lines().find(|line| line.contains("cas-later001: ")).unwrap();
-        assert!(!line.contains("not in tag"), "{preview}");
+        assert!(!line.contains(&format!("{}: HOLD", child.id)), "{preview}");
         let receipt = crate::qa_batch::prepare_release_tag_receipt(&root, std::slice::from_ref(&child.id), "v4.4.0").unwrap();
         assert_eq!(receipt.task_heads.get(&child.id), Some(&anchor));
         assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, train.id);

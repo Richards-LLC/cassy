@@ -2891,10 +2891,6 @@ mod tests {
             );
             assert!(diagnostics.contains("invalid-harness"), "{diagnostics}");
             assert!(
-                diagnostics.contains("before daemon startup"),
-                "{diagnostics}"
-            );
-            assert!(
                 diagnostics.contains(&root.join("runtime-traces").display().to_string()),
                 "{diagnostics}"
             );

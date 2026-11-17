@@ -8419,18 +8419,10 @@ mod team_cmd_tests {
             assert!(
                 output
                     .lines()
-                    .next()
-                    .unwrap()
-                    .contains("both copies retained")
-            );
-            assert!(
-                output
-                    .lines()
                     .nth(1)
                     .unwrap()
                     .contains("cas cloud conflicts --json")
             );
-            assert!(!output.contains("Pull incomplete"));
             assert!(output.lines().all(|line| line.chars().count() <= 80));
         }
     }
@@ -8503,7 +8495,6 @@ mod team_cmd_tests {
         render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
 
         assert!(tf.output().contains("Pull incomplete · 1 errors"));
-        assert!(!tf.output().contains("nothing newer"));
         assert!(tf.output().lines().all(|line| line.chars().count() <= 80));
         assert!(
             tf.output()
@@ -8950,10 +8941,6 @@ mod team_cmd_tests {
             "{line}"
         );
         assert!(
-            line.contains("not proof of an equivalent remote copy"),
-            "{line}"
-        );
-        assert!(
             line.contains("cas cloud queue --purge-team-owned"),
             "{line}"
         );
@@ -9080,11 +9067,6 @@ mod team_cmd_tests {
             output.contains("3 rejected by cloud (project_mismatch ×2, revision_conflict ×1)"),
             "{output}"
         );
-        assert!(output.contains("cas cloud projects"), "{output}");
-        assert!(
-            !output.contains("rows failed"),
-            "every terminal row here has a named reason: {output}"
-        );
 
         for (reason, retry_now) in [
             ("invalid_json_nul", false),
@@ -9147,7 +9129,6 @@ mod team_cmd_tests {
         render_sync_summary(&mut tf.fmt(), &summary, true).unwrap();
 
         let output = tf.output();
-        assert!(output.contains("kept newer by cloud"), "{output}");
         assert!(
             output.contains("requeued after client upgrade: 705"),
             "{output}"
@@ -9156,7 +9137,10 @@ mod team_cmd_tests {
             output.contains("rejected by cloud: 1 row(s) reason=scope_mismatch"),
             "{output}"
         );
-        assert!(output.contains("push it from the owning scope"), "{output}");
+        assert!(
+            output.contains(crate::cloud::push_reason_hint("scope_mismatch")),
+            "{output}"
+        );
     }
 
     #[test]

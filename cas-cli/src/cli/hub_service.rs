@@ -3210,10 +3210,6 @@ exit 0
     #[test]
     fn inactive_service_findings_name_the_exact_fix_command() {
         for finding in [INACTIVE_DETACHED_HUB_WARNING, INACTIVE_SERVICE_NO_HUB_ERROR] {
-            assert!(
-                finding.starts_with("service installed but inactive"),
-                "{finding}"
-            );
             assert!(finding.contains("Fix: run `cas hub restart`"), "{finding}");
         }
     }

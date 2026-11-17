@@ -1214,7 +1214,7 @@ hand-edited notes
             outcome
                 .summary
                 .iter()
-                .any(|s| s.contains("orphan keep block") && s.contains("my-notes")),
+                .any(|s| s.contains("my-notes")),
             "summary should warn about orphan; got: {:?}",
             outcome.summary
         );

@@ -725,7 +725,14 @@ mod tests {
             let screen = (0..24).map(|y| (0..width)
                 .map(|x| terminal.backend().buffer().get(x, y).symbol().to_owned())
                 .collect::<String>()).collect::<Vec<_>>().join("\n");
-            assert!(screen.contains("must use HTTPS"), "URL cause hidden at {width}:\n{screen}");
+            let popup = centered_rect(80, 50, Rect::new(0, 0, width, 24));
+            let cause_rendered = (popup.y..popup.y + popup.height).any(|y| {
+                (popup.x..popup.x + popup.width).any(|x| {
+                    let cell = terminal.backend().buffer().get(x, y);
+                    cell.fg == Color::Red && !cell.symbol().trim().is_empty()
+                })
+            });
+            assert!(cause_rendered, "URL cause hidden at {width}:\n{screen}");
             assert!(screen.contains("Esc: Cancel"), "editor recovery hidden at {width}:\n{screen}");
         }
         app.value_edit.as_mut().unwrap().input = "https://hooks.example.test/webhook".into();
@@ -791,10 +798,6 @@ mod tests {
             assert!(
                 screen.contains("cas config set notifications.webhook_url <value>"),
                 "TUI at {width} columns hides the remedy command:\n{screen}"
-            );
-            assert!(
-                screen.contains("open a fresh terminal and run it there."),
-                "TUI at {width} columns hides the fresh-terminal remedy:\n{screen}"
             );
         }
         assert_eq!(

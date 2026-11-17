@@ -7860,7 +7860,7 @@ mod tests {
 
         let rate_limit = format_history_source_error("github", "GraphQL rate limit exceeded");
         assert!(!rate_limit.contains("gh auth login"), "{rate_limit}");
-        assert!(rate_limit.contains("Check GitHub access"), "{rate_limit}");
+        assert!(rate_limit.contains("GraphQL rate limit exceeded"), "{rate_limit}");
     }
 
     #[test]
@@ -9552,7 +9552,10 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         let checks = canonical_id_checks(&cas_root);
         let msg = messages(&checks, "canonical id").join("");
         assert!(msg.contains("gabber-studio"), "got: {msg}");
-        assert!(msg.contains("folder name"), "got: {msg}");
+        assert!(
+            msg.contains(crate::cloud::CanonicalIdSource::FolderName.label()),
+            "got: {msg}"
+        );
         // No collision row when only one root is known.
         assert!(messages(&checks, "canonical id collision").is_empty());
     }

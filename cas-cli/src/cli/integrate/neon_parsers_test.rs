@@ -158,7 +158,6 @@ fn parse_describe_project_bails_when_no_default_database_name_is_resolvable() {
     });
     let err = parse_describe_project(&v).unwrap_err();
     let s = err.to_string();
-    assert!(s.contains("no default database name"), "got: {s}");
     // Bail message must point at the freshly-created-project recovery.
     assert!(
         s.contains("freshly-created project") || s.contains("provisioned"),

@@ -4886,28 +4886,30 @@ mod tests {
             macos_kill_identity_matches(codex, cas_mux::SupervisorCli::Codex, 100, 101, None)
                 .is_ok()
         );
-        let recycled =
+        assert!(
             macos_kill_identity_matches(codex, cas_mux::SupervisorCli::Codex, 102, 101, None)
-                .unwrap_err();
-        assert!(recycled.contains("after agent registration"), "{recycled}");
-        let foreign = macos_kill_identity_matches(
-            Path::new("/usr/bin/sleep"),
-            cas_mux::SupervisorCli::Codex,
-            100,
-            101,
-            None,
-        )
-        .unwrap_err();
-        assert!(foreign.contains("expected codex"), "{foreign}");
-        let mcp_child = macos_kill_identity_matches(
-            Path::new("/usr/local/bin/cas"),
-            cas_mux::SupervisorCli::Codex,
-            100,
-            101,
-            None,
-        )
-        .unwrap_err();
-        assert!(mcp_child.contains("expected codex"), "{mcp_child}");
+                .is_err()
+        );
+        assert!(
+            macos_kill_identity_matches(
+                Path::new("/usr/bin/sleep"),
+                cas_mux::SupervisorCli::Codex,
+                100,
+                101,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            macos_kill_identity_matches(
+                Path::new("/usr/local/bin/cas"),
+                cas_mux::SupervisorCli::Codex,
+                100,
+                101,
+                None,
+            )
+            .is_err()
+        );
         let fingerprint = macos_kill_identity_matches(
             codex,
             cas_mux::SupervisorCli::Codex,

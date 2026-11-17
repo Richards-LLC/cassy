@@ -3206,7 +3206,7 @@ mod tests {
     fn pipeline_latency_section_fails_an_over_budget_stage_with_its_trend() {
         // cas-692a: with no latency receipt there is nothing it "records".
         let absent = pipeline_latency_section(&ReleaseEvidence::default());
-        assert!(absent.contains("no latency receipt was found"), "{absent}");
+        assert!(!absent.contains("STAGE_SECS"), "{absent}");
         assert!(!absent.contains("records"), "{absent}");
         let root = tempfile::tempdir().unwrap();
         for (dir, receipt) in [
@@ -3275,7 +3275,12 @@ mod tests {
         );
 
         evidence.record_latency(&parse_key_values("PUBLISH_LATENCY_SECONDS=169\n"));
-        assert!(pipeline_latency_section(&evidence).contains("Stage timings are unavailable"));
+        assert!(evidence.stage_seconds.is_empty());
+        let section = pipeline_latency_section(&evidence);
+        assert!(
+            section.contains("STAGE_SECS") && !section.contains("gate"),
+            "{section}"
+        );
     }
 
     #[test]

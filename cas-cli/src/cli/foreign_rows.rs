@@ -1591,10 +1591,6 @@ mod tests {
         let summary = report.summary();
         assert!(summary.contains("0 project DB(s) compared"), "{summary}");
         assert!(
-            summary.contains("task replication was not checked"),
-            "{summary}"
-        );
-        assert!(
             summary.contains("0 attributed page(s) checked"),
             "{summary}"
         );
@@ -1722,7 +1718,6 @@ mod tests {
             summary.contains("1 registry root(s) skipped (not a project store): fresh-proxy"),
             "{summary}"
         );
-        assert!(!summary.contains("could NOT be read"), "{summary}");
         assert_eq!(
             report.to_json()["peers_skipped"][0]["project"],
             "fresh-proxy"

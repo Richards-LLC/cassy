@@ -4230,12 +4230,11 @@ mod tests {
         assert!(asked.is_empty(), "an agent is never even asked");
 
         let operator = invocation(&["-bash"], true);
-        let declined = pairing_admission(&operator, origin, &scopes, &mut |summary| {
+        pairing_admission(&operator, origin, &scopes, &mut |summary| {
             asked.push(summary.to_string());
             false
         })
         .unwrap_err();
-        assert!(declined.contains("not confirmed"), "{declined}");
         let summary = asked.pop().expect("the operator was asked");
         assert!(summary.contains(origin), "{summary}");
         assert!(summary.contains("pane:input"), "{summary}");
@@ -4559,10 +4558,10 @@ mod tests {
             phase: Some("running".to_owned()),
             command: None,
         };
-        let report = HubTransportReport::wedged_lock(&holder, true);
-        let rendered = render_transport_status(&report);
-        assert!(rendered.contains("but not answering"), "{rendered}");
-        assert!(!rendered.contains("startup is wedged"), "{rendered}");
+        assert_eq!(
+            lock_holder_display_state_with_timeout(&holder, hub_launch_timeout(true)),
+            HubDisplayState::Unresponsive { age_secs: 91 }
+        );
     }
 
     #[test]

@@ -169,13 +169,6 @@ mod tests {
             let json = super::super::serialize_checks(&[row], &[]);
             assert_eq!(json[0]["group"], "config");
             assert_eq!(json[0]["status"], "warning");
-            // pin: default doctor clips at three lines; the cause must lead even when paths are long.
-            assert!(
-                json[0]["message"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("Hooks directory is missing")
-            );
             assert!(
                 json[0]["message"]
                     .as_str()

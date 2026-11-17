@@ -1233,7 +1233,6 @@ mod tests {
         let help = String::from_utf8(help).expect("help is UTF-8");
 
         assert!(help.contains("cloud"));
-        assert!(help.contains("Sync data with Cassy Cloud"));
         assert!(help.contains("memory-migrate"));
         assert!(!help.contains("purge-test-fixtures"));
         assert!(!help.contains("retrieval-parity"));

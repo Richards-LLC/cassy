@@ -187,6 +187,6 @@ mod tests {
         // accidentally parsing it as the reverted entry's remedy.
         let mixed = check_for(&BacklogReport { reverted: report().delivered, ..report() });
         let (diagnostic, _) = mixed.parts();
-        assert!(diagnostic.contains("finished epics open") && diagnostic.contains("cas-i1"), "{diagnostic}");
+        assert!(diagnostic.contains("cas-e1") && diagnostic.contains("cas-i1"), "{diagnostic}");
     }
 }

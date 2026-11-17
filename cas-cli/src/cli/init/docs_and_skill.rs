@@ -489,7 +489,9 @@ mod tests {
 
         let claude = build_cas_section();
         assert!(claude.lines().any(|line| line == "@AGENTS.md"), "{claude}");
-        assert!(!claude.contains("Bug routing"), "the directive is not duplicated");
+        for line in AGENTS_DIRECTIVE_CONTENT.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(!claude.contains(line), "the directive is not duplicated: {line}");
+        }
         assert!(!claude.contains("TodoWrite"), "{claude}");
     }
 

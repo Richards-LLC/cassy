@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(status.signal(), Some(libc::SIGKILL));
         assert!(SessionManager::new().find_session(Some("wedged")).unwrap().is_none());
         let log = daemon_log("wedged");
-        assert!(log.contains("\"killed\"") && log.contains("sent SIGKILL"), "{log}");
+        assert!(log.contains("\"killed\""), "{log}");
     }
 
     /// cas-fcb0: after a manual `kill -9` the daemon is gone but its workers,

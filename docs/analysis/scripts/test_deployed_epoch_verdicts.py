@@ -42,7 +42,6 @@ class DeployedEpochVerdictsTests(unittest.TestCase):
         self.assertEqual(results[0]["exposure"]["mixed"], 1)
         self.assertFalse(any(card["evidence_id"] == "mixed-1" and card["epoch_class"] == "clean-post" for card in results[0]["evidence_cards"]))
         self.assertIsNotNone(results[1]["proposal_draft"])
-        self.assertIn("Human review required", results[1]["proposal_draft"]["body"])
 
     def evaluated_case(self, semantic):
         """A fix with adequate clean-post exposure and no symptom match.

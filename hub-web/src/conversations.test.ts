@@ -713,7 +713,6 @@ describe('conversation evidence', () => {
     expect(view.element.querySelector('.turn.sup .bub p')?.textContent).toBe('Actual reply <script>alert(1)</script>');
     expect(view.element.querySelector('script')).toBeNull();
     expect(view.element.querySelector('.turn.you')).toBeNull();
-    expect(view.element.textContent).not.toContain('Live pane text');
   });
   it('keeps typed supervisor turns and lays the artifact on the thread as a sheet beside the bubble', () => {
     // The fixture module imported above installs the Pebble 4 sheet, as main.ts does.

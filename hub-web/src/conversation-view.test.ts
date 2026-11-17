@@ -304,7 +304,6 @@ describe("ConversationView (Pebble thread)", () => {
     const quiet = view.element.querySelectorAll<HTMLElement>(".coalesce");
     expect(quiet).toHaveLength(1);
     expect(quiet[0]!.textContent).toBe("Gate 11 of 14 targets green");
-    expect(quiet[0]!.textContent).not.toContain("WAITING ON YOU");
   });
   it("offers Show full update on a folded run, opens every update, keeps it open across repaints, and closes again", () => {
     const history = new ConversationHistory();

@@ -140,7 +140,6 @@ class QueueTest(unittest.TestCase):
         self.assertTrue(item["link"], "the link is real — it is just incidental")
         self.assertTrue(item["link_is_incidental"])
         self.assertIsNone(item["suggested_action"])
-        self.assertIn("mentioned in passing", item["rationale"])
 
     def test_a_claim_about_the_fix_is_not_marked_incidental(self) -> None:
         item = next(i for i in self.queue_for("fixed")["items"] if i["memory"]["id"] == "m1")

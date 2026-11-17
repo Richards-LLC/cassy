@@ -290,7 +290,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         // cas-c74f: the worker's name in the terminal note reads whole, and
         // the raw-output button lines up with the note's text.
         const layout = await dialog.evaluate((node, worker) => {
-          const note = [...node.querySelectorAll<HTMLElement>(".worker-timeline-note")].find((p) => p.textContent!.includes("own terminal"))!;
+          const note = [...node.querySelectorAll<HTMLElement>(".worker-timeline-note")].find((p) => p.querySelector(".worker-timeline-name"))!;
           const walker = document.createTreeWalker(note, NodeFilter.SHOW_TEXT);
           let text: Node | null;
           while ((text = walker.nextNode()) && !text.textContent!.includes(worker));

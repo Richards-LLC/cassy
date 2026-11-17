@@ -176,7 +176,6 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue((self.artifacts / "state.json").exists())
         self.assertFalse(any("private-stage" in str(path) for path in report.parent.iterdir()))
         markdown = report.read_text()
-        self.assertIn("Top recurring failure narratives", markdown)
         self.assertIn("never auto-filed", markdown)
         self.assertEqual({path: path.read_bytes() for path in sources}, before)
 

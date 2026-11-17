@@ -2341,8 +2341,10 @@ recorded start ancestry of both tips, source/destination ownership and current
 task/delivery/review state. Commit-time `factory_branch_anchor` or `parked_branch`
 capture alone is not a park. AwaitingMerge, pending verification and active
 review envelopes refuse rewrites; persisted completion receipts and bound QA
-review tips must remain reachable. Unknown state and deletion refuse. Merge
-the target into parked/reviewed branches. Normal fast-forward pushes retain
+review tips must remain reachable. Unknown state refuses. An owned per-task
+diagnostic ref ending in `-diag` may be deleted while checked out on that ref
+only when no task, completion receipt, recorded merge or QA review binds it.
+Merge the target into parked/reviewed branches. Normal fast-forward pushes retain
 the existing ancestry, ownership, fast-row and local-gate checks.
 
 At park, `receipt_scope::park_refusal` reads passing capped test receipts for

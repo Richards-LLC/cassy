@@ -2006,7 +2006,29 @@ fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], 
 fn detached_runner_command_with_run(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, run: Option<&str>, test_env: &[String]) -> Command {
     let mut command = Command::new("/bin/sh");
     command
-        .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
+        .args(["-c", r#"
+runner=
+interrupted=
+forward_signal() {
+    interrupted=$1
+    if [ -n "$runner" ]; then kill -"$1" "$runner" 2>/dev/null || :; fi
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+"$0" "$@" &
+runner=$!
+if [ -n "$interrupted" ]; then forward_signal "$interrupted"; fi
+while :; do
+    interrupted=
+    wait "$runner"
+    code=$?
+    # A trapped signal interrupts wait before the producer drains its groups.
+    [ -n "$interrupted" ] || break
+done
+echo "worker-check: EXIT $code"
+exit "$code"
+"#])
         .arg(executable)
         .args(["factory", "worker-check", "--cas-root"])
         .arg(cas_root);
@@ -2748,18 +2770,19 @@ else:
         struct Owned {
             child: std::process::Child,
             marker: PathBuf,
+            cleanup_groups: bool,
         }
         impl Drop for Owned {
             fn drop(&mut self) {
-                if let Ok(text) = std::fs::read_to_string(&self.marker) {
+                if self.cleanup_groups && let Ok(text) = std::fs::read_to_string(&self.marker) {
                     let pids: Vec<i32> = text.split_whitespace().map(|pid| pid.parse().unwrap()).collect();
                     for group in [pids[0], pids[2]] { unsafe { libc::killpg(group, libc::SIGKILL); } }
                 }
-                unsafe { libc::killpg(self.child.id() as i32, libc::SIGKILL); }
+                let _ = self.child.kill();
                 let _ = self.child.wait();
             }
         }
-        let mut owned = Owned { child: spawn_detached(command).unwrap(), marker: root.join("pids") };
+        let mut owned = Owned { child: spawn_detached(command).unwrap(), marker: root.join("pids"), cleanup_groups: true };
         let deadline = Instant::now() + Duration::from_secs(20);
         while !owned.marker.exists() && Instant::now() < deadline {
             assert!(owned.child.try_wait().unwrap().is_none());
@@ -2779,6 +2802,7 @@ else:
         assert_eq!(status.code(), Some(1));
         assert!(!worker_group_has_live_members(pids[0]));
         assert!(!worker_group_has_live_members(pids[2]));
+        owned.cleanup_groups = false;
         assert!(try_lock_lane(&root, &repo).unwrap().is_some());
         assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
         let run: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("worker-runs").join(format!("{id}.json"))).unwrap()).unwrap();

@@ -2835,6 +2835,10 @@ records live under `.cas/worker-runs/`; no migration or authority capability is
 created. Linux and macOS resolve the actual stdout log file, and detached calls
 without a regular log are refused.
 
+TERM, INT or HUP sent to the printed detached PID forwards to its capped
+producer. The wrapper waits for the producer to drain its owned Cargo groups,
+release its leases and record completion before writing the exit trailer.
+
 Before recycling a worker, Cassy sends TERM to each of its registered,
 fingerprinted detached producers and lets the capped runner drain its guard
 and Cargo descendants. It checks the inherited target lease before retiring

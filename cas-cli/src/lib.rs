@@ -97,6 +97,7 @@ pub mod task_simulators;
 pub mod db_branch;
 pub mod deliverable;
 pub mod hooks;
+pub(crate) mod issue_intake;
 pub mod issue_reconcile;
 pub mod hub;
 pub mod hybrid_search;

@@ -245,6 +245,60 @@ pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
 
 /// Only positive named-test selectors may be joined by union/intersection.
 /// Exclude all(), negation, regex/globs and predicates that select a whole binary.
+/// The single nextest summary of a selected-test log, when every executed
+/// test passed. Shared by supervisor-recorded and carried receipts.
+fn passing_summary_count(log: &str) -> Result<u64> {
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
+    let log = ansi.replace_all(log, "");
+    let summary = regex::Regex::new(
+        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
+    )?;
+    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
+    if summaries.len() != 1 {
+        bail!("log must contain exactly one selected nextest summary");
+    }
+    let run: u64 = summaries[0][1].parse()?;
+    let count: u64 = summaries[0][2].parse()?;
+    if count == 0 || count != run {
+        bail!("log must show a nonzero selection with every executed test passed");
+    }
+    Ok(count)
+}
+
+/// cas-289b: a selected-test log's nextest PASS and Summary lines.
+fn passing_run_lines(log: &str) -> String {
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").expect("ANSI pattern");
+    let log = ansi.replace_all(log, "");
+    log.lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            line.starts_with("PASS [") || line.starts_with("Summary [")
+        })
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// cas-289b: whether carried run lines prove `count` passing tests, each of
+/// `package` (and `harness`) and selected by `filter`.
+/// cas-289b: digest of a carried run bound to the filter that minted it.
+fn passing_run_digest(filter: &str, passing_run: &str) -> String {
+    hex::encode(Sha256::digest(format!("{filter}\n{passing_run}").as_bytes()))
+}
+
+fn passing_run_proves(run: &str, package: &str, harness: Option<&str>, filter: &str, count: u64) -> bool {
+    let Some((name, _)) = package_selector(package) else { return false };
+    let binary = match harness {
+        Some(harness) => format!("{name}::{harness}"),
+        None => name.to_string(),
+    };
+    let line = regex::Regex::new(r"^ *PASS +\[[^\]]*\] +\( *[0-9]+/ *[0-9]+\) +(\S+) +(\S+)$").expect("PASS line");
+    let passes = run.lines().filter_map(|text| line.captures(text)).collect::<Vec<_>>();
+    passing_summary_count(run).ok() == Some(count)
+        && passes.len() as u64 == count
+        && passes.iter().all(|pass| pass[1] == binary && stability::rust::filter_matches(filter, &pass[2]))
+}
+
 fn named_filter(filter: &str) -> bool {
     regex::Regex::new(r"^[ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\)(?:[ \t]*[|&][ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\))*[ \t]*$")
         .is_ok_and(|pattern| pattern.is_match(filter))
@@ -616,18 +670,7 @@ fn read_selected_log(path: &Path) -> Result<(PathBuf, Vec<u8>, String, u64)> {
     let log = std::str::from_utf8(&bytes).context("supervisor log must be UTF-8")?;
     let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
     let log = ansi.replace_all(log, "").into_owned();
-    let summary = regex::Regex::new(
-        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
-    )?;
-    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
-    if summaries.len() != 1 {
-        bail!("supervisor log must contain exactly one selected nextest summary");
-    }
-    let run: u64 = summaries[0][1].parse()?;
-    let count: u64 = summaries[0][2].parse()?;
-    if count == 0 || count != run {
-        bail!("supervisor log must show a nonzero selection with every executed test passed");
-    }
+    let count = passing_summary_count(&log).map_err(|error| anyhow::anyhow!("supervisor {error}"))?;
     Ok((log_path, bytes, log, count))
 }
 
@@ -1017,6 +1060,7 @@ pub(crate) struct PassingTests<'a> {
     repo: &'a Path,
     head: &'a str,
     target: Option<&'a str>,
+    synced: &'a [cas_types::PortableTestReceipt],
     records: std::sync::OnceLock<Vec<(String, Option<String>, TestReceipt)>>,
 }
 
@@ -1027,8 +1071,38 @@ impl<'a> PassingTests<'a> {
             repo,
             head,
             target: None,
+            synced: &[],
             records: std::sync::OnceLock::new(),
         }
+    }
+
+    /// cas-289b: also count the receipts carried on the task row from the
+    /// machine that ran them. Only a receipt for this exact head, with a
+    /// named filter, a non-zero count and a recorded log hash is admitted;
+    /// a local receipt for the same test wins.
+    pub(crate) fn with_synced(mut self, synced: &'a [cas_types::PortableTestReceipt]) -> Self {
+        self.synced = synced;
+        self
+    }
+
+    /// This machine's passing receipts at the head, for the task row.
+    pub(crate) fn portable(&self) -> Vec<cas_types::PortableTestReceipt> {
+        self.records().iter().filter_map(|(tested_head, package, test)| {
+            let log = std::fs::read_to_string(test.selected_log.as_ref()?).ok()?;
+            let passing_run = passing_run_lines(&log);
+            let package = package.clone()?;
+            passing_run_proves(&passing_run, &package, test.harness.as_deref(), &test.filter, test.count)
+                .then(|| cas_types::PortableTestReceipt {
+                    head: self.head.to_string(),
+                    tested_head: tested_head.clone(),
+                    package,
+                    harness: test.harness.clone(),
+                    filter: test.filter.clone(),
+                    count: test.count,
+                    log_sha256: passing_run_digest(&test.filter, &passing_run),
+                    passing_run,
+                })
+        }).collect()
     }
 
     /// cas-2bdf: judge ancestor receipts against the integration target, so a
@@ -1040,7 +1114,38 @@ impl<'a> PassingTests<'a> {
 
     fn records(&self) -> &[(String, Option<String>, TestReceipt)] {
         self.records.get_or_init(|| {
-            passing_test_records(self.cas_root, self.repo, self.head, self.target)
+            let mut records = passing_test_records(self.cas_root, self.repo, self.head, self.target);
+            for synced in self.synced {
+                let admissible = synced.head == self.head
+                    && valid_git_oid(&synced.head)
+                    && valid_git_oid(&synced.tested_head)
+                    && (synced.tested_head == synced.head
+                        || receipt_head_is_ancestor(self.repo, &synced.tested_head, &synced.head))
+                    && named_filter(&synced.filter)
+                    && synced.count > 0
+                    && package_selector(&synced.package).is_some()
+                    && synced.harness.as_deref().is_none_or(valid_package)
+                    && passing_run_digest(&synced.filter, &synced.passing_run) == synced.log_sha256
+                    && passing_run_proves(&synced.passing_run, &synced.package,
+                        synced.harness.as_deref(), &synced.filter, synced.count);
+                let local = records.iter().any(|(_, package, test)| {
+                    package.as_deref() == Some(synced.package.as_str())
+                        && test.harness == synced.harness
+                        && test.filter == synced.filter
+                });
+                if admissible && !local {
+                    records.push((synced.tested_head.clone(), Some(synced.package.clone()), TestReceipt {
+                        filter: synced.filter.clone(),
+                        harness: synced.harness.clone(),
+                        count: synced.count,
+                        stability: None,
+                        selected_log: None,
+                        host_path_opt_out: None,
+                        supervisor_recorded: None,
+                    }));
+                }
+            }
+            records
         })
     }
 
@@ -1611,6 +1716,31 @@ fn normalize_repo_path(base: &str, path: &str) -> Option<String> {
 /// Write the receipt a passing targeted run leaves, for tests of the gates
 /// that read it (cas-b38a).
 #[cfg(test)]
+/// [`record_passing_test_for_tests`] with the selected-test log a capped
+/// run leaves beside its receipt.
+#[cfg(test)]
+pub(crate) fn record_passing_test_with_log_for_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    package: &str,
+    filter: &str,
+) {
+    record_passing_test_for_tests(cas_root, repo, head, package, filter);
+    let repo = repo.canonicalize().expect("canonical repo");
+    let path = test_receipt_path(cas_root, &repo, head, &TargetedTest {
+        package: package.to_string(), harness: None, filter: filter.to_string(),
+    });
+    let mut record: CheckReceipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let log = path.with_extension("log");
+    std::fs::write(&log, format!(
+        "    Starting 1 test across 1 binary\n        PASS [   0.010s] (1/1) {package} {}::tests::passes\n     Summary [   0.010s] 1 test run: 1 passed, 0 skipped\n",
+        filter.trim_start_matches("test(").trim_end_matches(')'),
+    )).unwrap();
+    record.test.as_mut().unwrap().selected_log = Some(log);
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+}
+
 pub(crate) fn record_passing_test_for_tests(
     cas_root: &Path,
     repo: &Path,
@@ -2006,7 +2136,29 @@ fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], 
 fn detached_runner_command_with_run(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, run: Option<&str>, test_env: &[String]) -> Command {
     let mut command = Command::new("/bin/sh");
     command
-        .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
+        .args(["-c", r#"
+runner=
+interrupted=
+forward_signal() {
+    interrupted=$1
+    if [ -n "$runner" ]; then kill -"$1" "$runner" 2>/dev/null || :; fi
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+"$0" "$@" &
+runner=$!
+if [ -n "$interrupted" ]; then forward_signal "$interrupted"; fi
+while :; do
+    interrupted=
+    wait "$runner"
+    code=$?
+    # A trapped signal interrupts wait before the producer drains its groups.
+    [ -n "$interrupted" ] || break
+done
+echo "worker-check: EXIT $code"
+exit "$code"
+"#])
         .arg(executable)
         .args(["factory", "worker-check", "--cas-root"])
         .arg(cas_root);
@@ -2690,115 +2842,105 @@ else:
     #[cfg(unix)]
     #[test]
     fn term_to_worker_check_parent_cleans_cargo_descendants() {
-        use std::os::unix::process::CommandExt;
-        use std::process::Stdio;
         use std::time::{Duration, Instant};
 
         const NAME: &str = "factory_worker_check::tests::term_to_worker_check_parent_cleans_cargo_descendants";
         const FIXTURE: &str = "CAS_WORKER_TERM_PARENT_FIXTURE";
         if let Some(root) = std::env::var_os(FIXTURE) {
             let root = PathBuf::from(root);
-            let mut command = Command::new("python3");
-            command.arg("-c").arg("import pathlib, runpy, sys; guard = runpy.run_path(sys.argv[1], run_name='signal_fixture'); guard['verified'](pathlib.Path(sys.argv[2]).read_text(), sys.argv[3], ['nextest', 'run', '-p', 'cas', '--lib'], pathlib.Path(sys.argv[4]))")
-                .arg(root.join("worker-proof-guards.py"))
-                .arg(root.join("verified.sh"))
-                .arg(root.join("fake-cargo.py"))
-                .arg(root.join("count"))
-                .env("VERIFIED_TEST_REPO_ROOT", &root)
-                .env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "60")
-                .env("PID_FILE", root.join("pids"))
-                .env("CARGO", root.join("fake-cargo.py"))
-                .env("PYTHONPATH", &root)
-                // CI runs the suite under run-verified-tests.sh with a
-                // relative VERIFIED_TEST_LOG; the nested runner must not
-                // inherit it, or it cannot open the log and never starts Cargo.
-                .env_remove("VERIFIED_TEST_LOG")
-                .stdout(Stdio::null()).stderr(Stdio::null());
-            command.process_group(0);
-            let signals = WorkerWaitSignals::install().unwrap();
-            let mut child = command.spawn().unwrap();
-            let status = wait_for_worker_command(&mut child).unwrap();
-            drop(signals);
-            assert!(!status.success(), "TERM must stop the worker command");
-            return;
+            let repo = root.join("worktrees/cancel-worker");
+            let mut env = crate::test_support::TestEnvGuard::new();
+            env.set_current_dir(&repo);
+            let id = std::fs::read_to_string(root.join("run-id")).unwrap();
+            let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(cancel)"].map(str::to_owned);
+            let result = crate::factory_worker_runs::monitor(&root, &id, || {
+                execute_at_with_scope(&root, &args, &repo, &root.join("cargo"), None, None)
+            });
+            assert!(result.is_err());
+            std::process::exit(1);
         }
 
-        let root = tempfile::tempdir().unwrap();
-        let fake = root.path().join("fake-cargo.py");
-        std::fs::write(
-            root.path().join("worker-proof-guards.py"),
-            include_str!("../../scripts/worker-proof-guards.py"),
-        )
-        .unwrap();
-        std::fs::write(root.path().join("verified.sh"), include_str!("../../scripts/run-verified-tests.sh")).unwrap();
-        std::fs::write(root.path().join("sitecustomize.py"), r#"import os, signal, time
-real_killpg = os.killpg
-def slow_group_term(group, signum):
-    if signum == signal.SIGTERM:
-        time.sleep(1.2)
-    return real_killpg(group, signum)
-os.killpg = slow_group_term
-"#).unwrap();
-        std::fs::write(&fake, r#"#!/usr/bin/env python3
-import os, pathlib, subprocess, sys
-marker = pathlib.Path(os.environ['PID_FILE'])
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', str(marker)])
-ready = marker.with_suffix('.ready')
-ready.write_text(f'{os.getpid()} {child.pid}')
-ready.replace(marker)
-print('    Finished `test` profile in 0.01s', flush=True)
-child.wait()
-"#).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut parent = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
-            .env(FIXTURE, root.path())
-            .stdout(Stdio::null()).stderr(Stdio::inherit())
-            .process_group(0)
-            .spawn().unwrap();
-        let marker = root.path().join("pids");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let repo = root.join("worktrees/cancel-worker");
+        fixture_commit(&repo);
+        env.set_current_dir(&repo);
+        fake_cargo(&root.join("cargo"), r#"exec python3 -c '
+import os, pathlib, subprocess
+root = pathlib.Path.cwd().parent.parent
+if (root / "retry").exists():
+    print("     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped", flush=True)
+else:
+    child = subprocess.Popen(["sleep", "120"], close_fds=False)
+    marker = root / "pids.ready"
+    marker.write_text(f"{os.getpid()} {child.pid} {os.getpgid(os.getppid())}")
+    marker.replace(root / "pids")
+    child.wait()
+'"#);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("cancel-id".into(), "cancel-worker".into(), cas_types::AgentRole::Worker);
+        worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        worker.metadata.insert("clone_path".into(), repo.display().to_string());
+        agents.register(&worker).unwrap();
+        let log = root.join("run.log");
+        std::fs::write(&log, "").unwrap();
+        let id = crate::factory_worker_runs::register(&root, &repo, &log, chrono::Utc::now()).unwrap().unwrap();
+        std::fs::write(root.join("run-id"), &id).unwrap();
+        let launcher = root.join("producer");
+        fake_cargo(&launcher, r#"exec "$CAS_WORKER_TERM_TEST_EXE" --exact "$CAS_WORKER_TERM_TEST_NAME" --nocapture --test-threads=1"#);
+        let args = ["-p", "cas", "--lib"].map(str::to_owned);
+        let mut command = detached_runner_command_with_run(&launcher, &root, &args, None, Some(&id), &[]);
+        command.env(FIXTURE, &root)
+            .env("CAS_WORKER_TERM_TEST_EXE", std::env::current_exe().unwrap())
+            .env("CAS_WORKER_TERM_TEST_NAME", NAME)
+            .env_remove("VERIFIED_TEST_LOG");
+        struct Owned {
+            child: std::process::Child,
+            marker: PathBuf,
+            cleanup_groups: bool,
         }
-        let pids: Vec<i32> = marker.exists()
-            .then(|| std::fs::read_to_string(&marker).unwrap())
-            .unwrap_or_default().split_whitespace()
-            .map(|pid| pid.parse().unwrap()).collect();
-        if pids.len() == 2 {
-            unsafe { libc::kill(parent.id() as i32, libc::SIGTERM) };
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut status = None;
-        while status.is_none() && Instant::now() < deadline {
-            status = parent.try_wait().unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if status.is_none() {
-            // The fixture's leader is still unreaped; only its owned group.
-            unsafe { libc::killpg(parent.id() as i32, libc::SIGKILL) };
-            status = Some(parent.wait().unwrap());
-        }
-        let survivors: Vec<_> = pids.into_iter().enumerate().filter(|(_, pid)| {
-            let output = Command::new("ps").args(["-p", &pid.to_string(), "-o", "stat="])
-                .output().unwrap();
-            let state = String::from_utf8_lossy(&output.stdout);
-            !state.trim().is_empty() && !state.trim().starts_with('Z')
-        }).collect();
-        for (index, pid) in &survivors {
-            let output = Command::new("ps").args(["-ww", "-p", &pid.to_string(), "-o", "command="])
-                .output().unwrap();
-            let command = String::from_utf8_lossy(&output.stdout);
-            let owned = if *index == 0 { command.contains(fake.to_str().unwrap()) }
-                        else { command.contains(root.path().to_str().unwrap()) && command.contains("time.sleep(60)") };
-            if owned {
-                unsafe { libc::kill(*pid, libc::SIGKILL) };
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                if self.cleanup_groups && let Ok(text) = std::fs::read_to_string(&self.marker) {
+                    let pids: Vec<i32> = text.split_whitespace().map(|pid| pid.parse().unwrap()).collect();
+                    for group in [pids[0], pids[2]] { unsafe { libc::killpg(group, libc::SIGKILL); } }
+                }
+                let _ = self.child.kill();
+                let _ = self.child.wait();
             }
         }
-        assert!(marker.exists(), "fake Cargo never reached discovery");
-        assert_eq!(status.unwrap().code(), Some(0), "parent signal fixture failed");
-        assert!(survivors.is_empty(), "Cargo descendants survived: {survivors:?}");
+        let mut owned = Owned { child: spawn_detached(command).unwrap(), marker: root.join("pids"), cleanup_groups: true };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !owned.marker.exists() && Instant::now() < deadline {
+            assert!(owned.child.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pids: Vec<i32> = std::fs::read_to_string(&owned.marker).unwrap().split_whitespace().map(|pid| pid.parse().unwrap()).collect();
+        assert!(try_lock_lane(&root, &repo).unwrap().is_none());
+        assert_eq!(crate::factory_target_cache::owner::for_retirement(&root, &repo).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
+        // The returned session leader is exactly the PID execute_detached prints.
+        assert_eq!(unsafe { libc::kill(owned.child.id() as i32, libc::SIGTERM) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = owned.child.try_wait().unwrap() { break status; }
+            assert!(Instant::now() < deadline, "detached cancellation did not drain");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.code(), Some(1));
+        assert!(!worker_group_has_live_members(pids[0]));
+        assert!(!worker_group_has_live_members(pids[2]));
+        owned.cleanup_groups = false;
+        assert!(try_lock_lane(&root, &repo).unwrap().is_some());
+        assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
+        let run: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("worker-runs").join(format!("{id}.json"))).unwrap()).unwrap();
+        assert!(run["finished_at"].is_string());
+        assert_eq!(run["exit_code"], 1);
+        std::fs::write(root.join("retry"), "").unwrap();
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(cancel)"].map(str::to_owned);
+        execute_at_with_scope(&root, &args, &repo, &root.join("cargo"), None, None).unwrap();
     }
 
     #[cfg(unix)]

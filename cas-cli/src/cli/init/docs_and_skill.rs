@@ -20,7 +20,7 @@ Cassy's MCP tools are `task`, `memory` and `search`, named with your harness's p
 
 Slack transport: use the `violet` skill and the Violet proxy for every Slack read (`violet.violet_read`) and post (`violet.violet_post`). Never use the Claude Slack connector or Codex Slack app. Pre-tool hooks deny non-Violet Slack writes by default; only an explicit operator setting `slack.transport=any` disables that guard.
 
-Bug routing (`issues.repo` for project bugs; `issues.components.{cassy,violet,cloud}` for components): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.
+Bug routing (`issues.repo` for project bugs; `issues.components.{cassy,violet,cloud}` for components): Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects. Find or file in issues.components.cassy: `system action=report_cas_bug`, refusal first in `actual`, then continue; in Cassy's source repo, find or staff a fix task.
 Deliverables: use `cas-sow-delivery-report` for SOW deliveries, `cas-feature-report` for feature reports, `cas-release-notes` + `cas-release-report` for internal releases, and `cas-customer-release-notes` for client updates; follow DESIGN.md and use real before/after pairs.
 Release notes: when a merge reaches `staging` or `main` and docs/release-notes/RUBRIC.md exists, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md."#;
 
@@ -733,7 +733,7 @@ mod tests {
         // pin: operator directive applies in every project's managed AGENTS.
         for required in [
             "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects.",
-            "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
+            "Find or file in issues.components.cassy: `system action=report_cas_bug`, refusal first in `actual`, then continue; in Cassy's source repo, find or staff a fix task.",
         ] {
             assert!(section.contains(required), "missing {required}");
         }

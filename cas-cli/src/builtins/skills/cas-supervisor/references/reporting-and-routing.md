@@ -19,7 +19,7 @@ A downstream product release is not done at deploy, and its release notes wait f
 - **Configured** (`[qa.post_release] command` in `.cas/config.toml`): run `cas qa post-release start --epic <id> --sha <released-sha>` as the first step after the merge lands, with `cas serve` running. `cas qa post-release status --epic <id>` reports `pending`, `clean` or `failed`; release-notes posts and epic close refuse until it is `clean`.
 - **Not configured:** run the project's invariant queries against production at deploy and on two `remind_delay_secs=900` deadline reminders, and read back at least one real customer flow end to end from the system of record. Record each run on the epic.
 
-A failed check is an incident: file the bug, and the fix-forward release runs its own check. Only the operator can waive a pending or failed check, in their own words in an epic decision note starting `POST-RELEASE OVERRIDE:`.
+A failed check is an incident: find or file the bug, and the fix-forward release runs its own check. Only the operator can waive a pending or failed check, in their own words in an epic decision note starting `POST-RELEASE OVERRIDE:`.
 
 ## Shared docs
 

@@ -7847,6 +7847,29 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
             .contains(checkout.to_str().unwrap()),
         "late-dirty checkout registration removed"
     );
+
+    // cas-f1b7: the host retention collector must repeat the source check too;
+    // its earlier inventory snapshot is not permission to delete later work.
+    let host_checkout = env.cas_root.join("worktrees/host-late-write");
+    std::fs::create_dir_all(host_checkout.parent().unwrap()).unwrap();
+    git_stdout(project, &["worktree", "add", "-b", "factory/host-late-write", host_checkout.to_str().unwrap(), "HEAD"]);
+    git_stdout(project, &["update-ref", "refs/remotes/origin/factory/host-late-write", "HEAD"]);
+    let mut owner = cas::types::Agent::new_with_role(
+        "host-late-write-owner".into(), "host-late-write".into(), cas::types::AgentRole::Worker,
+    );
+    owner.status = cas::types::AgentStatus::Shutdown;
+    env.agent_store().register(&owner).unwrap();
+    std::fs::remove_file(control.with_extension("done")).unwrap();
+    std::fs::write(&control, format!("{}\n", host_checkout.display())).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true);
+    cleanup.dry_run = Some(false);
+    let output = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    assert!(control.with_extension("done").exists(), "host late-write injection did not run");
+    assert_eq!(std::fs::read(host_checkout.join("late-notes.txt")).ok().as_deref(),
+        Some(b"late reviewer work\n".as_slice()), "host retention deleted late work: {}", get_text(&output));
+    assert!(git_stdout(project, &["worktree", "list", "--porcelain"])
+        .contains(host_checkout.to_str().unwrap()));
 }
 
 #[tokio::test]

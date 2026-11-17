@@ -2484,6 +2484,38 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
     }
 
     #[test]
+    fn deletion_beside_legacy_callbacks_only_classifies_surviving_edits_cas_31eb() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        let path = "whole-picture.journey.ts";
+        let kept = "const callback = async () => {\n  work();\n};\ntest('kept', callback);\n";
+        std::fs::write(repo.path().join(path), format!("test('removed', () => {{}});\n\n{kept}")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(path), kept).unwrap();
+        git(&["commit", "-qam", "delete unrelated inline test"]);
+        let deleted = git(&["rev-parse", "HEAD"]);
+        assert!(changed_tests(repo.path(), &base, &deleted, &[path.into()], None).unwrap().is_empty());
+        std::fs::write(repo.path().join(path), kept.replace("work();", "changed();")).unwrap();
+        git(&["commit", "-qam", "edit callback"]);
+        assert!(changed_tests(repo.path(), &deleted, "HEAD", &[path.into()], None).is_err());
+    }
+
+    #[test]
+    fn multiline_type_import_keeps_changed_test_locations_cas_31eb() {
+        let source = "vi.mock('m', async load => ({ ...(await load<typeof import(\n  'm'\n)>()) }));\ntest('before', () => {});\ntest('after', () => { work(); });\n";
+        assert_eq!(source_tests("a.test.ts", source, &[(5, 5)]).unwrap(), [id("a.test.ts", "after")]);
+    }
+
+    #[test]
     fn javascript_repeat_loop_stops_at_seeded_failure_and_requires_five_passes() {
         let tests = [id("a.test.js", "seeded")];
         for fail_at in [None, Some(2)] {

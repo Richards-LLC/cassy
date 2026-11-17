@@ -7,10 +7,10 @@
 //!
 //! Run with: cargo test --test e2e_test hook_e2e -- --ignored --nocapture
 
-#![cfg(feature = "claude_rs_e2e")]
+#![cfg(feature = "claude_e2e")]
 
 use crate::fixtures::{HOOK_TEST_SESSION_ID, HookTestEnv};
-use claude_rs::{Message, QueryOptions, prompt, session};
+use cas_claude::{Message, QueryOptions, prompt, session};
 use std::path::PathBuf;
 
 /// Get the CAS project root directory

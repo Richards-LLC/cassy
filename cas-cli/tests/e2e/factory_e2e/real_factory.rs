@@ -14,7 +14,7 @@
 //! # Running
 //! ```bash
 //! CAS_FACTORY_E2E=1 cargo test --test e2e_test factory_e2e::real_factory \
-//!     --features claude_rs_e2e -- --ignored --nocapture --test-threads=1
+//!     --features claude_e2e -- --ignored --nocapture --test-threads=1
 //! ```
 
 use cas::store::{open_agent_store, open_prompt_queue_store};

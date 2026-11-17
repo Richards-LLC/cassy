@@ -716,6 +716,8 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     // cas-e060: release cadence is the operator's call.
     "release.auto_cut_max_per_day",
     "release.auto_cut_min_interval_hours",
+    // cas-444b: lets a supervisor lift a freeze the operator applied.
+    "release.supervisor_lifts_operator_freeze",
     // cas-ae37c: both the destination and the hook-event switches can send
     // notification text to an external webhook.
     "notifications.webhook_url",

@@ -2969,6 +2969,20 @@ pub fn issue_server_verifier_handoff_with_secret(
     let store = SqliteVerificationStore::open(cas_dir)?;
     let mut conn = crate::shared_db::lock_connection(&store.conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let capability =
+        issue_server_verifier_handoff_with_conn(&tx, task_id, dispatch_id, issuer_agent_id, tool_use_id, secret)?;
+    tx.commit()?;
+    Ok(capability)
+}
+
+fn issue_server_verifier_handoff_with_conn(
+    tx: &Connection,
+    task_id: &str,
+    dispatch_id: &str,
+    issuer_agent_id: &str,
+    tool_use_id: &str,
+    secret: &[u8],
+) -> Result<VerifierCapability> {
     let now = Utc::now();
     let now_value = now.to_rfc3339();
 
@@ -3014,7 +3028,7 @@ pub fn issue_server_verifier_handoff_with_secret(
         ));
     }
 
-    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let dispatch = get_verification_dispatch_with_conn(tx, dispatch_id)?;
     if dispatch.task_id != task_id
         || dispatch.owner_agent_id != issuer_agent_id
         || dispatch.state != VerificationDispatchState::Pending
@@ -3068,7 +3082,6 @@ pub fn issue_server_verifier_handoff_with_secret(
             capability.issued_at.to_rfc3339(),
         ],
     )?;
-    tx.commit()?;
     Ok(capability)
 }
 
@@ -3100,6 +3113,15 @@ pub fn bind_server_verifier_handoff_and_register_child(
     child: &Agent,
 ) -> Result<VerifierCapability> {
     validate_distinct_verifier_child(issuer_agent_id, &child.id)?;
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let mut conn = crate::shared_db::lock_connection(&store.conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let bound = bind_child_with_conn(&tx, issuer_agent_id, child)?;
+    tx.commit()?;
+    Ok(bound)
+}
+
+fn bind_child_with_conn(tx: &Connection, issuer_agent_id: &str, child: &Agent) -> Result<VerifierCapability> {
     if child.name != "task-verifier"
         || child.agent_type != AgentType::SubAgent
         || child.role != AgentRole::Standard
@@ -3110,10 +3132,6 @@ pub fn bind_server_verifier_handoff_and_register_child(
             "verifier handoff requires the exact official task-verifier child identity".to_string(),
         ));
     }
-
-    let store = SqliteVerificationStore::open(cas_dir)?;
-    let mut conn = crate::shared_db::lock_connection(&store.conn)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     let issuer_status: Option<String> = tx
         .query_row(
@@ -3153,8 +3171,29 @@ pub fn bind_server_verifier_handoff_and_register_child(
         ));
     }
 
-    let bound = bind_server_verifier_handoff_with_conn(&tx, issuer_agent_id, &child.id)?;
-    register_agent_with_conn(&tx, child)?;
+    let bound = bind_server_verifier_handoff_with_conn(tx, issuer_agent_id, &child.id)?;
+    register_agent_with_conn(tx, child)?;
+    Ok(bound)
+}
+
+/// cas-111e: the daemon's own verifier start issues, binds and registers in one
+/// transaction. Separate calls let a bind lost to store contention leave a
+/// pending handoff that refused every later start for its parent until expiry.
+pub fn issue_and_bind_server_verifier_handoff(
+    cas_dir: &Path,
+    task_id: &str,
+    dispatch_id: &str,
+    tool_use_id: &str,
+    child: &Agent,
+) -> Result<VerifierCapability> {
+    let issuer_agent_id = child.parent_id.as_deref().unwrap_or_default();
+    validate_distinct_verifier_child(issuer_agent_id, &child.id)?;
+    let secret: [u8; 32] = rand::random();
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let mut conn = crate::shared_db::lock_connection(&store.conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    issue_server_verifier_handoff_with_conn(&tx, task_id, dispatch_id, issuer_agent_id, tool_use_id, &secret)?;
+    let bound = bind_child_with_conn(&tx, issuer_agent_id, child)?;
     tx.commit()?;
     Ok(bound)
 }

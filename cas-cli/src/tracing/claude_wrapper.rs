@@ -1,6 +1,6 @@
 //! Traced Claude API wrapper
 //!
-//! Provides a drop-in replacement for `claude_rs::prompt()` that automatically
+//! Wraps `cas_claude::prompt()` so every headless Claude call automatically
 //! records traces when dev mode is enabled.
 //!
 //! # Usage
@@ -9,7 +9,7 @@
 //! use cas::tracing::claude_wrapper::traced_prompt;
 //!
 //! // Instead of:
-//! // let result = claude_rs::prompt(&prompt_text, options).await?;
+//! // let result = cas_claude::prompt(&prompt_text, options).await?;
 //!
 //! // Use:
 //! let result = traced_prompt(&prompt_text, options, "consolidation").await?;
@@ -19,12 +19,12 @@
 //!
 //! Fully integrated - all Claude API calls use this wrapper for tracing.
 
-use claude_rs::{QueryOptions, message::ResultMessage};
+use cas_claude::{QueryOptions, ResultMessage};
 
 use crate::tracing::TraceTimer;
 use crate::tracing::dev_tracer::DevTracer;
 
-/// Traced version of claude_rs::prompt()
+/// Traced version of cas_claude::prompt()
 ///
 /// Wraps the Claude API call and records a trace if dev mode is enabled.
 /// The `caller` parameter identifies the calling context (e.g., "consolidation",
@@ -33,7 +33,7 @@ pub async fn traced_prompt(
     prompt: &str,
     mut options: QueryOptions,
     caller: &str,
-) -> Result<ResultMessage, claude_rs::Error> {
+) -> Result<ResultMessage, cas_claude::Error> {
     let timer = TraceTimer::new();
 
     // Extract model from options if possible (we'll use a default if not)
@@ -43,7 +43,7 @@ pub async fn traced_prompt(
         .env
         .get_or_insert_with(Default::default)
         .extend(crate::internal_llm::sdk_environment());
-    let result = claude_rs::prompt(prompt, options).await;
+    let result = cas_claude::prompt(prompt, options).await;
 
     let duration_ms = timer.elapsed_ms();
 
@@ -95,14 +95,14 @@ pub async fn traced_prompt_with_model(
     mut options: QueryOptions,
     model: &str,
     caller: &str,
-) -> Result<ResultMessage, claude_rs::Error> {
+) -> Result<ResultMessage, cas_claude::Error> {
     let timer = TraceTimer::new();
 
     options
         .env
         .get_or_insert_with(Default::default)
         .extend(crate::internal_llm::sdk_environment());
-    let result = claude_rs::prompt(prompt, options).await;
+    let result = cas_claude::prompt(prompt, options).await;
 
     let duration_ms = timer.elapsed_ms();
 

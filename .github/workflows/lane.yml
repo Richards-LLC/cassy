@@ -442,6 +442,7 @@ jobs:
       - id: own
         name: Build the selection and run own tests
         timeout-minutes: 52
+        shell: bash
         run: |
           mkdir -p target/ci-impact
           python3 scripts/ci-step-watchdog.py --label "Build the selection and run own tests" \

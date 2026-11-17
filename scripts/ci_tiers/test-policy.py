@@ -630,7 +630,9 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
 
     def test_lane_own_step_retains_both_streams_without_masking_failure(self):
         job = policy.load(self.root / '.github/workflows/lane.yml')['jobs']['lane-impact']
-        body = next(step['run'] for step in job['steps'] if step.get('id') == 'own')
+        step = next(step for step in job['steps'] if step.get('id') == 'own')
+        self.assertEqual(step.get('shell'), 'bash')
+        body = step['run']
         commands = self.root / 'bin'
         commands.mkdir()
         producer = commands / 'python3'

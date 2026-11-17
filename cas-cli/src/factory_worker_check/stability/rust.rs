@@ -11,6 +11,10 @@ pub(crate) struct Test {
     parameterized: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("STABILITY_TEST_NOT_DISCOVERABLE: {0}::{1}; wire the test into a Cargo target before park")]
+pub(crate) struct MissingTest(String, String);
+
 fn text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
     &source[node.byte_range()]
 }
@@ -187,7 +191,7 @@ pub(crate) fn changed(repo: &Path, base: &str, head: &str, paths: &[String]) -> 
                 && (resolved.identity.name == test.identity.name
                     || resolved.identity.name.ends_with(&format!("::{}", test.identity.name))))
             {
-                bail!("STABILITY_TEST_NOT_DISCOVERABLE: {}::{}; wire the test into a Cargo target before park", path, test.identity.name);
+                return Err(MissingTest(path.clone(), test.identity.name).into());
             }
         }
     }

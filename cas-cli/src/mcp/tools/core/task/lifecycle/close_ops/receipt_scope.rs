@@ -142,16 +142,31 @@ pub(super) fn park_refusals(
     let passing = crate::factory_worker_check::PassingTests::new(cas_root, proof_repo, head).with_target(target);
     if proof_repo.join(".git").exists() {
         use crate::factory_worker_check::stability;
-        match stability::required(proof_repo, head, target, changed_paths, delivery_ranges)
-            .map(|tests| stability::missing(&passing, &tests))
-        {
-            Ok(missing) if !missing.is_empty() => refusals.push(crate::gates::tag("G-61", format!(
+        let (tests, widened) = match stability::requirements(proof_repo, head, target, changed_paths, delivery_ranges) {
+            Ok(requirements) => requirements,
+            Err(error) => {
+                // A declared Rust test absent from every Cargo target is
+                // proven missing, rather than an uncertain classification.
+                refusals.push(crate::gates::tag("G-61", format!("CHANGED_TEST_DISCOVERY_FAILED: {error:#}")));
+                (Vec::new(), Vec::new())
+            }
+        };
+        let missing = stability::missing(&passing, &tests);
+        if !missing.is_empty() {
+            refusals.push(crate::gates::tag("G-61", format!(
                 "CHANGED_TEST_STABILITY_REQUIRED: task {} needs five consecutive capped passes at {short} for: {}. Fix or delete a failing test; never retry-wrap it. Run only these changed tests through the capped runner: {}. Then retry park.",
                 task.id, missing.iter().map(|test| format!("{}::{}", test.path, test.name)).collect::<Vec<_>>().join(", "),
                 stability::rerun_commands(cas_root, proof_repo, &missing).join("; "),
-            ))),
-            Err(error) => refusals.push(crate::gates::tag("G-61", format!("CHANGED_TEST_DISCOVERY_FAILED: {error:#}"))),
-            _ => {},
+            )));
+        }
+        let missing = crate::factory_worker_check::widened::missing(&passing, &widened);
+        if !missing.is_empty() {
+            // Classification is uncertain, but the broader capped receipt is
+            // proven missing. Park reads proof; it never starts a test process.
+            refusals.push(crate::gates::tag("G-61", format!(
+                "FOCUSED PROOF REQUIRED: task {} widened uncertain test selection to {missing:?}; one passing capped run is missing at {short}. Run: {}. Identified changed tests still require five passes.",
+                task.id, crate::factory_worker_check::widened::commands(cas_root, proof_repo, changed_paths, &missing).join("; ")
+            )));
         }
     }
     let tested = passing.packages();
@@ -1040,6 +1055,59 @@ mod tests {
         let runner = stability::rust::net_changed(repo.path(),
             String::from_utf8_lossy(&merge_base.stdout).trim(), &head).unwrap();
         assert_eq!(runner.into_iter().map(|test| test.identity).collect::<Vec<_>>(), required);
+    }
+
+    /// Unknown names widen once through the real runner, then the park consumer
+    /// reads that proof. A newer/failing delivery cannot borrow the old pass.
+    #[test]
+    fn uncertain_js_input_runs_file_or_package_once_before_park_cas_31eb() {
+        use crate::factory_worker_check::{javascript, stability, widened, PassingTests};
+        let _env = crate::test_support::TestEnvGuard::new();
+        for package in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let repo = root.path().join("worktrees/worker");
+            std::fs::create_dir_all(&repo).unwrap();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git").current_dir(&repo)
+                    .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                    .args(args).output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            git(&["init", "-q", "-b", "main"]);
+            std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+            std::fs::write(repo.join(".gitignore"), "runs\ntarget/\n").unwrap();
+            std::fs::write(repo.join("package.json"), "{}").unwrap();
+            let path = if package { "source.mjs" } else { "a.test.mjs" };
+            std::fs::write(repo.join(path), "").unwrap();
+            if package { std::fs::write(repo.join("a.test.mjs"), "import './source.mjs';\n").unwrap(); }
+            git(&["add", "."]);
+            git(&["commit", "-qm", "base"]);
+            let base = git(&["rev-parse", "HEAD"]);
+            let source = "import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\nconst name = ['dynamic'].join('');\ntest(name, () => { appendFileSync('runs', 'x'); });\n";
+            std::fs::write(repo.join(path), source).unwrap();
+            git(&["commit", "-qam", "unknown static name"]);
+            let head = git(&["rev-parse", "HEAD"]);
+            let paths = vec![path.to_string()];
+            let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
+            assert!(tests.is_empty());
+            assert_eq!(scopes, [if package { widened::Scope::Package(String::new()) } else { widened::Scope::File(path.into()) }]);
+            let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
+            assert!(!park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
+            let args = ["node".into(), "--test".into(), path.into()];
+            javascript::execute(root.path(), &args, &repo).unwrap();
+            assert_eq!(std::fs::read(repo.join("runs")).unwrap(), b"x");
+            assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
+            // The same source-to-runtime uncertainty at a newer failed tip
+            // owes a fresh run, and failure records no broadened proof.
+            std::fs::write(repo.join(path), source.replace("appendFileSync('runs', 'x');", "throw new Error('seeded');")).unwrap();
+            git(&["commit", "-qam", "failing delivery"]);
+            let failed = git(&["rev-parse", "HEAD"]);
+            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+            assert!(javascript::execute(root.path(), &args, &repo).is_err());
+            assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
+            assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", Some(&[(base, failed.clone())])).is_empty());
+        }
     }
 
     fn changelog_fixture() -> tempfile::TempDir {

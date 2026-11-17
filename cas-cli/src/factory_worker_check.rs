@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub(crate) mod stability;
+pub(crate) mod widened;
 pub(crate) mod javascript;
 
 #[cfg(unix)]
@@ -131,6 +132,8 @@ struct TestReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stability: Option<stability::Proof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    widened: Option<widened::Proof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_log: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
@@ -186,6 +189,9 @@ impl TestReceipt {
         if let Some(proof) = &self.stability {
             note.push_str(&format!(" [stability: {} consecutive passes; changed_tests={}; runner={}; elapsed_ms={}]",
                 proof.consecutive_passes, proof.tests.len(), proof.runner, proof.elapsed_ms));
+        }
+        if let Some(proof) = &self.widened {
+            note.push_str(&format!(" [widened: {:?}; runner={}; passes=1]", proof.scope, proof.runner));
         }
         note
     }
@@ -635,6 +641,7 @@ pub(crate) fn record_supervisor_test(
             harness: test.harness,
             count,
             stability,
+            widened: None,
             selected_log: Some(provenance.log_path.clone()),
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
@@ -1151,6 +1158,7 @@ impl<'a> PassingTests<'a> {
                         harness: synced.harness.clone(),
                         count: synced.count,
                         stability: None,
+                        widened: None,
                         selected_log: None,
                         host_path_opt_out: None,
                         supervisor_recorded: None,
@@ -1337,12 +1345,13 @@ fn read_passing_test_record(
     // Adapter-only stability receipts share ancestry/input validation, but
     // cannot count as a passing Rust crate test.
     let package = match record.packages.as_slice() {
-        [] if test.stability.as_ref().is_some_and(stability::valid) => None,
+        [] if test.stability.as_ref().is_some_and(stability::valid) || test.widened.is_some() => None,
         [package] if package_selector(package).is_some() => Some(package.clone()),
         _ => return None,
     };
     let targeted_test = TargetedTest {
-        package: package.clone().or_else(|| test.stability.as_ref().map(|proof| proof.runner.clone()))?,
+        package: package.clone().or_else(|| test.stability.as_ref().map(|proof| proof.runner.clone()))
+            .or_else(|| test.widened.as_ref().map(|proof| proof.runner.clone()))?,
         harness: test.harness.clone(),
         filter: test.filter.clone(),
     };
@@ -1778,6 +1787,7 @@ pub(crate) fn record_passing_test_for_tests(
             harness: None,
             count: 1,
             stability: None,
+                        widened: None,
             selected_log: None,
             host_path_opt_out: None,
             supervisor_recorded: None,
@@ -2348,9 +2358,20 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         validate_harness(&repo, test)?;
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
+    let mut widened_proof = None;
     let owned_tests = if let Some(test) = &test {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
-        stability::rust::selected(&repo, &base, &head, test)?
+        match stability::rust::selected(&repo, &base, &head, test) {
+            Ok(tests) => tests,
+            Err(error) if error.downcast_ref::<stability::rust::MissingTest>().is_some() => return Err(error),
+            Err(error) => {
+                eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
+                let scope = widened::Scope::Crate(test.package.clone());
+                widened::invalidate(&cas_root, &repo, &head, &scope)?;
+                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
+                Vec::new()
+            }
+        }
     } else { Vec::new() };
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
@@ -2527,7 +2548,10 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
     }
-    let mut cargo_args = args.to_vec();
+    let mut cargo_args = if let Some(proof) = &widened_proof {
+        let widened::Scope::Crate(package) = &proof.scope else { unreachable!() };
+        vec!["nextest".into(), "run".into(), "-p".into(), package.clone(), "--retries".into(), "0".into()]
+    } else { args.to_vec() };
     if live_headful {
         cargo_args.extend(["--success-output".into(), "immediate".into()]);
     }
@@ -2639,6 +2663,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                     consecutive_passes: stability::REQUIRED_PASSES,
                     elapsed_ms: started.elapsed().as_millis(),
                 }),
+                widened: widened_proof,
                 selected_log,
                 host_path_opt_out,
                 supervisor_recorded: None,

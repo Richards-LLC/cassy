@@ -1202,3 +1202,22 @@ fn quoted_strings(source: &str) -> Vec<(usize, String)> {
     }
     strings
 }
+
+#[cfg(test)]
+mod source_edit_tests {
+    use super::literal_python_source_edit;
+
+    /// cas-5d392: tree-sitter's comment token runs to '\n', while CPython also
+    /// ends a line at a bare '\r'. A script whose lines the two split
+    /// differently is never a recognised literal source edit.
+    #[test]
+    fn bare_carriage_return_is_not_a_literal_source_edit_cas_5d392() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fixture.rs"), "old\n").unwrap();
+        let edit = |comment: &str| format!(
+            "from pathlib import Path\np = Path('fixture.rs')\ns = p.read_text(){comment}\np.write_text(s.replace('old', 'new'))"
+        );
+        assert!(literal_python_source_edit(&edit(""), dir.path()), "control edit is admitted");
+        assert!(!literal_python_source_edit(&edit("\n#x\rs = s"), dir.path()));
+    }
+}

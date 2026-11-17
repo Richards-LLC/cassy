@@ -29747,7 +29747,7 @@ mod merge_state_gate_tests {
 
     #[test]
     fn parked_anchor_advance_replaces_completion_wakes_cas_f16b() {
-        use cas_store::{PromptQueueStore, ReminderStatus, ReminderTriggerType};
+        use cas_store::{PromptQueueStore, ReminderStatus, ReminderTriggerType, TaskStore};
         let mut env = TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_SESSION", "relay-fixture-session");
         let dir = TempDir::new().unwrap();
@@ -29802,6 +29802,7 @@ mod merge_state_gate_tests {
 
     #[test]
     fn park_with_epic_inherited_target_arms_completion_wakes_cas_f16b() {
+        use cas_store::TaskStore;
         let _env = TestEnvGuard::temp_home();
         for (branch, binding, expected) in [
             (Some("epic/inherited"), Some("main"), "epic/inherited"),

@@ -659,9 +659,9 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     // top line holds; a tail-follower instead keeps the newest turn in view.
     const thread = page.locator(".conversation-reading.thread");
     const parkReader = async () => {
-      await thread.evaluate(thread => {
-        thread.scrollTop = Math.min(thread.scrollTop, thread.scrollHeight - thread.clientHeight * 1.5);
-      });
+      // Claim reading intent before late layout or a queued tail pin runs.
+      await thread.hover();
+      await page.mouse.wheel(0, -await thread.evaluate(thread => thread.clientHeight / 2));
       await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
       await expect.poll(() => thread.evaluate(thread => thread.scrollHeight - thread.clientHeight - thread.scrollTop)).toBeGreaterThan(80);
     };
@@ -1050,12 +1050,14 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       await plain.scrollIntoViewIfNeeded();
       await expect(tab.frameLocator('iframe[title="Flagged page.html, a page from the supervisor"]').getByRole("heading", { name: "Hostile page" })).toBeVisible();
       // A tall frame can extend below the scrollable thread and behind the composer.
-      const probe = await plain.evaluate((element) => {
-        const frame = element.getBoundingClientRect();
-        const thread = element.closest(".conversation-reading.thread")!.getBoundingClientRect();
-        return { x: Math.round(Math.min(frame.right, thread.right) - 6), y: Math.round(Math.min(frame.bottom, thread.bottom) - 6) };
-      });
-      expect(Math.min(...await paintedPixel(tab, probe.x, probe.y)), "the plain page is legible on a light backdrop").toBeGreaterThan(200);
+      await expect.poll(async () => {
+        const probe = await plain.evaluate((element) => {
+          const frame = element.getBoundingClientRect();
+          const thread = element.closest(".conversation-reading.thread")!.getBoundingClientRect();
+          return { x: Math.round(Math.min(frame.right, thread.right) - 6), y: Math.round(Math.min(frame.bottom, thread.bottom) - 6) };
+        });
+        return Math.min(...await paintedPixel(tab, probe.x, probe.y));
+      }, { message: "the plain page is legible on a light backdrop" }).toBeGreaterThan(200);
       await tab.emulateMedia({ colorScheme: "light" });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
     });

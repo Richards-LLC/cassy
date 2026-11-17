@@ -275,6 +275,13 @@ fn git(path: &Path, args: &[&str], deadline: Instant) -> Result<String> {
 }
 
 struct Tree { bytes: u64, newest: SystemTime, repositories: Vec<PathBuf> }
+
+fn check_repository(repo: &Path, deadline: Instant) -> Result<()> {
+    ensure!(git(repo, &["rev-list", "--count", "HEAD", "--not", "--remotes"], deadline)? == "0", "unpushed commits");
+    ensure!(git(repo, &["status", "--porcelain=v1", "--untracked-files=all"], deadline)?.is_empty(), "dirty source");
+    Ok(())
+}
+
 fn inspect_tree(path: &Path, deadline: Instant, exclude: Option<&Path>) -> Result<Tree> {
     no_symlink_ancestors(path)?;
     let mut tree = Tree { bytes: 0, newest: SystemTime::UNIX_EPOCH, repositories: Vec::new() };
@@ -289,9 +296,8 @@ fn inspect_tree(path: &Path, deadline: Instant, exclude: Option<&Path>) -> Resul
         tree.newest = tree.newest.max(metadata.modified()?);
         if entry.file_name() == ".git" {
             let repo = entry.path().parent().context("Git parent missing")?;
-            ensure!(git(repo, &["rev-list", "--count", "HEAD", "--not", "--remotes"], deadline)? == "0", "unpushed commits");
-            ensure!(git(repo, &["status", "--porcelain=v1", "--untracked-files=all"], deadline)?.is_empty(), "dirty source");
-            if entry.file_type().is_file() { tree.repositories.push(repo.to_path_buf()); }
+            check_repository(repo, deadline)?;
+            tree.repositories.push(repo.to_path_buf());
             if entry.file_type().is_dir() { entries.skip_current_dir(); }
         } else if metadata.is_file() { tree.bytes = tree.bytes.saturating_add(metadata.len()); }
     }
@@ -483,6 +489,24 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
                     if candidate.category == "worktrees" {
                         ensure!(!crate::factory_scratch::worker_target_dir(&candidate.path).exists(), "worker output pending reclamation");
                     }
+                    // Inventory and native process probes may take time. Check
+                    // source again at mutation, including untracked files hidden
+                    // by local Git configuration. Existing worktrees are removed
+                    // by Git without force so it also rechecks their source.
+                    let mut repositories = tree.repositories;
+                    repositories.sort_by_key(|repo| std::cmp::Reverse(repo.components().count()));
+                    for repo in repositories {
+                        check_repository(&repo, deadline)?;
+                        if fs::symlink_metadata(repo.join(".git"))?.is_file() {
+                            git(project.root.parent().context("project parent")?,
+                                &["worktree", "remove", repo.to_str().context("non-UTF-8 checkout")?], deadline)?;
+                        }
+                    }
+                    if !candidate.path.exists() {
+                        row.reclaimed_bytes = tree.bytes;
+                        row.disposition = "reclaimed".into();
+                        return Ok(());
+                    }
                     let directory = trash.join(uuid::Uuid::new_v4().to_string());
                     no_symlink_ancestors(&directory)?;
                     fs::create_dir_all(&directory)?;
@@ -491,12 +515,6 @@ fn sweep_until(cas: &Path, apply: bool, deadline: Instant) -> Result<SweepReport
                     marker.sync_all()?;
                     drop(marker);
                     fs::rename(&candidate.path, directory.join("data"))?;
-                    for repo in tree.repositories {
-                        // Only vanished exact registrations are force-removed; source
-                        // was already proven clean and fully pushed before the rename.
-                        let _ = git(project.root.parent().context("project parent")?,
-                            &["worktree", "remove", "--force", repo.to_str().context("non-UTF-8 checkout")?], deadline);
-                    }
                     drain(&directory, &candidate, &refs, &lock, deadline, &mut row)?;
                 } else { row.disposition = "reclaimable".into(); }
                 Ok(())

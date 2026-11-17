@@ -1050,6 +1050,10 @@ pub(crate) fn runner_hint(repo: &Path, path: &str) -> Option<&'static str> {
     if source.contains("@jest/globals") {
         return Some("jest");
     }
+    // GH #2055: a node:test file beside a Jest config is Node's own runner.
+    if source.contains("'node:test'") || source.contains("\"node:test\"") {
+        return Some("node --test");
+    }
     let mut current = repo.join(path);
     while current.pop() && current.starts_with(repo) {
         let mut runners = local_runners(&current);
@@ -1878,6 +1882,14 @@ mod tests {
 
         assert_eq!(runner_hint(repo.path(), "web/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "api/a.test.ts"), Some("jest"));
+        // GH #2055 (cas-6aa9): a node:test file in a Jest package uses Node's runner.
+        std::fs::write(
+            repo.path().join("api/app-boot.test.cjs"),
+            "const { test } = require('node:test');\ntest('boots', () => {});\n",
+        )
+        .unwrap();
+        assert_eq!(runner_hint(repo.path(), "api/app-boot.test.cjs"), Some("node --test"));
+        assert_eq!(runner_files(&["node".into(), "--test".into(), "api/app-boot.test.cjs".into()]).map(|(runner, _)| runner), Some("node"));
         assert_eq!(runner_hint(repo.path(), "bin/a.test.ts"), Some("vitest"));
         assert_eq!(runner_hint(repo.path(), "bare/a.test.ts"), None);
 

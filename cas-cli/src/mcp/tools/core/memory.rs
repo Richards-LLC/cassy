@@ -159,12 +159,13 @@ pub(crate) fn build_remember_result(
     is_error: bool,
 ) -> CallToolResult {
     let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
-    CallToolResult {
-        content: vec![Content::text(text)],
-        structured_content: Some(value),
-        is_error: Some(is_error),
-        meta: None,
-    }
+    let mut result = if is_error {
+        CallToolResult::error(vec![ContentBlock::text(text)])
+    } else {
+        CallToolResult::success(vec![ContentBlock::text(text)])
+    };
+    result.structured_content = Some(value);
+    result
 }
 
 /// Outcome of [`CasCore::run_overlap_check`] translated into the three

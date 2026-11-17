@@ -558,8 +558,8 @@ mod tests {
         let text = result
             .content
             .iter()
-            .filter_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()

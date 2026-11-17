@@ -457,8 +457,8 @@ async fn ct2_p1_send_returns_named_outcome() {
         .unwrap()
         .content
         .into_iter()
-        .filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text),
+        .filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text),
             _ => None,
         })
         .collect();

@@ -64,8 +64,8 @@ impl CasCore {
                     cas_store::release_reconcile_store::retire_closed_parent_dispatch(&self.cas_root, id, &inventory.scope.final_release_sha).map_err(|e| e.to_string())?;
                     Ok(ParentOutcome::Closed)
                 } else {
-                    let gate = response.content.iter().filter_map(|c| match &c.raw {
-                        rmcp::model::RawContent::Text(t) => Some(t.text.as_str()), _ => None,
+                    let gate = response.content.iter().filter_map(|c| match c {
+                        rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()), _ => None,
                     }).collect::<Vec<_>>().join("\n");
                     Ok(held(gate, owner.clone()))
                 }

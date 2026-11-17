@@ -571,8 +571,8 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                 Ok(result) => result
                     .content
                     .iter()
-                    .filter_map(|c| match &c.raw {
-                        rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+                    .filter_map(|c| match c {
+                        rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()

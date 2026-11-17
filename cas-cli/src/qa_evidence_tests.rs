@@ -1127,18 +1127,23 @@ test('other', async () => {});
 });
 test('other', async () => { test.skip(); });
 test.skip('new disabled test', async () => {});
+test('runtime', async () => {
+  test.skip(!ready, 'No fixture');
+  test.skip("No details");
+});
 "#).unwrap();
     git_ok(&fx.repo, &["add", "."]);
     git_ok(&fx.repo, &["-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "migrate skips"]);
     let head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
     let markers = added_skip_markers(&delivery_test_diff(&fx.repo, &base, &head, &[path.into()]).unwrap());
     assert_eq!(markers.iter().map(|m| (m.line, m.allowed.is_some())).collect::<Vec<_>>(),
-        [(2, true), (3, true), (5, false), (6, false)]);
+        [(2, true), (3, true), (5, false), (6, false), (8, true), (9, true)]);
     let notes = fx.notes();
     let context = EvidenceContext { task_id: TASK, task_artifacts_dir: &fx.task_dir, repo: &fx.repo,
         delivered_head: &head, notes: &notes, deployed_origins: &[], capture_configured: false, rebind_scope: None };
     assert!(run_close_gate(&context, EvidenceTier::None, &[], &markers[..2]).is_ok());
-    assert!(run_close_gate(&context, EvidenceTier::None, &[], &markers[2..]).is_err());
+    assert!(run_close_gate(&context, EvidenceTier::None, &[], &markers[2..4]).is_err());
+    assert!(run_close_gate(&context, EvidenceTier::None, &[], &markers[4..]).is_ok());
 }
 
 #[test]

@@ -30890,8 +30890,10 @@ mod merge_state_gate_tests {
                 assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "origin/main"));
             }
             if row == "methodology-cleared" {
-                core.cas_task_update(Parameters(serde_json::from_value(serde_json::json!({
-                    "id": task.id, "proof_scope_fix": true, "execution_note": "",
+                use crate::mcp::CasService;
+                env.set("CAS_AGENT_ROLE", "supervisor");
+                core.task(Parameters(serde_json::from_value(serde_json::json!({
+                    "action": "update", "id": task.id, "proof_scope_fix": true, "execution_note": "",
                     "reason": "Correct the methodology label on the unchanged merged delivery",
                 })).unwrap())).await.unwrap();
                 task = tasks.get(&task.id).unwrap();

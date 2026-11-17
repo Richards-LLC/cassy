@@ -2356,6 +2356,7 @@ async fn supervisor_stability_exception_reaches_park_gh2041() {
     let held = text(f.core.cas_task_close(request(false)).await.unwrap());
     assert!(crate::gates::codes_in(&held).contains(&"G-61"), "{held}");
     f.core.set_agent_id_for_testing("supervisor-session".into());
+    env.set("CAS_AGENT_ROLE", "supervisor");
     let parked = text(f.core.cas_task_close(request(true)).await.unwrap());
     assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{parked}");
     assert!(tasks.get(TASK).unwrap().notes.contains("G-61"));

@@ -2145,6 +2145,22 @@ async fn recorded_own_commit_naming_another_task_stays_this_delivery_gh1944() {
     assert_eq!(delivery.commits.len(), 3, "{:?}", delivery.commits);
     task_commit_identity_in_repo(repo, &task, None).unwrap();
 
+    // GH #2043: recycling may reopen the task. Its recorded commits and
+    // original start must survive the real restart path without rewriting Git.
+    let boundary = task.deliverables.factory_branch_start.clone();
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let mut reopened = task.clone();
+    reopened.status = TaskStatus::Open;
+    tasks.update(&reopened).unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let restarted = text(f.core.cas_task_start_with_options(Parameters(
+        crate::mcp::tools::TaskStartRequest { id: TASK.into(), brief: Some(true), force: None },
+    )).await.unwrap());
+    let resumed = tasks.get(TASK).unwrap();
+    assert_eq!(resumed.status, TaskStatus::InProgress, "{restarted}");
+    assert_eq!(resumed.deliverables.factory_branch_start, boundary);
+    assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD"]), tip);
+
     commit_file(&f.worker_path, "d.rs", "fix(cas-dddd): unrecorded other task");
     assert!(task_attribution::started_delivery(repo, &task).is_err());
 }
@@ -2180,7 +2196,14 @@ async fn granted_commit_inside_no_ff_import_keeps_the_merge_gh1988() {
     })).await.unwrap();
     let granted = tasks.get(TASK).unwrap();
     let delivery = task_attribution::started_delivery(repo, &granted).unwrap().unwrap();
-    assert_eq!(delivery.commits, vec![merge]);
+    assert_eq!(delivery.commits, vec![merge.clone()]);
+    // Exercise rebind itself, including its branch/checkout/lease fences.
+    let replacement = format!("{BRANCH}-{TASK}-recovery");
+    git(&f.worker_path, &["switch", "-qc", &replacement]);
+    supervisor.rebind_task_branch(TASK, &replacement, "Approve the authorized merged repair").unwrap();
+    let rebound = tasks.get(TASK).unwrap();
+    assert_eq!(rebound.deliverables.factory_branch_start.unwrap().branch, replacement);
+    assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD"]), merge);
 }
 
 /// GH #1888 (cas-f45f): the returned task's start records the worker lane,

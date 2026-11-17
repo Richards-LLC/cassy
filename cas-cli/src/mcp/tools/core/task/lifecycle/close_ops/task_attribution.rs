@@ -477,12 +477,15 @@ fn claims_another_task(repo: &Path, sha: &str, message: &str, identity: &TaskCom
 /// GH #1133, #1151: whether every commit `lane` holds beyond `target` (and
 /// beyond `origin/<target>` when that exists) claims another task. An unnamed
 /// commit may be this task's own work (cas-2387), so it answers `false`.
+/// Artifact-only absence checks may also exclude a published upstream ref;
+/// epic delivery accounting keeps its original target-only measurement.
 /// `None` when Git cannot read the range or it is too large to judge.
 pub(super) fn lane_commits_all_claim_other_tasks(
     repo: &Path,
     lane: &str,
     target: &str,
     identity: &TaskCommitIdentity,
+    upstream: Option<&str>,
 ) -> Option<bool> {
     const LIMIT: usize = 200;
     if !is_safe_git_refname(lane) || !is_safe_git_refname(target) {
@@ -509,6 +512,11 @@ pub(super) fn lane_commits_all_claim_other_tasks(
     }
     if git_ref_exists(repo, &origin_target) {
         args.push(format!("^{origin_target}"));
+    }
+    // Artifact-only work may sync published trunk for its report tooling.
+    // That imported history is upstream, just as in the started-delivery walk.
+    if let Some(upstream) = upstream {
+        args.push(format!("^{upstream}"));
     }
     args.push("--".to_string());
     let args: Vec<&str> = args.iter().map(String::as_str).collect();

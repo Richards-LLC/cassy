@@ -118,6 +118,12 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
             # GH #1679: a data-* attribute is machine state; rendered text is not.
             ('work-picture.test.ts', 'expect(detail(1).dataset.retrievalState).toBe("offline");', False),
             ('work-picture.test.ts', 'expect(detail(1).textContent).toBe("offline");', True),
+            # cff5836b review: the subject is exactly one dataset projection.
+            ('work-picture.test.ts', 'expect(detail(1).textContent || detail(1).dataset.retrievalState).toBe("offline");', True),
+            ('work-picture.test.ts', 'expect(detail(1).textContent ?? detail(1).dataset.retrievalState).toBe("offline");', True),
+            ('work-picture.test.ts', 'expect(ok ? detail(1).textContent : detail(1).dataset.retrievalState).toBe("offline");', True),
+            ('work-picture.test.ts', 'expect(detail(1).textContent + detail(1).dataset.retrievalState).toBe("offline");', True),
+            ('work-picture.test.ts', 'expect(detail(1).textContent && detail(1).dataset.retrievalState).toBe("offline");', True),
             ('src/example.rs', '#[test] fn check() { for phrase in ["please try later", "run it again"] { assert!(error.contains(phrase)); } }', True),
             ('test_example.py', 'def test_x():\n    for phrase in ("please try later",):\n        self.assertIn(phrase, result.stderr)', True),
             ('example.test.ts', 'for (const phrase of ["please try later"]) { expect(error.message).toContain(phrase); }', True),

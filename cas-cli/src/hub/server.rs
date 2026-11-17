@@ -5166,6 +5166,59 @@ mod upstream_unavailable_tests {
     use crate::hub::SessionMultiplexer;
 
     #[tokio::test]
+    async fn pane_read_stream_keeps_first_authorization_without_per_frame_audit_cas_89fa() {
+        let temp = crate::test_support::private_hub_tempdir();
+        let root = temp.path().join("hub");
+        let auth = AuthStore::open(&root, "audit-machine").unwrap();
+        let now = chrono::Utc::now();
+        let scopes = [Scope::PaneRead, Scope::PaneInput].into_iter().collect();
+        let invite = auth.mint_pairing("https://controller.example", scopes, now).unwrap();
+        let credential = auth.exchange_pairing(PairingExchange::test_fixture(
+            invite.token, "audit-machine", "https://controller.example", invite.scopes.clone(),
+        ), now).unwrap();
+        let mut context = AuthContext::test_fixture(&credential.device_id, "https://controller.example", invite.scopes);
+        context.credential_id = credential.credential_id;
+        context.request_id = "read-stream-request".into();
+        let session = "audit-stream-89fa";
+        auth.acquire_lease(&context, session, now).unwrap();
+        let trusted = Some((auth, context));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready, connected) = tokio::sync::oneshot::channel();
+        let (observed, delivered) = tokio::sync::oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ready.send(()).unwrap();
+            for _ in 0..102 {
+                let message = socket.next().await.unwrap().unwrap();
+                serde_json::from_slice::<ClientMessage>(&message.into_data()).unwrap();
+            }
+            observed.send(()).unwrap();
+            futures_util::future::pending::<()>().await;
+        });
+        let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+        let _viewer = connector.attach(session, port, std::iter::empty::<String>(), None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), connected).await.unwrap().unwrap();
+        let bytes = serde_json::to_vec(&ClientMessage::RequestPaneKeyframe { pane_id: "supervisor".into() }).unwrap();
+        for _ in 0..100 {
+            handle_client_message(&connector, session, &trusted, &bytes).await.unwrap();
+        }
+        let input = serde_json::to_vec(&ClientMessage::Input { pane_id: "supervisor".into(), data: b"x".to_vec() }).unwrap();
+        for _ in 0..2 {
+            handle_client_message(&connector, session, &trusted, &input).await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), delivered).await.unwrap().unwrap();
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(root.join("audit.jsonl")).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.iter().filter(|row| row["action"] == "websocket_read").count(), 1);
+        let mutations: Vec<_> = rows.iter().filter(|row| row["action"] == "websocket_mutation").collect();
+        assert_eq!(mutations.len(), 2);
+        assert!(mutations.iter().all(|row| row["request_id"] == "read-stream-request"));
+        upstream.abort();
+    }
+
+    #[tokio::test]
     async fn send_refusal_preserves_pairing_scope_and_lease_causes_cas_5e60() {
         for (cause, scopes, expected_code, required_scope) in [
             ("revoked", vec![Scope::MessageSend], "pairing_required", None),

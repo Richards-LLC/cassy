@@ -21927,12 +21927,8 @@ effort = "high"
         // Plain dir with no git repo — all fields must be sentinels, no panic.
         let status = collect_worker_git_status(tmp.path());
         // branch and head_sha degrade to "?" (not empty, not a real branch name)
-        assert!(
-            status.branch == "?" || !status.branch.contains("fatal"),
-            "non-git dir must not propagate git error messages: '{}'",
-            status.branch
-        );
-        assert_eq!(status.pr_url, WorkerPrUrl::Unknown("branch unknown"));
+        assert_eq!(status.branch, "?");
+        assert!(matches!(status.pr_url, WorkerPrUrl::Unknown(_)));
         // No panics is the primary assertion — the above implicitly proves it.
     }
 

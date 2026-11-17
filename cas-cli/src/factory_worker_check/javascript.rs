@@ -2060,9 +2060,9 @@ for (const width of [390, 1280]) {
         git(&["commit", "--quiet", "-am", "changed inline test"]);
         let historical_head = git(&["rev-parse", "HEAD"]);
         let shared = r#"import { test, expect } from '@playwright/test';
-const run = async () => { expect(1).toBe(2); };
 for (const width of [390, 1280]) {
   test.describe(`fleet failure ${width}`, () => {
+    const run = async () => { expect(1).toBe(2); };
     // cas-stability-identities: ["fleet failure 390 case 390", "fleet failure 1280 case 1280"]
     test(`case ${width}`, run);
   });

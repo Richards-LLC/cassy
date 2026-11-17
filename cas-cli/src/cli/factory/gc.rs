@@ -107,6 +107,46 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn gc_cleanup_reclaims_expired_host_artifacts_cas_f1b7() {
+        use cas_store::TaskStore;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let mut expired = Vec::new();
+        let mut kept = Vec::new();
+        let mut roots = Vec::new();
+        for name in ["one", "two"] {
+            let project = env.home().join(name);
+            let root = crate::store::init_cas_dir(&project).unwrap();
+            std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {name:?}\n")).unwrap();
+            crate::store::known_repos::register_repo_strict(&project).unwrap();
+            for (suffix, closed) in [("old", true), ("live", false)] {
+                let mut task = cas_types::Task::new(format!("cas-{name}-{suffix}"), "Retention fixture".into());
+                if closed {
+                    task.status = cas_types::TaskStatus::Closed;
+                    task.closed_at = Some(chrono::Utc::now() - chrono::Duration::days(30));
+                    task.updated_at = task.closed_at.unwrap();
+                }
+                cas_store::SqliteTaskStore::open(&root).unwrap().add(&task).unwrap();
+                let base = crate::config::resolved_factory_artifacts_root(None);
+                let path = crate::config::project_factory_artifacts_root(&root, &base).join(&task.id);
+                std::fs::create_dir_all(&path).unwrap();
+                std::fs::write(path.join("proof.txt"), b"fixture evidence").unwrap();
+                let old = std::time::SystemTime::now() - Duration::from_secs(30 * 86400);
+                for item in [path.join("proof.txt"), path.clone()] {
+                    std::fs::File::open(item).unwrap().set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+                }
+                if closed { expired.push(path); } else { kept.push(path); }
+            }
+            roots.push(root);
+        }
+        let cli: crate::cli::Cli = clap::Parser::try_parse_from(["cas", "factory", "gc", "cleanup"]).unwrap();
+        let command = FactoryGcCommands::Cleanup { force: false, dry_run: false, no_dry_run: false };
+        execute(&command, &cli, Some(&roots[0])).unwrap();
+        assert!(expired.iter().all(|path| !path.exists()), "expired artifacts remain: {expired:?}");
+        assert!(kept.iter().all(|path| path.join("proof.txt").exists()));
+    }
+
+    #[test]
     fn cleanup_progress_runs_during_blocking_work_and_is_silent_when_disabled() {
         let (lines, received) = std::sync::mpsc::channel();
         with_cleanup_progress(

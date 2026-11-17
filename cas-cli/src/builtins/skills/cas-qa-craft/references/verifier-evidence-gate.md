@@ -186,7 +186,7 @@ When `task_type=epic`, use `verification_type=epic` and check, in order:
 2. **Plan outcome:** apply Plan conformance to the assembled epic's full planned scope and measurable targets, with receipts. A missed target or omitted behaviour is `PLAN-FIT: NOT VERIFIED` even if every child's card passed; follow-ups cannot excuse it.
 3. **Close reason covers the whole epic**, not only the last child; future-epic follow-ups may not defer this epic's obligations.
 4. **Verify on the epic branch**, not a worker worktree.
-5. **Stranded branches and owner:** reject child `factory/<assignee>` commits outside the epic's integration target unless the close authorizes `stranded_branch_override` with an inspection narrative, and an absent, stale or mismatched `epic_verification_owner`. Close enforces both too; a clean review overrides neither.
+5. **Stranded branches and owner:** reject child `factory/<assignee>` commits outside the epic's integration target unless the close authorizes `stranded_branch_override` with an inspection narrative. When `epic_verification_owner` is set, reject absent, stale or mismatched caller authority; only that live registered supervisor can close. Close enforces both too; a clean review overrides neither.
 
 ## Verdict recording
 

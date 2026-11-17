@@ -773,11 +773,28 @@ pub struct TaskDeliverables {
     pub green_merge_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_ci_admission: Option<MergeCiAdmission>,
+    /// cas-c8ae: the approved pre-merge verdict for this delivery. It travels
+    /// with the task row, so a release cut on another machine of the project
+    /// can admit a member reviewed elsewhere. Bound to its delivery cycle and
+    /// reviewed anchor; a reopen starts a new cycle and voids it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub premerge_approval: Option<PortablePremergeApproval>,
     /// cas-289b: the worker's passing capped test receipts at the parked tip.
     /// Receipt files stay on the machine that ran them; these travel with the
     /// task row, so a close on another machine can count them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_receipts: Vec<PortableTestReceipt>,
+}
+
+/// An approved pre-merge verdict carried on its task (cas-c8ae).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortablePremergeApproval {
+    pub verdict_id: String,
+    pub dispatch_id: String,
+    /// The exact delivery commit the approved review covered.
+    pub approved_anchor: String,
+    /// `TaskDeliverables::delivery_cycle` when the verdict was recorded.
+    pub delivery_cycle: u32,
 }
 
 /// A passing capped targeted-test receipt carried on its task (cas-289b).
@@ -885,6 +902,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     merge_ci_admission: Option<MergeCiAdmission>,
     #[serde(default)]
+    premerge_approval: Option<PortablePremergeApproval>,
+    #[serde(default)]
     test_receipts: Vec<PortableTestReceipt>,
 }
 
@@ -923,6 +942,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             no_delivery_close_intent: value.no_delivery_close_intent,
             green_merge_commit: value.green_merge_commit,
             merge_ci_admission: value.merge_ci_admission,
+            premerge_approval: value.premerge_approval,
             test_receipts: value.test_receipts,
         }
     }

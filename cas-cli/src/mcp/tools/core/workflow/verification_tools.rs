@@ -1172,6 +1172,27 @@ impl CasCore {
             let event = super::premerge_verification::cycle::event(&tx, &self.cas_root, &task,
                 &dispatch, &verification).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?
                 .with_session(&caller_id);
+            // cas-c8ae: an approval stamped for this delivery travels with the
+            // task row, so a release cut on another machine can admit it.
+            if let Some(anchor) = event.metadata.as_ref()
+                .and_then(|metadata| metadata.get("approved_anchor"))
+                .and_then(|anchor| anchor.as_str())
+            {
+                let approval = cas_types::PortablePremergeApproval {
+                    verdict_id: verification.id.clone(),
+                    dispatch_id: dispatch.id.clone(),
+                    approved_anchor: anchor.to_string(),
+                    delivery_cycle: task.deliverables.delivery_cycle,
+                };
+                let approval = serde_json::to_string(&approval)
+                    .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+                task_row_changed |= tx.execute(
+                    "UPDATE tasks SET deliverables = json_set(deliverables, '$.premerge_approval', json(?2)),
+                         updated_at = ?3
+                     WHERE id = ?1 AND json_valid(deliverables) AND json_type(deliverables) = 'object'",
+                    rusqlite::params![task.id, approval, chrono::Utc::now().to_rfc3339()],
+                ).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to record portable approval: {e}")))? > 0;
+            }
             cas_store::record_event_with_conn(&tx, &event)
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
 
@@ -1750,6 +1771,10 @@ mod lifecycle_friction_tests {
         assert_eq!(stamp.approved_anchor, task.deliverables.factory_branch_anchor.clone().unwrap());
         assert_eq!(stamp.dispatch_id, dispatch.id);
         assert_eq!(stamp.verdict_id, recorded.id);
+        // cas-c8ae: the approval travels with the task row for other machines.
+        let carried = core.open_task_store().unwrap().get(&task.id).unwrap().deliverables.premerge_approval.unwrap();
+        assert_eq!((carried.verdict_id, carried.dispatch_id, carried.approved_anchor),
+            (recorded.id.clone(), dispatch.id.clone(), stamp.approved_anchor.clone()));
 
         let text = |result: CallToolResult| {
             result

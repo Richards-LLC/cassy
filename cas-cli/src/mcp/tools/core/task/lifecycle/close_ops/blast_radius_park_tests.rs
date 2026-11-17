@@ -1107,7 +1107,7 @@ async fn cassy_merge_close_counts_receipts_carried_from_the_worker_machine_cas_2
         // A failing run, with its own matching digest.
         |receipt| {
             receipt.passing_run = receipt.passing_run.replace("1 passed", "0 passed, 1 failed");
-            receipt.log_sha256 = sha256_hex(receipt.passing_run.as_bytes());
+            receipt.log_sha256 = sha256_hex(format!("{}\n{}", receipt.filter, receipt.passing_run).as_bytes());
         },
     ];
     for tamper in tampered {

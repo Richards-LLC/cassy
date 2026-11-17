@@ -281,6 +281,11 @@ fn passing_run_lines(log: &str) -> String {
 
 /// cas-289b: whether carried run lines prove `count` passing tests, each of
 /// `package` (and `harness`) and selected by `filter`.
+/// cas-289b: digest of a carried run bound to the filter that minted it.
+fn passing_run_digest(filter: &str, passing_run: &str) -> String {
+    hex::encode(Sha256::digest(format!("{filter}\n{passing_run}").as_bytes()))
+}
+
 fn passing_run_proves(run: &str, package: &str, harness: Option<&str>, filter: &str, count: u64) -> bool {
     let Some((name, _)) = package_selector(package) else { return false };
     let binary = match harness {
@@ -1094,7 +1099,7 @@ impl<'a> PassingTests<'a> {
                     harness: test.harness.clone(),
                     filter: test.filter.clone(),
                     count: test.count,
-                    log_sha256: hex::encode(Sha256::digest(passing_run.as_bytes())),
+                    log_sha256: passing_run_digest(&test.filter, &passing_run),
                     passing_run,
                 })
         }).collect()
@@ -1120,7 +1125,7 @@ impl<'a> PassingTests<'a> {
                     && synced.count > 0
                     && package_selector(&synced.package).is_some()
                     && synced.harness.as_deref().is_none_or(valid_package)
-                    && hex::encode(Sha256::digest(synced.passing_run.as_bytes())) == synced.log_sha256
+                    && passing_run_digest(&synced.filter, &synced.passing_run) == synced.log_sha256
                     && passing_run_proves(&synced.passing_run, &synced.package,
                         synced.harness.as_deref(), &synced.filter, synced.count);
                 let local = records.iter().any(|(_, package, test)| {

@@ -810,7 +810,7 @@ pub struct PortableTestReceipt {
     pub harness: Option<String>,
     pub filter: String,
     pub count: u64,
-    /// SHA-256 of `passing_run`.
+    /// SHA-256 of the minting `filter`, a newline and `passing_run`.
     pub log_sha256: String,
     /// The run's nextest PASS and Summary lines from its selected-test log,
     /// so the receiving machine can check the run passed this filter.

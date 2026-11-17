@@ -334,6 +334,7 @@ pub(crate) fn delivery_ci_rearms(
             let rows = reminders.list_for_task(&task.id)?;
             let ours = |row: &&cas_store::Reminder| row.owner_id == owner.id
                 && row.trigger_event.as_deref() == Some("ci_completed")
+                && row.trigger_filter.as_ref().is_some_and(|filter| filter["delivery_wake"] == true)
                 && row.trigger_filter.as_ref().and_then(|filter| filter.get("sha")).and_then(serde_json::Value::as_str) == Some(sha);
             if rows.iter().filter(ours).any(|row| row.status == cas_store::ReminderStatus::Pending) { continue; }
             let Some(fired) = rows.iter().filter(ours).rev()
@@ -1988,9 +1989,13 @@ mod tests {
             }
         };
         let mut transport = recorded_runs("completed", Some("success"));
-        transport.runs.retain(|run| run.name == "CI" && run.event == "push");
+        // The fixture also has a default-branch push at the same SHA.
+        transport.runs.retain(|run| run.id == 38603274883);
         assert_eq!(transport.runs.len(), 1);
         fire(&transport);
+        reminders.create_with_scope(&owner.id, None, "unrelated workflow", cas_store::ReminderTriggerType::Event,
+            None, Some("ci_completed"), Some(&serde_json::json!({"sha": FIXTURE_SHA, "workflow": "Release"})),
+            0, Some("rerun-session"), None, true, Some(&task.id)).unwrap();
         for (attempt, status) in [(2, "in_progress"), (3, "completed")] {
             assert!(delivery_ci_rearms(&root, "rerun-session", &transport).unwrap().is_empty());
             transport.runs[0].run_attempt = attempt;

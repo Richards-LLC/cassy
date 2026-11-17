@@ -431,10 +431,23 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn fixture(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures")
-            .join(name)
+    /// Recorded `claude` stdout, embedded at compile time.
+    fn fixture(name: &str) -> Option<&'static str> {
+        match name {
+            "success.jsonl" => Some(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/success.jsonl"
+            ))),
+            "error.jsonl" => Some(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/error.jsonl"
+            ))),
+            "max_turns.jsonl" => Some(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/max_turns.jsonl"
+            ))),
+            _ => None,
+        }
     }
 
     /// A stand-in CLI: records its argv, input and environment in its cwd,
@@ -457,11 +470,17 @@ mod tests {
         path
     }
 
+    /// Options that run the stand-in CLI replaying fixture `name`; an
+    /// unknown name replays nothing.
     fn replay(dir: &Path, name: &str, exit: u8) -> QueryOptions {
+        let path = dir.join(name);
+        if let Some(stdout) = fixture(name) {
+            std::fs::write(&path, stdout).unwrap();
+        }
         QueryOptions::new()
             .executable(fake_cli(dir))
             .cwd(dir)
-            .env_var("FIXTURE", fixture(name).to_string_lossy())
+            .env_var("FIXTURE", path.to_string_lossy())
             .env_var("EXIT", exit.to_string())
     }
 

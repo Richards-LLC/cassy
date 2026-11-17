@@ -492,6 +492,18 @@ fn worker_sandbox_shadow(input: &HookInput, tool_name: &str) -> bool {
         && !crate::harness_policy::is_supervisor(input)
 }
 
+/// H-33 is shadowed only for a secret file the generated profile itself
+/// denies: one of its names, inside the worker checkout. Other protected
+/// names and paths keep the text guard.
+fn sandbox_denies_secret(path: &str) -> bool {
+    let path = Path::new(path);
+    std::env::var_os("CAS_CLONE_PATH").is_some_and(|worktree| path.starts_with(worktree))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(cas_mux::worker_sandbox::secret_write_denied)
+}
+
 /// Record a stage-A guard's would-deny instead of refusing. Returns `true`
 /// when the refusal is shadowed and the call should proceed.
 fn shadowed_by_sandbox(input: &HookInput, tool_name: &str, cas_root: Option<&Path>, reason: &str) -> bool {
@@ -1516,7 +1528,7 @@ fn handle_pre_tool_use_checked(
             for pattern in &protection.files {
                 if path.ends_with(pattern) || path.contains(&format!("/{pattern}")) {
                     let reason = crate::gates::tag("H-33", format!("Protected file: {pattern} files may contain secrets"));
-                    if !shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason) {
+                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
                         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
                     }
                 }
@@ -1529,7 +1541,7 @@ fn handle_pre_tool_use_checked(
             for pattern in &protection.patterns {
                 if path.ends_with(pattern) || path.contains(pattern) {
                     let reason = crate::gates::tag("H-33", "Protected file: may contain credentials or private keys");
-                    if !shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason) {
+                    if !(sandbox_denies_secret(path) && shadowed_by_sandbox(input, tool_name, Some(cas_root), &reason)) {
                         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
                     }
                 }

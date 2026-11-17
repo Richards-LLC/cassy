@@ -45,8 +45,6 @@ fn generated_profile_never_allowlists_the_shared_git_dir() {
         let mut sandbox = claude_sandbox_block(&ProfileRoots {
             write_roots: &[],
             cas_root: &tmp.path().join("cas"),
-            protected_files: &[],
-            protected_patterns: &[],
         });
         apply_worktree(&mut sandbox, checkout, Some(&git));
         for protected in [common.join("config"), common.join("hooks/pre-push"), common.join("refs/heads/main")] {
@@ -172,8 +170,6 @@ fn bypass_corpus_is_blocked_through_the_generated_profile() {
     let mut sandbox = claude_sandbox_block(&ProfileRoots {
         write_roots: &[artifacts.clone(), scratch.clone()],
         cas_root: &root.join("cas"),
-        protected_files: &[".env".into()],
-        protected_patterns: &[".pem".into(), "id_ed25519".into()],
     });
     apply_worktree(&mut sandbox, &worktree, Some(&git_layout));
     let settings = root.join("srt-settings.json");
@@ -221,7 +217,7 @@ git update-ref refs/heads/main HEAD 2>/dev/null && echo main=WRITTEN
 echo '[core]' >> {config} 2>/dev/null && echo config=WRITTEN
 echo x > {hooks}/pre-push 2>/dev/null && echo hooks=WRITTEN
 echo S=1 > .env 2>/dev/null && echo env=WRITTEN
-echo k > deploy.pem 2>/dev/null && echo pem=WRITTEN
+echo k > id_ed25519 2>/dev/null && echo key=WRITTEN
 true",
         config = common.join("config").display(),
         hooks = common.join("hooks").display(),

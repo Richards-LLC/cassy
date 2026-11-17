@@ -36,16 +36,26 @@ pub const ALLOWED_DOMAINS: [&str; 9] = [
 pub const CAS_ROOT_RUNNER_DIRS: [&str; 3] =
     ["worker-check-slots", "worker-target-owners", "worker-checks"];
 
+/// Secret files a worker cannot write in its checkout: exact names, and
+/// names containing a key or credential file name. File extensions such as
+/// `.pem` are not here: package trees ship certificates, so their text guard
+/// keeps refusing instead (H-33 is shadowed only for these names).
+pub const SECRET_FILE_NAMES: [&str; 1] = [".env"];
+pub const SECRET_NAME_FRAGMENTS: [&str; 5] =
+    ["id_rsa", "id_ed25519", "credentials.json", "secrets.yaml", "secrets.json"];
+
+/// Whether the generated profile denies writing a file with this name.
+pub fn secret_write_denied(file_name: &str) -> bool {
+    SECRET_FILE_NAMES.contains(&file_name)
+        || SECRET_NAME_FRAGMENTS.iter().any(|fragment| file_name.contains(fragment))
+}
+
 /// Inputs resolved by Cassy for the static half of the profile.
 pub struct ProfileRoots<'a> {
     /// Effective operator write roots, artifact and scratch roots.
     pub write_roots: &'a [PathBuf],
     /// The project store (`CAS_ROOT`).
     pub cas_root: &'a Path,
-    /// Protected file names (`.env`): writes to `name` and `name.*` are denied.
-    pub protected_files: &'a [String],
-    /// Protected path fragments (`.pem`, `id_rsa`): writes to matching files are denied.
-    pub protected_patterns: &'a [String],
 }
 
 /// The worker `sandbox` settings block before the checkout is known.
@@ -63,7 +73,6 @@ pub fn claude_sandbox_block(roots: &ProfileRoots<'_>) -> Value {
     for dir in CAS_ROOT_RUNNER_DIRS {
         push(&roots.cas_root.join(dir));
     }
-    let deny = secret_denies(&allow, roots.protected_files, roots.protected_patterns);
     json!({
         "enabled": true,
         "enabledPlatforms": ["macos"],
@@ -72,30 +81,19 @@ pub fn claude_sandbox_block(roots: &ProfileRoots<'_>) -> Value {
         // `gh` and other Go tools verify TLS through trustd (cas-ac77).
         "enableWeakerNetworkIsolation": true,
         "network": { "allowedDomains": ALLOWED_DOMAINS },
-        "filesystem": { "allowWrite": allow, "denyWrite": deny },
+        "filesystem": { "allowWrite": allow, "denyWrite": [] },
     })
 }
 
-fn secret_denies(roots: &[String], files: &[String], patterns: &[String]) -> Vec<String> {
+fn secret_denies(worktree: &Path) -> Vec<PathBuf> {
+    // Each glob is written at the checkout root and below it, so a match does
+    // not rely on `**/` also matching zero directories.
     let mut globs = Vec::new();
-    // Each glob is written at the root and below it, so a match does not rely
-    // on `**/` also matching zero directories.
-    for root in roots {
-        for dir in [root.clone(), format!("{root}/**")] {
-            for name in files.iter().filter(|name| safe_glob_part(name)) {
-                globs.push(format!("{dir}/{name}"));
-                globs.push(format!("{dir}/{name}.*"));
-            }
-            for fragment in patterns.iter().filter(|fragment| safe_glob_part(fragment)) {
-                globs.push(format!("{dir}/*{fragment}*"));
-            }
-        }
+    for dir in [worktree.to_path_buf(), worktree.join("**")] {
+        globs.extend(SECRET_FILE_NAMES.iter().map(|name| dir.join(name)));
+        globs.extend(SECRET_NAME_FRAGMENTS.iter().map(|fragment| dir.join(format!("*{fragment}*"))));
     }
     globs
-}
-
-fn safe_glob_part(part: &str) -> bool {
-    !part.is_empty() && !part.contains(['/', '*', '?', '[', ']', '{', '}'])
 }
 
 /// Exact git paths a linked worktree needs to commit, branch `factory/*` and
@@ -161,6 +159,7 @@ pub fn apply_worktree(sandbox: &mut Value, worktree: &Path, git: Option<&GitPath
         worktree.join(".claude/settings.json"),
         worktree.join(".claude/settings.local.json"),
     ];
+    deny.extend(secret_denies(worktree));
     if let Some(git) = git {
         allow.extend(git.allow.iter().cloned());
         deny.extend(git.deny.iter().cloned());

@@ -35,11 +35,5 @@ pub(crate) fn worker_sandbox_block(cas_root: &Path) -> Option<serde_json::Value>
             roots.push(root);
         }
     }
-    let protection = config.hooks().pre_tool_use.protection;
-    Some(claude_sandbox_block(&ProfileRoots {
-        write_roots: &roots,
-        cas_root,
-        protected_files: &protection.files,
-        protected_patterns: &protection.patterns,
-    }))
+    Some(claude_sandbox_block(&ProfileRoots { write_roots: &roots, cas_root }))
 }

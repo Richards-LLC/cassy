@@ -106,6 +106,8 @@ fn configured_supervisor_sees_issue_count_recent_titles_and_reuses_fresh_cache()
 
     let (first, _) = session_start(&project, "supervisor", &fake_bin, &call_log);
 
+    #[cfg(unix)]
+    assert!(project.path().join(".cas").join(TRIAGE_CACHE).exists(), "a successful fetch writes the cache");
     assert!(first.contains("7 open"), "{first}");
     assert!(first.contains("#105 Newest report"), "{first}");
     assert!(first.contains("#104 Second report"), "{first}");

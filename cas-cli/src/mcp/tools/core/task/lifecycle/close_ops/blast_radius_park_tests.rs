@@ -762,11 +762,50 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let delivered_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     assert_ne!(tested_tip, delivered_tip);
     // The crate receipt still rebounds across docs; the new test needs exact-tip proof.
-    stability::record(&f.cas_dir(), &f.worker_path, &delivered_tip, stability::Proof {
-        runner: "nextest".into(),
-        tests: vec![stability::Identity::exact("crates/widget/tests/gear.rs", "gear_turns")],
-        consecutive_passes: stability::REQUIRED_PASSES, elapsed_ms: 0,
-    }).unwrap();
+    // cas-763f: that test ran only on the peer machine (cas-3f0a), so the
+    // supervisor records its five per-repeat logs and park consumes them.
+    let refused = call(&f.worker, close.clone()).await;
+    assert!(refused.contains("CHANGED_TEST_STABILITY_REQUIRED"), "{refused}");
+    git(&tested_repo, &["checkout", "-q", "--detach", &delivered_tip]);
+    let passed = |i: usize, name: &str| format!(
+        "        PASS [ 0.0{i}s] (1/1) {name}\n     Summary [ 0.0{i}s] 1 test run: 1 passed, 0 skipped\n");
+    let logs: Vec<_> = (1..=7).map(|i| {
+        let log = scratch.path().join(format!("gear-{i}.log"));
+        std::fs::write(&log, passed(i, match i {
+            6 => "widget::gear gear_turns_elsewhere",
+            // Another harness with a same-named test is not this test.
+            7 => "widget::other gear_turns",
+            _ => "widget::gear gear_turns",
+        })).unwrap();
+        log
+    }).collect();
+    let failed = scratch.path().join("gear-failed.log");
+    std::fs::write(&failed, "        FAIL [ 0.01s] (1/1) widget::gear gear_turns\n     Summary [ 0.01s] 1 test run: 0 passed, 1 failed\n").unwrap();
+    let stable = |repeats: &[&std::path::PathBuf]| serde_json::json!({
+        "head": delivered_tip, "repo": tested_repo,
+        "cargo_args": ["nextest", "run", "-p", "widget", "--test", "gear", "-E", "test(gear_turns)"],
+        "log_path": logs[0], "exit_code": 0, "repeat_log_paths": repeats,
+    });
+    for (case, repeats) in [
+        ("short", vec![&logs[1], &logs[2], &logs[3]]),
+        ("failed", vec![&logs[1], &logs[2], &logs[3], &failed]),
+        ("another test", vec![&logs[1], &logs[2], &logs[3], &logs[5]]),
+        ("another harness", vec![&logs[1], &logs[2], &logs[3], &logs[6]]),
+        ("reused log", vec![&logs[1], &logs[1], &logs[2], &logs[3]]),
+    ] {
+        assert!(f.supervisor.factory(Parameters(request(&stable(&repeats)))).await.is_err(), "{case} repeat logs must not supply stability");
+    }
+    f.supervisor.factory(Parameters(request(&stable(&[&logs[1], &logs[2], &logs[3], &logs[4]])))).await
+        .expect("five passing per-repeat logs record stability");
+    // A later failed run of an overlapping selection withdraws that proof,
+    // exactly as a failed worker rerun does.
+    let mut exact = stable(&[&logs[1], &logs[2], &logs[3], &failed]);
+    exact["cargo_args"][7] = serde_json::json!("test(=gear_turns)");
+    assert!(f.supervisor.factory(Parameters(request(&exact))).await.is_err());
+    let withdrawn = call(&f.worker, close.clone()).await;
+    assert!(withdrawn.contains("CHANGED_TEST_STABILITY_REQUIRED"), "{withdrawn}");
+    f.supervisor.factory(Parameters(request(&stable(&[&logs[1], &logs[2], &logs[3], &logs[4]])))).await
+        .expect("a fresh passing set records stability again");
     let parked = call(&f.worker, close.clone()).await;
     assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);

@@ -1,6 +1,6 @@
 # Filing Cassy-system bugs
 
-A standing directive: **file every Cassy-system bug you observe, by reflex.** Do not leave it in chat, defer it, or say only "report it upstream"; an unrecorded bug resurfaces.
+File every Cassy-system bug you observe when you observe it, rather than leave it in chat or defer it: an unrecorded bug resurfaces.
 
 "Cassy-system" means a defect in Cassy itself: the verifier, hooks, factory/director orchestration, MCP dispatch, the task-verifier agent, worker/supervisor prompts, or builtin skills, whichever downstream project surfaced it.
 

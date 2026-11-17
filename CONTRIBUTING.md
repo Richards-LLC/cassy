@@ -55,19 +55,22 @@ the allowlisted count visible for review.
 ## CI check names are pinned
 
 CI job names are not free text. `docs/branch-protection/main-ruleset.json` lists required
-status checks for `main` by their **exact** job `name:` in `.github/workflows/ci.yml`, and
-GitHub matches required checks by name string.
+status checks for `main` by their exact job `name:`: the outer job in
+`.github/workflows/full-validation.yml` for merge-queue and release-train runs, and the
+`fast-validation` job in `.github/workflows/ci.yml` for other events. GitHub matches required
+checks by name string.
 
-**If you rename a CI job, update that JSON in the same commit.** A required check whose name no
-longer exists is never reported, so it never passes — and every affected branch stays
-unmergeable until someone notices. GH #138 renamed these jobs once already.
+If you rename a required CI job, update that JSON in the same commit. A required check whose
+name no longer exists is never reported, so it never passes and every affected branch stays
+unmergeable until the name is fixed.
 
 Currently required: `Fast Validation`. `macOS Check` is advisory and excluded
 from merge-group events; Release Prebuild retains pre-publish macOS proof.
 
-`Release-Profile & Build Guard (compile-only, no test suite)` is deliberately **not** a required
-check: its `if:` condition skips pull requests, so requiring it would make every PR wait forever
-on a check that cannot run. Keep it that way unless its triggers change.
+The heavy-tier guards (`Test Compile Guard`, `Panic Isolation`, `Build Benchmark & Timings`)
+are deliberately not required: their `if:` conditions skip pull requests and merge-group trees,
+so requiring one would make every PR wait forever on a check that cannot run. Keep it that way
+unless their triggers change.
 
 See [docs/branch-protection/README.md](docs/branch-protection/README.md) for the full ruleset
 and the rationale.

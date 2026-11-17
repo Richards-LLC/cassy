@@ -1775,6 +1775,37 @@ bug_families:
     title: Resumed delivery scope retains implementation and ignores restored journeys
     tasks: [cas-ded9]
     journeys: [FACTORY-CLOSE, FACTORY-SPAWN]
+  delivery-identity-cycle-anchors:
+    title: Replacement, rebound and retargeted deliveries are refused although their recorded cycle commits are the task's own
+    statement: Task start, close and rebind judged delivery ownership by commit subjects, ignored the cycle anchors Cassy recorded for the task, and let the #1353 redirect fall back to the bare branch. A delivery whose own recorded or granted commits named another task, or that held only a retired anchor, was refused or misattributed. Recorded commits and merge_source grants held under a live anchor now count as the task's own at start, close and rebind, and the redirect applies only when real delivered work exists.
+    found: {date: '2026-11-16', source: 'T2 recurrence GH #1888, #1939, #1944, #1976, #1988'}
+    fixed_by: [cas-f45f]
+    tasks: [cas-f45f]
+    journeys: [FACTORY-CLOSE]
+    invariants: []
+  history-wheel-queued-tail:
+    title: An upward reading gesture at the history edge survives a tail scroll queued for the same frame
+    tasks: [cas-c389]
+    journeys: [HUB-J23]
+    invariants: [HUB-J23-GOAL]
+  js-stability-runner-config-root:
+    title: JavaScript stability runs start from the test's runner config, and the stability refusal names the exact command
+    statement: A Jest spec under a nested package.json (apps/backend/scripts/package.json beside apps/backend/jest.config.js) ran without the project's ts-jest transform and failed with a Babel SyntaxError, and the park refusal named no runner command. The runner must start at the nearest runner config and pass it explicitly; the refusal names each changed test's runner, or each valid form as its own command when no evidence identifies one.
+    found: {date: '2026-11-16', source: pulse-card worker-check on v4.31.0}
+    fixed_by: [cas-1468]
+    tasks: [cas-1468]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-JS-STABILITY-RUNNER-ROOT]
+  raw-output-close-focus-takeback:
+    title: Raw output's deferred close handler no longer takes focus back from a control chosen after the drawer closed
+    tasks: [cas-c60a]
+    invariants: [HUB-J17-UNDO-SHELL-FOCUS]
+    journeys: [HUB-J17]
+  verifier-retired-owner:
+    title: Retired verifier owner blocks launch after a cross-factory supervisor handoff
+    tasks: [cas-32c2]
+    journeys: []
+    invariants: []
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -2621,6 +2652,10 @@ invariants:
     statement: A JavaScript stability run starts from the nearest ancestor holding the runner's config and passes it explicitly, so a nested package.json cannot hide the project's transforms; the stability refusal names each changed test's runner command and never a shell-metacharacter alternative.
     check: Run factory_worker_check::javascript::tests::nested_package_json_runs_from_the_jest_config_root_cas_1468 and config_free_test_runner_comes_from_package_evidence_cas_1468 through the capped runner.
     bug: {task: cas-1468}
+  REPORT-JOURNAL-GRID:
+    statement: Accounting report entries use saved ledger identities, numeric debit and credit rows, balanced totals, source-or-hypothetical amounts and visible revision changes; internal QBO IDs are never chart account numbers.
+    check: Run scripts/test-accounting-journals.py through the shipped CLI with saved chart/source fixtures, including disabled or blank AcctNum, imbalance, invalid accounts, missing or mismatched sources and revised amounts. Open the generated simple and compound before-after page in light/dark desktop/phone, print and JS-disabled modes; inspect indentation, totals and memo placement.
+    bug: {task: cas-b1f3}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -4684,3 +4719,14 @@ journeys:
     basis: New controls; no production traffic attribution yet.
   spec: hub-web/e2e/journeys/supervisor-commands.journey.ts
   catalog_gaps: Browser outcomes use a protocol double; Rust security tests and disposable Claude/Codex runs prove native mappings and observations.
+
+- id: CLI-ACCOUNTING-GRIDS
+  name: Validate and render accounting report entries
+  status: live
+  kind: cli
+  entry: {url: 'cli:accounting-journals.py', trigger: Render a bookkeeping report}
+  steps: [Save chart and source snapshots, Validate identities and exact-cent balance before output, Render debit and credit grids with memo below, Audit all revised grid amounts]
+  owners: [cas-cli/src/builtins/skills/cas-html-reports/SKILL.md, cas-cli/src/builtins/skills/cas-html-reports/references/accounting-entries.md, cas-cli/src/builtins/skills/cas-html-reports/scripts/accounting-journals.py, scripts/test-accounting-journals.py]
+  invariants: [REPORT-JOURNAL-GRID]
+  spec: scripts/test-accounting-journals.py
+  traffic: {share_pct: null, basis: New report-authoring capability; no per-journey usage instrumentation.}

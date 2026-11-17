@@ -11,10 +11,10 @@ Immediately before `task action=close`, treat your summary as a hypothesis, not 
 
 ## Claim verdicts
 
-Every claim in a close reason or note carries exactly one verdict; "looks good", "should work" and "it compiled in my IDE" are not verdicts.
+Every claim in a close reason or note carries exactly one verdict:
 
 - **VERIFIED**: the proof ran after your last change and its output is pasted.
-- **NOT VERIFIED**: not checked; say why and who checks it (using the full-suite ownership rule below).
+- **NOT VERIFIED**: not checked; say why and who owns the check. A factory worker's full suite runs once on the landing tree: the merge queue, else CI, else one supervisor run per epic.
 - **INCONCLUSIVE**: checked, but the evidence does not settle it; paste what you saw. Inconclusive is not a pass.
 
 ## Proof ladder
@@ -27,94 +27,52 @@ Each claim also states one **safety fact**: what could break and why it did not,
 
 ## Measurable claims: same-command baseline and treatment
 
-A measurable claim (faster, smaller, fewer, fixed) needs a before and an after from the **same command** with the same inputs: run it on the base commit, then on your change, and paste both. A delta between two different commands, or against a remembered baseline, is not attributable; it is INCONCLUSIVE at best.
+A measurable claim (faster, smaller, fewer, fixed) needs a before and an after from the same command with the same inputs: run it on the base commit, then on your change, and paste both. A delta between two different commands, or against a remembered baseline, is INCONCLUSIVE at best.
 
-## Factory workers: Rust proof
+## Protocol
 
-For a Rust change, the factory worker proof under `cas-worker/references/discipline.md` is:
+1. Name, in a task note, the one command whose success proves the claim: `curl -fsS http://localhost:3000/api/foo` for "the route returns 200", `./scripts/export.sh --json | jq .status` for "the script accepts `--json`". If you cannot name one in a sentence, narrow the claim. Factory workers proving Rust use the capped `check: PASS` and `test: PASS` receipts from [cas-worker/references/discipline.md](../cas-worker/references/discipline.md) instead of raw Cargo.
+2. Run each proof command in the current worktree at your latest commit.
+3. Record the result:
 
-- `git diff --stat` showing exactly the files you expected to change.
-- Wiring evidence: `rg '<symbol>'` or `git grep -n '<symbol>'` hits for every new or changed symbol outside its definition.
-- `check: PASS <sha>` for the delivered clean commit.
-- Targeted `test: PASS <sha> <package> <filter> <count>` evidence for the delivered clean commit.
-- Any non-Rust suite the change touches, with its passed count.
+   ```bash
+   task action=notes id=<task-id> note_type=progress \
+     notes="Claim: <claim> | Verdict: VERIFIED | Rung: <1-4>
+   Proof: <cmd>
+   Exit: 0
+   Tail:
+   <last 5-10 lines of output>
+   Safety: <what could break and why it did not>"
+   ```
 
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
+   The exit code is the load-bearing line; the tail shows what the command exercised (test count, file path, status code).
+4. Close only when every claim is VERIFIED or NOT VERIFIED with a named owner. A failed or INCONCLUSIVE proof goes back to implement, commit, re-prove.
 
-## The Four-Step Protocol
+## Proof shapes
 
-Run this every time, immediately before `task action=close`.
-
-### 1. Name the proof command, in plain prose
-
-State in a task note the single command that, if it exits zero, proves the work is done. Be specific to this task's claim.
-
-- "AC says the new route returns 200" → proof is `curl -fsS http://localhost:3000/api/foo`.
-- "AC says the script accepts `--json`" → proof is `./scripts/export.sh --json | jq .status`.
-- "AC says `cargo test --lib pull_scoping` passes" (supervisor / non-factory) → proof is `cargo test --lib pull_scoping`. A factory worker gives the worker proof above instead.
-
-If you cannot name a proof command in one sentence, narrow the claim.
-
-### 2. Run it FRESH in the current worktree
-
-Run it in the current worktree at your latest commit, not from memory of an earlier run. For multi-step claims, run each proof command, not just the last one.
-
-### 3. Capture exit code + tail of output
-
-Record the result as a task note:
-
-```bash
-task action=notes id=<task-id> note_type=progress \
-  notes="Claim: <claim> | Verdict: VERIFIED | Rung: <1-4>
-Proof: <cmd>
-Exit: 0
-Tail:
-<last 5-10 lines of output>
-Safety: <what could break and why it did not>"
-```
-
-Exit code is the load-bearing line. The tail lets a reviewer check that the command exercised what you think it did (test count, file path, status code).
-
-### 4. Only then, close
-
-If every claim is VERIFIED (exit 0, or the documented success signal for non-zero-success commands), or NOT VERIFIED with a named owner, call:
-
-```bash
-task action=close id=<task-id> reason="<...>"
-```
-
-If a proof failed or a claim is INCONCLUSIVE, do not close. Go back to the worker workflow: implement, commit, re-run the proof.
-
-## What Counts As a Proof Command
-
-| Claim type | Proof shape |
+| Claim | Proof |
 |---|---|
-| "Tests pass" (factory worker, Rust) | Tests written or updated and committed, plus the worker proof above; targeted runs have nonzero receipts, and the full suite follows the ownership rule above (see [cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)) |
-| "Tests pass" (non-Rust) | Affected targeted tests with a nonzero passed count; the full suite follows the ownership rule above |
-| "Tests pass" (supervisor / non-factory, Rust) | `cargo test [--lib --test --workspace]` against the relevant scope |
+| Tests pass (factory worker) | Committed tests plus nonzero targeted receipts per [close-gate.md](../cas-worker/references/close-gate.md); the full suite follows the landing-tree owner |
+| Tests pass (supervisor / non-factory, Rust) | `cargo test [--lib --test --workspace]` for the relevant scope |
 <!-- cas-src:begin -->
-| "Build is clean" (supervisor / non-factory) | `cargo build` for the touched crate(s); `cargo build --workspace` for `pub` type changes |
+| Build is clean (supervisor / non-factory) | `cargo build` for the touched crate(s); `cargo build --workspace` for `pub` type changes |
 <!-- cas-src:else -->
-| "Build is clean" (supervisor / non-factory) | The project's build command for the touched packages; `cargo build` (`--workspace` for `pub` type changes) in a Rust project |
+| Build is clean (supervisor / non-factory) | The project's build command for the touched packages; `cargo build` (`--workspace` for `pub` type changes) in a Rust project |
 <!-- cas-src:end -->
-| "Script runs end-to-end" | The actual script invocation, with the expected input |
-| "New CLI subcommand works" | `<binary> <subcommand> [args]` against a freshly built binary (supervisor / non-factory for Rust binaries) |
-| "Endpoint returns 200" | `curl -fsS` against a running server, OR an integration test |
-| "New code is wired in" | `rg '<symbol>'` or `git grep -n '<symbol>'` showing a caller outside the definition |
-| "Diff is clean" | `git diff --stat` showing exactly the files you expected |
-| "Specific file/line changed" | `grep -n '<expected-text>' <file>` returning the expected line |
-| "Bug repro is gone" | The repro steps run end-to-end, with success-state captured |
+| Script or CLI subcommand works | The real invocation with the expected input, against a freshly built binary |
+| Endpoint returns 200 | `curl -fsS` against a running server, or an integration test |
+| New code is wired in | `rg '<symbol>'` showing a caller outside the definition |
+| Diff is clean | `git diff --stat` showing exactly the files you expected |
+| Bug repro is gone | The repro steps end to end, with the success state captured |
 
-A proof command is **observable, deterministic, and recoverable**: anyone re-running it on the same commit gets the same answer. "I ran it earlier" is not a proof command.
+A proof is observable and deterministic: anyone re-running it on the same commit gets the same answer.
 
-## When This Skill Doesn't Fire
+## Exceptions
 
-- **Standalone documentation**: prove its applicable syntax/render acceptance. When text drives installation, routing or a parser, verify that consumer; never add a wording test. Record unexercised runtime routes explicitly.
-- **Spike / decision tasks** (`task_type=spike`): the deliverable is a decision note, not code. The proof is the existence and content of the decision note — capture that as the proof step instead.
-- **Tasks with `execution_note=additive-only`**: ship only new files, verify presence (`ls`, `git status`), and capture that as the proof. The close gate's `additive-only` enforcement (no `M`/`D` lines) is the safety net.
+- **Standalone documentation**: prove its syntax/render acceptance. When text drives installation, routing or a parser, verify that consumer; never add a wording test. Record unexercised runtime routes explicitly.
+- **Spike / decision tasks** (`task_type=spike`): the proof is the decision note's existence and content.
+- **`execution_note=additive-only`**: verify presence of the new files (`ls`, `git status`); the close gate refuses modified or deleted files.
 
-## Advisory vs Required-Paste
-
-This skill is advisory: close does not parse a pasted proof. The mechanical layer is the close gate and the verifier; a supervisor or verifier cites this skill when a close claims done without evidence.
+Close does not parse a pasted proof; the close gate and the verifier are the mechanical layer, and they cite this skill when a close claims done without evidence.
 
 Done when every claim carries a verdict, a rung and a safety fact, and each proof ran after your last change with its result in a task note.

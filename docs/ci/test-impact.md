@@ -4,11 +4,11 @@ Factory pushes and epic-targeted PRs run import/dependency-selected nextest test
 in the existing Scoped Validation lanes. Default-branch PRs run the required
 Fast Validation admission lane and an advisory macOS notice. macOS Check does
 not run on merge-group events; Release Prebuild proves macOS before publication. The fast-admission gate decides
-which factory lane executes; it does not change the test selector. The queue still
-builds one complete workspace archive and executes its unfiltered three shards. Doctests,
-Non-queue Darwin checks, snapshot-input routing and protected main-push receipt reuse retain
-their existing gates. Scheduled/manual and unvalidated direct-main safety runs
-also keep exhaustive validation.
+which factory lane executes; it does not change the test selector. The queue and
+frozen-train full set still build one complete workspace archive and run it unfiltered
+across six `count:N/6` shards. Doctests, non-queue Darwin checks, snapshot-input routing
+and protected main-push receipt reuse retain their existing gates. Scheduled/manual and
+unvalidated direct-main safety runs also keep exhaustive validation.
 
 `python3 scripts/ci-test-impact.py plan --base-sha <base> --out plan.json`
 inspects the committed merge-base diff without invoking Cargo. It selects changed

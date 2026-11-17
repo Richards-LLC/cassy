@@ -40,7 +40,8 @@ scripts/release.sh on the epic branch
 merge queue (merge_group)
   ci.yml                 Fast Validation (sole required check; no macOS Check)
   release-prebuild.yml   pending-release: did this entry change the version?
-                         build        Linux x86_64 release-fast   (hosted)
+                         build        Linux x86_64 release-fast   (hosted;
+                                      ISA audit, records the executable's SHA-256)
                          macos-route  probe the self-hosted Mac release runner
                          build-macos  macOS ARM64, LTO off, signed (Mac runner,
                                       else hosted)
@@ -53,7 +54,7 @@ release.yml
   detect        version changed against the previous main? tag absent?
   lookup        the queue run's archives, by commit or tree id (waits <= 30 min)
   build         FALLBACK ONLY: calls release-prebuild.yml when nothing to adopt
-  audit-linux   ISA audit + operator launch smoke on the packaged archive
+  audit-linux   audited-digest check + operator launch smoke on the packaged archive
   audit-macos   codesign verify + operator launch smoke on the packaged archive
   release       annotated tag, GitHub release, install-path proof dispatch
         |
@@ -128,12 +129,20 @@ that peels to another commit, and requires both platform archives.
 
 ### Why the audits run on the packaged assets
 
-The ISA audit (3.47.0 shipped AVX-512 instructions, cas-2a16) and the operator
-launch smoke (3.51.0 could not be launched, cas-e719) earn their place only on
-the bytes that ship. They run on the downloaded archives: Linux on
-`ubuntu-latest`, macOS on `macos-26`, where `codesign --verify` also checks the
-signature of the exact executable being published. macOS is compile-checked
-and launch-tested; the suite runs on Linux.
+The ISA audit (3.47.0 shipped AVX-512 instructions) and the operator launch
+smoke (3.51.0 could not be launched) earn their place only on the bytes that
+ship. The Linux prebuild ISA-audits the packaged executable once and uploads its
+SHA-256 beside the archive. `audit-linux` checks the downloaded archive's
+executable against that digest (`sha256sum --check --strict`) and runs the
+launch smoke on `ubuntu-latest`, so a digest mismatch blocks publication
+without a second audit. macOS runs on `macos-26`, where `codesign --verify`
+checks the signature of the exact executable being published before its launch
+smoke. macOS is compile-checked and launch-tested; the suite runs on Linux.
+
+The Linux release build stays on hosted runners. The self-hosted CI slots share
+toolchain, registry, target and compiler caches with merge-queue jobs, so the
+published binary never builds there
+([runner pilot](self-hosted-runner-pilot.md)).
 
 ### Why install on publish is a timer
 

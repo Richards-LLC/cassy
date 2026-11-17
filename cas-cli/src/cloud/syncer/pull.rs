@@ -1957,6 +1957,91 @@ impl CloudSyncer {
         }
     }
 
+    /// A pulled revision authorizes a retry only with the reconciled local
+    /// body, never with the old serialized queue entry. Unsafe skips remain
+    /// visible conflicts; they do not silently consume the retry budget.
+    fn settle_pulled_revision(
+        &self,
+        entity: EntityType,
+        id: &str,
+        revision: Option<i64>,
+        outcome: &Result<UpsertResult, CasError>,
+        can_reconcile_skip: bool,
+        read_payload: impl FnMut(Option<&str>) -> Result<String, CasError>,
+        result: &mut SyncResult,
+    ) {
+        let Some(revision) = revision else { return };
+        let settlement = match outcome {
+            Ok(UpsertResult::Created | UpsertResult::Updated) => true,
+            Ok(UpsertResult::Skipped(_)) => can_reconcile_skip,
+            Err(_) => false,
+        };
+        let settled = if settlement {
+            self.queue.reconcile_pulled_revision(
+                entity, id, revision, self.config.max_retries, read_payload,
+            )
+        } else {
+            self.queue.park_revision_conflicts(entity, id, self.config.max_retries)
+                .map(|count| {
+                    if count > 0 {
+                        result.errors.push(format!(
+                            "revision_reconciliation_required: {} {id}; inspect the sync conflict journal before retrying",
+                            entity.as_str(),
+                        ));
+                    }
+                })
+        };
+        if let Err(error) = settled {
+            result.errors.push(format!("revision reconciliation {} {id}: {error}", entity.as_str()));
+        }
+    }
+
+    fn settle_task_revision(
+        &self,
+        store: &dyn TaskStore,
+        remote: &Task,
+        revision: Option<i64>,
+        outcome: &Result<UpsertResult, CasError>,
+        incoming_is_owner: bool,
+        result: &mut SyncResult,
+    ) -> Result<(), CasError> {
+        if revision.is_none() { return Ok(()) }
+        let local = store.get(&remote.id)?;
+        let can_reconcile = incoming_is_owner
+            && local.origin_project == remote.origin_project
+            && matches!(outcome, Ok(UpsertResult::Skipped(
+                "local_conflict" | "lifecycle_timestamp"
+            )));
+        // A store veto may represent an in-flight delivery, live execution or
+        // a concurrent mutation. It is not a settled local-wins decision and
+        // must stay an explicit conflict until that authority permits a pull.
+        if can_reconcile {
+            let mut merged = local.clone();
+            merged.notes = merge_task_notes(&local.notes, &remote.notes);
+            if merged.notes != local.notes && store.update_from_sync(&merged, &local)?.is_none() {
+                self.queue.park_revision_conflicts(EntityType::Task, &remote.id, self.config.max_retries)?;
+                result.errors.push(format!("revision_reconciliation_required: task {}; local row changed during notes reconciliation", remote.id));
+                return Ok(());
+            }
+        }
+        let team_id = crate::store::share_policy::resolve_team_id(&self.cloud_config);
+        self.settle_pulled_revision(
+            EntityType::Task, &remote.id, revision, outcome, can_reconcile,
+            |previous_payload| {
+                // Scope is stored in the intent/queued wire body, not in the
+                // task table. Preserve that authority when loading canonical state.
+                let previous: serde_json::Value = serde_json::from_str(previous_payload
+                    .ok_or_else(|| CasError::Other("task reconciliation has no queued payload".into()))?)?;
+                Ok(crate::store::load_canonical_sync_payload(
+                    store.get(&remote.id)?,
+                    previous.get("scope").and_then(serde_json::Value::as_str) == Some("global"),
+                    team_id.as_deref(), self.cloud_config.team_only && team_id.is_some(),
+                )?.payload)
+            }, result,
+        );
+        Ok(())
+    }
+
     fn apply_task_from_sync(
         &self,
         store: &dyn TaskStore,
@@ -2397,12 +2482,23 @@ impl CloudSyncer {
                 row_origin.as_deref(),
             )?;
             let remote_entry_id = remote_entry.id.clone();
-            match self.upsert_entry_lww(
+            let entry_outcome = self.upsert_entry_lww(
                 store,
                 remote_entry,
                 remote_updated_at,
                 &mut result.memory_fold_conflicts,
-            ) {
+            );
+            if entry_revision_id.as_deref() == Some(remote_entry_id.as_str()) {
+                self.settle_pulled_revision(
+                    EntityType::Entry, &remote_entry_id, entry_revision, &entry_outcome,
+                    row_origin.as_deref().is_some_and(|origin| project_ids_match(origin, current_project_id))
+                        && !result.memory_fold_conflicts.contains(&remote_entry_id),
+                    |_| Ok(serde_json::to_string(&store.get(&remote_entry_id)
+                        .or_else(|_| store.get_archived(&remote_entry_id))?)?),
+                    &mut result,
+                );
+            }
+            match entry_outcome {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_entries += 1;
                     self.note_pulled_authorship(
@@ -2413,11 +2509,6 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
-                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision)
-                        && id == &remote_entry_id
-                    {
-                        let _ = self.queue.record_revision(EntityType::Entry, id, revision);
-                    }
                 }
                 Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
@@ -2518,6 +2609,7 @@ impl CloudSyncer {
                     "personal_pull",
                 )
             };
+            let mut task_proofs_restored = true;
             if task_outcome.is_ok() {
                 if let Err(error) = restore_task_proofs(
                     self.push_cas_root.as_deref(),
@@ -2527,6 +2619,7 @@ impl CloudSyncer {
                     &trusted_proofs,
                     &qa_receipts,
                 ) {
+                    task_proofs_restored = false;
                     // A rejected proof stays rejected without discarding other
                     // task rows in this authenticated incremental batch.
                     result
@@ -2534,17 +2627,18 @@ impl CloudSyncer {
                         .push(format!("task {} proof restore: {error}", remote_task.id));
                 }
             }
+            if matches!(task_outcome, Ok(UpsertResult::Created | UpsertResult::Updated))
+                && let Some(block) = trusted_provenance.as_deref()
+            {
+                task_store.append_trusted_note(&remote_task.id, block)?;
+            }
+            if task_outcome.is_ok() && task_proofs_restored {
+                self.settle_task_revision(task_store, &remote_task, task_revision,
+                    &task_outcome, incoming_is_owner, &mut result)?;
+            }
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
-                    if let Some(block) = trusted_provenance.as_deref() {
-                        task_store.append_trusted_note(&remote_task.id, block)?;
-                    }
                     result.pulled_tasks += 1;
-                    if let Some(revision) = task_revision {
-                        let _ =
-                            self.queue
-                                .record_revision(EntityType::Task, &remote_task.id, revision);
-                    }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
                             task_id: remote_task.id,
@@ -3620,12 +3714,23 @@ impl CloudSyncer {
                 row_origin.as_deref(),
             )?;
             let remote_entry_id = remote_entry.id.clone();
-            match self.upsert_entry_lww(
+            let entry_outcome = self.upsert_entry_lww(
                 store,
                 remote_entry,
                 remote_updated_at,
                 &mut result.memory_fold_conflicts,
-            ) {
+            );
+            if entry_revision_id.as_deref() == Some(remote_entry_id.as_str()) {
+                self.settle_pulled_revision(
+                    EntityType::Entry, &remote_entry_id, entry_revision, &entry_outcome,
+                    row_origin.as_deref().is_some_and(|origin| project_ids_match(origin, current_project_id))
+                        && !result.memory_fold_conflicts.contains(&remote_entry_id),
+                    |_| Ok(serde_json::to_string(&store.get(&remote_entry_id)
+                        .or_else(|_| store.get_archived(&remote_entry_id))?)?),
+                    &mut result,
+                );
+            }
+            match entry_outcome {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_entries += 1;
                     self.note_pulled_authorship(
@@ -3636,11 +3741,6 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
-                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision)
-                        && id == &remote_entry_id
-                    {
-                        let _ = self.queue.record_revision(EntityType::Entry, id, revision);
-                    }
                 }
                 Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
@@ -3742,6 +3842,7 @@ impl CloudSyncer {
                 &task_sync_id,
                 "team_pull",
             );
+            let mut task_proofs_restored = true;
             if task_outcome.is_ok() {
                 if let Err(error) = restore_task_proofs(
                     self.push_cas_root.as_deref(),
@@ -3751,6 +3852,7 @@ impl CloudSyncer {
                     &trusted_proofs,
                     &qa_receipts,
                 ) {
+                    task_proofs_restored = false;
                     // A rejected proof stays rejected without discarding other
                     // task rows in this authenticated incremental batch.
                     result
@@ -3758,17 +3860,18 @@ impl CloudSyncer {
                         .push(format!("task {} proof restore: {error}", remote_task.id));
                 }
             }
+            if matches!(task_outcome, Ok(UpsertResult::Created | UpsertResult::Updated))
+                && let Some(block) = trusted_provenance.as_deref()
+            {
+                task_store.append_trusted_note(&remote_task.id, block)?;
+            }
+            if task_outcome.is_ok() && task_proofs_restored {
+                self.settle_task_revision(task_store, &remote_task, team_task_revision,
+                    &task_outcome, incoming_is_owner, &mut result)?;
+            }
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
-                    if let Some(block) = trusted_provenance.as_deref() {
-                        task_store.append_trusted_note(&remote_task.id, block)?;
-                    }
                     result.pulled_tasks += 1;
-                    if let Some(revision) = team_task_revision {
-                        let _ =
-                            self.queue
-                                .record_revision(EntityType::Task, &remote_task.id, revision);
-                    }
                     if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
                         result.task_status_transitions.push(TaskStatusTransition {
                             task_id: remote_task.id,

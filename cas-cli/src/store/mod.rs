@@ -171,6 +171,7 @@ pub use syncing::SyncingRuleStore;
 pub use syncing_entry::SyncingEntryStore;
 pub use syncing_skill::SyncingSkillStore;
 pub use syncing_task::SyncingTaskStore;
+pub(crate) use syncing_task::load_canonical_sync_payload;
 
 // Mock stores for testing
 #[cfg(test)]

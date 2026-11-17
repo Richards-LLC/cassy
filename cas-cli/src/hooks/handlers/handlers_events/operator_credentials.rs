@@ -93,87 +93,86 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
     }
 }
 
+/// A command that cannot be projected is refused: no weaker reading stands in
+/// for the per-statement projection. An unresolved directory may be any
+/// directory, so its statements are judged from every one that could matter.
 fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
-    if depth > 3 {
-        return false;
-    }
-    let mut cwd = initial_cwd.to_path_buf();
-    let mut directory_stack = Vec::new();
-    // Nested shells are not standalone listings, so their payloads never
-    // reach here with inert names.
+    if depth > 3 { return true; }
+    let Some(contexts) = super::pre_tool::shell_read_contexts(command, initial_cwd) else {
+        return true;
+    };
     let names_inert = depth == 0 && listed_names_stay_inert(command);
-    let statements = super::pre_tool::shell_statement_words(command);
-    let arguments = super::pre_tool::shell_statement_arguments(command);
-    for (statement_index, words) in statements.iter().enumerate() {
-        let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
-            continue;
-        };
-        let executable = Path::new(&words[command_index])
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&words[command_index])
-            .to_ascii_lowercase();
-        let args = &words[command_index + 1..];
-
-        // Inspect shell payloads as nested statement lists so a `cd` inside a
-        // `sh -c` or `bash -c` does not leak into the caller's working dir.
-        if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
-            for payload in shell_command_payloads(args) {
-                if shell_references_store(payload, &cwd, depth + 1) {
-                    return true;
-                }
+    for mut context in contexts {
+        let parents = context.command.matches("..").count().min(16);
+        let directories: Vec<PathBuf> = std::mem::take(&mut context.directories).into_iter()
+            .flat_map(|cwd| cwd_candidates(cwd, parents))
+            .collect();
+        let statements = super::pre_tool::shell_statement_words(&context.command);
+        let arguments = super::pre_tool::shell_statement_arguments(&context.command);
+        for (at, words) in statements.iter().enumerate() {
+            let Some(index) = super::pre_tool::unwrapped_command_index(words) else { continue; };
+            let executable = Path::new(&words[index]).file_name().and_then(|name| name.to_str())
+                .unwrap_or(&words[index]).to_ascii_lowercase();
+            let names_only = names_inert && statements.len() == arguments.len()
+                && arguments.get(at).is_some_and(|argv| {
+                    super::pre_tool::unwrapped_command_index(argv).is_some_and(|other| {
+                        argv[other] == words[index] && lists_names_only(&executable, &argv[other + 1..])
+                    })
+                });
+            if directories.iter().any(|cwd| statement_references_store(words, cwd, depth, names_only)) {
+                return true;
             }
-            continue;
         }
-        if executable == "eval" && shell_references_store(&args.join(" "), &cwd, depth + 1) {
-            return true;
-        }
+        if super::pre_tool::shell_heredoc_bodies(&context.command).iter().any(|body| {
+            directories.iter().any(|cwd| script_constructs_store_path(body, cwd))
+        }) { return true; }
+    }
+    false
+}
 
-        if matches!(executable.as_str(), "cd" | "pushd") {
-            if let Some(target) = cd_target(args) {
-                if path_references_store(target, &cwd, false) {
-                    return true;
-                }
-                if let Some(next_cwd) = resolve_path(target, &cwd) {
-                    if executable == "pushd" {
-                        directory_stack.push(cwd.clone());
-                    }
-                    cwd = next_cwd;
-                }
-            } else if let Some(home) = std::env::var_os("HOME") {
-                if executable == "pushd" {
-                    directory_stack.push(cwd.clone());
-                }
-                cwd = PathBuf::from(home);
-            }
-            continue;
-        }
-        if executable == "popd" {
-            if let Some(previous) = directory_stack.pop() {
-                cwd = previous;
-            }
-            continue;
-        }
-
-        // Parse actual argv, without `2>/dev/null`, but retain raw words for
-        // protected redirect targets below. Ambiguous statement alignment
-        // keeps the conservative read classification.
-        let names_only = names_inert
-            && statements.len() == arguments.len()
-            && arguments.get(statement_index).is_some_and(|argv| {
-                super::pre_tool::unwrapped_command_index(argv).is_some_and(|index| {
-                    argv[index] == words[command_index]
-                        && lists_names_only(&executable, &argv[index + 1..])
+/// The directories that stand for `cwd`. Each unknown entry takes, per store,
+/// the store's own component at that depth (or a stand-in below the store),
+/// the only spelling under which the directory could reach that store.
+fn cwd_candidates(cwd: Option<PathBuf>, parents: usize) -> Vec<PathBuf> {
+    let Some(cwd) = cwd else {
+        return unresolved_cwd_candidates(parents);
+    };
+    let unknown = std::ffi::OsStr::new(super::pre_tool::UNKNOWN_DIRECTORY);
+    if !cwd.components().any(|part| part.as_os_str() == unknown) {
+        return vec![cwd];
+    }
+    store_roots(Path::new("/"))
+        .iter()
+        .map(|root| {
+            let root: Vec<_> = root.components().collect();
+            cwd.components()
+                .enumerate()
+                .map(|(at, part)| match part.as_os_str() == unknown {
+                    true => root.get(at).map_or(std::ffi::OsStr::new("unresolved-cwd"), |part| part.as_os_str()),
+                    false => part.as_os_str(),
                 })
-            });
-        if statement_references_store(words, &cwd, depth, names_only) {
-            return true;
+                .collect()
+        })
+        .collect()
+}
+
+/// Lexically, a relative path from an unknown directory reaches a store only
+/// from inside it or from one of its ancestors, after any parent traversal.
+/// Each such directory, with up to `parents` stand-in children, covers it.
+fn unresolved_cwd_candidates(parents: usize) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for root in store_roots(Path::new("/")) {
+        for ancestor in root.ancestors() {
+            let mut candidate = ancestor.to_path_buf();
+            for _ in 0..=parents {
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate.clone());
+                }
+                candidate.push("unresolved-cwd");
+            }
         }
     }
-
-    super::pre_tool::shell_heredoc_bodies(command)
-        .iter()
-        .any(|body| script_constructs_store_path(body, &cwd))
+    candidates
 }
 
 fn statement_references_store(
@@ -412,12 +411,6 @@ fn shell_command_payloads(args: &[String]) -> Vec<&str> {
         .filter(|arg| !arg.starts_with('-'))
         .map(String::as_str)
         .collect()
-}
-
-fn cd_target(args: &[String]) -> Option<&str> {
-    args.iter()
-        .find(|arg| !matches!(arg.as_str(), "-L" | "-P" | "--"))
-        .map(String::as_str)
 }
 
 fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool {

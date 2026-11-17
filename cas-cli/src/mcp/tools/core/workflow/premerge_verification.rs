@@ -1069,6 +1069,7 @@ impl CasCore {
         crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_candidate_verification_handoff(
             &self.cas_root, queue.as_ref(), dispatch, task.assignee.as_deref().unwrap_or("worker"),
             location.as_deref().unwrap_or("Review the exact candidate bound to this dispatch."),
+            &automatic::retry_call(&self.cas_root, dispatch),
         ).map_err(fail)?;
         Ok(None)
     }
@@ -1287,8 +1288,19 @@ impl CasCore {
                     dispatch.state,
                     cas_types::VerificationDispatchState::Pending
                         | cas_types::VerificationDispatchState::Claimed
-                ) {
-                    self.emit_premerge_review_handoff(task, dispatch)?;
+                ) && self.emit_premerge_review_handoff(task, dispatch)?.is_some()
+                    && dispatch.state == cas_types::VerificationDispatchState::Pending
+                {
+                    // GH #2023: a retry after a failed attempt starts one
+                    // replacement; say so rather than "finish this verdict".
+                    let mut error = fail(format!(
+                        "task {}: merge held on verification dispatch {}. An automatic verifier replacement is scheduled on this exact dispatch. Approval continues the merge automatically; verdicts needing attention wake you. Do not spawn another verifier",
+                        task.id, dispatch.id
+                    ));
+                    error.data = Some(serde_json::json!({
+                        "reason": "verifier_replacement_scheduled", "dispatch_id": dispatch.id,
+                    }));
+                    return Err(error);
                 }
                 if dispatch.state == cas_types::VerificationDispatchState::TimedOut {
                     return Err(fail(format!(

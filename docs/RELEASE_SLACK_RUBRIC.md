@@ -61,7 +61,8 @@ cycle. Never push the bump to `main` directly, never push a release tag by
 hand, and never open a separate release PR.
 
 When the version change lands, `release.yml` adopts the archives the queue
-run built, audits and launch-tests the packaged assets, creates the annotated
+run built, checks the Linux executable against the prebuild's audited SHA-256
+and the macOS signature, launch-tests both packaged assets, creates the annotated
 tag and the GitHub release, and dispatches the install-path proof. The
 supervisor host installs within a minute (`scripts/install-on-publish.sh`),
 and the release notes end with the timer from PR opened to installed. Only
@@ -113,11 +114,11 @@ must state the measured time and whether it exceeded the recorded budget.
    body submitted once; Violet may split it into multiple Slack messages under
    the same parent. Save every returned part ID in order, the singular message
    ID and returned permalink, including both parent IDs for report delivery.
-3. After the four messages (including all returned parts), set `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
-   `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to those returned parent IDs and run
-   `scripts/release-train.sh <version> <epic-worktree> --report`. Attach the PDF
-   to the existing User thread through Violet `violet_post` with `kind: file`
-   and link the HTML from the existing Dev thread. Require uploaded-PDF
+3. After the four messages (including all returned parts), run
+   `CAS_RELEASE_TRAIN_REPORT_RECEIPT=<run-dir>/release-report.receipt
+   scripts/release-report-post.py vX.Y.Z <pdf> <html> <user-parent-id> <dev-parent-id>`.
+   It attaches the PDF to the existing User thread through Violet with
+   `kind: file` and links the HTML from the existing Dev thread. Require uploaded-PDF
    download, decode, page-count and source-hash checks before accepting delivery.
    Preserve the returned file permalink, User/Dev thread receipts, local PDF
    SHA-256/size, verified remote PDF SHA-256/size/page count, the HTML SHA-256,
@@ -135,7 +136,7 @@ must state the measured time and whether it exceeded the recorded budget.
    explicit same-origin loopback exception used by tests), never to external
    signed/private-provider URLs; it rejects plaintext endpoints outside that test
    exception and cross-origin or scheme-changing redirects before following them.
-   The train also
+   The adapter also
    re-hashes the local PDF and checks every remote evidence field agrees with
    the local artifact; local checks alone do not prove uploaded-file integrity.
    Preserve partial receipts and stop on failure; never retry an uncertain write.
@@ -326,10 +327,9 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 
 ### Runtime release
 
-- [ ] Version/changelog commit landed on `main` through a reviewed PR with required checks green
-- [ ] PR URL + required-check status surfaced before the explicit merge (no `--auto` / admin bypass)
+- [ ] Version/changelog commit landed on `main` through the epic PR's merge queue with required checks green (no admin bypass)
 - [ ] After every release-train version bump, regenerate `Cargo.lock` and verify `cargo metadata --locked` before tagging.
-- [ ] Release tag points at the fetched `origin/main` landing and is pushed
+- [ ] `release.yml` created the annotated tag on the `main` landing (never push a release tag by hand)
 - [ ] Workflow-created release has both Linux x86_64 and macOS ARM64 assets;
   `release-published-receipt.sh --write-draft` succeeded from fresh downloads
   before any digest enters the draft (a local audit archive is not

@@ -455,7 +455,7 @@ impl CloudSyncer {
                         upserts_by_project
                             .entry(target_project.to_string())
                             .or_default()
-                            .push((item, value));
+                            .push((item, self.with_base_revision(item, value)));
                     }
                     Err(_) => {
                         let _ = self
@@ -508,6 +508,20 @@ impl CloudSyncer {
                 Ok(response) => {
                     self.rearm_after_successful_team_contact(team_id, &mut errors);
                     if let Some(body) = response.as_ref() {
+                        // Preserve a rejected known base until reconciliation;
+                        // clearing it would turn the next team push into an
+                        // unguarded timestamp write over unseen peer notes.
+                        if matches!(entity_type, EntityType::Task | EntityType::Entry)
+                            && let Some(accepted) = body.synced.get(entity_key)
+                            .and_then(|detail| detail.get("accepted"))
+                            .and_then(serde_json::Value::as_object)
+                        {
+                            for (id, receipt) in accepted {
+                                if let Some(revision) = crate::cloud::parse_wire_revision(receipt.get("revision")) {
+                                    let _ = self.queue.record_revision(entity_type, id, revision);
+                                }
+                            }
+                        }
                         self.maybe_adopt_team_canonical_id(body);
                     }
 
@@ -637,7 +651,8 @@ impl CloudSyncer {
                                 };
                                 let diagnostic = match failure {
                                     PushItemizedFailure::Rejection(rejection) => format!(
-                                        "permanent cloud rejection: reason={}; entity={entity_key}; id={}; existing_project={}",
+                                        "{}: reason={}; entity={entity_key}; id={}; existing_project={}",
+                                        if reason == "revision_conflict" { "revision_reconciliation_required" } else { "cloud rejection" },
                                         rejection.reason.as_str(),
                                         rejection.id,
                                         rejection.existing_canonical_id,
@@ -650,7 +665,8 @@ impl CloudSyncer {
                                         raw_response
                                     ),
                                 };
-                                if matches!(failure, PushItemizedFailure::Rejection(rejection) if rejection.reason.is_permanent())
+                                let _ = self.queue.record_row_outcome(item.id, "rejected", Some(&reason));
+                                if reason == "revision_conflict" || matches!(failure, PushItemizedFailure::Rejection(rejection) if rejection.reason.is_permanent())
                                 {
                                     let _ = self.queue.park_failed(
                                         item.id,

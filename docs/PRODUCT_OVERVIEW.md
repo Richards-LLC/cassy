@@ -423,6 +423,47 @@ After publishing the merge, Cassy makes a bounded attempt to cancel that SHA's
 
 Resumed delivery checks preserve task-owned first-parent intervals across train retargets and use surviving journey changes to determine stability proof. An unchanged restored journey does not need new test identities; current ambiguous test changes and foreign task ownership still refuse.
 
+The JavaScript stability runner starts each test file from the nearest ancestor
+holding that runner's config (`jest.config.*`, `vitest.config.*` or
+`vite.config.*`, `playwright.config.*`, or a `jest` key in package.json) and
+passes that config explicitly; without one it uses the nearest package.json.
+The changed-test stability refusal at park names the exact capped-runner command
+for each changed test's runner, taken from the file's runner import or the
+nearest runner config, package.json dependency or script, or local runner
+executable. When nothing identifies the runner, it lists the Jest, Vitest and
+Playwright commands separately.
+
+- **Review ownership follows recorded handoffs** — When a supervisor retires,
+  its pending review can follow the same-machine successor that claimed its
+  session-end receipt. The review keeps its identity and proof, records the
+  former owner, and protects any live verifier from replacement.
+
+Factory credential checks use each shell statement's effective working-directory alternatives from the existing shell-effects recognizer. Child scopes restore the parent directory and directory stack. A directory change before a pipe or inside a background list is undone; one after a pipe, or anywhere in a command that defines a function or runs a piped or background compound, is kept only as an alternative, and function bodies are judged from every reachable directory. A statement whose working directory is unresolved is judged from every directory that could reach a store; a glob directory keeps its literal ancestors. A command the recognizer cannot project is refused, by the workspace contract where it runs and otherwise by the credential gate. The command grammar and file-open policy stay unchanged.
+
+Worker SessionStart omits the role-wide current worker handoff: a worker's assigned task brief and its task-artifact `HANDOFF.md` carry its work, so a handoff saved by another worker for a different task never becomes startup instructions. Supervisor handoffs keep their machine-scoped selection.
+
+The daemon-owned pre-merge verifier on the Codex recipe pre-approves only
+Cassy's own MCP server, keeping its read-only sandbox. A merge retry on a
+pending dispatch whose last verifier attempt failed reports that one
+replacement is scheduled on the same dispatch, and the factory daemon logs a
+refused verifier launch.
+
+Conversation history preserves upward reading intent when several scroll events share one paint, allowing the oldest cached edge to request the next page without another gesture.
+
+Closing Raw output returns focus to its header button only when focus was lost, so a control the operator moved to meanwhile, such as Undo, keeps keyboard focus through a later catalog rebuild.
+
+A train merge entry that needs a pre-merge verdict starts the daemon-owned
+verifier during the daemon's resume pass, and the queue continues at the same
+position once the verdict lands. While a train owns the target, the verifier
+handoff and recovery notices name `factory action=train_merge`; retrying it
+restarts a stopped verifier on the same pending dispatch.
+
+Task and memory sync includes known server revisions on upserts and records accepted revisions. Rejected writes retain their known base and queued edit until reconciliation. Personal and team task/memory pulls refresh queued bodies together with the observed revision, including eligible local-wins task guards; task notes merge once with the established deduplication rules independently of lifecycle. Rebuilt task payloads use the canonical serializer and preserve their queued scope/origin policy. Other entity kinds keep their prior compatibility path. A revision conflict waits visibly for a pull and reconciliation and is rearmed after that succeeds. Foreign, malformed, concurrent-mutation and unresolved delivery or execution conflicts cannot authorize a fresh base. Atomic merging of concurrent task-note appends remains owned by petra-stella-cloud#268; this client change does not claim to implement that server operation.
+
+Artifact lookup distinguishes missing publication metadata from byte availability. If neither the local ledger nor synced task notes contain the publication reference, the diagnostic directs investigation to the publisher's Cloud reference instead of promising that another receiver sync will repair it.
+
+- **Recorded delivery identity** - Cassy treats commits it recorded for a task, and commits a supervisor granted with `merge_source`, as the task's own at start, close and rebind, provided they sit under an anchor the task still holds. Replacement, rebound and retargeted deliveries are no longer refused just because their own cycle commits name another task in the subject line. A branch that only has a retired anchor or a bare target-sync merge still counts as undelivered.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -560,6 +601,8 @@ identifiers; assertions on their surrounding human error sentences remain refuse
 The Focus epic picker lists titled live epics owned by the selected supervisor or its verification identity, excludes the current focus, and puts the release train first, then priority. Operation feedback and Undo use titles; desktop choices scroll within a short menu. Worker cards in Tasks & progress keep the worker name visible after its avatar on desktop and phone, independently of Team. Commander's Tasks & progress pane lists the selected project's live epics after the release header, joined across paired machines. Each row and the release header show the factory TUI's open / in progress / merged split with a segmented bar and live worker dots; blocked epics lead, and a row expands in place to its tasks. Other projects' epics and untitled epics never appear, and missing counts stay unreported. Commander’s lazy Team tab sits beside a supervisor conversation. It uses the same scoped staffing and epic progress model as Tasks & progress: task-led worker lanes, merge metrics, and an operator action queue sourced only from unresolved conversation requests. Request IDs and optional task IDs survive live delivery and history replay; the ask pinned above the composer is not duplicated. Agent merge, verification, sync and blocked states remain staffing details. Closed or cancelled epics and trains contribute no active navigation or quiet count; planned and paused work remains visible. Stale peer rows are labelled last known, including a reported reconciliation identity that differs from the selected conversation. A missing release identity remains unknown. Blocked tasks and stalled workers lead ahead of merge waits, while equal-priority workers keep roster order. The daemon reports harness/model, task start and durable lifecycle receipts; missing evidence stays unreported. Existing hub events refresh Team without an extra polling loop, while the browser updates elapsed text locally. The view includes keyboard tabs, phone stacking, forced colors and reduced motion, with no terminal or raw work output.
 
 The conversation's phase line uses the selected supervisor's recorded lifecycle start/end and the daemon's observation time. A local clock displays elapsed duration; waiting, completed, stale and disconnected states stay still. Missing phases or start times stay unreported. The ordinary status stream supplies these safe facts while Show work remains off; it exposes no tool input, output or reasoning text. A peer's retained events and catalog refresh leave unchanged conversations' controls alone; their own events and health heartbeats keep status fresh.
+
+Accounting entries use the report skill's saved-chart/source validator before rendering balanced journal grids; the simple/compound before-after example keeps account identities, numeric cells, memos and revision changes separate.
 
 <!-- cas:project-overview
 # Product paths the G6 park gate and overview freshness watch. Keep when regenerating.

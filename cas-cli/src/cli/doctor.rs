@@ -2591,7 +2591,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             checks.push(Check {
                 name: "database".to_string(),
                 status: CheckStatus::Warning,
-                message: "Using legacy markdown storage. Consider migrating with 'cas migrate'."
+                message: "Using legacy markdown storage."
                     .to_string(),
             });
         }
@@ -3232,7 +3232,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     } else if args.foreign_rows {
         anyhow::bail!(
             "`cas doctor --foreign-rows` needs a SQLite database at {}; this project uses legacy \
-             markdown storage. Migrate with `cas migrate` first.",
+             markdown storage.",
             cas_root.join("cas.db").display()
         );
     }
@@ -5984,6 +5984,8 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         backlog.next_step
     } else if held_notice.is_some() && rejections.is_empty() {
         "Resolve the held personal rows above by reviewing `cas cloud queue migrate-to-team` (rows it reports as already on the team are pull echoes: preview `cas cloud queue --purge-pull-echoes --dry-run`); `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    } else if rejections.iter().any(|(reason, _)| reason.eq_ignore_ascii_case("revision_conflict")) {
+        crate::cloud::push_reason_hint("revision_conflict")
     } else if rejections.is_empty()
         || rejections
             .iter()

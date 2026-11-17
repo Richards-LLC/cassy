@@ -5,6 +5,7 @@ No builds are performed by plan/history/record. Unknown inputs select the worksp
 module uncertainty selects the affected crate, never an empty successful run.
 """
 import argparse
+import datetime
 import io
 import json
 import os
@@ -541,7 +542,7 @@ def base_failure_proof(base, configuration, failures):
 
 
 # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."
-def lane_attribute(root, base, failures, destination, configuration=None):
+def lane_attribute(root, base, failures, destination, configuration=None, base_source="no attribution base"):
     """Reuse exact-base failures, replay misses, and fail closed on incomplete work."""
     started = time.monotonic()
     # Twenty minutes for lookup/preparation/build/test, within the existing
@@ -587,7 +588,11 @@ def lane_attribute(root, base, failures, destination, configuration=None):
         finally:
             result["timings"][phase] = time.monotonic() - phase_start
             save()
-    if pending:
+    if pending and not base:
+        # cas-0e97: nothing to replay at; never pass git an empty ref.
+        result["error"] = f"base unresolved: {base_source}"
+        print(f"Lane impact: {result['error']}", file=sys.stderr)
+    elif pending:
         try:
             preparation = time.monotonic()
             try:
@@ -657,7 +662,8 @@ def lane_attribute(root, base, failures, destination, configuration=None):
     lines = [f"Lane impact: inherited from base {base[:12]} (fails there too): {f['binary']} {f['test']}" for f in result["inherited"]]
     lines += [f"Lane impact: caused by this delivery (fails again on a rerun here, passes or is absent at base): {f['binary']} {f['test']}" for f in result["caused"]]
     lines += [f"Lane impact: unattributed (passed on a rerun here and at base {base[:12]}; not proof this delivery caused it): {f['binary']} {f['test']}" for f in result["unattributed"]]
-    lines += [f"Lane impact: unresolved at base: {f['binary']} {f['test']}" for f in result["unresolved"]]
+    lines += [f"Lane impact: own failure, base unresolved ({base_source}): {f['binary']} {f['test']}" if not base
+              else f"Lane impact: unresolved at base: {f['binary']} {f['test']}" for f in result["unresolved"]]
     print("\n".join(lines))
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
@@ -684,19 +690,46 @@ def lane_base(root, recorded_ref, inferred):
 
 
 # cas-rule: rule-176 scope: "(4) Run tests only for what changed. Plumbing changes get a smoke check, not the full suite."
+OWN_JOB = "Scoped Validation — impact own tests"
+
+
+def lane_overrun(root, args):
+    """Name the plan and elapsed time of an own-tests job that ended without a
+    verdict (cas-3a12). A hosted runner that stops responding uploads no log
+    and runs no always() step, so its timeout reads only as "cancelled"."""
+    selection = plan(root, args.base_sha, args.zero_base_ref, args.history, delivery=True)
+    split = lane_split(root, selection)
+    _, fetch = github_fetcher()
+    run, attempt = os.environ["GITHUB_RUN_ID"], os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+    jobs = json.loads(fetch(f"/actions/runs/{int(run)}/attempts/{int(attempt)}/jobs?per_page=100"))["jobs"]
+    job = next(job for job in jobs if job["name"].endswith(OWN_JOB))
+    stamp = lambda value: datetime.datetime.fromisoformat(value.replace("Z", "+00:00")) if value else datetime.datetime.now(datetime.timezone.utc)
+    minutes = (stamp(job["completed_at"]) - stamp(job["started_at"])).total_seconds() / 60
+    print(f"::error title=Lane impact overrun::{OWN_JOB} ended {job['conclusion'] or 'unfinished'} after {minutes:.1f} min "
+          f"(budget {args.budget_minutes} min) with a {selection['mode']} plan "
+          f"({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}")
+    return 1
+
+
 def lane(root, args):
-    """Lane CI phases: plan, own (builds and runs own tests), ring shards and
-    attribute (rerun a phase's failures at the base)."""
+    """Lane CI phases: plan, own (builds and runs own tests), ring shards,
+    attribute (rerun a phase's failures at the base) and overrun."""
     out = Path(args.out)
     outputs = {}
+    if args.phase == "overrun":
+        return lane_overrun(root, args)
     if args.phase == "plan":
-        base, source = lane_base(root, args.recorded_base_ref, args.base_sha)
         selection = plan(root, args.base_sha, args.zero_base_ref, args.history, delivery=True)
+        # cas-0e97: infer from the resolved merge-base, never the raw BASE_SHA,
+        # which is empty or all zeros on a branch's first push.
+        base, source = lane_base(root, args.recorded_base_ref, selection.get("base", ""))
+        if not base:
+            source = "neither a recorded start base nor a target merge-base resolved"
         selection["attribution_base"] = base
         selection["base_source"] = "live target merge-base"
         selection["attribution_base_source"] = source
         print(f"Lane impact base: {selection.get('base', args.base_sha)} (live target merge-base)")
-        print(f"Lane attribution base: {base or args.zero_base_ref} ({source})")
+        print(f"Lane attribution base: {base or 'none'} ({source})")
         selection["configuration"] = proof_configuration(root)
         split = lane_split(root, selection)
         write(out, {"plan": selection, "split": split})
@@ -709,7 +742,8 @@ def lane(root, args):
         selection, split = saved["plan"], saved["split"]
         if args.phase == "attribute":
             receipt = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())
-            return lane_attribute(root, selection.get("attribution_base", selection["base"]), receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"), receipt.get("configuration"))
+            return lane_attribute(root, selection.get("attribution_base", selection.get("base", "")), receipt["failures"], out.with_name(f"{args.receipt}-attribution.json"),
+                                  receipt.get("configuration"), selection.get("attribution_base_source", "no attribution base"))
         source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
         receipt = out.with_name(f"{args.phase}-receipt.json")
         status, failed = 0, False
@@ -720,7 +754,12 @@ def lane(root, args):
         else:
             print("Lane impact: no own tests; the ring follows")
         outputs = {"failed": str(failed).lower()}
-        if args.phase == "own" and (status == 0 or failed):
+        if args.phase == "own" and (status == 0 or failed) and selection["mode"] != "scoped":
+            # A whole-workspace ring would rerun the full suite in a slim lane;
+            # the train's full set owns it (cas-3a12).
+            print(f"Lane impact: whole-workspace plan ({'; '.join(selection['reasons'])}); the ring is left to the train full set")
+            outputs.update({"ring-shards": "[]", "ring-total": "0", "ring-tests": "0"})
+        elif args.phase == "own" and (status == 0 or failed):
             ring = lane_count(root, source, split["ring"])
             shards = min(3, -(-ring // 1500))
             outputs.update({"ring-shards": json.dumps(list(range(1, shards + 1))), "ring-total": str(shards), "ring-tests": str(ring)})
@@ -820,7 +859,8 @@ def record(plan, logs, status, elapsed, destination, role):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize", "lane"])
-    parser.add_argument("--phase", choices=["plan", "own", "ring", "attribute"], default="plan")
+    parser.add_argument("--phase", choices=["plan", "own", "ring", "attribute", "overrun"], default="plan")
+    parser.add_argument("--budget-minutes", type=int, default=45)
     parser.add_argument("--receipt", choices=["own", "ring"], default="own")
     parser.add_argument("--archive", default="lane-impact.tar.zst")
     parser.add_argument("--shard", default="1/1")

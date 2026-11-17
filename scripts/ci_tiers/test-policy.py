@@ -600,13 +600,13 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         self.assertEqual(
             {job['name'] for job in slim_jobs.values()},
             {'Classify CI diff', 'Docs Lint', 'Scoped Validation (fast)', 'Scoped Validation (factory/PR)',
-             'Scoped Validation — impact own tests',
+             'Scoped Validation — impact own tests', 'Scoped Validation — impact overrun',
              'Scoped Validation — impact ring ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}',
              'Scoped Validation — Commander journeys ${{ matrix.shard }}/${{ needs.ci-diff.outputs.journey-shard-total }}'},
             'merge admission and the CI watchers read these exact check names')
         # cas-2e1b: the train's impact selection runs on hosted runners for a
         # Rust diff, own tests first; ring shards wait for them (fail fast).
-        impact = {name: slim_jobs.pop(name) for name in ('lane-impact', 'lane-impact-ring', 'lane-journeys')}
+        impact = {name: slim_jobs.pop(name) for name in ('lane-impact', 'lane-impact-overrun', 'lane-impact-ring', 'lane-journeys')}
         self.assertEqual(impact['lane-impact-ring']['needs'], 'lane-impact')
         self.assertEqual({job['runs-on'] for job in impact.values()}, {'ubuntu-latest'})
         for slim, unaffected in itertools.product(('true', ''), ('true', 'false')):

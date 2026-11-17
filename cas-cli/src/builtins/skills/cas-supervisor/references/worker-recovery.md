@@ -54,9 +54,10 @@ Classify the failure before you retry. The same brief on the same cause fails th
 | Model tool errors | The worker keeps mis-calling or looping on a tool | Respawn the same brief on a different model. |
 | Wrong approach | Wrong problem solved, design rejected, brief misread | Rewrite the brief to name what was wrong; use a fresh worker. |
 | Environment or tooling | Missing binary, denied path, broken worktree, stale Cassy binary, CI infrastructure | Fix the environment first; no retry fixes it. |
-| Same failure twice | A retry fails the same way | Stop. Write down the premise you retried on and escalate, or file the CAS bug ([filing-cas-bugs.md](filing-cas-bugs.md)). |
+| Pre-merge rejection | The first eligible non-behavioural rejection in a delivery work cycle | Cassy automatically reopens it to the same live assignee and sends the findings directly, once per work cycle. It requires at least one blocking finding and every finding must have `awkward` or `cosmetic` triage with category `documentation`, `evidence`, `receipt`, `incomplete_close_reason`, `unnecessary_complexity`, `missing_validation` or `code_duplication`. Missing findings/triage, behavioural, security, correctness and money/data-loss findings hold for the supervisor, as does an unavailable worker. Never infer eligibility from summary prose. The dispatch-bound portable receipt consumes the budget across the corrective delivery; another rejection holds for the supervisor. An unchanged source cannot start another review. |
+| Same failure twice outside that review policy | A retry fails the same way | Stop. Write down the premise you retried on and escalate, or file the CAS bug ([filing-cas-bugs.md](filing-cas-bugs.md)). |
 
-Cap it at two retries per task, then escalate. Before reassigning a dead worker's task, write the report it never sent:
+Use the pre-merge rejection policy above for review repairs; cap other retries at two per task, then escalate. An automatic repair round never approves or publishes the delivery: it still needs an independent PASS on its corrected candidate. Before reassigning a dead worker's task, write the report it never sent:
 `task action=notes id=<task-id> note_type=blocker notes="BLOCKED <tip sha or none>: worker died (<failure mode>); landed: <commits or nothing>"`.
 
 ## Worker Failure Recovery

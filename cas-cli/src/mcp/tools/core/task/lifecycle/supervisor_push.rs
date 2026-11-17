@@ -518,6 +518,21 @@ pub(crate) fn queue_merged_lane_parked_notice(
     })
 }
 
+pub(crate) fn premerge_repair_worker_available(cas_root: &Path, task: &cas_types::Task) -> Result<bool, String> {
+    Ok(task.assignee.is_some() && matches!(auto_unblock_worker_target(cas_root, task)?, AutoUnblockWorkerTarget::Worker(_)))
+}
+
+/// The dispatch is the repair receipt and queue identity, including after restart.
+pub(crate) fn queue_premerge_repair_notice(
+    cas_root: &Path, task: &cas_types::Task, dispatch_id: &str, findings: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| (
+        format!("cassy-premerge-repair:{dispatch_id}:worker:{worker_name}"),
+        format!("Task {} is Open again after a non-behavioural review rejection ({dispatch_id}). Findings: {findings}\nStart task {} again, apply the findings on your delivery branch, commit, push and close. A new source commit and independent approval are required. This is the single automatic repair round; another rejection holds for the supervisor.", task.id, task.id),
+        format!("Review repair returned to worker: {}", task.id),
+    ))
+}
+
 /// cas-46ea: tell the assigned worker, once per verdict, that a rejected
 /// verdict returned its merged delivery, with the findings to fix.
 pub(crate) fn queue_rejected_merge_reopen_notice(

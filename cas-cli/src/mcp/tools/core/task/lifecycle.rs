@@ -2659,11 +2659,23 @@ impl CasCore {
                 data: None,
             })?;
 
+        // Artifact-only work does not own the shared repository checkout.
+        // Keep branch checks and start boundaries for isolated worker trees.
+        let shared_no_code_start = task.execution_note.as_deref() == Some("no-code")
+            && declared_repo_context.as_ref().is_some_and(|context| {
+                worker.as_ref().is_some_and(|worker| {
+                    let checkout = worker.metadata.get("clone_path")
+                        .map(std::path::Path::new).unwrap_or(&context.repo_root);
+                    checkout.canonicalize().is_ok_and(|root| root == context.repo_root)
+                })
+            });
+
         // Use the commit guard's identity predicate before claiming QA or
         // mutating the task, lease or checkout. A foreign factory ref must not
         // silently fall back to the reusable worker lane (cas-b153).
         // gate[G-10 start]: Worker lane identity (foreign, occupied, parked, dirty or unresolved lane)
-        if let Some(worker) = worker.as_ref()
+        if !shared_no_code_start
+            && let Some(worker) = worker.as_ref()
             && let Some(checkout) = worker.metadata.get("clone_path")
                 .map(std::path::Path::new)
                 .or_else(|| declared_repo_context.as_ref().map(|context| context.repo_root.as_path()))
@@ -2847,7 +2859,7 @@ impl CasCore {
         let mut delivery_base_repo = None;
         let mut reassigned_branch = None;
         let mut current_checkout_branch = None;
-        let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
+        let reused_factory_branch_reset = if is_worker && !shared_no_code_start && task.deliverables.work_target.is_some() {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do
                 // not guess from the worker's incidental checkout when legacy

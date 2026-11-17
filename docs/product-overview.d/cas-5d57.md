@@ -1,3 +1,5 @@
+## Primary Journeys
+
 ### Violet fallback, client findings and macOS update identity
 
 `cas violet post` accepts explicit reply intent and generation fields alongside a stable request ID. `cas violet react` adds or removes reactions. Reconciled reply failures retain provider diagnostics without repeating writes.

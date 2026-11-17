@@ -551,13 +551,21 @@ fn test_mcp_initialize() {
     let sandbox = CasSandbox::new();
 
     let mut client = McpTestClient::spawn(&sandbox);
-    let response = client.initialize();
+    // A client offering a newer revision is answered with the one Cassy serves.
+    let response = client.send_request(
+        "initialize",
+        Some(json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "cas-test-client", "version": "1.0.0"}
+        })),
+    );
 
     assert!(response.error.is_none(), "Initialize should succeed");
     assert!(response.result.is_some(), "Should have result");
 
     let result = response.result.unwrap();
-    assert!(result.get("protocolVersion").is_some());
+    assert_eq!(result["protocolVersion"], "2025-03-26");
     assert!(result.get("serverInfo").is_some());
     assert!(result.get("capabilities").is_some());
 
@@ -1038,6 +1046,10 @@ fn test_mcp_tool_call_invalid_arguments() {
         },
         "Should indicate error for missing required field"
     );
+
+    // A mistyped argument is a JSON-RPC invalid-params error, not a tool result.
+    let response = client.call_tool("task", json!({"action": "list", "limit": "many"}));
+    assert_eq!(response.error.as_ref().map(|error| error.code), Some(-32602));
 }
 
 #[test]

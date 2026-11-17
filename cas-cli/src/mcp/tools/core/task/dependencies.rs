@@ -278,16 +278,15 @@ impl CasCore {
             req.from_id, req.to_id
         );
         append_split_claim_cleanup(&mut response, split_cleanup);
-        Ok(CallToolResult {
-            structured_content: Some(serde_json::json!({
-                "removed_dependency": {
-                    "from_id": req.from_id,
-                    "to_id": req.to_id,
-                    "dep_type": dep_type,
-                }
-            })),
-            ..Self::success(response)
-        })
+        let mut result = Self::success(response);
+        result.structured_content = Some(serde_json::json!({
+            "removed_dependency": {
+                "from_id": req.from_id,
+                "to_id": req.to_id,
+                "dep_type": dep_type,
+            }
+        }));
+        Ok(result)
     }
 }
 

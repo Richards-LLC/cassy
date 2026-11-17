@@ -2273,7 +2273,7 @@ mod tests {
             crate::mcp::tools::service::mutation_receipt::run_on_blocking_pool(async move {
                 let result = worker.build_verification_candidate_sync(&task, &build_repo,
                     "factory/w", "main", digest, None).map(|candidate| {
-                    rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(candidate.source_sha)])
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(candidate.source_sha)])
                 });
                 let _ = done.send(());
                 result

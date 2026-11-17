@@ -105,8 +105,8 @@ fn test_server_protocol_version() {
 
     let info = service.get_info();
 
-    // Should use the expected protocol version
-    assert_eq!(info.protocol_version, rmcp::model::ProtocolVersion::LATEST);
+    // The handshake keeps the revision clients have always negotiated.
+    assert_eq!(info.protocol_version, rmcp::model::ProtocolVersion::V_2025_03_26);
 }
 
 #[tokio::test]

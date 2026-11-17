@@ -7897,7 +7897,7 @@ impl CasCore {
         let note = self.advance_queue_after_delivery(&id).await;
         match note {
             Ok(Some(note)) => if let Ok(result) = result.as_mut() {
-                result.content.push(rmcp::model::Content::text(note));
+                result.content.push(rmcp::model::ContentBlock::text(note));
             },
             Err(error) => tracing::warn!(task_id=%id, %error, "worker task queue advancement deferred"),
             Ok(None) => {},
@@ -7926,6 +7926,8 @@ impl CasCore {
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
+        #[cfg(test)]
+        crate::async_runtime::stack_probe::mark("close_body");
         let _phase = crate::mcp::tools::service::mutation_receipt::phase("close_gates");
         let caller_task = format!("{}task", self.guidance_prefix());
         if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
@@ -28981,7 +28983,7 @@ mod merge_state_gate_tests {
             "{response:?}"
         );
         assert_eq!(response.is_error, Some(true));
-        assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff))));
+        assert!(response.content.iter().any(|content| matches!(content, rmcp::model::ContentBlock::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff))));
         let message = format!("{response:?}");
         assert!(
             message.contains("epic/current-cas-new-parent")
@@ -29181,8 +29183,8 @@ mod merge_state_gate_tests {
         let text = response
             .content
             .iter()
-            .filter_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -29304,8 +29306,8 @@ mod merge_state_gate_tests {
             let response = fixture.service.task(Parameters(serde_json::from_value(serde_json::json!({
                 "action":"close", "id":fixture.task_id, "reason":reason,
             })).unwrap())).await.unwrap();
-            let text = response.content.iter().filter_map(|item| match &item.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+            let text = response.content.iter().filter_map(|item| match item {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None,
             }).collect::<Vec<_>>().join("\n");
             if marked < 3 {
                 assert!(text.contains("RULE REFERENCES REQUIRED"), "unmarked sites must refuse before park: {text}");
@@ -29880,8 +29882,8 @@ mod merge_state_gate_tests {
         request.reason = Some("worker cannot grant its own override".into());
         let response = core.cas_task_close(Parameters(request)).await.unwrap();
         assert_eq!(response.is_error, Some(true));
-        assert!(response.content.iter().any(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => text.text.contains("supervisor"),
+        assert!(response.content.iter().any(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => text.text.contains("supervisor"),
             _ => false,
         }), "the worker must receive the actual refusal: {response:?}");
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
@@ -29902,7 +29904,7 @@ mod merge_state_gate_tests {
         std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = './check'\n").unwrap();
         let result = core.cas_task_close(Parameters(base_req(&epic.id))).await.unwrap();
         assert_eq!(result.is_error,Some(true));
-        assert!(result.content.iter().any(|c| matches!(&c.raw,rmcp::model::RawContent::Text(t) if t.text.contains("POST-RELEASE CHECK pending"))),"{result:?}");
+        assert!(result.content.iter().any(|c| matches!(c,rmcp::model::ContentBlock::Text(t) if t.text.contains("POST-RELEASE CHECK pending"))),"{result:?}");
         assert_eq!(tasks.get(&epic.id).unwrap().status,TaskStatus::InProgress);
     }
 
@@ -30868,14 +30870,14 @@ mod merge_state_gate_tests {
         sibling.deliverables.factory_branch_anchor = Some(b.clone());
         tasks.add(&sibling).unwrap();
         let held = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
-        let handoff = held.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
+        let handoff = held.content.iter().any(|content| matches!(content, rmcp::model::ContentBlock::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
         let held = format!("{held:?}");
         assert!(handoff && held.contains(&b), "{held}");
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(a.as_str()));
         sibling.status = TaskStatus::Closed;
         tasks.update(&sibling).unwrap();
         let response = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
-        let handoff = response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
+        let handoff = response.content.iter().any(|content| matches!(content, rmcp::model::ContentBlock::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
         let text = format!("{response:?}");
         let parked = tasks.get(&task.id).unwrap();
         assert_ne!(parked.status, TaskStatus::Closed, "{text}");
@@ -31813,8 +31815,8 @@ esac
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -31994,8 +31996,8 @@ esac
             let service = &service;
             async move {
                 let response = service.task(Parameters(request)).await.unwrap();
-                let text = response.content.into_iter().filter_map(|content| match content.raw {
-                    rmcp::model::RawContent::Text(text) => Some(text.text),
+                let text = response.content.into_iter().filter_map(|content| match content {
+                    rmcp::model::ContentBlock::Text(text) => Some(text.text),
                     _ => None,
                 }).collect::<Vec<_>>().join("\n");
                 (response.is_error == Some(true), text)
@@ -32091,8 +32093,8 @@ esac
         });
         let response = service.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
         assert_eq!(response.is_error, Some(true), "an unshipped epic cannot waive review");
-        let text = response.content.iter().filter_map(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+        let text = response.content.iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()), _ => None,
         }).collect::<Vec<_>>().join("\n");
         // Backtick-delimited MCP payloads are the refusal's copyable interface.
         // Consume parameters, not prose; fill only the documented placeholders.
@@ -32233,8 +32235,8 @@ esac
             response
                 .content
                 .into_iter()
-                .filter_map(|content| match content.raw {
-                    rmcp::model::RawContent::Text(text) => Some(text.text),
+                .filter_map(|content| match content {
+                    rmcp::model::ContentBlock::Text(text) => Some(text.text),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -32434,8 +32436,8 @@ esac
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -32595,8 +32597,8 @@ esac
             })).unwrap();
             service.task(Parameters(request)).await.unwrap()
         };
-        let text = response.content.into_iter().filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        let text = response.content.into_iter().filter_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         let after = store.get(&task.id).unwrap();
         let rounds = cas_store::list_qa_passes(&cas_dir, &task.id).unwrap();
@@ -32740,8 +32742,8 @@ esac
         let text = response
             .content
             .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -32972,8 +32974,8 @@ esac
         let text = response
             .content
             .iter()
-            .filter_map(|content| match &content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+            .filter_map(|content| match content {
+                rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()

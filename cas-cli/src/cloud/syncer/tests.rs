@@ -5966,47 +5966,81 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     })).unwrap())).await.is_err());
     assert_eq!(cas_store::get_verification_dispatch(&reviewer, &invalid_dispatch.id).unwrap().state,
         cas_types::VerificationDispatchState::Invalidated);
+    let decision = "Verifier rejected the delivery; add the missing guard.";
     core.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
-        id: parked.id.clone(),
-        reason: "Verifier rejected the delivery; add the missing guard.".into(),
-    })).await.unwrap();
-    // Check before appending a note: append_note already syncs, which would
-    // otherwise hide a request_changes write that never queued its own row.
-    let verdict_queue = SyncQueue::open(&reviewer).unwrap();
-    let verdict_rows = verdict_queue.pending_for_team("review-team", 10, 5).unwrap();
-    assert!(verdict_rows.iter().any(|item| item.entity_id == parked.id));
-    let discovery = "Peer verifier found the guard missing on the retry path.";
-    core.cas_task_notes(Parameters(crate::mcp::tools::TaskNotesRequest {
-        id: parked.id.clone(), note_type: "discovery".into(),
-        note: discovery.into(),
-        supervisor_override: None, reason: None,
-    })).await.unwrap();
-    core.cas_task_reopen(Parameters(crate::mcp::tools::TaskReopenRequest {
-        id: closed.id.clone(), reason: Some("Regression found after release.".into()),
+        id: parked.id.clone(), reason: decision.into(),
     })).await.unwrap();
 
-    let queued = SyncQueue::open(&reviewer).unwrap().pending_for_team("review-team", 10, 5).unwrap();
-    let rows: Vec<serde_json::Value> = queued.iter()
-        .filter_map(|item| item.payload.as_deref())
-        .map(|payload| serde_json::from_str(payload).unwrap())
-        .collect();
+    // cas-08e0: transport the real queue before any later note can mask a
+    // missing verdict, then repeat with the actual AC-update handler.
+    let remote = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let writing = remote.clone();
+    Mock::given(method("POST")).and(path("/api/teams/review-team/sync/push"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body = decode_push_body(request);
+            let rows = body["tasks"].as_array().expect("task push envelope");
+            let mut remote = writing.lock().unwrap();
+            for row in rows {
+                remote.insert(row["id"].as_str().unwrap().to_string(), row.clone());
+            }
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "synced": {"tasks": {"inserted":0,"updated":rows.len(),"skipped":0}}
+            }))
+        }).mount(&server).await;
+    let reading = remote.clone();
     Mock::given(method("GET")).and(path("/api/teams/review-team/sync/pull"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tasks": rows, "pulled_at": "2026-11-12T19:34:00Z",
-            "team_id": "review-team", "status": "ok"
-        }))).mount(&server).await;
+        .respond_with(move |_: &wiremock::Request| {
+            let rows: Vec<_> = reading.lock().unwrap().values().cloned().collect();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": rows, "pulled_at": chrono::Utc::now().to_rfc3339(),
+                "team_id": "review-team", "status": "ok"
+            }))
+        }).mount(&server).await;
+    let source_queue = Arc::new(SyncQueue::open(&reviewer).unwrap());
+    let pusher = CloudSyncer::new_for_project(source_queue.clone(), CloudConfig {
+        endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default(), "review-project".into(), &reviewer);
     let queue = Arc::new(SyncQueue::open(&owner).unwrap());
     queue.init().unwrap();
     let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
         endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
     }, CloudSyncerConfig::default(), "review-project".into(), &owner);
     let tasks = crate::store::open_task_store_local(&owner).unwrap();
-    let result = syncer.pull_team(
-        "review-team", "review-project",
-        &*crate::store::open_store_local(&owner).unwrap(), &*tasks,
-        &*crate::store::open_rule_store_local(&owner).unwrap(),
-        &*crate::store::open_skill_store_local(&owner).unwrap(),
-    ).unwrap();
+    let round_trip = || {
+        let pushed = pusher.push_team("review-team").unwrap();
+        assert!(pushed.errors.is_empty(), "{:?}", pushed.errors);
+        assert!(pushed.pushed_tasks > 0);
+        assert!(source_queue.pending_for_team("review-team", 20, 5).unwrap().is_empty());
+        let result = syncer.pull_team(
+            "review-team", "review-project",
+            &*crate::store::open_store_local(&owner).unwrap(), &*tasks,
+            &*crate::store::open_rule_store_local(&owner).unwrap(),
+            &*crate::store::open_skill_store_local(&owner).unwrap(),
+        ).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let returned = tasks.get(&parked.id).unwrap();
+        assert_eq!(returned.status, TaskStatus::Open);
+        assert!(returned.notes.contains(decision));
+        assert_eq!(returned.assignee, parked.assignee);
+        result
+    };
+    round_trip();
+    let acceptance = "A peer-owned delivery reopens with the supervisor decision and amended acceptance criteria.";
+    core.cas_task_update(Parameters(serde_json::from_value(serde_json::json!({
+        "id": parked.id, "acceptance_criteria": acceptance,
+    })).unwrap())).await.unwrap();
+    round_trip();
+    assert_eq!(tasks.get(&parked.id).unwrap().acceptance_criteria, acceptance);
+
+    let discovery = "Peer verifier found the guard missing on the retry path.";
+    core.cas_task_notes(Parameters(crate::mcp::tools::TaskNotesRequest {
+        id: parked.id.clone(), note_type: "discovery".into(), note: discovery.into(),
+        supervisor_override: None, reason: None,
+    })).await.unwrap();
+    core.cas_task_reopen(Parameters(crate::mcp::tools::TaskReopenRequest {
+        id: closed.id.clone(), reason: Some("Regression found after release.".into()),
+    })).await.unwrap();
+    let result = round_trip();
 
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let returned = tasks.get(&parked.id).unwrap();

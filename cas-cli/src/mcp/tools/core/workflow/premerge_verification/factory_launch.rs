@@ -76,14 +76,33 @@ pub(super) fn request(session: &str, dispatch: &str) -> Result<(), String> {
     request().map_err(|error| format!("verifier_factory_launch: {error:#}"))
 }
 
+/// The dispatch owner must be a live registered supervisor. cas-5d2e: a lookup
+/// that failed, such as on a busy store connection, keeps its own cause and
+/// code; only a caller who is not a live supervisor is reported as one.
+fn owner_authority(core: &CasCore) -> Result<(), String> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::SupervisorAuthorityError;
+    core.resolve_live_supervisor_authority()
+        .map(drop)
+        .map_err(|error| match &error {
+            SupervisorAuthorityError::NotLive(_) | SupervisorAuthorityError::NotRegistered { .. } => {
+                format!("verifier_factory_owner: live registered supervisor required ({error:?})")
+            }
+            SupervisorAuthorityError::StoreBusy(error) => {
+                format!("verifier_factory_store_busy: {error}")
+            }
+            SupervisorAuthorityError::Identity(error) | SupervisorAuthorityError::Store(error) => {
+                format!("verifier_factory_owner_lookup: {error}")
+            }
+        })
+}
+
 /// This local control carries identity only, never executable arguments or a root.
 pub(crate) fn launch(
     root: &Path,
     session: &str,
     dispatch_id: &str,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
-    let dispatch =
-        cas_store::get_verification_dispatch(root, dispatch_id).map_err(|e| e.to_string())?;
+    let dispatch = super::automatic::launch_dispatch(root, dispatch_id, Some(session))?;
     let owner = crate::store::open_agent_store(root)
         .map_err(|e| e.to_string())?
         .get(&dispatch.owner_agent_id)
@@ -108,8 +127,7 @@ pub(crate) fn launch(
     let core = CasCore::with_daemon(root.to_path_buf(), None, Some(std::sync::Arc::new(daemon)));
     core.bind_agent_identity(owner.id, crate::mcp::AgentIdentitySource::ServerInternal)
         .map_err(|e| e.to_string())?;
-    core.resolve_live_supervisor_authority()
-        .map_err(|error| format!("verifier_factory_owner: live registered supervisor required ({error:?})"))?;
+    owner_authority(&core)?;
     let task = core
         .open_task_store()
         .map_err(|e| e.to_string())?
@@ -120,6 +138,114 @@ pub(crate) fn launch(
     }
     // Claim stays synchronous and exact; provider probes and the review run off-loop.
     super::automatic::launch_local(&core, &task, &dispatch)
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    /// cas-5d2e: verifier launches for cas-c389 and cas-5a04 said "live
+    /// registered supervisor required" while the owner was live, because the
+    /// authority lookup hit a busy shared store connection.
+    #[test]
+    fn busy_owner_lookup_is_a_retryable_store_refusal_cas_5d2e() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut owner = cas_types::Agent::new_with_role(
+            "owner".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        owner.pid = Some(std::process::id());
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal)
+            .unwrap();
+        owner_authority(&core).expect("a live registered supervisor owns the dispatch");
+
+        let shared = cas_store::shared_db::shared_connection(&root.join("cas.db")).unwrap();
+        let (held, holding) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            held.send(()).unwrap();
+            released.recv().unwrap();
+        });
+        holding.recv().unwrap();
+        let refused = {
+            let _budget = cas_store::wait_budget::bound_waits_for(Duration::from_millis(20));
+            owner_authority(&core).unwrap_err()
+        };
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(refused.starts_with("verifier_factory_store_busy:"), "{refused}");
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    #[test]
+    fn retired_supervisor_dispatch_launches_for_claimed_successor_cas_32c2() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("owner-handoff");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        // No real provider/account is needed to prove the synchronous launch
+        // and owner binding; provider preparation is asynchronous and isolated.
+        env.set("CAS_TEST_HUB_PATH", env.home().join("no-provider"));
+        let agents = cas_store::SqliteAgentStore::open(&root).unwrap();
+        use cas_store::AgentStore;
+        let mut previous = cas_types::Agent::new_with_role(
+            "supervisor-a".into(), "previous".into(), cas_types::AgentRole::Supervisor,
+        );
+        previous.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        previous.factory_session = Some("retired-factory".into());
+        agents.register(&previous).unwrap();
+        let mut task = Task::new("cas-32c2-launch".into(), "Owner handoff".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.pending_verification = true;
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &previous.id, &previous.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() - chrono::Duration::minutes(1), false,
+        ).unwrap();
+        agents.unregister(&previous.id).unwrap();
+        let mut successor = cas_types::Agent::new_with_role(
+            "supervisor-b".into(), "successor".into(), cas_types::AgentRole::Supervisor,
+        );
+        successor.machine_id = previous.machine_id.clone();
+        successor.factory_session = Some("successor-factory".into());
+        agents.register(&successor).unwrap();
+        let handoffs = agents.claim_supervisor_handoffs(&successor).unwrap();
+        assert!(handoffs.iter().any(|handoff| handoff.agent_id == previous.id));
+        assert!(agents.get(&previous.id).is_err());
+        assert!(super::super::automatic::recovery_retry(&root, &dispatch).is_none());
+        assert!(launch(&root, "unrelated-factory", &dispatch.id).is_err());
+        assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().owner_agent_id, previous.id);
+        let launched = launch(&root, "successor-factory", &dispatch.id)
+            .expect("retired owner must resolve through its claimed handoff")
+            .expect("an unresolved dispatch must launch once");
+        launched.join().unwrap();
+        let current = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(current.owner_agent_id, successor.id);
+        assert_eq!(current.requester_agent_id, previous.id);
+        assert_eq!(current.repository, dispatch.repository);
+        assert!(current.deadline_at > chrono::Utc::now());
+        assert!(super::super::automatic::recovery_retry(&root, &dispatch).is_some());
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let metadata: String = conn.query_row(
+            "SELECT metadata FROM events WHERE json_extract(metadata,'$.code') = 'verification_owner_adopted' AND json_extract(metadata,'$.dispatch_id') = ?1",
+            [&dispatch.id], |row| row.get(0),
+        ).unwrap();
+        let audit: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(audit["previous_owner"], previous.id);
+        assert_eq!(audit["owner"], successor.id);
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

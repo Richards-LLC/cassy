@@ -684,7 +684,7 @@ fn render_status(
 
     if view.agents.is_empty() {
         fmt.newline()?;
-        return fmt.remedy(0, "cas factory spawn");
+        return fmt.remedy(0, "factory action=spawn_workers count=<n>");
     }
 
     // Agents ledger: one row per agent, columns sized from the data, the
@@ -1452,7 +1452,8 @@ mod status_render_tests {
         };
         let out = render_at(80, &empty);
         assert!(out.starts_with("[WARN] no agents · "), "{out}");
-        assert!(out.contains("→ cas factory spawn"), "{out}");
+        // The remedy names a real spawn route (the MCP action id), not a CLI that does not exist.
+        assert!(out.contains("action=spawn_workers"), "{out}");
     }
 
     #[test]

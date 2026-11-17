@@ -74,7 +74,8 @@
         "supersede_key",
         "target",
         "task_id",
-        "urgent"
+        "urgent",
+        "wake"
       ]
     },
     "factory": {
@@ -198,7 +199,6 @@
         "theirs",
         "to_slot_id",
         "ttl_secs",
-        "wake",
         "worker_names",
         "workers"
       ]

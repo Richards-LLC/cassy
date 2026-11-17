@@ -20,9 +20,8 @@ M07 | read the adjacent status line after filtering | count agrees with list | �
 
 Rows M02–M06 are conditions the demo never mentioned; M07 is the adjacent
 status surface. Only M01 replays the stated happy path. The expected text was
-written before each cell; every row has one capture and a two-sentence observed
-narrative in the full ledger. The row label is `real-build`, so each PASS is
-user-facing evidence rather than source inference or a fixture result.
+written before each cell, and every row has one capture and a two-sentence
+observed narrative in the full ledger.
 
 ## Telemetry sweep
 
@@ -40,7 +39,7 @@ finding is recorded before M01 as:
 T01 | telemetry sweep | RISING finding is surfaced | kind=RISING; subject=checkout; count=42; people=17; window=2026-09-01..2026-09-07; sample=checkout completed | PASS | eyewitness/telemetry | telemetry-sweep.stdout | —
 ```
 
-Known, explained noise is cited rather than filed again with this table:
+Known noise ([telemetry-sweep.md](telemetry-sweep.md#known-noise)):
 
 | subject | explanation | task id | citation |
 | --- | --- | --- | --- |
@@ -58,6 +57,3 @@ Known, explained noise is cited rather than filed again with this table:
 
 - The timeout was induced by the local network throttle; it is a product-risk observation, not a claim of a production outage.
 - The phone-width cell used a real browser viewport, not a fixture.
-
-The task note and close reason both cite the durable ledger path. Defects are
-filed separately; this QA pass does not patch their implementation.

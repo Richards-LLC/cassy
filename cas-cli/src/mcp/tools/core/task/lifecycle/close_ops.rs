@@ -756,6 +756,8 @@ struct ExternalVerificationCloseReceipt {
 pub(crate) enum SupervisorAuthorityError {
     Identity(String),
     Store(String),
+    /// cas-5d2e: the store was busy, so authority is unknown; retry later.
+    StoreBusy(String),
     NotRegistered { caller_id: String, error: String },
     NotLive(cas_types::Agent),
 }
@@ -792,7 +794,7 @@ pub(super) fn gate_supervisor_authority_error(
         SupervisorAuthorityError::Identity(error) => format!(
             "GATE {operation} REJECTED: gate tasks require an authenticated registered supervisor; caller identity could not be resolved ({error})."
         ),
-        SupervisorAuthorityError::Store(error) => format!(
+        SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
             "GATE {operation} REJECTED: supervisor authority could not be checked ({error})."
         ),
         SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
@@ -5632,16 +5634,25 @@ impl CasCore {
     pub(crate) fn resolve_live_supervisor_authority(
         &self,
     ) -> Result<cas_types::Agent, SupervisorAuthorityError> {
-        let caller_id = self
-            .get_registered_agent_id_read_only()
-            .map_err(|error| SupervisorAuthorityError::Identity(error.to_string()))?;
+        let caller_id = self.get_registered_agent_id_read_only().map_err(|error| {
+            let busy = error.data.as_ref().and_then(|data| data.get("error_code"))
+                == Some(&serde_json::json!(crate::mcp::server::STORE_BUSY_CODE));
+            if busy {
+                SupervisorAuthorityError::StoreBusy(error.message.to_string())
+            } else {
+                SupervisorAuthorityError::Identity(error.to_string())
+            }
+        })?;
         let caller = self
             .open_agent_store()
             .map_err(|error| SupervisorAuthorityError::Store(error.to_string()))?
             .get(&caller_id)
-            .map_err(|error| SupervisorAuthorityError::NotRegistered {
-                caller_id,
-                error: error.to_string(),
+            .map_err(|error| match crate::mcp::server::store_busy_error(&error) {
+                Some(_) => SupervisorAuthorityError::StoreBusy(error.to_string()),
+                None => SupervisorAuthorityError::NotRegistered {
+                    caller_id,
+                    error: error.to_string(),
+                },
             })?;
         if caller.role != cas_types::AgentRole::Supervisor || !caller.is_alive() {
             return Err(SupervisorAuthorityError::NotLive(caller));
@@ -5691,7 +5702,7 @@ impl CasCore {
             SupervisorAuthorityError::Identity(error) => format!(
                 "{label} CLOSE REJECTED: {flag}=true requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
             ),
-            SupervisorAuthorityError::Store(error) => format!(
+            SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
                 "{label} CLOSE REJECTED: supervisor authority could not be checked ({error})."
             ),
             SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
@@ -5787,7 +5798,7 @@ impl CasCore {
             SupervisorAuthorityError::Identity(error) => format!(
                 "EXTERNAL VERIFICATION RECEIPT REJECTED: an authenticated live registered supervisor is required; caller identity could not be resolved ({error})."
             ),
-            SupervisorAuthorityError::Store(error) => format!(
+            SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
                 "EXTERNAL VERIFICATION RECEIPT REJECTED: supervisor authority could not be checked ({error})."
             ),
             SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
@@ -5908,7 +5919,7 @@ impl CasCore {
                 SupervisorAuthorityError::Identity(error) => format!(
                     "TASK CANCEL REJECTED: cancel requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
                 ),
-                SupervisorAuthorityError::Store(error) => format!(
+                SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
                     "TASK CANCEL REJECTED: supervisor authority could not be checked ({error})."
                 ),
                 SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
@@ -8947,7 +8958,7 @@ impl CasCore {
                                 SupervisorAuthorityError::Identity(error) => format!(
                                     "EPIC CLOSE OVERRIDE REJECTED: stranded_branch_override requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
                                 ),
-                                SupervisorAuthorityError::Store(error) => format!(
+                                SupervisorAuthorityError::Store(error) | SupervisorAuthorityError::StoreBusy(error) => format!(
                                     "EPIC CLOSE OVERRIDE REJECTED: supervisor authority could not be checked ({error})."
                                 ),
                                 SupervisorAuthorityError::NotRegistered { caller_id, error } => {
@@ -13857,11 +13868,11 @@ impl TaskCommitIdentity {
     /// Both sides are git object ids, so a prefix match in either direction is
     /// the same commit (Cassy records full ids; git may hand back an
     /// abbreviation).
-    fn matches_known_commit(&self, commit: &str) -> bool {
+    pub(crate) fn matches_known_commit(&self, commit: &str) -> bool {
         Self::matches_commit_in(&self.known_commits, commit) || self.matches_superseded_commit(commit)
     }
 
-    fn matches_superseded_commit(&self, commit: &str) -> bool {
+    pub(crate) fn matches_superseded_commit(&self, commit: &str) -> bool {
         Self::matches_commit_in(&self.superseded_commits, commit)
     }
 
@@ -13932,6 +13943,7 @@ pub(crate) fn task_commit_identity_in_repo(
         fetch_parent_branch_best_effort(repo, &target.target_branch);
     }
     task_attribution::include_superseded_commits(repo, task, &mut identity)?;
+    task_attribution::include_cycle_anchors(repo, task, &mut identity);
     if let Some(delivery) = task_attribution::validated_started_delivery(repo, task)? {
         identity.start_base = task.deliverables.factory_branch_start.as_ref()
             .map(|start| start.base_sha.clone());
@@ -16900,9 +16912,12 @@ pub(crate) fn resolve_close_delivery_branch(
         let mut measured = task.clone();
         measured.deliverables.factory_branch_start.as_mut().expect("start checked above")
             .branch = branch.strip_prefix("origin/").unwrap_or(&branch).to_string();
-        return Ok(task_attribution::started_delivery(repo_path, &measured)?
-            .map(|delivery| delivery.branch)
-            .unwrap_or(branch));
+        // cas-f45f (GH #1888): a ref merely named for this task is not its
+        // delivery. Redirect only when it carries this start's delivered work;
+        // otherwise the recorded start lane is measured below.
+        if let Some(delivery) = task_attribution::started_delivery(repo_path, &measured)? {
+            return Ok(delivery.branch);
+        }
     }
     if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
         return Ok(delivery.branch);
@@ -26413,6 +26428,50 @@ pub(crate) fn delivery_content_presence_from_base_on_target_for_task(
         .unwrap_or_else(|| DeliveryContentPresence::Unknown {
             reason: "delivery has no measurable task-owned first-parent content".into(),
         })
+}
+
+/// GH #2026: for an anchor already on the release commit, the line walk also
+/// reads later edits as drops: a sibling's merge resolution rewriting the
+/// delivered lines, a rebuilt bundle, or the task's own sync merge resolving
+/// an earlier draft. A dropped path is a real revert only when the task's
+/// net range no longer changes it, a revert commit outside the task's own
+/// first-parent work touches it, the target deleted it, or the target holds
+/// the pre-delivery content again. Any other drop is evolution.
+pub(crate) fn release_dropped_path_reverted(
+    repo: &std::path::Path,
+    base: &str,
+    anchor: &str,
+    target: &str,
+    path: &str,
+) -> bool {
+    use std::process::Command;
+    let git = |args: &[&str]| {
+        Command::new("git").args(args).current_dir(repo).measurement_output().ok()
+    };
+    let text = |args: &[&str]| {
+        git(args).filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+    };
+    let exists = |rev: &str| git(&["cat-file", "-e", &format!("{rev}:{path}")])
+        .is_some_and(|output| output.status.success());
+    let net_changes = git(&["diff", "--quiet", "--no-renames", base, anchor, "--", path])
+        .is_some_and(|output| output.status.code() == Some(1));
+    if !net_changes || (exists(anchor) && !exists(target)) {
+        return true;
+    }
+    let (Some(own), Some(history)) = (
+        text(&["rev-list", "--first-parent", &format!("{base}..{anchor}")]),
+        text(&["log", "--full-history", "--no-renames", "--format=%H%x1f%B%x1e", &format!("{base}..{target}"), "--", path]),
+    ) else {
+        return true;
+    };
+    let imported_revert = history.split('\u{1e}').filter_map(|record| record.trim().split_once('\u{1f}'))
+        .any(|(sha, message)| !own.lines().any(|commit| commit == sha)
+            && delivery_evolution::is_revert_message(message));
+    // The inverse patch applied in reverse is the delivery applied forward:
+    // it applies only where the target again has the pre-delivery content.
+    imported_revert || reverse_delivery_path_applies_to_tree(repo, anchor, base, target, path)
+        .unwrap_or(true)
 }
 
 fn delivery_content_presence_on_target_for_paths(

@@ -1,7 +1,6 @@
 # Factory Worker — Discipline
 
-Capped check and test evidence, browser suites and capacity waits. The launch
-contract carries the lifecycle rules.
+Capped check and test evidence, browser suites and capacity waits.
 
 ## Scope and test design
 
@@ -75,6 +74,7 @@ Park requires five consecutive capped passes for new or changed
 test functions. The Rust runner repeats only those functions in the requested
 selection automatically. For Vitest, Jest or Playwright, use
 `cas factory worker-check --cas-root "$CAS_ROOT" -- <runner> path/to/test-file`.
+It runs from the nearest jest/vitest config, past a nested package.json; a G-61 refusal names the exact command.
 The receipt includes the repeated source identities; park reads it without
 running tests. A failure stops the run: fix or delete the test before a new run.
 Changed tests owe stability in test-only deliveries too. Documentation or
@@ -91,8 +91,8 @@ consumers. Before the push, cut the tests you added to the
 Never run cargo test, clippy, rustc or scoped-test scripts. Rust: never record a
 scoped `--proof`, `SCOPED_PROOF:` or `loaded_proof` receipt. Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
 
-Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-After a CI failure, a worker reruns only the failing spec. Without a queue, the
+Read receipts; never rerun a passing check. After a CI failure, rerun only the
+failing spec. Without a queue, the
 supervisor's run records `ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>`
 on the epic.
 

@@ -1083,6 +1083,10 @@ pub(crate) fn release_delivery_effect(
     };
     match presence {
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => Ok(()),
+        // GH #2026: on-target ancestry plus a measured range lets later edits
+        // classify as evolution; only a real revert holds the member.
+        DeliveryContentPresence::Dropped { paths } if mapped.is_none() && base.is_some_and(|base|
+            !paths.iter().any(|path| close_ops::release_dropped_path_reverted(repo, base, anchor, target, path))) => Ok(()),
         DeliveryContentPresence::Dropped { .. } => Err(ReleaseInventoryCode::Reverted),
         DeliveryContentPresence::Unknown { .. } => Err(ReleaseInventoryCode::UnprovenContent),
     }

@@ -949,6 +949,29 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     view.element.dispatchEvent(new Event("scroll"));
   };
 
+  it("requests older history when an upward reading gesture follows a queued tail scroll", () => {
+    const flush = frames();
+    const history = new ConversationHistory();
+    const loadEarlier = vi.fn();
+    const view = new ConversationView(document, history, {
+      supervisor: "sup", hasEarlier: () => true, loadEarlier,
+    });
+    onTestFinished(() => view.dispose());
+    document.body.replaceChildren(view.element);
+    layout(view, { height: 1400 });
+    for (let turn = 1; turn <= 14; turn++) history.reply(reply(turn, "answer"), at(10, turn));
+    view.update();
+    flush(); flush();
+    // The tail pin's scroll and the reader's wheel arrive before the same paint.
+    view.element.dispatchEvent(new Event("scroll"));
+    view.element.dispatchEvent(new WheelEvent("wheel", { deltaY: -250 }));
+    view.element.scrollTop = 50;
+    view.element.dispatchEvent(new Event("scroll"));
+    flush();
+    expect(loadEarlier).toHaveBeenCalledExactlyOnceWith("scroll");
+    expect(view.element.scrollTop).toBe(50);
+  });
+
   it("keeps a revealed older-history failure in view across a queued activity pin", () => {
     const flush = frames();
     const history = new ConversationHistory();

@@ -834,14 +834,26 @@ fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339()
         1,
         "the current handoff appears once, not also under Helpful Memories: {supervisor}"
     );
+}
 
-    let worker = build_as("worker");
-
-    assert!(
-        worker.contains("Worker handoff: resume cas-0339"),
-        "{worker}"
-    );
-    assert!(!worker.contains("CURRENT handoff NEW"), "{worker}");
+/// cas-a042: a worker's SessionStart never injects a role-wide worker handoff,
+/// which can belong to another worker's task; the task brief carries its work.
+#[test]
+fn session_start_omits_other_worker_handoff_cas_a042() {
+    let (_temp, ks) = knowledge_fixture(&[]);
+    let store = SqliteStore::open(_temp.path()).unwrap();
+    store.init().unwrap();
+    store.add(&Entry {
+        id: "other-worker-handoff".into(),
+        tags: vec!["handoff".into(), "role:worker".into()],
+        content: "Other worker: resume unrelated task cas-unrelated".into(),
+        created: chrono::Utc::now(),
+        ..Default::default()
+    }).unwrap();
+    let input = HookInput { agent_role: Some("worker".into()), ..session_start_input() };
+    let context = build_with_config(&ks, Some(&store), &DefaultHooksConfig::new().with_session_start_memories(), &input);
+    assert!(!context.contains("Other worker:"), "{context}");
+    assert!(!context.contains("Current Handoff"), "{context}");
 }
 
 /// WP2 (audit cas-1660 M34): the usage reminder is paid on every SessionStart,

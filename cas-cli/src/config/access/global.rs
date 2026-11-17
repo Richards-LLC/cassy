@@ -67,7 +67,7 @@ pub fn prompt_telemetry_consent() -> bool {
     println!();
     println!("Cassy collects anonymous usage data to improve the product.");
     println!("- No personal data or file contents collected");
-    println!("- You can disable anytime: cas config telemetry.enabled false");
+    println!("- You can disable anytime: cas config set telemetry.enabled false");
     println!();
     print!("Enable anonymous telemetry? [Y/n] ");
     let _ = io::stdout().flush();

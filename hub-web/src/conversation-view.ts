@@ -494,6 +494,7 @@ export class ConversationView {
   private readonly historyFailure: HTMLElement;
   private readonly historyFailureDetail: HTMLElement;
   private windowFrame?: number;
+  private windowUp = false;
   private model?: readonly ThreadItem[];
   private earlierIntent = false;
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
@@ -926,9 +927,14 @@ export class ConversationView {
 
   /** Scroll intent, rather than mount/resize, is the only automatic paging trigger. */
   private scrollWindow(up: boolean): void {
+    // A tail/layout scroll may already own this frame when the reader wheels
+    // upward. Coalesce their direction too, rather than dropping the gesture.
+    this.windowUp ||= up;
     if (this.windowFrame !== undefined) return;
     this.windowFrame = requestAnimationFrame(() => {
       this.windowFrame = undefined;
+      const up = this.windowUp;
+      this.windowUp = false;
       if (this.disposed) return;
       if (up && this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)
         && !this.window.hasEarlier && this.options.hasEarlier?.() && !this.options.loadingEarlier?.()) {

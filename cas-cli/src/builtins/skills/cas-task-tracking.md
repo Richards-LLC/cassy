@@ -7,28 +7,26 @@ metadata:
 
 # Cassy Task Tracking
 
-Use `task` instead of built-in TodoWrite. Cassy tasks persist across sessions.
+Use `task` instead of a built-in todo list; Cassy tasks persist across sessions.
 
 ## Core Workflow
 
-1. **Create**: `task action=create title="..." description="..." priority=2 risk=none`
-   — `risk` is required for `task`, `bug` and `feature` types (`blast-radius`, `platform`, `concurrency` or `none`); `risk=blast-radius` also needs `proof_targets`.
+1. **Create**: `task action=create title="..." description="..." priority=2 risk=none`. `risk` is required for `task`, `bug` and `feature` types (`blast-radius`, `platform`, `concurrency` or `none`); `risk=blast-radius` also needs `proof_targets`.
 2. **Start**: `task action=start id=<task-id>`
 3. **Progress**: `task action=notes id=<task-id> notes="..." note_type=progress`
 4. **Close**: `task action=close id=<task-id> reason="..."`
 
 ## Useful Actions
 
-- **Ready tasks**: `task action=ready` — unblocked, actionable work
-- **My tasks**: `task action=mine` — tasks assigned to you
-- **Blocked**: `task action=blocked` — dependency-blocked work; `action=list status=blocked` shows only tasks explicitly set to blocked
-- **Add dependency**: `task action=dep_add id=<task> to_id=<blocker> dep_type=blocks`
-- **Approve a replacement delivery branch (supervisors)**: `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"` — records the old tip and preserves the assignee, target and normal close gates; request changes first if the delivery is already parked.
+- `task action=ready`: unblocked, actionable work; `action=mine`: tasks assigned to you.
+- `task action=blocked`: dependency-blocked work (`action=list status=blocked` shows only tasks explicitly set to blocked).
+- `task action=dep_add id=<task> to_id=<blocker> dep_type=blocks`.
+- Supervisors approve a replacement delivery branch with `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"`; it keeps the assignee, target and close gates.
 
 ## Note Types
 
-`progress`, `blocker`, `decision`, `discovery`, `question`, `platform_proof` — use the right type so notes are meaningful in context. The close gate reads a `platform_proof` note for `risk=platform`.
+`progress`, `blocker`, `decision`, `discovery`, `question`, `platform_proof`, `loaded_proof`. The close gate reads a `platform_proof` note for `risk=platform` and a `loaded_proof` note for `risk=concurrency`.
 
 ## Valid Actions
 
-**Valid `task` actions** (exact list — do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `get`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `rebind_branch`, `recover_delivery`, `available`, `mine`.
+**Valid `task` actions** (exact list): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `get`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `rebind_branch`, `recover_delivery`, `available`, `mine`.

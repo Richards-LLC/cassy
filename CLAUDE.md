@@ -5,10 +5,3 @@ Claude Code: load the Cassy tool schemas once per session with ToolSearch(query=
 <!-- CAS:END -->
 
 After writing markdown to a file, summarise it in chat instead of echoing it, and avoid nested fenced blocks. This avoids the Claude Code Ink `<Box>`-in-`<Text>` crash.
-
-Local sccache 0.10.0 measured 0/45 cross-worktree Rust cache hits; hardlink
-target seeding supplies cross-worktree reuse, and Cargo reuses each worktree's
-existing target. Capped worker checks and named tests explicitly disable both
-compiler wrappers so a cold sccache client cannot pass the private target lease
-to its daemon. Supervisor and CI builds retain sccache. Prestarting a cache
-server is insufficient because it can exit before the next compiler invocation.

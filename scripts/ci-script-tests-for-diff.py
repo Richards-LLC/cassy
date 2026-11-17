@@ -56,6 +56,10 @@ HEAVY = {
 # cas-2077 changed one and first failed in the merge queue (4 GiB != 2 GiB);
 # this one assertion pins that contract in 0.001 s. The full suite stays HEAVY.
 NAMED = {
+    **{path: "python3 scripts/test-accounting-journals.py" for path in (
+        "cas-cli/src/builtins/skills/cas-html-reports/scripts/accounting-journals.py",
+        "cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.json",
+        "cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-chart.json")},
     "hub-web/package.json": "python3 scripts/test-worker-memory.py "
                             "AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
 }
@@ -194,7 +198,11 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
             path.startswith("scripts/") and stem(path) in {subject, stem(test)} for path in changed)
         if test in changed or stem_related or provisioned_related or terminal_qa_related or boundary_related:
             selected.append((test, command))
-    return selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
+    # Several inputs may name one command; run it once, under its first identity.
+    seen: set[str] = set()
+    return [(test, command) for test, command in
+            selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
+            if not (command in seen or seen.add(command))]
 
 
 def main() -> int:

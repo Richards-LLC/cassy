@@ -176,7 +176,7 @@ lru = "0.12"
 uuid = { version = "1.11", features = ["v4"] }
 
 # Analytics (opt-in telemetry) - use blocking client, not async
-posthog-rs = { version = "0.6", default-features = false }
+posthog-rs = { version = "0.3", default-features = false }
 
 # Headless Claude Code CLI client (AI extraction, consolidation, summaries)
 cas-claude = { path = "../crates/cas-claude" }

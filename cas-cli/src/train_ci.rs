@@ -37,9 +37,7 @@ pub(crate) fn record_release_red(root: &Path, train: &str, branch: &str, head: &
         "branch": branch, "head": head, "gate": gate, "recorded_at": chrono::Utc::now().to_rfc3339(),
     });
     let path = dir.join(RELEASE_RED);
-    let tmp = dir.join(format!("{RELEASE_RED}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&receipt)?)?;
-    std::fs::rename(&tmp, &path)?;
+    crate::cli::integrate::fs::atomic_write(&path, &serde_json::to_string_pretty(&receipt)?)?;
     Ok(path)
 }
 

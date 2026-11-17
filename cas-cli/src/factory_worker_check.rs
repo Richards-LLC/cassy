@@ -4083,7 +4083,8 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let head = fixture_head(&repo);
         git(&project, &["remote", "add", "origin", project.to_str().unwrap()]).unwrap();
         git(&project, &["update-ref", "refs/remotes/origin/main", &head]).unwrap();
-        let scratch = base.join("rewind");
+        let scratch_dir = tempfile::Builder::new().prefix("cas").tempdir_in("/tmp").unwrap();
+        let scratch = scratch_dir.path().canonicalize().unwrap();
         std::fs::write(
             root.join("config.toml"),
             format!("[factory]\nscratch_root = {:?}\nartifacts_root = {:?}\n", scratch.display().to_string(), base.join("artifacts").display().to_string()),

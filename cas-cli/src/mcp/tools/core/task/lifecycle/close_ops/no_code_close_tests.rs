@@ -2342,6 +2342,49 @@ async fn artifact_only_close_after_released_trunk_sync_gh1983() {
     }
 }
 
+/// GH #2022: read-only work in artifacts does not own the shared checkout.
+/// Starting it must preserve another worker's branch and uncommitted edits.
+#[tokio::test]
+async fn no_code_start_preserves_the_shared_checkout_gh2022() {
+    for (branch, no_code) in [("main", true), ("factory/other-cas-2022", true), ("factory/other-cas-2022", false)] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        if branch != "main" {
+            git(repo, &["switch", "-qc", branch]);
+        }
+        std::fs::write(repo.join(".gitignore"), ".cas/\ndurable-artifacts/\nshared-edits/\n").unwrap();
+        let before = git(repo, &["status", "--porcelain"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), repo.display().to_string());
+        agents.update(&worker).unwrap();
+        let id = "cas-a2022";
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        if no_code {
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some(PROOF.into());
+        }
+        f.put(&task);
+        let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"start", "id":id,
+        })).unwrap())).await;
+        if no_code {
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(f.task(id).status, TaskStatus::InProgress, "{result:?}");
+            assert!(f.task(id).deliverables.factory_branch_start.is_none());
+        } else {
+            assert!(result.is_err(), "{result:?}");
+            assert_eq!(f.task(id).status, TaskStatus::Open);
+        }
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(git(repo, &["branch", "--show-current"]), branch);
+        assert_eq!(git(repo, &["status", "--porcelain"]), before);
+    }
+}
+
 /// A legacy start recorded the preceding parked task's lane before the worker
 /// switched to its own lane. Only a proven integrated delivery can recover it;
 /// neither an arbitrary receipt nor supervisor review erases delivery checks.

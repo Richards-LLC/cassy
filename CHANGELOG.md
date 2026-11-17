@@ -7,6 +7,95 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.34.0] - 2026-11-17
+
+### Fixed — CI
+
+- **A wedged lane compile fails fast with its phase named and reruns once** — Was: when a hosted runner's compile wedged in the lane's own-tests step, the job printed only compiler warnings for 55 minutes, past its 45-minute limit, and ended "cancelled" (exit 143) with no log kept and no hint of where it stopped; a person had to rerun it. Now: the step has its own 25-minute deadline (green runs took at most 19.1 minutes). Every 3 minutes it prints the live cargo/rustc/linker phase and free memory, and keeps those lines in the uploaded evidence. At the deadline it fails with a named error giving the last phase, then reruns the step once. Only the deadline triggers the rerun; an ordinary test or build failure is reported as before.
+
+### Fixed — Release
+
+- **The post-release notice no longer fails when a release has held members** — Was: a release whose closeout kept named residuals (legacy or other-owner holds) never counted as done, so every install-on-publish tick re-ran the full closeout (about 3 minutes on a real tree) under a 45-second deadline. The timer logged "publish reconciliation pending" every minute, retried older releases forever, and the post-release notice failed after 10 attempts. Now: the first publish closeout gets its own 15-minute deadline (`RELEASE_PUBLISH_TIMEOUT_SECONDS`), and once a closeout has recorded its notice, later publish and install triggers reuse it. Its residuals are named in that notice and are not retried.
+- **A refused cut no longer needs an operator freeze lift to repair** — Was: when `release.sh` refused to cut a green frozen train (zero would-close, REVIEW_MISSING or LANE_CI_MISSING), the merge gate still saw no red at the frozen tip, so the `release-repair` task that fixed the refusal could not merge until the operator lifted the freeze. Now: each of those refusals records a release red for the green tip it started from (`cas release refused`), and the merge gate admits a `release-repair` task against it. Other merges into the frozen train are still refused, and the train merge queue is not held by it.
+
+### Fixed — Factory
+
+- **Automatic pre-merge reviews start during a busy train** — Was: when the shared store was contended, the verifier start could record its handoff and then lose the bind. The stranded handoff made every later start for that supervisor fail with "another task-verifier spawn is already awaiting SubagentStart" for its 30-minute expiry. On Nov 17 no automatic review started from 10:43 to 11:13 AM ET. Each failing start also spent all four attempts within about 90 seconds and reported only "attempt 4 of 4". Now: the start records, binds and registers its verifier in one transaction, so a lost bind leaves nothing behind. A start blocked by another spawn awaiting SubagentStart, or by a busy store, waits with a doubling delay (15 s up to 5 min) for up to 15 minutes without spending launch attempts. When it gives up, the notice names the real blocker and how long it waited.
+- **Rejected train entries no longer hold siblings** — Was: a rejected candidate stopped the active train and callers could not append deliveries. Now: the rejected task stays parked for repair, the queue advances, and active runs accept appended tasks in order.
+- **Cancel detached checks completely** — Signalling the printed worker-check PID now reaches its capped producer and waits for Cargo descendants to stop, leases to release and completion to be recorded, so the next check can start.
+- **macOS build guard no longer refuses builds on Spotlight load** — Was: the guard compared the 1-minute load average with CPUs x `max_load_ratio`; on macOS that average counts I/O-blocked threads (Spotlight `mdworker`, `fseventsd`), so a 21%-idle 18-core host read load 113 and P0 builds waited 20+ minutes with no Cargo running. Now: macOS gates on CPU busy measured over a 250 ms window against `max_cpu_pressure_percent`, and the refusal names the measured percent; the load average is only a fallback when no measurement exists. Capacity-wait notices also carry a disk reading taken when the notice is written, not the figure from the first refusal.
+- **A delivery proven on one machine closes on the other** — Was: capped test receipts lived only in the worker machine's `.cas/worker-checks`, so a close on the supervising machine refused the blast-radius scope as untested and needed a supervisor override. Now: parking copies the worker's passing receipts at the parked tip onto the task row, which syncs with the task, and the close counts them only when they match the delivered head and their carried nextest PASS and Summary lines hash to the recorded digest, pass every selected test and were selected by the receipt's own filter; a local receipt for the same test wins.
+- **GitHub issue claims require an explicit task binding** — Task creation no longer turns incidental issue citations into ownership claims. A supplied `external_ref`, an issue-owning title prefix or suffix, or `Fixes/Closes #N` creates a GitHub source claim.
+- **Park resolves declared JavaScript identities at the delivered tip** — Historical delivery ranges use the final test tree for identity discovery, so a refactored shared callback can retain its declared parameterized identities while missing declarations still fail closed.
+- **Deliveries carry their own completion wakes** — Parking a delivery, sending its merge request or waiting for CI automatically records durable supervisor wakes. CI reruns on the same commit re-arm by run attempt. The watchdog immediately reports a missing wake as a Cassy defect. Corrected delivery tips replace superseded automatic watches, and inherited epic targets use close-time resolution.
+- **A worker script cannot hand a file-read provider token to a child process** — The worker credential guard refuses (H-09) a script that reads any file into an environment's provider credential variable, by subscript, `update`, a dictionary or `dict(...)` keyword, and starts a child process with that environment or with the modified process environment. The file's location does not matter.
+
+### Changed — Build
+
+- **Cassy no longer depends on an outside Git repository for Claude Code calls** — Was: memory extraction, consolidation, session titles and summaries, preference capture and the live end-to-end suites went through `claude_rs`, a Git dependency on a repository Cassy does not own. That made it the workspace's only `git+` source and pulled an unused rmcp 0.14 into Cargo.lock. Now the in-repo `cas-claude` crate runs `claude --print --output-format stream-json` directly. It covers the same options (model, max turns, thinking tokens, system prompt, allowed tools, MCP config, cwd, environment, extra flags) and the same result fields. It also accepts the CLI's current string-valued `errors` list. The live suites' feature flag is now `claude_e2e`.
+
+### Fixed — Accounts
+
+- **Workers land on the account with the most room, with no setup** — Was: by default, account selection preferred the subscription whose weekly limit reset soonest and ignored any account resetting more than 24 hours later. On Nov 13 workers went to an 85%-used Codex account while a 6%-used one sat idle, and this morning a 68%-left account was picked twice over a 97%-left one. Now: the default recommends the most headroom on the binding window, the fuller of 5h and weekly, with ties broken by the earliest reset. The receipt's "% left" is that binding headroom. `accounts.selection soonest-reset` keeps the old policy for anyone who wants it.
+
+### Added — Releases
+
+- **Supervisors can lift a release freeze** — Was: only the operator's Lift
+  freeze in Commander reopened a frozen train, so a train frozen by auto-cut
+  held its deliveries until the operator was at the keyboard, and auto-cut froze
+  the lifted train again a minute later. Now: the train's supervisor lifts it
+  with `train_freeze decision=lift` and a required reason, recorded on the train
+  and sent to the operator; a freeze the operator applied stays theirs unless
+  they set `release.supervisor_lifts_operator_freeze`, and auto-cut waits for a
+  new tip after any lift.
+
+### Fixed — Factory delivery
+
+- **Task close no longer runs at the edge of the thread stack** — Was: in debug builds, a `task close` used 1.56 MB of its 2 MiB blocking-pool thread before the close logic even began, because each wrapper around the close future kept its own copy. About 20 more inline lines (cas-289b) were enough to abort lane CI with "tokio-runtime-worker has overflowed its stack". Now: the future is boxed once when it enters the blocking pool, so the same path uses 387 KB. A budget test fails with the measured size and the 512 KiB budget before a regression can overflow the stack.
+
+### Changed — Bug intake
+
+- **Findings and QA follow-ups find before they file** — Was: a finding whose
+  wrong output an open task already recorded was refused until the filer
+  retried with `confirm_warning=true`. A matching open GitHub issue was never
+  checked, so the finding or QA follow-up became a new task. Now: both paths
+  use the report_cas_bug matcher against the project's issue tracker and open
+  tasks. A match gets the evidence and a +1, the existing issue or task is
+  returned, and no task is created.
+- **Find or file on GitHub** — Was: agents filed a new GitHub issue for every
+  sighting, so one verifier-launch refusal became five issues. Now:
+  `system action=report_cas_bug` matches first. It keys on the refusal leading
+  `actual` (gate codes plus normalized text), adds evidence and +1 to a matching
+  open issue, and refuses a report with no key. The bug-routing directive,
+  launch contracts, skills, the SessionStart filing banners and the
+  staged-report recovery now say "find or file". Matching for finding task
+  creates and QA follow-up tasks follows in cas-5edc.
+
+### Fixed — Release freeze
+
+- **Register freeze-lift refusal codes** — Attribute supervisor, reason, train-ownership and operator-freeze refusals to gate G-157 while preserving their existing error prefixes and authority checks.
+
+### Fixed — Releases
+
+- **Evolved members ship** — Was: a release cut refused with "zero would-close"
+  when train siblings had later rewritten a member's lines, because preview held
+  that member as reverted. Now: a member whose work is on the release commit and
+  was only changed by later work closes; an explicit revert, a deleted file or
+  restored pre-delivery content still holds it.
+
+### Security — MCP
+
+- **MCP server and proxy move to rmcp 3.10, clearing six rmcp advisories** — Was: Cassy's MCP server, its upstream proxy and the Violet/Viktor paths ran on rmcp 0.16, which carries GHSA-33f5-2c5q-wgwj (CVE-2026-63127, OAuth resource-metadata validation), GHSA-9g45-5xwm-f3wc (custom headers leaking to cross-origin redirects), GHSA-9pj6-vhgr-3mwh, GHSA-c9xm-49cp-xcr9, GHSA-89vp-x53w-74fx / RUSTSEC-2026-0189 and RUSTSEC-2026-0462 (unbounded response buffering in streamable-HTTP clients, fixed only in 3.9). Now: one rmcp 3.10.0 serves all three crates. The handshake stays on protocol revision 2025-03-26 in both directions, so tool names, schemas, results and negotiated versions are unchanged for clients and upstream servers.
+  The one remaining rmcp 0.14.0 lockfile entry comes from the upstream `claude_rs` dependency, which declares it but never calls it; the in-repo Claude Code client change removes it.
+
+### Fixed — Portable Linux releases
+
+- **Keep telemetry's TLS provider portable** — Restore PostHog 0.3.7 to remove AWS-LC from the Linux dependency graph and unblock the portable x86_64 release audit. Keep the other dependency security updates. Known residual: PostHog's older reqwest 0.11/rustls 0.21 stack reintroduces its existing TLS and certificate-validation advisories; a follow-up must replace or update the telemetry client with a ring-compatible option.
+
+### Fixed — Security
+
+- **Patched TLS, QUIC, compression and archive dependencies** — Update rustls to 0.23.46, rustls-webpki to 0.103.17, quinn-proto to 0.11.19, lz4_flex to 0.11.7/0.12.3 and tar to 0.4.46. Upgrade PostHog to 0.6 to remove its vulnerable legacy rustls and certificate-validation stack.
+
 ## [4.33.0] - 2026-11-17
 
 ### Fixed — Lane CI

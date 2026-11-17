@@ -697,6 +697,10 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     let cas_dir = repo.join(".cas");
     let tasks = open_task_store(&cas_dir).unwrap();
     tasks.add(&cas::types::Task::new("cas-2a33".to_string(), "Existing fixture defect".to_string())).unwrap();
+    // cas-7823: an open task that already records a finding's wrong output.
+    let mut launch = cas::types::Task::new("cas-2b44".to_string(), "Verifier launch refuses a live supervisor".to_string());
+    launch.description = "Notice: verifier_factory_launch: verifier_factory_owner: live registered supervisor required".to_string();
+    tasks.add(&launch).unwrap();
     close_text(&core, &task_id).await;
     let round_task = qa_task_id(&cas_dir, &task_id);
     let reviewer = reviewer_core(&cas_dir, "ledger-reviewer");
@@ -704,7 +708,7 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     let service = CasService::new(reviewer, None);
     let head = git(&repo, &["rev-parse", "factory/test-agent"]);
     let ledger = round_evidence(&repo.join("round-1"), &task_id, &head);
-    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\nF12 NORMAL: A cosmetic nit nobody acts on.\n").unwrap();
+    std::fs::write(&ledger, "# QA ledger\n## Pre-existing / limitations\nF10 NORMAL: Native fixture mismatch; existing follow-up cas-2a33.\nF11 NORMAL: Strict contrast capture instability.\nF12 NORMAL: A cosmetic nit nobody acts on.\nF13 NORMAL: The verifier never launches.\n").unwrap();
     let record = |issues: serde_json::Value| verification(serde_json::json!({
         "action": "qa_record", "task_id": task_id, "status": "approved",
         "summary": "delivery passes; older defects are tracked separately",
@@ -722,9 +726,12 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     let result = extract_text(service.verification(Parameters(record(serde_json::json!([
         {"id":"F10", "scope":"pre-existing"},
         {"id":"F11", "scope":"pre-existing", "repro":"run the strict capture twice; the contrast differs", "affected":"reviewers reading the capture"},
-        {"id":"F12", "scope":"pre-existing"}
+        {"id":"F12", "scope":"pre-existing"},
+        {"id":"F13", "scope":"pre-existing", "affected":"supervisors",
+         "repro":"close a task\nverifier_factory_launch: verifier_factory_owner: live registered supervisor required"}
     ])))).await.unwrap());
-    assert!(result.contains("Already tracked, not filed again: F10 by cas-2a33"), "{result}");
+    assert!(result.contains("Already tracked, not filed again: F10 by cas-2a33; F13 by cas-2b44"), "{result}");
+    assert!(tasks.get("cas-2b44").unwrap().notes.contains("+1"));
     assert!(result.contains("Theoretical backlog (P4): F12"), "{result}");
     let follow_ups: Vec<_> = tasks.list(None).unwrap().into_iter()
         .filter(|task| task.labels.iter().any(|label| label == "qa-follow-up")).collect();
@@ -738,6 +745,27 @@ async fn qa_record_files_ledger_findings_without_duplicates_cas_2849() {
     assert!(tasks.get_dependencies("cas-2a33").unwrap().iter()
         .any(|dep| dep.to_id == task_id && dep.dep_type == DependencyType::Related));
     assert_eq!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
+}
+
+/// cas-7823: a finding whose wrong output an open task records is refused
+/// (G-148) until the filer says it is a different defect.
+#[tokio::test]
+async fn finding_naming_an_open_tasks_wrong_output_adds_evidence_not_a_twin() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, _) = fixture(&mut test_env);
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    let mut launch = cas::types::Task::new("cas-2b44".to_string(), "Verifier launch refuses a live supervisor".to_string());
+    launch.description = "Notice: verifier_factory_launch: verifier_factory_owner: live registered supervisor required".to_string();
+    tasks.add(&launch).unwrap();
+    let service = CasService::new(core, None);
+    let finding = |confirm: bool| serde_json::from_value(serde_json::json!({
+        "action": "create", "title": "Daemon verifier never starts", "risk": "none", "task_type": "bug",
+        "finding_origin": "review:operator", "affected": "supervisors", "confirm_warning": confirm,
+        "repro": "task action=close id=cas-7823\nverifier_factory_launch: verifier_factory_owner: live registered supervisor required",
+    })).unwrap();
+    let error = service.task(Parameters(finding(false))).await.expect_err("an open task already records it");
+    assert!(error.message.contains("[G-148]") && error.message.contains("cas-2b44"), "{}", error.message);
+    service.task(Parameters(finding(true))).await.expect("confirm_warning admits a different defect");
 }
 
 /// Replay the visible failures and code-read findings from the Nov 4–5
@@ -771,7 +799,8 @@ async fn gabber_findings_derive_priority_and_ready_order() {
             "priority": 0, "finding_origin": "verification:ver-7e87d441000d",
             "labels": format!("severity:{severity},reach:{reach},journey:{journey}{}",
                 if title == "Unreachable resumed pending voice" { ",runtime-repro" } else { "" }),
-            "repro": repro.then_some("Run the journey; observe the broken output"),
+            // Distinct defects show distinct wrong output; a shared one is a twin.
+            "repro": repro.then(|| format!("Run the journey; observe {title}")),
             "affected": "the person using save or chat",
         })).unwrap())).await.expect("findings remain recordable even without a runtime repro");
         let text = extract_text(result);
@@ -814,7 +843,7 @@ async fn factory_main_findings_retain_derived_priority_cas_7129() {
             "action": "create", "title": format!("Broken {journey}"), "risk": "none", "task_type": "bug",
             "priority": 0, "finding_origin": "review:operator",
             "labels": format!("severity:broken,reach:main,journey:{journey}"),
-            "repro": "78 cached calls, 117K peak, 7.6M cumulative; supervisor auto-clears every turn",
+            "repro": format!("{journey}: 78 cached calls, 117K peak, 7.6M cumulative; supervisor auto-clears every turn"),
             "affected": "Every factory supervisor",
         })).unwrap())).await.unwrap();
         let text = extract_text(result);

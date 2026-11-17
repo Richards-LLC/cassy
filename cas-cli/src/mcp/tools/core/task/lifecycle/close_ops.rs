@@ -9605,7 +9605,7 @@ impl CasCore {
                     gate_refusals.extend(unpushed_refusal);
                     // cas-749f: close must not park a receipt absent from
                     // the source the supervisor will actually merge.
-                    let parking = if task.status != TaskStatus::AwaitingMerge
+                    let mut parking = if task.status != TaskStatus::AwaitingMerge
                         && tip_is_pushed && gate_refusals.is_empty()
                     {
                         self.advance_commit_time_anchor_before_park_with_receipt(
@@ -9766,6 +9766,17 @@ impl CasCore {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
                     drop(_phase);
+                    // cas-289b: carry this machine's passing receipts at the
+                    // parked tip, so a close on another machine can count them.
+                    let portable = exported_test_receipts(
+                        &self.cas_root,
+                        worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                        receipt_tip,
+                        &resolved_parent_branch,
+                    );
+                    if !portable.is_empty() {
+                        parking.deliverables.test_receipts = portable.clone();
+                    }
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-00eb: a commit-time anchor recorded earlier in
                         // this cycle survives the park (`record_park`). When
@@ -9809,7 +9820,8 @@ impl CasCore {
                         ) {
                             return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
                         }
-
+                        // The advanced anchor keeps this machine's fresh receipts.
+                        keep_fresh_test_receipts(task_store.as_ref(), &task.id, portable);
                     }
 
                     // cas-619f: a user-facing delivery needs an independent
@@ -11687,9 +11699,12 @@ impl CasCore {
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
+            // cas-289b: receipts from the worker's machine travel on the task row.
+            let synced_receipts = task.deliverables.test_receipts.clone();
             let passing_tests = delivered_tip.as_deref().map(|head| {
                 (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head)
-                    .with_target(&resolved_parent_branch))
+                    .with_target(&resolved_parent_branch)
+                    .with_synced(&synced_receipts))
             });
             if let Some((_, tests)) = passing_tests.as_ref() {
                 for receipt in tests.receipts() {
@@ -21074,6 +21089,42 @@ fn preserves_close_note_history(before: &str, after: &str) -> bool {
             .any(|start| after[start..].strip_prefix(*block)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n')))
     })
+}
+
+/// cas-289b: this machine's passing receipts at the parked tip. Kept out of
+/// the close future, whose debug-build poll frame is already near the worker
+/// stack limit.
+#[inline(never)]
+fn exported_test_receipts(
+    cas_root: &std::path::Path,
+    repo: &std::path::Path,
+    tip: Option<&str>,
+    target: &str,
+) -> Vec<cas_types::PortableTestReceipt> {
+    tip.map(|tip| {
+        crate::factory_worker_check::PassingTests::new(cas_root, repo, tip).with_target(target).portable()
+    })
+    .unwrap_or_default()
+}
+
+/// cas-289b: an already-parked task whose anchor advanced keeps this
+/// machine's fresh receipts. Best-effort; a concurrent write wins.
+#[inline(never)]
+fn keep_fresh_test_receipts(
+    task_store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    receipts: Vec<cas_types::PortableTestReceipt>,
+) {
+    if receipts.is_empty() {
+        return;
+    }
+    let Ok(latest) = task_store.get(task_id) else { return };
+    if latest.deliverables.test_receipts == receipts {
+        return;
+    }
+    let mut fresh = latest.clone();
+    fresh.deliverables.test_receipts = receipts;
+    let _ = task_store.update_if_current(&fresh, &latest);
 }
 
 /// A long close can overlap receipt/upkeep appends or a cloud note union.

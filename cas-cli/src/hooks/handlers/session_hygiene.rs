@@ -859,13 +859,13 @@ pub(crate) fn render_unfiled_reports_banner(staged: &[String]) -> SessionStartBa
         .unwrap_or_else(|| "docs/requests/<file>".to_string());
     let remediation = if total == 1 {
         format!(
-            "File it now: `gh issue create --repo \"$(cas config get issues.repo)\" \
-             --title \"<title>\" --body-file {first_path}`, then remove the staged file \
-             once the issue URL is known (see the cas-supervisor filing-cas-bugs reference)."
+            "Find or file it: +1 an open match, else `gh issue create --repo \
+             \"$(cas config get issues.repo)\" --title \"<title>\" --body-file {first_path}`; \
+             remove the staged file once the URL is known (cas-supervisor filing-cas-bugs)."
         )
     } else {
-        "Run the cas-github-issues sweep skill to file and reconcile them; each file is \
-         removed only after `gh issue create` succeeds and the issue URL is known."
+        "Run the cas-github-issues sweep to find or file them; each file is removed \
+         only after its match is +1'd or `gh issue create` succeeds."
             .to_string()
     };
     let compact = format!(

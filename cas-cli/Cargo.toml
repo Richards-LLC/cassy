@@ -38,6 +38,7 @@ cas-core = { path = "../crates/cas-core" }
 # Code analysis (workspace crate)
 cas-code = { path = "../crates/cas-code" }
 tree-sitter = "0.26"
+tree-sitter-python = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.24"
 
@@ -175,7 +176,7 @@ lru = "0.12"
 uuid = { version = "1.11", features = ["v4"] }
 
 # Analytics (opt-in telemetry) - use blocking client, not async
-posthog-rs = { version = "0.3", default-features = false }
+posthog-rs = { version = "0.6", default-features = false }
 
 # Claude SDK (for AI extraction)
 claude_rs = { git = "https://github.com/codingagentsystem/claude_rs", branch = "main" }

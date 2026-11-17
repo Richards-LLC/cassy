@@ -919,12 +919,14 @@ mod tests {
         );
         assert_eq!(choose_profile_name(None, None, Some("other")), "other");
         assert_eq!(choose_profile_name(None, None, None), "main");
+        // This case pins the soonest-reset policy's exclusion reasons.
+        let soonest = crate::config::AccountsConfig { selection: crate::config::AccountSelection::SoonestReset, ..Default::default() };
         for (provider, cli) in [(crate::accounts::Provider::Claude, SupervisorCli::Claude), (crate::accounts::Provider::Codex, SupervisorCli::Codex)] {
             let mut accounts = vec![crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0)];
             accounts[0].usage_observed_at = Some("2026-10-27T09:00:00Z".parse().unwrap());
             if provider == crate::accounts::Provider::Claude { accounts[0].windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
             let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, usage: None, windows: Vec::new(), usage_observed_at: None, exclusion: None }];
-            mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &soonest);
             assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 41% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()), "{cli:?}");
             assert_eq!(rows[0].windows, accounts[0].windows);
             assert_eq!(rows[0].usage_observed_at, accounts[0].usage_observed_at);
@@ -948,7 +950,7 @@ mod tests {
             duplicate.flags.duplicate_of = Some(idle_accounts[0].folder.clone());
             idle_accounts.extend([later, duplicate]);
             rows.extend(["later", "duplicate"].map(|name| LaunchProfile { name: name.into(), logged_in: true, is_default: false, recommendation: None, usage: None, windows: Vec::new(), usage_observed_at: None, exclusion: None }));
-            mark_recommendation(&mut rows, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            mark_recommendation(&mut rows, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &soonest);
             assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 90% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()));
             assert_eq!(rows[1].exclusion.as_deref(), Some(format!("resets later than chosen; {}", crate::cli::limits::format_reset(Some("2026-10-30T00:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()));
             assert_eq!(rows[2].exclusion.as_deref(), Some("duplicate of chosen"));
@@ -956,10 +958,10 @@ mod tests {
             let mut unknown_reset_accounts = accounts.clone();
             unknown_reset_accounts[0].windows[1].resets_at = None;
             unknown_reset_accounts.push(crate::account_selection::tests::row(provider, "later", 60, 70.0, 20.0));
-            mark_recommendation(&mut rows, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            mark_recommendation(&mut rows, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &soonest);
             assert_eq!(rows[0].exclusion.as_deref(), Some("weekly reset unknown; known resets first"));
             unknown_reset_accounts[1].flags.disabled = true;
-            mark_recommendation(&mut rows, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            mark_recommendation(&mut rows, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &soonest);
             assert_eq!(rows[0].recommendation.as_deref(), Some("weekly reset unknown, 41% left"));
 
             assert_eq!(choose_profile_name(Some("other"), None, Some("chosen")), "other");

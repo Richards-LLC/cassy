@@ -45,6 +45,8 @@ if [[ "$1 $2" == "release published" ]]; then
     publication_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
     printf 'publish=%s@%s\n' "$publication_tag" "$(cat "$FAKE_INSTALLED")" >>"$FAKE_LOG"
     [[ "${FAKE_PUBLISH_FAIL_TAG:-}" == "$publication_tag" ]] && exit 1
+    # A first closeout outlives the notice deadline (GH #2030).
+    [[ -z "${FAKE_PUBLISH_SECONDS:-}" ]] || perl -e 'select undef, undef, undef, shift' "$FAKE_PUBLISH_SECONDS"
     exit 0
 fi
 if [[ "$1 $2" == "release installed" ]]; then
@@ -236,7 +238,7 @@ PY_PUBLICATION_ORDER
 (
     export XDG_STATE_HOME="$tmp/timeout-state" FAKE_NOTICE_PID="$tmp/notice.pid"
     : >"$FAKE_LOG"
-    FAKE_LATEST=v9.99.4 FAKE_NOTICE_HANGS=v9.99.4 RELEASE_NOTICE_TIMEOUT_SECONDS=1 python3 - "$installer" <<'PY_TIMEOUT'
+    FAKE_LATEST=v9.99.4 FAKE_NOTICE_HANGS=v9.99.4 FAKE_PUBLISH_SECONDS=2 RELEASE_NOTICE_TIMEOUT_SECONDS=1 python3 - "$installer" <<'PY_TIMEOUT'
 import os
 import pathlib
 import signal
@@ -269,6 +271,7 @@ assert not state or state.startswith("Z"), state
 state = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "cassy"
 assert (state / "install-on-publish.pending.d/v9.99.4.json").exists()
 assert not (state / "install-on-publish.notified.d/v9.99.4").exists()
+assert (state / "install-on-publish.published.d/v9.99.4").exists()
 PY_TIMEOUT
     [[ $? == 0 ]] || exit 1
     FAKE_LATEST=v9.99.4 "$installer" --once >/dev/null
@@ -276,7 +279,7 @@ PY_TIMEOUT
     [[ "$(grep -c '^notice=v9.99.4$' "$FAKE_LOG")" == 2 ]]
     [[ "$(grep -c '^cas update ' "$FAKE_LOG")" == 1 ]]
     [[ ! -e "$XDG_STATE_HOME/cassy/install-on-publish.pending.d/v9.99.4.json" ]]
-) && ok 'a hung notice releases the lock, stays pending and retries once successfully' || bad 'a hung notice releases the lock, stays pending and retries once successfully'
+) && ok 'a hung notice releases the lock, stays pending and retries once successfully; a slower first closeout still records' || bad 'a hung notice releases the lock, stays pending and retries once successfully; a slower first closeout still records'
 echo 9.99.2 >"$FAKE_INSTALLED"
 
 # 3. A second host leaves the completed timer alone.

@@ -883,12 +883,12 @@ async fn launch_profiles_follow_the_resolved_projects_account_policy() {
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ));
     // Both overrides must change the actual HTTP projection, while no target
-    // retains the global soonest-reset policy.
+    // retains the global most-headroom policy.
     for (query_target, config, expected) in [
-        (None, "[accounts]\nthreshold = 50\n", "soon"),
-        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
-        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nselection = 'most-headroom'\n", "spare"),
-        (Some(serde_json::to_string(&browse).unwrap()), "[accounts]\nthreshold = 50\n", "spare"),
+        (None, "[accounts]\nselection = 'soonest-reset'\n", "spare"),
+        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nselection = 'soonest-reset'\n", "soon"),
+        (Some(serde_json::to_string(&target).unwrap()), "[accounts]\nselection = 'soonest-reset'\nthreshold = 50\n", "spare"),
+        (Some(serde_json::to_string(&browse).unwrap()), "[accounts]\nselection = 'soonest-reset'\n", "soon"),
     ] {
         std::fs::write(project.join(".cas/config.toml"), config).unwrap();
         let query = query_target.map(|target| url::form_urlencoded::Serializer::new(String::new()).append_pair("target", &target).finish());

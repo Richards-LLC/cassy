@@ -3,6 +3,18 @@ use crate::mcp::tools::service::imports::*;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use crate::issue_intake::RefusalFingerprint;
+
+enum OpenMatch {
+    Issue(String),
+    Task(String),
+}
+
+enum Filing {
+    Filed(BugFilingOutcome),
+    Evidence(String),
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct BugFilingOutcome {
     url: String,
@@ -19,6 +31,11 @@ trait BugFilingTransport {
         body: &str,
         labels: &[&str],
     ) -> Result<String, String>;
+
+    /// Open issues as (url, title + body) for the find-or-file match.
+    fn open_issues(&self, repo: &str) -> Result<Vec<(String, String)>, String>;
+
+    fn comment_issue(&self, url: &str, body: &str) -> Result<(), String>;
 }
 
 struct GhBugFilingTransport;
@@ -72,7 +89,44 @@ impl BugFilingTransport for GhBugFilingTransport {
             Err(command_failure_detail(&output))
         }
     }
+
+    fn open_issues(&self, repo: &str) -> Result<Vec<(String, String)>, String> {
+        let output = crate::gh_budget::output(
+            Command::new("gh").args([
+                "issue", "list", "--repo", repo, "--state", "open", "--limit", "1000", "--json",
+                "url,title,body",
+            ]),
+            std::time::Duration::from_secs(30),
+        )
+        .map_err(|error| format!("Failed to run gh CLI while listing open issues: {error}"))?;
+        if !output.status.success() {
+            return Err(command_failure_detail(&output));
+        }
+        let issues: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("could not parse open issues: {error}"))?;
+        Ok(issues
+            .iter()
+            .map(|issue| {
+                let field = |name| issue[name].as_str().unwrap_or_default().to_string();
+                (field("url"), format!("{}\n{}", field("title"), field("body")))
+            })
+            .collect())
+    }
+
+    fn comment_issue(&self, url: &str, body: &str) -> Result<(), String> {
+        let output = crate::gh_budget::output(
+            Command::new("gh").args(["issue", "comment", url, "--body", body]),
+            std::time::Duration::from_secs(30),
+        )
+        .map_err(|error| format!("Failed to run gh CLI while commenting: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(command_failure_detail(&output))
+        }
+    }
 }
+
 
 fn command_failure_detail(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -489,6 +543,53 @@ impl CasService {
             .await
     }
 
+    /// Find before file: an open issue first, then an open task.
+    fn find_open_match<T: BugFilingTransport>(
+        &self,
+        transport: &T,
+        repo: &str,
+        fingerprint: &RefusalFingerprint,
+    ) -> Result<Option<OpenMatch>, String> {
+        let issues = transport.open_issues(repo)?;
+        if let Some((url, _)) = issues.into_iter().find(|(_, text)| fingerprint.matches(text)) {
+            return Ok(Some(OpenMatch::Issue(url)));
+        }
+        let store = self
+            .inner
+            .open_task_store()
+            .map_err(|error| format!("task store unavailable: {}", error.message))?;
+        Ok(crate::issue_intake::open_task_match(store.as_ref(), fingerprint)
+            .map_err(|error| format!("could not list open tasks: {error}"))?
+            .map(|task| OpenMatch::Task(task.id)))
+    }
+
+    fn add_evidence<T: BugFilingTransport>(
+        &self,
+        transport: &T,
+        found: OpenMatch,
+        title: &str,
+        body: &str,
+    ) -> Result<Filing, String> {
+        let evidence = format!("+1: reported again as \"{title}\".\n\n{body}");
+        match found {
+            OpenMatch::Issue(url) => {
+                transport
+                    .comment_issue(&url, &evidence)
+                    .map_err(|error| format!("Failed to comment on matching issue {url}: {error}"))?;
+                Ok(Filing::Evidence(format!("added evidence and +1 to open issue {url}")))
+            }
+            OpenMatch::Task(id) => {
+                let note = format!("[{}] {evidence}", chrono::Utc::now().format("%Y-%m-%d %H:%M"));
+                self.inner
+                    .open_task_store()
+                    .map_err(|error| format!("task store unavailable: {}", error.message))?
+                    .append_note(&id, &note)
+                    .map_err(|error| format!("Failed to add evidence to task {id}: {error}"))?;
+                Ok(Filing::Evidence(format!("added evidence and +1 to open task {id}")))
+            }
+        }
+    }
+
     async fn report_cas_bug_with_transport<T: BugFilingTransport>(
         &self,
         req: SystemRequest,
@@ -521,6 +622,21 @@ impl CasService {
         let actual = req
             .actual
             .map(|value| redact_known_credentials(&anonymize(&value)));
+        // The verbatim refusal leads `actual`; it is the find-or-file key.
+        // Every report is matched before it is filed, so one without a key is
+        // refused rather than filed unmatched.
+        let fingerprint = actual
+            .as_deref()
+            .and_then(RefusalFingerprint::of)
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "actual must start with the verbatim refusal or wrong output (at least \
+                     four words): report_cas_bug matches that line against open issues and \
+                     tasks before it files",
+                )
+            })?;
+        let fingerprint_line = format!("{}\n", fingerprint.marker());
 
         let version = env!("CARGO_PKG_VERSION");
         let os_info = std::env::consts::OS;
@@ -540,7 +656,7 @@ impl CasService {
 - **Cassy Version**: {version}
 - **OS**: {os_info}
 - **Arch**: {arch}
-
+{fingerprint_line}
 ---
 *Reported by agent via `mcp__cas__system action=report_cas_bug`*
 *Home directory paths have been automatically anonymized*
@@ -558,10 +674,19 @@ impl CasService {
             Err(warning) => ("unassigned".to_string(), Some(warning)),
         };
         let filing_result = resolve_issue_repo(&self.inner.cas_root).and_then(|repo| {
-            file_bug_report(transport, &repo, &title, &body).map_err(|message| message.to_string())
+            self.find_open_match(transport, &repo, &fingerprint)?
+            .map_or_else(
+                || file_bug_report(transport, &repo, &title, &body).map(Filing::Filed),
+                |found| self.add_evidence(transport, found, &title, &body),
+            )
         });
         let outcome = match filing_result {
-            Ok(outcome) => outcome,
+            Ok(Filing::Filed(outcome)) => outcome,
+            Ok(Filing::Evidence(receipt)) => {
+                return Ok(Self::success(format!(
+                    "No new issue filed: {receipt}"
+                )));
+            }
             Err(error) => {
                 let failure_reason =
                     filing_failure_reason(&error, task_identity_warning.as_deref());
@@ -589,7 +714,8 @@ impl CasService {
                 })?;
                 return Ok(Self::success(format!(
                     "Bug report was not filed. {failure_reason}\nStaged report: {}\n\n\
-                     Resolve the filing failure above before filing the staged report.",
+                     Once the failure is resolved, rerun report_cas_bug with the same fields; \
+                     it matches open issues and tasks before it files.",
                     path.display()
                 )));
             }
@@ -964,6 +1090,7 @@ mod tests {
         labels_seen: std::cell::RefCell<Vec<String>>,
         repos_seen: std::cell::RefCell<Vec<String>>,
         reports_seen: std::cell::RefCell<Vec<(String, String)>>,
+        comments_seen: std::cell::RefCell<Vec<(String, String)>>,
     }
 
     impl BugFilingTransport for FakeTransport {
@@ -988,6 +1115,23 @@ mod tests {
                 .extend(labels.iter().map(|label| (*label).to_string()));
             Ok(self.issue_url.clone())
         }
+
+        // Every issue this fake filed is open, as on GitHub.
+        fn open_issues(&self, _repo: &str) -> Result<Vec<(String, String)>, String> {
+            Ok(self
+                .reports_seen
+                .borrow()
+                .iter()
+                .map(|(title, body)| (self.issue_url.clone(), format!("{title}\n{body}")))
+                .collect())
+        }
+
+        fn comment_issue(&self, url: &str, body: &str) -> Result<(), String> {
+            self.comments_seen
+                .borrow_mut()
+                .push((url.to_string(), body.to_string()));
+            Ok(())
+        }
     }
 
     struct FailingTransport;
@@ -1006,6 +1150,14 @@ mod tests {
         ) -> Result<String, String> {
             Err("HTTP 401: Bearer ghp_private-token-value".to_string())
         }
+
+        fn open_issues(&self, _repo: &str) -> Result<Vec<(String, String)>, String> {
+            Ok(Vec::new())
+        }
+
+        fn comment_issue(&self, _url: &str, _body: &str) -> Result<(), String> {
+            unreachable!("no open issue can match")
+        }
     }
 
     #[test]
@@ -1016,6 +1168,7 @@ mod tests {
             labels_seen: Default::default(),
             repos_seen: Default::default(),
             reports_seen: Default::default(),
+            comments_seen: Default::default(),
         };
 
         let outcome = file_bug_report(&transport, "example/cassy", "title", "body")
@@ -1039,6 +1192,7 @@ mod tests {
             labels_seen: Default::default(),
             repos_seen: Default::default(),
             reports_seen: Default::default(),
+            comments_seen: Default::default(),
         };
 
         let outcome = file_bug_report(&transport, "example/cassy", "title", "body")
@@ -1076,7 +1230,7 @@ mod tests {
             "title": format!("Cassy failure in {}", home.display()),
             "description": "Reproducer with ghp_private-token-value",
             "expected": "successful routing",
-            "actual": "wrong tracker"
+            "actual": "report routed to the wrong tracker"
         }))
         .unwrap()
     }
@@ -1097,6 +1251,7 @@ mod tests {
             labels_seen: Default::default(),
             repos_seen: Default::default(),
             reports_seen: Default::default(),
+            comments_seen: Default::default(),
         }
     }
 
@@ -1168,6 +1323,79 @@ mod tests {
             assert!(reports[0].1.contains("successful routing"));
             assert!(reports[0].1.contains("wrong tracker"));
         }
+    }
+
+    /// GH #1970, #1974, #1980, #1984, #1991: five agents reported one
+    /// verifier-launch refusal, each in its own words.
+    #[tokio::test]
+    async fn replayed_verifier_launch_duplicates_file_one_issue_and_four_evidence_comments() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let service = report_service(temp.path());
+        let transport = recording_transport();
+        let launch = "verifier_factory_launch: verifier_factory_owner: live registered supervisor required";
+        for (title, refusal) in [
+            ("Pre-merge daemon verifier fails to launch: \"live registered supervisor required\" while supervisor is live", launch.to_string()),
+            ("Pre-merge verifier dispatch fails 'verifier_factory_owner: live registered supervisor required' while the supervisor is live and registered", launch.to_string()),
+            ("Pre-merge verifier launch fails \"live registered supervisor required\" while supervisor is live", launch.to_string()),
+            ("Daemon verifier launch fails 'verifier_factory_owner: live registered supervisor required' while the owning supervisor is live", format!("premerge_verification vdispatch-9f1c2 {launch}")),
+            ("Daemon verifier launch refused with \"live registered supervisor required\" while the supervisor was live", launch.to_string()),
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "report_cas_bug",
+                "title": title,
+                "description": "A live registered supervisor's dispatch never gets a verifier.",
+                "actual": format!("{refusal}\n\nLaunch refused claiming no live registered supervisor."),
+            }))
+            .unwrap();
+            service
+                .report_cas_bug_with_transport(request, &transport)
+                .await
+                .unwrap();
+        }
+        // A report with no key is refused, never filed unmatched.
+        let keyless = serde_json::from_value(serde_json::json!({
+            "action": "report_cas_bug",
+            "title": "Verifier never starts",
+            "description": "No refusal captured.",
+            "actual": "hangs",
+        }))
+        .unwrap();
+        assert!(service.report_cas_bug_with_transport(keyless, &transport).await.is_err());
+        assert_eq!(transport.reports_seen.borrow().len(), 1);
+        let comments = transport.comments_seen.borrow();
+        assert_eq!(comments.len(), 4);
+        assert!(comments.iter().all(|(url, body)| url == &transport.issue_url && body.contains(launch)));
+    }
+
+    /// An open task already tracking the refusal takes the evidence; no issue.
+    #[tokio::test]
+    async fn refusal_tracked_by_an_open_task_adds_evidence_to_that_task() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let service = report_service(temp.path());
+        let store = service.inner.open_task_store().unwrap();
+        let mut task = crate::types::Task::new(
+            store.generate_id().unwrap(),
+            "Verifier launch refuses a live supervisor".to_string(),
+        );
+        task.description = "Refusal: [G-104] merge held on verification dispatch vdispatch-1; automatic verifier startup is scheduled".to_string();
+        store.add(&task).unwrap();
+        let transport = recording_transport();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "report_cas_bug",
+            "title": "Merge stays held after the verifier is scheduled",
+            "description": "worktree_merge holds forever.",
+            "actual": "merge held on verification dispatch vdispatch-77aa; automatic verifier startup is scheduled\n\n[G-104]",
+        }))
+        .unwrap();
+        service
+            .report_cas_bug_with_transport(request, &transport)
+            .await
+            .unwrap();
+        assert!(transport.reports_seen.borrow().is_empty());
+        assert!(transport.comments_seen.borrow().is_empty());
+        assert!(store.get(&task.id).unwrap().notes.contains("+1"));
     }
 
     #[tokio::test]

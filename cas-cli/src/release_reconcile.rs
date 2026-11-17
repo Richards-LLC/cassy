@@ -446,11 +446,24 @@ pub(crate) fn record_preview(root: &Path, repo: &Path, scope: &ReleaseScope, pre
 }
 
 /// The sole authoritative completed-operation lookup. Partial/held operations
-/// return None so a trusted event can resume them; JSON exports are derived.
+/// return None so backfill or promotion can resume them; JSON exports are derived.
 pub(crate) fn completed_operation(
     root: &Path,
     key: &ReleaseOperationKey,
 ) -> Result<Option<ReleaseReconcileReceipt>> {
+    reusable_operation(root, key, &ReconcileTrigger::Backfill)
+}
+
+/// The recorded operation `trigger` reuses instead of reconciling: a complete
+/// one always; for the installer's publish and install triggers also a partial
+/// one a qualified pass finished (notice intent recorded). Its residuals are
+/// reported in the notice, not retried every tick; backfill and promotion still resume it.
+pub(crate) fn reusable_operation(
+    root: &Path,
+    key: &ReleaseOperationKey,
+    trigger: &ReconcileTrigger,
+) -> Result<Option<ReleaseReconcileReceipt>> {
+    let settled_reused = matches!(trigger, ReconcileTrigger::Publish { .. } | ReconcileTrigger::Installed);
     let saved = cas_store::release_reconcile_store::load_release_operation(root, key)
         .map_err(|e| e.to_string())?
         .map(|value| {
@@ -458,7 +471,12 @@ pub(crate) fn completed_operation(
         })
         .transpose()?;
     match saved {
-        Some(receipt) if receipt.complete && !stale_reconciler(&receipt)? => Ok(Some(receipt)),
+        Some(receipt)
+            if (receipt.complete || (settled_reused && receipt.notice_intent.is_some()))
+                && !stale_reconciler(&receipt)? =>
+        {
+            Ok(Some(receipt))
+        }
         _ => Ok(None),
     }
 }

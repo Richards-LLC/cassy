@@ -31,7 +31,7 @@ use std::{
 
 /// The two release-operation calls the adapters make; tests use a recording double.
 pub(crate) trait Reconciler {
-    fn completed(&self, root: &Path, key: &ReleaseOperationKey) -> Result<Option<ReleaseReconcileReceipt>>;
+    fn reusable(&self, root: &Path, key: &ReleaseOperationKey, trigger: &ReconcileTrigger) -> Result<Option<ReleaseReconcileReceipt>>;
     fn reconcile(
         &self,
         root: &Path,
@@ -44,8 +44,8 @@ pub(crate) trait Reconciler {
 struct LocalReconciler;
 
 impl Reconciler for LocalReconciler {
-    fn completed(&self, root: &Path, key: &ReleaseOperationKey) -> Result<Option<ReleaseReconcileReceipt>> {
-        release_reconcile::completed_operation(root, key).map_err(anyhow::Error::msg)
+    fn reusable(&self, root: &Path, key: &ReleaseOperationKey, trigger: &ReconcileTrigger) -> Result<Option<ReleaseReconcileReceipt>> {
+        release_reconcile::reusable_operation(root, key, trigger).map_err(anyhow::Error::msg)
     }
 
     fn reconcile(
@@ -110,7 +110,8 @@ impl std::fmt::Display for ReleaseCloseoutCounts {
 // ---- One operation per release identity. ----
 
 /// Run one trigger. The first trigger for a release identity reconciles once;
-/// any later trigger reuses #3's completed record. The notice is keyed by #3's
+/// any later trigger reuses #3's completed record, and a publish or install
+/// trigger also reuses a settled partial one. The notice is keyed by #3's
 /// notice intent, so a crash between reconcile and notice is repaired by the
 /// next trigger without reconciling or notifying twice.
 pub(crate) fn reconcile_once(
@@ -122,7 +123,7 @@ pub(crate) fn reconcile_once(
 ) -> Result<String> {
     let tree = release_reconcile::final_tree(repo, &scope.final_release_sha).map_err(anyhow::Error::msg)?;
     let key = operation_key(&scope.project_id, &scope.release_id, &tree);
-    let recorded = reconciler.completed(root, &key)?;
+    let recorded = reconciler.reusable(root, &key, &trigger)?;
     let reused = recorded.is_some();
     let receipt = match recorded {
         Some(receipt) => receipt,
@@ -736,7 +737,7 @@ mod tests {
     }
 
     impl Reconciler for Recording {
-        fn completed(&self, _: &Path, key: &ReleaseOperationKey) -> Result<Option<ReleaseReconcileReceipt>> {
+        fn reusable(&self, _: &Path, key: &ReleaseOperationKey, _: &ReconcileTrigger) -> Result<Option<ReleaseReconcileReceipt>> {
             Ok(self.done.borrow().iter().find(|r| &r.key == key).cloned())
         }
         fn reconcile(&self, root: &Path, scope: &ReleaseScope, _: &ReleaseInventory, trigger: ReconcileTrigger) -> Result<ReleaseReconcileReceipt> {
@@ -893,6 +894,7 @@ mod tests {
 
     /// Recovery runs the real shared operation even when a delivery is held:
     /// the durable record, its notice intent and exactly one notice exist.
+    /// GH #2030: later installer triggers report that residual, never re-reconcile it.
     #[test]
     fn recovery_with_a_held_delivery_records_the_shared_operation_and_notice() {
         use cas_types::{Dependency, DependencyType, FactoryBranchStart, Task, TaskStatus, WorkTarget};
@@ -929,13 +931,14 @@ mod tests {
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let _cwd = env.enter_dir(repo);
-        for _ in 0..2 {
-            recover(&root, &train.id, &tag, ReconcileTrigger::Installed).unwrap();
-        }
         let key = operation_key("release-fixture", &tag, &release_reconcile::final_tree(repo, &anchor).unwrap());
-        let record: ReleaseReconcileReceipt = serde_json::from_value(
-            cas_store::release_reconcile_store::load_release_operation(&root, &key).unwrap().unwrap(),
-        ).unwrap();
+        let load = || cas_store::release_reconcile_store::load_release_operation(&root, &key).unwrap().unwrap();
+        recover(&root, &train.id, &tag, ReconcileTrigger::Installed).unwrap();
+        let settled = load();
+        recover(&root, &train.id, &tag, ReconcileTrigger::Installed).unwrap();
+        recover(&root, &train.id, &tag, ReconcileTrigger::Publish { tag: tag.clone() }).unwrap();
+        assert_eq!(load(), settled, "a settled partial operation is reused, not reconciled again");
+        let record: ReleaseReconcileReceipt = serde_json::from_value(settled).unwrap();
         assert!(!record.complete);
         assert!(matches!(record.members.get("cas-b001"), Some(CassyMergeClose::Held(_))));
         assert_eq!(record.triggers.first(), Some(&ReconcileTrigger::Installed));

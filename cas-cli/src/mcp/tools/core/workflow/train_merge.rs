@@ -681,9 +681,13 @@ mod tests {
         }
 
         async fn start(&self) {
+            self.start_with(&self.ids).await;
+        }
+
+        async fn start_with(&self, ids: &[String]) {
             let service = crate::mcp::CasService::new(self.core.clone(), None);
             let request = serde_json::from_value(serde_json::json!({
-                "action": "train_merge", "id": "cas-train", "task_ids": self.ids
+                "action": "train_merge", "id": "cas-train", "task_ids": ids
             }))
             .unwrap();
             let result = service.factory(Parameters(request)).await.unwrap();
@@ -791,6 +795,82 @@ mod tests {
         assert_eq!(queue.outcomes.len(), 3, "{:?}", queue.outcomes);
         admit(&fixture.root, fixture._repo.path(), "epic/train", Some("cas-later"), None)
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_delivery_drops_its_position_and_active_train_accepts_appends() {
+        let mut fixture = Fixture::build(false);
+        fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+        fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+        std::fs::write(
+            fixture.root.join("config.toml"),
+            "[verification]\nenabled=true\n[qa]\nmode='batch'\n",
+        )
+        .unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut rejected_task = tasks.get(&fixture.ids[0]).unwrap();
+        rejected_task.depth = TaskDepth::Deep;
+        tasks.update(&rejected_task).unwrap();
+
+        fixture.start_with(&fixture.ids[..1]).await;
+        // Let the real queued merge path prepare its exact pre-merge dispatch.
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.root, &fixture.ids[0])
+            .unwrap()
+            .expect("queued merge prepares a pre-merge verification dispatch");
+        let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+        let rejected = service
+            .verification(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action":"add", "task_id":fixture.ids[0], "dispatch_id":dispatch.id,
+                    "status":"rejected", "summary":"Reject this exact train candidate",
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(rejected.is_error, Some(true), "{rejected:?}");
+        assert_eq!(
+            cas_store::get_verification_for_dispatch(&fixture.root, &dispatch.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            cas_types::VerificationStatus::Rejected
+        );
+
+        // Reproduce the incident: another task list arrives while this run is
+        // active. It appends in order, and the rejected position is settled.
+        let appended = service
+            .factory(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action":"train_merge", "id":"cas-train",
+                    "task_ids":fixture.ids[1..],
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(appended.is_error, Some(true), "{appended:?}");
+        let queue_path = path(&fixture.root, fixture._repo.path(), "epic/train").unwrap();
+        let queued = read(&queue_path).unwrap().unwrap();
+        assert_eq!(queued.next, 1, "{}", queued.render());
+        assert_eq!(queued.entries.len(), 3, "{}", queued.render());
+        assert!(queued.outcomes[0].contains("rejected"), "{:?}", queued.outcomes);
+        let still_parked = tasks.get(&fixture.ids[0]).unwrap();
+        assert_eq!(still_parked.status, TaskStatus::AwaitingMerge);
+        assert_eq!(
+            still_parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(fixture.shas[0].as_str())
+        );
+
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+        let complete = read(&queue_path).unwrap().unwrap();
+        assert!(!complete.active(), "{}", complete.render());
+        let operations = GitOperations::new(fixture._repo.path().to_path_buf());
+        assert!(!operations.is_ancestor(&fixture.shas[0], "origin/epic/train"));
+        assert!(operations.is_ancestor(&fixture.shas[1], "origin/epic/train"));
+        assert!(operations.is_ancestor(&fixture.shas[2], "origin/epic/train"));
+        assert_eq!(tasks.get(&fixture.ids[0]).unwrap().status, TaskStatus::AwaitingMerge);
     }
 
     #[tokio::test]

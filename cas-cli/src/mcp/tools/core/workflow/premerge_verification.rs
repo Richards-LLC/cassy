@@ -2274,13 +2274,14 @@ mod tests {
         assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_none(), "unchanged source minted a review: {result:?}");
         let error = result.expect_err("same source must fail at the dispatch boundary");
         assert_eq!(error.data.as_ref().unwrap()["reason"], "premerge_repair_requires_new_commit");
+        let receipt_task_id = task.id.clone();
         let assert_no_intent = || {
             let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
             for table in ["worker_completion_receipts", "worker_delivery_transactions", "worker_delivery_events", "verification_dispatches"] {
                 let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
                 assert_eq!(count, 0, "{table}");
             }
-            assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+            assert_eq!(agents.get_lease(&receipt_task_id).unwrap().unwrap().epoch, lease.epoch);
         };
         assert_no_intent();
         // The common mint also fails closed without a provable source.

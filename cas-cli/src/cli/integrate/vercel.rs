@@ -35,8 +35,7 @@
 //! Templates live in `templates/vercel/` next to this file and are embedded
 //! at compile time via `include_str!`. They hold all project-specific IDs
 //! inside named keep blocks (`<!-- keep vercel-ids -->`,
-//! `<!-- keep vercel-notes -->`) so refresh can either preserve them
-//! (default) or replace them (`--update-ids`).
+//! `<!-- keep vercel-notes -->`) so refresh preserves them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -269,16 +268,12 @@ use super::md::{escape_md_cell, escape_md_cell_code};
 
 /// Public CLI entry point. Routes to the correct sub-action.
 ///
-/// Currently `Refresh` and `Verify` only accept the default behavior; the
-/// `--update-ids` flag for refresh and id-level verbosity for verify are
-/// surfaced by the lower-level `init/refresh_with_options/verify` calls used
-/// directly by `cas init` once cas-7417 wires that path.
 pub fn execute(action: IntegrationAction) -> anyhow::Result<IntegrationOutcome> {
     let repo_root = locate_repo_root()?;
     let client = default_client();
     match action {
         IntegrationAction::Init => init(&repo_root, client.as_ref()),
-        IntegrationAction::Refresh => refresh(&repo_root, client.as_ref(), false),
+        IntegrationAction::Refresh => refresh(&repo_root),
         IntegrationAction::Verify => verify(&repo_root, client.as_ref()),
     }
 }
@@ -414,13 +409,7 @@ pub fn init_with_preseed(
 }
 
 /// `cas integrate vercel refresh`: regenerate prose, preserve keep blocks.
-/// When `update_ids` is true, re-fetch from Vercel and overwrite the
-/// `<!-- keep vercel-ids -->` block.
-pub fn refresh(
-    repo_root: &Path,
-    client: &dyn VercelClient,
-    update_ids: bool,
-) -> anyhow::Result<IntegrationOutcome> {
+pub fn refresh(repo_root: &Path) -> anyhow::Result<IntegrationOutcome> {
     let mut outcome = IntegrationOutcome::new(
         Platform::Vercel,
         IntegrationAction::Refresh,
@@ -440,36 +429,9 @@ pub fn refresh(
 
     let basename = repo_basename(repo_root);
 
-    // Determine projects to render and merge mode:
-    // - default refresh: empty `projects`; mode = PreserveExisting; existing
-    //   keep-block content survives via merge.
-    // - `--update-ids` with a real upstream match: fetched `projects`;
-    //   mode = PreferTemplate; new IDs overwrite the keep block.
-    // - `--update-ids` with NO upstream match: surface a warning and fall
-    //   back to PreserveExisting so we never silently wipe recorded IDs.
-    let (projects, mode) = if update_ids {
-        let all = client
-            .list_projects()
-            .context("re-fetching Vercel projects via MCP")?;
-        match match_project(&basename, &all) {
-            MatchOutcome::Strong(p) => (vec![p], MergeMode::PreferTemplate),
-            MatchOutcome::Multiple(c) => {
-                outcome.summary.push(format!(
-                    "captured {} ambiguous Vercel matches for '{basename}' (picker pending cas-7417)",
-                    c.len()
-                ));
-                (c, MergeMode::PreferTemplate)
-            }
-            MatchOutcome::None => {
-                outcome.summary.push(format!(
-                    "warning: no Vercel project matched '{basename}' on refresh --update-ids; preserving existing keep-block IDs"
-                ));
-                (Vec::new(), MergeMode::PreserveExisting)
-            }
-        }
-    } else {
-        (Vec::new(), MergeMode::PreserveExisting)
-    };
+    // Keep-block content, including recorded IDs, survives through the merge.
+    let mode = MergeMode::PreserveExisting;
+    let projects = Vec::new();
 
     let ctx = RenderContext {
         repo_name: basename,
@@ -482,8 +444,8 @@ pub fn refresh(
     let new_claude = render_skill(&ctx, TemplateTarget::Claude);
     let new_cursor = render_skill(&ctx, TemplateTarget::Cursor);
 
-    // Surface orphans before writing — only meaningful in PreserveExisting mode.
-    if mode == MergeMode::PreserveExisting {
+    // Surface orphans before writing.
+    {
         if let Some(existing) = claude_existing.as_deref() {
             if let Ok(orphans) = keep_block::orphaned_existing(&new_claude, existing) {
                 for o in orphans {
@@ -522,11 +484,7 @@ pub fn refresh(
         PathBuf::from(REL_CLAUDE_REFS),
         PathBuf::from(REL_CURSOR_SKILL),
     ];
-    outcome.summary.push(if update_ids {
-        "re-fetched Vercel IDs; refresh wrote 3 files".to_string()
-    } else {
-        "refreshed prose; keep blocks preserved".to_string()
-    });
+    outcome.summary.push("refreshed prose; keep blocks preserved".to_string());
     Ok(outcome)
 }
 
@@ -1342,8 +1300,7 @@ mod tests {
     #[test]
     fn refresh_skipped_when_skill_md_absent() {
         let (_tmp, root) = make_repo_with_name("myapp");
-        let client = MockVercelClient::new(vec![]);
-        let outcome = refresh(&root, &client, false).unwrap();
+        let outcome = refresh(&root).unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Skipped);
     }
 
@@ -1363,33 +1320,12 @@ mod tests {
         );
         std::fs::write(&path, &edited).unwrap();
 
-        // Refresh with a different upstream — but update_ids=false should
-        // preserve the user's edit.
-        let client2 = MockVercelClient::new(vec![proj("prj_new", "myapp", "team_new")]);
-        let outcome = refresh(&root, &client2, false).unwrap();
+        // Refresh preserves the user's edit.
+        let outcome = refresh(&root).unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Refreshed);
-        assert_eq!(*client2.list_calls.borrow(), 0, "default refresh must not hit MCP");
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("prj_USER_EDIT"), "keep block must survive: {after}");
-        assert!(!after.contains("prj_new"));
-    }
-
-    #[test]
-    fn refresh_with_update_ids_replaces_keep_block() {
-        let (_tmp, root) = make_repo_with_name("myapp");
-        std::fs::write(root.join("vercel.json"), "{}").unwrap();
-        let client = MockVercelClient::new(vec![proj("prj_old", "myapp", "team_old")]);
-        init(&root, &client).unwrap();
-
-        let client2 = MockVercelClient::new(vec![proj("prj_new", "myapp", "team_new")]);
-        let outcome = refresh(&root, &client2, true).unwrap();
-        assert_eq!(outcome.status, IntegrationStatus::Refreshed);
-        assert!(*client2.list_calls.borrow() >= 1);
-
-        let after = std::fs::read_to_string(root.join(REL_CLAUDE_SKILL)).unwrap();
-        assert!(after.contains("prj_new"), "update-ids must rewrite IDs: {after}");
-        assert!(!after.contains("prj_old"));
     }
 
     #[test]
@@ -1405,7 +1341,7 @@ mod tests {
         content.push_str("\n<!-- keep vercel-extra -->\nuser hand-edited content\n<!-- /keep vercel-extra -->\n");
         std::fs::write(&path, &content).unwrap();
 
-        let outcome = refresh(&root, &client, false).unwrap();
+        let outcome = refresh(&root).unwrap();
         assert!(
             outcome
                 .summary
@@ -1629,7 +1565,7 @@ mod tests {
         );
         std::fs::write(&cursor_path, &cursor).unwrap();
 
-        let outcome = refresh(&root, &client, false).unwrap();
+        let outcome = refresh(&root).unwrap();
         assert!(
             outcome
                 .summary
@@ -1638,30 +1574,6 @@ mod tests {
             "cursor orphan must be surfaced: summary={:?}",
             outcome.summary
         );
-    }
-
-    // --- Refresh: --update-ids with no upstream match falls back -------
-
-    #[test]
-    fn refresh_with_update_ids_and_no_match_preserves_existing() {
-        let (_tmp, root) = make_repo_with_name("myapp");
-        std::fs::write(root.join("vercel.json"), "{}").unwrap();
-        let client = MockVercelClient::new(vec![proj("prj_old", "myapp", "team_old")]);
-        init(&root, &client).unwrap();
-
-        // Upstream now has nothing matching the basename.
-        let stranger = MockVercelClient::new(vec![proj(
-            "prj_other",
-            "totally-unrelated",
-            "team_b",
-        )]);
-        let outcome = refresh(&root, &stranger, true).unwrap();
-        assert_eq!(outcome.status, IntegrationStatus::Refreshed);
-
-        // IDs from init survive.
-        let after = std::fs::read_to_string(root.join(REL_CLAUDE_SKILL)).unwrap();
-        assert!(after.contains("prj_old"));
-        assert!(!after.contains("prj_other"));
     }
 
     // --- Verify: mixed-staleness + empty ID block ----------------------

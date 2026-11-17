@@ -1084,6 +1084,7 @@ mod tests {
             git(&["add", "."]);
             git(&["commit", "-qm", "base"]);
             let base = git(&["rev-parse", "HEAD"]);
+            git(&["checkout", "-qb", "delivery"]);
             let source = "import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\nconst name = ['dynamic'].join('');\ntest(name, () => { appendFileSync('runs', 'x'); });\n";
             std::fs::write(repo.join(path), source).unwrap();
             git(&["commit", "-qam", "unknown static name"]);

@@ -536,7 +536,8 @@ fn mask_type_imports(source: &str) -> std::borrow::Cow<'_, str> {
     let imports = TYPE_IMPORT.replace_all(source, |caps: &regex::Captures<'_>| {
         let (whole, query) = (&caps[0], caps.get(1).unwrap());
         let start = query.start() - caps.get(0).unwrap().start();
-        let masked = query.as_str().bytes().map(|byte| if matches!(byte, b'\n' | b'\r') { byte as char } else { '_' }).collect::<String>();
+        let masked = query.as_str().bytes().enumerate().map(|(index, byte)|
+            if matches!(byte, b'\n' | b'\r') { byte as char } else if index == 0 { '_' } else { ' ' }).collect::<String>();
         format!("{}{}", &whole[..start], masked)
     });
     if !TEMPLATE_TYPE_ARGUMENTS.is_match(&imports) {

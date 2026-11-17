@@ -981,6 +981,9 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
     // The same approval does not waive fresh receipt-scope checks at close.
     std::fs::remove_dir_all(f.cas_dir().join("worker-checks")).unwrap();
+    let mut unproven = f.task();
+    unproven.deliverables.test_receipts.clear();
+    tasks.update(&unproven).unwrap();
     // Publication continues the same verdict close, including its hold restoration.
     let first = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await.receipt(ID);
     // pin: preserve the worker receipt-scope refusal after the review moved before publication.

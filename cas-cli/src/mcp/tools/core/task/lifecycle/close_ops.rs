@@ -9763,6 +9763,18 @@ impl CasCore {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
                     drop(_phase);
+                    // cas-289b: carry this machine's passing receipts at the
+                    // parked tip, so a close on another machine can count them.
+                    if let Some(tip) = receipt_tip {
+                        let portable = crate::factory_worker_check::PassingTests::new(
+                            &self.cas_root,
+                            worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                            tip,
+                        ).with_target(&resolved_parent_branch).portable();
+                        if !portable.is_empty() {
+                            task.deliverables.test_receipts = portable;
+                        }
+                    }
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-00eb: a commit-time anchor recorded earlier in
                         // this cycle survives the park (`record_park`). When
@@ -11684,9 +11696,12 @@ impl CasCore {
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
+            // cas-289b: receipts from the worker's machine travel on the task row.
+            let synced_receipts = task.deliverables.test_receipts.clone();
             let passing_tests = delivered_tip.as_deref().map(|head| {
                 (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head)
-                    .with_target(&resolved_parent_branch))
+                    .with_target(&resolved_parent_branch)
+                    .with_synced(&synced_receipts))
             });
             if let Some((_, tests)) = passing_tests.as_ref() {
                 for receipt in tests.receipts() {

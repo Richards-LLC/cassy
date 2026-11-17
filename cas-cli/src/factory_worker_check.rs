@@ -951,6 +951,7 @@ pub(crate) struct PassingTests<'a> {
     repo: &'a Path,
     head: &'a str,
     target: Option<&'a str>,
+    synced: &'a [cas_types::PortableTestReceipt],
     records: std::sync::OnceLock<Vec<(String, Option<String>, TestReceipt)>>,
 }
 
@@ -961,8 +962,34 @@ impl<'a> PassingTests<'a> {
             repo,
             head,
             target: None,
+            synced: &[],
             records: std::sync::OnceLock::new(),
         }
+    }
+
+    /// cas-289b: also count the receipts carried on the task row from the
+    /// machine that ran them. Only a receipt for this exact head, with a
+    /// named filter, a non-zero count and a recorded log hash is admitted;
+    /// a local receipt for the same test wins.
+    pub(crate) fn with_synced(mut self, synced: &'a [cas_types::PortableTestReceipt]) -> Self {
+        self.synced = synced;
+        self
+    }
+
+    /// This machine's passing receipts at the head, for the task row.
+    pub(crate) fn portable(&self) -> Vec<cas_types::PortableTestReceipt> {
+        self.records().iter().filter_map(|(tested_head, package, test)| {
+            let log = std::fs::read(test.selected_log.as_ref()?).ok()?;
+            Some(cas_types::PortableTestReceipt {
+                head: self.head.to_string(),
+                tested_head: tested_head.clone(),
+                package: package.clone()?,
+                harness: test.harness.clone(),
+                filter: test.filter.clone(),
+                count: test.count,
+                log_sha256: hex::encode(Sha256::digest(&log)),
+            })
+        }).collect()
     }
 
     /// cas-2bdf: judge ancestor receipts against the integration target, so a
@@ -974,7 +1001,37 @@ impl<'a> PassingTests<'a> {
 
     fn records(&self) -> &[(String, Option<String>, TestReceipt)] {
         self.records.get_or_init(|| {
-            passing_test_records(self.cas_root, self.repo, self.head, self.target)
+            let mut records = passing_test_records(self.cas_root, self.repo, self.head, self.target);
+            for synced in self.synced {
+                let admissible = synced.head == self.head
+                    && valid_git_oid(&synced.head)
+                    && valid_git_oid(&synced.tested_head)
+                    && (synced.tested_head == synced.head
+                        || receipt_head_is_ancestor(self.repo, &synced.tested_head, &synced.head))
+                    && named_filter(&synced.filter)
+                    && synced.count > 0
+                    && package_selector(&synced.package).is_some()
+                    && synced.harness.as_deref().is_none_or(valid_package)
+                    && synced.log_sha256.len() == 64
+                    && synced.log_sha256.bytes().all(|byte| byte.is_ascii_hexdigit());
+                let local = records.iter().any(|(_, package, test)| {
+                    package.as_deref() == Some(synced.package.as_str())
+                        && test.harness == synced.harness
+                        && test.filter == synced.filter
+                });
+                if admissible && !local {
+                    records.push((synced.tested_head.clone(), Some(synced.package.clone()), TestReceipt {
+                        filter: synced.filter.clone(),
+                        harness: synced.harness.clone(),
+                        count: synced.count,
+                        stability: None,
+                        selected_log: None,
+                        host_path_opt_out: None,
+                        supervisor_recorded: None,
+                    }));
+                }
+            }
+            records
         })
     }
 

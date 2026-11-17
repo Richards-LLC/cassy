@@ -425,12 +425,13 @@ impl crate::mcp::CasCore {
 
     /// MCP lift (cas-444b): the train's live supervisor reopens a frozen train
     /// with a required reason, audited on the train and sent to the operator.
+    // gate[G-157 release-freeze-lift]: Train freeze lift authority and reason
     pub(crate) fn train_lift(&self, train_id: &str, reason: Option<&str>) -> Result<String> {
         let actor = self.resolve_live_supervisor_authority().map_err(|_| {
-            anyhow::anyhow!("TRAIN_LIFT_SUPERVISOR_REQUIRED: train_freeze decision=lift requires a live registered supervisor")
+            anyhow::anyhow!(crate::gates::tag("G-157", "TRAIN_LIFT_SUPERVISOR_REQUIRED: train_freeze decision=lift requires a live registered supervisor"))
         })?;
         let reason = reason.map(str::trim).filter(|reason| !reason.is_empty()).ok_or_else(|| {
-            anyhow::anyhow!("TRAIN_LIFT_REASON_REQUIRED: train_freeze decision=lift requires a nonempty reason. No freeze was lifted.")
+            anyhow::anyhow!(crate::gates::tag("G-157", "TRAIN_LIFT_REASON_REQUIRED: train_freeze decision=lift requires a nonempty reason. No freeze was lifted."))
         })?;
         let task = train(crate::store::open_task_store(&self.cas_root)?.as_ref(), train_id)?;
         // Another factory session's live supervisor owns this train's release.
@@ -444,16 +445,18 @@ impl crate::mcp::CasCore {
                     && agent.factory_session != actor.factory_session
             })
         {
-            anyhow::bail!(
+            anyhow::bail!(crate::gates::tag("G-157", format!(
                 "TRAIN_LIFT_NOT_TRAIN_SUPERVISOR: {train_id} belongs to supervisor {} in another factory session; ask it to lift. No freeze was lifted.",
                 other.name
-            );
+            )));
         }
         let granted = crate::config::Config::load(&self.cas_root)?.release.unwrap_or_default().supervisor_lifts_operator_freeze;
         ensure!(
             !operator_frozen(&task) || granted,
-            "TRAIN_LIFT_OPERATOR_FREEZE: the operator froze {train_id} in Commander, or the freeze predates supervisor lifts; only the operator lifts it there, \
-             unless they grant supervisor lifts with release.supervisor_lifts_operator_freeze. No freeze was lifted."
+            crate::gates::tag("G-157", format!(
+                "TRAIN_LIFT_OPERATOR_FREEZE: the operator froze {train_id} in Commander, or the freeze predates supervisor lifts; only the operator lifts it there, \
+                 unless they grant supervisor lifts with release.supervisor_lifts_operator_freeze. No freeze was lifted."
+            ))
         );
         let (detail, decision) = lift_with_reason(&self.cas_root, train_id, &format!("supervisor {}", actor.name), reason)?;
         crate::supervisor_notices::enqueue_with_context(
@@ -711,6 +714,7 @@ mod tests {
         for reason in [None, Some("  ")] {
             let error = lift_via_tool(&service, reason).await.unwrap_err();
             assert!(error.message.starts_with("TRAIN_LIFT_REASON_REQUIRED"), "{}", error.message);
+            assert_eq!(crate::gates::codes_in(&error.message), vec!["G-157"]);
             assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), frozen);
         }
 
@@ -770,6 +774,7 @@ mod tests {
             for (caller, code) in [(&foreign, "TRAIN_LIFT_NOT_TRAIN_SUPERVISOR"), (&service, "TRAIN_LIFT_OPERATOR_FREEZE")] {
                 let error = lift_via_tool(caller, Some("cut refused")).await.unwrap_err();
                 assert!(error.message.starts_with(code), "{}", error.message);
+                assert_eq!(crate::gates::codes_in(&error.message), vec!["G-157"]);
                 assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), frozen);
             }
             lift(&root, "cas-tr", "operator via Commander").unwrap();

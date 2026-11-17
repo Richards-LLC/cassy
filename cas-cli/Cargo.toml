@@ -2,7 +2,7 @@
 name = "cas"
 # Tests are modules of the explicit harnesses below; do not auto-link each source.
 autotests = false
-version = "4.33.0"
+version = "4.34.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"
@@ -176,7 +176,7 @@ lru = "0.12"
 uuid = { version = "1.11", features = ["v4"] }
 
 # Analytics (opt-in telemetry) - use blocking client, not async
-posthog-rs = { version = "0.6", default-features = false }
+posthog-rs = { version = "0.3", default-features = false }
 
 # Headless Claude Code CLI client (AI extraction, consolidation, summaries)
 cas-claude = { path = "../crates/cas-claude" }

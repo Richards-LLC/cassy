@@ -297,7 +297,7 @@ pub fn parse_list_organizations(value: &serde_json::Value) -> Result<Vec<NeonOrg
                     "list_organizations: response had no `organizations` array. \
                      cas-36fd0 dropped speculative tolerance for `orgs` and \
                      unrecognized wrapper keys; if Neon rolled out a new \
-                     shape, please file a bug with this payload: {inner}"
+                     shape, please find or file a bug with this payload: {inner}"
                 )
             })?,
         _ => anyhow::bail!(
@@ -335,7 +335,7 @@ pub fn parse_list_projects(value: &serde_json::Value) -> Result<Vec<NeonProject>
                     "list_projects: response had no `projects` array. cas-36fd0 \
                      dropped speculative tolerance for `data` and unrecognized \
                      wrapper keys; if Neon rolled out a new shape, please \
-                     file a bug with this payload: {inner}"
+                     find or file a bug with this payload: {inner}"
                 )
             })?,
         _ => anyhow::bail!(

@@ -3,6 +3,8 @@ use crate::mcp::tools::service::imports::*;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use crate::issue_intake::RefusalFingerprint;
+
 enum OpenMatch {
     Issue(String),
     Task(String),
@@ -125,76 +127,6 @@ impl BugFilingTransport for GhBugFilingTransport {
     }
 }
 
-const FINGERPRINT_MARKER: &str = "**Fingerprint**: `";
-
-/// Lowercased words with ids, numbers and hashes collapsed to `#` and gate
-/// tags removed, so one refusal reads the same in every report.
-fn normalize_refusal(text: &str) -> String {
-    let mut words: Vec<String> = Vec::new();
-    for raw in text.split(|c: char| c.is_whitespace() || c == '`') {
-        let word = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-        if word.is_empty() || crate::gates::find(word).is_some() {
-            continue;
-        }
-        let word = if word.chars().any(|c| c.is_ascii_digit()) || raw.contains('…') {
-            "#".to_string()
-        } else {
-            word.to_lowercase()
-        };
-        if !(word == "#" && words.last().is_some_and(|last| last == "#")) {
-            words.push(word);
-        }
-    }
-    words.join(" ")
-}
-
-/// The find-or-file key: the refusal's registry gate codes plus its
-/// normalized headline. Too little text is no key, so nothing matches it.
-#[derive(Debug, PartialEq, Eq)]
-struct RefusalFingerprint {
-    codes: Vec<&'static str>,
-    headline: String,
-}
-
-fn is_distinctive(headline: &str) -> bool {
-    headline.split(' ').filter(|word| *word != "#").count() >= 4
-}
-
-fn contains_phrase(haystack: &str, needle: &str) -> bool {
-    format!(" {haystack} ").contains(&format!(" {needle} "))
-}
-
-impl RefusalFingerprint {
-    fn of(refusal: &str) -> Option<Self> {
-        let headline = refusal
-            .lines()
-            .map(normalize_refusal)
-            .find(|line| !line.is_empty())?;
-        is_distinctive(&headline).then(|| Self {
-            codes: crate::gates::codes_in(refusal),
-            headline,
-        })
-    }
-
-    /// Same codes, and one headline contains the other: the earlier report's
-    /// text, or the fingerprint it recorded, names this refusal.
-    fn matches(&self, candidate: &str) -> bool {
-        if !self.codes.iter().all(|code| candidate.contains(code)) {
-            return false;
-        }
-        contains_phrase(&normalize_refusal(candidate), &self.headline)
-            || candidate.match_indices(FINGERPRINT_MARKER).any(|(start, _)| {
-                let rest = &candidate[start + FINGERPRINT_MARKER.len()..];
-                rest.split('`').next().is_some_and(|stored| {
-                    is_distinctive(stored) && contains_phrase(&self.headline, stored)
-                })
-            })
-    }
-
-    fn marker(&self) -> String {
-        format!("- {FINGERPRINT_MARKER}{}`", self.headline)
-    }
-}
 
 fn command_failure_detail(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -622,21 +554,12 @@ impl CasService {
         if let Some((url, _)) = issues.into_iter().find(|(_, text)| fingerprint.matches(text)) {
             return Ok(Some(OpenMatch::Issue(url)));
         }
-        let tasks = self
+        let store = self
             .inner
             .open_task_store()
-            .map_err(|error| format!("task store unavailable: {}", error.message))?
-            .list(None)
-            .map_err(|error| format!("could not list open tasks: {error}"))?;
-        Ok(tasks
-            .into_iter()
-            .find(|task| {
-                !task.is_terminal()
-                    && fingerprint.matches(&format!(
-                        "{}\n{}\n{}",
-                        task.title, task.description, task.notes
-                    ))
-            })
+            .map_err(|error| format!("task store unavailable: {}", error.message))?;
+        Ok(crate::issue_intake::open_task_match(store.as_ref(), fingerprint)
+            .map_err(|error| format!("could not list open tasks: {error}"))?
             .map(|task| OpenMatch::Task(task.id)))
     }
 
@@ -700,11 +623,20 @@ impl CasService {
             .actual
             .map(|value| redact_known_credentials(&anonymize(&value)));
         // The verbatim refusal leads `actual`; it is the find-or-file key.
-        let fingerprint = actual.as_deref().and_then(RefusalFingerprint::of);
-        let fingerprint_line = fingerprint
-            .as_ref()
-            .map(|fingerprint| format!("{}\n", fingerprint.marker()))
-            .unwrap_or_default();
+        // Every report is matched before it is filed, so one without a key is
+        // refused rather than filed unmatched.
+        let fingerprint = actual
+            .as_deref()
+            .and_then(RefusalFingerprint::of)
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "actual must start with the verbatim refusal or wrong output (at least \
+                     four words): report_cas_bug matches that line against open issues and \
+                     tasks before it files",
+                )
+            })?;
+        let fingerprint_line = format!("{}\n", fingerprint.marker());
 
         let version = env!("CARGO_PKG_VERSION");
         let os_info = std::env::consts::OS;
@@ -742,10 +674,7 @@ impl CasService {
             Err(warning) => ("unassigned".to_string(), Some(warning)),
         };
         let filing_result = resolve_issue_repo(&self.inner.cas_root).and_then(|repo| {
-            match fingerprint.as_ref() {
-                Some(fingerprint) => self.find_open_match(transport, &repo, fingerprint)?,
-                None => None,
-            }
+            self.find_open_match(transport, &repo, &fingerprint)?
             .map_or_else(
                 || file_bug_report(transport, &repo, &title, &body).map(Filing::Filed),
                 |found| self.add_evidence(transport, found, &title, &body),
@@ -785,7 +714,8 @@ impl CasService {
                 })?;
                 return Ok(Self::success(format!(
                     "Bug report was not filed. {failure_reason}\nStaged report: {}\n\n\
-                     Resolve the filing failure above before filing the staged report.",
+                     Once the failure is resolved, rerun report_cas_bug with the same fields; \
+                     it matches open issues and tasks before it files.",
                     path.display()
                 )));
             }
@@ -1300,7 +1230,7 @@ mod tests {
             "title": format!("Cassy failure in {}", home.display()),
             "description": "Reproducer with ghp_private-token-value",
             "expected": "successful routing",
-            "actual": "wrong tracker"
+            "actual": "report routed to the wrong tracker"
         }))
         .unwrap()
     }
@@ -1423,6 +1353,15 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // A report with no key is refused, never filed unmatched.
+        let keyless = serde_json::from_value(serde_json::json!({
+            "action": "report_cas_bug",
+            "title": "Verifier never starts",
+            "description": "No refusal captured.",
+            "actual": "hangs",
+        }))
+        .unwrap();
+        assert!(service.report_cas_bug_with_transport(keyless, &transport).await.is_err());
         assert_eq!(transport.reports_seen.borrow().len(), 1);
         let comments = transport.comments_seen.borrow();
         assert_eq!(comments.len(), 4);

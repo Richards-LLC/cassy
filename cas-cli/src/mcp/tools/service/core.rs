@@ -283,6 +283,33 @@ impl CasService {
             },
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        // Find or file (cas-7823): a finding whose wrong output an open task
+        // already records adds evidence there instead of opening a twin.
+        if finding_origin.is_some()
+            && !req.confirm_warning.unwrap_or(false)
+            && let Some(fingerprint) = req
+                .repro
+                .as_deref()
+                .and_then(crate::issue_intake::RefusalFingerprint::of_last)
+            && let Some(open) = crate::issue_intake::open_task_match(
+                self.inner.open_task_store()?.as_ref(),
+                &fingerprint,
+            )
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                crate::gates::tag(
+                    "G-148",
+                    format!(
+                        "FINDING ALREADY TRACKED: open task {} ({:?}) records this wrong output. \
+                         Add the new evidence with task action=notes id={}; if this is a different \
+                         defect, retry with confirm_warning=true.",
+                        open.id, open.title, open.id
+                    ),
+                ),
+            ));
+        }
         let mut req = req;
         if req.repro.as_deref().is_some_and(|s| !s.trim().is_empty()) {
             req.labels = Some(format!("{},runtime-repro", req.labels.as_deref().unwrap_or_default()));

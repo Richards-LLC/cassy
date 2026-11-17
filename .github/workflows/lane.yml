@@ -12,8 +12,8 @@
 #
 # With CAS_LANE_SLIM unset, the `full` job calls ci.yml itself, so a factory
 # push validates exactly as before (rollback: unset CAS_LANE_SLIM). Runner
-# placement follows cas-14e0: local runners only when CASSY_LANE_SELF_HOSTED is
-# enabled, and only the light lane slots (label cas-lane-light, cas-3b5e), so a
+# placement follows cas-14e0: the own-test build uses trusted cas-lane-light
+# slots; other local jobs opt in with CASSY_LANE_SELF_HOSTED (cas-3b5e), so a
 # burst of lanes never queues behind merge-queue Rust jobs on cas-ci-32core.
 # This workflow has no pull_request trigger, so a fork cannot reach self-hosted
 # runners. scripts/ci_tiers/test-policy.py pins all of this.
@@ -382,7 +382,7 @@ jobs:
     name: Scoped Validation — impact own tests
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.rust-unaffected != 'true'
     needs: ci-diff
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, cas-lane-light]
     # Two 25-minute own-test attempts plus setup and the archive (cas-02ab).
     timeout-minutes: 60
     env: &lane-impact-env
@@ -442,10 +442,12 @@ jobs:
       - id: own
         name: Build the selection and run own tests
         timeout-minutes: 52
-        run: >-
-          python3 scripts/ci-step-watchdog.py --label "Build the selection and run own tests"
-          --timeout-minutes 25 --log target/ci-impact/own-watchdog.log --
-          python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json --github-output "$GITHUB_OUTPUT"
+        run: |
+          mkdir -p target/ci-impact
+          python3 scripts/ci-step-watchdog.py --label "Build the selection and run own tests" \
+            --timeout-minutes 25 --log target/ci-impact/own-watchdog.log -- \
+            python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json \
+              --github-output "$GITHUB_OUTPUT" 2>&1 | tee target/ci-impact/own-build.log
 
       # Publish the named failures before archiving or rebuilding the base.
       # cas-rule: rule-176 scope: "(3) Remove steps before adding them. A new check must fit an existing stage budget or replace something."

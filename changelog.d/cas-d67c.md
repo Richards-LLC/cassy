@@ -1,3 +1,4 @@
 ### Security — MCP
 
 - **MCP server and proxy move to rmcp 3.10, clearing six rmcp advisories** — Was: Cassy's MCP server, its upstream proxy and the Violet/Viktor paths ran on rmcp 0.16, which carries GHSA-33f5-2c5q-wgwj (CVE-2026-63127, OAuth resource-metadata validation), GHSA-9g45-5xwm-f3wc (custom headers leaking to cross-origin redirects), GHSA-9pj6-vhgr-3mwh, GHSA-c9xm-49cp-xcr9, GHSA-89vp-x53w-74fx / RUSTSEC-2026-0189 and RUSTSEC-2026-0462 (unbounded response buffering in streamable-HTTP clients, fixed only in 3.9). Now: one rmcp 3.10.0 serves all three crates. The handshake stays on protocol revision 2025-03-26 in both directions, so tool names, schemas, results and negotiated versions are unchanged for clients and upstream servers.
+  The one remaining rmcp 0.14.0 lockfile entry comes from the upstream `claude_rs` dependency, which declares it but never calls it; the in-repo Claude Code client change removes it.

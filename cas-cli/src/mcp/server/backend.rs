@@ -3,7 +3,7 @@
 use std::sync::{Arc, OnceLock, atomic::{AtomicUsize, Ordering}};
 use anyhow::{Context, Result, bail};
 use rmcp::{Service, ServiceExt};
-use rmcp::model::{ClientRequest, ClientNotification, ServerResult, ServerInfo};
+use rmcp::model::{ClientRequest, ClientNotification, ProtocolVersion, ServerResult, ServerConfig};
 use rmcp::service::{RoleServer, RequestContext, NotificationContext};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -82,8 +82,12 @@ impl Service<RoleServer> for Switchable {
         }
     }
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         Service::get_info(self.active.get().unwrap_or(&self.passive))
+    }
+
+    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
+        Service::supported_protocol_versions(self.active.get().unwrap_or(&self.passive))
     }
 }
 

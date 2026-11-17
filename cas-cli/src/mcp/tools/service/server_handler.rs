@@ -5,7 +5,7 @@ use rmcp::model::{
     CallToolRequestParams, GetPromptRequestParams, GetPromptResult, Implementation,
     ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
     ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-    ServerCapabilities, ServerInfo,
+    ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use tracing::{info, warn};
@@ -16,6 +16,11 @@ use crate::mcp::tools::service::CasService;
 /// Always injected by the client, and cut at 2 KB by Claude Code: keep it to
 /// routing guidance, well under 200 characters.
 pub(crate) const SERVER_INSTRUCTIONS: &str = "Cassy: tasks, memory, search and factory coordination. If these tools are deferred, load task, coordination, search and memory together before first use.";
+
+/// Newest MCP revision Cassy negotiates. rmcp would otherwise echo any newer
+/// revision a client requests; the ceiling keeps the handshake and result
+/// shapes clients have always received.
+pub(crate) const MCP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_03_26;
 
 const WORKER_MCP_ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -93,25 +98,25 @@ fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
 
 #[allow(clippy::manual_async_fn)]
 impl ServerHandler for CasService {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder()
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::new(
+            ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
                 .enable_resources_list_changed()
                 .enable_prompts()
                 .build(),
-            server_info: Implementation {
-                name: "cas".to_string(),
-                title: Some("Coding Agent System".to_string()),
-                description: Some("Unified context system for AI agents: persistent memory, tasks, rules, and skills across sessions.".to_string()),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(SERVER_INSTRUCTIONS.to_string()),
-        }
+        );
+        info.protocol_version = MCP_PROTOCOL_VERSION;
+        info.server_info = Implementation::new("cas", env!("CARGO_PKG_VERSION"))
+            .with_title("Coding Agent System")
+            .with_description("Unified context system for AI agents: persistent memory, tasks, rules, and skills across sessions.");
+        info.instructions = Some(SERVER_INSTRUCTIONS.to_string());
+        info
+    }
+
+    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
+        std::borrow::Cow::Borrowed(ProtocolVersion::known_up_to(&MCP_PROTOCOL_VERSION))
     }
 
     fn list_resources(
@@ -231,7 +236,7 @@ impl ServerHandler for CasService {
             // `ToolCallContext` consumes `request` below.
             let timeout_arguments = request.arguments.clone();
             let caller_tool_use =
-                claude_tool_use_id(request.meta.as_ref()).or_else(|| claude_tool_use_id(Some(&context.meta)));
+                claude_tool_use_id(request.meta.as_deref()).or_else(|| claude_tool_use_id(Some(&*context.meta)));
             info!(method = "tools/call", tool = %tool_name, id = %request_id, "MCP call_tool START");
             // cas-b1dd: the handler owns its service clone so it can outlive an
             // early answer; a deadline never drops work past its commit.
@@ -275,7 +280,7 @@ impl ServerHandler for CasService {
 /// cas-badb (GH #1302): Claude Code tags every MCP call with the id of the
 /// `tool_use` that issued it. Subagents share the parent's MCP server, so this
 /// id is the only per-call evidence of who is calling.
-fn claude_tool_use_id(meta: Option<&rmcp::model::Meta>) -> Option<String> {
+fn claude_tool_use_id(meta: Option<&rmcp::model::MetaObject>) -> Option<String> {
     meta?
         .get("claudecode/toolUseId")?
         .as_str()
@@ -2529,11 +2534,11 @@ mod tests {
 
     #[test]
     fn claude_tool_use_id_reads_call_meta_cas_badb() {
-        let meta: rmcp::model::Meta =
+        let meta: rmcp::model::MetaObject =
             serde_json::from_value(serde_json::json!({"claudecode/toolUseId": "toolu_1"})).unwrap();
         assert_eq!(super::claude_tool_use_id(Some(&meta)).as_deref(), Some("toolu_1"));
         assert_eq!(super::claude_tool_use_id(None), None);
-        let empty: rmcp::model::Meta = serde_json::from_value(serde_json::json!({})).unwrap();
+        let empty: rmcp::model::MetaObject = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(super::claude_tool_use_id(Some(&empty)), None);
     }
 

@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{
-    ErrorCode, GetPromptResult, Prompt, PromptArgument, PromptMessage, PromptMessageRole,
-};
+use rmcp::model::{ErrorCode, GetPromptResult, Prompt, PromptArgument, PromptMessage, Role};
 
 use crate::mcp::server::CasCore;
 use crate::types::{RuleStatus, TaskStatus};
@@ -15,53 +13,48 @@ impl CasCore {
             Prompt::new(
                 "session_start",
                 Some("Get context for starting a new session"),
-                Some(vec![PromptArgument {
-                    name: "limit".to_string(),
-                    title: Some("Limit".to_string()),
-                    description: Some(
-                        "Maximum items per section (defaults to hooks.context_limit, 5)"
-                            .to_string(),
-                    ),
-                    required: Some(false),
-                }]),
+                Some(vec![
+                    PromptArgument::new("limit")
+                        .with_title("Limit")
+                        .with_description(
+                            "Maximum items per section (defaults to hooks.context_limit, 5)",
+                        )
+                        .with_required(false),
+                ]),
             ),
             Prompt::new(
                 "task_planning",
                 Some("Plan a new task with dependencies"),
                 Some(vec![
-                    PromptArgument {
-                        name: "title".to_string(),
-                        title: Some("Title".to_string()),
-                        description: Some("Task title".to_string()),
-                        required: Some(true),
-                    },
-                    PromptArgument {
-                        name: "context".to_string(),
-                        title: Some("Context".to_string()),
-                        description: Some("Additional context for planning".to_string()),
-                        required: Some(false),
-                    },
+                    PromptArgument::new("title")
+                        .with_title("Title")
+                        .with_description("Task title")
+                        .with_required(true),
+                    PromptArgument::new("context")
+                        .with_title("Context")
+                        .with_description("Additional context for planning")
+                        .with_required(false),
                 ]),
             ),
             Prompt::new(
                 "memory_review",
                 Some("Review and consolidate recent memories"),
-                Some(vec![PromptArgument {
-                    name: "days".to_string(),
-                    title: Some("Days".to_string()),
-                    description: Some("Number of days to review".to_string()),
-                    required: Some(false),
-                }]),
+                Some(vec![
+                    PromptArgument::new("days")
+                        .with_title("Days")
+                        .with_description("Number of days to review")
+                        .with_required(false),
+                ]),
             ),
             Prompt::new(
                 "rule_extraction",
                 Some("Extract rules from observations"),
-                Some(vec![PromptArgument {
-                    name: "tag".to_string(),
-                    title: Some("Tag".to_string()),
-                    description: Some("Filter by tag".to_string()),
-                    required: Some(false),
-                }]),
+                Some(vec![
+                    PromptArgument::new("tag")
+                        .with_title("Tag")
+                        .with_description("Filter by tag")
+                        .with_required(false),
+                ]),
             ),
             Prompt::new(
                 "task_summary",
@@ -71,23 +64,23 @@ impl CasCore {
             Prompt::new(
                 "search_context",
                 Some("Search for relevant context"),
-                Some(vec![PromptArgument {
-                    name: "query".to_string(),
-                    title: Some("Query".to_string()),
-                    description: Some("Search query".to_string()),
-                    required: Some(true),
-                }]),
+                Some(vec![
+                    PromptArgument::new("query")
+                        .with_title("Query")
+                        .with_description("Search query")
+                        .with_required(true),
+                ]),
             ),
             Prompt::new("daily_standup", Some("Generate daily standup notes"), None),
             Prompt::new(
                 "code_review_context",
                 Some("Get context for code review"),
-                Some(vec![PromptArgument {
-                    name: "file_patterns".to_string(),
-                    title: Some("File Patterns".to_string()),
-                    description: Some("Glob patterns for files".to_string()),
-                    required: Some(false),
-                }]),
+                Some(vec![
+                    PromptArgument::new("file_patterns")
+                        .with_title("File Patterns")
+                        .with_description("Glob patterns for files")
+                        .with_required(false),
+                ]),
             ),
             Prompt::new(
                 "session_end",
@@ -155,13 +148,11 @@ impl CasCore {
                 )
                 .unwrap_or_else(|_| "No context available".to_string());
 
-                Ok(GetPromptResult {
-                    description: Some("Session start context from Cassy".to_string()),
-                    messages: vec![PromptMessage::new_text(
-                        PromptMessageRole::User,
-                        format!("Here is the current context from Cassy:\n\n{context}"),
-                    )],
-                })
+                Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+                    Role::User,
+                    format!("Here is the current context from Cassy:\n\n{context}"),
+                )])
+                .with_description("Session start context from Cassy"))
             }
             "task_planning" => {
                 let title = args
@@ -176,10 +167,10 @@ impl CasCore {
                 }
                 prompt.push_str("Please help me:\n1. Break down the task into subtasks\n2. Identify dependencies\n3. Estimate complexity\n4. Suggest priority level");
 
-                Ok(GetPromptResult {
-                    description: Some("Task planning prompt".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)])
+                        .with_description("Task planning prompt"),
+                )
             }
             "memory_review" => {
                 let days = args.get("days").and_then(|s| s.parse().ok()).unwrap_or(7);
@@ -204,10 +195,10 @@ impl CasCore {
                 }
                 prompt.push_str("\nIdentify:\n1. Duplicate or redundant entries\n2. Entries that could be merged\n3. Patterns that should become rules");
 
-                Ok(GetPromptResult {
-                    description: Some("Memory review prompt".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)])
+                        .with_description("Memory review prompt"),
+                )
             }
             "rule_extraction" => {
                 let tag = args.get("tag").cloned();
@@ -230,10 +221,10 @@ impl CasCore {
                 }
                 prompt.push_str("\nFor each potential rule:\n1. State the rule clearly\n2. Identify when it applies (file patterns)\n3. Rate confidence (0-1)");
 
-                Ok(GetPromptResult {
-                    description: Some("Rule extraction prompt".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)])
+                        .with_description("Rule extraction prompt"),
+                )
             }
             "task_summary" => {
                 let task_store = self.open_task_store()?;
@@ -277,10 +268,10 @@ impl CasCore {
                     ));
                 }
 
-                Ok(GetPromptResult {
-                    description: Some("Task summary".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)])
+                        .with_description("Task summary"),
+                )
             }
             "search_context" => {
                 let query = args.get("query").cloned().unwrap_or_else(|| "".to_string());
@@ -292,10 +283,10 @@ impl CasCore {
                     "Search Cassy for: {query}\n\nUse the cas_search tool to find relevant memories, tasks, rules, and skills."
                 );
 
-                Ok(GetPromptResult {
-                    description: Some("Search context prompt".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)])
+                        .with_description("Search context prompt"),
+                )
             }
             "daily_standup" => {
                 let task_store = self.open_task_store()?;
@@ -328,10 +319,10 @@ impl CasCore {
                     prompt.push_str(&format!("- {}\n", entry.preview(60)));
                 }
 
-                Ok(GetPromptResult {
-                    description: Some("Daily standup prompt".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)])
+                        .with_description("Daily standup prompt"),
+                )
             }
             "code_review_context" => {
                 let patterns = args
@@ -359,10 +350,10 @@ impl CasCore {
                 }
                 prompt.push_str("\nApply these rules when reviewing the code.");
 
-                Ok(GetPromptResult {
-                    description: Some("Code review context".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)])
+                        .with_description("Code review context"),
+                )
             }
             "session_end" => {
                 let task_store = self.open_task_store()?;
@@ -391,10 +382,10 @@ impl CasCore {
                 }
                 prompt.push_str("\nSummarize:\n1. What was accomplished\n2. What's in progress\n3. Next steps for the incoming session");
 
-                Ok(GetPromptResult {
-                    description: Some("Session end summary prompt".to_string()),
-                    messages: vec![PromptMessage::new_text(PromptMessageRole::User, prompt)],
-                })
+                Ok(
+                    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)])
+                        .with_description("Session end summary prompt"),
+                )
             }
             _ => Err(Self::error(
                 ErrorCode::INVALID_PARAMS,

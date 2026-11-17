@@ -44,7 +44,19 @@ pub struct CatalogEntry {
     pub input_schema: Value,
 }
 
-type McpClientService = RunningService<rmcp::RoleClient, ()>;
+type McpClientService = RunningService<rmcp::RoleClient, rmcp::model::ClientConfig>;
+
+/// Protocol revision offered to upstream servers in `initialize`.
+const UPSTREAM_PROTOCOL_VERSION: rmcp::model::ProtocolVersion = rmcp::model::ProtocolVersion::V_2025_03_26;
+
+/// Client identity for the upstream handshake. rmcp's default client offers
+/// its newest revision (2026-07-28), which has no `initialize` handshake, so
+/// the proxy keeps offering the revision it has always negotiated.
+fn upstream_client() -> rmcp::model::ClientConfig {
+    let mut client = rmcp::model::ClientConfig::default();
+    client.protocol_version = UPSTREAM_PROTOCOL_VERSION;
+    client
+}
 
 /// Registered CAS actor that initiated a proxied upstream call.
 ///
@@ -2457,7 +2469,7 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
             }))
             .with_context(|| format!("failed to spawn stdio process for '{name}'"))?;
 
-            ().serve(transport)
+            upstream_client().serve(transport)
                 .await
                 .with_context(|| format!("failed to initialize MCP client for '{name}'"))?
         }
@@ -2471,7 +2483,7 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
 
             let transport = StreamableHttpClientTransport::from_config(cfg);
 
-            ().serve(transport)
+            upstream_client().serve(transport)
                 .await
                 .with_context(|| format!("failed to connect HTTP MCP client for '{name}'"))?
         }
@@ -2485,7 +2497,7 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
 
             let transport = StreamableHttpClientTransport::from_config(cfg);
 
-            ().serve(transport)
+            upstream_client().serve(transport)
                 .await
                 .with_context(|| format!("failed to connect SSE MCP client for '{name}'"))?
         }

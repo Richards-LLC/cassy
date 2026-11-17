@@ -12366,6 +12366,24 @@ mod worker_commit_guard_tests {
 
     /// A worker on its OWN factory branch is untouched by the sibling check.
     #[test]
+    fn own_worktree_can_recover_from_a_branch_suffix() {
+        let repo = make_git_repo();
+        let outside = make_git_repo();
+        let cwd = repo.path().to_str().unwrap();
+        assert!(std::process::Command::new("git").args(["switch", "-c", "factory/worker-staging"])
+            .current_dir(repo.path()).output().unwrap().status.success());
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(cwd)), ("CAS_AGENT_NAME", Some("worker")),
+        ]);
+        for command in ["git cherry-pick --abort", "git merge --abort", "git rebase --abort", "git reset --merge", "git switch main"] {
+            assert!(check_worker_git_commit_scope_for_command(cwd, command).is_none(), "{command}");
+            assert!(check_worker_git_commit_scope_for_command(outside.path().to_str().unwrap(), command).is_some(), "outside: {command}");
+        }
+        assert!(check_worker_git_commit_scope_for_command(cwd, "git cherry-pick HEAD").is_some());
+        assert!(check_worker_git_commit_scope_for_command(cwd, "git reset --hard").is_some());
+    }
+
+    #[test]
     fn own_factory_branch_commit_is_still_allowed() {
         let tmp = make_git_repo();
         let p = tmp.path().to_string_lossy().to_string();

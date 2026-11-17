@@ -727,6 +727,27 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn accepted_route_releases_local_dispatch_when_peer_departs() {
+        for peers in [vec![], vec![peer("best", 1, 4.0, 1372)]] {
+            let server = MockServer::start().await;
+            let env = crate::test_support::TestEnvGuard::temp_home();
+            let (root, sender) = failed_route_fixture(&server, env.home()).await;
+            server.reset().await;
+            Mock::given(method("GET")).and(path("/api/agents"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(directory(vec![peer("best", 1, 4.0, 0)]))).mount(&server).await;
+            Mock::given(method("POST")).and(path("/api/peer-messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"accepted-route","status":"queued"}))).mount(&server).await;
+            assert!(retry_route(&root, &sender).await.unwrap().is_some());
+            server.reset().await;
+            Mock::given(method("GET")).and(path("/api/agents"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(directory(peers))).mount(&server).await;
+            assert!(retry_route(&root, &sender).await.unwrap().is_none());
+            assert!(retry_route(&root, &sender).await.unwrap().is_none());
+            assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST").count(), 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn cas_656d_persistent_send_failure_expires_and_restores_local_fallback() {
         let server = MockServer::start().await;
         let mut env = crate::test_support::TestEnvGuard::temp_home();

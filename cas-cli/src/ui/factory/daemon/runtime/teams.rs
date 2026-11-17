@@ -5207,6 +5207,15 @@ mod tests {
                 .env_remove("CAS_SESSION_ID").env_remove("CAS_FACTORY_SESSION")
                 .current_dir(&repo).output().unwrap();
             assert!(push(&["push", "-q", "origin", branch]).status.success());
+            // Only an unbound diagnostic branch may be deleted. Task-bound
+            // checkpoints and parked/reviewed delivery refs keep their anchor.
+            assert!(!push(&["push", "origin", "--delete", branch]).status.success());
+            let diagnostic = "factory/w-cas-ef33-diag";
+            git(&repo, &["switch", "-c", diagnostic]);
+            assert!(push(&["push", "origin", diagnostic]).status.success());
+            let deleted = push(&["push", "origin", "--delete", diagnostic]);
+            assert!(deleted.status.success(), "{}", String::from_utf8_lossy(&deleted.stderr));
+            git(&repo, &["switch", branch]);
             git(&repo, &["rebase", "-q", "origin/main"]);
             let rewritten = git(&repo, &["rev-parse", "HEAD"]);
             assert_ne!(checkpoint, rewritten);

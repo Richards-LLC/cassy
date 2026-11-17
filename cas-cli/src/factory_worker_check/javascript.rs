@@ -2322,7 +2322,11 @@ for (const width of [390, 1280]) {
         git(&["commit", "--quiet", "-am", "share callback and declare identities"]);
         let head = git(&["rev-parse", "HEAD"]);
         let paths = [path.to_string()];
-        let ranges = [(base, historical_head)];
+        // A real park records the delivery range up to the parked tip; a
+        // range that stops short of head is not a state park produces. The
+        // historical commit stays inside the range, so its edit is owned.
+        let _ = historical_head;
+        let ranges = [(base.clone(), head.clone())];
         let required = crate::factory_worker_check::stability::required(
             repo.path(), &head, "main", &paths, Some(&ranges),
         )
@@ -2344,7 +2348,7 @@ for (const width of [390, 1280]) {
         let missing_head = git(&["rev-parse", "HEAD"]);
         assert!(
             crate::factory_worker_check::stability::required(
-                repo.path(), &missing_head, "main", &paths, Some(&ranges),
+                repo.path(), &missing_head, "main", &paths, Some(&[(base, missing_head.clone())]),
             )
             .is_err(),
             "park must continue to refuse shared callbacks without declared identities"

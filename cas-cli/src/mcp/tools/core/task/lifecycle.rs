@@ -74,6 +74,7 @@ fn publish_delivery_base(repo: &std::path::Path, branch: &str, base_sha: &str) {
 
 #[cfg(test)]
 mod gate_error_tests;
+#[cfg(test)] mod source_claim_tests;
 pub(crate) mod proof_scope;
 mod qa_dispatch;
 pub(crate) mod qa_impact;

@@ -700,12 +700,11 @@ mod tests {
     }
 
     #[test]
-    fn a_title_issue_sets_external_ref_and_prose_mentions_only_hint() {
+    fn only_explicit_fixing_references_set_external_ref() {
         assert_eq!(
             external_ref_hint("GH #1216: epic create ignores target", "", None, Some(REPO)),
-            ExternalRefHint::Set {
-                url: "https://github.com/Richards-LLC/cassy/issues/1216".into(),
-                issue: "Richards-LLC/cassy#1216".into(),
+            ExternalRefHint::Suggest {
+                issues: vec!["Richards-LLC/cassy#1216".into()],
             }
         );
         assert_eq!(
@@ -715,11 +714,9 @@ mod tests {
                 None,
                 Some(REPO)
             ),
-            ExternalRefHint::Suggest {
-                issues: vec![
-                    "Richards-LLC/cassy#1210".into(),
-                    "Richards-LLC/cassy#1211".into()
-                ],
+            ExternalRefHint::Set {
+                url: "https://github.com/Richards-LLC/cassy/issues/1210".into(),
+                issue: "Richards-LLC/cassy#1210".into(),
             }
         );
         assert_eq!(

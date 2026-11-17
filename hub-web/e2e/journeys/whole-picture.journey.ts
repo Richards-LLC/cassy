@@ -411,7 +411,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
     });
 
     // One catalog journey (HUB-J25), run as a part per surface and width.
+    // cas-stability-identities: ["whole picture 1280 light cas_ff22 HUB-J25 show work 1280 light cas_ff22", "whole picture 390 dark cas_ff22 HUB-J25 show work 390 dark cas_ff22"]
     test(`HUB-J25 show work ${width} ${colorScheme} cas_ff22`, journeyPart, showWork);
+    // cas-stability-identities: ["whole picture 1280 light cas_ff22 HUB-J25 worker timeline 1280 light cas_ff22", "whole picture 390 dark cas_ff22 HUB-J25 worker timeline 390 dark cas_ff22"]
     test(`HUB-J25 worker timeline ${width} ${colorScheme} cas_ff22`, journeyPart, timeline);
   });
 }

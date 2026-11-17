@@ -9602,7 +9602,7 @@ impl CasCore {
                     gate_refusals.extend(unpushed_refusal);
                     // cas-749f: close must not park a receipt absent from
                     // the source the supervisor will actually merge.
-                    let parking = if task.status != TaskStatus::AwaitingMerge
+                    let mut parking = if task.status != TaskStatus::AwaitingMerge
                         && tip_is_pushed && gate_refusals.is_empty()
                     {
                         self.advance_commit_time_anchor_before_park_with_receipt(
@@ -9772,7 +9772,7 @@ impl CasCore {
                             tip,
                         ).with_target(&resolved_parent_branch).portable();
                         if !portable.is_empty() {
-                            task.deliverables.test_receipts = portable;
+                            parking.deliverables.test_receipts = portable;
                         }
                     }
                     if task.status != TaskStatus::AwaitingMerge {

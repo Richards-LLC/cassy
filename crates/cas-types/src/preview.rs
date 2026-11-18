@@ -56,4 +56,10 @@ mod tests {
         let _ = truncate_preview(s, 10);
     }
 
+    #[test]
+    fn tiny_preview_budget_does_not_panic() {
+        let _ = truncate_preview("abcdef", 2);
+        let _ = truncate_preview("abcdef", 0);
+    }
+
 }

@@ -2743,6 +2743,62 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn broader_failure_preserves_only_passing_stability_cas_3a252() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project/.cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\nedition='2024'\n").unwrap();
+        std::fs::write(repo.join("Cargo.lock"), "version = 4\n[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\n").unwrap();
+        let base_source = r#"mod replay {
+    #[test]
+    fn unrelated() { assert!(!std::path::Path::new("target/fail-unrelated").exists()); }
+}
+"#;
+        std::fs::write(repo.join("src/lib.rs"), base_source).unwrap();
+        fixture_commit_as(&repo, "base");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &fixture_head(&repo)]).unwrap();
+        let source = base_source.replace("mod replay {", r#"mod replay {
+    #[test]
+    fn owned() { assert!(!std::path::Path::new("target/fail-owned").exists()); }
+"#);
+        std::fs::write(repo.join("src/lib.rs"), &source).unwrap();
+        fixture_commit_as(&repo, "owned test");
+        let mut env = env.enter_dir(&repo);
+        let narrow = ["nextest", "run", "-p", "fixture", "--lib", "-E", "test(=replay::owned)"].map(str::to_owned);
+        let mut broad = narrow.clone();
+        broad[6] = "test(replay::)".into();
+        let identity = stability::Identity::exact("src/lib.rs", "replay::owned");
+        for row in ["unrelated", "owned", "unrun", "changed-input"] {
+            execute_at(&root, &narrow, &repo, Path::new("cargo")).unwrap();
+            let head = fixture_head(&repo);
+            assert!(stability::missing(&PassingTests::new(&root, &repo, &head), std::slice::from_ref(&identity)).is_empty(), "{row}: setup");
+            std::fs::write(repo.join("target/fail-unrelated"), "").unwrap();
+            if row == "owned" { std::fs::write(repo.join("target/fail-owned"), "").unwrap(); }
+            if row == "changed-input" {
+                std::fs::write(repo.join("src/lib.rs"), format!("{source}\n// changed build input\n")).unwrap();
+                fixture_commit_as(&repo, "changed input");
+            }
+            let unavailable = repo.join("target/unavailable-cargo");
+            fake_cargo(&unavailable, "exit 1");
+            let cargo = if row == "unrun" { unavailable.as_path() } else { Path::new("cargo") };
+            assert!(execute_at(&root, &broad, &repo, cargo).is_err(), "{row}");
+            let head = fixture_head(&repo);
+            let passing = PassingTests::new(&root, &repo, &head);
+            assert_eq!(stability::missing(&passing, std::slice::from_ref(&identity)).is_empty(), row == "unrelated", "{row}");
+            assert!(!test_receipt_path(&root, &repo.canonicalize().unwrap(), &head, &targeted_test(&broad).unwrap()).exists(), "{row}: failed selection cannot mint a PASS");
+            std::fs::remove_file(repo.join("target/fail-unrelated")).unwrap();
+            if row == "owned" { std::fs::remove_file(repo.join("target/fail-owned")).unwrap(); }
+        }
+        // Restore cwd before the disposable repository is deleted.
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn changed_tests_need_five_consecutive_capped_passes_cas_9e02e() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");

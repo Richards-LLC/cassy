@@ -2387,7 +2387,16 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     let mut widened_proof = None;
     let owned_tests = if let Some(test) = &test {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
-        match stability::rust::selected_inputs(&repo, &base, &head, test) {
+        let classified = {
+            let package = test.package.clone();
+            let _heartbeat = stability::rust::Heartbeat::start(
+                std::time::Duration::from_secs(stability::rust::CLASSIFICATION_HEARTBEAT_SECS),
+                move |elapsed| eprintln!(
+                    "worker-check: still classifying changed tests for {package} before build admission ({}s elapsed)",
+                    elapsed.as_secs()));
+            stability::rust::selected_inputs(&repo, &base, &head, test)
+        };
+        match classified {
             Ok((tests, uncertain)) => {
                 if uncertain {
                     let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());

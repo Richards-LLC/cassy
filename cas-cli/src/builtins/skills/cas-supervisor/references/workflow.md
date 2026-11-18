@@ -178,6 +178,21 @@ with `scripts/release.sh --hotfix`.
 as a hotfix release.
 <!-- cas-src:end -->
 
+## Before freeze
+
+<!-- cas-src:begin -->
+At the exact train tip, dispatch `gh workflow run ci.yml --ref <train branch>`
+(train branches have no push CI) and read green for that SHA. On that tip run
+`cargo tree -i aws-lc-rs --target x86_64-unknown-linux-gnu` (empty graph), capped
+`cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'`, and
+`python3 scripts/check-test-shape.py` before `train_freeze`. Lint the committed
+notes with `python3 scripts/release-train-announce.py --lint <draft>`.
+<!-- cas-src:end -->
+
+Draft, commit and lint notes while jobs run, before the suite goes green. Once
+frozen, inspect suite jobs between short reminders until terminal; do not wait
+blind on a long reminder or use a blocking watch. A newer tip needs its own proof.
+
 Lift a release freeze on your own train with `factory action=train_freeze id=<train> decision=lift reason="<why>"` only when a Cassy gate blocks the cut on a green frozen tip or the operator asked for new work in the release, never as a CI hold. The lift is recorded on the train and sent to the operator; a freeze the operator applied in Commander (or one from before supervisor lifts existed) stays theirs unless they set `release.supervisor_lifts_operator_freeze`.
 
 ## Queue precheck

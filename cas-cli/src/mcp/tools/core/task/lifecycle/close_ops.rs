@@ -17372,6 +17372,9 @@ pub(crate) fn task_without_own_commits_judged(
             ) || (!named_only
                 && task_attribution::lane_commits_all_claim_other_tasks(
                     repo_path, &reference, target, &identity,
+                    task_attribution::released_trunk_ref(repo_path, target)
+                        .filter(|reference| reference.starts_with("refs/remotes/"))
+                        .as_deref(),
                 ) != Some(true))
             {
                 return false;
@@ -22560,6 +22563,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                             task_id: Some(t.id.clone()),
                             known_commits: recorded_anchor.map(str::to_string).into_iter().collect(),
                         },
+                        None,
                     ) == Some(true)
                 {
                     0

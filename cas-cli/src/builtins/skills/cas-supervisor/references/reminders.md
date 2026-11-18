@@ -1,6 +1,6 @@
 # Reminder Discipline — Push First, One Bounded Checkpoint
 
-Reminders are a safety net for work that may go quiet, not polling, acknowledgement, liveness, merge authority or task status. Start from lifecycle events and worker messages; on a reminder turn, read the authoritative task or worker state once, then act.
+Reminders cover quiet work and frozen-suite job checks, not acknowledgement, liveness, merge authority or task status. Start from lifecycle events and worker messages; on a reminder turn, read the authoritative task or worker state once, then act.
 
 ## Decision table
 
@@ -8,7 +8,8 @@ Reminders are a safety net for work that may go quiet, not polling, acknowledgem
 |---|---|---|
 | Worker reports `MERGE REQUIRED` | Merge now; Cassy runs the verifier on any pre-merge dispatch it opens | No; cancel any phase reminder after |
 | Parked merge refused only for pending CI | Let Cassy's armed exact-SHA retry finish | No; act only on its notice |
-| CI on a pushed or integrated SHA | Record the SHA and end the turn | One `ci_completed` or `branch_contained_in` reminder, never a delay |
+| Ordinary CI on a pushed or integrated SHA | Record the SHA and end the turn | One `ci_completed` or `branch_contained_in` reminder, never a delay |
+| Frozen train suite | Inspect jobs between short reminders until terminal; act on failures | One short backstop, no long blind reminder or blocking watch |
 | Long release, publication or detached job | Record its receipt and end the turn | One event reminder, or the harness background-task notice |
 | Context-pressure handoff | Commit, push, task note, explicit handoff | One time checkpoint only if no next owner can acknowledge in time |
 | Blocked worker recovery | Read state and send one recovery instruction | Only when an external dependency could otherwise go quiet |

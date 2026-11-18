@@ -51,6 +51,8 @@ pub enum VioletCommand {
     },
     /// Post a message, or local files by path, to a channel
     Post(PostArgs),
+    /// Add or remove a reaction on one message
+    React(ReactArgs),
     /// Post a top-level message and its ordered replies as one thread
     Thread(ThreadArgs),
     /// Read a channel since a time, one thread, or one message
@@ -80,6 +82,24 @@ pub struct PostArgs {
     /// Reuse a stable request ID for a managed reply retry
     #[arg(long = "request-id", value_name = "UUID", requires = "reply_to")]
     pub request_id: Option<String>,
+    /// Reply intent ID returned by factory reply_intent
+    #[arg(long, requires_all = ["reply_to", "expected_generation"])]
+    pub coordination_operation_id: Option<String>,
+    /// Claim generation returned with the reply intent
+    #[arg(long, requires_all = ["reply_to", "coordination_operation_id"])]
+    pub expected_generation: Option<u64>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReactArgs {
+    #[arg(long)]
+    pub channel: String,
+    #[arg(long)]
+    pub message_id: String,
+    #[arg(long)]
+    pub reaction: String,
+    #[arg(long, value_parser = ["add", "remove"])]
+    pub action: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -254,6 +274,7 @@ pub fn run_violet(
             };
         }
         VioletCommand::Post(args) => run_post(args, context, out),
+        VioletCommand::React(args) => run_react(args, context, out),
         VioletCommand::Thread(args) => run_thread(args, context, out),
         VioletCommand::Read(args) => run_read(args, context, out),
     };
@@ -358,6 +379,9 @@ fn run_post(
     // thread still enforces its remote authority. Known managed threads fail
     // locally when the caller has no live intent, before any upload is begun.
     let managed = reply_to.as_deref().map(|reply_to| (context.reply_claim)(reply_to)).transpose()?.flatten();
+    let managed = args.coordination_operation_id.as_ref().zip(args.expected_generation)
+        .map(|(id, generation)| json!({"coordination_operation_id":id,"expected_generation":generation}))
+        .or(managed);
     let request_id = optional(args.request_id.as_ref(), "--request-id")?;
     if request_id.is_some() && managed.is_none() {
         return Err(VioletError::local(
@@ -396,6 +420,20 @@ fn run_post(
     } else {
         render_post(out, route, &receipt);
     }
+    Ok(())
+}
+
+fn run_react(args: &ReactArgs, context: &mut RunContext<'_>, out: &mut dyn Write) -> Result<(), VioletError> {
+    let channel = required(&args.channel, "--channel")?;
+    let message_id = required(&args.message_id, "--message-id")?;
+    let reaction = required(&args.reaction, "--reaction")?;
+    let mut hub = (context.connect)()?;
+    let receipt = call_ok(hub.as_mut(), "violet_post", json!({
+        "kind":"reaction", "channel":channel, "message_id":message_id,
+        "reaction":reaction, "action":args.action,
+    }))?;
+    if context.json { print_json(out, &receipt); }
+    else { let _ = writeln!(out, "[OK] {} {reaction} on {message_id} in {channel}", args.action); }
     Ok(())
 }
 

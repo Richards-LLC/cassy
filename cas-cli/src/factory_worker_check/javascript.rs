@@ -1265,23 +1265,91 @@ fn config_literals(source: &str, key: &str) -> Vec<String> {
     found
 }
 
-/// Whether a Jest config selects `spec`: its `testRegex`/`testMatch`, else
-/// Jest's defaults. A config with `projects` delegates selection to Jest.
-fn jest_config_selects(config: &Path, spec: &Path) -> bool {
-    let Ok(source) = std::fs::read_to_string(config) else { return false };
-    if regex::Regex::new(r#"\bprojects["']?\s*:"#).is_ok_and(|projects| projects.is_match(&source)) {
-        return true;
+/// The text between the bracket at `open` and its match, skipping quoted text.
+fn balanced(source: &str, open: usize) -> Option<&str> {
+    let (mut depth, mut quote, mut escaped) = (0usize, None, false);
+    for (index, ch) in source[open..].char_indices() {
+        match (quote, ch) {
+            _ if escaped => escaped = false,
+            (_, '\\') => escaped = true,
+            (Some(mark), ch) if ch == mark => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`') => quote = Some(ch),
+            (None, '[' | '{') => depth += 1,
+            (None, ']' | '}') => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&source[open + 1..open + index]);
+                }
+            }
+            _ => {}
+        }
     }
+    None
+}
+
+/// The entries of the array a config assigns to `projects`: a string literal
+/// (a directory or config path) or the source of an inline `{ … }` project.
+fn config_projects(source: &str) -> Option<Vec<String>> {
+    let key = regex::Regex::new(r#"\bprojects["']?\s*:\s*\["#).ok()?.find(source)?;
+    let (mut entries, mut rest) = (Vec::new(), balanced(source, key.end() - 1)?);
+    while let Some(start) = rest.find(['{', '\'', '"', '`']) {
+        let tail = &rest[start..];
+        let (entry, end) = match tail.chars().next()? {
+            '{' => {
+                let end = balanced(tail, 0)?.len() + 2;
+                (&tail[..end], end)
+            }
+            mark => {
+                let end = tail[1..].find(mark)? + 2;
+                (&tail[1..end - 1], end)
+            }
+        };
+        entries.push(entry.to_string());
+        rest = &tail[end..];
+    }
+    Some(entries)
+}
+
+/// Whether the Jest config source in `dir` owns `spec`: the spec lies under
+/// one of its `roots` (default: the config's directory) and its
+/// `testRegex`/`testMatch` (default: Jest's own) selects it. With `projects`
+/// one project must own it; the key alone owns nothing.
+fn jest_owns(source: &str, dir: &Path, spec: &Path) -> bool {
+    if let Some(projects) = config_projects(source) {
+        return projects.iter().any(|project| {
+            if project.starts_with('{') {
+                return jest_owns(project, dir, spec);
+            }
+            let path = dir.join(project.trim_start_matches("<rootDir>/"));
+            let config = if path.is_dir() { runner_config(&path, "jest") } else { Some(path) };
+            config.is_some_and(|config| jest_config_selects(&config, spec))
+        });
+    }
+    let roots = config_literals(source, "roots");
+    let under_root = if roots.is_empty() {
+        spec.starts_with(dir)
+    } else {
+        roots.iter().any(|root| spec.starts_with(dir.join(root.trim_start_matches("<rootDir>").trim_start_matches('/'))))
+    };
     let spec = spec.to_string_lossy();
-    let regexes = config_literals(&source, "testRegex");
-    let mut globs = config_literals(&source, "testMatch");
+    let regexes = config_literals(source, "testRegex");
+    let mut globs = config_literals(source, "testMatch");
     if regexes.is_empty() && globs.is_empty() {
         globs = JEST_DEFAULT_MATCH.map(str::to_owned).to_vec();
     }
-    regexes
-        .iter()
-        .any(|pattern| regex::Regex::new(pattern).is_ok_and(|pattern| pattern.is_match(&spec)))
-        || globs.iter().any(|glob| glob_regex(glob).is_some_and(|glob| glob.is_match(&spec)))
+    under_root
+        && (regexes
+            .iter()
+            .any(|pattern| regex::Regex::new(pattern).is_ok_and(|pattern| pattern.is_match(&spec)))
+            || globs.iter().any(|glob| glob_regex(glob).is_some_and(|glob| glob.is_match(&spec))))
+}
+
+fn jest_config_selects(config: &Path, spec: &Path) -> bool {
+    match (std::fs::read_to_string(config), config.parent()) {
+        (Ok(source), Some(dir)) => jest_owns(&source, dir, spec),
+        _ => false,
+    }
 }
 
 /// The runner configs in `dir`, nearest default first. Jest repositories keep
@@ -2249,29 +2317,72 @@ mod tests {
     #[test]
     fn jest_spec_runs_under_the_config_that_selects_it_gh_2058() {
         let repo = tempfile::tempdir().unwrap();
-        let test = repo.path().join("apps/backend/test");
-        std::fs::create_dir_all(&test).unwrap();
-        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
-        std::fs::write(repo.path().join("apps/backend/package.json"), "{}").unwrap();
-        std::fs::write(repo.path().join("apps/backend/jest.config.js"), "module.exports = { testRegex: '.*\\.spec\\.ts$' };").unwrap();
-        std::fs::write(test.join("jest-inbox-tools.integration.config.js"),
-            "module.exports = { rootDir: '.', testRegex: '.*\\.integration\\.ts$' };").unwrap();
-        let (integration, unit) = ("apps/backend/test/inbox-analysis-pool.integration.ts", "apps/backend/src/pool.spec.ts");
-        std::fs::create_dir_all(repo.path().join("apps/backend/src")).unwrap();
-        for spec in [integration, unit] {
-            std::fs::write(repo.path().join(spec), "it('runs', () => {});").unwrap();
-        }
-
-        assert_eq!(
-            runner_root(repo.path(), integration, "jest").unwrap(),
-            (test.clone(), Some(test.join("jest-inbox-tools.integration.config.js")))
-        );
-        // A spec the default config selects keeps the default config.
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
         let backend = repo.path().join("apps/backend");
-        assert_eq!(
-            runner_root(repo.path(), unit, "jest").unwrap(),
-            (backend.clone(), Some(backend.join("jest.config.js")))
-        );
+        let test = backend.join("test");
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        git(&["init", "--quiet"]);
+        write(&repo.path().join("package.json"), "{}");
+        write(&backend.join("package.json"), "{}");
+        // The default config owns `src/` and `.spec.ts`; a sibling config owns the integration spec.
+        write(&backend.join("jest.config.js"),
+            r"module.exports = { roots: ['<rootDir>/src'], testRegex: '.*\\.spec\\.ts$' };");
+        let sibling = test.join("jest-inbox-tools.integration.config.js");
+        write(&sibling, r"module.exports = { testRegex: '.*\\.integration\\.ts$' };");
+        // A stand-in Jest: reports the spec's tests only when its own config selects the file.
+        let jest = backend.join("node_modules/.bin/jest");
+        write(&jest, "#!/usr/bin/env node\n\
+            const a = process.argv.slice(2), at = (f) => a[a.indexOf(f) + 1];\n\
+            const config = require(require('path').resolve(at('--config')));\n\
+            const spec = a[a.indexOf('--runTestsByPath') + 1], ok = new RegExp(config.testRegex).test(spec);\n\
+            require('fs').writeFileSync(at('--outputFile'), JSON.stringify({ success: ok, testResults: ok ? [{ name: spec, status: 'passed',\n\
+            assertionResults: [{ fullName: 'pool drains', status: 'passed' }] }] : [] }));\n\
+            process.exit(ok ? 0 : 1);\n");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&jest, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = "apps/backend/test/inbox-analysis-pool.integration.ts";
+        let source = |body: &str| format!("describe('pool', () => {{\n  it('drains', () => {{ {body} }});\n}});\n");
+        write(&repo.path().join(spec), &source("throw 0;"));
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        write(&repo.path().join(spec), &source(""));
+        git(&["commit", "--quiet", "-am", "head"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        // The real path: changed-test identity, owning config, five capped runs, receipt.
+        let tests = changed_tests(repo.path(), &base, &head, &[spec.to_string()], None).unwrap();
+        assert_eq!(tests, [id(spec, "pool drains")]);
+        assert_eq!(runner_root(repo.path(), spec, "jest").unwrap(), (test.clone(), Some(sibling)));
+        let cas_root = tempfile::tempdir().unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "jest", None, &tests, None, &[]).unwrap();
+        assert_eq!((proof.consecutive_passes, proof.tests), (5, tests));
+        let receipts = std::process::Command::new("grep").args(["-rl", "pool drains"]).arg(cas_root.path()).output().unwrap();
+        assert!(!receipts.stdout.is_empty(), "stability receipt names the spec's test");
+
+        // Ownership needs both a root holding the spec and a selecting matcher;
+        // `projects` owns it only through a project that does.
+        let owns = |source: &str, spec: &str| jest_owns(source, &backend, &repo.path().join(spec));
+        assert!(!owns("module.exports = { roots: ['<rootDir>/src'] };", spec));
+        assert!(owns("module.exports = { roots: ['<rootDir>/test'] };", "apps/backend/test/a.spec.ts"));
+        assert!(!owns("module.exports = { projects: ['<rootDir>/missing'] };", spec));
+        assert!(!owns("module.exports = { projects: [{ roots: ['<rootDir>/src'] }] };", spec));
+        assert!(owns("module.exports = { projects: [{ roots: ['<rootDir>/src'] }, { roots: ['<rootDir>/test'], testRegex: 'integration' }] };", spec));
     }
 
     /// A config-free global test resolves its runner from package metadata;

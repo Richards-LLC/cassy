@@ -31,16 +31,14 @@ pub(crate) fn publish_capacity(root: &Path, agent: &mut cas_types::Agent) {
         agent.metadata.remove(CAPACITY_META);
         return;
     }
-    let config = crate::config::Config::load(root)
-        .unwrap_or_default()
-        .factory();
-    let guard = crate::factory_build_guard::inspect_capacity(root, &config);
+    let config = crate::config::Config::load(root).unwrap_or_default();
+    let guard = crate::factory_build_guard::inspect_capacity(root, &config.factory());
     let mut sample = guard.build_capacity(Utc::now());
-    sample.max_workers = Some(config.max_workers());
-    match live_worker_count(root) {
+    sample.max_workers = Some(config.machine_max_workers());
+    match live_workers(root) {
         Ok(workers) => {
-            sample.live_workers = Some(workers);
-            sample.free_slots = sample.free_slots.min(config.max_workers().saturating_sub(workers));
+            sample.live_workers = Some(workers.total());
+            sample.free_slots = sample.free_slots.min(workers.remaining(&config));
         }
         Err(_) => sample.free_slots = 0,
     }
@@ -54,6 +52,7 @@ pub(crate) fn publish_capacity(root: &Path, agent: &mut cas_types::Agent) {
 #[derive(Debug, Default)]
 pub(crate) struct LiveWorkers {
     by_project: std::collections::BTreeMap<String, usize>,
+    project_workers: usize,
 }
 
 impl LiveWorkers {
@@ -61,13 +60,32 @@ impl LiveWorkers {
         self.by_project.values().sum()
     }
 
-    /// `8/8 live on this machine: cassy 1, gabber-studio 7`.
-    pub(crate) fn render(&self, max_workers: usize) -> String {
+    pub(crate) fn remaining(&self, config: &crate::config::Config) -> usize {
+        config.machine_max_workers().saturating_sub(self.total()).min(
+            config.project_max_workers().map_or(usize::MAX, |limit| limit.saturating_sub(self.project_workers)),
+        )
+    }
+
+    pub(crate) fn refusal(&self, config: &crate::config::Config, requested: usize) -> Option<String> {
+        if requested <= self.remaining(config) { return None; }
+        let (scope, source) = if self.total().saturating_add(requested) > config.machine_max_workers() {
+            ("machine", if config.user_max_workers.is_some() { "user" } else { "default" })
+        } else { ("project", "project") };
+        Some(format!(
+            "Worker capacity: {}; {requested} requested; {scope} limit reached (factory.max_workers source: {source})",
+            self.render(config),
+        ))
+    }
+
+    /// Show the machine census and any explicit project cap separately.
+    pub(crate) fn render(&self, config: &crate::config::Config) -> String {
         let projects = self.by_project.iter()
             .map(|(project, count)| format!("{project} {count}"))
             .collect::<Vec<_>>();
         let breakdown = if projects.is_empty() { String::new() } else { format!(": {}", projects.join(", ")) };
-        format!("{}/{max_workers} live on this machine{breakdown}", self.total())
+        let project = config.project_max_workers().map(|limit| format!("; project {}/{limit}", self.project_workers))
+            .unwrap_or_default();
+        format!("{}/{} live on this machine{breakdown}{project}", self.total(), config.machine_max_workers())
     }
 }
 
@@ -80,7 +98,8 @@ fn project_label(root: &Path) -> String {
 
 /// Use the roster's native heartbeat/process rule across local project stores.
 /// Registry aliases and same-name re-registrations consume only one slot.
-pub(crate) fn live_worker_count(root: &Path) -> Result<usize, String> {
+#[cfg(test)]
+fn live_worker_count(root: &Path) -> Result<usize, String> {
     live_workers(root).map(|workers| workers.total())
 }
 
@@ -88,14 +107,15 @@ pub(crate) fn live_workers(root: &Path) -> Result<LiveWorkers, String> {
     use std::collections::{HashMap, HashSet};
     let sessions = crate::ui::factory::SessionManager::new()
         .list_sessions_read_only().map_err(|error| error.to_string())?;
-    let mut roots = HashSet::from([root.canonicalize().map_err(|error| error.to_string())?]);
+    let project_root = root.canonicalize().map_err(|error| error.to_string())?;
+    let mut roots = HashSet::from([project_root.clone()]);
     let mut session_projects = HashMap::new();
     for session in &sessions {
         if let Some(project) = session.metadata.project_dir.as_deref()
             && let Ok(root) = crate::store::find_cas_root_ignoring_env(Path::new(project))
         {
             let root = root.canonicalize().map_err(|error| error.to_string())?;
-            session_projects.insert(session.name.clone(), project_label(&root));
+            session_projects.insert(session.name.clone(), (project_label(&root), root == project_root));
             roots.insert(root);
         }
     }
@@ -109,7 +129,7 @@ pub(crate) fn live_workers(root: &Path) -> Result<LiveWorkers, String> {
             {
                 workers.insert(
                     (agent.factory_session.unwrap_or_else(|| root.display().to_string()), agent.name),
-                    project_label(&root),
+                    (project_label(&root), root == project_root),
                 );
             }
         }
@@ -117,7 +137,7 @@ pub(crate) fn live_workers(root: &Path) -> Result<LiveWorkers, String> {
     // A real pane process covers the registration gap; dead metadata names do not.
     for session in sessions {
         let project = session_projects.get(&session.name).cloned()
-            .unwrap_or_else(|| session.name.clone());
+            .unwrap_or_else(|| (session.name.clone(), false));
         for worker in session.metadata.workers {
             if worker.pid.is_some_and(crate::mcp::daemon::pid_alive) {
                 workers.entry((session.name.clone(), worker.name)).or_insert_with(|| project.clone());
@@ -125,8 +145,9 @@ pub(crate) fn live_workers(root: &Path) -> Result<LiveWorkers, String> {
         }
     }
     let mut live = LiveWorkers::default();
-    for project in workers.into_values() {
+    for (project, local) in workers.into_values() {
         *live.by_project.entry(project).or_default() += 1;
+        live.project_workers += usize::from(local);
     }
     Ok(live)
 }
@@ -387,8 +408,9 @@ fn prepare(
     {
         return Ok(None);
     }
+    let limits = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     let local_ready = guard.violations().is_empty()
-        && live_worker_count(root)? < config.max_workers();
+        && live_workers(root)?.remaining(&limits) > 0;
     // Only unsent routes reach this point. Recheck local capacity before discovery.
     if has_route(task) {
         let plan = task.notes.lines().find_map(|line| {

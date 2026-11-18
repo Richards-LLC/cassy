@@ -3158,10 +3158,8 @@ impl CasService {
         // so a request cannot bypass the fleet cap by queueing four workers at
         // once. `force=true` is an explicit operator override and remains
         // visible in the queued receipt.
-        let (factory_config, max_workers_source) = {
-            let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
-            (config.factory(), config.max_workers_source())
-        };
+        let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+        let factory_config = config.factory();
         let build_guard = crate::factory_build_guard::inspect_for_task(
             &self.inner.cas_root,
             &factory_config,
@@ -3205,11 +3203,8 @@ impl CasService {
         }
         let live_workers = crate::factory_build_routing::live_workers(&self.inner.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
-        if live_workers.total().saturating_add(slots) > factory_config.max_workers() && !force_build_guard {
-            return Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
-                "Worker capacity: {}; {slots} requested (factory.max_workers source: {max_workers_source})",
-                live_workers.render(factory_config.max_workers()),
-            )));
+        if !force_build_guard && let Some(refusal) = live_workers.refusal(&config, slots) {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, refusal));
         }
         let mut build_guard_notice = build_guard.receipt_notice(force_build_guard);
         if build_guard.disabled || (force_build_guard && !build_guard.violations().is_empty()) {
@@ -4821,10 +4816,10 @@ impl CasService {
             .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
             .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
         if !qa_progress.is_empty() { binary_versions.push_str(&format!("\n{qa_progress}")); }
-        // The same machine-wide census spawn admission refuses against.
-        let max_workers = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default().factory().max_workers();
+        // Use the same project and machine limits as spawn admission.
+        let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
         binary_versions.push_str(&match crate::factory_build_routing::live_workers(&self.inner.cas_root) {
-            Ok(live) => format!("\nWorker capacity: {}", live.render(max_workers)),
+            Ok(live) => format!("\nWorker capacity: {}", live.render(&config)),
             Err(error) => format!("\nWorker capacity unavailable: {error}"),
         });
         match cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.inner.cas_root) {

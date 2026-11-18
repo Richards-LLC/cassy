@@ -168,7 +168,7 @@ fn wake(
             WakeChannel::Daemon => Some("delivery_watchdog"),
             _ => None,
         };
-        return (channel, false, None);
+        return (channel, false, notice.map(str::to_string));
     };
     let channel = match &row.origin {
         Some(QueueOrigin::PairedDevice { .. }) => WakeChannel::Operator,
@@ -200,11 +200,12 @@ fn wake(
         let event = cas_store::SqliteSupervisorQueueStore::open(root).ok()?.get(id).ok()??;
         if event.supervisor_id != agent.id { return None }
         let payload: Value = serde_json::from_str(&event.payload).ok()?;
-        Some(payload.get("kind").and_then(Value::as_str)
+        Some(payload.get("kind").or_else(|| payload.get("transition")).and_then(Value::as_str)
             .unwrap_or(&event.event_type).to_string())
     });
-    let notice = durable.or_else(|| row.kind.as_deref()
-        .and_then(|kind| kind.split(':').next()).map(str::to_string))
+    let stamped = row.kind.as_deref().and_then(|kind| kind.split(':').next()).map(str::to_string);
+    let notice = stamped.clone().filter(|kind| !matches!(kind.as_str(), "worker-attention" | "task_lifecycle" | "unknown"))
+        .or(durable).or(stamped)
         .or_else(|| match &row.origin {
             Some(QueueOrigin::PairedDevice { .. }) => Some("operator_message".into()),
             Some(QueueOrigin::RegisteredAgent { .. }) => Some("agent_message".into()),

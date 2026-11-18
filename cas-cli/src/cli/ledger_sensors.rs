@@ -13,6 +13,8 @@ use super::{Measure, unknown};
 
 #[derive(Debug, Serialize)]
 pub(super) struct Sensors {
+    pub github_captured_at: Option<DateTime<Utc>>,
+    pub github_window_end: Option<DateTime<Utc>>,
     pub hosted_runner_losses: Measure<RunnerLosses>,
     pub daily_issues: Measure<IssueDays>,
     pub park_to_train_merge: Measure<ParkLatency>,
@@ -21,6 +23,8 @@ pub(super) struct Sensors {
 impl Default for Sensors {
     fn default() -> Self {
         Self {
+            github_captured_at: None,
+            github_window_end: None,
             hosted_runner_losses: unknown("GitHub jobs not read"),
             daily_issues: unknown("project issues not read"),
             park_to_train_merge: unknown("park history not read"),
@@ -125,7 +129,7 @@ fn parks(db: &rusqlite::Connection) -> Result<Vec<Park>> {
     let mut stmt = db.prepare("SELECT id, notes FROM tasks")?;
     for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (task, notes) = row?;
-        let mut first: Option<(DateTime<Utc>, String, Option<String>)> = None;
+        let mut first: Option<(DateTime<Utc>, String, Option<String>, Option<String>)> = None;
         let mut seen = BTreeMap::new();
         for line in notes.lines() {
             if line.get(17..).is_some_and(|tail| {
@@ -140,11 +144,12 @@ fn parks(db: &rusqlite::Connection) -> Result<Vec<Park>> {
                     .and_then(time)
                     .filter(|t| *t >= at && *t < at + Duration::minutes(1))
                     .unwrap_or(at);
-                if first.as_ref().is_none_or(|(prior, _, _)| exact < *prior) {
+                if first.as_ref().is_none_or(|(prior, _, _, _)| exact < *prior) {
                     first = Some((
                         exact,
                         "canonical task park note".into(),
                         field(line, "origin_machine=").map(str::to_string),
+                        field(line, "merge_owner_machine=").map(str::to_string),
                     ));
                 }
             }
@@ -164,7 +169,7 @@ fn parks(db: &rusqlite::Connection) -> Result<Vec<Park>> {
                     .or_insert(at);
             }
         }
-        if let Some((parked_at, source, origin_machine)) = first {
+        if let Some((parked_at, source, origin_machine, owner_machine)) = first {
             found.insert(
                 task.clone(),
                 Park {
@@ -172,7 +177,7 @@ fn parks(db: &rusqlite::Connection) -> Result<Vec<Park>> {
                     parked_at,
                     source,
                     origin_machine,
-                    owner_machine: None,
+                    owner_machine,
                     seen,
                 },
             );
@@ -266,7 +271,7 @@ fn latency(
         merged: n,
         unmatched: pairs.len() - n,
         median_minutes: (n > 0).then(|| (minutes[(n - 1) / 2] + minutes[n / 2]) / 2.0),
-        p90_minutes: (n > 0).then(|| minutes[n / 2]),
+        p90_minutes: (n > 0).then(|| minutes[(9 * n).div_ceil(10) - 1]),
         captured_at,
         pairs,
     }
@@ -327,6 +332,7 @@ pub(super) fn local(
     let result = (|| -> Result<_> {
         let db =
             crate::qa_batch::release_close::read_connection(root).map_err(anyhow::Error::msg)?;
+        db.execute_batch("BEGIN")?;
         let parks = parks(&db)?
             .into_iter()
             .filter(|p| in_window(p.parked_at, from, to.unwrap_or(captured)))
@@ -416,18 +422,15 @@ fn pages(root: &Path, path: &str, key: Option<&str>) -> Result<Vec<Value>> {
     bail!("GitHub pagination exceeds 100 pages")
 }
 fn loss_evidence(text: &str) -> Vec<String> {
-    let lower = String::new();
-    let _ = text;
+    let lower = text.to_ascii_lowercase();
     let mut evidence = vec![];
     if lower.contains("runner lost communication")
         || lower.contains("runner has lost communication")
     {
         evidence.push("runner_lost_communication".into());
     }
-    if lower.contains("143")
-        && (lower.contains("exit code 143")
-            || lower.contains("exit code: 143")
-            || lower.contains("shutdown"))
+    if lower.contains("shutdown")
+        && (lower.contains("exit code 143") || lower.contains("exit code: 143"))
     {
         evidence.push("exit_143_shutdown".into());
     }
@@ -439,20 +442,37 @@ fn runners(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<RunnerLosses> {
-    let path = format!(
-        "repos/{repo}/actions/runs?created={}..{}",
-        from.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        to.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-    );
-    let runs = pages(root, &path, Some("workflow_runs"))?;
+    // Subdivide busy release intervals instead of silently dropping runs at
+    // GitHub's 1000-result Actions search limit.
+    let mut windows = vec![(from, to)];
+    let mut runs = vec![];
+    while let Some((start, end)) = windows.pop() {
+        let path = format!(
+            "repos/{repo}/actions/runs?created={}..{}",
+            start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+        let first = json(root, &format!("{path}&per_page=100&page=1"))?;
+        let total = first["total_count"].as_u64().context("run total missing")?;
+        if total >= 1000 {
+            anyhow::ensure!(
+                (end - start).num_seconds() > 1,
+                "Actions search cap within a single second"
+            );
+            let middle = start + Duration::seconds((end - start).num_seconds() / 2);
+            windows.extend([(start, middle), (middle, end)]);
+        } else {
+            runs.extend(pages(root, &path, Some("workflow_runs"))?);
+        }
+    }
     let mut out = RunnerLosses::default();
     let mut seen = BTreeSet::new();
     for run in runs {
-        if !run["created_at"]
+        let created = run["created_at"]
             .as_str()
             .and_then(time)
-            .is_some_and(|at| in_window(at, from, to))
-        {
+            .context("run creation timestamp missing")?;
+        if !in_window(created, from, to) {
             continue;
         }
         let id = run["id"].as_u64().context("run ID missing")?;
@@ -487,6 +507,16 @@ fn runners(
             if labels.is_empty() || job["runner_name"].as_str().is_none_or(str::is_empty) {
                 out.missing.push(format!(
                     "job {job_id}: hosted runner allocation not retained"
+                ));
+                continue;
+            }
+            if !job["runner_name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("GitHub Actions"))
+                && job["runner_group_name"] != "GitHub Actions"
+            {
+                out.missing.push(format!(
+                    "job {job_id}: hosted runner identity not established"
                 ));
                 continue;
             }
@@ -616,6 +646,8 @@ pub(super) fn external(
     offline: bool,
     out: &mut Sensors,
 ) {
+    out.github_captured_at = None;
+    out.github_window_end = None;
     let Some(from) = from else { return };
     let end = to.unwrap_or_else(Utc::now);
     let config = crate::config::Config::load(root).ok();
@@ -639,6 +671,8 @@ pub(super) fn external(
                     && c.actions_repo == actions_repo
                     && c.issues_repo == issues_repo =>
             {
+                out.github_captured_at = Some(c.captured_at);
+                out.github_window_end = Some(c.to);
                 out.hosted_runner_losses = c.runners;
                 out.daily_issues = c.issues;
             }
@@ -686,6 +720,8 @@ pub(super) fn external(
             tracing::warn!(%e, "ledger sensor capture could not be retained");
         }
     }
+    out.github_captured_at = Some(capture.captured_at);
+    out.github_window_end = Some(capture.to);
     out.hosted_runner_losses = capture.runners;
     out.daily_issues = capture.issues;
 }
@@ -693,6 +729,9 @@ pub(super) fn external(
 pub(super) fn render(out: &mut String, sensors: &Sensors) {
     use std::fmt::Write;
     let _ = writeln!(out, "\nFriction sensors");
+    if let (Some(at), Some(end)) = (sensors.github_captured_at, sensors.github_window_end) {
+        let _ = writeln!(out, "  GitHub capture: {at}; input window ends {end}");
+    }
     let _ = writeln!(
         out,
         "  Hosted runner losses: {}",

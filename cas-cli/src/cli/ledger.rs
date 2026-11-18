@@ -78,7 +78,9 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
             }
             let repo = cas_root.parent().unwrap_or(cas_root);
             let mut report = build_report(cas_root, repo, release.as_deref())?;
-            report.sensors = sensors::local(cas_root, report.from, report.to, *park_visibility_minutes);
+            if *park_visibility_minutes != 10 {
+                report.sensors = sensors::local(cas_root, report.from, report.to, *park_visibility_minutes);
+            }
             sensors::external(cas_root, report.from, report.to, *offline, &mut report.sensors);
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -740,6 +742,7 @@ struct LedgerReport {
     projects: Vec<String>,
     turns: TurnTotals,
     turns_by_notice_kind: BTreeMap<String, TurnTotals>,
+    wake_classification_missing_inputs: BTreeMap<String, usize>,
     turns_by_channel: BTreeMap<&'static str, TurnTotals>,
     /// Turns per supervisor (its agent id), then per wake channel.
     turns_by_actor: BTreeMap<String, BTreeMap<&'static str, TurnTotals>>,
@@ -851,6 +854,21 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         .is_some_and(|task| reviewed.contains(&(project_name(e), task.clone())))).cloned().collect();
     report.reviews = review_rows(&reviews);
     report.scorers = scorers::score(cas_root, repo, &report);
+    report.sensors = sensors::local(cas_root, report.from, report.to, 10);
+    let actors = crate::store::open_agent_store(cas_root).ok().and_then(|s| s.list(None).ok());
+    let superseded: std::collections::BTreeSet<_> = events.iter().filter_map(|e| match &e.payload {
+        QualityPayload::Turn { supersedes, .. } => supersedes.as_ref().map(|id| (e.project_id.clone(), id.clone())), _ => None,
+    }).collect();
+    for e in &events {
+        if superseded.contains(&(e.project_id.clone(), e.id.clone())) { continue }
+        if matches!(&e.payload, QualityPayload::Turn { notice_kind, .. } if notice_kind.as_ref()
+            .is_none_or(|kind| kind == "unknown" || kind.bytes().all(|b| b.is_ascii_digit()))) {
+            let reason = if actors.as_ref().is_none_or(|rows| !rows.iter().any(|a| e.actor.as_deref() == Some(a.id.as_str()))) {
+                "actor_identity_not_retained"
+            } else { "notice_kind_not_recovered_from_retained_inputs" };
+            *report.wake_classification_missing_inputs.entry(reason.into()).or_default() += 1;
+        }
+    }
     let published_at = published
         .then(|| cas_store::quality_release_events(cas_root))
         .transpose()?
@@ -993,6 +1011,7 @@ fn aggregate(
         projects: Vec::new(),
         turns: TurnTotals::default(),
         turns_by_notice_kind: BTreeMap::new(),
+        wake_classification_missing_inputs: BTreeMap::new(),
         turns_by_channel: BTreeMap::new(),
         turns_by_actor: BTreeMap::new(),
         deliveries: unknown("no merge record read"),
@@ -1303,6 +1322,9 @@ fn render(report: &LedgerReport) -> String {
 
     for (kind, row) in &report.turns_by_notice_kind {
         let _ = writeln!(out, "  notice {kind}: {} wakes, {} no-op", row.wakes, row.no_op_wakes);
+    }
+    for (input, count) in &report.wake_classification_missing_inputs {
+        let _ = writeln!(out, "    unknown input {input}: {count} wakes");
     }
     let _ = writeln!(out, "\nDelivery review history");
     for row in &report.reviews {

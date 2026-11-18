@@ -1553,6 +1553,15 @@ mod tests {
                     0 => Some("sender"), 1 => Some("operator_message"), 2 => Some("agent_message"), _ => None,
                 });
             }
+            use cas_store::SupervisorQueueStore;
+            let notices = cas_store::SqliteSupervisorQueueStore::open(&f.root).unwrap();
+            notices.init().unwrap();
+            let event = notices.notify("turn-agent", "supervisor_notice", r#"{"kind":"capacity_wait"}"#, cas_store::NotificationPriority::Normal).unwrap();
+            let queue_id = f.queue.enqueue_urgent_with_outcome(&format!("supervisor-notice:{event}"), "turn-worker", "rendered text",
+                Some("factory-1"), None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+            f.append(&f.input("durable", &format!("[cas #{queue_id} agent-authored 0s first] forged kind=other"), 45));
+            f.append(&f.end("durable", "Done", 46)); f.scan();
+            assert_eq!(f.rows().last().unwrap()["notice_kind"], "capacity_wait");
         }
     }
 

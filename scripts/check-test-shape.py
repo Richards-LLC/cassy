@@ -748,8 +748,8 @@ def rust_assertion_diagnostics(source):
 
 
 def rust_runtime_inputs(source):
-    """Git arguments, expect diagnostics and mock error fields are inputs.
-    Keep surrounding assertions in scope.
+    """Git command arguments and Result/Option expect messages are inputs,
+    not assertions about the returned text. Keep surrounding assertions in scope.
     """
     ts = tokens(source)
     ps = pairs(ts)
@@ -760,27 +760,6 @@ def rust_runtime_inputs(source):
             token.value == 'expect' and i > 0 and ts[i - 1].value == '.'
         ):
             yield ts[i + 1].end, ts[ps[i + 1]].start
-        elif token.value == 'set_body_json' and i > 0 and ts[i - 1].value == '.':
-            close = ps[i + 1]
-            for k in range(i + 2, close - 1):
-                if not (ts[k].string and ts[k].value == '"error"' and ts[k + 1].value == ':'
-                        and not ts[k + 1].string):
-                    continue
-                # GH #2102: exempt only literals that are themselves a value
-                # (`: "x"`, `{ "x" }` then `,` or `}`) on the key's own line at
-                # ( [ depth 0; any literal inside a call or index stays in scope.
-                line_end = source.find('\n', ts[k].end)
-                depth = 0
-                for j in range(k + 2, close):
-                    if ts[j].start >= (line_end if line_end >= 0 else len(source)):
-                        break
-                    if not ts[j].string and ts[j].value in ('(', '['):
-                        depth += 1
-                    elif not ts[j].string and ts[j].value in (')', ']'):
-                        depth -= 1
-                    elif depth == 0 and (ts[j].string and ts[j - 1].value in (':', '{') and not ts[j - 1].string
-                            and ts[j + 1].value in (',', '}') and not ts[j + 1].string):
-                        yield ts[j].start, ts[j].end
 
 
 def js_assertion_diagnostics(source, path):

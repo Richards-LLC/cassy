@@ -1176,27 +1176,158 @@ fn runner_config(dir: &Path, runner: &str) -> Option<PathBuf> {
         })
 }
 
+/// Jest's own selection when a config names neither `testMatch` nor `testRegex`.
+const JEST_DEFAULT_MATCH: [&str; 2] = [
+    "**/__tests__/**/*.?([mc])[jt]s?(x)",
+    "**/?(*.)+(spec|test).?([mc])[jt]s?(x)",
+];
+
+/// A suffix-anchored regex for a Jest glob, including the extglobs Jest's
+/// defaults use. `None` for a glob this does not model.
+fn glob_regex(glob: &str) -> Option<regex::Regex> {
+    let glob = glob.trim_start_matches("<rootDir>/").trim_start_matches("./");
+    let chars: Vec<char> = glob.chars().collect();
+    let mut out = String::from("(?:^|/)");
+    let mut open: Vec<char> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let next = chars.get(i + 1).copied();
+        match chars[i] {
+            '*' if next == Some('*') => {
+                i += 1;
+                if chars.get(i + 1) == Some(&'/') {
+                    i += 1;
+                    out.push_str("(?:.*/)?");
+                } else {
+                    out.push_str(".*");
+                }
+            }
+            '!' if next == Some('(') => return None,
+            quantifier @ ('*' | '?' | '+' | '@') if next == Some('(') => {
+                open.push(quantifier);
+                out.push_str("(?:");
+                i += 1;
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push_str("[^/]"),
+            '{' => {
+                open.push('{');
+                out.push_str("(?:");
+            }
+            ')' | '}' if !open.is_empty() => {
+                out.push(')');
+                if let Some(quantifier @ ('*' | '?' | '+')) = open.pop() {
+                    out.push(quantifier);
+                }
+            }
+            ',' if open.last() == Some(&'{') => out.push('|'),
+            '|' if open.last().is_some() => out.push('|'),
+            '[' => {
+                let close = chars[i..].iter().position(|ch| *ch == ']')?;
+                out.extend(&chars[i..=i + close]);
+                i += close;
+            }
+            other => out.push_str(&regex::escape(&other.to_string())),
+        }
+        i += 1;
+    }
+    out.push('$');
+    regex::Regex::new(&out).ok()
+}
+
+/// The string and regex literals a Jest config assigns to `key`, read from
+/// source: the config is JavaScript, so nothing is executed.
+fn config_literals(source: &str, key: &str) -> Vec<String> {
+    let Some(start) = regex::Regex::new(&format!(r#"\b{key}["']?\s*:"#))
+        .ok()
+        .and_then(|key| key.find(source))
+    else {
+        return Vec::new();
+    };
+    let literal = regex::Regex::new(
+        r##"'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`|/((?:[^/\\\n]|\\.)+)/"##,
+    )
+    .expect("literal pattern");
+    let rest = &source[start.end()..];
+    let (mut found, mut cursor) = (Vec::new(), 0);
+    for token in literal.captures_iter(rest) {
+        let whole = token.get(0).expect("match");
+        // Literals of one value are separated only by commas and whitespace.
+        if rest[cursor..whole.start()].contains([']', ':', ';', '}']) {
+            break;
+        }
+        cursor = whole.end();
+        found.push(match token.get(4) {
+            Some(raw) => raw.as_str().to_string(),
+            None => token.iter().skip(1).flatten().next().map_or("", |text| text.as_str()).replace("\\\\", "\\"),
+        });
+    }
+    found
+}
+
+/// Whether a Jest config selects `spec`: its `testRegex`/`testMatch`, else
+/// Jest's defaults. A config with `projects` delegates selection to Jest.
+fn jest_config_selects(config: &Path, spec: &Path) -> bool {
+    let Ok(source) = std::fs::read_to_string(config) else { return false };
+    if regex::Regex::new(r#"\bprojects["']?\s*:"#).is_ok_and(|projects| projects.is_match(&source)) {
+        return true;
+    }
+    let spec = spec.to_string_lossy();
+    let regexes = config_literals(&source, "testRegex");
+    let mut globs = config_literals(&source, "testMatch");
+    if regexes.is_empty() && globs.is_empty() {
+        globs = JEST_DEFAULT_MATCH.map(str::to_owned).to_vec();
+    }
+    regexes
+        .iter()
+        .any(|pattern| regex::Regex::new(pattern).is_ok_and(|pattern| pattern.is_match(&spec)))
+        || globs.iter().any(|glob| glob_regex(glob).is_some_and(|glob| glob.is_match(&spec)))
+}
+
+/// The runner configs in `dir`, nearest default first. Jest repositories keep
+/// further configs beside it (`jest-integration.config.js`) for other specs.
+fn runner_configs(dir: &Path, runner: &str) -> Vec<PathBuf> {
+    let mut configs: Vec<PathBuf> = runner_config(dir, runner).into_iter().collect();
+    if runner == "jest" {
+        let mut extra: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.contains("jest") && name.contains(".config.") && !JEST_CONFIGS.contains(&name.as_str())
+            })
+            .map(|entry| entry.path())
+            .collect();
+        extra.sort();
+        configs.extend(extra);
+    }
+    configs
+}
+
 /// The runner's working directory and explicit config for a test file: the
 /// nearest ancestor holding that runner's config, else the nearest
 /// package.json. A nested package.json must not hide the config and its
-/// transforms (cas-1468).
+/// transforms (cas-1468). For Jest the config must select the file: a spec
+/// outside the default config's `testRegex` belongs to the config that
+/// matches it (GH #2058); with no such config the nearest one stays.
 fn runner_root(repo: &Path, path: &str, runner: &str) -> Result<(PathBuf, Option<PathBuf>)> {
-    let mut current = repo
-        .join(path)
-        .parent()
-        .context("test parent")?
-        .to_path_buf();
-    let mut package = None;
+    let spec = repo.join(path);
+    let mut current = spec.parent().context("test parent")?.to_path_buf();
+    let (mut package, mut nearest) = (None, None);
     loop {
-        if let Some(config) = runner_config(&current, runner) {
-            return Ok((current, Some(config)));
+        for config in runner_configs(&current, runner) {
+            if runner != "jest" || jest_config_selects(&config, &spec) {
+                return Ok((current, Some(config)));
+            }
+            nearest.get_or_insert_with(|| (current.clone(), Some(config)));
         }
         if package.is_none() && current.join("package.json").is_file() {
             package = Some(current.clone());
         }
         if current == repo || !current.pop() {
-            return package
-                .map(|package| (package, None))
+            return nearest
+                .or_else(|| package.map(|package| (package, None)))
                 .with_context(|| format!("no package.json found for {path}"));
         }
     }

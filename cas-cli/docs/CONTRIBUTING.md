@@ -2833,6 +2833,11 @@ Node's built-in runner uses `-- node --test path/to/test-file`, five serial runs
 of the changed tests alone, which `node:test` cannot retry.
 Stability receipts share the worker-check store and include runner, source test
 identities, consecutive pass count and elapsed time. Park only reads them.
+When discovery cannot classify an input, the capped runner widens to the whole
+test file, or to the nearest JavaScript package/Rust crate for a source input.
+That wider set runs once and records a separate widened receipt at the tested
+commit. Park consumes it without executing tests; identified changed tests still
+owe five consecutive passes. Caller Jest name filters cannot narrow this proof.
 Stability uses the same receipt carry-forward as crate proof: documentation or
 changelog commits preserve it when no test/build inputs change. Target merges
 use the shared input/resolution checks. A changed test needs fresh stability

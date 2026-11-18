@@ -760,6 +760,44 @@ mod tests {
         }
     }
 
+    /// GH #2074: a supervisor row still marked active whose process is gone
+    /// does not own the train; a new live supervisor takes it over.
+    #[tokio::test]
+    async fn dead_active_supervisor_does_not_block_train_takeover_gh_2074() {
+        let fixture = Fixture::new();
+        fixture.start().await;
+        let agents = fixture.core.open_agent_store().unwrap();
+        let mut successor = Agent::new("supervisor-2".into(), "supervisor-2".into());
+        successor.role = AgentRole::Supervisor;
+        successor.factory_session = Some("queue-session".into());
+        agents.register(&successor).unwrap();
+        let takeover = || async {
+            let core = CasCore::with_daemon(fixture.root.clone(), None, None);
+            core.set_agent_id_for_testing("supervisor-2".into());
+            let service = crate::mcp::CasService::new(core, None);
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "train_merge", "id": "cas-train", "task_ids": fixture.ids
+            }))
+            .unwrap();
+            service.factory(Parameters(request)).await
+        };
+
+        // The owner's recorded process is this test: live, so it keeps the train.
+        let mut owner = agents.get("supervisor").unwrap();
+        owner.pid = Some(std::process::id());
+        agents.update(&owner).unwrap();
+        let held = takeover().await;
+        assert!(held.is_err() || held.unwrap().is_error == Some(true));
+
+        // Its process exits; the row stays `active`.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        owner.pid = Some(child.id());
+        child.wait().unwrap();
+        agents.update(&owner).unwrap();
+        let result = takeover().await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+    }
+
     #[tokio::test]
     async fn train_merge_requires_registered_supervisor() {
         let _env = crate::test_support::TestEnvGuard::temp_home();

@@ -1312,6 +1312,13 @@ pub enum FactoryGcCommands {
     },
 }
 
+/// Core for supervisor-only CLI subcommands. A shell or wrapper sits between
+/// the harness and `cas`, so identity must be resolved from the nearest
+/// harness ancestor (`for_cli`), not the immediate parent (GH #2125, #2074).
+fn supervisor_cli_core(root: &std::path::Path) -> crate::mcp::CasCore {
+    crate::mcp::CasCore::for_cli(root.to_path_buf())
+}
+
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
@@ -1345,7 +1352,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::Train { command: TrainCommand::Merge { epic, tasks, supervisor_override, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train merge requires a Cassy project"))?;
-                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let core = crate::mcp::CasCore::supervisor_cli_core(root);
                 let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()), *supervisor_override, reason.as_deref())?;
                 crate::gates::facts::observe_cli_output(root, &receipt);
                 if cli.json { println!("{}", serde_json::json!({"receipt": receipt})); }
@@ -1354,7 +1361,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::Train { command: TrainCommand::Drop { tasks, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train drop requires a Cassy project"))?;
-                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let core = crate::mcp::CasCore::supervisor_cli_core(root);
                 let queue = crate::train_guardrails::GhTrainQueue(
                     root.parent().unwrap_or(root).to_path_buf(),
                 );
@@ -2732,6 +2739,12 @@ fn check_factory_launch(
 mod tests {
     use super::*;
     use crate::ui::factory::FactoryConfig;
+
+    #[test]
+    fn supervisor_cli_core_resolves_identity_from_the_harness_ancestor() {
+        let root = std::path::Path::new("/nonexistent/.cas");
+        assert!(supervisor_cli_core(root).cli_harness.is_some());
+    }
 
     #[test]
     fn design_review_lift_refusal_keeps_the_requested_output_contract() {

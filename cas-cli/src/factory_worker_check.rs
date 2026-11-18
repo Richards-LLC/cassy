@@ -2801,6 +2801,85 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
     }
 
     #[cfg(unix)]
+    #[test]
+    fn rust_scope_receipt_table_cas_31eb() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let root = env.home().join("project/.cas");
+        for (row, known, unknown, selector) in [
+            ("R1", Some("src/lib.rs"), None, "fixture"),
+            ("R2", Some("tests/native.rs"), None, "fixture"),
+            ("R3", None, Some("tests/uncertain.rs"), "fixture"),
+            ("R4", Some("src/lib.rs"), Some("src/uncertain.rs"), "fixture"),
+            ("R5", Some("src/lib.rs"), Some("tests/uncertain.rs"), "fixture"),
+            ("R6", None, Some("src/uncertain.rs"), "fixture"),
+            ("R7", None, Some("tests/uncertain.rs"), "fixture@0.1.0"),
+        ] {
+            let repo = root.join(format!("worktrees/{row}"));
+            fixture_commit(&repo);
+            for dir in ["src/fixtures", "tests/fixtures"] { std::fs::create_dir_all(repo.join(dir)).unwrap(); }
+            let mut manifest = "[package]\nname='fixture'\nversion='0.1.0'\nautotests=false\n".to_string();
+            if known == Some("tests/native.rs") { manifest.push_str("[[test]]\nname='native'\npath='tests/native.rs'\n"); }
+            if unknown == Some("tests/uncertain.rs") { manifest.push_str("[[test]]\nname='uncertain'\npath='tests/uncertain.rs'\n"); }
+            std::fs::write(repo.join("Cargo.toml"), manifest).unwrap();
+            let prelude = if unknown == Some("src/uncertain.rs") { "mod uncertain;\n" } else { "" };
+            std::fs::write(repo.join("src/lib.rs"), prelude).unwrap();
+            if let Some(path) = known { std::fs::write(repo.join(path), format!("{prelude}#[test]\nfn known() {{ let before = 0; }}\n")).unwrap(); }
+            if let Some(path) = unknown {
+                std::fs::write(repo.join(path), "#[path = \"fixtures/a.rs\"] mod nested;\n").unwrap();
+                std::fs::write(repo.join(path).parent().unwrap().join("fixtures/a.rs"), "#[test]\nfn opaque() {}\n").unwrap();
+            }
+            fixture_commit_as(&repo, "base");
+            let base = fixture_head(&repo);
+            git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
+            if let Some(path) = known { std::fs::write(repo.join(path), format!("{prelude}#[test]\nfn known() {{}}\n")).unwrap(); }
+            if let Some(path) = unknown { std::fs::write(repo.join(path), "#[path = \"fixtures/\\u{0061}.rs\"] mod nested;\n").unwrap(); }
+            fixture_commit_as(&repo, "delivery");
+            env.set_current_dir(&repo);
+            let cargo = repo.join("target/fake-cargo");
+            std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+            let known_binary = if known == Some("tests/native.rs") { "fixture::native" } else { "fixture" };
+            let unknown_binary = if unknown == Some("tests/uncertain.rs") { "fixture::uncertain" } else { "fixture" };
+            let unknown_name = if unknown == Some("tests/uncertain.rs") { "nested::opaque" } else { "uncertain::nested::opaque" };
+            fake_cargo(&cargo, &format!(r#"python3 - "$@" <<'PY'
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[args.index('-p') + 1] == {selector:?}
+assert args[args.index('--retries') + 1] == '0'
+wide = '-E' not in args
+names = []
+if {has_known} and (wide or 'known' in args[args.index('-E') + 1]):
+    names.append(({known_binary:?}, 'known'))
+if {has_unknown} and wide:
+    names.append(({unknown_binary:?}, {unknown_name:?}))
+with Path('target/executed').open('a') as out:
+    for binary, name in names:
+        out.write(name + '\n')
+for index, (binary, name) in enumerate(names, 1):
+    print(f'        PASS [ 0.01s] ({{index}}/{{len(names)}}) {{binary}} {{name}}')
+print(f'     Summary [ 0.01s] {{len(names)}} tests run: {{len(names)}} passed, 0 skipped')
+PY"#, has_known=if known.is_some() { "True" } else { "False" }, has_unknown=if unknown.is_some() { "True" } else { "False" }));
+            let mut args = vec!["nextest".into(), "run".into(), "-p".into(), selector.into()];
+            if known == Some("tests/native.rs") { args.extend(["--test".into(), "native".into()]); }
+            else { args.push("--lib".into()); }
+            args.extend(["-E".into(), "test(known)".into()]);
+            execute_at(&root, &args, &repo, &cargo).unwrap();
+            let head = fixture_head(&repo);
+            let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &head, &targeted_test(&args).unwrap());
+            let record: CheckReceipt = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let receipt = record.test.unwrap();
+            assert_eq!(receipt.stability.is_some(), known.is_some(), "{row}");
+            if let Some(proof) = receipt.stability { assert_eq!(proof.consecutive_passes, 5, "{row}"); }
+            assert_eq!(receipt.widened.is_some(), unknown.is_some(), "{row}");
+            if let Some(proof) = receipt.widened { assert_eq!(proof.scope, widened::Scope::Crate("fixture".into()), "{row}"); }
+            let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
+            assert_eq!(executed.lines().filter(|name| *name == "known").count(), if known.is_some() { 5 } else { 0 }, "{row}");
+            assert_eq!(executed.lines().filter(|name| name.ends_with("opaque")).count(), usize::from(unknown.is_some()), "{row}");
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b() {
         use std::time::{Duration, Instant};

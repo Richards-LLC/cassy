@@ -1057,13 +1057,70 @@ mod tests {
         assert_eq!(runner.into_iter().map(|test| test.identity).collect::<Vec<_>>(), required);
     }
 
+    #[test]
+    fn javascript_deletion_anchor_table_cas_31eb() {
+        use crate::factory_worker_check::{javascript, stability, widened};
+        let _env = crate::test_support::TestEnvGuard::new();
+        let imports = "import { describe, test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\n";
+        let callback = "const options = {};\nconst callback = () => {\n  appendFileSync('runs', 'x');\n};\n";
+        let registration = "test('kept', options, callback);\n";
+        let removed = "test('removed', () => {});\n";
+        let inline = "test('kept', () => {\n  appendFileSync('runs', 'x');\n  const removed = 0;\n});\n";
+        let kept = format!("{imports}{callback}{registration}");
+        let suite = format!("{imports}describe('suite', () => {{\n{callback}{registration}}});\n");
+        let cases = [
+            ("J1", format!("{removed}{kept}"), kept.clone(), false, false),
+            ("J2", format!("{kept}{removed}"), kept.clone(), false, false),
+            ("J3", suite.replacen("() => {\n", &format!("() => {{\n{removed}"), 1), suite, false, false),
+            ("J4", format!("{imports}{callback}{removed}{registration}"), kept.clone(), false, false),
+            ("J5", format!("{imports}{inline}"), format!("{imports}{}", inline.replace("  const removed = 0;\n", "")), true, false),
+            ("J6", kept.replace("  appendFileSync", "  const removed = 0;\n  appendFileSync"), kept, false, true),
+        ];
+        for (row, before, after, identified, uncertain) in cases {
+            let root = tempfile::tempdir().unwrap();
+            let repo = root.path().join("worktrees/worker");
+            std::fs::create_dir_all(&repo).unwrap();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git").current_dir(&repo)
+                    .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                    .args(args).output().unwrap();
+                assert!(output.status.success(), "{row}: {output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            git(&["init", "-q", "-b", "main"]);
+            std::fs::write(root.path().join("config.toml"), "[factory]\nepic_base_branch='main'\n").unwrap();
+            std::fs::write(repo.join(".gitignore"), "runs\ntarget/\n").unwrap();
+            std::fs::write(repo.join("package.json"), "{}").unwrap();
+            let path = "a.test.mjs";
+            std::fs::write(repo.join(path), before).unwrap();
+            git(&["add", "."]);
+            git(&["commit", "-qm", "base"]);
+            let base = git(&["rev-parse", "HEAD"]);
+            git(&["checkout", "-qb", "delivery"]);
+            std::fs::write(repo.join(path), after).unwrap();
+            git(&["commit", "-qam", "delete"]);
+            let head = git(&["rev-parse", "HEAD"]);
+            let paths = vec![path.to_string()];
+            let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, Some(&[(base, head.clone())])).unwrap();
+            assert_eq!(tests, if identified { vec![stability::Identity::exact(path, "kept")] } else { vec![] }, "{row}");
+            assert_eq!(scopes, if uncertain { vec![widened::Scope::File(path.into())] } else { vec![] }, "{row}");
+            let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
+            assert_eq!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty(), !identified && !uncertain, "{row}");
+            if identified || uncertain {
+                javascript::execute(root.path(), &["node".into(), "--test".into(), path.into()], &repo).unwrap();
+                assert_eq!(std::fs::read(repo.join("runs")).unwrap().len(), if identified { 5 } else { 1 }, "{row}");
+            }
+            assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty(), "{row}");
+        }
+    }
+
     /// Unknown names widen once through the real runner, then the park consumer
     /// reads that proof. A newer/failing delivery cannot borrow the old pass.
     #[test]
     fn uncertain_js_input_runs_file_or_package_once_before_park_cas_31eb() {
         use crate::factory_worker_check::{javascript, stability, widened, PassingTests};
         let _env = crate::test_support::TestEnvGuard::new();
-        for package in [false, true] {
+        for (package, mixed) in [(false, false), (true, false), (false, true), (true, true)] {
             let root = tempfile::tempdir().unwrap();
             let repo = root.path().join("worktrees/worker");
             std::fs::create_dir_all(&repo).unwrap();
@@ -1081,23 +1138,29 @@ mod tests {
             let path = if package { "source.mjs" } else { "a.test.mjs" };
             std::fs::write(repo.join(path), "").unwrap();
             if package { std::fs::write(repo.join("a.test.mjs"), "import './source.mjs';\n").unwrap(); }
+            if mixed { std::fs::write(repo.join("known.test.mjs"), "import { test } from 'node:test'; test('known', () => { throw 0; });\n").unwrap(); }
             git(&["add", "."]);
             git(&["commit", "-qm", "base"]);
             let base = git(&["rev-parse", "HEAD"]);
             git(&["checkout", "-qb", "delivery"]);
             let source = "import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\nconst name = ['dynamic'].join('');\ntest(name, () => { appendFileSync('runs', 'x'); });\n";
             std::fs::write(repo.join(path), source).unwrap();
+            if mixed { std::fs::write(repo.join("known.test.mjs"), "import { test } from 'node:test'; import { appendFileSync } from 'node:fs'; test('known', () => { appendFileSync('runs', 'k'); });\n").unwrap(); }
             git(&["commit", "-qam", "unknown static name"]);
             let head = git(&["rev-parse", "HEAD"]);
-            let paths = vec![path.to_string()];
+            let mut paths = vec![path.to_string()];
+            if mixed { paths.push("known.test.mjs".into()); }
             let (tests, scopes) = stability::requirements(&repo, &head, "main", &paths, None).unwrap();
-            assert!(tests.is_empty());
+            assert_eq!(tests, if mixed { vec![stability::Identity::exact("known.test.mjs", "known")] } else { vec![] });
             assert_eq!(scopes, [if package { widened::Scope::Package(String::new()) } else { widened::Scope::File(path.into()) }]);
             let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
             assert!(!park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
-            let args = ["node".into(), "--test".into(), path.into()];
+            let mut args = vec!["node".into(), "--test".into(), path.into()];
+            if mixed { args.push("known.test.mjs".into()); }
             javascript::execute(root.path(), &args, &repo).unwrap();
-            assert_eq!(std::fs::read(repo.join("runs")).unwrap(), b"x");
+            let runs = std::fs::read(repo.join("runs")).unwrap();
+            assert_eq!(runs.iter().filter(|byte| **byte == b'x').count(), 1);
+            assert_eq!(runs.iter().filter(|byte| **byte == b'k').count(), if mixed { 5 + usize::from(package) } else { 0 });
             assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
             // The same source-to-runtime uncertainty at a newer failed tip
             // owes a fresh run, and failure records no broadened proof.
@@ -1114,35 +1177,61 @@ mod tests {
     #[test]
     fn mixed_rust_inputs_keep_identified_stability_beside_widening_cas_31eb() {
         use crate::factory_worker_check::{self, stability, widened, PassingTests};
-        let repo = changelog_fixture();
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(repo.path().join("src")).unwrap();
-        std::fs::write(repo.path().join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
-        std::fs::write(repo.path().join("src/lib.rs"), "mod uncertain;\n").unwrap();
-        std::fs::write(repo.path().join("src/uncertain.rs"), "#[path = \"a.rs\"] mod nested;\n").unwrap();
-        std::fs::write(repo.path().join("src/a.rs"), "pub fn helper() {}\n").unwrap();
-        let base = commit_changelog_fixture(repo.path(), "base");
-        assert!(std::process::Command::new("git").current_dir(repo.path())
-            .args(["update-ref", "refs/heads/main", &base]).status().unwrap().success());
-        std::fs::write(repo.path().join("src/lib.rs"), "mod uncertain;\n#[test]\nfn known() {}\n").unwrap();
-        std::fs::write(repo.path().join("src/uncertain.rs"), "#[path = \"\\u{0061}.rs\"] mod nested;\n").unwrap();
-        let head = commit_changelog_fixture(repo.path(), "mixed delivery");
-        let paths = vec!["src/lib.rs".to_string(), "src/uncertain.rs".to_string()];
-        let (tests, scopes) = stability::requirements(repo.path(), &head, "main", &paths, Some(&[(base, head.clone())])).unwrap();
-        assert_eq!(tests, [stability::Identity::exact("src/lib.rs", "known")]);
-        assert_eq!(scopes, [widened::Scope::Crate("fixture".into())]);
-        factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, "fixture", "test(known)");
-        widened::record(root.path(), repo.path(), &head,
-            widened::Proof { runner: "nextest".into(), scope: scopes[0].clone() }, 1).unwrap();
-        let passing = PassingTests::new(root.path(), repo.path(), &head);
-        assert!(widened::missing(&passing, &scopes).is_empty());
-        assert_eq!(stability::missing(&passing, &tests), tests);
-        let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
-        assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty());
-        stability::record(root.path(), repo.path(), &head, stability::Proof {
-            runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1,
-        }).unwrap();
-        assert!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty());
+        for (row, known, unknown, selector) in [
+            ("R1", Some("src/lib.rs"), None, "fixture"),
+            ("R2", Some("tests/native.rs"), None, "fixture"),
+            ("R3", None, Some("tests/uncertain.rs"), "fixture"),
+            ("R4", Some("src/lib.rs"), Some("src/uncertain.rs"), "fixture"),
+            ("R5", Some("src/lib.rs"), Some("tests/uncertain.rs"), "fixture"),
+            ("R6", None, Some("src/uncertain.rs"), "fixture"),
+            ("R7", None, Some("tests/uncertain.rs"), "fixture@0.1.0"),
+        ] {
+            let repo = changelog_fixture();
+            let root = tempfile::tempdir().unwrap();
+            for dir in ["src/fixtures", "tests/fixtures"] { std::fs::create_dir_all(repo.path().join(dir)).unwrap(); }
+            let mut manifest = "[package]\nname='fixture'\nversion='0.1.0'\nautotests=false\n".to_string();
+            if known == Some("tests/native.rs") { manifest.push_str("[[test]]\nname='native'\npath='tests/native.rs'\n"); }
+            if unknown == Some("tests/uncertain.rs") { manifest.push_str("[[test]]\nname='uncertain'\npath='tests/uncertain.rs'\n"); }
+            std::fs::write(repo.path().join("Cargo.toml"), manifest).unwrap();
+            let prelude = if unknown == Some("src/uncertain.rs") { "mod uncertain;\n" } else { "" };
+            std::fs::write(repo.path().join("src/lib.rs"), prelude).unwrap();
+            if let Some(path) = known { std::fs::write(repo.path().join(path), format!("{prelude}#[test]\nfn known() {{ let before = 0; }}\n")).unwrap(); }
+            if let Some(path) = unknown {
+                std::fs::write(repo.path().join(path), "#[path = \"fixtures/a.rs\"] mod nested;\n").unwrap();
+                std::fs::write(repo.path().join(path).parent().unwrap().join("fixtures/a.rs"), "#[test]\nfn opaque() {}\n").unwrap();
+            }
+            let base = commit_changelog_fixture(repo.path(), "base");
+            assert!(std::process::Command::new("git").current_dir(repo.path())
+                .args(["update-ref", "refs/heads/main", &base]).status().unwrap().success());
+            if let Some(path) = known { std::fs::write(repo.path().join(path), format!("{prelude}#[test]\nfn known() {{}}\n")).unwrap(); }
+            if let Some(path) = unknown { std::fs::write(repo.path().join(path), "#[path = \"fixtures/\\u{0061}.rs\"] mod nested;\n").unwrap(); }
+            let head = commit_changelog_fixture(repo.path(), "delivery");
+            let paths = known.into_iter().chain(unknown).map(str::to_string).collect::<Vec<_>>();
+            let expected = known.map(|path| stability::Identity::exact(path, "known")).into_iter().collect::<Vec<_>>();
+            let expected_scope = widened::Scope::Crate("fixture".into());
+            let (tests, scopes) = stability::requirements(repo.path(), &head, "main", &paths, Some(&[(base, head.clone())])).unwrap();
+            assert_eq!(tests, expected, "{row}");
+            assert_eq!(scopes, if unknown.is_some() { vec![expected_scope.clone()] } else { vec![] }, "{row}");
+            factory_worker_check::record_passing_test_for_tests(root.path(), repo.path(), &head, selector, "test(known)");
+            let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
+            assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
+            if unknown.is_some() {
+                // This is the producer's expected crate receipt, independent
+                // of the scope the park classifier just returned.
+                widened::record(root.path(), repo.path(), &head,
+                    widened::Proof { runner: "nextest".into(), scope: expected_scope }, 1).unwrap();
+            }
+            let passing = PassingTests::new(root.path(), repo.path(), &head);
+            assert!(widened::missing(&passing, &scopes).is_empty(), "{row}");
+            assert_eq!(stability::missing(&passing, &tests), tests, "{row}");
+            if !tests.is_empty() {
+                assert!(!park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
+                stability::record(root.path(), repo.path(), &head, stability::Proof {
+                    runner: "nextest".into(), tests, consecutive_passes: 5, elapsed_ms: 1,
+                }).unwrap();
+            }
+            assert!(park_refusals(root.path(), repo.path(), &task, &paths, &head, "main", None).is_empty(), "{row}");
+        }
     }
 
     fn changelog_fixture() -> tempfile::TempDir {

@@ -84,8 +84,9 @@ class ImpactTests(unittest.TestCase):
         destination = self.root / "output/receipt.json"
         impact.record(plan, [log], 0, 0.01, destination, "scoped")
         command = json.loads(destination.read_text())["plan"]["commands"][0]
-        self.assertEqual(command["reason"]["alpha_test"], "owner")
-        self.assertEqual(command["reason"]["beta_test"], "import-consumer")
+        self.assertEqual(
+            {stem: command["reason"][stem] for stem in ("alpha_test", "beta_test")},
+            {"alpha_test": "owner", "beta_test": "import-consumer"})
         self.assertNotIn("gamma_test", command["reason"])
 
     def test_binary_source_selects_subprocess_helpers_beyond_linked_imports(self):

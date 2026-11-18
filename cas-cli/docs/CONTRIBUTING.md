@@ -1544,6 +1544,18 @@ such a retry. Replaying the same supervisor verdict repairs the recovery notice
 without adding another verdict. Changed repository proof still invalidates the
 approval and requires a fresh dispatch.
 
+A parked delivery integrated through an outside PR may have no Cassy review
+cycle. Containment and green CI never supply that review. A live registered
+supervisor can use `verification action=add task_id=<id> dispatch_id=null
+status=approved|rejected summary="<review evidence>"` directly. Null requests authenticated dispatch
+inference; Cassy verifies the declared target still
+contains the immutable delivery and binds the verdict to that integrated tree,
+including any PR follow-up commits. An unmerged delivery still needs the normal
+candidate, and an existing dispatch retains its authority. Ordinary task notes
+cannot approve either path. After approval, retry ordinary close; other close
+and QA gates remain in force. G-70 also names the explicit, audited historical
+close override when that is the supervisor's chosen recovery.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside

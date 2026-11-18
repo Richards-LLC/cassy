@@ -585,9 +585,10 @@ def message_assertions(source, path, changed_lines=None):
             continue
         context = assertion_context(start)
         if context is not None and message_operand(context):
-            # Exact stdout marker tokens are machine data. Fixture setup cannot
-            # exempt prose: no provenance tracing or mutable-output assumptions.
-            if (re.fullmatch(r'[A-Za-z0-9_.:-]+', value)
+            # Only a whole expected string literal can be a stdout marker.
+            # Comments do not end an operand; operators and calls compose it.
+            if (source[start] in "'\"`" and re.fullmatch(r'[A-Za-z0-9_.:-]+', value)
+                    and re.match(r'(?:\s|//[^\n]*(?:\n|$)|/\*.*?\*/)*[,)]', source[end:], re.S)
                     and re.fullmatch(r'assert\.(?:equal|strictEqual)\(\s*\w+\.stdout(?:\.trim\(\))?\s*,\s*', context)):
                 continue
             hits.append((line, 'TEST_ASSERTION_PROSE'))

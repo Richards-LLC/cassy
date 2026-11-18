@@ -698,21 +698,18 @@ def is_exact_text_pin(body, context):
     prose = len(body.strip()) >= 55 and len(words) >= 8 and (
         '\n' in body or re.search(r'[.!?](?:\s|$)', body) is not None
     )
-    source_read = re.search(r'\b(?:read_text|readFile|read_to_string|include_str)\b', context, re.I) is not None
-    # Equality can select a mock scenario named `source`. Without an explicit
-    # assertion/search operation, require a real read before treating it as a pin.
-    read_comparison = source_read and re.search(r'===|==', context) is not None
     assertion = re.search(
         r'\b(?:assert\w*|expect|toBe|toEqual|toContain|toMatch|toHaveText|'
-        r'toMatchSnapshot|snapshot|should)\b', context, re.I,
-    ) is not None or read_comparison
-    source_input = source_read or re.search(
+        r'toMatchSnapshot|snapshot|should)\b|(?:===|==)', context, re.I,
+    ) is not None
+    source_input = re.search(
+        r'\b(?:read_text|readFile|read_to_string|include_str)\b|'
         r'(?<![\w.])(?:source|prompt|workflow|skill|template|contract|markdown|yaml|toml)(?:[_A-Za-z0-9]*)\b', context, re.I,
     ) is not None
     search = re.search(
         r'\b(?:contains|includes|indexOf|find|assertIn|assertRegex|toContain|'
-        r'toMatch|toEqual|toBe|assert\w*)\b', context, re.I,
-    ) is not None or read_comparison
+        r'toMatch|toEqual|toBe|assert\w*)\b|(?:===|==)', context, re.I,
+    ) is not None
     return (prose and assertion) or (len(body.strip()) >= 12 and len(words) >= 2 and source_input and search)
 
 

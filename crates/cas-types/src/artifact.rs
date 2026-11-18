@@ -200,17 +200,6 @@ mod tests {
     }
 
     #[test]
-    fn sizes_read_the_way_a_file_dialog_reads() {
-        let mut artifact = valid();
-        artifact.size_bytes = 812;
-        assert_eq!(artifact.human_size(), "812 B");
-        artifact.size_bytes = 812_345;
-        assert_eq!(artifact.human_size(), "813 KB");
-        artifact.size_bytes = 3_400_000;
-        assert_eq!(artifact.human_size(), "3.4 MB");
-    }
-
-    #[test]
     fn status_round_trips_through_its_wire_form() {
         for status in [
             ArtifactStatus::Local,

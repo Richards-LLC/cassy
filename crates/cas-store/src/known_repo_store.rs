@@ -409,17 +409,31 @@ mod tests {
         }
 
         store.upsert(&a).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
         store.upsert(&b).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
         store.upsert(&c).unwrap();
+
+        for (path, date) in [
+            (&a, "2020-01-01T00:00:00Z"),
+            (&c, "2020-01-02T00:00:00Z"),
+            (&b, "2020-01-03T00:00:00Z"),
+        ] {
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE known_repos SET last_touched_at = ?1 WHERE path = ?2",
+                    params![date, path.canonicalize().unwrap().to_str().unwrap()],
+                )
+                .unwrap();
+        }
 
         let list = store.list().unwrap();
         let names: Vec<_> = list
             .iter()
             .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["c", "b", "a"]);
+        assert_eq!(names, vec!["b", "c", "a"]);
     }
 
     #[test]

@@ -1,13 +1,13 @@
 ---
 name: cas-test-audit
-description: Use when auditing a project's tests for flake risk, historical flakes, dead or duplicate coverage, wording/style pins and cost; not for writing one new test.
+description: Use when auditing test value, flake history, dead/duplicate coverage or wording pins, or running an approved deletion campaign; not for writing one new test.
 metadata:
   managed_by: cas
 ---
 
 # Test value audit
 
-One read-only pass inventories test value, nondeterminism and the project's own failure history. It changes no audited test and never runs the full local suite.
+Default: one read-only pass inventories test value, nondeterminism and the project's failure history. It changes no audited test and never runs the full local suite.
 
 1. **Scope.** Name the project, source revision, runners and task artifact directory. Read its DESIGN.md before producing a human-facing report.
 2. **Mine history, then scan once.** Run the shipped portable script (Python standard library; `gh` for history):
@@ -25,3 +25,9 @@ One read-only pass inventories test value, nondeterminism and the project's own 
 A workflow turning green, a green requeue on another SHA or a retry label alone is not proof that a named test flaked. Match native test identity, executed failure and executed pass, plus identical SHA/tree and comparable selection. Preserve first failure evidence; never retry a suite to discover history or turn this audit green.
 
 For timing guesses, fix by waiting on the event, completion or owned resource; use a controlled clock for a timing contract. Repair isolation or delete useless coverage. Remove implementation/style pins; preserve behavioral assertions and named accessibility-property contracts from [cas-playwright-tests](../cas-playwright-tests/references/locators-and-accessibility.md). Computed style alone is not an accessibility outcome. Exact caller payloads and machine protocol identifiers remain data-integrity checks. Never prescribe retry wrapping, quarantine or a guessed longer sleep.
+
+## Approved deletion campaign
+
+1. Slice by subsystem. Triage the measured inventory: fixed sleeps → wording/prose pins → no assertions → disabled → duplicates.
+2. Read production code first. Keep the strongest owner per contract; delete redundant tests, never the only regression guard.
+3. Record a per-area ledger: removed tests, remaining contracts/owners, risks. Prove the surviving coverage and merge each slice separately.

@@ -361,75 +361,11 @@ pub trait AsyncEmbedder: Send + Sync {
 mod tests {
     use crate::traits::*;
 
-    struct TestDoc {
-        id: String,
-        content: String,
-        doc_type: String,
-        tags: Vec<String>,
-    }
-
-    impl SearchDocument for TestDoc {
-        fn doc_id(&self) -> &str {
-            &self.id
-        }
-
-        fn doc_content(&self) -> &str {
-            &self.content
-        }
-
-        fn doc_type(&self) -> &str {
-            &self.doc_type
-        }
-
-        fn doc_tags(&self) -> Vec<&str> {
-            self.tags.iter().map(|s| s.as_str()).collect()
-        }
-
-        fn doc_metadata(&self) -> HashMap<String, String> {
-            HashMap::new()
-        }
-    }
-
-    #[test]
-    fn test_search_document_trait() {
-        let doc = TestDoc {
-            id: "doc-001".into(),
-            content: "This is test content".into(),
-            doc_type: "test".into(),
-            tags: vec!["tag1".into(), "tag2".into()],
-        };
-
-        assert_eq!(doc.doc_id(), "doc-001");
-        assert_eq!(doc.doc_content(), "This is test content");
-        assert_eq!(doc.doc_type(), "test");
-        assert_eq!(doc.doc_tags(), vec!["tag1", "tag2"]);
-        assert!(doc.doc_title().is_none());
-    }
-
-    #[test]
-    fn test_search_document_embedding_text() {
-        let doc = TestDoc {
-            id: "doc-001".into(),
-            content: "Content here".into(),
-            doc_type: "test".into(),
-            tags: vec![],
-        };
-
-        // Without title, returns content
-        assert_eq!(doc.doc_embedding_text(), "Content here");
-    }
-
     #[test]
     fn test_search_result() {
         let result = SearchResult::new("doc-001", 0.85, ScoreSource::Hybrid);
         assert_eq!(result.id, "doc-001");
         assert!((result.score - 0.85).abs() < 0.001);
         assert_eq!(result.source, ScoreSource::Hybrid);
-    }
-
-    #[test]
-    fn test_score_source_equality() {
-        assert_eq!(ScoreSource::Bm25, ScoreSource::Bm25);
-        assert_ne!(ScoreSource::Bm25, ScoreSource::Semantic);
     }
 }

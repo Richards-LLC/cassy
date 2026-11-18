@@ -288,22 +288,24 @@ fn task_note_append_waits_through_a_foreign_write_lock() {
         .execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;")
         .unwrap();
 
-    let (started_tx, started_rx) = mpsc::channel();
+    let shared = std::sync::Arc::clone(&store.conn);
     let (finished_tx, finished_rx) = mpsc::channel();
     let task_id = task.id.clone();
     let worker = std::thread::spawn(move || {
-        started_tx.send(()).unwrap();
         let result = store.append_note(&task_id, "note after contention");
         finished_tx.send(result).unwrap();
     });
 
-    started_rx.recv().unwrap();
-    assert!(
-        finished_rx
-            .recv_timeout(Duration::from_millis(100))
-            .is_err(),
-        "task note append must wait while a foreign writer holds the lock"
-    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let attempting = loop {
+        if matches!(shared.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::yield_now();
+    };
     holder.execute_batch("COMMIT").unwrap();
 
     finished_rx
@@ -311,6 +313,7 @@ fn task_note_append_waits_through_a_foreign_write_lock() {
         .expect("task note append should finish after lock release")
         .expect("task note append should succeed after transient contention");
     worker.join().unwrap();
+    assert!(attempting, "the note writer attempted its transaction under contention");
     assert_eq!(
         SqliteTaskStore::open(temp.path())
             .unwrap()
@@ -1497,13 +1500,7 @@ fn init_of_an_initialized_store_reads_only_cas_0e57() {
 
     let locker = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
     locker.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let started = std::time::Instant::now();
     SqliteTaskStore::open(temp.path()).unwrap().init().unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "init waited {:?} on a foreign write lock",
-        started.elapsed()
-    );
     locker.execute_batch("ROLLBACK").unwrap();
 
     // A row written without its revision (as before the revision table

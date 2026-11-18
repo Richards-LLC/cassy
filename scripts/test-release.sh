@@ -661,6 +661,15 @@ PY
     ! grep -q '^qa candidate build ' "$FAKE_CAS_LOG" &&
         grep -q '^preflight-cli release preview ' "$FAKE_CAS_LOG" &&
         grep -q '^preflight-cli release track ' "$FAKE_CAS_LOG" || return 1
+    # A green receipt whose artifact is gone retries once, then previews with
+    # the installed CLI; it still never builds locally.
+    : >"$FAKE_CAS_LOG"
+    : >"$FAKE_GH_LOG"
+    FAKE_PREFLIGHT_CLI="$tmp/no-such-artifact" run "$fixture" --no-watch --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" && "$(grep -c '^run download .* --name preflight-cli ' "$FAKE_GH_LOG")" == 2 ]] &&
+        ! grep -q '^qa candidate build ' "$FAKE_CAS_LOG" &&
+        ! grep -q '^preflight-cli ' "$FAKE_CAS_LOG" &&
+        grep -q '^release preview ' "$FAKE_CAS_LOG" || return 1
     # There is deliberately no Y run/artifact: retry must fetch X again.
     rm -rf "$fixture/.git/cas/train-ci"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }

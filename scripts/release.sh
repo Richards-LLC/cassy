@@ -486,8 +486,8 @@ refuse_cut() {
 # cas-7971: the green frozen-train run already built this tip's CLI
 # (preflight-cli, produced by the receipt's own preflight job). The release
 # commit adds only version and release files, so that binary previews and
-# tracks the cut with no local build. Any miss falls through to the prebuild
-# lookup and the local build; a missing or red receipt never reaches here.
+# tracks the cut with no local build. A missing artifact falls back to the
+# installed CLI; a missing or red receipt never reaches here.
 train_receipt_cli() {
     local dir="$1" producer
     producer="$(jq -r '[.job_receipts[]? | select(.job == "fast-validation-preflight") | .producer_run][0] // empty' \
@@ -513,22 +513,30 @@ preview_cut() {
     local candidate_dir
     candidate_dir="$(git rev-parse --path-format=absolute --git-path "cas/cut-preview/$sha")"
     mkdir -p "$candidate_dir"
-    lookup=''
-    train_receipt_cli "$candidate_dir" || lookup="$(RELEASE_PREBUILD_WAIT_SECONDS=0 RELEASE_PREBUILD_PLATFORM=linux \
-        "$script_dir/find-release-prebuild.sh" "$sha")"
-    if [[ -z "$lookup" ]]; then
-        candidate="$candidate_dir/cas"
-    elif grep -qx 'found=true' <<<"$lookup"; then
-        run_id="$(sed -n 's/^run-id=//p' <<<"$lookup")"
-        "$gh_bin" run download "$run_id" --name cas-x86_64-unknown-linux-gnu --dir "$candidate_dir"
-        tar -xzf "$candidate_dir/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$candidate_dir" cas
-        candidate="$candidate_dir/cas"
+    if [[ -n "$train_receipt" ]]; then
+        # A green receipt never means a local build (cas-7971): retry the
+        # train's CLI once, then preview with the installed one.
+        if train_receipt_cli "$candidate_dir" || train_receipt_cli "$candidate_dir"; then
+            candidate="$candidate_dir/cas"
+        else
+            say "warning: the green train run's preflight-cli is unavailable; previewing with the installed CLI"
+            candidate="$cas_bin"
+        fi
     else
-        build_start=$SECONDS
-        "$cas_bin" qa candidate build --task "$task" --rev "$sha" >&2 \
-            || die "cut candidate build failed; no retry, nothing pushed"
-        build_seconds=$((SECONDS - build_start))
-        candidate="$("$cas_bin" qa candidate path --task "$task")"
+        lookup="$(RELEASE_PREBUILD_WAIT_SECONDS=0 RELEASE_PREBUILD_PLATFORM=linux \
+            "$script_dir/find-release-prebuild.sh" "$sha")"
+        if grep -qx 'found=true' <<<"$lookup"; then
+            run_id="$(sed -n 's/^run-id=//p' <<<"$lookup")"
+            "$gh_bin" run download "$run_id" --name cas-x86_64-unknown-linux-gnu --dir "$candidate_dir"
+            tar -xzf "$candidate_dir/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$candidate_dir" cas
+            candidate="$candidate_dir/cas"
+        else
+            build_start=$SECONDS
+            "$cas_bin" qa candidate build --task "$task" --rev "$sha" >&2 \
+                || die "cut candidate build failed; no retry, nothing pushed"
+            build_seconds=$((SECONDS - build_start))
+            candidate="$("$cas_bin" qa candidate path --task "$task")"
+        fi
     fi
     release_candidate="$candidate"
     local train_args=()

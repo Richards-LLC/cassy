@@ -298,13 +298,62 @@ fn title(node: Node<'_>, source: &str) -> Option<String> {
     }
     let raw = text(node, source);
     let contents = raw.get(1..raw.len().checked_sub(1)?)?;
-    if raw.starts_with('"') {
-        return serde_json::from_str(raw).ok();
+    if raw.starts_with('"')
+        && let Ok(decoded) = serde_json::from_str(raw)
+    {
+        return Some(decoded);
     }
-    if contents.contains('\\') || (raw.starts_with('`') && contents.contains("${")) {
+    if raw.starts_with('`') && contents.contains("${") {
         return None;
     }
-    Some(contents.to_string())
+    unescape(contents)
+}
+
+/// Simple single-character JavaScript escapes (GH #2093: `'it\'s'`); anything
+/// else, such as `\u0041` or a line continuation, is not a static identity.
+fn unescape(contents: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(contents.len());
+    let mut chars = contents.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        decoded.push(match chars.next()? {
+            escaped @ ('\'' | '"' | '`' | '\\' | '/' | '$') => escaped,
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            _ => return None,
+        });
+    }
+    Some(decoded)
+}
+
+/// GH #2112: a suite title built at runtime (`describe(api, …)`, a template
+/// with `${…}`) names a family of suites. Literal parts stay exact and each
+/// dynamic part becomes a `%s` placeholder of the parameterized identity.
+/// `None` for a static title.
+fn dynamic_suite_title(node: Option<Node<'_>>, source: &str) -> Option<String> {
+    let escape = |literal: &str| literal.replace('%', "%%");
+    let Some(node) = node else { return Some("%s".into()) };
+    if title(node, source).is_some() {
+        return None;
+    }
+    if node.kind() != "template_string" {
+        return Some("%s".into());
+    }
+    let mut cursor = node.walk();
+    let mut pattern = String::new();
+    for part in node.children(&mut cursor) {
+        match part.kind() {
+            "string_fragment" | "string_content" => pattern.push_str(&escape(&unescape(text(part, source))?)),
+            "template_substitution" => pattern.push_str("%s"),
+            "escape_sequence" => pattern.push_str(&escape(&unescape(text(part, source))?)),
+            _ => {}
+        }
+    }
+    Some(pattern)
 }
 
 /// `(suite, supported, parameterized)` for a test registration call.
@@ -894,11 +943,16 @@ fn walk(
         if node.child_by_field_name("function").is_some_and(|function| skipped_registration(function, source)) {
             return Ok(());
         }
-        let templated = templated || each;
         let args = node
             .child_by_field_name("arguments")
             .context("test arguments")?;
-        let name = args.named_child(0).and_then(|name| title(name, source));
+        let first = args.named_child(0);
+        let mut name = first.and_then(|name| title(name, source));
+        let mut templated = templated || each;
+        if suite && supported && name.is_none() && let Some(pattern) = dynamic_suite_title(first, source) {
+            name = Some(pattern);
+            templated = true;
+        }
         let unresolved = unresolved || !supported || name.is_none();
         let mut cursor = args.walk();
         let callback = args

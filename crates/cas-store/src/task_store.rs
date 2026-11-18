@@ -1327,6 +1327,31 @@ impl TaskStore for SqliteTaskStore {
         self.update_checked(task, "", Some(expected), true)
     }
 
+    fn rewind_sync_clock(
+        &self,
+        task_id: &str,
+        expected: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<bool> {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            let clock: Option<String> = tx
+                .query_row(
+                    "SELECT updated_at FROM tasks WHERE id = ?1",
+                    params![task_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if to >= expected || clock.as_deref().and_then(Self::parse_datetime) != Some(expected) {
+                return Ok(false);
+            }
+            let rows = tx.execute(
+                "UPDATE tasks SET updated_at = ?1 WHERE id = ?2",
+                params![to.to_rfc3339(), task_id],
+            )?;
+            Ok(rows == 1)
+        })
+    }
+
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         self.append_note_with_mutation_receipt(task_id, formatted_note, "")
     }

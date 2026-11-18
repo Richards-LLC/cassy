@@ -95,6 +95,86 @@ async fn artifact_note_append_survives_personal_and_team_reconciliation_once() {
     }
 }
 
+/// GH #2105: the merge owner applies the parking machine's early row (which
+/// carries a published proof), then the park itself arrives. Restoring the
+/// proof used to mint an apply-time clock, so the park looked older than the
+/// local row and was dropped; the owner kept seeing the task in progress.
+#[tokio::test]
+async fn park_after_proof_bearing_pull_is_not_outranked_by_the_apply_clock_gh2105() {
+    use crate::mcp::CasCore;
+    use crate::mcp::tools::TaskNotesRequest;
+    use rmcp::handler::server::wrapper::Parameters;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let project = "park-sync-project";
+    // Machine B (parking machine) publishes a proof on its task.
+    let parking = tempfile::tempdir().unwrap();
+    let b_root = crate::store::init_cas_dir(parking.path()).unwrap();
+    std::fs::write(b_root.join("config.toml"), format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+    let b_tasks = crate::store::open_task_store_local(&b_root).unwrap();
+    let mut task = Task::new("cas-park-sync".into(), "Park sync".into());
+    task.origin_project = Some(project.into());
+    b_tasks.add(&task).unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&b_root).unwrap();
+    artifacts.record_local(&cas_store::NewArtifact {
+        id: "art-park-sync".into(), task_id: task.id.clone(), name: "LEDGER.md".into(),
+        mime: "text/markdown".into(), size_bytes: 11,
+        sha256: "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9".into(),
+    }).unwrap();
+    artifacts.mark_uploaded("art-park-sync", "cloud-park-sync").unwrap();
+    artifacts.mark_committed("art-park-sync", None).unwrap();
+    let core = CasCore::with_daemon(b_root.clone(), None, None);
+    core.set_agent_id_for_testing("park-test-agent".into());
+    core.cas_task_notes(Parameters(TaskNotesRequest {
+        id: task.id.clone(), note_type: "platform_proof".into(),
+        note: "Park proof\n\nLedger: art-park-sync\ncells=1; PASS=1".into(),
+        supervisor_override: None, reason: None,
+    })).await.unwrap();
+    let mut working = b_tasks.get(&task.id).unwrap();
+    working.status = TaskStatus::InProgress;
+    working.updated_at = chrono::Utc::now() - chrono::Duration::seconds(2);
+    let mut parked = working.clone();
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.updated_at = working.updated_at + chrono::Duration::milliseconds(400);
+
+    // Machine A (merge owner) pulls the working row first, then the park.
+    let server = MockServer::start().await;
+    for (row, first) in [(&working, true), (&parked, false)] {
+        let mock = Mock::given(method("GET")).and(path("/api/sync/pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [row], "pulled_at": "2026-11-18T04:05:00Z", "team_id": "park-team", "status": "ok"
+            })));
+        if first { mock.up_to_n_times(1).mount(&server).await } else { mock.mount(&server).await }
+    }
+    let owner = tempfile::tempdir().unwrap();
+    let a_root = crate::store::init_cas_dir(owner.path()).unwrap();
+    std::fs::write(a_root.join("config.toml"), format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+    let a_tasks = crate::store::open_task_store_local(&a_root).unwrap();
+    let mut local = task.clone();
+    local.updated_at = working.updated_at - chrono::Duration::hours(1);
+    a_tasks.add(&local).unwrap();
+    let queue = Arc::new(SyncQueue::open(&a_root).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
+        endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default(), project.into(), &a_root);
+    let entries = crate::store::open_store_local(&a_root).unwrap();
+    let rules = crate::store::open_rule_store_local(&a_root).unwrap();
+    let skills = crate::store::open_skill_store_local(&a_root).unwrap();
+    for expected in [TaskStatus::InProgress, TaskStatus::AwaitingMerge] {
+        let result = syncer.pull(&*entries, &*a_tasks, &*rules, &*skills,
+            &*crate::store::open_spec_store(&a_root).unwrap(),
+            &*crate::store::open_event_store(&a_root).unwrap(),
+            &*crate::store::open_prompt_store(&a_root).unwrap(),
+            &*crate::store::open_file_change_store(&a_root).unwrap(),
+            &*crate::store::open_commit_link_store(&a_root).unwrap()).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(a_tasks.get(&task.id).unwrap().status, expected);
+    }
+}
+
 #[tokio::test]
 async fn concurrent_team_note_push_preserves_new_artifact_through_guarded_pull_cas_d655() {
     use crate::cloud::{EntityType, SyncOperation};

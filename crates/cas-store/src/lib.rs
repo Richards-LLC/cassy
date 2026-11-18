@@ -829,6 +829,19 @@ pub trait TaskStore: Send + Sync {
         ))
     }
 
+    /// Move `updated_at` from `expected` back to `to`, only while the row still
+    /// carries `expected`. Sync apply bookkeeping (proof and provenance notes)
+    /// uses it so restoring a note is not a new edit (GH #2105). Returns
+    /// whether the clock moved.
+    fn rewind_sync_clock(
+        &self,
+        _task_id: &str,
+        _expected: DateTime<Utc>,
+        _to: DateTime<Utc>,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     fn append_trusted_note_with_mutation_receipt(
         &self,
         _task_id: &str,

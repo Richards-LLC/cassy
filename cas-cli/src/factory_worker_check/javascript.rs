@@ -331,11 +331,10 @@ fn unescape(contents: &str) -> Option<String> {
 }
 
 /// GH #2112: a suite title built at runtime (`describe(api, …)`, a template
-/// with `${…}`) names a family of suites. Literal parts stay exact and each
+/// with `${…}`) names a family of suites. Literal parts are kept and each
 /// dynamic part becomes a `%s` placeholder of the parameterized identity.
 /// `None` for a static title.
 fn dynamic_suite_title(node: Option<Node<'_>>, source: &str) -> Option<String> {
-    let escape = |literal: &str| literal.replace('%', "%%");
     let Some(node) = node else { return Some("%s".into()) };
     if title(node, source).is_some() {
         return None;
@@ -347,9 +346,9 @@ fn dynamic_suite_title(node: Option<Node<'_>>, source: &str) -> Option<String> {
     let mut pattern = String::new();
     for part in node.children(&mut cursor) {
         match part.kind() {
-            "string_fragment" | "string_content" => pattern.push_str(&escape(&unescape(text(part, source))?)),
+            "string_fragment" | "string_content" => pattern.push_str(&unescape(text(part, source))?),
             "template_substitution" => pattern.push_str("%s"),
-            "escape_sequence" => pattern.push_str(&escape(&unescape(text(part, source))?)),
+            "escape_sequence" => pattern.push_str(&unescape(text(part, source))?),
             _ => {}
         }
     }
@@ -2325,7 +2324,7 @@ mod tests {
         // that test under every runtime suite name; the test title stays literal.
         let looped = "for (const [mode, api] of rows) test.describe(api, () => {\n  test('p100%_ok', () => {});\n});\ntest.describe(`ssr_${mode}_run`, () => {\n  test('defers_ok', () => {});\n});";
         let wildcard = |name: &str| Identity { parameterized: true, ..id("a.test.ts", name) };
-        let (dynamic, interpolated) = (wildcard("%s p100%%_ok"), wildcard("ssr_%s_run defers_ok"));
+        let (dynamic, interpolated) = (wildcard("%s p100%_ok"), wildcard("ssr_%s_run defers_ok"));
         assert_eq!(source_tests("a.test.ts", looped, &[(2, 2)]).unwrap(), [dynamic.clone()]);
         assert_eq!(source_tests("a.test.ts", looped, &[(5, 5)]).unwrap(), [interpolated]);
         assert_eq!(

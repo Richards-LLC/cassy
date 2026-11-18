@@ -1320,6 +1320,8 @@ mod tests {
     fn ui_merge_receipt_keeps_its_own_qa_requirement_after_later_backend_merge_gh1181() {
         for later in [None, Some("src/service.ts")] {
             let (temp, receipt) = merged_receipt_fixture_gh1181("hub-web/dist/own.vue", later);
+            // This attribution control exercises individual evidence ownership.
+            std::fs::write(temp.path().join(".cas/config.toml"), "[qa]\nmode='per_task'\n").unwrap();
             let repo = temp.path().join("repo");
             let mut task = Task::new("cas-8104".into(), "UI delivery".into());
             task.assignee = Some("worker".into());

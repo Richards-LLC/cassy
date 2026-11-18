@@ -3734,7 +3734,6 @@ mod tests {
         std::path::PathBuf,
         std::path::PathBuf,
         std::path::PathBuf,
-        std::path::PathBuf,
         Pty,
     ) {
         let temp = std::env::temp_dir().join(format!(
@@ -3746,10 +3745,8 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&temp).expect("temporary PTY evidence directory");
-        let ready = temp.join("eof-ready");
         let done = temp.join("wait-status-ready");
         let release = temp.join("release-wait-status");
-        let ready_shell = shell_quote(&ready.to_string_lossy());
         let done_shell = shell_quote(&done.to_string_lossy());
         let delay = format!(
             "while [ ! -e {} ]; do sleep 0.01; done",
@@ -3760,7 +3757,7 @@ mod tests {
             args: vec![
                 "-c".to_string(),
                 format!(
-                    "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; {delay}; printf done > {done_shell}; exit 37"
+                    "exec 0<&- 1>&- 2>&-; {delay}; printf done > {done_shell}; exit 37"
                 ),
             ],
             ..PtyConfig::default()
@@ -3773,7 +3770,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         pty.event_rx = rx;
         tx.try_send(PtyEvent::Exited(None)).expect("inject reader EOF");
-        (temp, ready, done, release, pty)
+        (temp, done, release, pty)
     }
 
     #[tokio::test]
@@ -3879,7 +3876,7 @@ mod tests {
 
     #[tokio::test]
     async fn eof_before_wait_status_retries_without_blocking_try_recv() {
-        let (temp, _ready, done, release, mut pty) = spawn_delayed_wait_status_probe();
+        let (temp, done, release, mut pty) = spawn_delayed_wait_status_probe();
         let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
 
         assert!(pty.try_recv().is_none());
@@ -3914,7 +3911,7 @@ mod tests {
 
     #[tokio::test]
     async fn recv_after_try_recv_consumes_eof_retries_wait_status() {
-        let (temp, _ready, done, release, mut pty) = spawn_delayed_wait_status_probe();
+        let (temp, done, release, mut pty) = spawn_delayed_wait_status_probe();
 
         assert!(pty.try_recv().is_none());
         assert!(pty.exit_status_pending);
@@ -3939,7 +3936,7 @@ mod tests {
 
     #[tokio::test]
     async fn recv_only_retries_wait_status_after_pty_eof() {
-        let (temp, _ready, done, release, mut pty) = spawn_delayed_wait_status_probe();
+        let (temp, done, release, mut pty) = spawn_delayed_wait_status_probe();
         let mut receiving = Box::pin(pty.recv());
         let first = std::future::poll_fn(|cx| {
             std::task::Poll::Ready(std::future::Future::poll(receiving.as_mut(), cx))

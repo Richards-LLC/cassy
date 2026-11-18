@@ -752,6 +752,7 @@ mod tests {
         let home = env.home().to_path_buf();
         let h = home.as_path();
         let client = h.join("claude");
+        crate::test_paths::warm_stub(&client, "#!/bin/sh\nprintf '%s' '{\"loggedIn\":false}'\n");
         env.set("CAS_TEST_CLAUDE_BIN", &client);
         // The retired-main premise needs confirmed logout even on macOS.
         assert_eq!(

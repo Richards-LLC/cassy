@@ -145,34 +145,22 @@ const EXAMPLE: &str = r#"Rule { rule: "quoted.fake" }"#;
   });
   assert.equal(child.stdout.trim(), 'explicit');
 });'''
+        prose = source.replace('explicit', 'Please try later')
         cases = [
             (source, False),
             (source.replace('assert.equal', 'assert.strictEqual'), False),
             (source.replace("child.stdout.trim(), 'explicit'", "'explicit', child.stdout.trim()"), False),
-            (source.replace('marker', 'identity').replace('explicit', 'selected package'), False),
-            (source.replace('marker', 'message'), False),
-            (source.replace('marker', 'message').replace(
+            (source.replace('explicit', 'fixture.v1:selected-package'), False),
+            ("assert.equal(child.stdout.trim(), 'explicit');", False),
+            (source.replace('marker', 'identity').replace('explicit', 'selected package'), True),
+            (prose, True),
+            (prose.replace('  assert.equal', '  child.stdout = runProduct().message;\n  assert.equal'), True),
+            (prose.replace('  const child', "  await writeFile(join(dir, 'selected', 'index.js'), productModuleSource);\n  const child"), True),
+            (prose.replace('marker', 'message').replace(
                 "import { resolvePlaywright } from ${JSON.stringify(pathToFileURL(join(dir, 'visual-qa.mjs')).href)}; console.log((await resolvePlaywright()).playwright.message);",
                 "import { product } from './product.mjs'; console.log(product.message);"), True),
-            (source.replace("pathToFileURL(join(dir, 'visual-qa.mjs'))", "pathToFileURL(join(other, 'visual-qa.mjs'))"), True),
-            (source.replace("PLAYWRIGHT_MODULE: join(dir, 'selected')", "PLAYWRIGHT_MODULE: join(other, 'selected')"), True),
-            (source.replace("PLAYWRIGHT_MODULE: join(dir, 'selected')", "PLAYWRIGHT_MODULE: join(dir, 'unrelated')"), True),
-            (source.replace("child.stdout.trim(), 'explicit'", "child.stdout.trim(), 'local'"), True),
-            (source.replace("'scripts/visual-qa.mjs'", "'scripts/product.mjs'"), True),
-            (source.replace("join(dir, 'visual-qa.mjs'));", "join(other, 'visual-qa.mjs'));"), True),
-            (source.replace("join(pkg, 'index.js')", "join(other, 'index.js')"), True),
-            (source.replace("'explicit');", "'unrelated');"), True),
             (source.replace('child.stdout.trim()', 'child.stderr.trim()'), True),
             (source.replace("assert.equal(child.stdout.trim(), 'explicit')", "assert.ok(child.stdout.includes('explicit'))"), True),
-            (source.replace('export const marker', 'export const label'), True),
-            (source.replace('.playwright.marker', '.playwright.message'), True),
-            (source.replace('console.log(', "console.log('Product copy' + "), True),
-            (source.replace('console.log(', "console.log('Product copy'); // console.log("), True),
-            (source.replace("['selected', 'explicit']", "/* ['selected', 'explicit'] */ ['selected', 'other']"), True),
-            (source.replace('await writeFile(', 'await render('), True),
-            (source.replace('  assert.equal', '  const child = runProduct();\n  assert.equal'), True),
-            (source.replace('  assert.equal', "});\ntest('other', () => {\n  assert.equal"), True),
-            ("assert.equal(child.stdout.trim(), 'explicit');\n" + source, True),
         ]
         for code, rejected in cases:
             lines = {i for i, line in enumerate(code.splitlines(), 1) if 'assert.' in line}

@@ -405,6 +405,22 @@ mod tests {
     }
 
     #[test]
+    fn capped_temporary_fixtures_do_not_discover_the_checkout_cas_2085() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let outer = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git").args(["init", "-q"])
+            .arg(outer.path()).status().unwrap();
+        assert!(status.success());
+        let (cas, worktree) = managed(outer.path(), Some("[factory]\n"));
+        let temporary = prepare_test_tmp(&cas, &worktree).unwrap();
+        let fixture = tempfile::tempdir_in(&temporary).unwrap();
+        assert!(crate::worktree::GitOperations::detect_repo_root(fixture.path()).is_err());
+        assert!(crate::store::find_cas_root_from(fixture.path()).is_err());
+        drop(fixture);
+        reclaim_test_tmp(&cas, &worktree).unwrap();
+    }
+
+    #[test]
     fn scratch_root_unset_keeps_in_tree_target_and_build_cache() {
         let dir = tempfile::tempdir().unwrap();
         for config in [None, Some("[factory]\nspawn_min_free_gib = 0\n")] {

@@ -97,3 +97,42 @@ fn release_preview_reuses_parallel_proofs_with_identical_outcomes_cas_b7be() {
         assert!(blame_counts[1] <= 2 * members, "{blame_counts:?}");
     }
 }
+
+/// cas-0e29e: the v4.29 cut preview spent its time in `advance`, which
+/// re-tokenized every (owned line, added line) pair of a changed hunk for each
+/// of the hunk's owners: O(owners x added) tokenizations per edge. A later
+/// commit replacing all of a delivery's lines must tokenize each hunk line once.
+#[test]
+fn ownership_walk_tokenizes_each_hunk_line_once_cas_0e29e() {
+    const LINES: usize = 200;
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let repo = env.home().join("tokenize");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    let write = |body: &dyn Fn(usize) -> String| {
+        let text: String = (0..LINES).map(|i| body(i) + "\n").collect();
+        std::fs::write(repo.join("owned.rs"), text).unwrap();
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    write(&|i| format!("let value_{i} = base({i});"));
+    git(&["add", "owned.rs"]);
+    git(&["commit", "-qm", "base"]);
+    let parent = git(&["rev-parse", "HEAD"]);
+    write(&|i| format!("let value_{i} = delivered_{i}(input);"));
+    git(&["commit", "-qam", "fix(cas-0e29e): deliver"]);
+    let delivery = git(&["rev-parse", "HEAD"]);
+    write(&|i| format!("let value_{i} = replaced_{i}(input, extra);"));
+    git(&["commit", "-qam", "later rewrite of every delivered line"]);
+    TOKENIZED_LINES.with(|count| count.set(0));
+    let presence = line_content_presence(&repo, &parent, &delivery, "HEAD", "owned.rs").unwrap();
+    assert!(presence.is_some());
+    let tokenized = TOKENIZED_LINES.with(std::cell::Cell::get);
+    assert!(tokenized > 0, "the ownership walk must run");
+    assert!(tokenized <= 2 * LINES, "tokenized {tokenized} lines for one {LINES}-line hunk");
+}

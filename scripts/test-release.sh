@@ -283,6 +283,28 @@ missing_fragment_delivery_stops_release() {
 }
 check 'missing_fragment_delivery_stops_release || { cat "$tmp/missing-fix.log"; false; }' 'cas-4bdf: report all missing fixes; accept historical cherry-picks after edits and ignore epic mentions'
 
+contained_prefix_delivery_beats_abandoned_suffix_attempt() {
+    local fixture="$tmp/prefix-owner" base
+    clone_epic "$fixture" hotfix/prefix-owner prefix-owner
+    base="$(git -C "$fixture" rev-parse HEAD)"
+    git -C "$fixture" checkout --quiet -b abandoned-attempt
+    echo abandoned >"$fixture/attempt.txt"
+    git -C "$fixture" add attempt.txt
+    git -C "$fixture" commit --quiet -m 'fix: abandoned delivery (cas-2090)'
+    git -C "$fixture" checkout --quiet hotfix/prefix-owner
+    mkdir -p "$fixture/changelog.d"
+    echo delivered >"$fixture/delivery.txt"
+    printf '### Fixed — Fixture\n\n- **Delivery** — contained fix.\n' >"$fixture/changelog.d/cas-2090.md"
+    git -C "$fixture" add delivery.txt changelog.d
+    git -C "$fixture" commit --quiet -m 'fix(cas-2090): contained second attempt'
+    (cd "$fixture" && python3 scripts/release_changelog.py verify-deliveries "$base") >"$tmp/prefix-owner.json" 2>"$tmp/prefix-owner.err" || return 1
+    jq -e '.included_task_ids | index("cas-2090") != null' "$tmp/prefix-owner.json" >/dev/null || return 1
+    # Prefix ownership retains the same explicit red marker as suffix ownership.
+    git -C "$fixture" commit --quiet --allow-empty -m 'test(cas-209a red): regression without a fix'
+    ! (cd "$fixture" && python3 scripts/release_changelog.py verify-deliveries "$base") >"$tmp/prefix-red.json" 2>"$tmp/prefix-red.err"
+}
+check 'contained_prefix_delivery_beats_abandoned_suffix_attempt || { cat "$tmp/prefix-owner.err"; false; }' 'GH2090: contained conventional owner wins over an abandoned suffix attempt; red-only stays incomplete'
+
 # Real release history is part of this regression: CI checks out full history.
 historical_release_replay() {
     local status=0

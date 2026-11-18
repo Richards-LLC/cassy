@@ -342,7 +342,14 @@ pub(super) fn is_revert_message(message: &str) -> bool {
             .any(|line| line.trim_start().starts_with("this reverts commit "))
 }
 
+#[cfg(test)]
+thread_local! {
+    static TOKENIZED_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn tokens(line: &str) -> Vec<&str> {
+    #[cfg(test)]
+    TOKENIZED_LINES.with(|count| count.set(count.get() + 1));
     line.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|token| !token.is_empty())
         .collect()

@@ -32457,7 +32457,7 @@ esac
             cas_store::timeout_verification_dispatch(&root, &id,
                 chrono::Utc::now() + chrono::Duration::hours(2)).unwrap();
             if case == "rejected" {
-                let mut verdict = Verification::rejected("ver-shipped-rejected".into(), id.clone(), "fixture rejection".into());
+                let mut verdict = Verification::rejected("ver-shipped-rejected".into(), id.clone(), "fixture rejection".into(), Vec::new());
                 verdict.provenance = cas_types::VerificationProvenance::System;
                 cas_store::add_system_verification(&root, &verdict).unwrap();
             }

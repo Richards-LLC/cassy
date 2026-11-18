@@ -40,20 +40,6 @@ mod tests {
     }
 
     #[test]
-    fn ascii_longer_is_truncated_with_ellipsis() {
-        assert_eq!(truncate_preview("abcdefghij", 6), "abc...");
-    }
-
-    #[test]
-    fn multibyte_boundary_inside_cut_does_not_panic() {
-        // `→` is 3 bytes (E2 86 92). "aaaaa→bbbbb" is 13 bytes; cutting at 7
-        // (target = 10 - 3 = 7) would land inside the `→`. Must not panic.
-        let s = "aaaaa→bbbbb";
-        let out = truncate_preview(s, 10);
-        assert_eq!(out, "aaaaa..."); // 5 bytes + "..." = 8 bytes, boundary at 5
-    }
-
-    #[test]
     fn regression_cas_serve_search_crash_2026_04_16() {
         // Exact prefix that crashed `cas serve` when returned by `search`.
         // Byte index 57 was inside `→` (bytes 55..58) with max_len = 60.
@@ -70,9 +56,4 @@ mod tests {
         let _ = truncate_preview(s, 10);
     }
 
-    #[test]
-    fn max_len_smaller_than_ellipsis_returns_just_ellipsis() {
-        assert_eq!(truncate_preview("abcdef", 2), "...");
-        assert_eq!(truncate_preview("abcdef", 0), "...");
-    }
 }

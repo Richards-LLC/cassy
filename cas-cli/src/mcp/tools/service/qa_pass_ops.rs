@@ -868,7 +868,7 @@ mod tests {
         let store = crate::store::open_task_store(&root).unwrap();
         store.init().unwrap();
         let delivery = cas_types::Task::new("cas-delivery".into(), "Delivery".into());
-        store.create(&delivery).unwrap();
+        store.create_atomic(&delivery, &[], None, None).unwrap();
         let service = CasService::new(crate::mcp::server::CasCore::with_daemon(root, None, None),
             #[cfg(feature = "mcp-proxy")] None);
         let now = chrono::Utc::now();

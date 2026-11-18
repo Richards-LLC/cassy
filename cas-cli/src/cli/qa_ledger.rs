@@ -286,7 +286,7 @@ mod tests {
         let task = cas_types::Task::new("cas-worktree-ledger".into(), "Review src/form.rs".into());
         let store = crate::store::open_task_store(&root).unwrap();
         store.init().unwrap();
-        store.create(&task).unwrap();
+        store.create_atomic(&task, &[], None, None).unwrap();
         let args = LedgerArgs { command: LedgerCommand::Init { task: task.id.clone(), covers: Vec::new(), release_scope: None } };
         execute(&args, &Cli::parse_from(["cas"]), Some(&root)).unwrap();
         let path = crate::config::resolved_factory_artifact_paths(&root, config.factory().artifacts_root.as_deref())

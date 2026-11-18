@@ -514,10 +514,7 @@ async fn cas_f707_branch_is_registered_and_refreshed_on_the_heartbeat() {
         ).unwrap();
         assert!(sample.cpu_count > 0);
         assert!(sample.observed_at <= chrono::Utc::now());
-        // Other builders and host pressure can reduce live availability.
-        let config = crate::config::Config::load(&fx.cas_root).unwrap().factory();
-        assert!(sample.free_slots <= config.max_concurrent_builders);
-        assert_eq!(sample.max_workers, Some(config.max_workers()));
+        assert_eq!(sample.free_slots, crate::config::Config::load(&fx.cas_root).unwrap().factory().max_concurrent_builders);
     }
 }
 

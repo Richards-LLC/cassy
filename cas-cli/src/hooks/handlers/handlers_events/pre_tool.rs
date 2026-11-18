@@ -2734,6 +2734,7 @@ enum GitHeadAction {
     NewBranch,
     Navigate { reference: Option<String>, guess: bool },
     RefRewrite,
+    Recover { branch: Option<String> },
     Guarded,
 }
 
@@ -3153,8 +3154,19 @@ fn collect_git_write_targets(
         let mut target = default_target.clone();
         target.unresolved_directory = shell_cwd.is_none();
         target.cwd = shell_cwd.clone().unwrap_or_else(|| default_target.cwd.clone());
-        target.head_action = if matches!(git_words[write_index].as_str(), "checkout" | "switch") {
-            git_head_action(&git_words[write_index], &git_words[write_index + 1..])
+        let operation = git_words[write_index].as_str();
+        let operands = &git_words[write_index + 1..];
+        target.head_action = if (matches!(operation, "cherry-pick" | "merge" | "rebase")
+                && operands == ["--abort"])
+            || (operation == "reset" && operands == ["--merge"])
+        {
+            GitHeadAction::Recover { branch: None }
+        } else if operation == "switch" && matches!(operands.len(), 2 | 3)
+            && matches!(operands[0].as_str(), "-C" | "--force-create")
+        {
+            GitHeadAction::Recover { branch: Some(operands[1].clone()) }
+        } else if matches!(operation, "checkout" | "switch") {
+            git_head_action(operation, operands)
         } else { GitHeadAction::Guarded };
         target.checkout_args = (git_words[write_index] == "checkout")
             .then(|| git_words[write_index + 1..].to_vec());
@@ -3436,6 +3448,24 @@ fn check_worker_git_commit_scope_at_target(
                 not the Claude Code PreToolUse harness)."
             ));
         }
+    }
+
+    // Recovery in a registered checkout must remain possible after an
+    // incidental suffix was mistaken for another worker. Compare actual Git
+    // directories too: --git-dir/--work-tree must not redirect this allowance.
+    if is_isolated && let GitHeadAction::Recover { branch } = &target.head_action {
+        let owned = branch.as_deref().is_none_or(|branch| {
+            std::env::var("CAS_AGENT_NAME").ok().is_some_and(|worker|
+                crate::factory_isolation::classify_worker_binding(&worker, Some(branch))
+                    == crate::factory_isolation::WorkerBinding::Own)
+        });
+        let git_dir = |output: std::io::Result<std::process::Output>| output.ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| std::path::Path::new(String::from_utf8_lossy(&output.stdout).trim()).canonicalize().ok());
+        let actual = git_dir(git_command_at_target(target).args(["rev-parse", "--absolute-git-dir"]).output());
+        let expected = git_dir(std::process::Command::new("git").arg("-C").arg(clone_path.as_deref().unwrap())
+            .args(["rev-parse", "--absolute-git-dir"]).output());
+        if owned && actual.is_some() && actual == expected { return None; }
     }
 
     // Navigation never creates a commit. Keep the effective-directory and
@@ -5998,6 +6028,9 @@ fn factory_write_decision(
             }),
         }
     };
+    let directory_sinks: std::collections::HashSet<_> = shell_effects.directory_sinks.iter()
+        .filter_map(|raw| absolute(raw, &cwd).and_then(|path| resolve_through_links(&path, &aliases)))
+        .filter_map(|path| canonicalize_for_containment(&path)).collect();
     let mut uses = Vec::new();
     let admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
         policy.matching(&resolved, mode, task_ids).map(|root| {
@@ -6146,7 +6179,11 @@ fn factory_write_decision(
         ) else {
             continue;
         };
-        let mode = mode.unwrap_or(if std::fs::symlink_metadata(&resolved).is_ok() {
+        let mode = mode.unwrap_or(if directory_sinks.contains(&resolved) && resolved.is_dir() {
+            // mv/cp/install into an existing directory creates a child; it
+            // does not overwrite or rename the directory itself.
+            WriteMode::Create
+        } else if std::fs::symlink_metadata(&resolved).is_ok() {
             WriteMode::Edit
         } else {
             WriteMode::Create
@@ -9841,6 +9878,14 @@ EOF
         let decide = |command: String| {
             factory_write_decision(&bash_input(&command, &worktree), &None, None, false, Some(worktree.as_path()), &policy, &no_tasks)
         };
+        let trash = home.join(".Trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(worktree.join(".merge_file_fixture"), "merge scratch").unwrap();
+        let trash_policy = root_policy(&trash, &[WriteMode::Create, WriteMode::Edit, WriteMode::Delete], None);
+        for command in ["mv .merge_file_* ~/.Trash/", "mv .merge_file_fixture ~/.Trash/"] {
+            assert!(matches!(factory_write_decision(&bash_input(command, &worktree), &None, None, false,
+                Some(worktree.as_path()), &trash_policy, &no_tasks), FactoryWriteDecision::AllowedByRoot(_)), "{command}");
+        }
         let root = managed.display().to_string();
         for command in [
             format!("rm -rf {root}"),
@@ -12365,6 +12410,31 @@ mod worker_commit_guard_tests {
     }
 
     /// A worker on its OWN factory branch is untouched by the sibling check.
+    #[test]
+    fn own_worktree_can_recover_from_a_branch_suffix() {
+        let repo = make_git_repo();
+        let outside = make_git_repo();
+        let cwd = repo.path().to_str().unwrap();
+        assert!(std::process::Command::new("git").args(["switch", "-c", "factory/worker-staging"])
+            .current_dir(repo.path()).output().unwrap().status.success());
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(cwd)), ("CAS_AGENT_NAME", Some("worker")),
+        ]);
+        for command in ["git cherry-pick --abort", "git merge --abort", "git rebase --abort", "git reset --merge", "git switch main", "git switch -C factory/worker"] {
+            assert!(check_worker_git_commit_scope_for_command(cwd, command).is_none(), "{command}");
+            // Plain navigation and reset --merge already bypass this history
+            // guard. The new recovery exception must not relax its guarded ops.
+            if !matches!(command, "git reset --merge" | "git switch main") {
+                assert!(check_worker_git_commit_scope_for_command(outside.path().to_str().unwrap(), command).is_some(), "outside: {command}");
+            }
+        }
+        assert!(check_worker_git_commit_scope_for_command(cwd, "git cherry-pick HEAD").is_some());
+        assert!(check_worker_git_commit_scope_for_command(cwd, "git reset --hard").is_some());
+        assert!(check_worker_git_commit_scope_for_command(cwd, "git switch -C factory/sibling").is_some());
+        let redirected = format!("git --git-dir '{}' --work-tree '{cwd}' merge --abort", outside.path().join(".git").display());
+        assert!(check_worker_git_commit_scope_for_command(cwd, &redirected).is_some());
+    }
+
     #[test]
     fn own_factory_branch_commit_is_still_allowed() {
         let tmp = make_git_repo();

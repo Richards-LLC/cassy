@@ -2019,14 +2019,17 @@ while read local_ref local_sha remote_ref remote_sha; do
   if [ \"$remote_sha\" != \"$zero_sha\" ] && {
     [ \"$local_sha\" = \"$zero_sha\" ] || ! git merge-base --is-ancestor \"$remote_sha\" \"$local_sha\";
   }; then
-    if [ \"$local_sha\" != \"$zero_sha\" ] &&
-      CAS_PUSH_GUARD_BRANCH=\"$branch\" CAS_PUSH_GUARD_REMOTE_REF=\"$remote_ref\" \\
+    if CAS_PUSH_GUARD_BRANCH=\"$branch\" CAS_PUSH_GUARD_REMOTE_REF=\"$remote_ref\" \\
       CAS_PUSH_GUARD_LOCAL_SHA=\"$local_sha\" CAS_PUSH_GUARD_REMOTE_SHA=\"$remote_sha\" \\
       cas hook WorkerCheckpointPush; then
       :
     else
       record_push_rejection \"$remote_ref\"
-      echo \"Cassy PUSH GUARD: rewrite refused; only a verified InProgress checkpoint may be rebased. Merge the target into parked or reviewed deliveries. [H-40]\" >&2
+      if [ \"$local_sha\" = \"$zero_sha\" ]; then
+        echo \"Cassy PUSH GUARD: deletion refused; only an unbound owned diagnostic ref may be removed. [H-40]\" >&2
+      else
+        echo \"Cassy PUSH GUARD: rewrite refused; only a verified InProgress checkpoint may be rebased. Merge the target into parked or reviewed deliveries. [H-40]\" >&2
+      fi
       exit 1
     fi
   fi
@@ -5126,7 +5129,9 @@ mod tests {
         if std::env::var_os("CAS_TEST_CHECKPOINT_HOOK_CHILD").is_some() {
             let cli = crate::cli::Cli::try_parse_from(["cas", "hook", "WorkerCheckpointPush"]).unwrap();
             let Some(crate::cli::Commands::Hook(args)) = &cli.command else { unreachable!() };
-            std::process::exit(if crate::cli::hook::execute(args, &cli).is_ok() { 0 } else { 1 });
+            let result = crate::cli::hook::execute(args, &cli);
+            if let Err(error) = &result { eprintln!("{error:#}"); }
+            std::process::exit(if result.is_ok() { 0 } else { 1 });
         }
         let _home = crate::test_support::TestEnvGuard::temp_home();
         for (case, status, reviewed, foreign_owner, bound, stale_lease, allow) in [
@@ -5152,7 +5157,7 @@ mod tests {
                 assert!(output.status.success(), "{case}: git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
                 String::from_utf8(output.stdout).unwrap().trim().to_string()
             };
-            let branch = "factory/w-cas-ef33";
+            let branch = if case == "parked" { "factory/w-cas-ef33-diag" } else { "factory/w-cas-ef33" };
             git(&repo, &["branch", "-m", branch]);
             let checkpoint = git(&repo, &["rev-parse", "HEAD"]);
             let base = git(&repo, &["rev-parse", "HEAD^"]);
@@ -5207,6 +5212,17 @@ mod tests {
                 .env_remove("CAS_SESSION_ID").env_remove("CAS_FACTORY_SESSION")
                 .current_dir(&repo).output().unwrap();
             assert!(push(&["push", "-q", "origin", branch]).status.success());
+            // Only an unbound diagnostic branch may be deleted. Task-bound
+            // checkpoints and parked/reviewed delivery refs keep their anchor.
+            assert!(!push(&["push", "origin", "--delete", branch]).status.success());
+            if case == "ef33 checkpoint" {
+                let diagnostic = "factory/w-cas-ef33-diag";
+                git(&repo, &["switch", "-c", diagnostic]);
+                assert!(push(&["push", "origin", diagnostic]).status.success());
+                let deleted = push(&["push", "origin", "--delete", diagnostic]);
+                assert!(deleted.status.success(), "{}", String::from_utf8_lossy(&deleted.stderr));
+                git(&repo, &["switch", branch]);
+            }
             git(&repo, &["rebase", "-q", "origin/main"]);
             let rewritten = git(&repo, &["rev-parse", "HEAD"]);
             assert_ne!(checkpoint, rewritten);

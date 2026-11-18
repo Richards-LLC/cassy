@@ -3,6 +3,7 @@
 //! Provides HTTP client for communicating with cas-cloud for
 //! distributed agent coordination across multiple machines.
 
+use crate::cloud::auth::CloudRequestExt;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -476,7 +477,7 @@ impl CloudCoordinator {
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
-            .send_json(self.project_scoped(serde_json::json!({
+            .cloud_send_json(self.project_scoped(serde_json::json!({
                 "id": agent.id,
                 "name": agent.name,
                 "agent_type": format!("{:?}", agent.agent_type).to_lowercase(),
@@ -537,7 +538,7 @@ impl CloudCoordinator {
             request.clone()
                 .timeout(left)
                 .set("Authorization", &format!("Bearer {}", self.token()))
-                .call()
+                .cloud_call()
         })
         .map_err(|error| Failure::from_http("Shutdown", error))?;
         #[derive(Deserialize)]
@@ -583,7 +584,7 @@ impl CloudCoordinator {
             .set(ATTEMPT_ID_HEADER, &attempt.id)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
-            .send_json(self.project_scoped(serde_json::json!({
+            .cloud_send_json(self.project_scoped(serde_json::json!({
                 "agent_id": agent_id,
                 "duration_secs": duration_secs,
                 "reason": reason,
@@ -660,7 +661,7 @@ impl CloudCoordinator {
                 .timeout(left)
                 .set("Authorization", &format!("Bearer {}", self.token()))
                 .set("Content-Type", "application/json")
-                .send_json(self.project_scoped(serde_json::json!({ "agent_id": agent_id })))
+                .cloud_send_json(self.project_scoped(serde_json::json!({ "agent_id": agent_id })))
         })
         .map(|_| ())
         .map_err(|error| {
@@ -692,7 +693,7 @@ impl CloudCoordinator {
                 .timeout(left)
                 .set("Authorization", &format!("Bearer {}", self.token()))
                 .set("Content-Type", "application/json")
-                .send_json(self.project_scoped(serde_json::json!({
+                .cloud_send_json(self.project_scoped(serde_json::json!({
                     "agent_id": agent_id,
                     "expected_epoch": epoch,
                     "expected_renewal_count": renewal_count,
@@ -730,7 +731,7 @@ impl CloudCoordinator {
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
-            .send_json(self.project_scoped(serde_json::json!({
+            .cloud_send_json(self.project_scoped(serde_json::json!({
                 "agent_id": agent_id,
                 "duration_secs": duration_secs,
             })));
@@ -774,7 +775,7 @@ impl CloudCoordinator {
             .timeout(self.timeout)
             .set(ATTEMPT_ID_HEADER, &attempt.id)
             .set("Authorization", &format!("Bearer {}", self.token()))
-            .call();
+            .cloud_call();
 
         attempt.response(&response);
         match response {
@@ -838,7 +839,7 @@ impl CloudCoordinator {
                     .set(ATTEMPT_ID_HEADER, &attempt.id)
                     .set("Authorization", &format!("Bearer {}", self.token())),
             )
-            .call();
+            .cloud_call();
 
         attempt.response(&response);
         match response {
@@ -878,7 +879,7 @@ impl CloudCoordinator {
         let request = ureq::get(&url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()));
-        let response = self.project_query(request).call();
+        let response = self.project_query(request).cloud_call();
 
         match response {
             Ok(resp) => {
@@ -909,7 +910,7 @@ impl CloudCoordinator {
         let response = ureq::get(&url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
-            .call();
+            .cloud_call();
 
         match response {
             Ok(resp) => {
@@ -955,8 +956,8 @@ impl CloudCoordinator {
         let response = match metadata {
             Some(metadata) => request
                 .set("Content-Type", "application/json")
-                .send_json(serde_json::json!({ "metadata": metadata })),
-            None => request.call(),
+                .cloud_send_json(serde_json::json!({ "metadata": metadata })),
+            None => request.cloud_call(),
         };
 
         match response {
@@ -1033,7 +1034,7 @@ impl CloudCoordinator {
                     request = request.query("sort_cursor", sort);
                 }
             }
-            let response = request.call();
+            let response = request.cloud_call();
             attempt.response(&response);
             let page: AgentsPage = match response {
                 Ok(resp) => attempt

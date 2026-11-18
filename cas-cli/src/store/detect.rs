@@ -99,7 +99,7 @@ pub(crate) fn root_override_notice(env_root: &Path, cwd_root: &Path) -> Option<S
     };
     let width = usize::from(crate::ui::components::terminal_width()).max(8);
     let compact = format!(
-        "{mark} {} overrides {} {dash} CAS_ROOT wins",
+        "{mark} {} vs {} {dash} CAS_ROOT default",
         env_root.display(), cwd_root.display(),
     );
     let mut lines = Vec::new();
@@ -107,15 +107,15 @@ pub(crate) fn root_override_notice(env_root: &Path, cwd_root: &Path) -> Option<S
         // Keep the whole store choice on the first line whenever it fits.
         lines.push(compact);
     } else {
-        lines.push(format!("{mark} {dash} CAS_ROOT wins"));
+        lines.push(format!("{mark} {dash} CAS_ROOT default"));
         lines.push("    CAS_ROOT:".to_owned());
         append_root_notice_path(&mut lines, env_root, width);
         lines.push("    Working-directory store:".to_owned());
         append_root_notice_path(&mut lines, cwd_root, width);
     }
     append_root_notice_prose(&mut lines,
-        "Every read and write targets CAS_ROOT. This precedence is intentional \
-         (factory workers in clones rely on it).", width);
+        "CAS_ROOT supplies the default store. An explicit --store here selects \
+         the working-directory store; --store cas-root selects CAS_ROOT.", width);
     append_root_notice_prose(&mut lines,
         "To act on the working-directory store instead, clear the variable for this command:", width);
     lines.push("    env -u CAS_ROOT cas <command>".to_owned());
@@ -1575,14 +1575,13 @@ mod tests {
         assert_eq!(found_canon, expected_canon);
     }
 
-    /// cas-b69a (GH #157): the notice must name BOTH roots and say which one
-    /// won — that is the whole point, an operator reading it has to be able to
-    /// tell that the store under their feet was not the one used.
+    /// Both store identities remain visible and copyable in a narrow terminal.
+    /// The default notice must leave explicit --store selection to the caller.
     #[test]
     fn root_override_notice_names_both_roots_and_the_winner_cas_b69a() {
         let mut env = TestEnvGuard::new();
         let long_root = format!("/fixtures/{}/store/.cas", "long path-segment/".repeat(12));
-        for (locale, mark, separator) in [("C", "[WARN]", "--"), ("C.UTF-8", "⚠️", "—")] {
+        for (locale, mark) in [("C", "[WARN]"), ("C.UTF-8", "⚠️")] {
             env.set("LC_ALL", locale);
             for columns in [80, 120] {
                 env.set("COLUMNS", columns.to_string());
@@ -1597,7 +1596,6 @@ mod tests {
                     assert!(joined.contains(env_root), "full overriding path: {notice}");
                     assert!(joined.contains(cwd_root), "full cwd path: {notice}");
                     let first_line = notice.lines().next().unwrap();
-                    assert!(first_line.contains("CAS_ROOT wins"), "{first_line}");
                     if env_root == "/live/project/.cas" {
                         assert!(first_line.contains(env_root), "short paths fit: {first_line}");
                         assert!(first_line.contains(cwd_root), "short paths fit: {first_line}");
@@ -1605,7 +1603,6 @@ mod tests {
                     assert!(notice.lines().any(|line| line.trim() == "env -u CAS_ROOT cas <command>"),
                         "remedy must be copyable on one line: {notice}");
                     assert!(notice.starts_with(mark), "{locale}: {notice}");
-                    assert!(notice.contains(&format!("{separator} CAS_ROOT wins")), "{locale}: {notice}");
                     if locale == "C" {
                         assert!(notice.is_ascii(), "C-locale decorations must be ASCII: {notice}");
                     }

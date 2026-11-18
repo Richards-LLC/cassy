@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('reviewer_eval', Path(__file__).with_name('reviewer-eval.py'))
 evaluation = importlib.util.module_from_spec(spec)
@@ -84,6 +85,63 @@ class ReplayBoundaries(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         with self.assertRaises(ValueError):
             evaluation.clone(self.case, 'spec', self.out)
+
+    def fake_model(self):
+        fake = self.root/'bin'
+        fake.mkdir(exist_ok=True)
+        codex = fake/'codex'
+        codex.write_text('#!/usr/bin/env python3\n' +
+            'import json,sys,os\nfrom pathlib import Path\n' +
+            'args=sys.argv[1:]\ntext=sys.stdin.read()\n' +
+            'Path(os.environ["REVIEW_EVAL_CALL_LOG"]).write_text(json.dumps({"args":args,"input":text}))\n' +
+            'Path(args[args.index("-o")+1]).write_text(json.dumps(' + repr(self.report('baseline')) + '))\n' +
+            'print(json.dumps({"type":"item.completed","item":{"type":os.environ.get("REVIEW_EVAL_ITEM","agent_message"),"text":"done"}}))\n')
+        codex.chmod(0o755)
+        bwrap = fake/'bwrap'
+        bwrap.write_text('#!/bin/sh\nexit "${REVIEW_EVAL_BWRAP_STATUS:-1}"\n')
+        bwrap.chmod(0o755)
+        return mock.patch.dict(os.environ, {'PATH': str(fake)+os.pathsep+os.environ['PATH'], 'REVIEW_EVAL_CALL_LOG': str(self.root/'called.json')})
+
+    def test_namespace_preflight_stops_before_model_and_keeps_supported_run(self):
+        checkout = evaluation.clone(self.case, 'baseline', self.out)
+        with self.fake_model(), mock.patch('platform.system', return_value='Linux'):
+            report, telemetry = evaluation.invoke(checkout, self.out/'blocked', 'input', 'baseline', 5)
+            self.assertIsNone(report)
+            self.assertEqual(telemetry['error'], 'namespace_sandbox_unavailable')
+            self.assertFalse((self.root/'called.json').exists())
+            with mock.patch.dict(os.environ, {'REVIEW_EVAL_BWRAP_STATUS': '0'}):
+                report, telemetry = evaluation.invoke(checkout, self.out/'supported', 'input', 'baseline', 5)
+            self.assertEqual(report, self.report('baseline'))
+            self.assertEqual(telemetry['exit_code'], 0)
+            call = json.loads((self.root/'called.json').read_text())
+            self.assertEqual(call['input'], 'input')
+            self.assertEqual(call['args'][call['args'].index('-s')+1], 'read-only')
+
+    def test_input_only_replay_supplies_pinned_bytes_without_shell_or_authority(self):
+        with self.fake_model(), mock.patch('platform.system', return_value='Linux'):
+            result = evaluation.review(self.case, 'baseline', self.sources, self.out, 5, source_input=True)
+        self.assertIsNone(result['validation_error'])
+        directory = self.out/'opaque/baseline'
+        bundle = json.loads((directory/'source-input.json').read_text())
+        self.assertEqual(bundle['base_sha'], self.case['base_sha'])
+        self.assertEqual(bundle['head_sha'], self.case['head_sha'])
+        self.assertEqual(bundle['files']['contract.txt'], {'base': 'base\n', 'head': 'defective\n'})
+        self.assertIn('-base\n+defective', bundle['diff'])
+        call = json.loads((self.root/'called.json').read_text())
+        self.assertEqual(call['input'], (directory/'prompt.txt').read_text())
+        self.assertNotIn('hidden repair sentinel', call['input'])
+        self.assertEqual(result['telemetry']['authority'], 'simulated')
+        self.assertEqual(result['telemetry']['source_input_sha256'], evaluation.digest(json.dumps(bundle, sort_keys=True)))
+        overrides = [call['args'][i+1] for i,v in enumerate(call['args'][:-1]) if v == '-c']
+        self.assertIn('features.shell_tool=false', overrides)
+        self.assertIn('features.unified_exec=false', overrides)
+        self.assertIn('web_search="disabled"', overrides)
+        self.assertEqual(call['args'][call['args'].index('-s')+1], 'read-only')
+        with self.fake_model(), mock.patch.dict(os.environ, {'REVIEW_EVAL_ITEM': 'command_execution'}):
+            report, telemetry = evaluation.invoke(Path(result['checkout']), self.out/'tool-attempt',
+                                                   'pinned input', 'baseline', 5, source_input=True)
+        self.assertIsNone(report)
+        self.assertEqual(telemetry['error'], 'source_input_tool_call')
 
     def test_report_cannot_hide_an_actual_fix(self):
         checkout = evaluation.clone(self.case, 'spec', self.out)

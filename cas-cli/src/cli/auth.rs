@@ -814,30 +814,7 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
         anyhow::bail!("Token cannot be empty");
     }
 
-    // Verify token
-    let status_url = format!("{endpoint}/api/sync/status");
-    let response = ureq::get(&status_url)
-        .set("Authorization", &format!("Bearer {token}"))
-        .call();
-
-    match response {
-        Ok(resp) => {
-            if resp.status() != 200 {
-                anyhow::bail!("Invalid token or server error: {}", resp.status());
-            }
-        }
-        Err(ureq::Error::Status(401, _)) => {
-            anyhow::bail!("Invalid API token");
-        }
-        Err(e) => {
-            anyhow::bail!("Failed to connect to Cassy Cloud: {e}");
-        }
-    }
-
-    // Credentials live at user level (`~/.cas/cloud.json`), so this works from
-    // any directory — including outside a Cassy project — and logs the whole
-    // machine in once (cas-046d / Ben #3, #4).
-    store_login_credentials(endpoint, token, None, None)?;
+    crate::cloud::auth::verify_and_store_token(endpoint, token)?;
 
     // Best-effort: fetch team membership from /api/me and cache into
     // ~/.cas/cloud.json so T3's resolution chain works immediately.

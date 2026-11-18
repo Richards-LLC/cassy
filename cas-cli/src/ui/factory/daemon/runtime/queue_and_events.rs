@@ -1816,6 +1816,26 @@ fn enqueue_spawn_outcome_notice(
     if success {
         return Ok(None);
     }
+    // A deliberate retirement or an already-rebound promise cannot ask the
+    // supervisor to recover the old launch. Preserve the spawn audit itself.
+    let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
+    if agents.iter().filter(|agent| agent.name == worker_name
+        && agent.factory_session.as_deref() == Some(factory_session))
+        .max_by_key(|agent| agent.registered_at)
+        .is_some_and(|agent| agent.status == cas_types::AgentStatus::Shutdown)
+    { return Ok(None); }
+    if let Some(request_id) = request_id {
+        let spawn = crate::store::open_spawn_queue_store(cas_dir)?
+            .recent_spawn_lifecycle(factory_session, 100)?.into_iter().find(|row| row.id == request_id);
+        if let Some(task_id) = spawn.and_then(|row| row.task_id) {
+            let task = crate::store::open_task_store_local(cas_dir)?.get(&task_id)?;
+            if task.is_terminal() || task.status == cas_types::TaskStatus::AwaitingMerge
+                || (task.status == cas_types::TaskStatus::InProgress
+                    && task.assignee.as_deref().is_some_and(|owner| owner != worker_name
+                        && !agents.iter().any(|agent| agent.name == worker_name && agent.id == owner)))
+            { return Ok(None); }
+        }
+    }
     let queue = open_prompt_queue_store(cas_dir)?;
     let request = request_id
         .map(|id| format!("request {id}"))
@@ -11690,9 +11710,9 @@ impl FactoryDaemon {
                     let queue = open_prompt_queue_store(&root)?;
                     queue.enqueue_idempotent(
                         "director", &supervisor,
-                        &crate::prompt_revalidation::attach_blocker_envelope(&body, &worker, None),
+                        &body,
                         Some(&session), Some(&format!("Worker cleanup still running: {worker}")),
-                        Some(cas_store::NotificationPriority::High), &key,
+                        Some(cas_store::NotificationPriority::Normal), &key,
                         Some(&cas_store::QueueOrigin::Daemon),
                     )?;
                     super::delivery::wake_daemon_after_enqueue(&root);
@@ -13947,6 +13967,31 @@ mod tests {
     }
 
     #[test]
+    fn retired_spawn_failure_is_quiet_gh2040() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("old-worker".into(), "old-worker".into(), cas_types::AgentRole::Worker);
+        worker.factory_session = Some("factory-session".into());
+        worker.status = cas_types::AgentStatus::Shutdown;
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", None,
+            &worker.name, "register", false, "boot failed").unwrap().is_none());
+        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+        let spawns = crate::store::open_spawn_queue_store(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-replaced".into(), "replacement active".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("replacement".into());
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        let request = spawns.enqueue_spawn(1, &["never-registered".into()], false, None,
+            Some("factory-session"), Some(&task.id)).unwrap();
+        for stage in ["register", "preassign"] {
+            assert!(super::enqueue_spawn_outcome_notice(&root, "supervisor", "factory-session", Some(request),
+                "never-registered", stage, false, "boot failed").unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn cleanup_warns_supervisor_once_after_bound_cas_af63() {
         use crate::ui::factory::app::render_and_ops::epic_workers::{WorkerCleanupJob, CrashCleanupOutcome, WORKER_CLEANUP_WARN_AFTER};
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -13970,9 +14015,8 @@ mod tests {
         assert_eq!(rows.len(), 1, "a held cleanup needs one supervisor warning");
         assert_eq!(rows[0].target, daemon.app.supervisor_name());
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
-        assert!(rows[0].prompt.contains("slow-worker"));
-        assert!(super::FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon,
-            daemon.app.supervisor_name(), &rows[0].source, &rows[0].prompt).is_some());
+        assert!(crate::prompt_revalidation::parse_blocker_envelope(&rows[0].prompt).is_none());
+        assert_eq!(rows[0].priority, cas_store::NotificationPriority::Normal);
         drop(held);
         daemon.app.join_worker_worktree_cleanups();
     }

@@ -70,6 +70,11 @@ case "$1 $2" in
     case "${FAKE_CONTEXT_MODE:-}" in
       no_train) echo 'Error: no open release train; create work on the train first' >&2; exit 1 ;;
       different_branch) echo 'Error: check out the open release train epic/train-cas-a001 first' >&2; exit 1 ;;
+      frozen_alias)
+        [[ "$4" == "$FAKE_FROZEN_BRANCH" ]] || exit 1
+        [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$FAKE_FROZEN_BRANCH")" ]] || exit 1
+        printf '{"train_id":"cas-0001","branch":"%s","integration":"main"}\n' "$FAKE_FROZEN_BRANCH"
+        exit 0 ;;
     esac
     printf '{"train_id":"cas-0001","branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
   "release preview")
@@ -664,6 +669,19 @@ check 'train_receipt_cut' 'train cut reuses green proof after CODEMAP-only work 
 unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
+frozen_train_alias() {
+    local fixture="$tmp/frozen-alias" canonical="epic/release-train-vnext-cas-8b79" before status=0
+    clone_epic "$fixture" sync-8b79 frozen-alias
+    git -C "$fixture" branch "$canonical"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    write_valid_draft "$tmp/frozen-alias-notes.md"
+    FAKE_CONTEXT_MODE=frozen_alias FAKE_FROZEN_BRANCH="$canonical" \
+        run "$fixture" --dry-run --notes "$tmp/frozen-alias-notes.md" >"$tmp/frozen-alias.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+        grep -Fq "git checkout -B $canonical" "$tmp/frozen-alias.log" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/sync-8b79
+}
+check 'frozen_train_alias' 'cas-5529: a frozen train under a local alias names its canonical checkout before preparation'
 freeze_failure_stops_publication() {
     local fixture="$tmp/cut-failure" status=0
     clone_epic "$fixture" epic/cut-failure cut-failure

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub(crate) mod stability;
+pub(crate) mod widened;
 pub(crate) mod javascript;
 
 #[cfg(unix)]
@@ -131,6 +132,8 @@ struct TestReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stability: Option<stability::Proof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    widened: Option<widened::Proof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_log: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
@@ -186,6 +189,9 @@ impl TestReceipt {
         if let Some(proof) = &self.stability {
             note.push_str(&format!(" [stability: {} consecutive passes; changed_tests={}; runner={}; elapsed_ms={}]",
                 proof.consecutive_passes, proof.tests.len(), proof.runner, proof.elapsed_ms));
+        }
+        if let Some(proof) = &self.widened {
+            note.push_str(&format!(" [widened: {:?}; runner={}; passes=1]", proof.scope, proof.runner));
         }
         note
     }
@@ -635,6 +641,7 @@ pub(crate) fn record_supervisor_test(
             harness: test.harness,
             count,
             stability,
+            widened: None,
             selected_log: Some(provenance.log_path.clone()),
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
@@ -1151,6 +1158,7 @@ impl<'a> PassingTests<'a> {
                         harness: synced.harness.clone(),
                         count: synced.count,
                         stability: None,
+                        widened: None,
                         selected_log: None,
                         host_path_opt_out: None,
                         supervisor_recorded: None,
@@ -1337,12 +1345,13 @@ fn read_passing_test_record(
     // Adapter-only stability receipts share ancestry/input validation, but
     // cannot count as a passing Rust crate test.
     let package = match record.packages.as_slice() {
-        [] if test.stability.as_ref().is_some_and(stability::valid) => None,
+        [] if test.stability.as_ref().is_some_and(stability::valid) || test.widened.is_some() => None,
         [package] if package_selector(package).is_some() => Some(package.clone()),
         _ => return None,
     };
     let targeted_test = TargetedTest {
-        package: package.clone().or_else(|| test.stability.as_ref().map(|proof| proof.runner.clone()))?,
+        package: package.clone().or_else(|| test.stability.as_ref().map(|proof| proof.runner.clone()))
+            .or_else(|| test.widened.as_ref().map(|proof| proof.runner.clone()))?,
         harness: test.harness.clone(),
         filter: test.filter.clone(),
     };
@@ -1778,6 +1787,7 @@ pub(crate) fn record_passing_test_for_tests(
             harness: None,
             count: 1,
             stability: None,
+                        widened: None,
             selected_log: None,
             host_path_opt_out: None,
             supervisor_recorded: None,
@@ -2374,9 +2384,29 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         validate_harness(&repo, test)?;
     }
     let config = crate::config::Config::load(&cas_root)?.factory();
+    let mut widened_proof = None;
     let owned_tests = if let Some(test) = &test {
         let base = proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?;
-        stability::rust::selected(&repo, &base, &head, test)?
+        match stability::rust::selected_inputs(&repo, &base, &head, test) {
+            Ok((tests, uncertain)) => {
+                if uncertain {
+                    let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
+                    widened::invalidate(&cas_root, &repo, &head, &scope)?;
+                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
+                }
+                tests
+            },
+            Err(error) if error.downcast_ref::<stability::rust::MissingTest>().is_some() => {
+                bail!(crate::gates::tag("G-61", format!("CHANGED_TEST_DISCOVERY_FAILED: {error:#}")));
+            }
+            Err(error) => {
+                eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
+                let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
+                widened::invalidate(&cas_root, &repo, &head, &scope)?;
+                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
+                Vec::new()
+            }
+        }
     } else { Vec::new() };
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
@@ -2553,7 +2583,12 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
     }
-    let mut cargo_args = args.to_vec();
+    let mut cargo_args = if widened_proof.is_some() {
+        // Scope matching uses the crate name; Cargo retains the caller's
+        // version selector so duplicate names still resolve to the right crate.
+        let package = &test.as_ref().expect("widened targeted test").package;
+        vec!["nextest".into(), "run".into(), "-p".into(), package.clone(), "--retries".into(), "0".into()]
+    } else { args.to_vec() };
     if live_headful {
         cargo_args.extend(["--success-output".into(), "immediate".into()]);
     }
@@ -2564,7 +2599,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         cargo_args.insert(4, "--lib".into());
     }
     // Native retries must not turn a failing invocation into stability proof.
-    if !owned_tests.is_empty() {
+    if !owned_tests.is_empty() && widened_proof.is_none() {
         cargo_args.extend(["--retries".into(), "0".into()]);
     }
     command
@@ -2665,6 +2700,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                     consecutive_passes: stability::REQUIRED_PASSES,
                     elapsed_ms: started.elapsed().as_millis(),
                 }),
+                widened: widened_proof,
                 selected_log,
                 host_path_opt_out,
                 supervisor_recorded: None,
@@ -2711,16 +2747,26 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         let root = env.home().join("project/.cas");
-        for seeded_failure in [true, false] {
-            let repo = root.join(format!("worktrees/worker-{seeded_failure}"));
+        for (seeded_failure, mixed) in [(true, false), (false, false), (false, true)] {
+            let repo = root.join(format!("worktrees/worker-{seeded_failure}-{mixed}"));
             fixture_commit(&repo);
             std::fs::create_dir_all(repo.join("src")).unwrap();
             std::fs::write(repo.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n").unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n").unwrap();
+            let prelude = if mixed { "mod uncertain;\n" } else { "" };
+            if mixed {
+                std::fs::write(repo.join("src/uncertain.rs"), "#[path = \"a.rs\"] mod nested;\n").unwrap();
+                std::fs::write(repo.join("src/a.rs"), "#[test]\nfn opaque() {}\n").unwrap();
+            }
+            std::fs::write(repo.join("src/lib.rs"), format!("{prelude}#[test]\nfn untouched() {{ let raw = 1; let _borrow = &raw; }}\n")).unwrap();
             fixture_commit_as(&repo, "base");
             let base = fixture_head(&repo);
             git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
-            std::fs::write(repo.join("src/lib.rs"), "#[test]\nfn untouched() { let raw = 1; let _borrow = &raw; }\n#[test]\nfn owned_new() {}\n").unwrap();
+            std::fs::write(repo.join("src/lib.rs"), format!("{prelude}#[test]\nfn untouched() {{ let raw = 1; let _borrow = &raw; }}\n#[test]\nfn owned_new() {{}}\n")).unwrap();
+            if mixed {
+                // Valid Rust escape, outside the JSON string subset the
+                // static module-path adapter can currently classify.
+                std::fs::write(repo.join("src/uncertain.rs"), "#[path = \"\\u{0061}.rs\"] mod nested;\n").unwrap();
+            }
             fixture_commit_as(&repo, "new test");
             env.set_current_dir(&repo);
             let cargo = repo.join("target/fake-cargo");
@@ -2731,11 +2777,13 @@ import sys
 p = Path('target/attempts')
 n = int(p.read_text()) + 1 if p.exists() else 1
 p.write_text(str(n))
-selection = sys.argv[sys.argv.index('-E') + 1]
+selection = sys.argv[sys.argv.index('-E') + 1] if '-E' in sys.argv else 'untouched opaque'
 retries = sys.argv[sys.argv.index('--retries') + 1] if '--retries' in sys.argv else None
 with Path('target/retries').open('a') as output:
     output.write(str(retries) + '\n')
 names = ['owned_new'] + (['untouched'] if 'untouched' in selection else [])
+if 'opaque' in selection:
+    names.append('uncertain::nested::opaque')
 with Path('target/executed').open('a') as output:
     output.write(','.join(names) + '\n')
 if {seeded_failure} and n % 3 == 0:
@@ -2764,7 +2812,8 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
                 let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
                 assert_eq!(receipt["test"]["stability"]["consecutive_passes"], 5);
                 assert_eq!(receipt["test"]["stability"]["tests"][0]["name"], "owned_new");
-                assert_eq!(receipt["test"]["count"], 2);
+                assert_eq!(receipt["test"]["count"], if mixed { 3 } else { 2 });
+                assert_eq!(receipt["test"]["widened"].is_object(), mixed);
                 assert_eq!(std::fs::read_to_string(repo.join("target/retries")).unwrap().lines().collect::<Vec<_>>(), vec!["0"; 5]);
                 let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
                 assert_eq!(executed.lines().filter(|line| line.split(',').any(|name| name == "untouched")).count(), 1);
@@ -2776,6 +2825,85 @@ PY"#, seeded_failure = if seeded_failure { "True" } else { "False" }));
                 assert!(execute_at(&root, &overlap, &repo, &cargo).is_err());
                 assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_scope_receipt_table_cas_31eb() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let root = env.home().join("project/.cas");
+        for (row, known, unknown, selector) in [
+            ("R1", Some("src/lib.rs"), None, "fixture"),
+            ("R2", Some("tests/native.rs"), None, "fixture"),
+            ("R3", None, Some("tests/uncertain.rs"), "fixture"),
+            ("R4", Some("src/lib.rs"), Some("src/uncertain.rs"), "fixture"),
+            ("R5", Some("src/lib.rs"), Some("tests/uncertain.rs"), "fixture"),
+            ("R6", None, Some("src/uncertain.rs"), "fixture"),
+            ("R7", None, Some("tests/uncertain.rs"), "fixture@0.1.0"),
+        ] {
+            let repo = root.join(format!("worktrees/{row}"));
+            fixture_commit(&repo);
+            for dir in ["src/fixtures", "tests/fixtures"] { std::fs::create_dir_all(repo.join(dir)).unwrap(); }
+            let mut manifest = "[package]\nname='fixture'\nversion='0.1.0'\nautotests=false\n".to_string();
+            if known == Some("tests/native.rs") { manifest.push_str("[[test]]\nname='native'\npath='tests/native.rs'\n"); }
+            if unknown == Some("tests/uncertain.rs") { manifest.push_str("[[test]]\nname='uncertain'\npath='tests/uncertain.rs'\n"); }
+            std::fs::write(repo.join("Cargo.toml"), manifest).unwrap();
+            let prelude = if unknown == Some("src/uncertain.rs") { "mod uncertain;\n" } else { "" };
+            std::fs::write(repo.join("src/lib.rs"), prelude).unwrap();
+            if let Some(path) = known { std::fs::write(repo.join(path), format!("{prelude}#[test]\nfn known() {{ let before = 0; }}\n")).unwrap(); }
+            if let Some(path) = unknown {
+                std::fs::write(repo.join(path), "#[path = \"fixtures/a.rs\"] mod nested;\n").unwrap();
+                std::fs::write(repo.join(path).parent().unwrap().join("fixtures/a.rs"), "#[test]\nfn opaque() {}\n").unwrap();
+            }
+            fixture_commit_as(&repo, "base");
+            let base = fixture_head(&repo);
+            git(&repo, &["update-ref", "refs/remotes/origin/main", &base]).unwrap();
+            if let Some(path) = known { std::fs::write(repo.join(path), format!("{prelude}#[test]\nfn known() {{}}\n")).unwrap(); }
+            if let Some(path) = unknown { std::fs::write(repo.join(path), "#[path = \"fixtures/\\u{0061}.rs\"] mod nested;\n").unwrap(); }
+            fixture_commit_as(&repo, "delivery");
+            env.set_current_dir(&repo);
+            let cargo = repo.join("target/fake-cargo");
+            std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+            let known_binary = if known == Some("tests/native.rs") { "fixture::native" } else { "fixture" };
+            let unknown_binary = if unknown == Some("tests/uncertain.rs") { "fixture::uncertain" } else { "fixture" };
+            let unknown_name = if unknown == Some("tests/uncertain.rs") { "nested::opaque" } else { "uncertain::nested::opaque" };
+            fake_cargo(&cargo, &format!(r#"python3 - "$@" <<'PY'
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[args.index('-p') + 1] == {selector:?}
+assert args[args.index('--retries') + 1] == '0'
+wide = '-E' not in args
+names = []
+if {has_known} and (wide or 'known' in args[args.index('-E') + 1]):
+    names.append(({known_binary:?}, 'known'))
+if {has_unknown} and wide:
+    names.append(({unknown_binary:?}, {unknown_name:?}))
+with Path('target/executed').open('a') as out:
+    for binary, name in names:
+        out.write(name + '\n')
+for index, (binary, name) in enumerate(names, 1):
+    print(f'        PASS [ 0.01s] ({{index}}/{{len(names)}}) {{binary}} {{name}}')
+print(f'     Summary [ 0.01s] {{len(names)}} tests run: {{len(names)}} passed, 0 skipped')
+PY"#, has_known=if known.is_some() { "True" } else { "False" }, has_unknown=if unknown.is_some() { "True" } else { "False" }));
+            let mut args = vec!["nextest".into(), "run".into(), "-p".into(), selector.into()];
+            if known == Some("tests/native.rs") { args.extend(["--test".into(), "native".into()]); }
+            else { args.push("--lib".into()); }
+            args.extend(["-E".into(), "test(known)".into()]);
+            execute_at(&root, &args, &repo, &cargo).unwrap();
+            let head = fixture_head(&repo);
+            let path = test_receipt_path(&root, &repo.canonicalize().unwrap(), &head, &targeted_test(&args).unwrap());
+            let record: CheckReceipt = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let receipt = record.test.unwrap();
+            assert_eq!(receipt.stability.is_some(), known.is_some(), "{row}");
+            if let Some(proof) = receipt.stability { assert_eq!(proof.consecutive_passes, 5, "{row}"); }
+            assert_eq!(receipt.widened.is_some(), unknown.is_some(), "{row}");
+            if let Some(proof) = receipt.widened { assert_eq!(proof.scope, widened::Scope::Crate("fixture".into()), "{row}"); }
+            let executed = std::fs::read_to_string(repo.join("target/executed")).unwrap();
+            assert_eq!(executed.lines().filter(|name| *name == "known").count(), if known.is_some() { 5 } else { 0 }, "{row}");
+            assert_eq!(executed.lines().filter(|name| name.ends_with("opaque")).count(), usize::from(unknown.is_some()), "{row}");
         }
     }
 
@@ -5635,6 +5763,28 @@ JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
             assert_eq!(row["path"], file);
             assert_eq!(row["name"], "db-fixture");
             assert_eq!(row["reason"], "changed-test");
+            if runner == "node" {
+                // Unknown static alias provenance must widen through the real
+                // entry point while retaining the declared child-only fixture.
+                std::fs::write(repo.join(file), format!(
+                    "import {{ describe, test }} from 'node:test';\nimport assert from 'node:assert/strict';\nimport {{ appendFileSync }} from 'node:fs';\n\
+                     const suite = true ? describe : unknown;\nsuite('legal', () => {{ test('db-fixture', () => {{\n\
+                     assert.equal(process.env.LEGAL_TEST_DATABASE_URL, {}); appendFileSync('target/database-runs', '1');\n}}); }});\n",
+                    serde_json::to_string(&url).unwrap(),
+                )).unwrap();
+                fixture_commit_as(&repo, "unknown conditional alias");
+                std::fs::remove_file(repo.join("target/database-runs")).unwrap();
+                execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
+                assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 1);
+                let head = fixture_head(&repo);
+                let receipts = receipt_path(&root, &repo.canonicalize().unwrap(), &head);
+                let receipt = std::fs::read_dir(receipts.parent().unwrap()).unwrap().next().unwrap().unwrap();
+                let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt.path()).unwrap()).unwrap();
+                let widened = &receipt["test"]["widened"];
+                assert_eq!(widened["scope"]["File"], file);
+                assert!(widened["reason"].as_str().unwrap().starts_with("widened:"));
+                assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none());
+            }
         }
     }
 

@@ -123,9 +123,19 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
                 "# Product\n\n## Core Concepts\n\nShipped marmoset.\n\nSibling experiment.\n").unwrap();
             git(&["commit", "-qam", "unrelated sibling experiment"]);
             git(&["revert", "--no-edit", "HEAD"]);
+            git(&["checkout", "-qb", "docs-sibling", &base]);
+            std::fs::write(&overview,
+                "# Product\n\n## Core Concepts\n\nSibling ostrich.\n").unwrap();
+            git(&["commit", "-qam", "sibling overview"]);
+            let conflict = Command::new("git").arg("-C").arg(&repo)
+                .args(["merge", "-q", "main"]).output().unwrap();
+            assert!(!conflict.status.success());
             std::fs::write(&overview,
                 "# Product\n\n## Core Concepts\n\nRegenerated zeppelin.\n").unwrap();
-            git(&["commit", "-qam", "build: regenerate project overview"]);
+            git(&["add", "docs/PRODUCT_OVERVIEW.md"]);
+            git(&["commit", "-qm", "sync train into docs sibling"]);
+            git(&["checkout", "-q", "main"]);
+            git(&["merge", "--no-ff", "-qm", "merge docs sibling", "docs-sibling"]);
         } else if id == "cas-reverted" {
             git(&["revert", "-m", "1", "--no-edit", &merge]);
         } else if id == "cas-partial" {

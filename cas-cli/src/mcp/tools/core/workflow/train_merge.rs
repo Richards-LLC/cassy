@@ -203,7 +203,9 @@ impl CasCore {
                     .open_agent_store()
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
                 ensure!(
-                    !agents.get(&queue.supervisor).is_ok_and(|a| a.is_alive()),
+                    !agents.get(&queue.supervisor).is_ok_and(|a| {
+                        crate::mcp::tools::service::agent_liveness::agent_registration_is_live(&a)
+                    }),
                     crate::gates::tag("G-113", "another live supervisor owns this train merge")
                 );
                 queue.supervisor = actor.id.clone();

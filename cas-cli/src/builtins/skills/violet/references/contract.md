@@ -215,6 +215,7 @@ command a path and it reads the bytes from disk:
 
 ```text
 cas violet post   --channel <name> [--text "…"] [--reply-to <message_id>] [--file <path>]... [--json]
+cas violet react  --channel <name> --message-id <message_id> --reaction <name> --action add|remove [--json]
 cas violet thread --channel <name> --text "…" --reply "…" [--reply-file <path>]... [--reply "…"]... --idempotency-key <key> [--json]
 cas violet read   --channel <name> --since <RFC3339> | --thread <message_id> | --message <message_id> [--cursor <c>] [--max-messages N] [--json]
 ```
@@ -229,8 +230,11 @@ cas violet read   --channel <name> --since <RFC3339> | --thread <message_id> | -
   then complete. For a managed `--reply-to`, the caller's live journal intent
   supplies the operation ID and claim generation to both steps; one request
   UUID stays unchanged through completion (`--request-id` reuses it for the
-  same reply). A locally known managed thread without a current caller intent
+  same reply). To supply a registered intent explicitly, add
+  `--coordination-operation-id <uuid> --expected-generation <n>`; these fields
+  pass through unchanged and Violet validates the claim. A locally known managed thread without a current caller intent
   is refused before an upload is begun.
+- **react**: one `kind: "reaction"` call; adds or removes only Violet's own reaction.
 - **thread**: one `kind: "thread"` call. Replies keep the order given; each
   `--reply-file` attaches to the `--reply` before it. Files across the whole
   thread go inline up to 1048576 bytes; above that every file is uploaded

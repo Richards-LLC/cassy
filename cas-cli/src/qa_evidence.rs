@@ -2623,10 +2623,140 @@ fn allow_reason(line: &str) -> Option<String> {
     (!reason.is_empty()).then(|| reason.to_string())
 }
 
+/// Playwright's runtime skip states its reason as a string argument (GH #1877):
+/// `test.skip("reason")` or `test.skip(condition, "reason")`. A declaration,
+/// `test.skip("title", async () => …)`, and a bare or condition-only call
+/// state none. `test.fixme` keeps requiring `cas-allow-skip`.
+fn runtime_skip_reason(line: &str) -> Option<String> {
+    let start = line.find("test.skip(")? + "test.skip(".len();
+    let mut args = vec![String::new()];
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = line[start..].chars();
+    while let Some(ch) = chars.next() {
+        let current = args.last_mut().expect("one argument");
+        if let Some(open) = quote {
+            current.push(ch);
+            if ch == '\\' {
+                current.extend(chars.next());
+            } else if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => {
+                let args: Vec<&str> = args.iter().map(|arg| arg.trim()).collect();
+                let reason = match args.as_slice() {
+                    [reason] => reason,
+                    [condition, reason] if !string_literal(condition) => reason,
+                    _ => return None,
+                };
+                return string_literal(reason)
+                    .then(|| reason[1..reason.len() - 1].trim().to_string())
+                    .filter(|reason| !reason.is_empty());
+            }
+            ')' | ']' | '}' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                args.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        args.last_mut().expect("one argument").push(ch);
+    }
+    None
+}
+
+fn string_literal(text: &str) -> bool {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next_back()) {
+        (Some(open @ ('\'' | '"' | '`')), Some(close)) => open == close && text.len() > 2,
+        _ => false,
+    }
+}
+
+/// Markers whose count did not increase in the same named test. A marker
+/// removed from another test cannot authorize a new skip here (GH #1877).
+fn existing_skip_sites(diff: &str) -> std::collections::BTreeSet<(String, usize, &'static str)> {
+    type Sites = std::collections::BTreeMap<(Vec<String>, &'static str), Vec<usize>>;
+    fn sites(path: &str, source: &str) -> Option<Sites> {
+        fn walk(node: tree_sitter::Node<'_>, source: &str, scope: &[String], sites: &mut Sites) {
+            let mut owner = scope.to_vec();
+            if node.kind() == "call_expression"
+                && let Some(function) = node.child_by_field_name("function")
+                && let Ok(function) = function.utf8_text(source.as_bytes())
+            {
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    let mut cursor = args.walk();
+                    let arguments: Vec<_> = args.named_children(&mut cursor).collect();
+                    if matches!(function.split('.').next(), Some("test" | "it" | "describe"))
+                        && arguments.iter().any(|arg| matches!(arg.kind(), "arrow_function" | "function_expression"))
+                        && let Some(title) = arguments.first()
+                        && matches!(title.kind(), "string" | "template_string")
+                        && let Ok(title) = title.utf8_text(source.as_bytes())
+                    {
+                        owner.push(title[1..title.len() - 1].to_string());
+                    }
+                }
+                if !owner.is_empty()
+                    && let Some(marker) = marker_in(&format!("{function}("))
+                {
+                    sites.entry((owner.clone(), marker)).or_default().push(node.start_position().row + 1);
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                walk(child, source, &owner, sites);
+            }
+        }
+        let mut parser = tree_sitter::Parser::new();
+        let language = if path.ends_with("tsx") || path.ends_with("jsx") {
+            tree_sitter_typescript::LANGUAGE_TSX
+        } else { tree_sitter_typescript::LANGUAGE_TYPESCRIPT };
+        parser.set_language(&language.into()).ok()?;
+        let tree = parser.parse(source, None)?;
+        if tree.root_node().has_error() { return None; }
+        let mut result = Sites::new();
+        walk(tree.root_node(), source, &[], &mut result);
+        Some(result)
+    }
+    let mut files = std::collections::BTreeMap::<String, (String, String)>::new();
+    let mut current = None;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git") { current = None; in_hunk = false; }
+        else if let Some(path) = line.strip_prefix("+++ b/") { current = Some(path.to_string()); }
+        else if line.starts_with("@@") { in_hunk = true; }
+        else if in_hunk && let Some(path) = current.as_ref() {
+            let (old, new) = files.entry(path.clone()).or_default();
+            if let Some(body) = line.strip_prefix('-').or_else(|| line.strip_prefix(' ')) {
+                old.push_str(body); old.push('\n');
+            }
+            if let Some(body) = line.strip_prefix('+').or_else(|| line.strip_prefix(' ')) {
+                new.push_str(body); new.push('\n');
+            }
+        }
+    }
+    let mut unchanged = std::collections::BTreeSet::new();
+    for (path, (old, new)) in files {
+        let (Some(old), Some(new)) = (sites(&path, &old), sites(&path, &new)) else { continue };
+        for (identity, lines) in new {
+            if old.get(&identity).is_some_and(|prior| prior.len() >= lines.len()) {
+                unchanged.extend(lines.into_iter().map(|line| (path.clone(), line, identity.1)));
+            }
+        }
+    }
+    unchanged
+}
+
 /// Skip markers on the added lines of a `git diff -U<n>` body. A marker is
 /// allowed when its own line or the line directly above it (added or
 /// context) carries `cas-allow-skip: <reason>`.
 pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
+    let existing = existing_skip_sites(diff);
     let mut markers = Vec::new();
     let mut file: Option<String> = None;
     let mut new_line = 0usize;
@@ -2665,7 +2795,10 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
                     line: new_line,
                     marker,
                     allowed: allow_reason(added)
-                        .or_else(|| previous.as_deref().and_then(allow_reason)),
+                        .or_else(|| previous.as_deref().and_then(allow_reason))
+                        .or_else(|| (marker == "test.skip(").then(|| runtime_skip_reason(added)).flatten())
+                        .or_else(|| existing.contains(&(path.to_string(), new_line, marker))
+                            .then(|| "unchanged existing marker in this test".to_string())),
                 });
             }
             previous = Some(added.to_string());
@@ -2682,7 +2815,8 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
     markers
 }
 
-/// `git diff -U1 <from> <to>` restricted to JS/TS test files; `None` when git fails.
+/// Full-file context restricted to changed JS/TS tests, so skip counts retain
+/// their owning test on both sides. `None` when Git fails.
 pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -> Option<String> {
     let tests: Vec<&String> = paths.iter().filter(|path| is_js_test_file(path)).collect();
     if tests.is_empty() {
@@ -2690,7 +2824,7 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
     }
     let mut args: Vec<String> = vec![
         "diff".into(),
-        "-U1".into(),
+        "--unified=2147483647".into(),
         "--no-color".into(),
         "--no-ext-diff".into(),
         from.into(),

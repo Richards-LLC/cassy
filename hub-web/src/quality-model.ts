@@ -110,7 +110,7 @@ export function trendOf(now?: number, was?: number): Trend | undefined {
   const ratio = now / was;
   const word = ratio > 1 ? "worse" : ratio < 1 ? "better" : "no change";
   if (word === "no change") return { change: "no change", word, ratio };
-  const factor = ratio >= 1.5 ? `${ratio.toFixed(1)}×` : ratio <= 0.67 ? `${(1 / ratio).toFixed(1)}×` : `${ratio > 1 ? "+" : "−"}${Math.abs((ratio - 1) * 100).toFixed(0)}%`;
+  const factor = ratio === 0 ? "100%" : ratio >= 1.5 ? `${ratio.toFixed(1)}×` : ratio <= 0.67 ? `${(1 / ratio).toFixed(1)}×` : `${ratio > 1 ? "+" : "−"}${Math.abs((ratio - 1) * 100).toFixed(0)}%`;
   return { change: `${factor} ${word}`, word, ratio };
 }
 

@@ -66,9 +66,20 @@ impl Identity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Proof {
     pub runner: String,
+    #[serde(serialize_with = "serialize_changed_tests")]
     pub tests: Vec<Identity>,
     pub consecutive_passes: u32,
     pub elapsed_ms: u128,
+}
+
+fn serialize_changed_tests<S: serde::Serializer>(tests: &[Identity], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Row<'a> {
+        #[serde(flatten)]
+        identity: &'a Identity,
+        reason: &'static str,
+    }
+    serializer.collect_seq(tests.iter().map(|identity| Row { identity, reason: "changed-test" }))
 }
 
 pub(super) fn valid(proof: &Proof) -> bool {
@@ -127,7 +138,7 @@ pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     // After integration, keep the attributed base rather than collapsing proof
     // onto the already-landed tip. Otherwise compare with the current target.
     let net_base = if base == head { ranges.first().map_or(base.as_str(), |(from, _)| from) } else { &base };
-    let live = rust::net_changed(repo, net_base, head)?.into_iter()
+    let live = rust::changed(repo, net_base, head, paths)?.into_iter()
         .map(|test| test.identity).collect::<BTreeSet<_>>();
     let mut required = BTreeSet::new();
     for (from, to) in ranges {
@@ -145,6 +156,26 @@ fn delivery_commits(repo: &Path, ranges: &[(String, String)]) -> Result<BTreeSet
             .lines().map(str::to_owned));
     }
     Ok(commits)
+}
+
+/// Classify each touched input independently. An uncertain input widens;
+/// identified tests in other files still owe their normal stability proof.
+pub(crate) fn requirements(repo: &Path, head: &str, target: &str, paths: &[String],
+    ranges: Option<&[(String, String)]>) -> Result<(Vec<Identity>, Vec<super::widened::Scope>)> {
+    let mut tests = BTreeSet::new();
+    let mut widened = BTreeSet::new();
+    for path in paths.iter().filter(|path| path.ends_with(".rs") || super::javascript::javascript(path)) {
+        match required(repo, head, target, std::slice::from_ref(path), ranges) {
+            Ok(selected) => tests.extend(selected),
+            Err(error) => {
+                if error.downcast_ref::<rust::MissingTest>().is_some() { return Err(error); }
+                let scope = super::widened::scope(repo, path);
+                eprintln!("Changed-test classification uncertain for {path} ({error:#}); widening to {scope:?}");
+                widened.insert(scope);
+            }
+        }
+    }
+    Ok((tests.into_iter().collect(), widened.into_iter().collect()))
 }
 
 /// The command that proves these changed tests, one per runner (cas-1468).
@@ -206,7 +237,7 @@ pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, mut proof: Proof)
     let receipt = CheckReceipt {
         head: head.into(), repo: repo.canonicalize()?, packages: Vec::new(),
         test: Some(TestReceipt { filter: selection.filter, harness: None,
-            count: proof.tests.len() as u64, stability: Some(proof), selected_log: None,
+            count: proof.tests.len() as u64, stability: Some(proof), widened: None, selected_log: None,
             host_path_opt_out: None, supervisor_recorded: None }),
     };
     std::fs::create_dir_all(path.parent().context("receipt directory")?)?;

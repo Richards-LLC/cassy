@@ -784,7 +784,7 @@ async fn concurrent_attach_input_survives_sender_close_during_output_flush() {
     for name in names {
         let pty = cas_mux::Pty::spawn(name, cas_mux::PtyConfig {
             command: "/bin/sh".into(),
-            args: vec!["-c".into(), "stty raw -echo; printf ready; exec cat > \"$1\"".into(),
+            args: vec!["-c".into(), "stty raw -echo || exit; : > \"$1.ready\"; printf ready; exec cat > \"$1\"".into(),
                 "fixture".into(), root.path().join(name).to_str().unwrap().into()],
             cwd: Some(root.path().into()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
         }).unwrap();
@@ -792,6 +792,11 @@ async fn concurrent_attach_input_survives_sender_close_during_output_flush() {
         daemon.app.mux.add_pane(cas_mux::Pane::with_pty(
             name, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
         ).unwrap());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !root.path().join(format!("{name}.ready")).exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("the fixture must enter raw mode before accepting input");
         super::provisioning_tests::await_ready_fixture_pane(&mut daemon, name).await;
     }
     let mut clients: Vec<_> = names.iter().map(|_| UnixStream::connect(cas_dir.join("gui.sock")).unwrap()).collect();
@@ -820,12 +825,13 @@ async fn concurrent_attach_input_survives_sender_close_during_output_flush() {
     daemon.forward_pane_output_to_gui("kept-b", b"SEQ:kept-b:1\r\n");
     daemon.flush_gui_client_output();
     daemon.process_gui_client_input().await;
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
+            daemon.process_gui_client_input().await;
             if names.iter().all(|name| std::fs::read(root.path().join(name)).ok().as_deref() == Some(b"PROOF-HISTORY\r")) {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await;
     let received: Vec<_> = names.iter().map(|name| (*name, std::fs::read(root.path().join(name)).unwrap_or_default())).collect();

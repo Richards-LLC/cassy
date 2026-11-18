@@ -486,6 +486,69 @@ Factory deliveries automatically arm supervisor-owned CI and published-merge com
 
 **Bounded review repairs.** Previously a non-behavioural rejection needed a supervisor to return the delivery. Cassy now reopens the first eligible rejection to the same live worker and sends the findings as its next prompt. Eligibility uses existing structured categories and awkward/cosmetic triage, limited to explicit documentation, evidence, receipt, incomplete close reason and unnecessary complexity categories. Summary prose grants no authority. A dispatch-bound portable receipt consumes the single repair round across the correction cycle and restart. A new provable source commit is required before another independent review through either merge or completion receipt. A receipt-path rejection can return only its exact failed transaction; external holds stay held. Another rejection, unsafe or incomplete findings, and an unavailable worker hold for the supervisor; automatic repair never approves or publishes a delivery.
 
+Changed-test discovery widens uncertain inputs instead of refusing them: one capped pass covers the complete test file, or the nearest JavaScript package/Rust crate for source inputs. Widened receipts are distinct from five-pass stability receipts and bind to the tested commit. Missing or failing proof still prevents park. Unchanged callbacks beside deleted tests require no new annotations; changed callbacks retain identity discovery or wider runtime proof.
+
+### Factory recovery and account routing
+
+An isolated spawn can initialize worktree management after a running session's project gains Git history. Recycle and cleanup retain that worktree manager. Worker startup briefs stay private, readable until teardown and excluded from Git status without excluding other project state.
+
+Automatic Codex lane requests can choose another eligible account whose model catalogue verifies the lane. Explicit account settings remain binding. Account recommendations distinguish stale, cleared usage from a fresh unopened window, retaining the binding window's reset for headroom ties. An omitted unopened window does not discard another window's observed capacity or its launch recommendation.
+
+Accepted build routes recheck peer freshness before withholding local admission on an unclaimed task. A successful directory lookup showing departure or stale capacity releases that route; an unavailable directory, an in-flight send, a claimed task or a fresh busy peer preserves ownership.
+
+Workers can abort merge, rebase or cherry-pick operations and switch back to an owned branch in their registered Git directory after a suffix change. A disposable diagnostic ref ending in `-diag` can be deleted only when no task, delivery or review binds it. Existing per-task branch names also support a separately based forward-port delivery.
+
+Factory preflight normalizes scp-style and SSH origins with arbitrary SSH usernames. An unresolved repository finding identifies the branch or identity input that failed.
+
+Factory alerts are rechecked against current task and close-refusal state before delivery. A resolved member leaves a grouped close-hold notice; the remaining members retain an updated action notice. Deliberate task holds and retirement of a blocked worker do not become fresh supervisor blockers.
+
+Worker queues retain an unstarted spawn promise when their pending tail changes. A queued code task can reclaim a clean shared checkout when no other work owns it; queued no-code tasks preserve the shared branch and files. Isolated worker checkouts retain their ownership checks. Commander keeps a task transition label as its subject when it has no separator and treats ordinary one-word questions as text.
+
+A registered supervisor can record a reasoned test-stability exception at park. The decision is retained on the task without creating a passing runner receipt or waiving the separate crate/content obligations. Unknown classifier widening remains a capped-run concern.
+
+Clearing an execution-methodology label retains an existing resolved code approval only when the delivery identity, work target, declared risk and proof targets are unchanged. Close still checks the live source and exact landing, so an old approval cannot cover a newer code commit.
+
+Park publishes ordinary task evidence and cited worker target logs through the existing artifact transport, so a reviewer on another machine can fetch them. Ordinary publication problems are reported without a new admission requirement; routed builds retain their existing manifest contract. A historical integrated delivery missing approval receives an explicit authenticated recovery command instead of a no-op merge loop.
+
+Delivery content can be proven by a target path that exactly matches the task-authored final snapshot. Returning to an imported baseline or reverting the task's own delivery does not establish that proof.
+
+Playwright runtime skip reasons are valid close evidence. Reformatted existing skip markers retain their allowance only within the same test and suite when the count does not increase. A removed marker cannot authorize skipping another test.
+
+Disposable database branch env files set both DATABASE_URL and DIRECT_URL to the provisioned branch. Their quoted values survive both dotenv parsing and shell sourcing.
+
+- Capped JavaScript checks can receive an explicit password-free loopback PostgreSQL fixture URL with `--test-env TEST_DATABASE_URL=...` or `--test-env <PREFIX>_TEST_DATABASE_URL=...`; the runner applies the value only to discovery and test children.
+- Conditional `describe.runIf`/`describe.skipIf` registrations preserve runtime suite names, and explicit disabled prerequisite registrations are excluded from required passing identities. Changed-test receipt rows carry their selection reason.
+- Widened file, package and crate receipts record the classification cause that selected broader proof. Unknown conditional aliases run through that broader proof with the same child-only fixture environment.
+- CI selector command rows preserve each integration test stem's owner or import-consumer cause in the existing receipt's `reason` field, alongside changed-test and broader policy causes.
+- QA ledger preflight and close share canonical owner parsing and permit contained absolute capture paths. Initialization uses the matching caller worktree for its journey registry and fallback revision; existing recorded delivery references remain authoritative.
+- A failed attempt to attach QA evidence to an existing issue or task is reported without filing a duplicate follow-up.
+
+### Release delivery proof
+
+Release previews share ownership walks across members and index changed hunk lines once. Delivery inventory recognizes conventional commit task owners while retaining historical changelog-fragment evidence.
+
+Immutable commit metadata and changed paths are read in batches. Repeated measurements reuse successful immutable ranges and promotion evidence; moved refs and failed reads are measured again.
+
+A release checkout that aliases a train's exact tip names the canonical checkout before preparing a release. Auto-cut resolves a live local supervisor after handoff and waits for unfinished release-repair children. Installer adapter timeouts identify their phase, deadline and retained receipt.
+
+An active parked delivery contained in a versioned release tag on origin's default branch can close from its recorded anchor, release tag and that branch's immutable tip. The close records its ancestry evidence and clears stale verification waiting state. It does not depend on a retired worker checkout or replay park evidence. Historical anchors, unshipped work, newer cycles and current rejected reviews retain ordinary checks.
+
+Release closeout judges missing generated documentation, bundles and builtin reference history through the surviving task-owned source. Those outputs cannot prove a source revert. A delivery with only generated output still needs evidence; folded fragments retain their existing content proof.
+
+### Artifact inventory, retention and candidate fallback
+
+Artifact list reads the named task's synced publication references as well as its local artifact ledger. CLI JSON and MCP structured results carry `task_id`, `state: "partial"` and `artifacts`; the local catalog cannot prove an exhaustive Cloud inventory. Listing does not fetch bytes or mutate task/publication records. Explicit artifact fetch remains the recovery route for a known ID missing from synced notes.
+
+The factory performs bounded host retention across registered projects on idle maintenance and above 80% disk usage. Expired artifacts retain a 14-day window and live/release citation protection. Dead-owner targets and resolved review builds are regenerable; citations into build folders do not preserve them. Source ownership, unpushed commits, active processes, ambiguous references and unsafe paths continue to preserve data. Sweep logs include per-project/category bytes and every considered path; preflight reports disk pressure with the last sweep outcome. `cas factory gc cleanup --dry-run` previews retention.
+
+Workers request candidates through `factory action=candidate_request`. If the queue is unavailable or the host lacks its sandbox, the supervisor runs `cas qa candidate build --task <task-id> --rev <sha>` directly and supplies its receipt.
+
+**Exact-tip freeze preparation.** Before freezing a release train, supervisors dispatch CI and confirm green for its exact SHA, audit portable dependencies, gate registration and test shape, and prepare committed, linted notes before the suite goes green. Frozen-suite jobs receive active checks between short reminders; other CI retains event-driven waits.
+
+**Consistent config and hook policy.** Moving files into an operator write-root directory is allowed while deleting or replacing that root remains separate. User-level parent grants apply to ordinary files in nested projects. SessionStart and config get share the effective issue destination, and store diagnostics distinguish the CAS_ROOT default from explicit store selection. Pure generated agent/rule projections stay ignored; mixed harness configuration stays tracked and is regenerated from current source before the final train proof and cut.
+
+Merge regeneration commits tracked generated outputs while leaving ignored native projections untracked.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.
@@ -596,6 +659,26 @@ A supervisor command sent from Commander while the supervisor's native turn is o
 
 - **Account recommendation by headroom** - Workers, `cas claude` / `cas codex` and Commander recommend the subscription with the most headroom on its binding window, the fuller of the 5h and weekly windows, with ties broken by the earliest reset. A window whose reset has passed counts as rolled over, and each spawn rereads the native usage snapshots before choosing. `accounts.selection soonest-reset` restores the earlier policy of draining the account that resets first.
 
+Commander keeps zero-rate quality improvements finite and distinguishes successful table cells from actual failures, including cells that state a zero failure count. Visual QA uses the explicitly selected Playwright package and detects page-level horizontal overflow on phone viewports.
+
+### Violet fallback, client findings and macOS update identity
+
+`cas violet post` accepts explicit reply intent and generation fields alongside a stable request ID. `cas violet react` adds or removes reactions. Reconciled reply failures retain provider diagnostics without repeating writes.
+
+The shared `cas-client-report` skill covers client findings and recommendations, reusable accounting validation, responsive HTML and print inspection. SOW completion, feature showcases and customer product updates retain their specialized workflows.
+
+On macOS, updates can use an operator-created local signing identity to preserve their designated requirement across versions. Creating that identity is opt-in; the updater does not change system privacy or Gatekeeper settings.
+
+### Cloud authorization and isolated proof checks
+
+Proof publication, peer messaging, message-status reads and agent discovery retry one 401 response that identifies an invalid API key with the current stored login or a verified environment credential. The environment credential is scoped to its configured endpoint and shares the direct-token login path. Other 401 responses retain the server cause without retrying. Failed credential recovery reports `Cloud session expired, run cas login`; transport failures and uncertain writes do not trigger this retry.
+
+Capped tests use short scratch paths outside a checkout and protected `.cas` ancestry. The credential-fixture sentinel also covers arbitrary login tokens, so an intended no-project fixture cannot overwrite the operator's project or user login cache.
+
+No-code factory workers can start artifact work while a shared checkout remains on another worker's branch with pending edits. Isolated worker checkouts keep their normal source attribution. An artifact-only task can sync published trunk for report tooling and close using portable proof; an unpublished source commit still requires delivery handling.
+
+When repository discovery is incomplete, the lifecycle receipt names the requested selector and branch, the roots that failed or were not reached, and the identities successfully read. It retains the declared work target and does not infer a storage outage or select a different branch from incidental Git history.
+
 ## Authoritative Sources
 
 Delivery checks use observable behavior and stable error or rule identifiers.
@@ -627,6 +710,16 @@ The Focus epic picker lists titled live epics owned by the selected supervisor o
 The conversation's phase line uses the selected supervisor's recorded lifecycle start/end and the daemon's observation time. A local clock displays elapsed duration; waiting, completed, stale and disconnected states stay still. Missing phases or start times stay unreported. The ordinary status stream supplies these safe facts while Show work remains off; it exposes no tool input, output or reasoning text. A peer's retained events and catalog refresh leave unchanged conversations' controls alone; their own events and health heartbeats keep status fresh.
 
 Accounting entries use the report skill's saved-chart/source validator before rendering balanced journal grids; the simple/compound before-after example keeps account identities, numeric cells, memos and revision changes separate.
+
+Factory-lane own-test builds run on the trusted local `cas-lane-light` runners. Their existing evidence upload includes `target/ci-impact/own-build.log`, which captures compiler output, test execution and watchdog resource heartbeats without masking command failures. Ring shards and browser jobs keep their existing runners and stage budgets.
+
+Self-hosted Rust setup exposes the runner home's Cargo binaries, bootstraps the repository-pinned toolchain when missing, and serializes toolchain installation across slots sharing that home. It leaves `RUSTC_WRAPPER` empty and skips sccache; hosted setup retains its existing cache behavior.
+
+The lane selector includes the existing gate-registry audits in the own-test phase for production Rust changes. This catches uncoded refusals before later ring shards or the final train suite. Test-fixture-only changes avoid an additional library-test build; uncertain input still widens selection through the existing planner.
+
+Automatic pre-merge review keeps small review contexts inline. When serialized context exceeds 256 KiB, it writes the complete task, parent, dispatch and review context to a content-addressed JSON file under the dispatch's verification-runs directory and tells the reviewer to read it. This keeps accumulated repair history out of the harness's launch request without discarding evidence or changing verification authority.
+
+The independent historical reviewer-eval script checks Linux bubblewrap namespace support before invoking Codex. Its explicit --source-input-only mode supplies pinned base/head source and diff on stdin, keeps the read-only sandbox, disables shell/integration tools, and rejects reports accompanied by tool events. It remains a simulated evaluation without live verification authority.
 
 <!-- cas:project-overview
 # Product paths the G6 park gate and overview freshness watch. Keep when regenerating.

@@ -2294,6 +2294,97 @@ async fn no_code_close_survives_the_next_task_on_its_lane_cas_aa98() {
     assert_closed_without_lane(&f, id, &response);
 }
 
+/// GH #1983: syncing released trunk for report tooling is not an artifact-only
+/// task's delivery. A subsequent unpublished commit still belongs to its lane.
+#[tokio::test]
+async fn artifact_only_close_after_released_trunk_sync_gh1983() {
+    for own_commit in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "epic/artifact");
+        let repo = f.dir.path();
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        git(&checkout, &["reset", "-q", "--hard", "epic/artifact"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&worker).unwrap();
+        let id = "cas-a1983";
+        let mut task = assigned(id, TaskType::Task, "epic/artifact");
+        task.status = TaskStatus::Open;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("artifact:art-1983".into());
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        git(repo, &["merge", "-q", "--ff-only", &f.foreign_tip]);
+        std::fs::write(repo.join("parser.rs"), "pub fn parser() {}\n").unwrap();
+        git(repo, &["add", "parser.rs"]);
+        git(repo, &["commit", "-qm", "Repair report parser"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(&checkout, &["merge", "-q", "--ff-only", "origin/main"]);
+        if own_commit {
+            std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+            git(&checkout, &["add", "own.rs"]);
+            git(&checkout, &["commit", "-qm", "Report tooling changes"]);
+        }
+        let branch = git(&checkout, &["branch", "--show-current"]);
+        let tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", &branch]);
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":id, "reason":"Report published with portable artifact proof",
+        })).await;
+        if own_commit {
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "{response}");
+        } else {
+            assert_closed_without_lane(&f, id, &response);
+        }
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), tip);
+    }
+}
+
+/// GH #2022: read-only work in artifacts does not own the shared checkout.
+/// Starting it must preserve another worker's branch and uncommitted edits.
+#[tokio::test]
+async fn no_code_start_preserves_the_shared_checkout_gh2022() {
+    for (branch, no_code) in [("main", true), ("factory/other-cas-2022", true), ("factory/other-cas-2022", false)] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        if branch != "main" {
+            git(repo, &["switch", "-qc", branch]);
+        }
+        std::fs::write(repo.join(".gitignore"), ".cas/\ndurable-artifacts/\nshared-edits/\n").unwrap();
+        let before = git(repo, &["status", "--porcelain"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), repo.display().to_string());
+        agents.update(&worker).unwrap();
+        let id = "cas-a2022";
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        if no_code {
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some(PROOF.into());
+        }
+        f.put(&task);
+        let result = f.worker.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"start", "id":id,
+        })).unwrap())).await;
+        if no_code {
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(f.task(id).status, TaskStatus::InProgress, "{result:?}");
+            assert!(f.task(id).deliverables.factory_branch_start.is_none());
+        } else {
+            assert!(result.is_err(), "{result:?}");
+            assert_eq!(f.task(id).status, TaskStatus::Open);
+        }
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(git(repo, &["branch", "--show-current"]), branch);
+        assert_eq!(git(repo, &["status", "--porcelain"]), before);
+    }
+}
+
 /// A legacy start recorded the preceding parked task's lane before the worker
 /// switched to its own lane. Only a proven integrated delivery can recover it;
 /// neither an arbitrary receipt nor supervisor review erases delivery checks.
@@ -2565,6 +2656,22 @@ async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
         task.status = TaskStatus::Open;
         task.assignee = None;
         f.put(&task);
+    }
+    // A single-task spawn has no queue yet. Replacing its tail while its
+    // registered process is still booting must first recover that promise.
+    agents.register(&worker).unwrap();
+    call(&f.supervisor, serde_json::json!({
+        "action":"update", "assignee":WORKER, "task_ids":[pending[0]],
+    })).await;
+    let initial_queue = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap()
+        .get("queue-session", WORKER).unwrap();
+    assert_eq!(initial_queue.current_task.as_deref(), Some(first.id.as_str()));
+    assert_eq!(initial_queue.pending, [pending[0]]);
+    call(&f.supervisor, serde_json::json!({
+        "action":"update", "assignee":WORKER, "task_ids":[],
+    })).await;
+    agents.unregister(&worker.id).unwrap();
+    for id in pending {
         call(&f.supervisor, serde_json::json!({
             "action":"update", "id":id, "assignee":WORKER,
         })).await;
@@ -2587,6 +2694,12 @@ async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
     spawns.mark_processed(request).unwrap();
     spawns.record_spawn_state(request, cas_store::SpawnLifecycleState::Registered,
         Some(WORKER), None).unwrap();
+    call(&f.supervisor, serde_json::json!({
+        "action":"update", "assignee":WORKER, "task_ids":[pending[0], pending[3]],
+    })).await;
+    let before_start = queues.get("queue-session", WORKER).unwrap();
+    assert_eq!(before_start.current_task.as_deref(), Some(first.id.as_str()));
+    assert_eq!(before_start.pending, [pending[0], pending[3]]);
     call(&f.worker, serde_json::json!({"action":"start", "id":first.id})).await;
     std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
     git(&checkout, &["add", "own.rs"]);
@@ -3177,8 +3290,14 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     let request = serde_json::from_value(serde_json::json!({
         "action":"update", "assignee":WORKER, "task_ids":["cas-8488-one"],
     })).unwrap();
-    assert!(f.supervisor.task(Parameters(request)).await.is_err(),
-        "Queue assignment must refuse a shared checkout before accepting a backlog");
+    let shared_branch = git(f.dir.path(), &["branch", "--show-current"]);
+    let accepted = f.supervisor.task(Parameters(request)).await.unwrap();
+    assert!(!accepted.is_error.unwrap_or(false), "{accepted:?}");
+    assert_eq!(git(f.dir.path(), &["branch", "--show-current"]), shared_branch);
+    let queued = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap()
+        .get("queue-session", WORKER).unwrap();
+    assert_eq!(queued.pending, ["cas-8488-one"]);
+    assert_eq!(f.task("cas-8488-one").status, TaskStatus::Open);
     agents.update(&isolated).unwrap();
     let _ = call(&f.supervisor, serde_json::json!({
         "action":"update", "assignee":WORKER,
@@ -3525,4 +3644,42 @@ async fn close_future_frame_stays_under_stack_budget_cas_5dc9e() {
         "close stack budget exceeded: {used} B from the blocking-pool thread start to the close body, budget {BUDGET} B. \
          Box the growing future (crate::async_runtime::heap_future) or move new close-body code into a helper fn; \
          do not raise the thread stack size.");
+}
+
+/// GH2022: queue admission reads the declared task before judging a shared
+/// checkout. A no-code task never acquires or mutates that checkout.
+#[test]
+fn shared_queue_checkout_rebinds_only_executable_work_gh2022() {
+    let mut env = TestEnvGuard::temp_home();
+    for (no_code, dirty, foreign_active) in [(false, false, false), (false, true, false), (false, false, true), (true, true, true)] {
+        let f = fixture(&mut env, "main");
+        let root = f.cas_dir();
+        let checkout = root.join("worktrees").join(WORKER);
+        git(f.dir.path(), &["worktree", "remove", checkout.to_str().unwrap()]);
+        git(f.dir.path(), &["switch", "-c", "factory/retired-worker"]);
+        let agents = open_agent_store(&root).unwrap();
+        let mut worker = agents.get("nocode-worker-session").unwrap();
+        worker.metadata.insert("clone_path".into(), f.dir.path().display().to_string());
+        agents.update(&worker).unwrap();
+        let mut task = assigned("cas-shared-queue", TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        task.execution_note = no_code.then(|| "no-code".into());
+        f.put(&task);
+        if foreign_active {
+            let mut other = assigned("cas-other-active", TaskType::Task, "main");
+            other.assignee = Some("another-worker".into());
+            f.put(&other);
+        }
+        if dirty { std::fs::write(f.dir.path().join("operator-draft.txt"), "unsaved\n").unwrap(); }
+        let before = git(f.dir.path(), &["status", "--porcelain"]);
+        let result = crate::worker_task_queue::ensure_owned_queue_checkout(&root, &worker, Some(&task.id));
+        assert_eq!(result.is_ok(), no_code || (!dirty && !foreign_active), "{result:?}");
+        assert_eq!(git(f.dir.path(), &["status", "--porcelain"]), before);
+        if no_code || dirty || foreign_active {
+            assert_eq!(git(f.dir.path(), &["branch", "--show-current"]), "factory/retired-worker");
+        } else {
+            assert_eq!(crate::factory_isolation::classify_worker_binding(&worker.name,
+                crate::factory_isolation::branch_at(f.dir.path()).as_deref()), crate::factory_isolation::WorkerBinding::Own);
+        }
+    }
 }

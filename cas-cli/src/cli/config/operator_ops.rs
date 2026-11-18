@@ -853,6 +853,23 @@ large_artifact_dir = \"before\"\n",
         }
     }
 
+    #[test]
+    fn user_parent_write_root_survives_project_get_cas_5245() {
+        let env = operator_in_agent_pane();
+        let home = env.home().to_path_buf();
+        let parent = home.join("projects");
+        let project = crate::store::init_cas_dir(&parent.join("a")).unwrap();
+        let user = crate::store::init_cas_dir(&crate::config::host_config_dir()).unwrap();
+        let change = set_project_write_roots(parent.to_str().unwrap(), &user, PANE_CGROUP).unwrap();
+        let stored = crate::config::Config::load(&user).unwrap().factory().write_roots;
+        assert_eq!(stored, change.stored);
+        assert_eq!(stored, vec![parent.display().to_string()]);
+        let effective = crate::config::operator_policy::effective_write_roots(&[], &stored, &project);
+        assert!(effective.contains(&parent), "configured user parent disappeared from the project get/hook view");
+        let cli = <Cli as clap::Parser>::parse_from(["cas", "--json", "config", "get", "factory.write_roots"]);
+        execute_get_write_roots(&cli, &project).unwrap();
+    }
+
     /// GH #1182: setting roots refuses inside a factory worker (or server)
     /// cgroup, and refuses unsafe roots without touching config.toml.
     #[test]

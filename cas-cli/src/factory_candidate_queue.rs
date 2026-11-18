@@ -27,8 +27,6 @@ const RUNNER_LOCK: &str = "runner.lock";
 const RUNNER_HEARTBEAT: &str = "runner.heartbeat";
 /// Written by a daemon whose own context cannot run the build sandbox.
 const RUNNER_UNAVAILABLE: &str = "runner.unavailable";
-/// A supervisor's direct build uses no sandbox, so it works where this queue cannot.
-pub(crate) const SUPERVISOR_FALLBACK: &str = "Ask the supervisor to run `cas qa candidate build` for this revision; a direct build needs no sandbox.";
 const BUILD_ENVIRONMENT: [&str; 35] = [
     "HOME",
     "PATH",

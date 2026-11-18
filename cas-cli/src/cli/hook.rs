@@ -136,6 +136,34 @@ fn execute_worker_checkpoint_push() -> anyhow::Result<()> {
     let remote = required("CAS_PUSH_GUARD_REMOTE_SHA")?;
     let sha = |value: &str| matches!(value.len(), 40 | 64)
         && value.bytes().all(|byte| byte.is_ascii_hexdigit()) && value.bytes().any(|byte| byte != b'0');
+    if local.bytes().all(|byte| byte == b'0') && matches!(local.len(), 40 | 64) {
+        // Deletion is not a checkpoint rewrite. It may remove only an owned,
+        // disposable diagnostic ref with no task or review bound to it.
+        ensure!(sha(&remote) && branch.ends_with("-diag")
+            && crate::factory_isolation::own_task_branch_task_id(&worker, &branch).is_some()
+            && remote_ref == format!("refs/heads/{branch}"), "H-40: deletion requires an owned diagnostic ref");
+        let conn = rusqlite::Connection::open_with_flags(root.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        cas_store::shared_db::install_busy_handler(&conn)?;
+        // These stores create their tables lazily. An absent table has no
+        // binding; do not initialize or scan an entire store to delete a ref.
+        for (table, column) in [("worker_completion_receipts", "source_branch"),
+            ("observed_delivery_merges", "source_branch"), ("qa_passes", "branch")] {
+            let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |row| row.get(0))?;
+            if exists {
+                let recorded: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {column}=?1)"), [&branch], |row| row.get(0))?;
+                ensure!(!recorded, "H-40: this branch has a recorded delivery or review");
+            }
+        }
+        let tasks = store::open_task_store(&root)?.list(None)?;
+        for task in tasks {
+            ensure!(task.branch.as_deref() != Some(branch.as_str())
+                && task.deliverables.parked_branch.as_deref() != Some(branch.as_str())
+                && task.deliverables.factory_branch_start.as_ref().is_none_or(|start| start.branch != branch)
+                && !task.deliverables.handoff_branches.contains(&branch),
+                "H-40: {} retains this delivery branch", task.id);
+        }
+        return Ok(());
+    }
     ensure!(sha(&local) && sha(&remote), "H-40: checkpoint pushes cannot delete or use unknown tips");
     ensure!(!worker.is_empty() && crate::factory_isolation::classify_worker_binding(&worker, Some(&branch))
         == crate::factory_isolation::WorkerBinding::Own && remote_ref == format!("refs/heads/{branch}"),

@@ -21,7 +21,6 @@
       "url": "https://api.githubcopilot.com/mcp/"
     },
     "playwright": {
-      "command": "npx",
       "args": [
         "--prefix",
         "hub-web",
@@ -34,7 +33,8 @@
         "chromium",
         "--output-dir",
         "target/artifacts/playwright-mcp"
-      ]
+      ],
+      "command": "npx"
     }
   }
 }

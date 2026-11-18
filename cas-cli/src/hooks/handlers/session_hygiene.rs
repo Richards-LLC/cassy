@@ -892,25 +892,15 @@ pub(crate) fn render_unfiled_reports_banner(staged: &[String]) -> SessionStartBa
     SessionStartBanner { full, compact }
 }
 
-/// Unset `[issues] repo` in a project that stages requests (cas-20f27).
-///
-/// Without a target the filing flow has nowhere to push, so every report takes
-/// the durable-fallback path and silently accumulates. Fires only when the
-/// project shows it wants the flow (a `docs/requests/` directory exists), and
-/// deliberately never proposes a value: `origin` in a downstream project is the
-/// consumer's own repo, and guessing routes Cassy bugs into the wrong tracker
-/// (filing-cas-bugs.md rule).
+/// Missing effective issue destination in a project that stages requests.
+/// Use the same read-only project resolver as `cas config get issues.repo`;
+/// an origin fallback suppresses a false missing-tracker warning without
+/// writing inferred values into config.toml.
 pub fn build_session_start_issues_target_banner_sized(
     cas_root: &Path,
     config: &crate::config::Config,
 ) -> Option<SessionStartBanner> {
-    let configured = config
-        .issues
-        .as_ref()
-        .and_then(|issues| issues.repo.as_deref())
-        .map(str::trim)
-        .filter(|repo| !repo.is_empty());
-    if configured.is_some() {
+    if config.issue_repo_registry_for_project(cas_root).project.is_some() {
         return None;
     }
     let repo_root = cas_root.parent()?;
@@ -1779,73 +1769,30 @@ mod tests {
         );
     }
 
-    /// cas-20f27 detector 2: an unset `issues.repo` in a project that stages
-    /// requests must be surfaced with the literal config command — and must
-    /// never propose a value derived from the `origin` remote, which in a
-    /// downstream project is the consumer's own tracker.
     #[test]
-    fn issues_target_banner_fires_only_when_unset_and_never_suggests_origin() {
+    fn issues_target_banner_matches_resolved_project_destination_cas_c3c3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         init_repo(repo);
-        // A configured remote that must not leak into the banner.
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/downstream-consumer/private-app.git",
-            ])
-            .status();
+        let status = Command::new("git").arg("-C").arg(repo)
+            .args(["remote", "add", "origin", "https://github.com/downstream-consumer/private-app.git"])
+            .status().unwrap();
+        assert!(status.success());
         let cas_root = repo.join(".cas");
         fs::create_dir_all(&cas_root).unwrap();
-
-        let unset = crate::config::Config::default();
-
-        // No docs/requests/ → the project does not use the flow → silent.
-        assert!(
-            build_session_start_issues_target_banner_sized(&cas_root, &unset).is_none(),
-            "projects that do not stage requests must not be nagged"
-        );
-
-        fs::create_dir_all(repo.join("docs").join("requests")).unwrap();
-        let banner = build_session_start_issues_target_banner_sized(&cas_root, &unset)
-            .expect("unset target with a requests dir must be surfaced");
-        let full = banner.full.as_str();
-        assert!(
-            full.contains("cas config set issues.repo owner/repo"),
-            "banner must name the exact command: {full}"
-        );
-        assert!(
-            !banner.full.contains("downstream-consumer")
-                && !banner.full.contains("private-app")
-                && !banner.compact.contains("downstream-consumer"),
-            "the banner must never derive a value from origin: {}",
-            banner.full
-        );
-
-        // Set → silent. Whitespace-only is treated as unset.
-        let mut set = crate::config::Config::default();
-        set.issues = Some(crate::config::IssuesConfig {
-            repo: Some("owner/cas".to_string()),
-            ..crate::config::IssuesConfig::default()
-        });
-        assert!(
-            build_session_start_issues_target_banner_sized(&cas_root, &set).is_none(),
-            "a configured target must silence the banner"
-        );
-
-        let mut blank = crate::config::Config::default();
-        blank.issues = Some(crate::config::IssuesConfig {
-            repo: Some("   ".to_string()),
-            ..crate::config::IssuesConfig::default()
-        });
-        assert!(
-            build_session_start_issues_target_banner_sized(&cas_root, &blank).is_some(),
-            "a blank repo value is not a target"
-        );
+        fs::create_dir_all(repo.join("docs/requests")).unwrap();
+        let mut config = crate::config::Config::default();
+        assert_eq!(config.get_resolved("issues.repo", &cas_root).as_deref(), Some("downstream-consumer/private-app"));
+        assert!(build_session_start_issues_target_banner_sized(&cas_root, &config).is_none());
+        assert!(Command::new("git").arg("-C").arg(repo).args(["remote", "remove", "origin"]).status().unwrap().success());
+        assert!(build_session_start_issues_target_banner_sized(&cas_root, &config).is_some());
+        config.issues = Some(crate::config::IssuesConfig { repo: Some("owner/cas".into()), ..Default::default() });
+        assert!(build_session_start_issues_target_banner_sized(&cas_root, &config).is_none());
+        config.issues.as_mut().unwrap().repo = Some("   ".into());
+        assert!(build_session_start_issues_target_banner_sized(&cas_root, &config).is_some());
+        fs::remove_dir(repo.join("docs/requests")).unwrap();
+        assert!(build_session_start_issues_target_banner_sized(&cas_root, &config).is_none());
     }
 
     #[test]

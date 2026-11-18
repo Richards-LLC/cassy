@@ -582,6 +582,21 @@ impl CasService {
         issues: &[PreExistingIssue],
         ledger_path: &str,
     ) -> String {
+        self.file_pre_existing_follow_ups_with_matcher(delivery_id, pass, issues, ledger_path, |issue| {
+            let Some(fingerprint) = crate::issue_intake::RefusalFingerprint::of_last(&issue.repro) else { return Ok(None) };
+            let evidence = format!("QA pass {} reported this again.\nRepro: {}", pass.id, issue.repro);
+            self.add_evidence_to_open_match(&fingerprint, &issue.problem, &evidence, Some(delivery_id))
+        })
+    }
+
+    fn file_pre_existing_follow_ups_with_matcher(
+        &self,
+        delivery_id: &str,
+        pass: &QaPass,
+        issues: &[PreExistingIssue],
+        ledger_path: &str,
+        mut matched: impl FnMut(&PreExistingIssue) -> Result<Option<String>, String>,
+    ) -> String {
         if issues.is_empty() {
             return String::new();
         }
@@ -617,17 +632,17 @@ impl CasService {
             // not filed again.
             // cas-7823, cas-5edc: so is one whose wrong output an open issue
             // or task records; it gets the evidence and a +1.
-            let matched = || {
-                let fingerprint = crate::issue_intake::RefusalFingerprint::of_last(&issue.repro)?;
-                let evidence = format!("QA pass {} reported this again.\nRepro: {}", pass.id, issue.repro);
-                self.add_evidence_to_open_match(&fingerprint, &issue.problem, &evidence, Some(delivery_id))
-                    .ok()
-                    .flatten()
+            let existing = match crate::qa_pass::tracked_follow_up(issue, delivery_id, |id| store.get(id).is_ok()) {
+                Some(id) => Some(id),
+                None => match matched(issue) {
+                    Ok(existing) => existing,
+                    Err(error) => {
+                        failed.push(format!("{} ({error})", issue.problem));
+                        continue;
+                    }
+                },
             };
-            if let Some(existing) =
-                crate::qa_pass::tracked_follow_up(issue, delivery_id, |id| store.get(id).is_ok())
-                    .or_else(matched)
-            {
+            if let Some(existing) = existing {
                 // A matched GitHub issue is named, not linked: it is no task.
                 if store.get(&existing).is_ok() {
                     let related =
@@ -846,5 +861,49 @@ fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, McpError>
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| CasService::error(ErrorCode::INVALID_PARAMS, format!("{name} is required")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matched_comment_error_does_not_file_duplicate_cas_47f7() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        store.init().unwrap();
+        let delivery = cas_types::Task::new("cas-delivery".into(), "Delivery".into());
+        store.create_atomic(&delivery, &[], None, None).unwrap();
+        let service = CasService::new(crate::mcp::server::CasCore::with_daemon(root, None, None),
+            #[cfg(feature = "mcp-proxy")] None);
+        let now = chrono::Utc::now();
+        let pass = QaPass {
+            id: "qapass-fixture".into(), task_id: delivery.id.clone(), round: 1,
+            implementer_agent_id: "implementer".into(), branch: "factory/fixture".into(),
+            bound_head: "fixture-head".into(), qa_task_id: None, reviewer_agent_id: None,
+            state: cas_types::QaPassState::Passed, summary: None, issues_json: None,
+            ledger_path: None, issuer_agent_id: None, requested_at: now, deadline_at: now, resolved_at: None,
+        };
+        let issue = PreExistingIssue {
+            id: "F1".into(), problem: "Existing fixture failure".into(),
+            repro: "HTTP_503_FIXTURE: matched issue comment failed".into(),
+            affected: "Fixture caller".into(), ..Default::default()
+        };
+        let failure = "HTTP_503_FIXTURE";
+        let output = service.file_pre_existing_follow_ups_with_matcher(&delivery.id, &pass, &[issue.clone()], "LEDGER.md",
+            |_| Err(failure.into()));
+        assert_eq!(store.list(None).unwrap().len(), 1);
+        assert!(output.contains(failure), "dependency failure code must survive: {output}");
+        service.file_pre_existing_follow_ups_with_matcher(&delivery.id, &pass, &[issue.clone()], "LEDGER.md",
+            |_| Ok(Some("https://github.com/example/repo/issues/7".into())));
+        assert_eq!(store.list(None).unwrap().len(), 1);
+        service.file_pre_existing_follow_ups_with_matcher(&delivery.id, &pass, &[issue], "LEDGER.md", |_| Ok(None));
+        let tasks = store.list(None).unwrap();
+        assert_eq!(tasks.len(), 2);
+        let follow_up = tasks.iter().find(|task| task.id != delivery.id).unwrap();
+        assert!(store.get_dependencies(&follow_up.id).unwrap().iter().any(|dep| dep.to_id == delivery.id));
+    }
 }
 

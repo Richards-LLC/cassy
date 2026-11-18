@@ -767,13 +767,18 @@ def rust_runtime_inputs(source):
                         and not ts[k + 1].string):
                     continue
                 # GH #2102: exempt only literals that are themselves a value
-                # (`: "x"`, `{ "x" }` then `,` or `}`) on the key's own line;
-                # a literal inside a call such as `.contains("x")` stays in scope.
+                # (`: "x"`, `{ "x" }` then `,` or `}`) on the key's own line at
+                # ( [ depth 0; any literal inside a call or index stays in scope.
                 line_end = source.find('\n', ts[k].end)
+                depth = 0
                 for j in range(k + 2, close):
                     if ts[j].start >= (line_end if line_end >= 0 else len(source)):
                         break
-                    if (ts[j].string and ts[j - 1].value in (':', '{') and not ts[j - 1].string
+                    if not ts[j].string and ts[j].value in ('(', '['):
+                        depth += 1
+                    elif not ts[j].string and ts[j].value in (')', ']'):
+                        depth -= 1
+                    elif depth == 0 and (ts[j].string and ts[j - 1].value in (':', '{') and not ts[j - 1].string
                             and ts[j + 1].value in (',', '}') and not ts[j + 1].string):
                         yield ts[j].start, ts[j].end
 

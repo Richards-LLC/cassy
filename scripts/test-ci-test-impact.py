@@ -76,6 +76,19 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("opaque_test", command["stems"])
         self.assertNotIn("gamma_test", command["stems"])
 
+    def test_receipt_preserves_each_stem_selection_reason(self):
+        plan = self.select()
+        log = self.root / "output/tests.log"
+        log.parent.mkdir()
+        log.write_text("Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n")
+        destination = self.root / "output/receipt.json"
+        impact.record(plan, [log], 0, 0.01, destination, "scoped")
+        command = json.loads(destination.read_text())["plan"]["commands"][0]
+        self.assertEqual(
+            {stem: command["reason"][stem] for stem in ("alpha_test", "beta_test")},
+            {"alpha_test": "owner", "beta_test": "import-consumer"})
+        self.assertNotIn("gamma_test", command["reason"])
+
     def test_binary_source_selects_subprocess_helpers_beyond_linked_imports(self):
         # cas-778c: the CLI can change even when the suite imports only an
         # unrelated library module. Follow helpers, not a list of suite names.

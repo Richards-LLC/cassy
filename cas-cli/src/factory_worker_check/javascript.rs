@@ -321,6 +321,12 @@ fn declaration(
 /// branches declare the same kind; jest names its tests with that title.
 fn callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>, parameterized: bool) -> Option<(bool, bool)> {
     match function.kind() {
+        "call_expression" => {
+            let inner = function.child_by_field_name("function")?;
+            let property = inner.child_by_field_name("property")?;
+            matches!(text(property, source), "skipIf" | "runIf")
+                .then(|| callee(inner, source, aliases, parameterized)).flatten()
+        }
         "parenthesized_expression" => callee(function.named_child(0)?, source, aliases, parameterized),
         "ternary_expression" => {
             let (suite, supported) = callee(function.child_by_field_name("consequence")?, source, aliases, parameterized)?;
@@ -336,7 +342,9 @@ fn callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>, 
 
 /// A conditional callee that names the test API yet resolves to no single kind.
 fn unresolved_callee(function: Node<'_>, source: &str, aliases: &BTreeMap<String, String>) -> bool {
-    matches!(function.kind(), "parenthesized_expression" | "ternary_expression")
+    (matches!(function.kind(), "parenthesized_expression" | "ternary_expression")
+        || text(function, source).split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .any(|word| aliases.get(word).is_some_and(|api| api == UNRESOLVED_API)))
         && callee(function, source, aliases, false).is_none()
         && text(function, source)
             .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
@@ -371,6 +379,8 @@ fn named_declaration(name: &str, aliases: &BTreeMap<String, String>) -> Option<(
                     | "fails"
                     | "fail"
                     | "fixme"
+                    | "skipIf"
+                    | "runIf"
             )
         })
     {
@@ -737,6 +747,8 @@ fn declared_sites(path: &str, source: &str) -> Result<Vec<DeclaredSite>> {
     Ok(sites)
 }
 
+const UNRESOLVED_API: &str = "unresolved-test-api";
+
 fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String, String>) {
     if node.kind() == "import_specifier"
         && let Some(name) = node.child_by_field_name("name")
@@ -753,9 +765,13 @@ fn imported_aliases(node: Node<'_>, source: &str, aliases: &mut BTreeMap<String,
         && let (Some(name), Some(value)) = (node.child_by_field_name("name"), node.child_by_field_name("value"))
         && name.kind() == "identifier"
         && matches!(value.kind(), "parenthesized_expression" | "ternary_expression")
-        && let Some((suite, true)) = callee(value, source, aliases, false)
     {
-        aliases.insert(text(name, source).to_string(), if suite { "describe" } else { "test" }.to_string());
+        let api = match callee(value, source, aliases, false) {
+            Some((suite, true)) => Some(if suite { "describe" } else { "test" }),
+            _ if unresolved_callee(value, source, aliases) => Some(UNRESOLVED_API),
+            _ => None,
+        };
+        if let Some(api) = api { aliases.insert(text(name, source).to_string(), api.to_string()); }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -814,6 +830,21 @@ fn reject_retry_configuration(
     Ok(())
 }
 
+/// Explicit disabled registrations do not promise a passing runtime result.
+/// Conditional skipIf/runIf and mixed conditional aliases still owe real proof.
+fn skipped_registration(function: Node<'_>, source: &str) -> bool {
+    match function.kind() {
+        "member_expression" => {
+            function.child_by_field_name("property").is_some_and(|property|
+                matches!(text(property, source), "skip" | "todo" | "fixme"))
+                || function.child_by_field_name("object").is_some_and(|object| skipped_registration(object, source))
+        }
+        "call_expression" => function.child_by_field_name("function").is_some_and(|callee| skipped_registration(callee, source)),
+        "parenthesized_expression" => function.named_child(0).is_some_and(|inner| skipped_registration(inner, source)),
+        _ => false,
+    }
+}
+
 // gate-audit[force]: Suite-header changes include descendant tests in the selected proof; this broadens test coverage and never bypasses a refusal.
 // gate-audit[strict]: selector Chooses the changed-scope pass that raises G-61 for an unresolvable callee or title; the non-strict inventory pass never selects tests for proof.
 // gate-audit[unresolved]: selector Inherited title-resolution state; it only makes a changed test fail closed and never accepts a refused identity.
@@ -848,6 +879,9 @@ fn walk(
     if node.kind() == "call_expression"
         && let Some((suite, supported, each)) = declaration(node, source, aliases)
     {
+        if node.child_by_field_name("function").is_some_and(|function| skipped_registration(function, source)) {
+            return Ok(());
+        }
         let templated = templated || each;
         let args = node
             .child_by_field_name("arguments")
@@ -1000,7 +1034,7 @@ fn callback_scope_changed(node: Node<'_>, name: &str, source: &str, lines: &[(us
     node.named_children(&mut cursor).any(|child| callback_scope_changed(child, name, source, lines))
 }
 
-pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()> {
+pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path, test_env: &[String]) -> Result<()> {
     let invocation = invocation(args).context(SHAPE)?;
     if args.iter().any(|arg| arg == "-t" || arg.starts_with("--testNamePattern")) {
         eprintln!("Widening the caller's name filter to the capped changed-test selection");
@@ -1050,8 +1084,9 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
             Ok(selected) if !selected.is_empty() => tests.extend(selected),
             result => {
                 let scope = super::widened::scope(&repo, file);
-                eprintln!("Widening {file} to {scope:?} for one capped pass: {}", result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into()));
-                widened.entry(scope).or_insert_with(|| file.clone());
+                let cause = result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into());
+                eprintln!("Widening {file} to {scope:?} for one capped pass: {cause}");
+                widened.entry(scope).or_insert_with(|| (file.clone(), cause));
             }
         }
     }
@@ -1071,11 +1106,11 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         )
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
-    for (scope, file) in &widened {
-        execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file)))?;
+    for (scope, (file, cause)) in &widened {
+        execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file, cause)), test_env)?;
     }
     if tests.is_empty() { return Ok(()); }
-    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, None)?;
+    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, None, test_env)?;
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -1269,8 +1304,12 @@ fn execute_tests(
     runner: &str,
     runner_config: Option<&Path>,
     tests: &[Identity],
-    widened: Option<(&super::widened::Scope, &str)>,
+    widened: Option<(&super::widened::Scope, &str, &str)>,
+    test_env: &[String],
 ) -> Result<Proof> {
+    let environment = test_env.iter().map(|spec| {
+        super::javascript_test_environment_spec(spec).context("invalid JavaScript test input")
+    }).collect::<Result<Vec<_>>>()?;
     let start = Instant::now();
     let config = crate::config::Config::load(cas_root)?.factory();
     let high = crate::factory_build_memory::memory_high(
@@ -1282,7 +1321,7 @@ fn execute_tests(
     for test in tests {
         by_file.entry(&test.path).or_default().push(test);
     }
-    if let Some((scope, file)) = widened {
+    if let Some((scope, file, _)) = widened {
         super::widened::invalidate(cas_root, repo, head, scope)?;
         by_file.insert(file, Vec::new());
     }
@@ -1291,7 +1330,7 @@ fn execute_tests(
     for (path, selected) in by_file {
         // One config path: the caller's own `--config` wins over the
         // discovered runner config (cas-1468); never pass both.
-        let (package, discovered) = if let Some((super::widened::Scope::Package(directory), _)) = widened {
+        let (package, discovered) = if let Some((super::widened::Scope::Package(directory), _, _)) = widened {
             let package = repo.join(directory);
             let config = self::runner_config(&package, runner);
             (package, config)
@@ -1316,6 +1355,7 @@ fn execute_tests(
             let report = reports.path().join("discovery.json");
             let mut command = Command::new(&executable);
             command
+                .envs(environment.iter().copied())
                 .current_dir(&package)
                 .env("CI", "1")
                 .arg("test")
@@ -1345,7 +1385,7 @@ fn execute_tests(
         count += verify_repeats(runner, repo, &selected, |iteration| {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
-            command.current_dir(&package).env("CI", "1");
+            command.current_dir(&package).env("CI", "1").envs(environment.iter().copied());
             let file = repo.join(path);
             match runner {
                 "vitest" => {
@@ -1416,7 +1456,7 @@ fn execute_tests(
                     _ => { command.args(["--testNamePattern", &pattern]); }
                 }
             }
-            if !matches!(widened, Some((super::widened::Scope::Package(_), _))) {
+            if !matches!(widened, Some((super::widened::Scope::Package(_), _, _))) {
                 if runner == "jest" { command.arg("--runTestsByPath"); }
                 if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
                 else { command.arg(&file); }
@@ -1439,8 +1479,8 @@ fn execute_tests(
         consecutive_passes: if widened.is_some() { 1 } else { 5 },
         elapsed_ms: start.elapsed().as_millis(),
     };
-    if let Some((scope, _)) = widened {
-        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone() }, count as u64)?;
+    if let Some((scope, _, cause)) = widened {
+        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone(), reason: format!("widened:{cause}") }, count as u64)?;
         println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
     } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)
@@ -1905,7 +1945,7 @@ mod tests {
         let tests = changed_tests(repo.path(), &base, &head, &invocation.files, None).unwrap();
         assert_eq!(tests, [id(file, "server changed")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &tests, None).unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &tests, None, &[]).unwrap();
         assert_eq!(
             (proof.runner.as_str(), proof.consecutive_passes),
             ("node", 5)
@@ -1951,8 +1991,19 @@ mod tests {
         let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()], None).unwrap();
         assert_eq!(tests, [id(file, "aliased keeps consent"), id(file, "legal keeps consent")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests, None).unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests, None, &[]).unwrap();
         assert_eq!(proof.consecutive_passes, 5);
+
+        for wrapper in ["runIf(true)", "skipIf(false)"] {
+            let (suite, case) = ("legal", "consent");
+            let source = format!("describe.{wrapper}('{suite}', () => {{ test('{case}', () => {{}}); }});");
+            let selected = source_tests(file, &source, &[(1, 1)]).unwrap();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].path, file);
+            assert_eq!(selected[0].name.split(' ').collect::<Vec<_>>(), [suite, case]);
+        }
+        let unknown = "const suite = true ? describe : unknown; suite('legal', () => { test('consent', () => {}); });";
+        assert!(source_tests(file, unknown, &[(1, 1)]).is_err());
 
         // Branches of different kinds cannot name a runtime identity.
         std::fs::write(repo.path().join(file), source("", prelude).replace("describe.skip)(", "test)(")).unwrap();
@@ -1960,6 +2011,22 @@ mod tests {
         let mixed = git(&["rev-parse", "HEAD"]);
         let refusal = changed_tests(repo.path(), &head, &mixed, &[file.to_string()], None).unwrap_err().to_string();
         assert!(refusal.contains("G-61"), "{refusal}");
+    }
+
+    #[test]
+    fn inactive_prerequisite_skip_does_not_require_passing_evidence_gh2046() {
+        let file = "legal.test.ts";
+        let source = "describe('Signup legal consent', () => {\n\
+            if (!databaseUrl) { test.skip('requires disposable DB', () => {}); return; }\n\
+            test('stores consent', () => {});\n});";
+        let selected = source_tests(file, source, &[(1, 4)]).unwrap();
+        assert_eq!(selected, [id(file, "Signup legal consent stores consent")]);
+        let report = serde_json::json!({"success":true,"testResults":[{"name":file,"status":"passed",
+            "assertionResults":[{"fullName":"Signup legal consent stores consent","status":"passed"}]}]});
+        validate_report("jest", Path::new("/project"), &report, &selected, 1).unwrap();
+        let skipped = serde_json::json!({"success":true,"testResults":[{"name":file,"status":"passed",
+            "assertionResults":[{"fullName":"Signup legal consent stores consent","status":"pending"}]}]});
+        assert!(validate_report("jest", Path::new("/project"), &skipped, &selected, 1).is_err());
     }
 
     /// pulse-card auth.test.ts (GH #2052): `importOriginal<typeof import('#imports')>()`
@@ -2250,6 +2317,7 @@ mod tests {
             cas_root.path(),
             &["vitest".into(), "a.test.ts".into()],
             repo.path(),
+            &[],
         )
         .unwrap_err();
         assert!(error.is::<IsolatedCheckoutRequired>());

@@ -3135,6 +3135,16 @@ final test child receives the requested values. Identity, PATH, target-directory
 compiler and builder-limit overrides remain refused. This does not admit
 environment prefixes on compile-only checks.
 
+JavaScript integration fixtures can declare a child-only loopback database URL
+through `cas factory worker-check --cas-root "$CAS_ROOT" --test-env
+'LEGAL_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/test' -- jest
+path/to/integration.test.ts`. Supported names are `TEST_DATABASE_URL` and
+`*_TEST_DATABASE_URL`; the value must use `postgres` or `postgresql`, name
+`localhost` or a literal loopback IP, and contain no password, query or fragment.
+The exact value reaches discovery and each capped test child, including detached
+runs. It never changes Cassy's parent environment or admission identity. Ambient
+environment inputs continue to be inherited.
+
 For a credential-free CI reproduction, first create a private config directory.
 The hook also accepts this complete fixed profile before a named nextest command
 (use an existing, literal absolute path without shell expansion):

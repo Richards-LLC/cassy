@@ -1112,7 +1112,7 @@ mod tests {
             let task = crate::types::Task::new("cas-31eb".into(), "fixture".into());
             assert_eq!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty(), !identified && !uncertain, "{row}");
             if identified || uncertain {
-                javascript::execute(root.path(), &["node".into(), "--test".into(), path.into()], &repo).unwrap();
+                javascript::execute(root.path(), &["node".into(), "--test".into(), path.into()], &repo, &[]).unwrap();
                 assert_eq!(std::fs::read(repo.join("runs")).unwrap().len(), if identified { 5 } else { 1 }, "{row}");
             }
             assert!(park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty(), "{row}");
@@ -1163,7 +1163,7 @@ mod tests {
             assert!(!park_refusals(root.path(), &repo, &task, &paths, &head, "main", None).is_empty());
             let mut args = vec!["node".into(), "--test".into(), path.into()];
             if mixed { args.push("known.test.mjs".into()); }
-            javascript::execute(root.path(), &args, &repo).unwrap();
+            javascript::execute(root.path(), &args, &repo, &[]).unwrap();
             let runs = std::fs::read(repo.join("runs")).unwrap();
             assert_eq!(runs.iter().filter(|byte| **byte == b'x').count(), 1);
             assert_eq!(runs.iter().filter(|byte| **byte == b'k').count(), if mixed { 5 + usize::from(package) } else { 0 });
@@ -1174,7 +1174,7 @@ mod tests {
             git(&["commit", "-qam", "failing delivery"]);
             let failed = git(&["rev-parse", "HEAD"]);
             assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
-            assert!(javascript::execute(root.path(), &args, &repo).is_err());
+            assert!(javascript::execute(root.path(), &args, &repo, &[]).is_err());
             assert_eq!(widened::missing(&PassingTests::new(root.path(), &repo, &failed), &scopes), scopes);
             assert!(!park_refusals(root.path(), &repo, &task, &paths, &failed, "main", Some(&[(base, failed.clone())])).is_empty());
         }
@@ -1229,7 +1229,7 @@ mod tests {
                 // This is the producer's expected crate receipt, independent
                 // of the scope the park classifier just returned.
                 widened::record(root.path(), repo.path(), &head,
-                    widened::Proof { runner: "nextest".into(), scope: expected_scope }, 1).unwrap();
+                    widened::Proof { runner: "nextest".into(), scope: expected_scope, reason: "widened:fixture-unclassified-input".into() }, 1).unwrap();
             }
             let passing = PassingTests::new(root.path(), repo.path(), &head);
             assert!(widened::missing(&passing, &scopes).is_empty(), "{row}");

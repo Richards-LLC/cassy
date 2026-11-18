@@ -522,6 +522,21 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
     report
 }
 
+/// CLI preflight and close share both row policy and canonical ownership.
+pub fn check_for_task(path: &Path, task: &cas_types::Task) -> Report {
+    let mut report = check(path, minimum_rows(task));
+    if let Ok(body) = std::fs::read_to_string(path)
+        && let Some(owner) = foreign_owner(&body, &task.id)
+    {
+        report.error(1, None, "owner", "ledger_owner",
+            format!("ledger belongs to {owner}, not {}", task.id),
+            "use this task's canonical heading or an explicit covers: header");
+    }
+    report.diagnostics.sort_by_key(|d| d.line);
+    report.ok = report.diagnostics.is_empty();
+    report
+}
+
 /// The same parser plus safe readable PASS captures, relative to the ledger.
 pub fn check(path: &Path, min_rows: usize) -> Report {
     let body = match std::fs::read_to_string(path) {
@@ -551,14 +566,6 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
             .as_ref()
             .ok()
             .and_then(|root| {
-                let relative = Path::new(&row.evidence_path);
-                if relative.is_absolute()
-                    || relative
-                        .components()
-                        .any(|p| matches!(p, std::path::Component::ParentDir))
-                {
-                    return None;
-                }
                 crate::qa_evidence::resolve_bundle_file(root, "ledger capture", &row.evidence_path)
                     .ok()
             })
@@ -586,10 +593,14 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
 /// `# QA evidence: <id>` title, unless its `covers:` header names `task_id`.
 /// `None` when the ledger does not name another task.
 pub fn foreign_owner(body: &str, task_id: &str) -> Option<String> {
-    let owner = body
+    let heading = body
         .lines()
         .find_map(|line| line.trim().strip_prefix("# QA evidence:"))?
         .trim();
+    // A descriptive suffix is prose; the leading valid task ID is protocol data.
+    // Preserve invalid headings as foreign rather than silently granting ownership.
+    let first = heading.split_whitespace().next()?;
+    let owner = if covered_task_id(first).is_ok() { first } else { heading };
     let covered = coverage(body).covers.is_some_and(|ids| ids.iter().any(|id| id == task_id));
     (!owner.is_empty() && owner != task_id && !covered).then(|| owner.to_string())
 }
@@ -763,6 +774,18 @@ mod tests {
         std::fs::write(dir.path().join("capture.txt"), "usage").unwrap();
         std::fs::write(&path, &base).unwrap();
         assert!(check(&path, 1).ok);
+        let absolute = dir.path().join("capture.txt");
+        std::fs::write(path, base.replace("capture.txt", absolute.to_str().unwrap())).unwrap();
+        assert!(check(path, 1).ok);
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path, base.replace("capture.txt", outside.path().to_str().unwrap())).unwrap();
+        assert!(check(path, 1).diagnostics.iter().any(|d| d.code == "capture"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("escape.txt")).unwrap();
+            std::fs::write(path, base.replace("capture.txt", dir.path().join("escape.txt").to_str().unwrap())).unwrap();
+            assert!(check(path, 1).diagnostics.iter().any(|d| d.code == "capture"));
+        }
         // cas-f0c5: init copies the task title into scope; quoted verdict text is not a count.
         let quoted = "# QA evidence: cas-c6e3\nscope: CI flake gate prints 'FAIL: 0 flaky test(s)' on a real failure\nsurface: PASS: 3 rows\n";
         std::fs::write(&path, format!("{quoted}{base}")).unwrap();

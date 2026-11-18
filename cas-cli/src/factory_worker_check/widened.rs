@@ -12,6 +12,8 @@ pub(crate) enum Scope {
 pub(crate) struct Proof {
     pub runner: String,
     pub scope: Scope,
+    #[serde(default)]
+    pub reason: String,
 }
 
 pub(crate) fn scope(repo: &Path, path: &str) -> Scope {

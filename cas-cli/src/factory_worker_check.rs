@@ -2085,12 +2085,37 @@ pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> 
 }
 
 fn validate_test_environment(args: &[String], test_env: &[String]) -> Result<()> {
+    if javascript::allowed_args(args) {
+        if test_env.iter().any(|spec| javascript_test_environment_spec(spec).is_none()) {
+            bail!("JavaScript test inputs require TEST_DATABASE_URL or *_TEST_DATABASE_URL with a password-free loopback PostgreSQL URL and no query or fragment");
+        }
+        return Ok(());
+    }
     if !test_env.is_empty()
         && (targeted_test(args).is_none() || test_env.iter().any(|spec| test_environment_spec(spec).is_none()))
     {
         bail!("Test environment overrides require named targeted tests and allowlisted HOME, Rust home, Git identity/config or CI inputs");
     }
     Ok(())
+}
+
+/// Explicit local fixture inputs for JavaScript children, never runner identity
+/// or provider credentials. Preserve the caller's exact bytes after validation.
+fn javascript_test_environment_spec(spec: &str) -> Option<(&str, &str)> {
+    let (key, value) = spec.split_once('=')?;
+    if !(key == "TEST_DATABASE_URL" || key.ends_with("_TEST_DATABASE_URL"))
+        || !key.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let url = url::Url::parse(value).ok()?;
+    let host = url.host_str()?.trim_matches(['[', ']']);
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (matches!(url.scheme(), "postgres" | "postgresql") && loopback
+        && url.password().is_none() && url.query().is_none() && url.fragment().is_none())
+        .then_some((key, value))
 }
 
 pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
@@ -2327,10 +2352,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 
 fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if javascript::allowed_args(args) {
-        if isolated_test_env.is_some() || !test_env.is_empty() {
+        validate_test_environment(args, test_env)?;
+        if isolated_test_env.is_some() {
             bail!("JavaScript stability commands do not accept Rust child environment profiles");
         }
-        return javascript::execute(cas_root, args, cwd);
+        return javascript::execute(cas_root, args, cwd, test_env);
     }
     validate_test_environment(args, test_env)?;
     let test = targeted_test(args);
@@ -2366,7 +2392,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 if uncertain {
                     let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                     widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
+                    widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: "widened:unclassified-rust-input".into() });
                 }
                 tests
             },
@@ -2377,7 +2403,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 eprintln!("Changed-test classification uncertain ({error:#}); widening to crate {} for one capped pass", test.package);
                 let scope = widened::Scope::Crate(package_selector(&test.package).expect("validated package selector").0.into());
                 widened::invalidate(&cas_root, &repo, &head, &scope)?;
-                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope });
+                widened_proof = Some(widened::Proof { runner: "nextest".into(), scope, reason: format!("widened:{error:#}") });
                 Vec::new()
             }
         }
@@ -5652,6 +5678,115 @@ PY"#);
             shared_repo.join("target/cargo-ran").exists(),
             "admitted Cargo still runs"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_loopback_database_url_reaches_javascript_children_gh2036() {
+        use clap::Parser;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.remove("CAS_SESSION_ID");
+        env.remove("LEGAL_TEST_DATABASE_URL");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("postgresql://postgres@127.0.0.1:{}/postgres", listener.local_addr().unwrap().port());
+        let input = format!("LEGAL_TEST_DATABASE_URL={url}");
+        for local in ["postgresql://localhost/db", "postgres://127.0.0.2/db", "postgresql://[::1]/db"] {
+            assert!(javascript_test_environment_spec(&format!("TEST_DATABASE_URL={local}")).is_some());
+        }
+        for spec in [
+            "TEST_DATABASE_URL=postgresql://db.example.invalid/db",
+            "TEST_DATABASE_URL=postgresql://postgres:private@localhost/db",
+            "TEST_DATABASE_URL=postgresql://localhost/db?host=db.example.invalid",
+            "TEST_DATABASE_URL=postgresql://localhost/db#private",
+            "TEST_DATABASE_URL=https://localhost/db",
+            "DATABASE_URL=postgresql://localhost/db",
+            "CAS_SESSION_ID=other", "PATH=/tmp", "HOME=/tmp",
+        ] {
+            assert!(validate_test_environment(&["node".into(), "--test".into(), "db.test.mjs".into()], &[spec.into()]).is_err());
+        }
+        for runner in ["node", "jest"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join(".cas");
+            let repo = root.join("worktrees/worker");
+            fixture_commit(&repo);
+            std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+            std::fs::write(repo.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+            std::fs::write(repo.join("package.json"), "{}\n").unwrap();
+            let file = "database.integration.test.mjs";
+            let source = |body: &str| format!(
+                "import {{ test }} from 'node:test';\nimport assert from 'node:assert/strict';\nimport {{ appendFileSync }} from 'node:fs';\ntest('db-fixture', () => {{ {body} }});\n"
+            );
+            std::fs::write(repo.join(file), source("throw new Error('before correction');")).unwrap();
+            fixture_commit_as(&repo, "integration fixture");
+            std::fs::write(repo.join(file), source(&format!(
+                "assert.equal(process.env.LEGAL_TEST_DATABASE_URL, {}); appendFileSync('target/database-runs', '1');",
+                serde_json::to_string(&url).unwrap(),
+            ))).unwrap();
+            fixture_commit_as(&repo, "correct integration fixture");
+            std::fs::create_dir_all(repo.join("target")).unwrap();
+            if runner == "jest" {
+                // Framework boundary: report skipped unless the actual child
+                // receives this fixture input, matching the incident's predicate.
+                std::fs::create_dir_all(repo.join("node_modules/.bin")).unwrap();
+                fake_cargo(&repo.join("node_modules/.bin/jest"), &format!(r#"exec python3 - "$@" <<'JEST_PROBE'
+import json, os, pathlib, sys
+args = sys.argv[1:]
+passed = os.environ.get('LEGAL_TEST_DATABASE_URL') == {}
+if passed:
+    with open('target/database-runs', 'a') as out: out.write('1')
+report = {{'success': True, 'testResults': [{{'name': args[-1], 'status': 'passed',
+    'assertionResults': [{{'fullName': 'db-fixture', 'status': 'passed' if passed else 'pending'}}]}}]}}
+pathlib.Path(args[args.index('--outputFile') + 1]).write_text(json.dumps(report))
+JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
+            }
+            let mut argv = vec!["cas".to_string(), "factory".into(), "worker-check".into(),
+                "--cas-root".into(), root.display().to_string(), "--test-env".into(), input.clone(),
+                "--".into(), runner.into()];
+            if runner == "node" { argv.push("--test".into()); }
+            argv.push(file.into());
+            let cli = crate::cli::Cli::parse_from(argv);
+            let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("fixture factory command"); };
+            let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cargo_args, test_env, .. }) = factory.command else { panic!("fixture worker check"); };
+            validate_test_environment(&cargo_args, &test_env).unwrap();
+            let detached = detached_runner_command_with_run(Path::new("cas"), &root, &cargo_args, None, None, &test_env);
+            assert!(detached.get_args().collect::<Vec<_>>().windows(2)
+                .any(|pair| pair == [std::ffi::OsStr::new("--test-env"), std::ffi::OsStr::new(&input)]));
+            execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
+            assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 5, "{runner}");
+            assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none(), "input is child-only");
+            let head = fixture_head(&repo);
+            let receipts = receipt_path(&root, &repo.canonicalize().unwrap(), &head);
+            let receipt = std::fs::read_dir(receipts.parent().unwrap()).unwrap().next().unwrap().unwrap();
+            let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt.path()).unwrap()).unwrap();
+            let row = &receipt["test"]["stability"]["tests"][0];
+            assert_eq!(row["path"], file);
+            assert_eq!(row["name"], "db-fixture");
+            assert_eq!(row["reason"], "changed-test");
+            if runner == "node" {
+                // Unknown static alias provenance must widen through the real
+                // entry point while retaining the declared child-only fixture.
+                std::fs::write(repo.join(file), format!(
+                    "import {{ describe, test }} from 'node:test';\nimport assert from 'node:assert/strict';\nimport {{ appendFileSync }} from 'node:fs';\n\
+                     const suite = true ? describe : unknown;\nsuite('legal', () => {{ test('db-fixture', () => {{\n\
+                     assert.equal(process.env.LEGAL_TEST_DATABASE_URL, {}); appendFileSync('target/database-runs', '1');\n}}); }});\n",
+                    serde_json::to_string(&url).unwrap(),
+                )).unwrap();
+                fixture_commit_as(&repo, "unknown conditional alias");
+                std::fs::remove_file(repo.join("target/database-runs")).unwrap();
+                execute_at_with_scope_and_environment(&root, &cargo_args, &repo, Path::new("unused-cargo"), None, None, &test_env).unwrap();
+                assert_eq!(std::fs::metadata(repo.join("target/database-runs")).unwrap().len(), 1);
+                let head = fixture_head(&repo);
+                let receipts = receipt_path(&root, &repo.canonicalize().unwrap(), &head);
+                let receipt = std::fs::read_dir(receipts.parent().unwrap()).unwrap()
+                    .map(|entry| serde_json::from_slice::<serde_json::Value>(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap())
+                    .find(|receipt| receipt["head"] == head).unwrap();
+                let widened = &receipt["test"]["widened"];
+                assert_eq!(widened["scope"]["File"], file);
+                assert!(widened["reason"].as_str().unwrap().starts_with("widened:"));
+                assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none());
+            }
+        }
     }
 
     #[cfg(unix)]

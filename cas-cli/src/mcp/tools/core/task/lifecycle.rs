@@ -6575,7 +6575,7 @@ mod preassigned_start_message_order_tests {
     async fn forced_peer_takeover_notice_routes_to_own_supervisor_cas_c2b0() {
         use crate::mcp::tools::service::CasService;
         use crate::test_support::TestEnvGuard;
-        use rmcp::model::{ErrorCode, RawContent};
+        use rmcp::model::{ContentBlock, ErrorCode};
         use serde_json::json;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6632,8 +6632,8 @@ mod preassigned_start_message_order_tests {
         })).await.unwrap();
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
         assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, "replacement");
-        let output = result.content.into_iter().filter_map(|item| match item.raw {
-            RawContent::Text(text) => Some(text.text), _ => None,
+        let output = result.content.into_iter().filter_map(|item| match item {
+            ContentBlock::Text(text) => Some(text.text), _ => None,
         }).collect::<Vec<_>>().join("\n");
         // target= is a machine tool argument; execute it instead of pinning prose.
         let target = output.split_whitespace().find_map(|word| word.strip_prefix("target="))

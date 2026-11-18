@@ -2187,6 +2187,7 @@ mod tests {
             cas_root.path(),
             &["vitest".into(), "a.test.ts".into()],
             repo.path(),
+            &[],
         )
         .unwrap_err();
         assert!(error.is::<IsolatedCheckoutRequired>());

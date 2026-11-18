@@ -315,7 +315,8 @@ async fn candidate_completion_reaches_idle_supervisor_without_another_event_cas_
         }
     }).await;
     assert!(delivered.is_ok(), "{:?}", queue.message_delivery_report(id).unwrap());
-    assert!(queue.queued_prompt(id).unwrap().unwrap().transport_delivered_at.is_some());
+    let transported: bool = conn.query_row("SELECT transport_delivered_at IS NOT NULL FROM prompt_queue WHERE id=?", [id], |row| row.get(0)).unwrap();
+    assert!(transported);
 }
 
 fn event(daemon: &FactoryDaemon, body: &str) -> i64 {

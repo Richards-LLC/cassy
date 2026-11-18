@@ -212,7 +212,11 @@ def verify_deliveries(base_ref, notes=None):
             raise ChangelogError(result.stderr.strip())
         return result.stdout.strip()
 
-    owner = re.compile(r'\((cas-[0-9a-f]+)(,? red)?\)$')
+    suffix_owner = re.compile(r'\((cas-[0-9a-f]+)(,? red)?\)$')
+    prefix_owner = re.compile(r'^[a-z][a-z0-9_-]*\((cas-[0-9a-f]+)(,? red)?\)!?:')
+
+    def owner(subject):
+        return suffix_owner.search(subject) or prefix_owner.match(subject)
     paths = [str(path) for path in fragment_paths('CHANGELOG.md')]
     for commit in git('log', f'{base_ref}..HEAD', '--no-merges', '--format=%H',
                       '--grep=^release: v[0-9]').splitlines():
@@ -222,11 +226,11 @@ def verify_deliveries(base_ref, notes=None):
              if re.fullmatch(r'cas-[0-9a-f]+\.md', Path(path).name)}
     tasks.update(match[1] for subject in git('log', f'{base_ref}..HEAD', '--no-merges',
                                             '--format=%s').splitlines()
-                 if (match := owner.search(subject)))
+                 if (match := owner(subject)))
     deliveries, red = {}, set()
     for line in (git('log', '--all', '--no-merges', '--format=%H%x09%s').splitlines() if tasks else []):
         commit, _, subject = line.partition('\t')
-        if match := owner.search(subject):
+        if match := owner(subject):
             if match[2]:
                 red.add(commit)
             else:
@@ -289,7 +293,7 @@ def verify_deliveries(base_ref, notes=None):
         floor = base_ref  # Legacy/local fixture without release tags.
     previous = set(git('rev-list', floor).splitlines())
     included = {match[1] for subject in git('log', f'{floor}..HEAD', '--no-merges', '--format=%s').splitlines()
-                if (match := owner.search(subject)) and not match[2]}
+                if (match := owner(subject)) and not match[2]}
     included.update(Path(path).stem for path in git('log', f'{floor}..HEAD', '--format=',
         '--diff-filter=A', '--name-only', '--', 'changelog.d/').splitlines()
         if re.fullmatch(r'cas-[0-9a-f]+\.md', Path(path).name))

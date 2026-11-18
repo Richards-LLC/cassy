@@ -1416,7 +1416,48 @@ pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<
 pub(super) fn first_parent_delivery_content_presence(
     repo: &Path, base: &str, anchor: &str, shipped: &str, target: &str, task_id: &str,
 ) -> Option<DeliveryContentPresence> {
-    if [base, anchor, shipped, target].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
+    if !is_safe_git_refname(target) { return None; }
+    let FirstParentDeliveryPlan { identity, ranges, clean, synced, synced_commits } =
+        first_parent_delivery_plan(repo, base, anchor, shipped, task_id)?;
+    if anchor != shipped {
+        return Some(super::delivery_content_presence_on_target_for_paths(
+            repo, shipped, target, ranges[0].1.as_deref(), false, &[task_id], Some(base),
+        ));
+    }
+    let clean_proof = (!clean.is_empty()).then(|| super::delivery_content_presence_on_target_for_paths(
+        repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
+    ));
+    let synced_proof = if synced_commits.is_empty() { None } else {
+        Some(merge_tip_content_presence_selected(
+            repo, target, anchor, None, &identity, None, Some((synced_commits.as_slice(), synced.as_slice())),
+        )?)
+    };
+    judge_presence(clean_proof, synced_proof, |paths| {
+        paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
+            && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
+    })
+}
+
+/// One immutable plan drives measurement and prewalk enumeration; synced or
+/// foreign paths keep per-commit proof, while own-only paths use the net range.
+struct FirstParentDeliveryPlan {
+    identity: TaskCommitIdentity,
+    ranges: Vec<(String, Option<Vec<String>>, Option<String>)>,
+    clean: Vec<String>,
+    synced: Vec<String>,
+    synced_commits: Vec<String>,
+}
+
+pub(super) fn first_parent_delivery_ranges(
+    repo: &Path, base: &str, anchor: &str, shipped: &str, task_id: &str,
+) -> Option<Vec<(String, Option<Vec<String>>, Option<String>)>> {
+    Some(first_parent_delivery_plan(repo, base, anchor, shipped, task_id)?.ranges)
+}
+
+fn first_parent_delivery_plan(
+    repo: &Path, base: &str, anchor: &str, shipped: &str, task_id: &str,
+) -> Option<FirstParentDeliveryPlan> {
+    if [base, anchor, shipped].iter().any(|rev| !is_safe_git_refname(rev)) { return None; }
     let history = git_text(repo, &["rev-list", "--first-parent", "--no-merges", "--reverse", &format!("{base}..{anchor}")])?;
     let mut identity = TaskCommitIdentity {
         task_id: Some(task_id.into()), start_base: Some(base.into()), ..Default::default()
@@ -1440,9 +1481,9 @@ pub(super) fn first_parent_delivery_content_presence(
     if anchor != shipped {
         // The squash has the exact source snapshot. Limit its comparison to
         // the task's own first-parent paths, excluding target-sync imports.
-        return Some(super::delivery_content_presence_on_target_for_paths(
-            repo, shipped, target, Some(&paths), false, &[task_id], Some(base),
-        ));
+        return Some(FirstParentDeliveryPlan { identity, ranges: vec![
+            (shipped.to_string(), Some(paths), Some(base.to_string())),
+        ], clean: Vec::new(), synced: Vec::new(), synced_commits: Vec::new() });
     }
     // cas-2430: a path only the task's own commits touched is judged by its
     // net base..anchor effect, so a change the task itself reverted or
@@ -1465,18 +1506,12 @@ pub(super) fn first_parent_delivery_content_presence(
         changed_paths(repo, &format!("{commit}^1"), commit)
             .is_some_and(|changed| changed.iter().any(|path| synced.contains(path)))
     }).cloned().collect();
-    let clean_proof = (!clean.is_empty()).then(|| super::delivery_content_presence_on_target_for_paths(
-        repo, anchor, target, Some(&clean), false, &[task_id], Some(base),
-    ));
-    let synced_proof = if synced_commits.is_empty() { None } else {
-        Some(merge_tip_content_presence_selected(
-            repo, target, anchor, None, &identity, None, Some((synced_commits.as_slice(), synced.as_slice())),
-        )?)
-    };
-    judge_presence(clean_proof, synced_proof, |paths| {
-        paths.iter().all(|path| super::regenerable_build_artifact(repo, path))
-            && super::delivery_source_paths(repo, anchor).is_some_and(|source| !source.is_empty())
-    })
+    let mut ranges = Vec::new();
+    if !clean.is_empty() {
+        ranges.push((anchor.to_string(), Some(clean.clone()), Some(base.to_string())));
+    }
+    ranges.extend(synced_commits.iter().map(|commit| (commit.clone(), Some(synced.clone()), None)));
+    Some(FirstParentDeliveryPlan { identity, ranges, clean, synced, synced_commits })
 }
 
 /// Join the net proof of the task's own-only paths with the per-commit proof
@@ -1860,6 +1895,9 @@ fn merge_tip_content_presence_selected(
     }
     // cas-18aa: every commit is measured first, so an earlier draft can be
     // judged against the later task commit that replaced it.
+    if explicit_commits.is_none() {
+        super::prewalk_in_parent_deliveries(repo, &commits, target, merge_tip, &carries_source);
+    }
     let measurements: Vec<_> = commits
         .iter()
         .map(|commit| {

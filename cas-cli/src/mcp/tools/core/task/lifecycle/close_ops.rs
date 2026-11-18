@@ -26575,6 +26575,85 @@ pub(crate) fn release_dropped_path_reverted(
         .unwrap_or(true)
 }
 
+/// One release member's measured delivery: `(base, anchor, shipped, task_id)`
+/// as `delivery_content_presence_from_base_on_target_for_task` takes them, or
+/// no base for `delivery_content_presence_on_target_for_task`.
+pub(crate) struct TaskDeliveryRange<'a> {
+    pub(crate) base: Option<&'a str>,
+    pub(crate) anchor: &'a str,
+    pub(crate) shipped: &'a str,
+    pub(crate) task_id: &'a str,
+}
+
+/// cas-0e29e: before a release judges its members one at a time, enumerate
+/// every ordinary line walk their content presence will request on `target`
+/// and walk each delivered path once, carrying every member's owners. The
+/// per-member calls then read those answers. Walks that depend on an earlier
+/// answer (a dropped path's resolution, task-cycle, rename or regeneration
+/// proofs) cannot be enumerated here and still run when reached.
+pub(crate) fn prewalk_task_deliveries(repo: &std::path::Path, target: &str, deliveries: &[TaskDeliveryRange<'_>]) {
+    let mut requests = Vec::new();
+    for delivery in deliveries {
+        let (base, anchor) = match delivery.base {
+            Some(base) => (Some(base.to_string()), delivery.anchor),
+            None => (crate::qa_batch::release_close::delivery_base(repo, delivery.shipped, target), delivery.shipped),
+        };
+        let ranges = match base {
+            Some(base) => task_attribution::first_parent_delivery_ranges(repo, &base, anchor, delivery.shipped, delivery.task_id),
+            None => Some(vec![(delivery.shipped.to_string(), None, None)]),
+        };
+        for (commit, paths, base) in ranges.into_iter().flatten() {
+            requests.extend(line_requests(repo, &commit, target, paths.as_deref(), base.as_deref()));
+        }
+    }
+    delivery_evolution::prewalk_line_content_presence(repo, target, &requests);
+}
+
+/// cas-0e29e: a close measures each attributed task commit in its parent
+/// branch separately (`delivery_content_presence_in_parent_leaving_artifacts`),
+/// and every commit walked its paths through the same epic history. Walk each
+/// `(path, target)` once for all of them first; the per-commit measurements
+/// then read those answers.
+pub(super) fn prewalk_in_parent_deliveries(
+    repo: &std::path::Path,
+    commits: &[String],
+    parent_branch: &str,
+    carrier: &str,
+    carries_source: &std::cell::OnceCell<bool>,
+) {
+    let mut by_target: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+    for commit in commits {
+        let selected = match in_parent_artifact_split(repo, commit, parent_branch, carrier, carries_source) {
+            None => None,
+            Some((_, _, measured)) if measured.is_empty() => continue,
+            Some((_, _, measured)) => Some(measured),
+        };
+        let Some(target) = in_parent_target(repo, commit, parent_branch) else { continue };
+        let requests = line_requests(repo, commit, &target, selected.as_deref(), None);
+        by_target.entry(target).or_default().extend(requests);
+    }
+    for (target, requests) in by_target {
+        delivery_evolution::prewalk_line_content_presence(repo, &target, &requests);
+    }
+}
+
+/// The ordinary line walks one `delivery_content_presence_on_target_for_paths`
+/// call requests; none when its range is refused.
+fn line_requests(
+    repo: &std::path::Path,
+    commit: &str,
+    target: &str,
+    paths: Option<&[String]>,
+    base: Option<&str>,
+) -> Vec<delivery_evolution::LineRequest> {
+    let Ok(range) = delivery_line_range(repo, commit, target, paths, base) else { return Vec::new() };
+    range.paths.into_iter().map(|path| delivery_evolution::LineRequest {
+        parent: range.parent.clone(),
+        delivery: range.delivery.clone(),
+        path,
+    }).collect()
+}
+
 fn delivery_content_presence_on_target_for_paths(
     repo_path: &std::path::Path,
     delivery_commit: &str,
@@ -26624,49 +26703,58 @@ fn delivery_content_presence_on_target_for_paths(
     }
 }
 
-fn delivery_content_presence_on_target_for_paths_raw(
+/// cas-0e29e: the first-parent range and delivered paths one
+/// `delivery_content_presence_on_target_for_paths` call walks, each path from
+/// `parent` to `target` (all resolved commits).
+struct DeliveryLineRange {
+    parent: String,
+    delivery: String,
+    target: String,
+    paths: Vec<String>,
+}
+
+fn delivery_line_range(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     target_ref: &str,
     selected_paths: Option<&[String]>,
-    resolution_only: bool,
     base: Option<&str>,
-) -> DeliveryContentPresence {
+) -> Result<DeliveryLineRange, DeliveryContentPresence> {
     use std::process::Command;
 
     if !is_safe_git_refname(delivery_commit) || !is_safe_git_refname(target_ref)
         || base.is_some_and(|base| !is_safe_git_refname(base)) {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: "delivery commit or target ref is not safe to pass to Git".to_string(),
-        };
+        });
     }
     if !git_ref_exists(repo_path, delivery_commit) || !git_ref_exists(repo_path, target_ref) {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!(
                 "delivery commit `{delivery_commit}` or target `{target_ref}` does not resolve"
             ),
-        };
+        });
     }
 
     let Some(delivery) = resolve_branch_sha(repo_path, &format!("{delivery_commit}^{{commit}}"))
     else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` does not peel to a commit"),
-        };
+        });
     };
     let delivery_commit = delivery.as_str();
 
     let Some(delivery_parent) = base.map(str::to_string)
         .or_else(|| resolve_branch_sha(repo_path, &format!("{delivery_commit}^1")))
     else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` has no resolvable first parent"),
-        };
+        });
     };
     let Some(target) = resolve_branch_sha(repo_path, target_ref) else {
-        return DeliveryContentPresence::Unknown {
+        return Err(DeliveryContentPresence::Unknown {
             reason: format!("target `{target_ref}` does not resolve to a commit"),
-        };
+        });
     };
 
     // Match repository_proof: lifecycle-owned .cas metadata is outside the
@@ -26689,17 +26777,17 @@ fn delivery_content_presence_on_target_for_paths_raw(
     let names = match names {
         Ok(output) if output.status.success() => output.stdout,
         Ok(output) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!(
                     "Git could not enumerate delivery paths (exit {})",
                     output.status
                 ),
-            };
+            });
         }
         Err(error) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!("failed to enumerate delivery paths: {error}"),
-            };
+            });
         }
     };
     let paths = names
@@ -26714,19 +26802,37 @@ fn delivery_content_presence_on_target_for_paths_raw(
     let paths = match paths {
         Ok(paths) if !paths.is_empty() => paths,
         Ok(_) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: format!(
                     "delivery commit `{delivery_commit}` has no first-parent tree effect"
                 ),
-            };
+            });
         }
         Err(_) => {
-            return DeliveryContentPresence::Unknown {
+            return Err(DeliveryContentPresence::Unknown {
                 reason: "delivery paths are not valid UTF-8 and cannot be reported safely"
                     .to_string(),
-            };
+            });
         }
     };
+
+    Ok(DeliveryLineRange { parent: delivery_parent, delivery, target, paths })
+}
+
+fn delivery_content_presence_on_target_for_paths_raw(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    selected_paths: Option<&[String]>,
+    resolution_only: bool,
+    base: Option<&str>,
+) -> DeliveryContentPresence {
+    let DeliveryLineRange { parent: delivery_parent, delivery, target, paths } =
+        match delivery_line_range(repo_path, delivery_commit, target_ref, selected_paths, base) {
+            Ok(range) => range,
+            Err(unknown) => return unknown,
+        };
+    let delivery_commit = delivery.as_str();
 
     let mut dropped = Vec::new();
     let mut evolved = Vec::new();
@@ -26859,43 +26965,11 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
     carries_source: &std::cell::OnceCell<bool>,
     owners: &[&str],
 ) -> DeliveryContentPresence {
-    let ordinary = || {
-        delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch, owners)
-    };
-    let Some(paths) = std::process::Command::new("git")
-        .args([
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "-z",
-            &format!("{delivery_commit}^1"),
-            delivery_commit,
-            "--",
-        ])
-        .current_dir(repo_path)
-        .measurement_output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|path| !path.is_empty())
-                .map(|path| String::from_utf8(path.to_vec()).ok())
-                .collect::<Option<Vec<_>>>()
-        })
+    let Some((paths, artifacts, measured)) =
+        in_parent_artifact_split(repo_path, delivery_commit, parent_branch, carrier, carries_source)
     else {
-        return ordinary();
+        return delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch, owners);
     };
-    let (artifacts, measured): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
-        artifact_left_to_regeneration_rule(repo_path, carrier, path, carries_source)
-    });
-    if artifacts.is_empty() {
-        return ordinary();
-    }
-    if !delivery_reachable_in_parent(repo_path, delivery_commit, parent_branch) {
-        return ordinary();
-    }
     let inner = (!measured.is_empty()).then(|| {
         delivery_content_presence_in_parent_for_paths(
             repo_path,
@@ -26920,18 +26994,66 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
     }
 }
 
-/// The reachability [`delivery_content_presence_in_parent_for_paths`]
-/// requires before it measures anything.
-fn delivery_reachable_in_parent(
+/// The commit's paths, those left to cas-baf7's rule and those measured, as
+/// [`delivery_content_presence_in_parent_leaving_artifacts`] splits them; `None`
+/// when it makes the ordinary measurement instead.
+fn in_parent_artifact_split(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     parent_branch: &str,
-) -> bool {
+    carrier: &str,
+    carries_source: &std::cell::OnceCell<bool>,
+) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
+    let paths = std::process::Command::new("git")
+        .args([
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &format!("{delivery_commit}^1"),
+            delivery_commit,
+            "--",
+        ])
+        .current_dir(repo_path)
+        .measurement_output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .map(|path| String::from_utf8(path.to_vec()).ok())
+                .collect::<Option<Vec<_>>>()
+        })?;
+    let (artifacts, measured): (Vec<_>, Vec<_>) = paths.iter().cloned().partition(|path| {
+        artifact_left_to_regeneration_rule(repo_path, carrier, path, carries_source)
+    });
+    if artifacts.is_empty() || in_parent_target(repo_path, delivery_commit, parent_branch).is_none() {
+        return None;
+    }
+    Some((paths, artifacts, measured))
+}
+
+/// The parent ref [`delivery_content_presence_in_parent_for_paths`] measures
+/// on: the remote branch when it holds the delivery, else the local one.
+fn in_parent_target(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    parent_branch: &str,
+) -> Option<String> {
     let origin_parent = format!("origin/{parent_branch}");
-    (git_ref_exists(repo_path, &origin_parent)
-        && git_commit_is_ancestor(repo_path, delivery_commit, &origin_parent))
-        || (git_ref_exists(repo_path, parent_branch)
-            && git_commit_is_ancestor(repo_path, delivery_commit, parent_branch))
+    if git_ref_exists(repo_path, &origin_parent)
+        && git_commit_is_ancestor(repo_path, delivery_commit, &origin_parent)
+    {
+        Some(origin_parent)
+    } else if git_ref_exists(repo_path, parent_branch)
+        && git_commit_is_ancestor(repo_path, delivery_commit, parent_branch)
+    {
+        Some(parent_branch.to_string())
+    } else {
+        None
+    }
 }
 
 fn delivery_content_presence_in_parent_for_paths(
@@ -26942,26 +27064,17 @@ fn delivery_content_presence_in_parent_for_paths(
     resolution_only: bool,
     owners: &[&str],
 ) -> DeliveryContentPresence {
-    let origin_parent = format!("origin/{parent_branch}");
-    let target = if git_ref_exists(repo_path, &origin_parent)
-        && git_commit_is_ancestor(repo_path, delivery_commit, &origin_parent)
-    {
-        origin_parent.as_str()
-    } else if git_ref_exists(repo_path, parent_branch)
-        && git_commit_is_ancestor(repo_path, delivery_commit, parent_branch)
-    {
-        parent_branch
-    } else {
+    let Some(target) = in_parent_target(repo_path, delivery_commit, parent_branch) else {
         return DeliveryContentPresence::Unknown {
             reason: format!(
-                "delivery commit `{delivery_commit}` is not reachable from `{parent_branch}` or `{origin_parent}`"
+                "delivery commit `{delivery_commit}` is not reachable from `{parent_branch}` or `origin/{parent_branch}`"
             ),
         };
     };
     delivery_content_presence_on_target_for_paths(
         repo_path,
         delivery_commit,
-        target,
+        &target,
         selected_paths,
         resolution_only,
         owners,

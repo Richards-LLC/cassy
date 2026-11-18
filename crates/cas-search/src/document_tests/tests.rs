@@ -130,6 +130,9 @@ fn test_rule_search_document() {
     assert_eq!(rule.doc_type(), "rule");
     assert_eq!(rule.doc_tags(), vec!["security", "validation"]);
 
+    assert!(rule.doc_title().is_none());
+    assert_eq!(rule.doc_embedding_text(), rule.content);
+
     let metadata = rule.doc_metadata();
     assert_eq!(metadata.get("status"), Some(&"Proven".to_string()));
     assert_eq!(metadata.get("paths"), Some(&"**/*.rs".to_string()));

@@ -21,7 +21,6 @@ impl TestDoc {
         }
     }
 
-    #[cfg(feature = "parallel")]
     fn with_type(mut self, doc_type: &str) -> Self {
         self.doc_type = doc_type.to_string();
         self

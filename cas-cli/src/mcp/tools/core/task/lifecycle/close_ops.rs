@@ -771,6 +771,7 @@ struct PublishedDeliveryProof {
     anchor: String,
     target: String,
     target_sha: String,
+    release_tag: String,
 }
 
 fn published_delivery_proof(
@@ -811,8 +812,17 @@ fn published_delivery_proof(
     let branch = crate::mcp::tools::core::task::repo_context::resolve_default_branch(&repo).ok()?;
     let target = format!("refs/remotes/origin/{branch}");
     let target_sha = crate::qa_batch::commit(&repo, &target)?;
-    git_commit_is_ancestor(&repo, &anchor, &target_sha)
-        .then_some(PublishedDeliveryProof { anchor, target, target_sha })
+    if !git_commit_is_ancestor(&repo, &anchor, &target_sha) { return None; }
+    // A fresh main merge still owes its queue/receipt and correction gates.
+    // This recovery is for shipped releases, whose version tag contains the
+    // active delivery and is itself contained in the published default tip.
+    let tags = crate::git_evidence::git_text(&repo,
+        &["tag", "--list", "v*", "--contains", &anchor, "--merged", &target_sha])?;
+    let release_tag = tags.lines().filter_map(|tag| {
+        let version = semver::Version::parse(tag.strip_prefix('v')?).ok()?;
+        Some((version, tag.to_string()))
+    }).max_by(|left, right| left.0.cmp(&right.0))?.1;
+    Some(PublishedDeliveryProof { anchor, target, target_sha, release_tag })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8193,6 +8203,7 @@ impl CasCore {
         if let Some(proof) = published_delivery.as_ref() {
             close_notes.record(&mut task, &format!("MAIN_ANCESTRY_CLOSE: {}", serde_json::json!({
                 "anchor": proof.anchor, "target": proof.target, "target_sha": proof.target_sha,
+                "release_tag": proof.release_tag,
                 "disposition": "already_published", "park_gates": "not_replayed_after_publication",
             })));
         }
@@ -32412,6 +32423,7 @@ esac
         git(repo, &["commit", "-qm", "fix(cas-4cbf1): shipped implementation"]);
         let shipped = rev_parse_local(repo, "HEAD");
         git(repo, &["update-ref", "refs/remotes/origin/main", &shipped]);
+        git(repo, &["tag", "v0.1.0", &shipped]);
         git(repo, &["checkout", "-qb", "unshipped"]);
         std::fs::write(repo.join("pending.rs"), "fn pending() {}\n").unwrap();
         git(repo, &["add", "pending.rs"]);

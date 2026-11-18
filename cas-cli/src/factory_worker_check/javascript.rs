@@ -22,11 +22,17 @@ fn safe_path(path: &str) -> bool {
         && !path.starts_with('-')
 }
 
-fn javascript(path: &str) -> bool {
+pub(super) fn javascript(path: &str) -> bool {
     matches!(
         Path::new(path).extension().and_then(|ext| ext.to_str()),
         Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts")
     )
+}
+
+pub(super) fn test_file(path: &str) -> bool {
+    let stem = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    [".test", ".spec", ".journey", ".integration"].iter().any(|suffix| stem.ends_with(suffix))
+        || path.split('/').any(|part| matches!(part, "__tests__" | "tests" | "test" | "e2e"))
 }
 
 /// A scoped JavaScript stability command, however the shell names its runner.
@@ -41,9 +47,8 @@ pub(super) struct Invocation {
 
 pub(super) const SHAPE: &str = "JavaScript stability runs one runner on its test files: `[npx|pnpm exec|yarn|bunx] vitest|jest|playwright [run|test] [--config <file>] <test files>` or `node --test <test files>`";
 
-/// Package-manager prefixes and runner subcommands are spelling; the only
-/// runner option is a config file. Retries, filters and other flags stay
-/// refused: the stability run owns them.
+/// Package-manager prefixes and runner subcommands are spelling. The capped
+/// run owns selection, widening caller name filters rather than trusting them.
 pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let args = match args.as_slice() {
@@ -66,6 +71,11 @@ pub(super) fn invocation(args: &[String]) -> Option<Invocation> {
         let value = match *arg {
             "--config" | "-c" => Some(*rest.next()?),
             "--runInBand" | "-i" if runner == "jest" => continue,
+            "--testNamePattern" | "-t" if runner == "jest" => {
+                if rest.next()?.is_empty() { return None; }
+                continue;
+            }
+            other if runner == "jest" && other.starts_with("--testNamePattern=") => continue,
             other => other.strip_prefix("--config="),
         };
         if let Some(value) = value {
@@ -153,7 +163,7 @@ pub(crate) fn changed_tests(
             lines = lines
                 .into_iter()
                 .flat_map(|(start, end)| {
-                    if start == end && diff_deletes_at(&diff, start) {
+                    if start > end {
                         // A pure deletion has no surviving line to blame.
                         return vec![(start, end)];
                     }
@@ -174,21 +184,14 @@ pub(crate) fn changed_tests(
             .map(String::from_utf8)
             .transpose()?
             .unwrap_or_default();
-        let stem = Path::new(path)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default();
-        let test_file = stem.ends_with(".test")
-            || stem.ends_with(".spec")
-            || path.split('/').any(|part| part == "__tests__");
+        let test_file = self::test_file(path);
         let all = match parsed_tests(path, &source, &[(1, usize::MAX)], false) {
             Ok(all) => all,
-            // GH #2054: a source file the parser cannot read declares no
-            // tests; only a test file's parse error refuses (cas-6aa9).
-            Err(_) if !test_file => continue,
+            // The caller widens an unclassifiable source to its package.
             Err(error) => return Err(error),
         };
-        if test_file && all.is_empty() && !source.trim().is_empty() {
+        let only_deletions = lines.iter().all(|(start, end)| start > end);
+        if test_file && all.is_empty() && !source.trim().is_empty() && !only_deletions {
             bail!(
                 "cannot resolve tests in {path}: test factories require explicit source-to-runtime identities"
             );
@@ -246,17 +249,6 @@ fn authored_lines(
     Ok(lines)
 }
 
-/// Whether the net diff deletes lines just above head line `line`.
-fn diff_deletes_at(diff: &str, line: usize) -> bool {
-    diff.lines().filter(|hunk| hunk.starts_with("@@ ")).any(|hunk| {
-        let mut ranges = hunk.split_whitespace().skip(1);
-        let (Some(old), Some(new)) = (ranges.next(), ranges.next()) else { return false };
-        let count = |range: &str| range.split_once(',').map_or(Some(1), |(_, n)| n.parse::<usize>().ok());
-        let start = new.trim_start_matches('+').split(',').next().and_then(|n| n.parse::<usize>().ok());
-        count(old).is_some_and(|n| n > 0) && count(new) == Some(0) && start == Some(line)
-    })
-}
-
 fn changed_lines(diff: &str) -> Result<Vec<(usize, usize)>> {
     diff.lines()
         .filter(|line| line.starts_with("@@ "))
@@ -270,8 +262,9 @@ fn changed_lines(diff: &str) -> Result<Vec<(usize, usize)>> {
             let (start, count) = range.split_once(',').unwrap_or((range, "1"));
             let start: usize = start.parse()?;
             let count: usize = count.parse()?;
-            // A pure deletion inside a surviving test still changes that test.
-            Ok((start, start + count.saturating_sub(1)))
+            // A deletion is a gap after `start`, not a surviving changed line.
+            // Reversed bounds intersect a containing scope but neither neighbour.
+            Ok(if count == 0 { (start + 1, start) } else { (start, start + count - 1) })
         })
         .collect()
 }
@@ -533,7 +526,9 @@ fn mask_type_imports(source: &str) -> std::borrow::Cow<'_, str> {
     let imports = TYPE_IMPORT.replace_all(source, |caps: &regex::Captures<'_>| {
         let (whole, query) = (&caps[0], caps.get(1).unwrap());
         let start = query.start() - caps.get(0).unwrap().start();
-        format!("{}{}", &whole[..start], "_".repeat(query.len()))
+        let masked = query.as_str().bytes().enumerate().map(|(index, byte)|
+            if matches!(byte, b'\n' | b'\r') { byte as char } else if index == 0 { '_' } else { ' ' }).collect::<String>();
+        format!("{}{}", &whole[..start], masked)
     });
     if !TEMPLATE_TYPE_ARGUMENTS.is_match(&imports) {
         return imports;
@@ -905,7 +900,16 @@ fn walk(
                 .named_children(&mut cursor)
                 .skip(1)
                 .any(|arg| arg.kind() == "identifier");
-        if strict && (external_callback || (suite && supported && callback.is_none())) {
+        let external_changed = external_callback && {
+            let mut cursor = args.walk();
+            force || overlaps(node, lines)
+                || args.named_children(&mut cursor).skip(1)
+                    .filter(|arg| arg.kind() == "identifier")
+                    .any(|argument| callback_scope_changed(tree_root(node), text(argument, source), source, lines))
+                || control_headers(node, source, aliases).iter().any(|(first, last, _)|
+                    lines.iter().any(|(start, end)| start <= last && end >= first))
+        };
+        if strict && (external_changed || (suite && supported && callback.is_none() && (force || overlaps(node, lines)))) {
             bail!(
                 "cannot resolve changed test scope at {path}:{}: out-of-line callbacks require explicit source-to-runtime identities",
                 node.start_position().row + 1
@@ -977,8 +981,30 @@ fn walk(
     Ok(())
 }
 
-pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()> {
+fn tree_root(mut node: Node<'_>) -> Node<'_> {
+    while let Some(parent) = node.parent() { node = parent; }
+    node
+}
+
+/// An unchanged registration can still owe proof when its callback changed.
+/// Include unsupported binding forms conservatively; discovery will widen them.
+fn callback_scope_changed(node: Node<'_>, name: &str, source: &str, lines: &[(usize, usize)]) -> bool {
+    if matches!(node.kind(), "variable_declarator" | "function_declaration" | "generator_function_declaration" | "import_statement")
+        && (node.child_by_field_name("name").is_some_and(|binding| contains_binding(binding, name, source))
+            || (node.kind() == "import_statement" && contains_binding(node, name, source)))
+        && overlaps(node, lines)
+    {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(|child| callback_scope_changed(child, name, source, lines))
+}
+
+pub(crate) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()> {
     let invocation = invocation(args).context(SHAPE)?;
+    if args.iter().any(|arg| arg == "-t" || arg.starts_with("--testNamePattern")) {
+        eprintln!("Widening the caller's name filter to the capped changed-test selection");
+    }
     let repo = PathBuf::from(super::git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     // Paths are as the shell sees them: relative to the invocation directory.
     let cwd = cwd.canonicalize()?;
@@ -996,7 +1022,11 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         .config
         .as_deref()
         .map(|config| {
-            let config = repo.join(relative(config)?);
+            let mut config = repo.join(relative(config)?);
+            if !config.is_file() && let Some(file) = files.first() {
+                let (package, _) = runner_root(&repo, file, invocation.runner)?;
+                config = package.join(invocation.config.as_deref().expect("config"));
+            }
             if !config.is_file() {
                 bail!("{} config not found: {}", invocation.runner, config.display());
             }
@@ -1013,12 +1043,17 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
     let head = super::clean_head(&repo)?;
     let config = crate::config::Config::load(cas_root)?.factory();
     let base = super::proof_diff_base(cas_root, &repo, config.epic_base_branch.as_deref())?;
-    let tests = changed_tests(&repo, &base, &head, &files, None)?;
-    if tests.is_empty() {
-        bail!(crate::gates::tag(
-            "G-61",
-            "no changed JavaScript tests matched the supplied files"
-        ));
+    let mut tests = Vec::new();
+    let mut widened = BTreeMap::new();
+    for file in &files {
+        match changed_tests(&repo, &base, &head, std::slice::from_ref(file), None) {
+            Ok(selected) if !selected.is_empty() => tests.extend(selected),
+            result => {
+                let scope = super::widened::scope(&repo, file);
+                eprintln!("Widening {file} to {scope:?} for one capped pass: {}", result.err().map(|error| format!("{error:#}")).unwrap_or_else(|| "no static changed-test selection".into()));
+                widened.entry(scope).or_insert_with(|| file.clone());
+            }
+        }
     }
     let _lane =
         super::try_lock_lane_with_command(cas_root, &repo, &super::worker_check_command(args))?
@@ -1036,7 +1071,11 @@ pub(super) fn execute(cas_root: &Path, args: &[String], cwd: &Path) -> Result<()
         )
     })?;
     super::stability::invalidate(cas_root, &repo, &head, &tests)?;
-    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests)?;
+    for (scope, file) in &widened {
+        execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &[], Some((scope, file)))?;
+    }
+    if tests.is_empty() { return Ok(()); }
+    let proof = execute_tests(cas_root, &repo, &head, invocation.runner, runner_config.as_deref(), &tests, None)?;
     println!(
         "stability: PASS {head} {} {} tests 5/5 in {} ms",
         proof.runner,
@@ -1230,6 +1269,7 @@ fn execute_tests(
     runner: &str,
     runner_config: Option<&Path>,
     tests: &[Identity],
+    widened: Option<(&super::widened::Scope, &str)>,
 ) -> Result<Proof> {
     let start = Instant::now();
     let config = crate::config::Config::load(cas_root)?.factory();
@@ -1242,11 +1282,20 @@ fn execute_tests(
     for test in tests {
         by_file.entry(&test.path).or_default().push(test);
     }
+    if let Some((scope, file)) = widened {
+        super::widened::invalidate(cas_root, repo, head, scope)?;
+        by_file.insert(file, Vec::new());
+    }
+    let mut count = 0;
     let reports = tempfile::tempdir()?;
     for (path, selected) in by_file {
         // One config path: the caller's own `--config` wins over the
         // discovered runner config (cas-1468); never pass both.
-        let (package, discovered) = runner_root(repo, path, runner)?;
+        let (package, discovered) = if let Some((super::widened::Scope::Package(directory), _)) = widened {
+            let package = repo.join(directory);
+            let config = self::runner_config(&package, runner);
+            (package, config)
+        } else { runner_root(repo, path, runner)? };
         let config: Vec<std::ffi::OsString> = runner_config
             .map(Path::to_path_buf)
             .or(discovered)
@@ -1259,7 +1308,7 @@ fn execute_tests(
             runner_path(repo, &package, runner)?
         };
         let source = std::fs::read_to_string(repo.join(path))?;
-        let sites = declared_sites(path, &source)?;
+        let sites = if widened.is_none() { declared_sites(path, &source)? } else { Vec::new() };
         if !sites.is_empty() {
             if runner != "playwright" {
                 bail!("declared stability identities require native Playwright discovery");
@@ -1293,7 +1342,7 @@ fn execute_tests(
             format!("^(?:{pattern})$")
         };
         let selected: Vec<_> = selected.into_iter().cloned().collect();
-        verify_repeats(runner, repo, &selected, |iteration| {
+        count += verify_repeats(runner, repo, &selected, |iteration| {
             let report = reports.path().join(format!("report-{iteration}.json"));
             let mut command = Command::new(&executable);
             command.current_dir(&package).env("CI", "1");
@@ -1316,10 +1365,7 @@ fn execute_tests(
                             "--reporter=json",
                             "--outputFile",
                         ])
-                        .arg(&report)
-                        .arg("--testNamePattern")
-                        .arg(&pattern)
-                        .arg(&file);
+                        .arg(&report);
                 }
                 "jest" => {
                     command
@@ -1331,11 +1377,7 @@ fn execute_tests(
                             "--json",
                             "--outputFile",
                         ])
-                        .arg(&report)
-                        .arg("--testNamePattern")
-                        .arg(&pattern)
-                        .arg("--runTestsByPath")
-                        .arg(&file);
+                        .arg(&report);
                 }
                 "playwright" => {
                     command
@@ -1343,7 +1385,7 @@ fn execute_tests(
                         .args(&config)
                         .args([
                             "--repeat-each",
-                            "5",
+                            if widened.is_some() { "1" } else { "5" },
                             "--retries",
                             "0",
                             "--max-failures",
@@ -1354,9 +1396,6 @@ fn execute_tests(
                             "--output",
                         ])
                         .arg(reports.path().join("playwright-output"))
-                        .arg("--grep")
-                        .arg(&pattern)
-                        .arg(regex::escape(&file.to_string_lossy()))
                         .env("PLAYWRIGHT_JSON_OUTPUT_FILE", &report);
                 }
                 "node" => {
@@ -1366,11 +1405,21 @@ fn execute_tests(
                         .args(["--test", "--test-concurrency=1", "--test-reporter=spec"])
                         .arg("--test-reporter-destination=stdout")
                         .arg(format!("--test-reporter={}", reporter.display()))
-                        .arg(format!("--test-reporter-destination={}", report.display()))
-                        .arg(format!("--test-name-pattern={pattern}"))
-                        .arg(&file);
+                        .arg(format!("--test-reporter-destination={}", report.display()));
                 }
                 _ => bail!("unsupported stability runner: {runner}"),
+            }
+            if widened.is_none() {
+                match runner {
+                    "node" => { command.arg(format!("--test-name-pattern={pattern}")); }
+                    "playwright" => { command.args(["--grep", &pattern]); }
+                    _ => { command.args(["--testNamePattern", &pattern]); }
+                }
+            }
+            if !matches!(widened, Some((super::widened::Scope::Package(_), _))) {
+                if runner == "jest" { command.arg("--runTestsByPath"); }
+                if runner == "playwright" { command.arg(regex::escape(&file.to_string_lossy())); }
+                else { command.arg(&file); }
             }
             let marker = reports.path().join(format!("scope-{iteration}"));
             let success = run_scoped_javascript(command, high, &marker)?;
@@ -1387,10 +1436,13 @@ fn execute_tests(
     let proof = Proof {
         runner: runner.to_string(),
         tests: tests.to_vec(),
-        consecutive_passes: 5,
+        consecutive_passes: if widened.is_some() { 1 } else { 5 },
         elapsed_ms: start.elapsed().as_millis(),
     };
-    super::stability::record(cas_root, repo, head, proof.clone())?;
+    if let Some((scope, _)) = widened {
+        super::widened::record(cas_root, repo, head, super::widened::Proof { runner: runner.into(), scope: scope.clone() }, count as u64)?;
+        println!("widened: PASS {head} {scope:?} {count} tests; passes=1");
+    } else { super::stability::record(cas_root, repo, head, proof.clone())?; }
     Ok(proof)
 }
 
@@ -1571,15 +1623,16 @@ fn verify_repeats(
     repo: &Path,
     tests: &[Identity],
     mut run: impl FnMut(usize) -> Result<(bool, Value)>,
-) -> Result<()> {
-    for iteration in 0..if runner == "playwright" { 1 } else { 5 } {
+) -> Result<usize> {
+    let mut count = 0;
+    for iteration in 0..if runner == "playwright" || tests.is_empty() { 1 } else { 5 } {
         let (success, report) = run(iteration)?;
-        validate_report(
+        count = validate_report(
             runner,
             repo,
             &report,
             tests,
-            if runner == "playwright" { 5 } else { 1 },
+            if runner == "playwright" && !tests.is_empty() { 5 } else { 1 },
         )?;
         if !success {
             bail!(
@@ -1588,7 +1641,7 @@ fn verify_repeats(
             );
         }
     }
-    Ok(())
+    Ok(count)
 }
 
 fn validate_report(
@@ -1597,7 +1650,7 @@ fn validate_report(
     report: &Value,
     tests: &[Identity],
     repeats: usize,
-) -> Result<()> {
+) -> Result<usize> {
     let mut results: BTreeMap<Identity, usize> = BTreeMap::new();
     if runner == "playwright" {
         let root = report
@@ -1696,10 +1749,11 @@ fn validate_report(
             );
         }
     }
-    if results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
+    if !tests.is_empty() && results.keys().any(|ran| !tests.iter().any(|test| test.selects(ran))) {
         bail!("{runner} ran tests outside the changed selection");
     }
-    Ok(())
+    if results.is_empty() { bail!(crate::gates::tag("G-61", format!("{runner} executed zero tests"))); }
+    Ok(results.len())
 }
 
 fn report_path(repo: &Path, path: &str) -> Result<String> {
@@ -1851,7 +1905,7 @@ mod tests {
         let tests = changed_tests(repo.path(), &base, &head, &invocation.files, None).unwrap();
         assert_eq!(tests, [id(file, "server changed")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &tests).unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, invocation.runner, None, &tests, None).unwrap();
         assert_eq!(
             (proof.runner.as_str(), proof.consecutive_passes),
             ("node", 5)
@@ -1897,7 +1951,7 @@ mod tests {
         let tests = changed_tests(repo.path(), &base, &head, &[file.to_string()], None).unwrap();
         assert_eq!(tests, [id(file, "aliased keeps consent"), id(file, "legal keeps consent")]);
         let cas_root = tempfile::tempdir().unwrap();
-        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests).unwrap();
+        let proof = execute_tests(cas_root.path(), repo.path(), &head, "node", None, &tests, None).unwrap();
         assert_eq!(proof.consecutive_passes, 5);
 
         // Branches of different kinds cannot name a runtime identity.
@@ -1953,14 +2007,16 @@ mod tests {
         let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[file.to_string()], None).unwrap();
         assert_eq!(tests, [id(file, "auth signs out")]);
 
-        // GH #2054: an unparseable source file in the delivery holds no tests.
+        // GH #2054: uncertain source parsing widens to package proof without
+        // erasing identified changed tests in the neighbouring test file.
         let service = "comment-analytics.service.ts";
         std::fs::write(repo.path().join(service), "export const total = ;\n").unwrap();
         std::fs::write(repo.path().join(file), source("expect(4).toBe(4);")).unwrap();
         git(&["add", "."]);
         git(&["commit", "--quiet", "-m", "service"]);
-        let tests = changed_tests(repo.path(), "HEAD~1", "HEAD", &[service.to_string(), file.to_string()], None).unwrap();
+        let (tests, widened) = super::super::stability::requirements(repo.path(), "HEAD", "HEAD~1", &[service.to_string(), file.to_string()], None).unwrap();
         assert_eq!(tests, [id(file, "auth signs out")]);
+        assert_eq!(widened, [super::super::widened::Scope::Package(String::new())]);
     }
 
     /// pulse-card (GH #2011): apps/backend/scripts/package.json hid
@@ -2081,7 +2137,7 @@ mod tests {
         assert_eq!(source_tests("a.test.ts", generic, &[(1, 4)]).unwrap(), [id("a.test.ts", "a")]);
         assert_eq!(
             changed_lines("@@ -7 +7,0 @@\n-x\n@@ -10 +9,2 @@\n+y\n+z").unwrap(),
-            [(7, 7), (9, 10)]
+            [(8, 7), (9, 10)]
         );
         assert!(!allowed_args(&["vitest".into(), "--retry=3".into()]));
         assert!(!allowed_args(&["jest".into(), "../a.test.js".into()]));
@@ -2095,6 +2151,7 @@ mod tests {
             ("npx vitest run src/a.spec.ts", "vitest", None),
             ("pnpm exec vitest run src/a.spec.ts", "vitest", None),
             ("npx jest src/a.spec.ts --runInBand", "jest", None),
+            ("npx jest -t name src/a.spec.ts", "jest", None),
             ("pnpm exec jest --config jest.conversations.config.js --runInBand src/a.spec.ts", "jest", Some("jest.conversations.config.js")),
             ("yarn playwright test -c e2e/playwright.config.ts src/a.spec.ts", "playwright", Some("e2e/playwright.config.ts")),
         ] {
@@ -2104,8 +2161,19 @@ mod tests {
                 "{command}"
             );
         }
-        for command in ["npx jest -t name src/a.spec.ts", "vitest run --retry 2 src/a.spec.ts", "jest --config ../x.js src/a.spec.ts"] {
+        for command in ["vitest run --retry 2 src/a.spec.ts", "jest --config ../x.js src/a.spec.ts"] {
             assert_eq!(parse(command), None, "{command}");
+        }
+        // Exact command shapes supplied in the G-61 reports. Caller filters
+        // cannot narrow the capped run's own source-derived selection.
+        for (issue, command) in [
+            (2058, "jest apps/backend/test/inbox-analysis-pool.integration.ts --config apps/backend/test/jest-inbox-tools.integration.config.js"),
+            (2059, "jest apps/backend/test/workspace-reports.integration.ts --config test/jest-workspace-reports.integration.config.js"),
+            (2064, "jest apps/backend/test/inbox-tools.integration.ts --config apps/backend/test/jest-inbox-tools.integration.config.js --runInBand --testNamePattern=positive-filter"),
+            (2064, "jest apps/backend/test/inbox-analysis-pool.integration.ts --config apps/backend/test/jest-inbox-tools.integration.config.js -t positive-filter"),
+            (2066, "pnpm exec jest apps/backend/test/sales-opportunity.integration.ts --config test/jest-sales-opportunity.integration.config.js --runInBand"),
+        ] {
+            assert!(parse(command).is_some(), "GH #{issue}: {command}");
         }
         let aliased = "import { test as check } from 'vitest'; check('case_id', () => {});";
         assert_eq!(
@@ -2481,6 +2549,38 @@ test('unrelated', () => { throw new Error('must remain unselected'); });
         assert!(
             validate_report("playwright", Path::new("/project"), &report, &selected, 5).is_err()
         );
+    }
+
+    #[test]
+    fn deletion_beside_legacy_callbacks_only_classifies_surviving_edits_cas_31eb() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").current_dir(repo.path())
+                .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        let path = "whole-picture.journey.ts";
+        let kept = "for (const width of [390, 1280]) {\n  test.describe(`surface ${width}`, () => {\n    const callback = async () => {\n      work();\n    };\n    test(`kept ${width}`, callback);\n  });\n}\n";
+        std::fs::write(repo.path().join(path), format!("test('removed', () => {{}});\n\n{kept}")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(path), kept).unwrap();
+        git(&["commit", "-qam", "delete unrelated inline test"]);
+        let deleted = git(&["rev-parse", "HEAD"]);
+        assert!(changed_tests(repo.path(), &base, &deleted, &[path.into()], None).unwrap().is_empty());
+        std::fs::write(repo.path().join(path), kept.replace("work();", "changed();")).unwrap();
+        git(&["commit", "-qam", "edit callback"]);
+        assert!(changed_tests(repo.path(), &deleted, "HEAD", &[path.into()], None).is_err());
+    }
+
+    #[test]
+    fn multiline_type_import_keeps_changed_test_locations_cas_31eb() {
+        let source = "vi.mock('m', async load => ({ ...(await load<typeof import(\n  'm'\n)>()) }));\ntest('before', () => {});\ntest('after', () => { work(); });\n";
+        assert_eq!(source_tests("a.test.ts", source, &[(5, 5)]).unwrap(), [id("a.test.ts", "after")]);
     }
 
     #[test]

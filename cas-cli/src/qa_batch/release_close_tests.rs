@@ -29,7 +29,7 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
     let tasks = crate::store::open_task_store(&root).unwrap();
     let mut anchors = BTreeMap::new();
     let mut foreign = None;
-    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone"] {
+    for id in ["cas-reverted", "cas-partial", "cas-ledger", "cas-compact", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved"] {
         if id == "cas-undone" {
             std::fs::write(repo.join("shared.rs"), "fn shared() { baseline() }\n").unwrap();
             git(&["add", "shared.rs"]);
@@ -45,6 +45,12 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         if id == "cas-undone" {
             std::fs::write(repo.join("shared.rs"), "fn shared() { delivered() }\n").unwrap();
             git(&["commit", "-qam", "deliver shared change"]);
+        }
+        if id == "cas-doc-evolved" {
+            std::fs::write(repo.join("docs/PRODUCT_OVERVIEW.md"),
+                "# Product\n\n## Core Concepts\n\nShipped marmoset.\n").unwrap();
+            git(&["add", "docs/PRODUCT_OVERVIEW.md"]);
+            git(&["commit", "-qm", "delivery overview"]);
         }
         if id == "cas-redrafted" {
             // cas-f4a2 / v4.28: 03bc's red control reverted inside its own
@@ -109,7 +115,18 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         git(&["checkout", "-q", "main"]);
         git(&["merge", "--no-ff", "-qm", "merge delivery", id]);
         let merge = git(&["rev-parse", "HEAD"]);
-        if id == "cas-reverted" {
+        if id == "cas-doc-evolved" {
+            // v4.28 cas-d725: an unrelated revert touched the generated
+            // overview before release prep rewrote the delivered prose.
+            let overview = repo.join("docs/PRODUCT_OVERVIEW.md");
+            std::fs::write(&overview,
+                "# Product\n\n## Core Concepts\n\nShipped marmoset.\n\nSibling experiment.\n").unwrap();
+            git(&["commit", "-qam", "unrelated sibling experiment"]);
+            git(&["revert", "--no-edit", "HEAD"]);
+            std::fs::write(&overview,
+                "# Product\n\n## Core Concepts\n\nRegenerated zeppelin.\n").unwrap();
+            git(&["commit", "-qam", "build: regenerate project overview"]);
+        } else if id == "cas-reverted" {
             git(&["revert", "-m", "1", "--no-edit", &merge]);
         } else if id == "cas-partial" {
             git(&["revert", "--no-edit", &first]);
@@ -206,15 +223,15 @@ fn reverted_delivery_is_held_at_release_closeout_cas_aeb3() {
         assert!(inventory.exceptions.iter().any(|e| e.task_id == id && serde_json::to_value(&e.code).unwrap() == "reverted"));
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == id));
     }
-    for id in ["cas-retained", "cas-redrafted", "cas-evolved"] {
+    for id in ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved"] {
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{id}: {:?}", result.members.get(id));
     }
-    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone"] {
+    for id in ["cas-reverted", "cas-partial", "cas-unfolded", "cas-retained", "cas-redrafted", "cas-resynced", "cas-foreign-cut", "cas-evolved", "cas-undone", "cas-doc-evolved"] {
         let task = tasks.get(id).unwrap();
         assert_eq!(release_tag_ships_delivery(&repo,
             task.deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
             task.deliverables.factory_branch_anchor.as_deref().unwrap(), &scope.final_release_sha, id),
-            ["cas-retained", "cas-redrafted", "cas-evolved"].contains(&id), "{id}");
+            ["cas-retained", "cas-redrafted", "cas-evolved", "cas-doc-evolved"].contains(&id), "{id}");
     }
     assert!(prepare_release_tag_receipt(&root, &["cas-retained".into()], &tag).is_ok());
     for id in ["cas-reverted", "cas-partial", "cas-unfolded"] {

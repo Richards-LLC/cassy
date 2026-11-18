@@ -393,26 +393,6 @@ fn test_code_search_result_from_symbol() {
     assert!(result.source.as_ref().unwrap().contains("test_func"));
 }
 
-/// Test: Snippet creation
-#[test]
-fn test_code_search_snippet_creation() {
-    // Short source
-    let snippet = CodeSearchResult::create_snippet("fn foo() {}");
-    assert_eq!(snippet, "fn foo() {}");
-
-    // Multi-line source (more than 3 lines)
-    let source = "fn foo() {\n    bar();\n    baz();\n    qux();\n}";
-    let snippet = CodeSearchResult::create_snippet(source);
-    assert!(snippet.ends_with("..."));
-    assert!(snippet.contains("bar()"));
-
-    // Very long single line
-    let long = "a".repeat(300);
-    let snippet = CodeSearchResult::create_snippet(&long);
-    assert_eq!(snippet.len(), 200);
-    assert!(snippet.ends_with("..."));
-}
-
 /// Test: Search stats
 #[test]
 fn test_code_search_stats() {

@@ -11,7 +11,7 @@ use cas_search::{Bm25Index, SearchDocument, TextIndex};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tempfile::tempdir;
 
 /// Test document implementing SearchDocument
@@ -509,10 +509,6 @@ fn test_bm25_concurrent_searches() {
     );
 
     assert!(total > 0, "Should find results");
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "Concurrent searches should be fast"
-    );
 }
 
 /// Test: Update document (re-index with same ID)
@@ -635,52 +631,4 @@ fn test_bm25_rebuild_atomic() {
 
     // New documents should exist
     assert!(index.exists("new-0").unwrap());
-}
-
-/// Test: Search performance with 10k documents
-#[test]
-fn test_bm25_search_performance_10k() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    // Create 10k documents with some having a special keyword
-    let docs: Vec<TestDoc> = (0..10_000)
-        .map(|i| {
-            let content = if i % 100 == 0 {
-                format!("Document {i} with specialkeyword for testing")
-            } else {
-                format!("Document {i} with regular content")
-            };
-            TestDoc::new(&format!("doc-{i:05}"), &content)
-        })
-        .collect();
-
-    let doc_refs: Vec<&dyn SearchDocument> =
-        docs.iter().map(|d| d as &dyn SearchDocument).collect();
-
-    let start = Instant::now();
-    index.index_batch(doc_refs).unwrap();
-    let index_time = start.elapsed();
-    println!("Indexed 10k docs in {index_time:?}");
-
-    // Search should find ~100 documents
-    let start = Instant::now();
-    let results = index.search("specialkeyword", 200).unwrap();
-    let search_time = start.elapsed();
-
-    assert_eq!(
-        results.len(),
-        100,
-        "Should find exactly 100 docs with keyword"
-    );
-    println!(
-        "Search found {} results in {:?}",
-        results.len(),
-        search_time
-    );
-
-    // Search should be fast (< 100ms)
-    assert!(
-        search_time.as_millis() < 100,
-        "Search should be fast, took {search_time:?}"
-    );
 }

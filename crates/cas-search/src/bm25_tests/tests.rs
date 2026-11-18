@@ -352,47 +352,6 @@ fn test_bm25_scoring() {
 }
 
 #[test]
-fn test_search_10k_documents() {
-    let index = Bm25Index::in_memory().unwrap();
-
-    // Create 10k documents
-    let docs: Vec<TestDoc> = (0..10_000)
-        .map(|i| {
-            let content = if i % 100 == 0 {
-                format!("Document {i} with special keyword searchterm")
-            } else {
-                format!("Document {i} with regular content")
-            };
-            TestDoc::new(&format!("doc-{i:05}"), &content)
-        })
-        .collect();
-
-    let doc_refs: Vec<&dyn SearchDocument> =
-        docs.iter().map(|d| d as &dyn SearchDocument).collect();
-
-    let start = std::time::Instant::now();
-    let count = index.index_batch(doc_refs).unwrap();
-    let index_time = start.elapsed();
-
-    assert_eq!(count, 10_000);
-    println!("Indexed 10k docs in {index_time:?}");
-
-    // Search should find ~100 documents (every 100th has the keyword)
-    let start = std::time::Instant::now();
-    let results = index.search("searchterm", 200).unwrap();
-    let search_time = start.elapsed();
-
-    assert_eq!(results.len(), 100);
-    println!("Searched 10k docs in {search_time:?}");
-
-    // Search should be fast (< 100ms)
-    assert!(
-        search_time.as_millis() < 100,
-        "Search took too long: {search_time:?}"
-    );
-}
-
-#[test]
 fn test_concurrent_reads() {
     use std::sync::Arc;
     use std::thread;

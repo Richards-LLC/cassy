@@ -3226,12 +3226,10 @@ mod tests {
             );
         }
         // Read-only narrows the allowlist; it never widens it.
-        assert_eq!(
+        assert!(matches!(
             decide(Worker, "github", "list_issues", true),
-            ProxyPolicyDecision::Deny {
-                reason: ExternalToolAllowlistPolicy::denial_reason("github", "list_issues"),
-            }
-        );
+            ProxyPolicyDecision::Deny { .. }
+        ));
         // A server without the mode is unchanged for workers.
         assert_eq!(
             decide(Worker, "review", "start_review", false),

@@ -2336,9 +2336,7 @@ fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Re
 
 pub(crate) fn diff_base(repo: &Path, target: Option<&str>) -> Result<String> {
     if let Some(target) = target {
-        let remote = format!("refs/remotes/origin/{target}");
-        return git(repo, &["merge-base", &remote, "HEAD"])
-            .or_else(|_| git(repo, &["merge-base", &format!("refs/heads/{target}"), "HEAD"]));
+        return stability::proof_base(repo, target, "HEAD");
     }
     // Standalone checkouts and hermetic fixtures have no factory assignment.
     git(repo, &["merge-base", "refs/remotes/origin/HEAD", "HEAD"])

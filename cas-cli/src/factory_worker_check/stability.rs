@@ -132,6 +132,29 @@ pub(super) fn prior(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Proof
         }).collect()
 }
 
+/// The one proof base park and the capped runner both diff from: the newest
+/// `merge-base` of `head` with the target's remote-tracking ref, its local
+/// ref, or the name itself. A queued successor's stale local ref must not
+/// widen park's changed tests beyond what the runner (and the rebased
+/// delivery) really changed (cas-69a0).
+pub(crate) fn proof_base(repo: &Path, target: &str, head: &str) -> Result<String> {
+    let mut best: Option<String> = None;
+    let mut failure = None;
+    for candidate in [format!("refs/remotes/origin/{target}"), format!("refs/heads/{target}"), target.to_owned()] {
+        match git(repo, &["merge-base", &candidate, head]) {
+            Ok(base) if best.as_deref().is_none_or(|held| held != base
+                && git(repo, &["merge-base", "--is-ancestor", held, &base]).is_ok()) => best = Some(base),
+            Ok(_) => {}
+            Err(error) => failure = Some(error),
+        }
+    }
+    match (best, failure) {
+        (Some(base), _) => Ok(base),
+        (None, Some(error)) => Err(error),
+        (None, None) => bail!("no proof base for {target}"),
+    }
+}
+
 /// Tests this delivery changed. Rust keeps its per-range ownership adapter,
 /// intersected with the same surviving net changes the capped runner repeats. JavaScript
 /// reads only the delivered head over the net diff from the scoped proof base
@@ -141,8 +164,7 @@ pub(super) fn prior(passing: &PassingTests<'_>, tests: &[Identity]) -> Vec<Proof
 /// on the same branch stays out).
 pub(crate) fn required(repo: &Path, head: &str, target: &str, paths: &[String],
     ranges: Option<&[(String, String)]>) -> Result<Vec<Identity>> {
-    let base = git(repo, &["merge-base", target, head])
-        .or_else(|_| git(repo, &["merge-base", &format!("refs/remotes/origin/{target}"), head]))?;
+    let base = proof_base(repo, target, head)?;
     let fallback = [(base.clone(), head.to_owned())];
     let owned = ranges.map(|ranges| delivery_commits(repo, ranges)).transpose()?;
     let ranges = ranges.unwrap_or(&fallback);
@@ -222,14 +244,17 @@ pub(crate) fn rerun_commands(cas_root: &Path, repo: &Path, tests: &[Identity]) -
 }
 
 /// A failed rerun may not leave an earlier overlapping five-pass proof usable.
+/// Only the rerun tests lose credit: a receipt that also covered other tests
+/// keeps them under a receipt of their own (cas-69a0).
 pub(crate) fn invalidate(cas_root: &Path, repo: &Path, head: &str, tests: &[Identity]) -> Result<()> {
     if tests.is_empty() { return Ok(()); }
     for (path, record) in records(cas_root, repo, head)? {
-        if record.test.and_then(|test| test.stability)
-            .is_some_and(|proof| proof.tests.iter().any(|test| tests.contains(test)))
-        {
-            std::fs::remove_file(path)?;
-        }
+        let Some(proof) = record.test.and_then(|test| test.stability) else { continue };
+        if !proof.tests.iter().any(|test| tests.contains(test)) { continue; }
+        std::fs::remove_file(path)?;
+        let mut kept = proof;
+        kept.tests.retain(|test| !tests.contains(test));
+        if valid(&kept) { persist(cas_root, &record.repo, &record.head, kept)?; }
     }
     Ok(())
 }
@@ -240,14 +265,18 @@ pub(crate) fn record(cas_root: &Path, repo: &Path, head: &str, mut proof: Proof)
     if clean_head(repo)? != head || !valid(&proof) {
         bail!("STABILITY_PROOF_INVALID: clean exact tip and five nonempty passing test identities required");
     }
+    persist(cas_root, &repo.canonicalize()?, head, proof)
+}
+
+fn persist(cas_root: &Path, repo: &Path, head: &str, mut proof: Proof) -> Result<()> {
     proof.tests.sort();
     proof.tests.dedup();
     let key = hex::encode(Sha256::digest(serde_json::to_vec(&proof.tests)?));
     let selection = TargetedTest { package: proof.runner.clone(), harness: None,
         filter: format!("test(stability_{key})") };
-    let path = test_receipt_path(cas_root, &repo.canonicalize()?, head, &selection);
+    let path = test_receipt_path(cas_root, repo, head, &selection);
     let receipt = CheckReceipt {
-        head: head.into(), repo: repo.canonicalize()?, packages: Vec::new(),
+        head: head.into(), repo: repo.to_path_buf(), packages: Vec::new(),
         test: Some(TestReceipt { filter: selection.filter, harness: None,
             count: proof.tests.len() as u64, stability: Some(proof), widened: None, selected_log: None,
             host_path_opt_out: None, supervisor_recorded: None }),

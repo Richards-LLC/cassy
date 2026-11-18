@@ -2838,14 +2838,12 @@ kills the shell's process group, including any `&` job, when the shell exits
 
 `cas factory worker-check --cas-root "$CAS_ROOT" -- lane-impact` is the broad
 form of the targeted check: it runs `scripts/ci-test-impact.py lane --phase plan`
-for the diff from the target merge-base, then one capped nextest pass over a
-bounded slice of lane CI's selection: its own tests plus the integration suites
-that import the edited module directly. The wider ring (reverse-import closure,
-opaque suites, other crates) and a whole-workspace plan's ring stay with lane CI
-and the train's full set; the summary line counts what was left. It records a
-test receipt for each changed Rust crate. Failure history is CI-only and absent
-locally; a plan with nothing to run locally is reported, not passed.
-Named-test checks remain available.
+for the diff from the target merge-base, then one capped nextest pass over lane
+CI's own tests followed by its ring (a whole-workspace plan leaves the ring to
+the train's full set, so only its own tests run). It records a test receipt for
+each changed Rust crate, so park sees what lane CI will run. Failure history is
+CI-only and absent locally; a plan with nothing to run locally is reported, not
+passed. Named-test checks remain available.
 
 The existing focused-proof park gate also requires five consecutive passes for
 the delivery's new or changed test functions, including test-only deliveries. The capped Rust

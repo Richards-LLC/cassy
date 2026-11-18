@@ -15,8 +15,6 @@ pub(crate) struct Proof {
     pub mode: String,
     pub build: Vec<String>,
     pub expression: String,
-    /// Selected suites and rings lane CI still runs that park did not.
-    pub left_to_ci: u64,
 }
 
 pub(crate) struct Selection {
@@ -26,32 +24,29 @@ pub(crate) struct Selection {
 }
 
 impl Selection {
-    /// Lane CI's own tests plus the integration suites that import the edited
-    /// module directly (`lane_bounded`); the wider ring stays with lane CI, so a
-    /// park costs far less than the bounce it prevents. Nothing selected is an
-    /// error rather than a PASS that ran zero tests.
+    /// Lane CI's own phase, then its ring. A whole-workspace plan leaves the ring
+    /// to the train's full set, so only the own phase is local proof there.
+    /// Nothing selected is an error rather than a PASS that ran zero tests.
     pub(crate) fn from_plan(plan: &serde_json::Value, packages: Vec<String>) -> Result<Self> {
-        let mode = plan["plan"]["mode"].as_str().context("lane plan has no mode")?.to_owned();
-        let split = &plan["split"];
-        let own = split["own"].as_str().filter(|own| !own.is_empty());
-        let (build, expression, left_to_ci) = match (&split["bounded"], own) {
-            (bounded, _) if bounded.is_object() => (
-                bounded["build"].clone(),
-                bounded["expression"].as_str().context("bounded lane plan has no selection")?.to_owned(),
-                bounded["left_to_ci"].as_u64().unwrap_or(0),
-            ),
-            // A whole-workspace plan leaves its ring to the train's full set.
-            (_, Some(own)) if mode != "scoped" => (split["build"].clone(), own.to_owned(), 0),
-            _ => bail!("lane CI runs no own tests for this {mode} plan; its ring belongs to CI. Prove the change with a named test instead"),
+        let text = |value: &serde_json::Value| value.as_str().filter(|text| !text.is_empty()).map(str::to_owned);
+        let (selection, split) = (&plan["plan"], &plan["split"]);
+        let mode = selection["mode"].as_str().context("lane plan has no mode")?.to_owned();
+        let (own, ring) = (text(&split["own"]), text(&split["ring"]));
+        let expression = match (mode.as_str(), own, ring) {
+            ("scoped", Some(own), Some(ring)) => format!("({own}) or ({ring})"),
+            ("scoped", None, Some(only)) | ("scoped", Some(only), None) => only,
+            ("scoped", None, None) => bail!("lane CI selects no tests for this diff"),
+            (_, Some(own), _) => own,
+            _ => bail!("lane CI runs no own tests for this {mode} plan; its ring belongs to the train's full set. Prove the change with a named test instead"),
         };
-        let build = build.as_array().context("lane plan has no build arguments")?
+        let build = split["build"].as_array().context("lane plan has no build arguments")?
             .iter().filter_map(|arg| arg.as_str().map(str::to_owned)).collect();
-        Ok(Self { proof: Proof { mode, build, expression, left_to_ci }, packages })
+        Ok(Self { proof: Proof { mode, build, expression }, packages })
     }
 
     pub(crate) fn summary(&self) -> String {
-        format!("Lane impact: {} plan; build {}; selection {} bytes; {} suites left to lane CI; changed crates {}",
-            self.proof.mode, self.proof.build.join(" "), self.proof.expression.len(), self.proof.left_to_ci, self.packages.join(","))
+        format!("Lane impact: {} plan; build {}; selection {} bytes; changed crates {}",
+            self.proof.mode, self.proof.build.join(" "), self.proof.expression.len(), self.packages.join(","))
     }
 
     pub(crate) fn args(&self) -> Vec<String> {
@@ -129,14 +124,9 @@ mod tests {
         serde_json::json!({
             "plan": {"mode": "scoped"},
             "split": {
-                "build": ["-p", "cas", "--lib", "--test", "mcp_tools_test", "--test", "cli_test"],
+                "build": ["-p", "cas", "--lib", "--test", "mcp_tools_test"],
                 "own": "(package(cas) and ((binary(cas) and test(/^qa_evidence_tests::/))))",
-                "ring": "(package(cas) and (binary(cas) or binary(mcp_tools_test) or binary(cli_test)))",
-                "bounded": {
-                    "build": ["-p", "cas", "--lib", "--test", "mcp_tools_test"],
-                    "expression": "((package(cas) and ((binary(cas) and test(/^qa_evidence_tests::/))))) or binary(mcp_tools_test)",
-                    "left_to_ci": 87
-                }
+                "ring": "((package(cas) and (binary(cas) or binary(mcp_tools_test))) or (package(cas) and binary(cas) and test(gates::registry_tests::))) and not ((package(cas) and ((binary(cas) and test(/^qa_evidence_tests::/)))))"
             }
         })
     }
@@ -144,8 +134,7 @@ mod tests {
     #[test]
     fn park_proof_is_the_lane_selection_and_covers_the_changed_crate() {
         let selection = Selection::from_plan(&qa_bundle_plan(), vec!["cas".into()]).unwrap();
-        assert!(selection.proof.expression.contains("binary(mcp_tools_test)"), "the suite that imports the edited module");
-        assert!(!selection.args().contains(&"cli_test".to_string()), "import-consumer suites stay with lane CI");
+        assert!(selection.proof.expression.contains("binary(mcp_tools_test)"), "ring tests the worker never ran");
         assert!(selection.proof.expression.contains("qa_evidence_tests"), "own tests");
         assert_eq!(selection.args()[..2], ["nextest", "run"]);
 
@@ -161,7 +150,7 @@ mod tests {
 
     #[test]
     fn a_plan_with_nothing_to_run_locally_is_not_a_pass() {
-        let workspace = serde_json::json!({"plan": {"mode": "workspace"}, "split": {"build": ["--workspace"], "own": null, "ring": "all()", "bounded": null}});
+        let workspace = serde_json::json!({"plan": {"mode": "workspace"}, "split": {"build": ["--workspace"], "own": null, "ring": "all()"}});
         assert!(Selection::from_plan(&workspace, vec!["cas".into()]).is_err());
     }
 }

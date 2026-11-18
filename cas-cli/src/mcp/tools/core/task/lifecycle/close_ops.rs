@@ -763,9 +763,62 @@ pub(crate) enum SupervisorAuthorityError {
     NotLive(cas_types::Agent),
 }
 
+/// A bookkeeping close of a parked delivery already on the repository's
+/// published default branch. It approves no new code and never consults the
+/// former worker's mutable checkout or historical/retired anchors.
+#[derive(Debug)]
+struct PublishedDeliveryProof {
+    anchor: String,
+    target: String,
+    target_sha: String,
+}
+
+fn published_delivery_proof(
+    root: &std::path::Path,
+    task: &Task,
+    receipt: Option<&str>,
+) -> Option<PublishedDeliveryProof> {
+    if task.status != TaskStatus::AwaitingMerge
+        || matches!(task.task_type, TaskType::Epic | TaskType::Gate)
+    {
+        return None;
+    }
+    let (repo, _) = crate::qa_batch::task_context(root, task).ok()?;
+    let anchor = task.deliverables.factory_branch_anchor.as_deref()?;
+    if !delivery_git::oid(anchor) { return None; }
+    let anchor = crate::qa_batch::commit(&repo, anchor)?;
+    if let Some(receipt) = receipt
+        && crate::qa_batch::commit(&repo, receipt).as_deref() != Some(anchor.as_str())
+    {
+        return None;
+    }
+    if let Some(start) = task.deliverables.factory_branch_start.as_ref()
+        && !git_commit_is_ancestor(&repo, &start.base_sha, &anchor)
+    {
+        return None;
+    }
+    // Publication cannot erase a current rejection. Missing or unreadable
+    // verification state leaves the ordinary close gates in control.
+    let latest = crate::store::open_verification_store(root).ok()?
+        .get_latest_for_task(&task.id).ok()?;
+    if latest.is_some_and(|verdict| verdict.status == VerificationStatus::Rejected) { return None; }
+    if let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, &task.id).ok()?
+        && let Some(verdict) = cas_store::get_verification_for_dispatch(root, &dispatch.id).ok()?
+        && verdict.status == VerificationStatus::Rejected
+    {
+        return None;
+    }
+    let branch = crate::mcp::tools::core::task::repo_context::resolve_default_branch(&repo).ok()?;
+    let target = format!("refs/remotes/origin/{branch}");
+    let target_sha = crate::qa_batch::commit(&repo, &target)?;
+    git_commit_is_ancestor(&repo, &anchor, &target_sha)
+        .then_some(PublishedDeliveryProof { anchor, target, target_sha })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskCloseDisposition {
     Delivered,
+    PublishedDelivery,
     NegativeResult,
     EvidenceOnly,
     Decision,
@@ -778,7 +831,7 @@ impl TaskCloseDisposition {
 
     fn terminal_outcome(self) -> cas_types::TaskTerminalOutcome {
         match self {
-            Self::Delivered => cas_types::TaskTerminalOutcome::Delivered,
+            Self::Delivered | Self::PublishedDelivery => cas_types::TaskTerminalOutcome::Delivered,
             Self::NegativeResult => cas_types::TaskTerminalOutcome::NegativeResult,
             Self::EvidenceOnly => cas_types::TaskTerminalOutcome::EvidenceOnly,
             Self::Decision => cas_types::TaskTerminalOutcome::Decision,
@@ -5450,6 +5503,7 @@ pub(crate) enum VerificationSkipReason {
     /// A live registered supervisor closed a Gate after recording the
     /// decision in the task timeline. No code delivery is being approved.
     SupervisorDecision,
+    AlreadyShipped,
 }
 
 impl VerificationSkipReason {
@@ -5457,7 +5511,7 @@ impl VerificationSkipReason {
     pub(crate) fn is_skip(&self) -> bool {
         matches!(self,
             Self::SupervisorBypass | Self::SupervisorNegativeResult
-                | Self::SupervisorEvidenceOnly | Self::SupervisorDecision
+                | Self::SupervisorEvidenceOnly | Self::SupervisorDecision | Self::AlreadyShipped
         )
     }
 
@@ -5490,6 +5544,9 @@ impl VerificationSkipReason {
             VerificationSkipReason::SupervisorDecision => {
                 " (decision recorded — supervisor-authorized gate)".to_string()
             }
+            VerificationSkipReason::AlreadyShipped => {
+                " (already shipped — recorded main-ancestry proof)".to_string()
+            }
         }
     }
 
@@ -5510,6 +5567,9 @@ impl VerificationSkipReason {
     /// just in the response text.
     pub(crate) fn audit_reason(&self) -> String {
         match self {
+            VerificationSkipReason::AlreadyShipped => {
+                "The task's active parked delivery is already on origin's default branch; this close records shipment and approves no new code.".to_string()
+            }
             VerificationSkipReason::None
                 | VerificationSkipReason::NoAssignee
                 | VerificationSkipReason::AssigneeInactive { .. }
@@ -8110,6 +8170,12 @@ impl CasCore {
                 Ok(receipt) => receipt,
                 Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-24", message))),
             };
+        // gate-audit[published_delivery]: selector Immutable active-anchor ancestry proves an already-published delivery; it cannot authorize an unshipped or newer cycle.
+        let published_delivery = (negative_result_receipt.is_none() && evidence_only_receipt.is_none()
+            && completion_receipt.is_none() && external_verification_receipt.is_none()
+            && !no_delivery_declared && inline_execution_note.is_none() && inline_external_ref.is_none())
+            .then(|| published_delivery_proof(&self.cas_root, &task, req.commit_receipt.as_deref()))
+            .flatten();
         let close_disposition = if task.task_type == TaskType::Gate {
             if let Err(message) = self.validate_gate_decision_close(&task) {
                 return Ok(Self::tool_error(crate::gates::tag("G-26", message.to_string())));
@@ -8119,9 +8185,17 @@ impl CasCore {
             TaskCloseDisposition::EvidenceOnly
         } else if negative_result_receipt.is_some() {
             TaskCloseDisposition::NegativeResult
+        } else if published_delivery.is_some() {
+            TaskCloseDisposition::PublishedDelivery
         } else {
             TaskCloseDisposition::Delivered
         };
+        if let Some(proof) = published_delivery.as_ref() {
+            close_notes.record(&mut task, &format!("MAIN_ANCESTRY_CLOSE: {}", serde_json::json!({
+                "anchor": proof.anchor, "target": proof.target, "target_sha": proof.target_sha,
+                "disposition": "already_published", "park_gates": "not_replayed_after_publication",
+            })));
+        }
 
         let external_verification_receipt = match self.validate_external_verification_close(
             &task,
@@ -8255,6 +8329,7 @@ impl CasCore {
         // close projection may proceed until that exact dispatch resolves.
         // This guard also protects internal post-merge re-close calls.
         if close_disposition != TaskCloseDisposition::Decision
+            && published_delivery.is_none()
             && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, &task.id)
             && shipped_timeout_waiver.is_none()
         {
@@ -8677,6 +8752,7 @@ impl CasCore {
         // exact pushed correction through its declared WorkTarget instead.
         // This identifies code to lint/park; it never proves integration.
         let retired_receipt = if supervisor_override
+            && published_delivery.is_none()
             && !supervisor_closing_merged_receipt
             && !supervisor_closing_merged_anchor
             && matches!(self.compute_verification_skip_reason(&task, &req),
@@ -8694,7 +8770,7 @@ impl CasCore {
             }
         } else { None };
         let recovery_branch = retired_receipt.as_ref().map(|(branch, _)| format!("origin/{branch}"));
-        let worker_worktree_path = if matches!(close_disposition, TaskCloseDisposition::Decision | TaskCloseDisposition::EvidenceOnly)
+        let worker_worktree_path = if matches!(close_disposition, TaskCloseDisposition::Decision | TaskCloseDisposition::EvidenceOnly | TaskCloseDisposition::PublishedDelivery)
             || supervisor_closing_merged_anchor
             || supervisor_closing_merged_receipt
             || retired_receipt.is_some()
@@ -10054,7 +10130,9 @@ impl CasCore {
         });
 
         let assignee_state = self.compute_verification_skip_reason(&task, &req);
-        let skip_reason = if close_disposition == TaskCloseDisposition::Decision {
+        let skip_reason = if close_disposition == TaskCloseDisposition::PublishedDelivery {
+            VerificationSkipReason::AlreadyShipped
+        } else if close_disposition == TaskCloseDisposition::Decision {
             VerificationSkipReason::SupervisorDecision
         } else if close_disposition == TaskCloseDisposition::EvidenceOnly {
             VerificationSkipReason::SupervisorEvidenceOnly
@@ -10079,7 +10157,7 @@ impl CasCore {
                 }))
         );
         // Legacy errors also retain their authority when no typed dispatch exists.
-        let skip_verification = skip_reason.is_skip() && exact_dispatch_allows_skip
+        let skip_verification = published_delivery.is_some() || skip_reason.is_skip() && exact_dispatch_allows_skip
             && self.open_verification_store().is_ok_and(|store| {
                 store.get_latest_for_task(&req.id).is_ok_and(|latest| latest.is_none_or(|row| {
                     row.dispatch_id.is_some()
@@ -12107,7 +12185,9 @@ impl CasCore {
         // cas-062d: capture pre-close status for durable lifecycle push identity.
         let old_status_for_lifecycle = task.status;
         task.status = TaskStatus::Closed;
-        if crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id).is_some() { task.pending_verification = false; }
+        if published_delivery.is_some() || crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id).is_some() {
+            task.pending_verification = false;
+        }
         task.deliverables.no_delivery_close_intent = None;
         task.terminal_outcome = Some(close_disposition.terminal_outcome());
         task.closed_at = Some(now);
@@ -32352,7 +32432,7 @@ esac
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing(actor.into());
         let service = CasService::new(core, None);
-        for (index, case) in ["shipped", "unshipped", "retired", "new-cycle", "foreign-receipt"].into_iter().enumerate() {
+        for (index, case) in ["shipped", "unshipped", "retired", "new-cycle", "foreign-receipt", "rejected"].into_iter().enumerate() {
             let id = format!("cas-4cbf{}", index + 1);
             let mut task = worker_task("retired-peer-worker");
             task.id = id.clone();
@@ -32376,6 +32456,11 @@ esac
                 chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
             cas_store::timeout_verification_dispatch(&root, &id,
                 chrono::Utc::now() + chrono::Duration::hours(2)).unwrap();
+            if case == "rejected" {
+                let mut verdict = Verification::rejected("ver-shipped-rejected".into(), id.clone(), "fixture rejection".into());
+                verdict.provenance = cas_types::VerificationProvenance::System;
+                cas_store::add_system_verification(&root, &verdict).unwrap();
+            }
             let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
                 "action":"close", "id":id, "reason":"shipped delivery ancestry proof",
                 "commit_receipt":if case == "foreign-receipt" { &base } else if case == "unshipped" { &unshipped } else { &shipped },

@@ -7,6 +7,117 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.36.0] - 2026-11-18
+
+### Fixed — Test evidence
+
+- **Uncertain test selection runs broader proof** — Unclassified tests now widen to one capped pass of the test file, JavaScript package or Rust crate. Park consumes a separate receipt; identified changed tests still require five passes. Deleting an unrelated inline test no longer demands annotations on unchanged shared callbacks, and multiline TypeScript import types preserve test locations. Dedicated Jest configs and caller name filters remain executable through the capped runner.
+
+### Fixed — Factory
+
+- **Resume local work after a peer departs** — Accepted build routes stop withholding an unclaimed task when a successful peer lookup shows a departed peer or stale capacity. Discovery outages and in-flight sends retain their ownership.
+- **Use an eligible account for a lane** — Automatic Codex selection tries another eligible account when the selected account cannot verify the lane's models. Explicit account choices remain binding. Cleared stale usage windows rank behind observed capacity; an omitted unopened window preserves the account's observed usage and launch recommendation.
+- **Recover worker workspaces** — Workers can abort Git operations or return to their own branch inside their registered checkout after a branch suffix change. Unbound owned diagnostic refs can be deleted while delivery and review refs remain protected.
+- **Start isolation after Git initialization** — A running factory can provision its first isolated worker after the project becomes a Git repository. Temporary startup briefs are excluded from Git's dirty-work checks without hiding other files.
+- **Resolve SSH repository identities** — Factory preflight accepts SSH usernames and absolute scp paths, and identifies whether branch or repository identity resolution failed.
+- **Disposable datasource URLs** — Was: the branch env file set only an unquoted DATABASE_URL. Now: DATABASE_URL and DIRECT_URL both select the disposable branch and preserve shell metacharacters when sourced or parsed as dotenv.
+- **Local database fixtures in JavaScript checks** — Capped JavaScript tests accept an explicit password-free loopback PostgreSQL URL through `--test-env TEST_DATABASE_URL=...` or `--test-env <PREFIX>_TEST_DATABASE_URL=...`, and pass it to discovery and every test child.
+- **Conditional JavaScript test identities** — `describe.runIf` and `describe.skipIf` retain suite titles. Explicit skipped prerequisite registrations do not require passing results; runnable tests still do. Unknown conditional aliases retain their provenance for broader evidence selection.
+- **QA ledger consistency** — CLI preflight and close use the same task identity from a suffixed ledger heading and its coverage header. Readable absolute captures inside the ledger directory are accepted, with canonical containment still enforced. Ledger initialization reads the caller's worktree registry and fallback build revision when it belongs to the target repository.
+- **QA follow-up deduplication** — An evidence-comment failure on an existing match is reported without creating a duplicate follow-up task.
+- **Traceable test receipts** — Selected changed identities record `reason: changed-test`, and widened file/package/crate proofs retain their classification cause under `reason: widened:<cause>`. CI selector command rows retain each integration stem's `owner`, `import-consumer`, changed-test or broader policy cause in their existing receipt. Identity matching and existing evidence gates retain their semantics.
+- **Artifact work preserves shared checkouts** — Starting a no-code task in a shared repository leaves its branch and pending edits untouched. Artifact-only close recognizes published trunk imports used for report tooling while retaining checks for unpublished source work.
+- **Repository scan failures identify their scope** — Incomplete target resolution names the requested repository and branch, the roots that could not be checked, and the identities that were read, without assuming a storage outage.
+
+### Fixed — Factory coordination
+
+- **Current work owns director alerts** — Retire obsolete close holds, spawn failures and merge retries; preserve promised spawn tasks and safely rebind sequential shared-checkout queues. Intentional holds and unreadable task receipts no longer produce unrelated stall pages. Commander retains task subjects and ordinary one-word questions.
+
+### Fixed — Delivery
+
+- **Supervisor stability decisions apply at park** — Was: an authenticated close override still stopped at the earlier stability check. Now: the same explicit decision applies there and is audited, while crate proof, content and other obligations remain in force.
+- **Methodology corrections retain approval** — Was: clearing a no-code label invalidated approval for unchanged merged code. Now: the existing approved delivery remains bound when its identity, risk and proof targets are unchanged; newer code still needs its own proof.
+- **Portable park evidence** — Was: ordinary parks could leave cited logs on one machine. Now: park publishes task evidence and cited worker logs through the artifact transport; an upload problem is visible without adding an ordinary-delivery gate.
+- **Historical approval recovery** — Was: G-70 directed already-integrated deliveries back to a merge that did nothing. Now: it names the authenticated supervisor recovery and the audit it requires.
+- **Present delivery content** — Was: a dropping merge could leave a restored, byte-identical authored snapshot classified as missing. Now: the final target snapshot proves presence while imported baselines and self-reverts remain excluded.
+
+### Fixed — QA
+
+- **Playwright skip migrations** — Was: runtime skip reasons and reformatted existing skips were counted as new unexplained markers. Now: runtime reasons count, and inherited marker counts stay with their own test and suite.
+
+### Fixed — Commander
+
+- **Truthful quality and status cells** — A rate that reaches zero shows a finite improvement. Table cells with zero or negated failures keep their successful or neutral tone; actual failures retain their failure tone.
+- **Stable history checks** — Reader parking uses an actual reading gesture, and the inline-page check waits for its painted backdrop instead of sampling one unfinished frame.
+- **Bounded read auditing** — A socket retains its first authorized read for each session and writes frame and byte totals when it closes. Sends, mutations and denied requests keep their individual audit records.
+
+### Fixed — Developer tools
+
+- **Use the requested browser and catch page overflow** — Visual QA honors an explicit Playwright package before local dependencies and reports a page wider than its viewport, including unbroken inline text on phones.
+
+### Fixed — Violet
+
+- **CLI reply and reaction parity** — Managed replies accept explicit intent IDs and claim generations; `cas violet react` adds or removes a reaction through Violet.
+- **Reply refusal diagnostics** — A reconciled `not_posted` result retains the provider's error and reason and the original uncertain response, without resending the write.
+
+### Added — Reports
+
+- **Client findings reports** — The shared `cas-client-report` skill prepares client findings as HTML and PDF, with accounting validation and routing to specialized delivery skills.
+
+### Fixed — macOS
+
+- **Stable opt-in update identity** — Updates use an existing local code-signing identity before relaunching, keeping the same designated requirement across versions. Hosts without that identity retain their existing signing behavior.
+
+### Fixed — CI
+
+- **Retain own-build diagnostics on trusted runners** — Lane own-test builds use the trusted `cas-lane-light` runners and retain complete build/test output alongside the watchdog heartbeats. Self-hosted setup bootstraps the pinned Rust toolchain in the runner home when needed and skips sccache. Hosted setup, ring/browser placement and timeout policy are unchanged.
+- **Run existing refusal audits before the ring** — Production Rust deliveries include the existing gate-registry audit in their own-test selection even when no import edge leads to that module. Integration-only fixture edits keep their existing build scope.
+
+### Fixed — Cloud
+
+- **Recover rejected credentials once** — Artifact publication, peer messages, message status and agent discovery re-read the current login after the server rejects an invalid API key, or verify and persist the configured environment credential through the normal token-login path. Other 401 responses preserve the server cause without retrying. A failed credential recovery names the expired Cloud login and its login command; uncertain writes are never replayed.
+
+### Fixed — Developer checks
+
+- **Keep fixtures outside the checkout** — Capped test scratch uses a short directory outside Git and `.cas` ancestry. Credential fixtures also protect real login files when a test uses a production-shaped token, keeping no-Git tests and artifact fixtures isolated.
+
+### Fixed — Releases
+
+- **Delivery preview scaling** — Reuse indexed hunks and shared ownership walks across release members while preserving task-owned net-range proof.
+- **Conventional delivery ownership** — Recognize task IDs in conventional commit prefixes alongside historical changelog evidence, so abandoned attempts do not hide a shipped fix.
+- **Installer timeout evidence** — Report the release adapter phase, deadline and receipt when a publication or notice times out; retained operations still retry on the next tick.
+- **Release preview Git reads** — Batch immutable commit metadata and first-parent paths, and reuse immutable delivery ranges and proven fragment promotions across measurements.
+- **Train checkout and handoff** — Detect a frozen train at a local sync alias before release preparation, select explicit train context, and resolve auto-cut through its live local successor while unfinished release repairs remain pending.
+- **Close shipped deliveries** — Close an active parked anchor contained in a versioned release tag on origin's default branch with an ancestry receipt, without replaying pre-merge paperwork or depending on the former worker's checkout. New delivery cycles and rejected reviews retain their gates.
+- **Generated release outputs** — Judge reverts by the delivery's source, so unrelated reverts of regenerated documentation or bundles cannot hold a shipped member. Generated-only losses still require delivery proof.
+
+### Fixed — Factory verification
+
+- **Keep automatic review input bounded** — Large task and epic histories move to an immutable local context file instead of exceeding the verifier harness input limit; all criteria, evidence and dispatch identity remain available to the reviewer.
+- **Replay reviews without namespace tools** — Historical reviewer evaluation probes Linux namespace support before spending a model run and offers a source-input-only replay with pinned source/diff, shell tools disabled and no verification authority.
+- **Explain approval reuse accurately** — Merge retries reuse an unchanged candidate's approval, including a supervisor approval after dispatch expiry; changed delivery code or review context requires another review.
+
+### Fixed — Accounts
+
+- **Account ties break on the window that binds, and assumed-empty usage ranks last** — Was: when two accounts had the same headroom on their binding window, the tie was broken by the weekly reset even when the 5-hour window was the one binding. And a window whose reset had already passed was counted as 0% used, so an account with an old 95% snapshot could outrank one with fresh, observed usage. Now: a tie goes to the account whose binding window resets first. Under either selection policy, accounts whose usage was observed are chosen before any whose expired window is only assumed empty. An assumed-empty account is still chosen when nothing observed is eligible, and otherwise its exclusion is named.
+
+### Fixed — Factory and artifacts
+
+- **Host retention** — Sweep expired, uncited task artifacts across registered projects automatically on idle maintenance and disk pressure; report reclaimed bytes and preserved paths. Build outputs remain regenerable even when cited; live owners, unpublished source and durable artifact references retain their protections.
+- **Late source writes** — Recheck checkout cleanliness at deletion and remove registered worktrees without force, preserving source written after inventory. Interrupted trash deletion repeats the source check.
+- **Cold artifact lists** — Include synced publication references alongside local records and explicitly report a partial inventory. An empty local cache no longer claims that no artifacts were published.
+- **Candidate build guidance** — Give supervisors the direct candidate-build command when the worker queue or sandbox is unavailable, including on macOS.
+
+### Changed — Release preparation
+
+- **Prove the exact train tip before freeze** — Supervisor and cut guidance require explicit tip CI and whole-tree dependency, gate-registry and test-shape audits. Draft and lint notes before the suite finishes; inspect frozen-suite jobs between short reminders.
+
+### Fixed — Config and workspace policy
+
+- **Honor configured write roots** — Moving files into a configured Trash directory now creates children without treating the destination directory as an overwrite. User-level parent roots remain effective in nested projects instead of disappearing from config get and hook policy.
+- **Report the effective store and tracker accurately** — Store notices describe CAS_ROOT as the default and account for explicit `--store` selection. SessionStart uses the same issue destination resolver as config get.
+- **Keep generated harness files consistent** — Pure agent and rule projections are ignored; mixed configuration remains tracked, regenerated from current source during release preparation. Merge regeneration stages only tracked outputs so ignored native projections cannot stop the merge.
+
 ## [4.35.0] - 2026-11-18
 
 ### Fixed — Issue intake

@@ -1,3 +1,0 @@
-### Fixed — Accounts
-
-- **Account ties break on the window that binds, and assumed-empty usage ranks last** — Was: when two accounts had the same headroom on their binding window, the tie was broken by the weekly reset even when the 5-hour window was the one binding. And a window whose reset had already passed was counted as 0% used, so an account with an old 95% snapshot could outrank one with fresh, observed usage. Now: a tie goes to the account whose binding window resets first. Under either selection policy, accounts whose usage was observed are chosen before any whose expired window is only assumed empty. An assumed-empty account is still chosen when nothing observed is eligible, and otherwise its exclusion is named.

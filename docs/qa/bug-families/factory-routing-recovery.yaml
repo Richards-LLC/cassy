@@ -1,4 +1,0 @@
-title: Factory routing and workspace recovery
-tasks: [cas-4379, cas-c58f]
-journeys: [HUB-J13]
-statement: Exercise account recommendation, lane admission, peer routing, worktree provisioning, startup brief and Git hook paths with disposable profiles and repositories.

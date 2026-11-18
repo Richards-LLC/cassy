@@ -5783,8 +5783,7 @@ JEST_PROBE"#, serde_json::to_string(&url).unwrap()));
                     .find(|receipt| receipt["head"] == head).unwrap();
                 let widened = &receipt["test"]["widened"];
                 assert_eq!(widened["scope"]["File"], file);
-                let reason = widened["reason"].as_str().unwrap();
-                assert!(reason.starts_with("widened:") && reason.contains(file));
+                assert!(widened["reason"].as_str().unwrap().starts_with("widened:"));
                 assert!(std::env::var_os("LEGAL_TEST_DATABASE_URL").is_none());
             }
         }

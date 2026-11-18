@@ -3990,7 +3990,7 @@ impl CasCore {
             return Err(not_parked_here(format!("merge on {machine} (peer {assignee})")));
         }
         let git = crate::worktree::GitOperations::new(repo.to_path_buf());
-        let Some(tip) = git.resolve_commit(&format!("refs/heads/{}", start.branch)) else {
+        let Some(mut tip) = git.resolve_commit(&format!("refs/heads/{}", start.branch)) else {
             return Err(if !worker_known {
                 not_parked_here("not parked here yet; retry after sync".into())
             } else {
@@ -4008,6 +4008,17 @@ impl CasCore {
         } else {
             None
         };
+        // GH #2103: a local ref left by an earlier merge attempt that is an
+        // ancestor of the live origin tip is stale, not a conflicting approved
+        // tip. Follow origin; a local ref with its own commits still refuses.
+        if let Some(Some(live)) = origin_tip.as_ref()
+            && *live != tip
+            && git.fetch_branch(&start.branch).is_ok()
+            && git.is_ancestor(&tip, live)
+            && git.advance_local_branch(&start.branch, &tip, live).is_ok()
+        {
+            tip = live.clone();
+        }
         // cas-06f53: the pre-merge path merged the delivery and moved the local
         // branch to the target. Local and origin tips then differ, but nothing
         // is unresolved: both are already in a target tip. The branches decide
@@ -4953,9 +4964,17 @@ impl CasCore {
                 ))),
                 data: None,
             })?;
+            // GH #1689/#1692: the declared WorkTarget binds the repository only.
+            // The merge branch has one source, the resolver above; comparing it
+            // with the raw task target refused an epic child that targets the
+            // epic's own base (its lane is the resolved destination).
+            let expected = crate::mcp::tools::core::task::repo_context::RepoContext {
+                target_branch: worktree.parent_branch.clone(),
+                ..expected.clone()
+            };
             crate::mcp::tools::core::task::repo_context::validate_worktree_binding(
                 task_id,
-                expected,
+                &expected,
                 &actual,
                 &worktree.parent_branch,
                 &worktree.path,

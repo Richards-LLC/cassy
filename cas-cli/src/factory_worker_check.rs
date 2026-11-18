@@ -2748,7 +2748,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn broader_failure_preserves_only_passing_stability_cas_3a252() {
+        let _ambient_profile = crate::test_env_guard::AmbientEnvRestore::set("NEXTEST_PROFILE", "queue");
         let mut env = crate::test_support::TestEnvGuard::new();
+        // The disposable crate owns its default profile, not the outer CI queue profile.
+        env.set("NEXTEST_PROFILE", "default");
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("project/.cas");

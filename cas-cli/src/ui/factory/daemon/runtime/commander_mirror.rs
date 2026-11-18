@@ -1550,7 +1550,7 @@ mod tests {
                 let rows = f.rows();
                 assert_eq!(rows.last().unwrap()["no_op"], expected_noop, "{cli:?} row {index}: {rows:?}");
                 assert_eq!(rows.last().unwrap()["notice_kind"].as_str(), match index {
-                    0 => Some("sender"), 1 => Some("operator_message"), 2 => Some("agent_message"), _ => None,
+                    0 => None, 1 => Some("operator_message"), 2 => Some("agent_message"), _ => None,
                 });
             }
             use cas_store::SupervisorQueueStore;
@@ -1568,6 +1568,12 @@ mod tests {
             f.append(&f.input("expired", &format!("[cas #{queue_id} agent-authored 0s first] kind=capacity_wait"), 50));
             f.append(&f.end("expired", "Done", 51)); f.scan();
             assert!(f.rows().last().unwrap()["notice_kind"].is_null());
+            let body = cas_store::format_reminder_delivery(44, "Check the queued build", None);
+            let queue_id = f.queue.enqueue_urgent_with_outcome("sender", "turn-worker", &body,
+                Some("factory-1"), None, None, false, Some(&cas_store::QueueOrigin::Daemon)).unwrap().id();
+            f.append(&f.input("reminder", &format!("[cas #{queue_id} agent-authored 0s first] {body}"), 55));
+            f.append(&f.end("reminder", "Done", 56)); f.scan();
+            assert_eq!(f.rows().last().unwrap()["notice_kind"], "reminder_fired");
         }
     }
 

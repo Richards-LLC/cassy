@@ -209,6 +209,9 @@ fn wake(
         .or_else(|| match &row.origin {
             Some(QueueOrigin::PairedDevice { .. }) => Some("operator_message".into()),
             Some(QueueOrigin::RegisteredAgent { .. }) => Some("agent_message".into()),
+            Some(QueueOrigin::Daemon) if cas_store::parse_reminder_delivery_id(&row.prompt).is_some() => Some("reminder_fired".into()),
+            Some(QueueOrigin::Daemon) if row.source.starts_with("peer:") => Some("peer_message".into()),
+            Some(QueueOrigin::Daemon) if agents.iter().any(|a| a.name == row.source) => None,
             Some(QueueOrigin::Daemon) => {
                 let source = row.source.strip_prefix("lifecycle-wake:").unwrap_or(&row.source);
                 let category = source.split(':').next()?;

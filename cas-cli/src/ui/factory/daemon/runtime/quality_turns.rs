@@ -158,7 +158,17 @@ fn wake(
                     && row.origin == Some(QueueOrigin::Daemon))
         })
     else {
-        return (unqueued_wake(prompt, origin, agent), false, None);
+        let channel = unqueued_wake(prompt, origin, agent);
+        let notice = match channel {
+            WakeChannel::Terminal => Some("terminal_input"),
+            WakeChannel::Operator => Some("operator_input"),
+            _ if origin == Some("task-notification") => Some("harness_notification"),
+            WakeChannel::Daemon if prompt.starts_with(cas_pty::WORKER_STARTUP_BRIEF_PREFIX)
+                || prompt.starts_with(cas_pty::CODEX_WORKER_STARTUP_PREFIX) => Some("factory_startup"),
+            WakeChannel::Daemon => Some("delivery_watchdog"),
+            _ => None,
+        };
+        return (channel, false, None);
     };
     let channel = match &row.origin {
         Some(QueueOrigin::PairedDevice { .. }) => WakeChannel::Operator,
@@ -180,30 +190,34 @@ fn wake(
     let may_answer = channel == WakeChannel::Operator
         || (channel != WakeChannel::Unknown
             && (row.kind.as_deref() == Some("ask") || row.prompt.contains('?')));
-    // Lifecycle kinds carry an episode key after the category (for example
-    // merge_ready:[supervisor,task,head]); only the category is a notice kind.
-    let notice = row.kind.as_deref().and_then(|kind| kind.split(':').next()).map(str::to_string)
-        .or_else(|| if row.origin == Some(QueueOrigin::Daemon) {
-        // Older lifecycle prompts only retain the durable notification id.
-        // Recover its type only for this exact authenticated recipient.
+    // Resolve durable notification IDs before using transport categories such as
+    // worker-attention. Copied sender prose never supplies a notice type.
+    let durable_id = ["lifecycle-wake:", "supervisor-notice:", "lifecycle:"]
+        .into_iter().find_map(|prefix| row.source.strip_prefix(prefix))
+        .and_then(|tail| tail.rsplit(':').next()?.parse::<i64>().ok());
+    let durable = durable_id.and_then(|id| {
         use cas_store::SupervisorQueueStore;
-        if let Some(id) = row.source.strip_prefix("lifecycle-wake:").and_then(|id| id.parse::<i64>().ok())
-            && let Ok(store) = cas_store::SqliteSupervisorQueueStore::open(root)
-            && let Ok(Some(event)) = store.get(id)
-            && event.supervisor_id == agent.id {
-            return Some(event.event_type);
-        }
-        match row.source.as_str() {
-            "worker-check" => Some("worker_check".into()),
-            "task-assignment" => Some("task_assignment".into()),
-            "delivery-watchdog" => Some("delivery_watchdog".into()),
-            "relay-watchdog" => Some("relay_watchdog".into()),
-            "director" => Some("director".into()),
-            source if source.starts_with("lifecycle-wake:") => source.split(':').nth(1)
-                .filter(|kind| kind.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())).map(str::to_string),
+        let event = cas_store::SqliteSupervisorQueueStore::open(root).ok()?.get(id).ok()??;
+        if event.supervisor_id != agent.id { return None }
+        let payload: Value = serde_json::from_str(&event.payload).ok()?;
+        Some(payload.get("kind").and_then(Value::as_str)
+            .unwrap_or(&event.event_type).to_string())
+    });
+    let notice = durable.or_else(|| row.kind.as_deref()
+        .and_then(|kind| kind.split(':').next()).map(str::to_string))
+        .or_else(|| match &row.origin {
+            Some(QueueOrigin::PairedDevice { .. }) => Some("operator_message".into()),
+            Some(QueueOrigin::RegisteredAgent { .. }) => Some("agent_message".into()),
+            Some(QueueOrigin::Daemon) => {
+                let source = row.source.strip_prefix("lifecycle-wake:").unwrap_or(&row.source);
+                let category = source.split(':').next()?;
+                // The authenticated routing source itself is a typed fact. Keep
+                // IDs unknown when the retained notification has expired.
+                (!category.is_empty() && !category.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| category.replace('-', "_"))
+            }
             _ => None,
-        }
-    } else { None });
+        });
     let notice = notice.filter(|kind| !kind.is_empty() && kind.len() <= 96
         && kind.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/')));
     (channel, may_answer, notice)

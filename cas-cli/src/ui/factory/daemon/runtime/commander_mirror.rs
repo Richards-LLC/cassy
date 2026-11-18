@@ -1477,6 +1477,15 @@ mod tests {
                 f.append(&f.end(id, "Done.", index as u32 * 5 + 1));
                 f.scan();
                 assert_eq!(f.rows().last().unwrap()["woken_by"], expected, "{cli:?} {id}");
+                let expected_notice = match id {
+                    "typed" => Some("terminal_input"),
+                    "brief" | "codex-startup" => Some("factory_startup"),
+                    "startup" => Some("cas_startup"),
+                    "notification" => Some("harness_notification"),
+                    "watchdog" => Some("delivery_watchdog"),
+                    _ => None,
+                };
+                assert_eq!(f.rows().last().unwrap()["notice_kind"].as_str(), expected_notice, "{cli:?} {id}");
             }
         }
     }
@@ -1540,6 +1549,9 @@ mod tests {
                 f.scan();
                 let rows = f.rows();
                 assert_eq!(rows.last().unwrap()["no_op"], expected_noop, "{cli:?} row {index}: {rows:?}");
+                assert_eq!(rows.last().unwrap()["notice_kind"].as_str(), match index {
+                    0 => Some("sender"), 1 => Some("operator_message"), 2 => Some("agent_message"), _ => None,
+                });
             }
         }
     }

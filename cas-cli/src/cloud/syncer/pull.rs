@@ -1688,8 +1688,8 @@ fn append_sync_status_provenance(merged: &mut Task, local: &Task, sync_id: &str,
         .unwrap_or("<none>")
         .replace(['\n', '\r'], " ");
     let note = format!(
-        "[{timestamp}] [CAS_SYNC_STATUS] sync_id={sync_id} source={source} prior_status={} prior_close_reason={prior_close_reason} applied_status={}",
-        local.status, merged.status,
+        "[{timestamp}] [CAS_SYNC_STATUS] sync_id={sync_id} source={source} prior_status={} prior_close_reason={prior_close_reason} applied_status={} observer_machine={} observed_at={}",
+        local.status, merged.status, cas_types::Agent::get_or_generate_machine_id(), chrono::Utc::now().to_rfc3339(),
     );
     if merged.notes.is_empty() {
         merged.notes = note;

@@ -64,9 +64,9 @@ receipts. Run the red test before fixing it, then commit and run the green test.
 Rust example: `--lib -E 'test(close_ops::changed_fn)'`.
 
 In cas-src, `cas factory worker-check --cas-root "$CAS_ROOT" -- lane-impact` runs lane
-CI's own impact selection for your diff (own tests, then the ring) in one capped
-pass and records a receipt per changed crate. Use it before park so lane-CI ring
-bounces surface locally.
+CI's own impact selection for your diff, bounded to its own tests plus the suites
+that import the edited module directly, in one capped pass and records a receipt
+per changed crate. Use it before park so lane-CI bounces surface locally.
 <!-- cas-src:else -->
 In a Rust project, Cassy's capped runner admits only
 `cargo check -p <crate> --lib` (or `--tests`) and

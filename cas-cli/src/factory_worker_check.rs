@@ -1166,7 +1166,7 @@ impl<'a> PassingTests<'a> {
                         count: synced.count,
                         stability: None,
                         widened: None,
-            lane: None,
+                        lane: None,
                         selected_log: None,
                         host_path_opt_out: None,
                         supervisor_recorded: None,

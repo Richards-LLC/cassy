@@ -68,3 +68,9 @@ __pycache__/
 # artifact, never source. One was committed by an over-broad `git add -A`
 # (cas-2c05); ignoring the pattern stops the next worker repeating it.
 *.snap.new
+
+# Pure harness projections; mixed project configuration remains tracked.
+/.claude/agents/task-verifier.md
+/.codex/agents/task-verifier.toml
+/.claude/rules/cas/
+/.grok/agents/

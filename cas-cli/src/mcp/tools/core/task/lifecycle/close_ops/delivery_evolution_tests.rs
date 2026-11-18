@@ -68,13 +68,20 @@ fn release_preview_reuses_parallel_proofs_with_identical_outcomes_cas_b7be() {
             promotion_pr: None, release_tag: None, constituent_epic_ids: vec![], included_task_ids: ids,
             no_code_members: Default::default(), proof_refs: vec![],
         };
+        // cas-0e29e: an edge is the unit of a walk's Git and hunk work. The
+        // release must read each (path, edge) once, not once per member walk.
+        let edges = git(&["rev-list", "--parents", "HEAD"]).lines()
+            .map(|record| record.split_whitespace().count() - 1).sum::<usize>();
         let mut results = Vec::new();
         let mut blame_counts = Vec::new();
-        for enabled in [false, true] {
+        // Per-member walks are the reference outcome for the shared walk.
+        for (shared, enabled) in [(false, true), (true, false), (true, true)] {
             // A whole-walk hit must not conceal the edge cache under test.
-            if let Some(walks) = WALKS.get() { walks.lock().unwrap().clear(); }
+            forget_walks();
             USE_PARALLEL_PROOF_CACHE.store(enabled, Ordering::Relaxed);
-            let trace = repo.join(format!("git-{enabled}.jsonl"));
+            USE_SHARED_WALK.store(shared, Ordering::Relaxed);
+            EDGE_READS.store(0, Ordering::Relaxed);
+            let trace = repo.join(format!("git-{shared}-{enabled}.jsonl"));
             env.set("GIT_TRACE2_EVENT", &trace);
             let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
             assert!(inventory.exceptions.is_empty(), "{:?}", inventory.exceptions);
@@ -90,10 +97,96 @@ fn release_preview_reuses_parallel_proofs_with_identical_outcomes_cas_b7be() {
                 event["event"] == "start" && event["argv"][1] == "blame"
             }).count();
             blame_counts.push(starts);
+            let reads = EDGE_READS.load(Ordering::Relaxed);
+            eprintln!("PREVIEW_SCALING members={members} shared={shared} edges={edges} edge_reads={reads}");
+            assert!(!shared || reads <= edges, "{reads} edge reads for {edges} edges");
         }
         assert_eq!(results[0], results[1]);
-        eprintln!("PREVIEW_SCALING members={members} uncached_blame={} cached_blame={}", blame_counts[0], blame_counts[1]);
-        assert!(blame_counts[1] > 0, "edge proof must actually execute");
-        assert!(blame_counts[1] <= 2 * members, "{blame_counts:?}");
+        assert_eq!(results[0], results[2]);
+        eprintln!("PREVIEW_SCALING members={members} uncached_blame={} cached_blame={}", blame_counts[1], blame_counts[2]);
+        assert!(blame_counts[2] > 0, "edge proof must actually execute");
+        assert!(blame_counts[2] <= 2 * members, "{blame_counts:?}");
     }
+}
+
+/// cas-0e29e: the v4.29 cut preview spent its time in `advance`, which
+/// re-tokenized every (owned line, added line) pair of a changed hunk for each
+/// of the hunk's owners: O(owners x added) tokenizations per edge. A later
+/// commit replacing all of a delivery's lines must tokenize each hunk line once.
+#[test]
+fn ownership_walk_tokenizes_each_hunk_line_once_cas_0e29e() {
+    const LINES: usize = 200;
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let repo = env.home().join("tokenize");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    let write = |body: &dyn Fn(usize) -> String| {
+        let text: String = (0..LINES).map(|i| body(i) + "\n").collect();
+        std::fs::write(repo.join("owned.rs"), text).unwrap();
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    write(&|i| format!("let value_{i} = base({i});"));
+    git(&["add", "owned.rs"]);
+    git(&["commit", "-qm", "base"]);
+    let parent = git(&["rev-parse", "HEAD"]);
+    write(&|i| format!("let value_{i} = delivered_{i}(input);"));
+    git(&["commit", "-qam", "fix(cas-0e29e): deliver"]);
+    let delivery = git(&["rev-parse", "HEAD"]);
+    write(&|i| format!("let value_{i} = replaced_{i}(input, extra);"));
+    git(&["commit", "-qam", "later rewrite of every delivered line"]);
+    TOKENIZED_LINES.with(|count| count.set(0));
+    let presence = line_content_presence(&repo, &parent, &delivery, "HEAD", "owned.rs").unwrap();
+    assert!(presence.is_some());
+    let tokenized = TOKENIZED_LINES.with(std::cell::Cell::get);
+    eprintln!("TOKENIZATION lines={LINES} operations={tokenized}");
+    assert!(tokenized > 0, "the ownership walk must run");
+    assert!(tokenized <= 2 * LINES, "tokenized {tokenized} lines for one {LINES}-line hunk");
+}
+
+#[test]
+fn repeated_immutable_delivery_proof_avoids_git_spawns_cas_ac43() {
+    use super::super::{DeliveryContentPresence, delivery_content_presence_on_target_for_paths};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let repo = env.home().join("memoized-proof");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    std::fs::write(repo.join("owned.rs"), "fn value() { base() }\n").unwrap();
+    git(&["add", "owned.rs"]);
+    git(&["commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("owned.rs"), "fn value() { delivered() }\n").unwrap();
+    git(&["commit", "-qam", "fix(cas-ac43): delivery"]);
+    let anchor = git(&["rev-parse", "HEAD"]);
+    let proof = |target: &str| delivery_content_presence_on_target_for_paths(
+        &repo, &anchor, target, None, false, &["cas-ac43"], Some(&base));
+    let trace = repo.join("git.jsonl");
+    env.set("GIT_TRACE2_EVENT", &trace);
+    let first = proof(&anchor);
+    let count = || std::fs::read_to_string(&trace).unwrap().lines().filter(|line|
+        serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "start").count();
+    let before = count();
+    let repeated = proof(&anchor);
+    let extra = count() - before;
+    env.remove("GIT_TRACE2_EVENT");
+    assert_eq!(first, repeated);
+    assert!(before > 0);
+    assert_eq!(extra, 0, "immutable repeated proof spawned {extra} Git children");
+    // Advancing the target must not reuse the old answer.
+    git(&["revert", "--no-edit", &anchor]);
+    let reverted = git(&["rev-parse", "HEAD"]);
+    assert!(matches!(proof(&reverted), DeliveryContentPresence::Dropped { .. }));
+    assert_ne!(proof(&reverted), first);
 }

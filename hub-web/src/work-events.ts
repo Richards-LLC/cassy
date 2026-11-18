@@ -365,7 +365,7 @@ export function taskChip(event: WorkEvent): TaskChip | undefined {
   const transition = separator < 0 ? event.label : event.label.slice(0, separator);
   const match = CHIP_VERBS.find(([pattern]) => pattern.test(transition));
   if (!match) return undefined;
-  const subject = (separator < 0 ? "" : event.label.slice(separator + 1).trim()) || "Task title not reported";
+  const subject = (separator < 0 ? event.label.trim() : event.label.slice(separator + 1).trim()) || "Task title not reported";
   return { id: event.id, subject, verb: match[2], tone: match[1], label: event.label };
 }
 

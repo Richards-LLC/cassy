@@ -240,13 +240,16 @@ PY_PUBLICATION_ORDER
     : >"$FAKE_LOG"
     FAKE_LATEST=v9.99.4 FAKE_NOTICE_HANGS=v9.99.4 FAKE_PUBLISH_SECONDS=2 RELEASE_NOTICE_TIMEOUT_SECONDS=1 python3 - "$installer" <<'PY_TIMEOUT'
 import os
+import json
 import pathlib
 import signal
 import subprocess
 import sys
-process = subprocess.Popen([sys.argv[1], "--once"], start_new_session=True, stdout=subprocess.DEVNULL)
+process = subprocess.Popen([sys.argv[1], "--once"], start_new_session=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 try:
-    assert process.wait(timeout=6) == 0
+    output, _ = process.communicate(timeout=6)
+    assert process.returncode == 0, output
 except BaseException:
     pid_file = pathlib.Path(os.environ["FAKE_NOTICE_PID"])
     if pid_file.exists():
@@ -258,6 +261,11 @@ except BaseException:
     os.killpg(process.pid, signal.SIGKILL)
     process.wait()
     raise
+events = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
+assert [event for event in events if event.get("event") == "release_adapter_timeout"] == [{
+    "event": "release_adapter_timeout", "phase": "installed", "deadline_seconds": 1,
+    "receipt": str(pathlib.Path(os.environ["XDG_STATE_HOME"]) / "cassy/install-on-publish.pending.d/v9.99.4.json"),
+}], output
 pid, child = map(int, pathlib.Path(os.environ["FAKE_NOTICE_PID"]).read_text().split())
 try:
     os.kill(pid, 0)

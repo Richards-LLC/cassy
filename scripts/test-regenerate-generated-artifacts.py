@@ -162,6 +162,26 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         ledger = json.loads((self.repo / LEDGER).read_text())["files"]
         self.assertTrue({"skills/demo/references/first.md", "skills/demo/references/second.md"} <= set(ledger))
 
+    def test_regeneration_commits_history_without_retracking_ignored_native_projection(self):
+        native = ".codex/agents/task-verifier.toml"
+        self.write(".gitignore", native + "\n")
+        self.git("rm", "--cached", native)
+        self.git("add", ".gitignore")
+        self.git("commit", "-q", "-m", "leave the native verifier as a runtime projection")
+        before = self.git("rev-parse", "HEAD").stdout.strip()
+        reference = "skills/demo/references/after-untracking.md"
+        self.write("cas-cli/src/builtins/" + reference, "# Added builtin reference\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "add builtin history after untracking the projection")
+        after = self.git("rev-parse", "HEAD").stdout.strip()
+
+        self.run_script("regenerate-generated-artifacts.sh", before, after)
+
+        self.assertEqual(self.git("ls-files", "--", native).stdout, "")
+        self.assertTrue((self.repo / native).is_file())
+        self.assert_ledger_fresh()
+        self.assertIn(reference, json.loads((self.repo / LEDGER).read_text())["files"])
+
     def test_merged_edit_then_revert_regenerates_once_and_ledger_equals_fresh_run(self):
         before = self.git("rev-parse", "HEAD").stdout.strip()
         self.git("checkout", "-q", "-b", "factory/reverted-builtin")

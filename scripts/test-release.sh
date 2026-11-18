@@ -70,6 +70,11 @@ case "$1 $2" in
     case "${FAKE_CONTEXT_MODE:-}" in
       no_train) echo 'Error: no open release train; create work on the train first' >&2; exit 1 ;;
       different_branch) echo 'Error: check out the open release train epic/train-cas-a001 first' >&2; exit 1 ;;
+      frozen_alias)
+        [[ "$4" == "$FAKE_FROZEN_BRANCH" ]] || exit 1
+        [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$FAKE_FROZEN_BRANCH")" ]] || exit 1
+        printf '{"train_id":"cas-0001","branch":"%s","integration":"main"}\n' "$FAKE_FROZEN_BRANCH"
+        exit 0 ;;
     esac
     printf '{"train_id":"cas-0001","branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
   "release preview")
@@ -282,6 +287,28 @@ missing_fragment_delivery_stops_release() {
 
 }
 check 'missing_fragment_delivery_stops_release || { cat "$tmp/missing-fix.log"; false; }' 'cas-4bdf: report all missing fixes; accept historical cherry-picks after edits and ignore epic mentions'
+
+contained_prefix_delivery_beats_abandoned_suffix_attempt() {
+    local fixture="$tmp/prefix-owner" base
+    clone_epic "$fixture" hotfix/prefix-owner prefix-owner
+    base="$(git -C "$fixture" rev-parse HEAD)"
+    git -C "$fixture" checkout --quiet -b abandoned-attempt
+    echo abandoned >"$fixture/attempt.txt"
+    git -C "$fixture" add attempt.txt
+    git -C "$fixture" commit --quiet -m 'fix: abandoned delivery (cas-2090)'
+    git -C "$fixture" checkout --quiet hotfix/prefix-owner
+    mkdir -p "$fixture/changelog.d"
+    echo delivered >"$fixture/delivery.txt"
+    printf '### Fixed — Fixture\n\n- **Delivery** — contained fix.\n' >"$fixture/changelog.d/cas-2090.md"
+    git -C "$fixture" add delivery.txt changelog.d
+    git -C "$fixture" commit --quiet -m 'fix(cas-2090): contained second attempt'
+    (cd "$fixture" && python3 scripts/release_changelog.py verify-deliveries "$base" --report "$tmp/prefix-owner.json") >"$tmp/prefix-owner.out" 2>"$tmp/prefix-owner.err" || return 1
+    jq -e '.included_task_ids | index("cas-2090") != null' "$tmp/prefix-owner.json" >/dev/null || return 1
+    # Prefix ownership retains the same explicit red marker as suffix ownership.
+    git -C "$fixture" commit --quiet --allow-empty -m 'test(cas-209a red): regression without a fix'
+    ! (cd "$fixture" && python3 scripts/release_changelog.py verify-deliveries "$base") >"$tmp/prefix-red.json" 2>"$tmp/prefix-red.err"
+}
+check 'contained_prefix_delivery_beats_abandoned_suffix_attempt || { cat "$tmp/prefix-owner.err"; false; }' 'GH2090: contained conventional owner wins over an abandoned suffix attempt; red-only stays incomplete'
 
 # Real release history is part of this regression: CI checks out full history.
 historical_release_replay() {
@@ -642,6 +669,19 @@ check 'train_receipt_cut' 'train cut reuses green proof after CODEMAP-only work 
 unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
+frozen_train_alias() {
+    local fixture="$tmp/frozen-alias" canonical="epic/release-train-vnext-cas-8b79" before status=0
+    clone_epic "$fixture" sync-8b79 frozen-alias
+    git -C "$fixture" branch "$canonical"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    write_valid_draft "$tmp/frozen-alias-notes.md"
+    FAKE_CONTEXT_MODE=frozen_alias FAKE_FROZEN_BRANCH="$canonical" \
+        run "$fixture" --dry-run --notes "$tmp/frozen-alias-notes.md" >"$tmp/frozen-alias.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+        grep -Fq "git checkout -B $canonical" "$tmp/frozen-alias.log" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/sync-8b79
+}
+check 'frozen_train_alias' 'cas-5529: a frozen train under a local alias names its canonical checkout before preparation'
 freeze_failure_stops_publication() {
     local fixture="$tmp/cut-failure" status=0
     clone_epic "$fixture" epic/cut-failure cut-failure

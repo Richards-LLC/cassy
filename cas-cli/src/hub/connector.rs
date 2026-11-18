@@ -149,12 +149,6 @@ impl DaemonConnector {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_exit_evidence_store(mut self, store: DaemonExitEvidenceStore) -> Self {
-        self.exit_evidence = Some(store);
-        self
-    }
-
     pub async fn attach<I, S>(
         &self,
         session: &str,

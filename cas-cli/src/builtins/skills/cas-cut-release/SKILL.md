@@ -14,13 +14,30 @@ compile-checked and launch-tested.
 
 Release prep checklist: compare the locked Playwright version with the latest stable and verify browser binaries plus the chosen Node runtime. Any gap needs an upgrade decision before authoring/cut; the Node 26 tracing incident is a compatibility warning, not a universal engine constraint. Generate `npx playwright init-agents --loop=<harness>` and `npx playwright init-skills --loop=<harness>` in scratch, then review the official diff against [cas-playwright-tests](../cas-playwright-tests/SKILL.md), including its healer guard.
 
+In the current-source train worktree, run `cas update --sync` before the final
+train proof and cut, using the Cassy binary built from that source. Commit the
+regenerated mixed project files (`.claude/settings.json`, `.codex/config.toml`,
+`.mcp.json`, `.codex/hooks.json`, `AGENTS.md` and `CLAUDE.md` when changed).
+Pure generated agents and `rules/cas/` stay ignored. Run sync again and verify
+that it leaves those tracked projections unchanged. Reuse the current-source
+binary; this step requires no second candidate build or new release command.
+
 1. Start from the epic branch only after closeout is complete: one full review,
-   one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` and the
+   one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4).
+   Before `train_freeze`, dispatch `gh workflow run ci.yml --ref <train branch>`
+   (no train push CI) and read green for the exact tip SHA. On that tip run
+   `cargo tree -i aws-lc-rs --target x86_64-unknown-linux-gnu` (empty graph), capped
+   `cargo nextest run -p cas --lib -E 'test(gates::registry_tests)'`, and
+   `python3 scripts/check-test-shape.py`.
+   CHANGELOG `[Unreleased]` and the
    `changelog.d/` fragments hold the release entries. `scripts/release.sh --next-version` prints the version and
-   the draft path. The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
+   the draft path. The supervisor writes release notes; workers never draft them, and release prep merges, writes the changelog and regenerates the codemap and mixed harness projections.
    Write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
+   Draft, commit and lint it with `python3 scripts/release-train-announce.py --lint <draft>`
+   while jobs run, before the suite goes green. While frozen, inspect jobs between short
+   reminders until terminal; never wait blind on a long reminder or block on a watch.
    Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`. The cut checks each member's existing merge approval alongside the green frozen-train receipt; missing approvals are named before push. Only the release's included tasks gate the zero-would-close check: held legacy members outside them are listed as nonblocking and never refuse the cut. No separate release-review ledger or recorder is needed for code deliveries. Deliberate light, sampled and Tier 0 exemptions use green lane CI plus the green train run; a missing lane receipt is named separately.
    Commit the regenerated `.claude/CODEMAP.md` (`/codemap`) and the previous
    release's report there too; no docs PR follows. The command refuses while a

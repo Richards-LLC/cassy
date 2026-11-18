@@ -1,0 +1,25 @@
+# Approved three-hotfix pilot (art-c7fa7432). Apply with cas config set;
+# keep enabled=false until all other keys are installed.
+[fast_lane]
+enabled = true
+paths = [
+  "apps/frontend/app/src/components/creators/creator-detail/CreatorDetailView.vue",
+  "apps/frontend/app/src/components/creators/creator-detail/CreatorDetailView.test.ts",
+  "apps/frontend/app/src/components/metrics/ScoreBasisCaption.vue",
+  "apps/frontend/app/src/components/metrics/ScoreBasisCaption.test.ts",
+  "apps/frontend/locales/en.json",
+  "apps/frontend/locales/es.json",
+]
+deny = [
+  "**/server/**", "**/api/**", "**/middleware/**", "apps/backend/**",
+  "**/*auth*", "**/*Auth*", "**/*permission*", "**/*Permission*",
+  "**/*billing*", "**/*Billing*", "**/*payment*", "**/*Payment*",
+  "**/*stripe*", "**/*Stripe*", "**/schema/**", "**/migrations/**",
+  "**/package.json", "**/*lock*", "**/*.config.*", "**/vercel.json", "**/.env*", ".github/**",
+]
+max_files = 10
+max_lines = 300
+merge_checks = ["Frontend unit tests"]
+receipt_checks = ["Hermetic end-to-end tests"]
+receipt_statuses = ["Vercel"]
+receipt_window_mins = 30

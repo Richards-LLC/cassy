@@ -76,6 +76,19 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("opaque_test", command["stems"])
         self.assertNotIn("gamma_test", command["stems"])
 
+    def test_receipt_preserves_each_stem_selection_reason(self):
+        plan = self.select()
+        log = self.root / "output/tests.log"
+        log.parent.mkdir()
+        log.write_text("Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n")
+        destination = self.root / "output/receipt.json"
+        impact.record(plan, [log], 0, 0.01, destination, "scoped")
+        command = json.loads(destination.read_text())["plan"]["commands"][0]
+        self.assertEqual(
+            {stem: command["reason"][stem] for stem in ("alpha_test", "beta_test")},
+            {"alpha_test": "owner", "beta_test": "import-consumer"})
+        self.assertNotIn("gamma_test", command["reason"])
+
     def test_binary_source_selects_subprocess_helpers_beyond_linked_imports(self):
         # cas-778c: the CLI can change even when the suite imports only an
         # unrelated library module. Follow helpers, not a list of suite names.
@@ -150,6 +163,23 @@ pub fn run() { nested::launch(); }
 
     def test_missing_diff_base_runs_workspace(self):
         self.assertEqual(impact.plan(self.root, "missing-base", "", None)["mode"], "workspace")
+
+    def test_lane_keeps_registry_audits_in_own_selection_for_production_rust(self):
+        audit = '(package(cas) and binary(cas) and test(gates::registry_tests::))'
+        for path in ('cas-cli/src/alpha.rs', 'crates/shared/src/lib.rs', 'unknown.rs'):
+            with self.subTest(path=path):
+                self.put(path, 'fn changed(role: Role) { if role == Worker { anyhow::bail!("denied"); } }\n')
+                self.commit()
+                split = impact.lane_split(self.root, impact.plan(self.root, self.base, '', None))
+                self.assertIn(audit, split['own'])
+                self.assertIn(audit, split['selected'])
+                self.assertTrue('--workspace' in split['build'] or any(
+                    split['build'][i:i+2] == ['-p', 'cas'] for i in range(len(split['build']))))
+                self.base = self.git('rev-parse', 'HEAD')
+        # A test-fixture edit cannot introduce a production refusal; avoid a
+        # new lib-test build for an otherwise integration-only lane.
+        split = impact.lane_split(self.root, self.select('cas-cli/tests/alpha_test.rs'))
+        self.assertNotIn(audit, split['own'])
 
     def test_zero_base_uses_trusted_fallback(self):
         self.select()

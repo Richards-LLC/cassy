@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import signal
 import subprocess
 import threading
@@ -248,17 +249,69 @@ def clone(case, axis, out):
     return checkout
 
 
-def invoke(checkout, directory, text, axis, timeout, cross=False, public=None):
+def sandbox_preflight():
+    if platform.system() != 'Linux':
+        return None
+    try:
+        probe = subprocess.run(['bwrap', '--ro-bind', '/', '/', '--proc', '/proc',
+                                '--dev', '/dev', '--', '/bin/true'],
+                               capture_output=True, text=True, timeout=5)
+        if probe.returncode == 0:
+            return None
+        return {'exit_code': probe.returncode, 'stderr': probe.stderr[-2048:]}
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {'error': str(exc)}
+
+
+def pinned_source_input(checkout, case):
+    """Read pinned Git objects, never the working tree or later repair commits."""
+    paths = sorted(set(case['scope']))
+    files = {}
+    for path in paths:
+        versions = {}
+        for version, sha in [('base', case['base_sha']), ('head', case['head_sha'])]:
+            entries = git('ls-tree', '-z', sha, '--', path, cwd=checkout).split('\0')
+            if not any(entry.partition('\t')[2] == path for entry in entries):
+                versions[version] = None
+                continue
+            versions[version] = subprocess.check_output(
+                ['git', 'show', f'{sha}:{path}'], cwd=checkout).decode('utf-8')
+        files[path] = versions
+    return {'base_sha': case['base_sha'], 'head_sha': case['head_sha'], 'files': files,
+            'diff': git('diff', '--binary', case['base_sha'], case['head_sha'], '--',
+                        *case['scope'], cwd=checkout)}
+
+
+def invoke(checkout, directory, text, axis, timeout, cross=False, public=None, source_input=False):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / 'prompt.txt').write_text(text)
     write(directory / 'schema.json', schema(axis, cross, public))
     config_path = Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex')))/'config.toml'
     config = tomllib.loads(config_path.read_text()) if config_path.exists() else {}
+    if not source_input and (failure := sandbox_preflight()) is not None:
+        telemetry = {'exit_code': None, 'error': 'namespace_sandbox_unavailable',
+                     'sandbox_preflight': failure, 'authority': 'simulated',
+                     'prompt_sha256': digest(text), 'elapsed_seconds': 0,
+                     'remedy': 'Use --source-input-only with pinned source paths; keep the sandbox enabled.'}
+        write(directory/'telemetry.json', telemetry)
+        return None, telemetry
     argv = ['codex', 'exec', '--ephemeral', '--json', '-s',
-            'read-only' if axis == 'baseline' or cross else 'workspace-write',
+            'read-only' if axis == 'baseline' or cross or source_input else 'workspace-write',
             '-C', str(checkout), '-c', 'project_doc_max_bytes=0']
+    if source_input:
+        # No shell is needed: pinned sources arrive on stdin. Keep read-only
+        # sandboxing and strip user tool integrations rather than bypass it.
+        argv += ['--ignore-user-config', '--ignore-rules']
+        for key in ('model', 'model_reasoning_effort'):
+            if key in config:
+                argv += ['-c', f'{key}={json.dumps(config[key])}']
+        for feature in ('shell_tool', 'unified_exec', 'apps', 'multi_agent',
+                        'multi_agent_v2', 'browser_use', 'computer_use',
+                        'image_generation', 'view_image'):
+            argv += ['-c', f'features.{feature}=false']
+        argv += ['-c', 'web_search="disabled"', '-c', 'include_apply_patch_tool=false']
     # Disable actual configured servers; creating a nonexistent stanza is invalid.
-    for name in config.get('mcp_servers', {}):
+    for name in ({} if source_input else config.get('mcp_servers', {})):
         argv += ['-c', f'mcp_servers.{name}.enabled=false']
     argv += [
             '--output-schema', str(directory / 'schema.json'),
@@ -282,7 +335,7 @@ def invoke(checkout, directory, text, axis, timeout, cross=False, public=None):
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
             error = 'timeout'
-    usage, models = [], []
+    usage, models, tool_events = [], [], []
     for line in (directory / 'events.jsonl').read_text().splitlines():
         try:
             event = json.loads(line)
@@ -292,13 +345,20 @@ def invoke(checkout, directory, text, axis, timeout, cross=False, public=None):
             usage.append(event['usage'])
         if 'model' in event:
             models.append(event['model'])
+        if source_input and event.get('type') in ('item.started', 'item.completed'):
+            item = event.get('item', {})
+            if item.get('type') not in ('agent_message', 'reasoning'):
+                tool_events.append(item.get('type'))
     telemetry = {'exit_code': rc, 'error': error, 'elapsed_seconds': time.monotonic()-start,
                  'usage': usage, 'models_observed': models, 'argv': argv,
                  'configured_model': config.get('model'),
                  'configured_reasoning_effort': config.get('model_reasoning_effort'),
                  'prompt_sha256': digest(text), 'authority': 'simulated'}
+    if tool_events:
+        telemetry['error'] = 'source_input_tool_call'
+        telemetry['tool_events'] = tool_events
     report = None
-    if rc == 0:
+    if rc == 0 and not tool_events:
         try:
             report = json.loads((directory / 'report.json').read_text())
         except (ValueError, FileNotFoundError) as exc:
@@ -346,19 +406,29 @@ def validate_report(report, case, axis, checkout):
     return commits
 
 
-def review(case, axis, sources, out, timeout, fix_transport='native'):
+def review(case, axis, sources, out, timeout, fix_transport='native', source_input=False):
     directory = out / case['id'] / axis
     if (directory / 'result.json').exists():
         return json.loads((directory / 'result.json').read_text())
     checkout = clone(case, axis, out)
     text = prompt(case, axis, sources, fix_transport)
     public = context(case, axis, sources)
-    if fix_transport == 'bridge' and axis != 'baseline':
+    if source_input:
+        bundle = pinned_source_input(checkout, case)
+        write(directory/'source-input.json', bundle)
+        text += ('\nSource-input-only replay: use only the pinned JSON below. Do not call tools, '
+                 'inspect the filesystem, or make commits. Earlier fix instructions do not apply; '
+                 'return findings with null commit. Missing dependencies are missing evidence.\n')
+        text += json.dumps(bundle, indent=2)
+        report, telemetry = invoke(checkout, directory, text, axis, timeout, public=public, source_input=True)
+        telemetry['source_input_sha256'] = digest(json.dumps(bundle, sort_keys=True))
+        write(directory/'telemetry.json', telemetry)
+    elif fix_transport == 'bridge' and axis != 'baseline':
         with CommitBridge(checkout, axis, directory, case['scope']):
             report, telemetry = invoke(checkout, directory, text, axis, timeout, public=public)
     else:
         report, telemetry = invoke(checkout, directory, text, axis, timeout, public=public)
-    telemetry['commit_execution'] = fix_transport if axis != 'baseline' else 'none'
+    telemetry['commit_execution'] = fix_transport if axis != 'baseline' and not source_input else 'none'
     error, commits = None, []
     try:
         commits = validate_report(report, case, axis, checkout)
@@ -539,10 +609,14 @@ def main():
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--fix-transport', choices=['native', 'bridge'], default='native',
                         help='Bridge mechanically commits reviewer-selected files, preserving sandbox limits')
+    parser.add_argument('--source-input-only', action='store_true',
+                        help='Read-only independent replay with pinned sources on stdin and shell tools disabled')
     parser.add_argument('--labels', type=Path)
     parser.add_argument('--registered-adapter', type=Path,
                         help='Registered supervisor/children executable; JSON stdin, evidence JSON stdout')
     args = parser.parse_args()
+    if args.source_input_only and (args.operation != 'run' or args.registered_adapter):
+        parser.error('--source-input-only is for independent run replays')
     corpus = json.loads(args.corpus.read_text())
     axes = args.axes.split(',')
     if any(axis not in AXES for axis in axes) or len(axes) != len(set(axes)):
@@ -580,7 +654,7 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
         action = review if args.operation == 'run' else cross_check
         futures = {executor.submit(action, case, axis, sources, out, args.timeout,
-                     *([args.fix_transport] if args.operation == 'run' else [])): (case['id'], axis)
+                     *([args.fix_transport, args.source_input_only] if args.operation == 'run' else [])): (case['id'], axis)
                    for case, axis in operations}
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]

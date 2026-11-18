@@ -1640,11 +1640,16 @@ impl ProxyEngine {
                     return Ok(violet_result(receipt));
                 }
                 if state == "not_posted" {
-                    return Ok(violet_result(serde_json::json!({
-                        "ok": false, "state": "not_posted", "request_id": request_id,
-                        "error": {"code": "not_posted", "retryable": false,
-                            "message": "Violet confirmed that this request did not post."},
-                    })));
+                    // Keep the provider's reason and original uncertain response (#1968).
+                    let mut body = lookup;
+                    body["ok"] = Value::Bool(false);
+                    body["request_id"] = Value::String(request_id.into());
+                    if !body["error"].is_object() {
+                        body["error"] = serde_json::json!({"code": "not_posted", "retryable": false,
+                            "message": "Violet confirmed that this request did not post."});
+                    }
+                    if let Some(prior) = prior { body["post_response"] = prior; }
+                    return Ok(violet_result(body));
                 }
             }
         }
@@ -3537,9 +3542,9 @@ for line in sys.stdin:
                 os._exit(0)
             if name == "violet_post":
                 mode = args.get("text", "posted")
-                state = mode if mode in ("outcome_unknown", "not_posted") else "posted"
+                state = mode if mode in ("outcome_unknown", "not_posted") else ("not_posted" if mode == "not_posted_detail" else "posted")
                 with open(state_path, "w") as handle:
-                    json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch"}, handle)
+                    json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch", "diagnostic": mode == "not_posted_detail"}, handle)
                 if mode == "transport_rollback":
                     with open(log + ".schema", "w") as handle:
                         handle.write("legacy")
@@ -3547,6 +3552,8 @@ for line in sys.stdin:
                     os._exit(0)
                 body = {"ok": False, "request_id": request_id, "error": {"code": "outcome_unknown", "retryable": False},
                         "reconcile": {"tool": "violet_reconcile_reply", "arguments": {"request_id": request_id}}}
+                if mode == "not_posted_detail":
+                    body["error"]["detail"] = {"stage": "provider_preflight"}
                 if request_id is None:
                     body = {"ok": False, "state": "outcome_unknown", "error": {"code": "outcome_unknown", "retryable": False}}
                 if mode == "rejected":
@@ -3562,6 +3569,10 @@ for line in sys.stdin:
                 with open(state_path) as handle:
                     state = json.load(handle)
                 body = {"ok": state["state"] != "outcome_unknown", **state}
+                if state.get("diagnostic"):
+                    body["reason"] = "occurrence_not_eligible"
+                    body["error"] = {"code": "occurrence_not_eligible", "retryable": False,
+                                     "message": "Provider rejected the occurrence", "detail": {"occurrence_id": "fixture-occurrence"}}
                 if state["state"] == "posted":
                     body["receipt"] = {"ok": True, **state, "message": {"message_id": "1710000000.000001"}}
                 if state.get("mismatch"):
@@ -3641,6 +3652,7 @@ for line in sys.stdin:
         }
         for (schema, mode, expected) in [("modern", "posted", "posted"), ("modern", "transport", "posted"),
             ("modern", "outcome_unknown", "outcome_unknown"), ("modern", "not_posted", "not_posted"),
+            ("modern", "not_posted_detail", "not_posted"),
             ("modern", "post_only", "posted"), ("modern", "post_only_not_posted", "not_posted"),
             ("modern", "post_only_supervisor", "posted"), ("modern", "lookup_denied", "outcome_unknown"),
             ("modern", "rejected", "not_posted"), ("modern", "mismatch", "outcome_unknown"),
@@ -3708,6 +3720,12 @@ for line in sys.stdin:
                 let audit = engine.policy_audit();
                 assert_eq!(audit.last().unwrap().tool, "violet_reconcile_reply");
                 assert!(audit.last().unwrap().allowed);
+            }
+            if mode == "not_posted_detail" {
+                assert_eq!(body["reason"], "occurrence_not_eligible");
+                assert_eq!(body["error"], serde_json::json!({"code":"occurrence_not_eligible", "retryable":false,
+                    "message":"Provider rejected the occurrence", "detail":{"occurrence_id":"fixture-occurrence"}}));
+                assert_eq!(body["post_response"]["error"]["detail"]["stage"], "provider_preflight");
             }
             assert_eq!(body["request_id"], request_id);
             if mode == "transport" {

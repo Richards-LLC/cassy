@@ -744,10 +744,12 @@ pub(crate) fn apply_idle_liveness(
     if prompt.retract_task.is_none() && observation.state != Liveness::WaitingForInput {
         return false;
     }
-    prompt.text = prompt.text.replace(
-        &format!("Worker {worker} is idle while task"),
-        &format!("Worker {worker} has a pending delivery while task"),
-    );
+    if prompt.retract_task.is_some() {
+        prompt.text = prompt.text.replace(
+            &format!("Worker {worker} is idle while task"),
+            &format!("Worker {worker} has a pending delivery while task"),
+        );
+    }
     prompt.text = format!("{}\n{}", observation.detail(), prompt.text);
     true
 }
@@ -6798,5 +6800,8 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
         merge.retract_task = Some("t".into());
         assert!(apply_idle_liveness(&mut merge, "wolf", &observed));
         assert!(merge.text.starts_with(&observed.detail()));
+        let mut ordinary = prompt.clone();
+        apply_idle_liveness(&mut ordinary, "wolf", &Observation { state: Liveness::WaitingForInput, evidence: "idle".into() });
+        assert_eq!(ordinary.text.lines().last(), prompt.text.lines().last());
     }
 }

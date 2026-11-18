@@ -673,9 +673,11 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             return Err(crate::qa_batch::debt_refusal(&task.id));
         }
     }
-    // Resolved QA mode owns park evidence, including missing target refs and
-    // already-landed deliveries. Neither requires an implementer's task bundle.
-    let batch_defer = batch_mode && !matches!(tier, EvidenceTier::None);
+    // Missing target refs must not turn a batch park into per-task QA.
+    // Proven integrated deliveries retain their final-close evidence path.
+    let batch_defer = batch_mode
+        && integrated != Some(true)
+        && !matches!(tier, EvidenceTier::None);
     // Optional citations alone do not upgrade None/Ledger proof requirements.
     // A declared comparison still applies when batch approval replaces a bundle.
     let pair_coverage = if tier != EvidenceTier::Bundle
@@ -891,15 +893,20 @@ mod tests {
                     &root, &task, repo, target, Some(&head), Some(&changed), Some(&base),
                 );
                 let result = check();
-                assert_eq!(result.is_ok(), expected == crate::config::QaMode::Batch,
+                let batch_park = expected == crate::config::QaMode::Batch
+                    && integration != Some(true);
+                assert_eq!(result.is_ok(), batch_park,
                     "mode={expected}, integration={integration:?}: {result:?}");
                 assert_eq!(cas_store::has_qa_batch_deferral(&root, &task.id).unwrap(),
-                    expected == crate::config::QaMode::Batch);
-                if expected == crate::config::QaMode::Batch {
-                    // Repeated parks still defer uncertain/unmerged targets;
-                    // once integrated, the recorded staging receipt remains due.
-                    assert_eq!(check().is_ok(), integration != Some(true));
-                } else {
+                    batch_park);
+                if batch_park {
+                    assert!(check().is_ok());
+                    // Once integrated, recorded staging evidence remains due.
+                    git(repo, &["branch", "-f", "main", &head]);
+                    assert!(qa_evidence_close_gate_for_paths(
+                        &root, &task, repo, "main", Some(&head), Some(&changed), Some(&base),
+                    ).is_err());
+                } else if expected == crate::config::QaMode::PerTask {
                     cas_store::defer_qa_batch_evidence(&root, &task.id, &head).unwrap();
                     assert!(check().is_err());
                 }
